@@ -1,0 +1,1359 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FXTD Studio - Radiance Documentation</title>
+    <link rel="icon" type="image/png" href="icon.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            /* ComfyUI Dark Theme Colors */
+            --bg-primary: #1a1a1a;
+            --bg-secondary: #202020;
+            --bg-card: rgba(35, 35, 35, 0.95);
+            --bg-card-hover: rgba(45, 45, 45, 0.95);
+            --bg-glass: rgba(255, 255, 255, 0.02);
+
+            /* Text Colors - Muted */
+            --text-primary: #e0e0e0;
+            --text-secondary: #888888;
+            --text-muted: #666666;
+
+            /* Accent Colors - Subtle grays with one accent */
+            --accent-gold: #888888;
+            --accent-amber: #999999;
+            --accent-crimson: #777777;
+            --accent-coral: #999999;
+            --accent-teal: #aaaaaa;
+            --accent-violet: #888888;
+
+            /* Gradients - Subtle */
+            --gradient-brand: linear-gradient(135deg, #555555 0%, #444444 50%, #333333 100%);
+            --gradient-gold: linear-gradient(135deg, #666666 0%, #555555 100%);
+            --gradient-warm: linear-gradient(135deg, #555555 0%, #444444 100%);
+            --gradient-glow: none;
+
+            /* Borders & Effects */
+            --border-default: rgba(255, 255, 255, 0.1);
+            --border-hover: rgba(255, 255, 255, 0.2);
+            --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.3);
+            --shadow-glow: none;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.7;
+            min-height: 100vh;
+        }
+
+        /* B/W Icons */
+        .node-icon,
+        .feature-icon {
+            filter: grayscale(100%);
+            opacity: 0.7;
+        }
+
+        /* Light Theme */
+        body.light-theme {
+            --bg-primary: #f5f5f5;
+            --bg-secondary: #e0e0e0;
+            --bg-card: rgba(255, 255, 255, 0.95);
+            --text-primary: #1a1a1a;
+            --text-secondary: #555;
+            --text-muted: #888;
+            --border-default: rgba(0, 0, 0, 0.1);
+        }
+
+        /* Print */
+        @media print {
+
+            nav,
+            #backToTop,
+            #themeToggle {
+                display: none !important;
+            }
+
+            body {
+                background: white;
+                color: black;
+            }
+        }
+
+        .container {
+            max-width: 1440px;
+            margin: 0 auto;
+            padding: 2.5rem;
+        }
+
+        /* ===== HEADER ===== */
+        header {
+            text-align: center;
+            padding: 5rem 2rem;
+            margin-bottom: 3rem;
+            position: relative;
+        }
+
+        header::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 100%;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(212, 168, 83, 0.3), transparent);
+        }
+
+        header::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 60%;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--border-default), transparent);
+        }
+
+        .logo-container {
+            margin-bottom: 1.5rem;
+        }
+
+        header h1 {
+            font-size: 3.5rem;
+            font-weight: 800;
+            letter-spacing: -0.03em;
+            margin-bottom: 0.75rem;
+            color: #ffffff;
+            text-shadow: 0 0 60px rgba(255, 255, 255, 0.2);
+        }
+
+        header .subtitle {
+            font-size: 1.35rem;
+            font-weight: 400;
+            color: var(--text-secondary);
+            letter-spacing: 0.02em;
+            margin-bottom: 2rem;
+        }
+
+        header .tagline {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.15em;
+            margin-bottom: 2.5rem;
+        }
+
+        /* ===== BADGES ===== */
+        .badges {
+            display: flex;
+            gap: 0.75rem;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .badge {
+            padding: 0.6rem 1.25rem;
+            border-radius: 50px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            border: 1px solid transparent;
+            backdrop-filter: blur(10px);
+            transition: all 0.3s ease;
+        }
+
+        .badge:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-glow);
+        }
+
+        .badge-gold {
+            background: linear-gradient(135deg, rgba(212, 168, 83, 0.2), rgba(232, 168, 56, 0.15));
+            border-color: rgba(212, 168, 83, 0.4);
+            color: var(--accent-gold);
+        }
+
+        .badge-teal {
+            background: rgba(45, 212, 191, 0.12);
+            border-color: rgba(45, 212, 191, 0.3);
+            color: var(--accent-teal);
+        }
+
+        .badge-coral {
+            background: rgba(255, 107, 91, 0.12);
+            border-color: rgba(255, 107, 91, 0.3);
+            color: var(--accent-coral);
+        }
+
+        .badge-violet {
+            background: rgba(139, 92, 246, 0.12);
+            border-color: rgba(139, 92, 246, 0.3);
+            color: var(--accent-violet);
+        }
+
+        /* ===== NAVIGATION TOC ===== */
+        nav.toc {
+            background: var(--bg-card);
+            backdrop-filter: blur(20px);
+            border-radius: 16px;
+            padding: 2rem 2.5rem;
+            margin-bottom: 2.5rem;
+            border: 1px solid var(--border-default);
+            box-shadow: var(--shadow-card);
+        }
+
+        nav.toc h3 {
+            font-size: 0.85rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            color: var(--text-muted);
+            margin-bottom: 1.25rem;
+        }
+
+        nav.toc ul {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem 1.5rem;
+            list-style: none;
+        }
+
+        nav.toc a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-weight: 500;
+            font-size: 0.95rem;
+            padding: 0.35rem 0;
+            position: relative;
+            transition: all 0.25s ease;
+        }
+
+        nav.toc a:hover {
+            color: var(--accent-gold);
+        }
+
+        nav.toc a::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 0;
+            height: 2px;
+            background: var(--gradient-gold);
+            transition: width 0.25s ease;
+        }
+
+        nav.toc a:hover::after {
+            width: 100%;
+        }
+
+        /* ===== SHORTCUTS SECTION ===== */
+        .shortcuts-section {
+            background: var(--bg-card);
+            backdrop-filter: blur(20px);
+            border-radius: 16px;
+            padding: 2.5rem;
+            margin-bottom: 3rem;
+            border: 1px solid var(--border-default);
+            box-shadow: var(--shadow-card);
+        }
+
+        .shortcuts-section h2 {
+            font-size: 1.3rem;
+            font-weight: 700;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .shortcuts-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 1rem;
+        }
+
+        .shortcut {
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+
+        .key {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-default);
+            border-radius: 8px;
+            padding: 0.5rem 0.85rem;
+            font-family: 'JetBrains Mono', 'Consolas', monospace;
+            font-weight: 500;
+            font-size: 0.85rem;
+            min-width: 42px;
+            text-align: center;
+            color: var(--accent-gold);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+            transition: all 0.2s ease;
+        }
+
+        .shortcut:hover .key {
+            border-color: var(--accent-gold);
+            box-shadow: 0 0 12px rgba(212, 168, 83, 0.2);
+        }
+
+        /* ===== CATEGORY SECTIONS ===== */
+        .category {
+            margin-bottom: 4rem;
+        }
+
+        .category-header {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border-default);
+        }
+
+        .category-header h2 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            letter-spacing: -0.01em;
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+        }
+
+        .category-count {
+            background: var(--bg-glass);
+            padding: 0.35rem 0.9rem;
+            border-radius: 50px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            border: 1px solid var(--border-default);
+        }
+
+        /* ===== NODE CARDS GRID ===== */
+        .nodes-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+            gap: 1.25rem;
+        }
+
+        .node-card {
+            background: var(--bg-card);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--border-default);
+            border-radius: 14px;
+            padding: 1.75rem;
+            transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .node-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: var(--gradient-brand);
+            opacity: 0;
+            transition: opacity 0.35s ease;
+        }
+
+        .node-card:hover {
+            background: var(--bg-card-hover);
+            border-color: var(--border-hover);
+            transform: translateY(-4px);
+            box-shadow: var(--shadow-card), var(--shadow-glow);
+        }
+
+        .node-card:hover::before {
+            opacity: 1;
+        }
+
+        .node-header {
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .node-icon {
+            font-size: 1.4rem;
+            filter: drop-shadow(0 0 8px rgba(212, 168, 83, 0.3));
+        }
+
+        .node-name {
+            font-weight: 600;
+            font-size: 1.05rem;
+            color: var(--text-primary);
+            letter-spacing: -0.01em;
+        }
+
+        .node-class {
+            font-family: 'JetBrains Mono', 'Consolas', monospace;
+            font-size: 0.72rem;
+            font-weight: 500;
+            color: var(--accent-gold);
+            background: rgba(212, 168, 83, 0.1);
+            padding: 0.25rem 0.6rem;
+            border-radius: 6px;
+            display: inline-block;
+            margin-bottom: 0.85rem;
+            border: 1px solid rgba(212, 168, 83, 0.2);
+        }
+
+        .node-description {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            line-height: 1.6;
+            margin-bottom: 1.25rem;
+        }
+
+        .node-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+
+        .tag {
+            font-size: 0.7rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            padding: 0.3rem 0.7rem;
+            border-radius: 6px;
+            background: var(--bg-glass);
+            color: var(--text-muted);
+            border: 1px solid var(--border-default);
+        }
+
+        .tag-gpu {
+            background: rgba(45, 212, 191, 0.12);
+            border-color: rgba(45, 212, 191, 0.25);
+            color: var(--accent-teal);
+        }
+
+        .tag-pro {
+            background: rgba(139, 92, 246, 0.12);
+            border-color: rgba(139, 92, 246, 0.25);
+            color: var(--accent-violet);
+        }
+
+        .tag-new {
+            background: rgba(212, 168, 83, 0.12);
+            border-color: rgba(212, 168, 83, 0.25);
+            color: var(--accent-gold);
+        }
+
+        /* ===== FOOTER ===== */
+        footer {
+            text-align: center;
+            padding: 4rem 2rem;
+            margin-top: 2rem;
+            position: relative;
+        }
+
+        footer::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 50%;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--border-default), transparent);
+        }
+
+        footer p {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            margin-bottom: 0.5rem;
+        }
+
+        footer strong {
+            color: var(--text-secondary);
+            font-weight: 600;
+        }
+
+        footer .brand {
+            background: var(--gradient-gold);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-weight: 700;
+        }
+
+        /* ===== RESPONSIVE ===== */
+        @media (max-width: 768px) {
+            .container {
+                padding: 1.5rem;
+            }
+
+            header {
+                padding: 3rem 1rem;
+            }
+
+            header h1 {
+                font-size: 2.25rem;
+            }
+
+            header .subtitle {
+                font-size: 1.1rem;
+            }
+
+            .nodes-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .shortcuts-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+
+            nav.toc {
+                padding: 1.5rem;
+            }
+
+            .shortcuts-section {
+                padding: 1.5rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            header h1 {
+                font-size: 1.85rem;
+            }
+
+            .badges {
+                gap: 0.5rem;
+            }
+
+            .badge {
+                padding: 0.5rem 1rem;
+                font-size: 0.75rem;
+            }
+
+            .shortcuts-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* ===== ANIMATIONS ===== */
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .category {
+            animation: fadeIn 0.6s ease-out forwards;
+        }
+
+        .category:nth-child(1) {
+            animation-delay: 0.1s;
+        }
+
+        .category:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .category:nth-child(3) {
+            animation-delay: 0.3s;
+        }
+
+        .category:nth-child(4) {
+            animation-delay: 0.4s;
+        }
+
+        .category:nth-child(5) {
+            animation-delay: 0.5s;
+        }
+    
+        /* SVG Icon Styles */
+        svg.feature-icon {
+            width: 1.5em;
+            height: 1.5em;
+            vertical-align: middle;
+            margin-right: 0.5rem;
+            display: inline-block;
+        }
+        </style>
+</head>
+
+<body>
+    <!-- Documentation Navigation -->
+    <nav
+        style="background: #252525; border-bottom: 1px solid #333; padding: 0.75rem 2rem; position: sticky; top: 0; z-index: 100;">
+        <div
+            style="max-width: 1440px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem;">
+            <a href="index.html" style="text-decoration: none; color: #e0e0e0; font-weight: 600; font-size: 1.2rem;">
+                Radiance
+            </a>
+            <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: center;">
+                <a href="index.html"
+                    style="color: #fff; text-decoration: none; padding: 0.35rem 0.75rem; background: #444; border-radius: 4px; font-size: 0.9rem;">Overview</a>
+                <a href="installation.html"
+                    style="color: #999; text-decoration: none; padding: 0.35rem 0.75rem; border-radius: 4px; font-size: 0.9rem;">Installation</a>
+                <a href="node_reference.html"
+                    style="color: #999; text-decoration: none; padding: 0.35rem 0.75rem; border-radius: 4px; font-size: 0.9rem;">Nodes</a>
+                <a href="radiance_viewer.html"
+                    style="color: #999; text-decoration: none; padding: 0.35rem 0.75rem; border-radius: 4px; font-size: 0.9rem;">Viewer</a>
+                <a href="tutorials.html"
+                    style="color: #999; text-decoration: none; padding: 0.35rem 0.75rem; border-radius: 4px; font-size: 0.9rem;">Tutorials</a>
+                <a href="faq.html"
+                    style="color: #999; text-decoration: none; padding: 0.35rem 0.75rem; border-radius: 4px; font-size: 0.9rem;">FAQ</a>
+                <a href="changelog.html"
+                    style="color: #999; text-decoration: none; padding: 0.35rem 0.75rem; border-radius: 4px; font-size: 0.9rem;">Changelog</a>
+                <button id="themeToggle"
+                    style="background: #333; border: 1px solid #444; border-radius: 4px; padding: 0.35rem 0.75rem; color: #888; cursor: pointer; font-size: 0.85rem;">
+                    Light</button>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container">
+        <header>
+            <img src="RADIANCE.png" alt="RADIANCE"
+                style="max-width: 550px; height: auto; margin-bottom: 0px; opacity: 0.9; mix-blend-mode: screen;">
+            <p
+                style="font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3em; color: var(--accent-gold); margin-top: 5px; margin-bottom: 2rem;">
+                by FXTD STUDIOS</p>
+            <p class="tagline">Industry-Grade Color Science · GPU Accelerated</p>
+            <div class="badges">
+                <span class="badge badge-gold">v2.0.0</span>
+                <span class="badge badge-teal">67 Nodes</span>
+                <span class="badge badge-coral">GPU Accelerated</span>
+                <span class="badge badge-violet">Industry Grade</span>
+            </div>
+        </header>
+
+        <nav class="toc">
+            <h3><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg> Categories</h3>
+            <ul>
+                <li><a href="#hdr">HDR & Color (30)</a></li>
+                <li><a href="#film">Film & Camera (15)</a></li>
+                <li><a href="#upscale">Upscaling (7)</a></li>
+                <li><a href="#viewer">Viewer & Analysis (3)</a></li>
+                <li><a href="#utils">IO & Utilities (12)</a></li>
+            </ul>
+        </nav>
+
+        <section class="shortcuts-section">
+            <h2><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><rect x="2" y="4" width="20" height="16" rx="2" ry="2"/><line x1="6" y1="8" x2="6" y2="8"/><line x1="10" y1="8" x2="10" y2="8"/><line x1="14" y1="8" x2="14" y2="8"/><line x1="18" y1="8" x2="18" y2="8"/><line x1="6" y1="12" x2="6" y2="12"/><line x1="10" y1="12" x2="10" y2="12"/><line x1="14" y1="12" x2="14" y2="12"/><line x1="18" y1="12" x2="18" y2="12"/><line x1="6" y1="16" x2="6" y2="16"/><line x1="10" y1="16" x2="14" y2="16"/><line x1="18" y1="16" x2="18" y2="16"/></svg> Radiance Pro Viewer Keyboard Shortcuts</h2>
+            <div class="shortcuts-grid">
+                <div class="shortcut"><span class="key">F</span> Fit to View</div>
+                <div class="shortcut"><span class="key">1</span> 100% Zoom</div>
+                <div class="shortcut"><span class="key">R</span> Red Channel</div>
+                <div class="shortcut"><span class="key">G</span> Green Channel</div>
+                <div class="shortcut"><span class="key">B</span> Blue Channel</div>
+                <div class="shortcut"><span class="key">L</span> Luminance</div>
+                <div class="shortcut"><span class="key">C</span> Color (RGB)</div>
+                <div class="shortcut"><span class="key">H</span> Histogram</div>
+                <div class="shortcut"><span class="key">W</span> Waveform</div>
+                <div class="shortcut"><span class="key">V</span> Vectorscope</div>
+                <div class="shortcut"><span class="key">E</span> False Color</div>
+                <div class="shortcut"><span class="key">Z</span> Zebra</div>
+                <div class="shortcut"><span class="key">A</span> A/B Compare</div>
+                <div class="shortcut"><span class="key">P</span> Fullscreen</div>
+            </div>
+        </section>
+
+
+
+        <!-- hdr Section -->
+        <section class="category" id="hdr">
+            <div class="category-header">
+                <h2><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg> HDR & Color Science</h2>
+                <span class="category-count">30 nodes</span>
+            </div>
+            <div class="nodes-grid">
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance Image to Float32</span>
+                    </div>
+                    <code class="node-class">ImageToFloat32</code>
+                    <p class="node-description">Convert images to 32-bit float precision for HDR processing. Preserves
+                        full dynamic range without clamping.</p>
+                    <div class="node-tags"><span class="tag tag-gpu">GPU</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance HDR Exposure Blend</span>
+                    </div>
+                    <code class="node-class">HDRExposureBlend</code>
+                    <p class="node-description">Blend multiple exposures for extended dynamic range. Uses Mertens Fusion
+                        or Averaging.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance HDR Tone Map</span>
+                    </div>
+                    <code class="node-class">HDRToneMap</code>
+                    <p class="node-description">Tonemap HDR images to SDR using Reinhard, Hable (Uncharted 2), or ACES
+                        Filmic curves.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance HDR Shadow/Highlight Recovery</span>
+                    </div>
+                    <code class="node-class">HDRShadowHighlightRecovery</code>
+                    <p class="node-description">Recover shadow and highlight detail from single HDR image for better
+                        grading flexibility.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance HDR 360 Generate</span>
+                    </div>
+                    <code class="node-class">HDR360Generate</code>
+                    <p class="node-description">Project and generate 360° HDR panoramas (Equirectangular, Cube Map,
+                        Mirror Ball).</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance Float32 Color Correct</span>
+                    </div>
+                    <code class="node-class">Float32ColorCorrect</code>
+                    <p class="node-description">Professional 32-bit color correction: Exposure, Contrast, Brightness,
+                        Saturation, Lift, Gain.</p>
+                    <div class="node-tags"><span class="tag tag-gpu">GPU</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance LOG Curve Encode</span>
+                    </div>
+                    <code class="node-class">RadianceLogCurveEncode</code>
+                    <p class="node-description">Encode linear data to Log curves: ARRI LogC3/4, S-Log3, V-Log, ACEScct.
+                    </p>
+                    <div class="node-tags"><span class="tag tag-gpu">GPU</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance Log Curve Decode</span>
+                    </div>
+                    <code class="node-class">RadianceLogCurveDecode</code>
+                    <p class="node-description">Logarithmic to Linear conversion for specific camera curves. Implements
+                        exact mathematical formulas for industry standard curves.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance Color Space Convert</span>
+                    </div>
+                    <code class="node-class">ColorSpaceConvert</code>
+                    <p class="node-description">GPU-accelerated conversion: sRGB, ACEScg, ACEScct, Rec.2020, DCI-P3.</p>
+                    <div class="node-tags"><span class="tag tag-gpu">GPU</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance ACES 2.0 Output Transform</span>
+                    </div>
+                    <code class="node-class">ACES2OutputTransform</code>
+                    <p class="node-description">Apply ACES 2.0 Output Transform (RRT+ODT) for SDR/HDR/Cinema monitors.
+                    </p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance OCIO Color Transform</span>
+                    </div>
+                    <code class="node-class">RadianceOCIOColorTransform</code>
+                    <p class="node-description">No description provided.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance GPU Color Matrix</span>
+                    </div>
+                    <code class="node-class">RadianceGPUColorMatrix</code>
+                    <p class="node-description">Apply custom color matrix transformation. Features: • Pre-built presets
+                        (Sepia, B&W, Invert, etc.) • Custom 3x3 or 4x4 matrices • Optional offset/bias • GPU-accelerated
+                        processing • Robust input validation</p>
+                    <div class="node-tags"><span class="tag tag-gpu">GPU</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance DaVinci Wide Gamut</span>
+                    </div>
+                    <code class="node-class">DaVinciWideGamut</code>
+                    <p class="node-description">Convert to/from DaVinci Wide Gamut and Intermediate.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance ARRI Wide Gamut 4</span>
+                    </div>
+                    <code class="node-class">ARRIWideGamut4</code>
+                    <p class="node-description">Convert to/from ARRI Wide Gamut 4 (Alexa 35).</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">ACESConfigManager</span>
+                    </div>
+                    <code class="node-class">ACESConfigManager</code>
+                    <p class="node-description">Professional node for Radiance workflow.</p>
+                    <div class="node-tags"><span class="tag">New</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance LUT Apply</span>
+                    </div>
+                    <code class="node-class">RadianceLUTApply</code>
+                    <p class="node-description">Apply 3D LUT (.cube) to images with professional controls. Features: •
+                        Cached LUT parsing for performance • GPU-accelerated trilinear interpolation • Domain scaling
+                        for HDR support • Multiple log space encodings • Strength-based blending</p>
+                    <div class="node-tags"><span class="tag tag-gpu">GPU</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance GPU Tensor Ops</span>
+                    </div>
+                    <code class="node-class">GPUTensorOps</code>
+                    <p class="node-description">Fast GPU tensor operations: Exposure, Gamma, Lift/Gain, Normalize,
+                        Clamp.</p>
+                    <div class="node-tags"><span class="tag tag-gpu">GPU</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">ℹ</span>
+                        <span class="node-name">Radiance OCIO List Colorspaces</span>
+                    </div>
+                    <code class="node-class">OCIOListColorspaces</code>
+                    <p class="node-description">List available colorspaces in an OCIO config file.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg></span>
+                        <span class="node-name">Save 16-bit</span>
+                    </div>
+                    <code class="node-class">SaveImage16bit</code>
+                    <p class="node-description">Save as 16-bit PNG/TIFF.</p>
+                    <div class="node-tags"><span class="tag">New</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance Grade</span>
+                    </div>
+                    <code class="node-class">FXTD_Grade</code>
+                    <p class="node-description">Professional grading with per-channel RGB controls for Lift, Gamma,
+                        Gain, Offset.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance HDR Expand Dynamic Range</span>
+                    </div>
+                    <code class="node-class">HDRExpandDynamicRange</code>
+                    <p class="node-description">Expand SDR images to HDR range using inverse tonemapping.</p>
+                    <div class="node-tags"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- film Section -->
+        <section class="category" id="film">
+            <div class="category-header">
+                <h2> Film & Camera</h2>
+                <span class="category-count">14 nodes</span>
+            </div>
+            <div class="nodes-grid">
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">✶</span>
+                        <span class="node-name">✶ Radiance Film Look</span>
+                    </div>
+                    <code class="node-class">FXTDFilmLook</code>
+                    <p class="node-description">Apply complete film look with camera, film stock, and lens presets.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">✶</span>
+                        <span class="node-name">✶ Radiance Film Grain</span>
+                    </div>
+                    <code class="node-class">FXTDFilmGrain</code>
+                    <p class="node-description">GPU-accelerated film grain with camera and film stock presets.</p>
+                    <div class="node-tags"><span class="tag">GPU</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">✶</span>
+                        <span class="node-name">✶ Radiance Grain Advanced</span>
+                    </div>
+                    <code class="node-class">FXTDFilmGrainAdvanced</code>
+                    <p class="node-description">Advanced film grain with complete manual control over all parameters.
+                    </p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">✶</span>
+                        <span class="node-name">✶ Radiance Realistic Grain</span>
+                    </div>
+                    <code class="node-class">FXTDRealisticGrain</code>
+                    <p class="node-description">Realistic camera grain based on real sensor noise measurements.</p>
+                    <div class="node-tags"><span class="tag">New</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">✶</span>
+                        <span class="node-name">✶ Radiance Film Effects</span>
+                    </div>
+                    <code class="node-class">FXTDProFilmEffects</code>
+                    <p class="node-description">Industry-level film effects combining grain, halation, lens effects,
+                        bloom, etc.</p>
+                    <div class="node-tags"><span class="tag">GPU</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◿</span>
+                        <span class="node-name">✶ Radiance Lens Effects</span>
+                    </div>
+                    <code class="node-class">FXTDLensEffects</code>
+                    <p class="node-description">Apply professional lens effects with cinema lens presets.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◿</span>
+                        <span class="node-name">Radiance Physical Camera</span>
+                    </div>
+                    <code class="node-class">FXTDPhysicalCamera</code>
+                    <p class="node-description">Professional Physical Camera simulation with: • Exposure Triangle
+                        (Shutter, Aperture, ISO) • Sensor Size selection • White Balance with temperature/tint • Depth
+                        of Field with bokeh • Motion Blur & Rolling Shutter • Camera Shake</p>
+                    <div class="node-tags"><span class="tag tag-pro">Physical</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◿</span>
+                        <span class="node-name">Radiance Camera Shake</span>
+                    </div>
+                    <code class="node-class">FXTDCameraShake</code>
+                    <p class="node-description">Add handheld camera shake with translation and rotation.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◿</span>
+                        <span class="node-name">Radiance Depth of Field</span>
+                    </div>
+                    <code class="node-class">FXTDDepthOfField</code>
+                    <p class="node-description">Apply cinematic depth of field blur with optional depth map input and
+                        bokeh shaping.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◿</span>
+                        <span class="node-name">Radiance Motion Blur</span>
+                    </div>
+                    <code class="node-class">FXTDMotionBlur</code>
+                    <p class="node-description">Apply motion blur (directional, radial, or zoom) to simulate camera
+                        movement.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◿</span>
+                        <span class="node-name">Radiance Rolling Shutter</span>
+                    </div>
+                    <code class="node-class">FXTDRollingShutter</code>
+                    <p class="node-description">Simulate rolling shutter artifacts (skew, wobble, flash banding).</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◿</span>
+                        <span class="node-name">Radiance Compression Artifacts</span>
+                    </div>
+                    <code class="node-class">FXTDCompressionArtifacts</code>
+                    <p class="node-description">Add compression artifacts (JPEG blocking, color banding) for lo-fi
+                        aesthetics.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◿</span>
+                        <span class="node-name">Radiance White Balance</span>
+                    </div>
+                    <code class="node-class">FXTDWhiteBalance</code>
+                    <p class="node-description">Adjust white balance using color temperature (Kelvin) and tint.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">FXTDDepthMapGenerator</span>
+                    </div>
+                    <code class="node-class">FXTDDepthMapGenerator</code>
+                    <p class="node-description">Professional node for Radiance workflow.</p>
+                    <div class="node-tags"><span class="tag">New</span></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- upscale Section -->
+        <section class="category" id="upscale">
+            <div class="category-header">
+                <h2>⬆️ Upscaling & Restoration</h2>
+                <span class="category-count">7 nodes</span>
+            </div>
+            <div class="nodes-grid">
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance AI Upscale</span>
+                    </div>
+                    <code class="node-class">FXTDAIUpscale</code>
+                    <p class="node-description">AI-powered upscaling using neural network models.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance Pro Upscale</span>
+                    </div>
+                    <code class="node-class">FXTDProUpscale</code>
+                    <p class="node-description">Professional 32-bit upscaler optimized for Flux with HDR support.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance Upscale By Size</span>
+                    </div>
+                    <code class="node-class">FXTDUpscaleBySize</code>
+                    <p class="node-description">Upscale to exact dimensions with aspect ratio control.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance Upscale Tiled</span>
+                    </div>
+                    <code class="node-class">FXTDUpscaleTiled</code>
+                    <p class="node-description">Tile-based upscaler for processing very large images efficiently.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">FXTDSharpen32bit</span>
+                    </div>
+                    <code class="node-class">FXTDSharpen32bit</code>
+                    <p class="node-description">Professional node for Radiance workflow.</p>
+                    <div class="node-tags"><span class="tag">New</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance Downscale 32-bit</span>
+                    </div>
+                    <code class="node-class">FXTDDownscale32bit</code>
+                    <p class="node-description">GPU-accelerated 32-bit downscaling with anti-aliasing.</p>
+                    <div class="node-tags"><span class="tag tag-gpu">GPU</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance Bit Depth Convert</span>
+                    </div>
+                    <code class="node-class">FXTDBitDepthConvert</code>
+                    <p class="node-description">Convert between bit depths with optional dithering.</p>
+                    <div class="node-tags"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- viewer Section -->
+        <section class="category" id="viewer">
+            <div class="category-header">
+                <h2><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> Viewer & Analysis</h2>
+                <span class="category-count">4 nodes</span>
+            </div>
+            <div class="nodes-grid">
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">⌗</span>
+                        <span class="node-name">⌗ Radiance Viewer</span>
+                    </div>
+                    <code class="node-class">FXTD_RadianceViewer</code>
+                    <p class="node-description">VFX Industry-Standard Viewer (NO OUTPUT): Zoom/Pan, Exposure/Gamma,
+                        Channel viewing.</p>
+                    <div class="node-tags"><span class="tag">New</span><span class="tag">Interact</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">⌗</span>
+                        <span class="node-name">⌗ Radiance Waveform Monitor</span>
+                    </div>
+                    <code class="node-class">FXTDWaveform</code>
+                    <p class="node-description">Visualize image exposure and channel balance using a Waveform monitor.
+                    </p>
+                    <div class="node-tags"><span class="tag">New</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">⌗</span>
+                        <span class="node-name">⌗ Radiance Vectorscope</span>
+                    </div>
+                    <code class="node-class">FXTDVectorscope</code>
+                    <p class="node-description">Visualize color saturation and hue distribution (U/V plot).</p>
+                    <div class="node-tags"><span class="tag">New</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance HDR Histogram</span>
+                    </div>
+                    <code class="node-class">HDRHistogram</code>
+                    <p class="node-description">Analyze HDR image histogram with dynamic range statistics and clipping
+                        indicators.</p>
+                    <div class="node-tags"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- utils Section -->
+        <section class="category" id="utils">
+            <div class="category-header">
+                <h2> IO & Utilities</h2>
+                <span class="category-count">13 nodes</span>
+            </div>
+            <div class="nodes-grid">
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">▲</span>
+                        <span class="node-name">▲ Radiance Unified Loader</span>
+                    </div>
+                    <code class="node-class">FXTDRadianceLoader</code>
+                    <p class="node-description">Unified Professional Loader for Flux and modern Diffusion models (UNET +
+                        Dual CLIP + VAE).</p>
+                    <div class="node-tags"><span class="tag">New</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">▼</span>
+                        <span class="node-name"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg> Radiance Save EXR</span>
+                    </div>
+                    <code class="node-class">FXTDSaveEXR</code>
+                    <p class="node-description">Save images as EXR files with full HDR and metadata support.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
+                        <span class="node-name">Load EXR</span>
+                    </div>
+                    <code class="node-class">LoadImageEXR</code>
+                    <p class="node-description">Load OpenEXR images with linear color space handling.</p>
+                    <div class="node-tags"><span class="tag">New</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">LoadImageEXRSequence</span>
+                    </div>
+                    <code class="node-class">LoadImageEXRSequence</code>
+                    <p class="node-description">Professional node for Radiance workflow.</p>
+                    <div class="node-tags"><span class="tag">New</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>
+                        <span class="node-name">VAE Encode</span>
+                    </div>
+                    <code class="node-class">RadianceVAEEncode</code>
+                    <p class="node-description">Encode image to latent space.</p>
+                    <div class="node-tags"><span class="tag">New</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg></span>
+                        <span class="node-name">VAE Decode</span>
+                    </div>
+                    <code class="node-class">RadianceVAEDecode</code>
+                    <p class="node-description">Decode latent to image.</p>
+                    <div class="node-tags"><span class="tag">New</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">ℹ</span>
+                        <span class="node-name">ℹ Radiance DNA Reader</span>
+                    </div>
+                    <code class="node-class">FXTDDNAReader</code>
+                    <p class="node-description">Verifies if an image contains a valid FXTD Digital DNA signature.</p>
+                    <div class="node-tags"><span class="tag">New</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance Help & Docs</span>
+                    </div>
+                    <code class="node-class">FXTDHelp</code>
+                    <p class="node-description">Open FXTD Studio Radiance documentation or website in your browser.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance Resolution</span>
+                    </div>
+                    <code class="node-class">FXTDResolution</code>
+                    <p class="node-description">Professional Resolution Generator with industry presets: • Social Media
+                        (Instagram, TikTok, YouTube, Twitter, etc.) • Film & Cinema (4K DCI, 2K, IMAX, Anamorphic
+                        scopes) • Television (8K/4K UHD, HD, SD) • AI Optimized (SDXL, FLUX) Outputs empty latent +
+                        visual preview.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">ℹ</span>
+                        <span class="node-name">ℹ Cinematic Prompt Encoder</span>
+                    </div>
+                    <code class="node-class">FXTDCinematicPromptEncoder</code>
+                    <p class="node-description">All-in-one cinematic prompt builder with direct CLIP encoding.</p>
+                    <div class="node-tags"><span class="tag">New</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">✶</span>
+                        <span class="node-name">✶ Radiance Lighting Studio</span>
+                    </div>
+                    <code class="node-class">FXTDLightingStudio</code>
+                    <p class="node-description">Generate cinematic lighting prompts (e.g. 'cinematic lighting, rim
+                        light, volumetric fog').</p>
+                    <div class="node-tags"><span class="tag">New</span></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance Sampler Pro</span>
+                    </div>
+                    <code class="node-class">FXTD_Radiance_Sampler_Pro</code>
+                    <p class="node-description">Professional Flux-optimized sampler with presets, timing report, and
+                        full parameter control.</p>
+                    <div class="node-tags"></div>
+                </div>
+                <div class="node-card">
+                    <div class="node-header">
+                        <span class="node-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span>
+                        <span class="node-name">FXTD_Radiance_Sampler</span>
+                    </div>
+                    <code class="node-class">FXTD_Radiance_Sampler</code>
+                    <p class="node-description">Flux-optimized sampling node.</p>
+                    <div class="node-tags"><span class="tag">New</span></div>
+                </div>
+            </div>
+        </section>
+
+        <footer>
+            <p><strong class="brand">FXTD Studios</strong> © 2024-2026</p>
+            <p>Making AI image generation professional-grade</p>
+            <div style="margin-top: 1rem; display: flex; gap: 1.5rem; justify-content: center; flex-wrap: wrap;">
+                <a href="https://www.fxtd.org" target="_blank" style="color: #888; text-decoration: none;">
+                    fxtd.org</a>
+                <a href="https://github.com/fxtdstudios" target="_blank"
+                    style="color: #888; text-decoration: none;">GitHub</a>
+                <a href="https://instagram.com/fxtdstudios" target="_blank"
+                    style="color: #888; text-decoration: none;">Instagram</a>
+                <a href="https://linkedin.com/company/fxtdstudios" target="_blank"
+                    style="color: #888; text-decoration: none;">LinkedIn</a>
+                <a href="https://vimeo.com/fxtdstudios" target="_blank"
+                    style="color: #888; text-decoration: none;">Vimeo</a>
+                <a href="https://discord.gg/fxtdstudios" target="_blank"
+                    style="color: #888; text-decoration: none;">Discord</a>
+                <a href="https://facebook.com/fxtdstudios" target="_blank"
+                    style="color: #888; text-decoration: none;">Facebook</a>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Back to Top Button -->
+    <button id="backToTop"
+        style="position: fixed; bottom: 2rem; right: 2rem; width: 48px; height: 48px; background: #333; border: 1px solid #444; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; opacity: 0; visibility: hidden; transition: all 0.3s; z-index: 1000; color: #888; font-size: 1.2rem;">↑</button>
+
+    <script>
+        // Back to top
+        const backToTop = document.getElementById('backToTop');
+        window.addEventListener('scroll', () => {
+            if (window.scrollY > 300) {
+                backToTop.style.opacity = '1';
+                backToTop.style.visibility = 'visible';
+            } else {
+                backToTop.style.opacity = '0';
+                backToTop.style.visibility = 'hidden';
+            }
+        });
+        backToTop.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+
+        // Theme toggle
+        const themeToggle = document.getElementById('themeToggle');
+        if (localStorage.getItem('fxtd-docs-theme') === 'light') {
+            document.body.classList.add('light-theme');
+            themeToggle.textContent = '◐ Dark';
+        }
+        themeToggle.addEventListener('click', () => {
+            document.body.classList.toggle('light-theme');
+            const isLight = document.body.classList.contains('light-theme');
+            themeToggle.textContent = isLight ? '◐ Dark' : ' Light';
+            localStorage.setItem('fxtd-docs-theme', isLight ? 'light' : 'dark');
+        });
+    </script>
+</body>
+
+</html>

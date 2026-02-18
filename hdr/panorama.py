@@ -1,0 +1,253 @@
+
+import torch
+import numpy as np
+import logging
+from typing import Tuple, Dict, Any, List, Optional
+import cv2
+
+# Local imports
+from .utils import tensor_to_numpy_float32, numpy_to_tensor_float32
+
+logger = logging.getLogger("radiance.hdr.panorama")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#                          HDR 360 PANORAMA NODES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class HDR360Generate:
+    """
+    Generate 360° equirectangular panoramas for HDRI environment mapping in 3D applications.
+    """
+    
+    PROJECTION_TYPES = ["Equirectangular", "Cube_Map", "Mirror_Ball", "Angular_Map"]
+    INTERPOLATION_MODES = ["Bilinear", "Bicubic", "Lanczos", "Nearest"]
+    FILL_MODES = ["Mirror", "Repeat", "Black", "Edge"]
+    
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "source_image": ("IMAGE", {"tooltip": "Input image to project. For best results, use a wide or panoramic image."}),
+                "projection_type": (cls.PROJECTION_TYPES, {
+                    "default": "Equirectangular",
+                    "tooltip": "Projection type: Equirectangular (standard HDRI), Cube_Map (6-face), Mirror_Ball (chrome ball), Angular_Map (light probe)."
+                }),
+                "output_width": ("INT", {
+                    "default": 4096, "min": 512, "max": 16384, "step": 64,
+                    "tooltip": "Output panorama width in pixels. Standard HDRI sizes: 2048 (preview), 4096 (standard), 8192 (high), 16384 (ultra)."
+                }),
+                "output_height": ("INT", {
+                    "default": 2048, "min": 256, "max": 8192, "step": 64,
+                    "tooltip": "Output panorama height. For equirectangular, height should be half of width (2:1 ratio)."
+                }),
+            },
+            "optional": {
+                "horizontal_fov": ("FLOAT", {
+                    "default": 360.0, "min": 30.0, "max": 360.0, "step": 1.0,
+                    "tooltip": "Horizontal field of view in degrees. 360° = full sphere, less = partial panorama."
+                }),
+                "vertical_fov": ("FLOAT", {
+                    "default": 180.0, "min": 15.0, "max": 180.0, "step": 1.0,
+                    "tooltip": "Vertical field of view in degrees. 180° = pole to pole, less = band around horizon."
+                }),
+                "rotation_x": ("FLOAT", {
+                    "default": 0.0, "min": -180.0, "max": 180.0, "step": 1.0,
+                    "tooltip": "Rotation around X axis (pitch) in degrees. Tilts the panorama up/down."
+                }),
+                "rotation_y": ("FLOAT", {
+                    "default": 0.0, "min": -180.0, "max": 180.0, "step": 1.0,
+                    "tooltip": "Rotation around Y axis (yaw) in degrees. Rotates the panorama left/right."
+                }),
+                "rotation_z": ("FLOAT", {
+                    "default": 0.0, "min": -180.0, "max": 180.0, "step": 1.0,
+                    "tooltip": "Rotation around Z axis (roll) in degrees. Tilts the horizon."
+                }),
+                "interpolation": (cls.INTERPOLATION_MODES, {
+                    "default": "Lanczos",
+                    "tooltip": "Sampling interpolation: Lanczos (highest quality), Bicubic (good), Bilinear (fast), Nearest (pixelated)."
+                }),
+                "fill_mode": (cls.FILL_MODES, {
+                    "default": "Mirror",
+                    "tooltip": "How to fill areas outside source image: Mirror (reflects), Repeat (tiles), Black (transparent), Edge (extends edge pixels)."
+                }),
+                "exposure_adjust": ("FLOAT", {
+                    "default": 0.0, "min": -5.0, "max": 5.0, "step": 0.1,
+                    "tooltip": "Exposure adjustment in stops. +1 = double brightness, -1 = half brightness."
+                }),
+            }
+        }
+    
+    RETURN_TYPES = ("IMAGE", "IMAGE")
+    RETURN_NAMES = ("panorama", "projection_map")
+    OUTPUT_TOOLTIPS = ("Generated 360° panorama.", "UV projection map for debugging.")
+    FUNCTION = "generate"
+    CATEGORY = "FXTD Studios/Radiance/Image"
+    DESCRIPTION = "Generate 360° equirectangular panoramas for HDRI environment mapping in 3D applications."
+    
+    def _create_rotation_matrix(self, rx: float, ry: float, rz: float) -> np.ndarray:
+        """Create 3D rotation matrix from Euler angles (in degrees)."""
+        rx, ry, rz = np.radians([rx, ry, rz])
+        
+        Rx = np.array([
+            [1, 0, 0],
+            [0, np.cos(rx), -np.sin(rx)],
+            [0, np.sin(rx), np.cos(rx)]
+        ])
+        
+        Ry = np.array([
+            [np.cos(ry), 0, np.sin(ry)],
+            [0, 1, 0],
+            [-np.sin(ry), 0, np.cos(ry)]
+        ])
+        
+        Rz = np.array([
+            [np.cos(rz), -np.sin(rz), 0],
+            [np.sin(rz), np.cos(rz), 0],
+            [0, 0, 1]
+        ])
+        
+        return Rz @ Ry @ Rx
+    
+    def _equirectangular_to_xyz(self, width: int, height: int) -> np.ndarray:
+        """Convert equirectangular coordinates to 3D unit sphere coordinates."""
+        u = np.linspace(0, 1, width)
+        v = np.linspace(0, 1, height)
+        u, v = np.meshgrid(u, v)
+        
+        theta = (u - 0.5) * 2 * np.pi
+        phi = (0.5 - v) * np.pi
+        
+        x = np.cos(phi) * np.sin(theta)
+        y = np.sin(phi)
+        z = np.cos(phi) * np.cos(theta)
+        
+        return np.stack([x, y, z], axis=-1)
+    
+    def _xyz_to_equirectangular(self, xyz: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Convert 3D coordinates back to equirectangular UV coordinates."""
+        x, y, z = xyz[..., 0], xyz[..., 1], xyz[..., 2]
+        
+        theta = np.arctan2(x, z)
+        phi = np.arcsin(np.clip(y, -1, 1))
+        
+        u = theta / (2 * np.pi) + 0.5
+        v = 0.5 - phi / np.pi
+        
+        return u, v
+    
+    def _apply_fill_mode(self, u: np.ndarray, v: np.ndarray, fill_mode: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Apply fill mode for out-of-bounds coordinates."""
+        if fill_mode == "Mirror":
+            u = np.abs(np.mod(u, 2) - 1) * (np.mod(np.floor(u), 2) * 2 - 1) + np.mod(np.floor(u) + 1, 2)
+            v = np.abs(np.mod(v, 2) - 1) * (np.mod(np.floor(v), 2) * 2 - 1) + np.mod(np.floor(v) + 1, 2)
+            u = np.clip(u, 0, 1)
+            v = np.clip(v, 0, 1)
+            mask = np.ones_like(u)
+        elif fill_mode == "Repeat":
+            u = np.mod(u, 1)
+            v = np.mod(v, 1)
+            mask = np.ones_like(u)
+        elif fill_mode == "Edge":
+            u = np.clip(u, 0, 1)
+            v = np.clip(v, 0, 1)
+            mask = np.ones_like(u)
+        else:  # Black
+            mask = ((u >= 0) & (u <= 1) & (v >= 0) & (v <= 1)).astype(np.float32)
+            u = np.clip(u, 0, 1)
+            v = np.clip(v, 0, 1)
+        
+        return u, v, mask
+    
+    def _sample_image(self, img: np.ndarray, u: np.ndarray, v: np.ndarray, 
+                      interpolation: str) -> np.ndarray:
+        """Sample image at UV coordinates with specified interpolation."""
+        
+        h, w = img.shape[:2]
+        x = u * (w - 1)
+        y = v * (h - 1)
+        
+        interp_map = {
+            "Nearest": cv2.INTER_NEAREST,
+            "Bilinear": cv2.INTER_LINEAR,
+            "Bicubic": cv2.INTER_CUBIC,
+            "Lanczos": cv2.INTER_LANCZOS4
+        }
+        
+        map_x = x.astype(np.float32)
+        map_y = y.astype(np.float32)
+        
+        result = cv2.remap(img, map_x, map_y, interp_map.get(interpolation, cv2.INTER_LANCZOS4),
+                          borderMode=cv2.BORDER_REFLECT)
+        
+        return result
+    
+    def generate(self, source_image: torch.Tensor, projection_type: str = "Equirectangular",
+                 output_width: int = 4096, output_height: int = 2048,
+                 horizontal_fov: float = 360.0, vertical_fov: float = 180.0,
+                 rotation_x: float = 0.0, rotation_y: float = 0.0, rotation_z: float = 0.0,
+                 interpolation: str = "Lanczos", fill_mode: str = "Mirror",
+                 exposure_adjust: float = 0.0) -> Tuple[torch.Tensor, torch.Tensor]:
+        
+        img = tensor_to_numpy_float32(source_image)
+        if img.ndim == 4:
+            img = img[0]
+        
+        src_h, src_w = img.shape[:2]
+        
+        # Generate equirectangular UV grid
+        xyz = self._equirectangular_to_xyz(output_width, output_height)
+        
+        # Apply rotation if specified
+        if rotation_x != 0 or rotation_y != 0 or rotation_z != 0:
+            R = self._create_rotation_matrix(rotation_x, rotation_y, rotation_z)
+            xyz = xyz @ R.T
+        
+        # Project based on type
+        if projection_type == "Equirectangular":
+            u, v = self._xyz_to_equirectangular(xyz)
+            # Apply FOV scaling
+            h_scale = horizontal_fov / 360.0
+            v_scale = vertical_fov / 180.0
+            u = (u - 0.5) / h_scale + 0.5
+            v = (v - 0.5) / v_scale + 0.5
+            
+        elif projection_type == "Cube_Map":
+            x, y, z = xyz[..., 0], xyz[..., 1], xyz[..., 2]
+            abs_x, abs_y, abs_z = np.abs(x), np.abs(y), np.abs(z)
+            max_axis = np.maximum(np.maximum(abs_x, abs_y), abs_z)
+            u = np.where(max_axis == abs_x, 0.5 + y / (2 * abs_x + 1e-8), 
+                        np.where(max_axis == abs_z, 0.5 + x / (2 * abs_z + 1e-8), 0.5 + x / (2 * abs_y + 1e-8)))
+            v = np.where(max_axis == abs_y, 0.5 + z / (2 * abs_y + 1e-8), 0.5 + y / (2 * max_axis + 1e-8))
+            
+        elif projection_type == "Mirror_Ball":
+            x, y, z = xyz[..., 0], xyz[..., 1], xyz[..., 2]
+            r = np.sqrt(x**2 + y**2)
+            m = 2 * np.sqrt(x**2 + y**2 + (z + 1)**2 + 1e-8)
+            u = x / m + 0.5
+            v = y / m + 0.5
+            
+        elif projection_type == "Angular_Map":
+            x, y, z = xyz[..., 0], xyz[..., 1], xyz[..., 2]
+            r = np.arccos(np.clip(z, -1, 1)) / np.pi
+            phi = np.arctan2(y, x)
+            u = r * np.cos(phi) * 0.5 + 0.5
+            v = r * np.sin(phi) * 0.5 + 0.5
+        
+        # Apply fill mode
+        u, v, mask = self._apply_fill_mode(u, v, fill_mode)
+        
+        # Sample the source image
+        panorama = self._sample_image(img, u, v, interpolation)
+        
+        # Apply mask for black fill mode
+        if fill_mode == "Black":
+            panorama = panorama * mask[..., np.newaxis]
+        
+        # Apply exposure adjustment
+        if exposure_adjust != 0:
+            panorama = panorama * (2.0 ** exposure_adjust)
+        
+        # Create UV map for visualization
+        uv_map = np.stack([u, v, mask], axis=-1).astype(np.float32)
+        
+        return (numpy_to_tensor_float32(panorama), numpy_to_tensor_float32(uv_map))
