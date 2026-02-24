@@ -3378,6 +3378,41 @@ class RadianceViewer {
     renderPromptTab(container) {
         container.style.cssText = 'display: flex; flex-direction: column; gap: 10px; padding: 10px; max-height: 380px; overflow-y: auto; color: #fff;';
         const t = this.theme;
+
+        // v2.4: Move Run Button to top of prompt tab
+        const runBtnWrapper = document.createElement('div');
+        runBtnWrapper.style.cssText = 'padding: 5px 0 15px 0; display: flex; justify-content: center; border-bottom: 1px solid rgba(255,255,255,0.05); margin-bottom: 5px;';
+
+        const runBtn = document.createElement('button');
+        runBtn.innerHTML = '▶ RUN WORKFLOW';
+        runBtn.style.cssText = `
+        background: #1a4a1a;
+        color: #4f4;
+        border: 1px solid #2a6a2a;
+        border-radius: 8px;
+        padding: 10px 20px;
+        font-size: 12px;
+        font-weight: 800;
+        cursor: pointer;
+        letter-spacing: 1px;
+        transition: all 0.2s;
+        width: 100%;
+        font-family: ${t.font};
+    `;
+        runBtn.onmouseover = () => {
+            runBtn.style.background = '#226222';
+            runBtn.style.boxShadow = '0 0 15px rgba(79, 255, 79, 0.2)';
+        };
+        runBtn.onmouseout = () => {
+            runBtn.style.background = '#1a4a1a';
+            runBtn.style.boxShadow = 'none';
+        };
+        this.runButton = runBtn;
+        runBtn.onclick = () => this.runWorkflow();
+
+        runBtnWrapper.appendChild(runBtn);
+        container.appendChild(runBtnWrapper);
+
         // v2.4: ONLY show the Cinematic Encoder node in the HUD prompt tab
         const nodes = app.graph._nodes.filter(n => {
             const nodeType = n.type || "";
@@ -3516,39 +3551,6 @@ class RadianceViewer {
             container.appendChild(wrapper);
         });
 
-        // v2.4: Move Run Button here from Toolbar
-        const runBtnWrapper = document.createElement('div');
-        runBtnWrapper.style.cssText = 'padding: 10px; display: flex; justify-content: center; border-top: 1px solid rgba(255,255,255,0.05); margin-top: 10px;';
-
-        const runBtn = document.createElement('button');
-        runBtn.innerHTML = '▶ RUN WORKFLOW';
-        runBtn.style.cssText = `
-        background: #1a4a1a;
-        color: #4f4;
-        border: 1px solid #2a6a2a;
-        border-radius: 8px;
-        padding: 10px 20px;
-        font-size: 12px;
-        font-weight: 800;
-        cursor: pointer;
-        letter-spacing: 1px;
-        transition: all 0.2s;
-        width: 100%;
-        font-family: ${t.font};
-    `;
-        runBtn.onmouseover = () => {
-            runBtn.style.background = '#226222';
-            runBtn.style.boxShadow = '0 0 15px rgba(79, 255, 79, 0.2)';
-        };
-        runBtn.onmouseout = () => {
-            runBtn.style.background = '#1a4a1a';
-            runBtn.style.boxShadow = 'none';
-        };
-        this.runButton = runBtn;
-        runBtn.onclick = () => this.runWorkflow();
-
-        runBtnWrapper.appendChild(runBtn);
-        container.appendChild(runBtnWrapper);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
