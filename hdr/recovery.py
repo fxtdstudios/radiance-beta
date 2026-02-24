@@ -1,131 +1,188 @@
 import torch
 import numpy as np
 import logging
-from typing import Tuple, Dict, Any, List, Optional
+from typing import Tuple, Dict, Any
 
 from .utils import tensor_to_numpy_float32, numpy_to_tensor_float32
 
 logger = logging.getLogger("radiance.hdr.recovery")
 
+
 class RadianceHighlightSynthesis:
     """
     Synthesize high dynamic range details in clipped highlights.
-    
+
     This node "hallucinates" detail in blown-out areas (> threshold) by:
     1. Expanding the dynamic range using a roll-off curve.
     2. Generating synthetic grain/texture that matches the image statistics.
     3. Blending this detail into the expanded highlights to simulate film clipping.
-    
+
     This is useful for fixing "flat white" skies or light sources in standard generation outputs.
     """
-    
+
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "threshold": ("FLOAT", {"default": 0.95, "min": 0.5, "max": 1.0, "step": 0.01, "tooltip": "Luminance level above which to synthesize detail."}),
-                "expansion": ("FLOAT", {"default": 1.5, "min": 1.0, "max": 4.0, "step": 0.1, "tooltip": "How much to expand highlight range (multiplier for values > 1.0)."}),
-                "detail_amount": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "Strength of synthetic grain in highlights."}),
-                "detail_scale": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 5.0, "step": 0.1, "tooltip": "Scale/frequency of the synthetic detail."}),
+                "threshold": (
+                    "FLOAT",
+                    {
+                        "default": 0.95,
+                        "min": 0.5,
+                        "max": 1.0,
+                        "step": 0.01,
+                        "tooltip": "Luminance level above which to synthesize detail.",
+                    },
+                ),
+                "expansion": (
+                    "FLOAT",
+                    {
+                        "default": 1.5,
+                        "min": 1.0,
+                        "max": 4.0,
+                        "step": 0.1,
+                        "tooltip": "How much to expand highlight range (multiplier for values > 1.0).",
+                    },
+                ),
+                "detail_amount": (
+                    "FLOAT",
+                    {
+                        "default": 0.2,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.05,
+                        "tooltip": "Strength of synthetic grain in highlights.",
+                    },
+                ),
+                "detail_scale": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.1,
+                        "max": 5.0,
+                        "step": 0.1,
+                        "tooltip": "Scale/frequency of the synthetic detail.",
+                    },
+                ),
                 "blend_mode": (["Screen", "Add", "Soft Light"], {"default": "Screen"}),
             }
         }
-    
+
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "synthesize"
     CATEGORY = "FXTD Studios/Radiance/Color"
     DESCRIPTION = "Synthesize high dynamic range details in clipped highlights to simulate film scan quality."
-    
-    def synthesize(self, image: torch.Tensor, threshold: float = 0.95, 
-                   expansion: float = 1.5, detail_amount: float = 0.2, 
-                   detail_scale: float = 1.0, blend_mode: str = "Screen") -> Tuple[torch.Tensor]:
-        
+
+    def synthesize(
+        self,
+        image: torch.Tensor,
+        threshold: float = 0.95,
+        expansion: float = 1.5,
+        detail_amount: float = 0.2,
+        detail_scale: float = 1.0,
+        blend_mode: str = "Screen",
+    ) -> Tuple[torch.Tensor]:
+
         # Working in numpy for complex masking/noise generation
         img_np = tensor_to_numpy_float32(image)
-        
+
         # Batch handling
         if img_np.ndim == 3:
             img_np = img_np[np.newaxis, ...]
-            
+
         batch_size, h, w, c = img_np.shape
         result_batch = np.zeros_like(img_np)
-        
+
         for b in range(batch_size):
             frame = img_np[b]
-            
+
             # 1. Calculate Luminance
             if c >= 3:
-                luma = 0.2126 * frame[..., 0] + 0.7152 * frame[..., 1] + 0.0722 * frame[..., 2]
+                luma = (
+                    0.2126 * frame[..., 0]
+                    + 0.7152 * frame[..., 1]
+                    + 0.0722 * frame[..., 2]
+                )
             else:
                 luma = frame[..., 0]
-            
+
             # 2. Create Highlight Mask
             # Soft mask starting at threshold
             mask = np.clip((luma - threshold) / (1.0 - threshold + 1e-6), 0, 1)
             # Smooth step for better blending
             mask = mask * mask * (3 - 2 * mask)
-            
+
             # If no highlights, skip
             if mask.max() < 1e-4:
                 result_batch[b] = frame
                 continue
-                
+
             # 3. Expansion (Inverse Tone Mapping curve)
             # Simple quadratic expansion for values above threshold
             # v_expanded = v + (v - threshold)^2 * expansion_factor
-            
+
             # Identify highlight pixels
-            high_pixels = luma > threshold
-            
+            luma > threshold
+
             # Apply expansion to the image
             expanded_frame = frame.copy()
-            
+
             # Calculate expansion factor map based on luma
             # Start at 1.0, increase with brightness
             expansion_map = 1.0 + (luma - threshold) * (expansion - 1.0) * 2.0
             expansion_map = np.maximum(1.0, expansion_map)
-            
+
             # Apply expansion only where mask > 0
             # Blend original and expanded based on mask
-            expanded_frame = frame * (1.0 - mask[..., np.newaxis]) + \
-                             frame * expansion_map[..., np.newaxis] * mask[..., np.newaxis]
-                             
+            expanded_frame = (
+                frame * (1.0 - mask[..., np.newaxis])
+                + frame * expansion_map[..., np.newaxis] * mask[..., np.newaxis]
+            )
+
             # 4. Synthesize Detail (Grain/Noise)
             # Generate gaussian noise
             noise = np.random.normal(0, 0.5, (h, w)).astype(np.float32)
-            
+
             # Scale noise (simulate grain size)
             if detail_scale != 1.0:
                 try:
                     from scipy.ndimage import zoom
+
                     # Generate smaller noise and upscale it
                     h_small = int(h / detail_scale)
                     w_small = int(w / detail_scale)
-                    noise_small = np.random.normal(0, 0.5, (h_small, w_small)).astype(np.float32)
+                    noise_small = np.random.normal(0, 0.5, (h_small, w_small)).astype(
+                        np.float32
+                    )
                     noise = zoom(noise_small, (h / h_small, w / w_small), order=1)
                     # Handle size mismatch after zoom
                     noise = noise[:h, :w]
                     if noise.shape != (h, w):
-                         noise = np.pad(noise, ((0, max(0, h - noise.shape[0])), 
-                                                (0, max(0, w - noise.shape[1]))))[:h, :w]
+                        noise = np.pad(
+                            noise,
+                            (
+                                (0, max(0, h - noise.shape[0])),
+                                (0, max(0, w - noise.shape[1])),
+                            ),
+                        )[:h, :w]
                 except ImportError:
-                    pass # Fallback to standard noise
-            
+                    pass  # Fallback to standard noise
+
             # Modulate noise by detail_amount and mask
             noise_layer = noise * detail_amount * mask
-            
+
             # 5. Blend Noise
             final_frame = expanded_frame.copy()
-            
+
             # Apply noise to all channels (monochromatic grain) or per-channel?
-            # Film grain is usually coupled to dye clouds, so often coupled. 
+            # Film grain is usually coupled to dye clouds, so often coupled.
             # Let's apply to all channels identically (luminance noise).
-            
+
             if blend_mode == "Add":
-                 for ch in range(c):
-                     final_frame[..., ch] += noise_layer
+                for ch in range(c):
+                    final_frame[..., ch] += noise_layer
             elif blend_mode == "Screen":
                 # Screen: 1 - (1-a)(1-b)
                 # But here we want to screen noise ON TOP of image.
@@ -133,15 +190,15 @@ class RadianceHighlightSynthesis:
                 # Actually, simpler film grain model: multipy for shadows, add for highlights?
                 # For highlights, we want to break up the flat white.
                 for ch in range(c):
-                     final_frame[..., ch] += noise_layer
+                    final_frame[..., ch] += noise_layer
             elif blend_mode == "Soft Light":
-                 # Overlay logic
-                 pass
-            
+                # Overlay logic
+                pass
+
             # Ensure we strictly expanded range (don't clip back to 1.0)
             # But ensure we don't go below 0
             final_frame = np.maximum(0.0, final_frame)
-            
+
             result_batch[b] = final_frame
-            
+
         return (numpy_to_tensor_float32(result_batch),)

@@ -2,7 +2,7 @@
 
 ## Overview
 
-This guide helps users migrate from older versions of Radiance to the latest version with professional color science and optimizations.
+This guide helps users migrate from older versions of Radiance to the latest version (2.1) with professional color science and optimizations.
 
 ---
 
@@ -12,7 +12,6 @@ This guide helps users migrate from older versions of Radiance to the latest ver
 
 **What's New:**
 - ✅ Professional ARRI LogC gamut conversions
-- ✅ Professional Sony S-Log3 gamut conversions
 - ✅ Input validation (resolution, metadata)
 - ✅ 100x performance improvement (alpha premultiplication)
 - ✅ Scene-linear color space option
@@ -20,7 +19,7 @@ This guide helps users migrate from older versions of Radiance to the latest ver
 
 ### ⚠️ Breaking Changes
 
-#### 1. Color Output Changed (LogC3/LogC4/S-Log3)
+#### 1. Color Output Changed (LogC3/LogC4)
 
 **Impact:** HIGH - Colors will be different (CORRECT now)
 
@@ -30,16 +29,13 @@ This guide helps users migrate from older versions of Radiance to the latest ver
 
 **Who's Affected:**
 - Users exporting to ARRI LogC3/LogC4
-- Users exporting to Sony S-Log3
 - Professional color grading workflows
 
 **Migration Steps:**
-1. Re-export all LogC3/LogC4/S-Log3 files
+1. Re-export all LogC3/LogC4 files
 2. Update DaVinci Resolve project settings:
    - LogC3: Set input to `ARRI LogC3 / AWG`
    - LogC4: Set input to `ARRI LogC4 / AWG`
-   - S-Log3: Set input to `Sony S-Log3 / S-Gamut3.Cine`
-3. Colors will now match manufacturer specifications
 
 **Before/After Comparison:**
 ```python
@@ -163,21 +159,16 @@ Replace old nodes with `◆ Radiance Save EXR/HDR`:
 - Adjust `output_color_space` if needed
 - Verify compression settings
 
-#### Step 3: Re-export LogC/S-Log3
-If you used:
-- ARRI LogC3
-- ARRI LogC4
-- Sony S-Log3
+#### Step 3: Re-export LogC
+To get the proper wide-gamut log files that VFX compositors and colorists expect, you **must re-export** your sequences out of ComfyUI. The previous v1.x EXRs will grade differently because they lack the proper gamut transformations.
 
-**Action:** Re-export all files (colors will be corrected)
+**DaVinci Resolve Setup**
+When importing the newly generated v2.0 EXRs into DaVinci Resolve, right click the footage and set the Input Color Space:
 
-#### Step 4: Update DaVinci Resolve Projects
-Set correct input color space:
-| Export Format | DaVinci Resolve Setting |
-|---------------|-------------------------|
+| EXR Export Parameter | DaVinci Resolve Input Space |
+| :--- | :--- |
 | ARRI LogC3 | `ARRI LogC3 / AWG` |
 | ARRI LogC4 | `ARRI LogC4 / AWG` |
-| Sony S-Log3 | `Sony S-Log3 / S-Gamut3.Cine` |
 
 #### Step 5: Test Workflows
 - Verify colors in grading suite
@@ -210,7 +201,7 @@ Set correct input color space:
 ### Q: Do I need to update my workflows?
 
 **A:** Only if you use:
-1. LogC3/LogC4/S-Log3 color spaces → Re-export needed
+1. LogC3/LogC4 color spaces → Re-export needed
 2. Removed nodes → Replace with unified saver
 3. Otherwise → No changes needed
 
@@ -235,7 +226,7 @@ output_color_space = "Same as Input"
 
 ### Q: Why did colors change?
 
-**A:** Previous LogC/S-Log3 exports were technically INCORRECT:
+**A:** Previous LogC exports were technically INCORRECT:
 - Used wrong primaries (sRGB instead of ARRI/Sony)
 - Only applied log curve
 - Didn't match manufacturer specifications

@@ -4,7 +4,7 @@ from .camera import (
     RadianceDepthOfField,
     RadianceMotionBlur,
     RadianceRollingShutter,
-    RadianceCompressionArtifacts
+    RadianceCompressionArtifacts,
 )
 
 __all__ = [
@@ -13,5 +13,5 @@ __all__ = [
     "RadianceDepthOfField",
     "RadianceMotionBlur",
     "RadianceRollingShutter",
-    "RadianceCompressionArtifacts"
+    "RadianceCompressionArtifacts",
 ]

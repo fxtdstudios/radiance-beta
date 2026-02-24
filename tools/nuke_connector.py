@@ -49,8 +49,8 @@ CONNECT_TIMEOUT = 5.0
 READ_TIMEOUT = 15.0
 
 # Wire protocol
-HEADER_MAGIC = b"RCMD"        # 4-byte magic identifier
-HEADER_VERSION = 1             # Protocol version
+HEADER_MAGIC = b"RCMD"  # 4-byte magic identifier
+HEADER_VERSION = 1  # Protocol version
 END_MARKER = b"\n__RADIANCE_END__\n"  # Response terminator
 
 
@@ -82,7 +82,9 @@ class NukeConnector:
     #  LOW-LEVEL: send raw Python command to Nuke
     # ═════════════════════════════════════════════════════════════════════
 
-    def send_command(self, command: str, timeout: float = READ_TIMEOUT) -> Tuple[bool, str]:
+    def send_command(
+        self, command: str, timeout: float = READ_TIMEOUT
+    ) -> Tuple[bool, str]:
         """
         Send a Python command string to Nuke and return (success, result).
 
@@ -97,8 +99,8 @@ class NukeConnector:
             sock.settimeout(timeout)
 
             # Wire frame: MAGIC(4) + VERSION(1) + LENGTH(4 LE) + PAYLOAD
-            payload = command.encode('utf-8')
-            header = HEADER_MAGIC + struct.pack('<BI', HEADER_VERSION, len(payload))
+            payload = command.encode("utf-8")
+            header = HEADER_MAGIC + struct.pack("<BI", HEADER_VERSION, len(payload))
             sock.sendall(header + payload)
 
             # Read response chunks until END_MARKER or disconnect
@@ -116,7 +118,7 @@ class NukeConnector:
                 except socket.timeout:
                     break
 
-            response = accumulated.decode('utf-8', errors='replace')
+            response = accumulated.decode("utf-8", errors="replace")
             response = response.replace(END_MARKER.decode(), "").strip()
 
             if response.startswith("ERROR:"):
@@ -151,7 +153,7 @@ class NukeConnector:
             if sock:
                 try:
                     sock.close()
-                except Exception:
+                except Exception:  # nosec B110
                     pass
 
     # ═════════════════════════════════════════════════════════════════════
@@ -248,9 +250,7 @@ class NukeConnector:
 
     def set_frame(self, frame: int) -> Tuple[bool, str]:
         """Set Nuke's current frame."""
-        return self.send_command(
-            f"import nuke; nuke.frame({frame}); 'frame={frame}'"
-        )
+        return self.send_command(f"import nuke; nuke.frame({frame}); 'frame={frame}'")
 
     def get_info(self) -> Tuple[bool, Dict[str, Any]]:
         """Query Nuke for version, project, format, frame range, fps."""

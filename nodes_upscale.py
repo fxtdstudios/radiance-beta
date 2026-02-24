@@ -1,13 +1,13 @@
-
 """
 Radiance Upscale - Legacy Facade
 """
+
 from .image.upscale import (
-    RadianceProUpscale, 
+    RadianceProUpscale,
     RadianceUpscaleBySize,
     RadianceDownscale32bit,
     RadianceBitDepthConvert,
-    RadianceAIUpscale
+    RadianceAIUpscale,
 )
 
 NODE_CLASS_MAPPINGS = {

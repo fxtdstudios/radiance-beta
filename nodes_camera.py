@@ -1,10 +1,9 @@
-
 from .film import (
     RadianceWhiteBalance,
     RadianceDepthOfField,
     RadianceMotionBlur,
     RadianceRollingShutter,
-    RadianceCompressionArtifacts
+    RadianceCompressionArtifacts,
 )
 
 NODE_CLASS_MAPPINGS = {
@@ -12,7 +11,7 @@ NODE_CLASS_MAPPINGS = {
     "RadianceDepthOfField": RadianceDepthOfField,
     "RadianceMotionBlur": RadianceMotionBlur,
     "RadianceRollingShutter": RadianceRollingShutter,
-    "RadianceCompressionArtifacts": RadianceCompressionArtifacts
+    "RadianceCompressionArtifacts": RadianceCompressionArtifacts,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -20,5 +19,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceDepthOfField": "◎ Radiance Depth of Field",
     "RadianceMotionBlur": "◎ Radiance Motion Blur",
     "RadianceRollingShutter": "◎ Radiance Rolling Shutter",
-    "RadianceCompressionArtifacts": "◎ Radiance Compression Artifacts"
+    "RadianceCompressionArtifacts": "◎ Radiance Compression Artifacts",
 }

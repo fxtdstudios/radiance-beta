@@ -15,9 +15,11 @@
  * ═══════════════════════════════════════════════════════════════════════════════
  */
 
+console.log("[Radiance] Viewer Script Loading...");
+
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { RadianceWebGLRenderer } from "./radiance_webgl.js?v=2.6.0";
+import { RadianceWebGLRenderer } from "./radiance_webgl.js?v=2.1.0";
 
 
 class RadianceViewer {
@@ -55,9 +57,6 @@ class RadianceViewer {
         this.panY = 0;
         this.isPanning = false;
         this.exposure = 0.0;
-        this.lift = [0, 0, 0];
-        this.gamma = [1, 1, 1];
-        this.gain = [1, 1, 1];
         this.channel = 'rgb';
 
         // DoF / Lens Settings
@@ -71,7 +70,9 @@ class RadianceViewer {
         this.lensFringe = 0.0;
         this.vignetteIntensity = 0.0;
         this.vignetteFalloff = 0.5;
-
+        this.bokehHighlightBias = 0.0;
+        this.bokehSoapBubble = 0.0;
+        this.bokehOpticalVig = 0.0;
 
         this.saturation = 1.0;
         this.zebraThreshold = 0.95;
@@ -79,6 +80,8 @@ class RadianceViewer {
 
         this.falseColor = false;
         this.zebra = false;
+        this.gamutWarning = false;
+        this.clippingMonitor = false;
         this.colorspace = 'sRGB';
 
         // Batch Navigation
@@ -113,7 +116,7 @@ class RadianceViewer {
         this.showWaveform = false;
         this.showVectorscope = false;
         this.scopeOverlay = false;
-        this.waveformParadeMode = false; // false = overlay, true = RGB parade
+        this.waveformParadeMode = true; // true = RGB parade
         this.scopeMode = localStorage.getItem('radiance_scope_mode') || 'parade'; // parade|waveform|histogram|vectorscope|falsecolor
 
         // Annotations
@@ -157,9 +160,44 @@ class RadianceViewer {
 
         // Color Space / LUT
         this.displayLut = 'None';
-        this.lutOptions = ['None', 'sRGB', 'Rec.709', 'LogC3', 'ACEScg'];
+        this.lutOptions = [
+            'None',
+            'sRGB (Display)',
+            'Rec.709 (Broadcast)',
+            'Filmic (Cinematic)',
+            'Log C3 (ARRI)',
+            'Log C4 (ARRI)',
+            'Canon Log',
+            'Fuji F-Log',
+            'Blackmagic Gen5',
+            'Linear to Log',
+            'Reinhard Tonemap',
+            'ACES Filmic'
+        ];
         this.denoise = 0.0;
         this.grain = 0.0;
+
+        // Grading State
+        this.exposure = 0.0;
+        this.temperature = 0.0;
+        this.tint = 0.0;
+        this.contrast = 1.0;
+        this.pivot = 0.5;
+        this.saturation = 1.0;
+        this.lift = [0, 0, 0];
+        this.gamma = [1, 1, 1];
+        this.gain = [1, 1, 1];
+        this.offset = [0, 0, 0];
+
+        // v2.2 Pro features
+        this.displayLutMode = 0;
+        this.displayLutStrength = 1.0;
+        this.lumaMix = 1.0;
+        this.wipe = 0.5;
+        this.wipeEnabled = false;
+        this.wipeRefEnabled = false;
+        this.gridMode = 0;
+        this.gridColor = [0.0, 0.7, 1.0, 0.5]; // Light blue guide color
 
         // Help Screen
         this.showHelp = false;
@@ -178,11 +216,16 @@ class RadianceViewer {
         this.showControls = true;
         this.controlsPanel = null;
 
-        // HUD Panel Sizing (persisted)
+        // HUD Panel Sizing and Position (persisted)
         const savedHudWidth = localStorage.getItem('radiance_hud_width');
         this.hudPanelWidth = savedHudWidth ? parseInt(savedHudWidth) : 580;
         this.hudPanelMinWidth = 480;
         this.hudPanelMaxWidth = 960;
+
+        const savedHudX = localStorage.getItem('radiance_hud_x');
+        const savedHudY = localStorage.getItem('radiance_hud_y');
+        this.hudX = savedHudX !== null ? parseFloat(savedHudX) : null; // null means default (bottom center)
+        this.hudY = savedHudY !== null ? parseFloat(savedHudY) : null;
 
         // Scope update debouncing (for performance)
         this.scopeUpdateTimer = null;
@@ -205,6 +248,17 @@ class RadianceViewer {
             l: 0.5, lW: 0.5, lS: 0.1
         };
 
+        // v3.1: Masking (Power Windows) state
+        this.maskState = {
+            type: 0, // 0=None, 1=Circle, 2=Box
+            center: [0.5, 0.5],
+            scale: [0.3, 0.3],
+            feather: 0.2,
+            rotation: 0.0,
+            invert: false,
+            showOverlay: false
+        };
+
         this.init();
     }
 
@@ -223,17 +277,24 @@ class RadianceViewer {
     showUI(visible) {
         const opacity = visible ? '1' : '0';
         const pointerEvents = visible ? 'all' : 'none';
-        const transform = visible ? 'translateX(-50%)' : 'translate(-50%, 20px)';
 
         if (this.controlsPanel) {
             this.controlsPanel.style.opacity = opacity;
-            this.controlsPanel.style.transform = transform;
             this.controlsPanel.style.pointerEvents = pointerEvents;
+            this.controlsPanel.style.transform = visible ? 'translateX(-50%)' : 'translate(-50%, 20px)';
         }
         if (this.toolbar) {
             this.toolbar.style.opacity = opacity;
             this.toolbar.style.pointerEvents = pointerEvents;
             this.toolbar.style.transition = 'opacity 0.4s';
+        }
+        if (this.bottomInfoBar) {
+            this.bottomInfoBar.style.display = visible ? 'flex' : 'none';
+        }
+        if (this.transportPanel) {
+            this.transportPanel.style.opacity = opacity;
+            this.transportPanel.style.pointerEvents = pointerEvents;
+            this.transportPanel.style.transform = visible ? 'translateX(-50%)' : 'translate(-50%, 10px)';
         }
     }
 
@@ -296,19 +357,19 @@ class RadianceViewer {
         this.canvasWrapper.appendChild(this.glCanvas); // Insert after 2D canvas so it overlays
 
         // Initialize WebGL Renderer
-        this.useWebGL = true; // Enable by default
+        this.useWebGL = true;
         try {
-            if (RadianceWebGLRenderer) {
+            if (typeof RadianceWebGLRenderer !== 'undefined') {
                 this.renderer = new RadianceWebGLRenderer(this.glCanvas);
-                console.log("[Radiance] WebGL Renderer Initialized (GPU acceleration enabled)");
+                if (this.renderer.init()) {
+                    console.log("[Radiance] WebGL Renderer Initialized");
+                }
             } else {
-                console.error("[Radiance] RadianceWebGLRenderer class is missing.");
-                this.renderer = null;
+                console.warn("[Radiance] WebGL Renderer class not found, falling back to 2D.");
                 this.useWebGL = false;
             }
         } catch (e) {
-            console.error("[Radiance] WebGL init failed:", e);
-            this.renderer = null;
+            console.warn("[Radiance] WebGL init failed:", e);
             this.useWebGL = false;
         }
 
@@ -370,23 +431,52 @@ class RadianceViewer {
 
 
 
-        // Pixel probe tooltip
-        this.probeTooltip = document.createElement('div');
-        this.probeTooltip.style.cssText = `
-            position: absolute;
-            display: none;
-            background: rgba(0,0,0,0.92);
-            border: 1px solid ${t.panelBorder};
-            border-radius: 4px;
-            padding: 6px 8px;
-            font-size: 9px;
-            color: ${t.text};
-            pointer-events: none;
+        // Bottom Info Bar (HUD)
+        this.bottomInfoBar = document.createElement('div');
+        this.bottomInfoBar.style.cssText = `
+            flex: 0 0 22px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 10px;
+            background: rgba(10, 10, 14, 0.95);
+            border-top: 1px solid ${t.panelBorder};
+            font-size: 10.5px;
+            font-family: monospace;
+            color: #aaa;
+            white-space: nowrap;
+            overflow: hidden;
             z-index: 1000;
-            white-space: pre;
-            cursor: pointer;
         `;
-        this.canvasWrapper.appendChild(this.probeTooltip);
+
+        this.infoLeft = document.createElement('div');
+        this.infoLeft.style.cssText = 'display: flex; gap: 16px; align-items: center;';
+        this.bottomInfoBar.appendChild(this.infoLeft);
+
+        this.infoRight = document.createElement('div');
+        this.infoRight.style.cssText = 'display: flex; gap: 16px; align-items: center;';
+        this.bottomInfoBar.appendChild(this.infoRight);
+
+        // False Color Legend (Overlay within Bottom Bar)
+        this.fcLegend = document.createElement('div');
+        this.fcLegend.style.cssText = `
+            position: absolute; left: 50%; transform: translateX(-50%);
+            display: none; align-items: center; gap: 4px; height: 100%;
+        `;
+        const fcMap = [
+            { s: '-4', c: '#0d0d66' }, { s: '-3', c: '#1a668c' }, { s: '-2', c: '#1a7359' },
+            { s: '-1', c: '#268c26' }, { s: 'MD', c: '#666666' }, { s: '+1', c: '#b3a61a' },
+            { s: '+2', c: '#bf660d' }, { s: '+3', c: '#b31a1a' }, { s: 'CLIP', c: '#cc2699' }
+        ];
+        fcMap.forEach(item => {
+            const block = document.createElement('div');
+            block.style.cssText = `display: flex; align-items: center; gap: 3px;`;
+            block.innerHTML = `<div style="width:8px; height:8px; background:${item.c}; border:1px solid rgba(255,255,255,0.2)"></div><span style="font-size:8.5px; color:#888">${item.s}</span>`;
+            this.fcLegend.appendChild(block);
+        });
+        this.bottomInfoBar.appendChild(this.fcLegend);
+
+        this.container.appendChild(this.bottomInfoBar);
 
         // Metadata Info Panel
         this.metadataPanel = document.createElement('div');
@@ -467,6 +557,9 @@ class RadianceViewer {
             letter-spacing: 0.5px;
         `;
         this.statusBar.appendChild(this.bitDepthInfo);
+
+        // Create metadata overlay (once, not per-render)
+        this.createMetadataOverlay();
     }
 
     createScopes() {
@@ -481,13 +574,37 @@ class RadianceViewer {
         this.scopePanel.appendChild(this.histogramCanvas);
 
         // Waveform
+        const waveformHeader = document.createElement('div');
+        waveformHeader.style.cssText = 'display: flex; justify-content: space-between; align-items: center; margin-top: 5px;';
+
+        this.waveformLabel = this.createLabel('Waveform', true);
+
+        this.paradeToggle = document.createElement('div');
+        this.paradeToggle.textContent = 'PARADE';
+        this.paradeToggle.style.cssText = `
+            font-size: 8px;
+            padding: 1px 4px;
+            border: 1px solid ${this.theme.accent};
+            color: ${this.theme.accent};
+            cursor: pointer;
+            border-radius: 2px;
+            display: none;
+            opacity: ${this.waveformParadeMode ? 1 : 0.4};
+        `;
+        this.paradeToggle.onclick = () => {
+            this.toggleParadeMode();
+            this.paradeToggle.style.opacity = this.waveformParadeMode ? 1 : 0.4;
+        };
+
+        waveformHeader.appendChild(this.waveformLabel);
+        waveformHeader.appendChild(this.paradeToggle);
+        this.scopePanel.appendChild(waveformHeader);
+
         this.waveformCanvas = document.createElement('canvas');
         this.waveformCanvas.width = 256;
         this.waveformCanvas.height = 150; // Increased from 50px to broadcast standard
         this.waveformCanvas.style.cssText = 'width: 100%; height: 150px; display: none;';
         this.waveformCtx = this.waveformCanvas.getContext('2d');
-        this.waveformLabel = this.createLabel('Waveform', true);
-        this.scopePanel.appendChild(this.waveformLabel);
         this.scopePanel.appendChild(this.waveformCanvas);
 
         // Vectorscope
@@ -573,16 +690,17 @@ class RadianceViewer {
     createToolbar() {
         // Fullscreen & Export
         this.addButton('⛶', () => this.toggleFullscreen(), 'Fullscreen');
-        this.addButton('💾', () => this.exportSnapshot(), 'Export');
+        this.addButton('💾', (e) => this.showExportMenu(e), 'Export');
         this.addButton('↺', () => this.resetControls(), 'Reset');
         this.addButton('?', () => this.toggleHelp(), 'Keyboard Shortcuts (?)');
         this.addSep();
 
         // Run & Editor
-        this.runButton = this.addButton('▶', () => this.runWorkflow(), 'Run (Shift+Enter)');
-        this.runButton.style.color = '#4f4'; // Green hue
+        // this.runButton = this.addButton('▶', () => this.runWorkflow(), 'Run (Shift+Enter)');
+        // this.runButton.style.color = '#4f4'; // Green hue
 
-        this.promptButton = this.addButton('P', () => this.togglePromptPanel(), 'Prompt Editor (P)');
+        // Removed separate Prompt button (v2.4: Integration into HUD complete)
+        // this.promptButton = this.addButton('P', () => this.togglePromptPanel(), 'Prompt Editor (P)');
         this.addSep();
 
         // Controls Toggle
@@ -645,12 +763,23 @@ class RadianceViewer {
         this.addSep();
 
         // View
-        this.addButton('FC', () => { this.falseColor = !this.falseColor; this.zebra = false; this.focusPeaking = false; this.showZdepth = false; this.render(); }, 'False Color (E)');
+        this.addButton('FC', () => { this.falseColor = !this.falseColor; this.zebra = false; this.focusPeaking = false; this.showZdepth = false; this.gamutWarning = false; this.clippingMonitor = false; this.render(); }, 'False Color (E)');
+        this.addButton('GW', () => { this.gamutWarning = !this.gamutWarning; this.clippingMonitor = false; this.falseColor = false; this.render(); }, 'Gamut Warning');
+        this.addButton('CLP', () => { this.clippingMonitor = !this.clippingMonitor; this.gamutWarning = false; this.falseColor = false; this.render(); }, 'Clipping Monitor');
         this.addButton('Z', () => this.toggleZdepth(), 'Z-Depth / Zebra (Z)');
         this.focusPeakingBtn = this.addButton('FP', () => { this.focusPeaking = !this.focusPeaking; this.falseColor = false; this.zebra = false; this.render(); }, 'Focus Peaking (K)');
         this.gridBtn = this.addButton('▦', () => this.cycleGridMode(), 'Grid / Safe Areas (G)');
         this.addButton('📺', () => this.cycleSafeAreas(), 'Safe Areas (S)');
-        this.loupeBtn = this.addButton('🔍', () => { this.showLoupe = !this.showLoupe; }, 'Pixel Loupe (Q)');
+        this.loupeBtn = this.addButton('🔍', () => {
+            this.showLoupe = !this.showLoupe;
+            this.loupeBtn.classList.toggle('active', this.showLoupe);
+            this.loupeBtn.style.color = this.showLoupe ? this.theme.accent : this.theme.textDim;
+            this.renderOverlay();
+        }, 'Pixel Loupe (Q)');
+        if (this.showLoupe) {
+            this.loupeBtn.classList.add('active');
+            this.loupeBtn.style.color = this.theme.accent;
+        }
         this.addSep();
 
         // Compare
@@ -1120,12 +1249,23 @@ class RadianceViewer {
     // ═══════════════════════════════════════════════════════════════════════════
 
     setupKeyboardShortcuts() {
-        const handler = (e) => {
-            if (e.target.tagName === 'INPUT') return;
-            this.handleKey(e);
+        // v2.5: Global document listener for standard pipeline reliability
+        this._docKeyHandler = (e) => {
+            // Ignore if in input fields
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+            // Only handle if viewer is the active component or in fullscreen
+            if (this.isFullscreen) {
+                this.handleKey(e);
+                return;
+            }
+
+            // Simple heuristic: if container is visible and not hidden behind other Comfy nodes
+            if (this.container.style.display !== 'none') {
+                this.handleKey(e);
+            }
         };
-        this.canvas.addEventListener('keydown', handler);
-        document.addEventListener('keydown', (e) => { if (this.isFullscreen) handler(e); });
+        document.addEventListener('keydown', this._docKeyHandler);
     }
 
     handleKey(e) {
@@ -1146,7 +1286,14 @@ class RadianceViewer {
             case 'e': this.falseColor = !this.falseColor; this.zebra = false; this.focusPeaking = false; this.showZdepth = false; this.render(); break;
             case 'k': this.focusPeaking = !this.focusPeaking; this.falseColor = false; this.zebra = false; this.showZdepth = false; this.render(); break;
             case 'z': this.toggleZdepth(); break;
-            case 'q': this.showLoupe = !this.showLoupe; break;
+            case 'q':
+                this.showLoupe = !this.showLoupe;
+                if (this.loupeBtn) {
+                    this.loupeBtn.classList.toggle('active', this.showLoupe);
+                    this.loupeBtn.style.color = this.showLoupe ? this.theme.accent : this.theme.textDim;
+                }
+                this.renderOverlay();
+                break;
             case 'a':
                 if (e.shiftKey) { this.channel = 'a'; this.render(); }
                 else { this.cycleCompareMode(); }
@@ -1170,6 +1317,7 @@ class RadianceViewer {
     }
 
     adjustEV(delta) {
+        this._pushUndoDebounced();
         this.exposure = Math.max(-5, Math.min(5, this.exposure + delta));
         // v2.2: Update HUD slider (replaces crashed evSlider.setValue)
         if (this.evControl) {
@@ -1216,40 +1364,106 @@ class RadianceViewer {
     //                          EXPORT
     // ═══════════════════════════════════════════════════════════════════════════
 
-    exportSnapshot() {
+    showExportMenu(e) {
+        if (this.exportMenu) this.exportMenu.remove();
+
+        const menu = document.createElement('div');
+        this.exportMenu = menu;
+        menu.style.cssText = `
+            position: absolute;
+            background: rgba(15, 15, 20, 0.95);
+            border: 1px solid rgba(100, 110, 150, 0.4);
+            border-radius: 6px;
+            padding: 4px;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.5);
+            backdrop-filter: blur(10px);
+        `;
+
+        // Position menu above/near the button
+        const rect = e.target.getBoundingClientRect();
+        menu.style.left = rect.left + 'px';
+        menu.style.top = (rect.bottom + 5) + 'px';
+
+        const addOption = (label, icon, onClick, disabled = false) => {
+            const opt = document.createElement('div');
+            opt.innerHTML = `<span style="margin-right: 8px;">${icon}</span> ${label}`;
+            opt.style.cssText = `
+                padding: 6px 12px;
+                color: ${disabled ? '#555' : '#ccc'};
+                font-size: 11px;
+                cursor: ${disabled ? 'default' : 'pointer'};
+                border-radius: 4px;
+                white-space: nowrap;
+                transition: 0.2s;
+            `;
+            if (!disabled) {
+                opt.onmouseenter = () => opt.style.background = 'rgba(255,255,255,0.08)';
+                opt.onmouseleave = () => opt.style.background = 'transparent';
+                opt.onclick = () => {
+                    onClick();
+                    menu.remove();
+                };
+            }
+            menu.appendChild(opt);
+        };
+
+        // v2.3: Foolproof metadata retrieval - use the last known message data
+        // This prevents metadata loss when 'this.image' is replaced by a canvas placeholder
+        const imgData = (this.lastResult || []).find(d => d.frame === this.currentFrame && !d.is_compare && !d.is_zdepth);
+        const hasEXR = !!(imgData && imgData.exr_filename);
+
+        addOption('Save PNG (Result)', '🖼️', () => this.exportSnapshot('png'));
+        addOption('Save EXR (Source)', '🏗️', () => this.exportSnapshot('exr'), !hasEXR);
+
+        document.body.appendChild(menu);
+
+        // Close on click outside
+        const closeMenu = (ev) => {
+            if (!menu.contains(ev.target) && ev.target !== e.target) {
+                menu.remove();
+                document.removeEventListener('mousedown', closeMenu);
+            }
+        };
+        setTimeout(() => document.addEventListener('mousedown', closeMenu), 10);
+    }
+
+    exportSnapshot(format = 'png') {
         if (!this.image) return;
-        // v2.2: Export from WebGL canvas (WYSIWYG) instead of CPU renderImage
+
+        if (format === 'exr') {
+            const imgData = (this.lastResult || []).find(d => d.frame === this.currentFrame && !d.is_compare && !d.is_zdepth);
+            if (imgData && imgData.exr_filename) {
+                const url = api.apiURL(`/view?filename=${encodeURIComponent(imgData.exr_filename)}&subfolder=${encodeURIComponent(imgData.subfolder || '')}&type=${encodeURIComponent(imgData.type || 'temp')}`);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = imgData.exr_filename;
+                link.click();
+            }
+            return;
+        }
+
+        // Default PNG Export
         const exp = document.createElement('canvas');
         exp.width = this.imageWidth;
         exp.height = this.imageHeight;
         const ctx = exp.getContext('2d');
 
         if (this.useWebGL && this.renderer && this.renderer.textures.image) {
-            // Ensure WebGL renders at full image resolution
             const prevW = this.glCanvas.width, prevH = this.glCanvas.height;
             this.glCanvas.width = this.imageWidth;
             this.glCanvas.height = this.imageHeight;
             this.renderer.render(this.lutIntensity || 1.0);
             ctx.drawImage(this.glCanvas, 0, 0);
-            // Restore
             this.glCanvas.width = prevW;
             this.glCanvas.height = prevH;
         } else {
             this.renderImage(ctx, this.image);
         }
         this.annotations.forEach(a => this.drawAnnotation(ctx, a, 1));
-
-        // v3.2: Export EXR if available (Requested by users)
-        // Checks current HDR data object or fallback image for metadata
-        const currentData = this.hdrData || this.image;
-        if (currentData && currentData.exr_filename) {
-            const url = api.apiURL(`/view?filename=${encodeURIComponent(currentData.exr_filename)}&subfolder=${encodeURIComponent(currentData.subfolder || '')}&type=${encodeURIComponent(currentData.type || 'temp')}`);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = currentData.exr_filename;
-            link.click();
-            return;
-        }
 
         const link = document.createElement('a');
         link.download = `radiance_${Date.now()}.png`;
@@ -1377,6 +1591,7 @@ class RadianceViewer {
             this.showWaveform = !this.showWaveform;
             this.waveformCanvas.style.display = this.showWaveform ? 'block' : 'none';
             this.waveformLabel.style.display = this.showWaveform ? 'block' : 'none';
+            this.paradeToggle.style.display = this.showWaveform ? 'block' : 'none';
         } else if (scope === 'vectorscope') {
             this.showVectorscope = !this.showVectorscope;
             this.vectorscopeCanvas.style.display = this.showVectorscope ? 'block' : 'none';
@@ -1489,39 +1704,13 @@ class RadianceViewer {
     }
 
     updateHistogram() {
-        if (!this.image || !this.imageData) return;
+        if (!this.image || !this.renderer) return;
 
-        // v2.2: Use HDR float data for histogram when available
-        if (this.hdrData && this.hdrData.data) {
-            this._updateHistogramHDR();
-            return;
+        // v2.5: GPU-Accelerated HDR Histogram
+        const tex = this.renderer.textures.image;
+        if (tex) {
+            this.renderer.renderScope('histogram', this.histogramCanvas, tex, this.renderer.isLinearTexture);
         }
-
-        const data = this.imageData;
-        const hR = new Uint32Array(256), hG = new Uint32Array(256), hB = new Uint32Array(256);
-        for (let i = 0; i < data.length; i += 4) { hR[data[i]]++; hG[data[i + 1]]++; hB[data[i + 2]]++; }
-
-        let max = 1;
-        for (let i = 0; i < 256; i++) max = Math.max(max, hR[i], hG[i], hB[i]);
-
-        this.histogramData = { hR, hG, hB, max };
-
-        const hCtx = this.histogramCtx;
-        const w = this.histogramCanvas.width, h = this.histogramCanvas.height;
-        hCtx.fillStyle = '#0a0a0f';
-        hCtx.fillRect(0, 0, w, h);
-
-        const draw = (hist, color) => {
-            hCtx.strokeStyle = color; hCtx.lineWidth = 1; hCtx.beginPath();
-            for (let i = 0; i < 256; i++) {
-                const y = h - (hist[i] / max) * h;
-                if (i === 0) hCtx.moveTo(i, y); else hCtx.lineTo(i, y);
-            }
-            hCtx.stroke();
-        };
-        hCtx.globalAlpha = 0.7;
-        draw(hR, '#ff4444'); draw(hG, '#44ff44'); draw(hB, '#4444ff');
-        hCtx.globalAlpha = 1;
     }
 
     toggleParadeMode() {
@@ -1532,139 +1721,52 @@ class RadianceViewer {
     }
 
     updateWaveform() {
-        if (!this.image || !this.imageData) return;
-        const data = this.imageData;
+        if (!this.image || !this.renderer) return;
 
-        if (this.waveformParadeMode) {
-            this.updateWaveformParade(data);
-        } else {
-            this.updateWaveformOverlay(data);
+        // v2.5: GPU-Accelerated Waveform (32-bit HDR)
+        const tex = this.renderer.textures.image;
+        if (tex) {
+            this.renderer.renderScope('waveform', this.waveformCanvas, tex, this.renderer.isLinearTexture, this.waveformParadeMode);
         }
     }
 
-    updateWaveformOverlay(data) {
-        const wCtx = this.waveformCtx;
-        const w = this.waveformCanvas.width, h = this.waveformCanvas.height;
-        wCtx.fillStyle = '#0a0a0f';
-        wCtx.fillRect(0, 0, w, h);
-
-        const step = Math.max(1, Math.floor(this.imageWidth / w));
-        wCtx.globalAlpha = 0.1;
-        for (let col = 0; col < this.imageWidth; col += step) {
-            const x = Math.floor((col / this.imageWidth) * w);
-            for (let row = 0; row < this.imageHeight; row += 3) {
-                const idx = (row * this.imageWidth + col) * 4;
-                const luma = data[idx] * 0.2126 + data[idx + 1] * 0.7152 + data[idx + 2] * 0.0722;
-                const y = h - (luma / 255) * h;
-                wCtx.fillStyle = `rgb(${data[idx]},${data[idx + 1]},${data[idx + 2]})`;
-                wCtx.fillRect(x, y, 1, 1);
-            }
-        }
-        wCtx.globalAlpha = 1;
-    }
-
-    updateWaveformParade(data) {
-        const wCtx = this.waveformCtx;
-        const w = this.waveformCanvas.width, h = this.waveformCanvas.height;
-        wCtx.fillStyle = '#0a0a0f';
-        wCtx.fillRect(0, 0, w, h);
-
-        const paradeWidth = Math.floor(w / 3);
-        const step = Math.max(1, Math.floor(this.imageWidth / paradeWidth));
-
-        // Draw separators
-        wCtx.strokeStyle = this.theme.panelBorder;
-        wCtx.lineWidth = 1;
-        wCtx.beginPath();
-        wCtx.moveTo(paradeWidth, 0);
-        wCtx.lineTo(paradeWidth, h);
-        wCtx.moveTo(paradeWidth * 2, 0);
-        wCtx.lineTo(paradeWidth * 2, h);
-        wCtx.stroke();
-
-        // Labels
-        wCtx.fillStyle = '#ff4444';
-        wCtx.font = '10px monospace';
-        wCtx.fillText('R', 4, 12);
-        wCtx.fillStyle = '#44ff44';
-        wCtx.fillText('G', paradeWidth + 4, 12);
-        wCtx.fillStyle = '#4444ff';
-        wCtx.fillText('B', paradeWidth * 2 + 4, 12);
-
-        wCtx.globalAlpha = 0.15;
-
-        // Red parade
-        for (let col = 0; col < this.imageWidth; col += step) {
-            const x = Math.floor((col / this.imageWidth) * paradeWidth);
-            for (let row = 0; row < this.imageHeight; row += 3) {
-                const idx = (row * this.imageWidth + col) * 4;
-                const r = data[idx];
-                const y = h - (r / 255) * h;
-                wCtx.fillStyle = `rgb(${r},0,0)`;
-                wCtx.fillRect(x, y, 1, 1);
-            }
-        }
-
-        // Green parade
-        for (let col = 0; col < this.imageWidth; col += step) {
-            const x = paradeWidth + Math.floor((col / this.imageWidth) * paradeWidth);
-            for (let row = 0; row < this.imageHeight; row += 3) {
-                const idx = (row * this.imageWidth + col) * 4;
-                const g = data[idx + 1];
-                const y = h - (g / 255) * h;
-                wCtx.fillStyle = `rgb(0,${g},0)`;
-                wCtx.fillRect(x, y, 1, 1);
-            }
-        }
-
-        // Blue parade
-        for (let col = 0; col < this.imageWidth; col += step) {
-            const x = paradeWidth * 2 + Math.floor((col / this.imageWidth) * paradeWidth);
-            for (let row = 0; row < this.imageHeight; row += 3) {
-                const idx = (row * this.imageWidth + col) * 4;
-                const b = data[idx + 2];
-                const y = h - (b / 255) * h;
-                wCtx.fillStyle = `rgb(0,0,${b})`;
-                wCtx.fillRect(x, y, 1, 1);
-            }
-        }
-
-        wCtx.globalAlpha = 1;
-    }
 
     updateVectorscope() {
-        if (!this.image || !this.imageData) return;
-        const data = this.imageData; // Use cached data
+        if (!this.image || !this.renderer) return;
 
-        const vCtx = this.vectorscopeCtx;
-        const size = this.vectorscopeCanvas.width;
-        const cx = size / 2, cy = size / 2, rad = size / 2 - 6;
+        // v2.5: GPU-Accelerated Vectorscope
+        const tex = this.renderer.textures.image;
+        if (tex) {
+            this.renderer.renderScope('vectorscope', this.vectorscopeCanvas, tex, this.renderer.isLinearTexture);
 
-        vCtx.fillStyle = '#0a0a0f';
-        vCtx.fillRect(0, 0, size, size);
+            // Draw Pro Overlays (Skin Tone Line, Targets) on top of GPU result
+            const vCtx = this.vectorscopeCtx;
+            const size = this.vectorscopeCanvas.width;
+            const cx = size / 2, cy = size / 2, rad = size / 2 - 10;
 
-        vCtx.strokeStyle = '#222'; vCtx.lineWidth = 1;
-        for (let r = 0.25; r <= 1; r += 0.25) { vCtx.beginPath(); vCtx.arc(cx, cy, rad * r, 0, Math.PI * 2); vCtx.stroke(); }
-
-        const targets = [{ a: 103, c: '#f00' }, { a: 167, c: '#ff0' }, { a: 241, c: '#0f0' }, { a: 283, c: '#0ff' }, { a: 347, c: '#00f' }, { a: 61, c: '#f0f' }];
-        targets.forEach(t => {
-            const ang = (t.a - 90) * Math.PI / 180;
-            vCtx.fillStyle = t.c;
+            // Skin Tone Line (I-axis in YIQ, approx 123 deg)
+            vCtx.strokeStyle = 'rgba(255, 120, 80, 0.4)';
+            vCtx.lineWidth = 1.5;
+            vCtx.setLineDash([4, 4]);
+            const skinAng = (123 - 90) * Math.PI / 180;
             vCtx.beginPath();
-            vCtx.arc(cx + Math.cos(ang) * rad * 0.75, cy + Math.sin(ang) * rad * 0.75, 2, 0, Math.PI * 2);
-            vCtx.fill();
-        });
+            vCtx.moveTo(cx, cy);
+            vCtx.lineTo(cx + Math.cos(skinAng) * rad, cy + Math.sin(skinAng) * rad);
+            vCtx.stroke();
+            vCtx.setLineDash([]);
 
-        vCtx.globalAlpha = 0.03;
-        const step = Math.max(1, Math.floor(data.length / 4 / 30000));
-        for (let i = 0; i < data.length; i += 4 * step) {
-            const r = data[i] / 255, g = data[i + 1] / 255, b = data[i + 2] / 255;
-            const y = r * 0.2126 + g * 0.7152 + b * 0.0722;
-            const u = (b - y) * 0.492, v = (r - y) * 0.877;
-            vCtx.fillStyle = `rgb(${data[i]},${data[i + 1]},${data[i + 2]})`;
-            vCtx.fillRect(cx + u * rad * 2, cy - v * rad * 2, 1, 1);
+            // Rec.709 Targets
+            const targets = [
+                { a: 103, c: '#f44', n: 'R' }, { a: 167, c: '#ff4', n: 'Y' },
+                { a: 241, c: '#4f4', n: 'G' }, { a: 283, c: '#4ff', n: 'C' },
+                { a: 347, c: '#44f', n: 'B' }, { a: 61, c: '#f4f', n: 'M' }
+            ];
+            targets.forEach(t => {
+                const ang = (t.a - 90) * Math.PI / 180;
+                vCtx.strokeStyle = t.c; vCtx.lineWidth = 1;
+                vCtx.strokeRect(cx + Math.cos(ang) * rad * 0.75 - 3, cy + Math.sin(ang) * rad * 0.75 - 3, 6, 6);
+            });
         }
-        vCtx.globalAlpha = 1;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1878,12 +1980,16 @@ class RadianceViewer {
             e.preventDefault();
             const rect = this.canvas.getBoundingClientRect();
             const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-            const factor = e.deltaY > 0 ? 0.9 : 1.1;
-            const newZoom = Math.max(0.02, Math.min(100, this.zoom * factor));
+
+            // v2.5: Exponential zoom for smoother response at all scales (Nuke/Resolve style)
+            const sensitivity = 0.001;
+            const factor = Math.exp(-e.deltaY * sensitivity);
+            const newZoom = Math.max(0.01, Math.min(200, this.zoom * factor));
+
             this.panX = mx - (mx - this.panX) * (newZoom / this.zoom);
             this.panY = my - (my - this.panY) * (newZoom / this.zoom);
             this.zoom = newZoom;
-            this.updateInfo();
+            this.updateBottomBar();
             this.render();
         });
 
@@ -2104,7 +2210,10 @@ class RadianceViewer {
             }
         });
 
-        this.canvas.addEventListener('mouseleave', () => { this.probeTooltip.style.display = 'none'; });
+        this.canvas.addEventListener('mouseleave', () => {
+            this.infoLeft.innerHTML = '';
+            // Don't clear infoRight as it contains static info
+        });
 
         if (typeof ResizeObserver !== 'undefined') {
             this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -2136,7 +2245,7 @@ class RadianceViewer {
     }
 
     updateProbe(e) {
-        if (!this.image || !this.imageData) { this.probeTooltip.style.display = 'none'; return; }
+        if (!this.image || !this.imageData) { this.infoLeft.innerHTML = ''; return; }
         const rect = this.canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left, my = e.clientY - rect.top;
         const imgX = Math.floor((mx - this.panX) / this.zoom);
@@ -2170,48 +2279,107 @@ class RadianceViewer {
                 floatB = b / 255;
             }
 
+            let floatVals = '';
+            let evVal = '';
+            const luma_f = (r * 0.2126 + g * 0.7152 + b * 0.0722) / 255;
+
+            if (this.hdrData && this.hdrData.data) {
+                const ch = this.hdrData.channels || 3;
+                const hIdx = (imgY * this.imageWidth + imgX) * ch;
+                const fr = this.hdrData.data[hIdx];
+                const fg = ch > 1 ? this.hdrData.data[hIdx + 1] : fr;
+                const fb = ch > 2 ? this.hdrData.data[hIdx + 2] : fr;
+                floatVals = `<span style="color:${this.theme.accent}">F: ${(fr).toFixed(4)} ${(fg).toFixed(4)} ${(fb).toFixed(4)}</span> | `;
+
+                const curLuma = fr * 0.2126 + fg * 0.7152 + fb * 0.0722;
+                const stops = Math.log2(Math.max(1e-6, curLuma) / 0.18);
+                evVal = `<span style="color:#d49dff">EV: ${stops > 0 ? '+' : ''}${stops.toFixed(1)}</span> | `;
+            } else {
+                const stops = Math.log2(Math.max(1e-6, luma_f) / 0.18);
+                evVal = `<span style="color:#d49dff">EV: ${stops > 0 ? '+' : ''}${stops.toFixed(1)}</span> | `;
+            }
+
             this.lastPixelColor = { r, g, b, a };
             const luma = (r * 0.2126 + g * 0.7152 + b * 0.0722).toFixed(0);
             const hex = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
 
             this.colorInfo.textContent = `RGB: ${r} ${g} ${b}`;
-            this.probeTooltip.innerHTML = `
-                <div style="margin-bottom:2px; border-bottom:1px solid #444; padding-bottom:2px"><b>X:${imgX} Y:${imgY}</b></div>
-                <div style="color:${this.theme.accent}">Float: ${(floatR).toFixed(4)} ${(floatG).toFixed(4)} ${(floatB).toFixed(4)}</div>
-                <div style="color:#888; font-size: 0.9em">8-bit: ${r} ${g} ${b} ${a !== 255 ? 'A:' + a : ''}</div>
-                <div style="color:#666; font-size: 0.8em">Hex: ${hex} | L: ${luma}</div>
+
+            // v2.5 Pro Probing UI
+            this.infoLeft.innerHTML = `
+                <span style="color:#888; margin-right:8px;">X:${imgX.toString().padStart(4, '0')} Y:${imgY.toString().padStart(4, '0')}</span>
+                ${evVal}${floatVals}
+                <span style="margin-right:8px; border-left:1px solid #333; padding-left:8px;">8b: ${r} ${g} ${b}</span>
+                <span style="color:#777">Hx: ${hex} | L: ${luma}</span>
             `;
-            this.probeTooltip.style.display = 'block';
-            this.probeTooltip.style.left = `${mx + 12}px`;
-            this.probeTooltip.style.top = `${my + 12}px`;
 
             // Draw pixel loupe on overlay
             if (this.showLoupe) {
+                this.renderOverlay(); // Clear and redraw annotations/grid first
                 this.drawLoupe(mx, my, imgX, imgY);
             }
         } else {
-            this.probeTooltip.style.display = 'none';
+            this.infoLeft.innerHTML = '';
             this.colorInfo.textContent = 'RGB: — — —';
             this.lastPixelColor = null;
         }
+
+        // Update fixed right info stats continuously
+        const zoomPct = Math.round(this.zoom * 100);
+        const depth = (this.hdrData && this.hdrData.data) ? '32b FP' : '8b INT';
+
+        let indicators = '';
+        if (this.gamutWarning) indicators += '<span style="color:#f0f; font-weight:bold">GW</span> ';
+        if (this.clippingMonitor) indicators += '<span style="color:#f00; font-weight:bold">CLP</span> ';
+        if (this.falseColor) indicators += '<span style="color:#fc0; font-weight:bold">FC</span> ';
+
+        this.infoRight.innerHTML = `
+            ${indicators}
+            <span>${depth}</span>
+            <span>CH: ${this.channel.toUpperCase()}</span>
+            <span>RES: ${this.imageWidth}x${this.imageHeight}</span>
+            <span>ZOOM: ${zoomPct}%</span>
+            <span>FRM: ${this.currentFrame + 1}/${this.totalFrames}</span>
+        `;
+
+        // Toggle Legend visibility
+        if (this.fcLegend) {
+            this.fcLegend.style.display = this.falseColor ? 'flex' : 'none';
+        }
+
+    }
+
+    updateBottomBar() {
+        if (!this.infoRight) return;
+        const zoomPct = Math.round((this.zoom || 1) * 100);
+        const w = this.imageWidth || 0;
+        const h = this.imageHeight || 0;
+        this.infoRight.innerHTML = `
+            <span>CH: ${(this.channel || 'rgb').toUpperCase()}</span>
+            <span>RES: ${w}x${h}</span>
+            <span>ZOOM: ${zoomPct}%</span>
+            <span>FRM: ${(this.currentFrame || 0) + 1}/${this.totalFrames || 1}</span>
+        `;
     }
 
     drawLoupe(mx, my, imgX, imgY) {
+        if (!this.overlayCtx) return;
         const ctx = this.overlayCtx;
         const size = this.loupeSize;
         const mag = this.loupeMagnification;
-        const halfPixels = Math.floor(size / mag / 2);
+        const numPixels = Math.floor(size / mag);
+        const halfPixels = Math.floor(numPixels / 2);
 
         // Position loupe in corner opposite to cursor
         let lx = mx > this.canvas.width / 2 ? 10 : this.canvas.width - size - 10;
         let ly = my > this.canvas.height / 2 ? 10 : this.canvas.height - size - 10;
 
         // Draw loupe background
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-        ctx.lineWidth = 2;
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.9)';
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+        ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.roundRect(lx - 2, ly - 2, size + 4, size + 4, 4);
+        ctx.roundRect(lx - 1, ly - 1, size + 2, size + 2, 4);
         ctx.fill();
         ctx.stroke();
 
@@ -2219,16 +2387,24 @@ class RadianceViewer {
         for (let py = -halfPixels; py <= halfPixels; py++) {
             for (let px = -halfPixels; px <= halfPixels; px++) {
                 const sx = imgX + px, sy = imgY + py;
+                const dx = lx + (px + halfPixels) * mag;
+                const dy = ly + (py + halfPixels) * mag;
+
+                // Stop if we are outside the loupe box bounds
+                if (px + halfPixels >= numPixels || py + halfPixels >= numPixels) continue;
+
                 if (sx >= 0 && sx < this.imageWidth && sy >= 0 && sy < this.imageHeight) {
                     let r, g, b;
                     // v2.2: Read HDR float data for loupe when available
                     if (this.hdrData && this.hdrData.data) {
-                        const ch = this.hdrData.channels || 3;
-                        const hIdx = (sy * this.imageWidth + sx) * ch;
+                        const channels = this.hdrData.shape ? (this.hdrData.shape[2] || 3) : (this.hdrData.channels || 3);
+                        const hIdx = (sy * this.imageWidth + sx) * channels;
+
                         // Tonemap for display: simple Reinhard per-channel
                         const fr = this.hdrData.data[hIdx];
-                        const fg = ch > 1 ? this.hdrData.data[hIdx + 1] : fr;
-                        const fb = ch > 2 ? this.hdrData.data[hIdx + 2] : fr;
+                        const fg = channels > 1 ? this.hdrData.data[hIdx + 1] : fr;
+                        const fb = channels > 2 ? this.hdrData.data[hIdx + 2] : fr;
+
                         // Apply exposure
                         const em = Math.pow(2, this.exposure || 0);
                         r = Math.min(255, Math.max(0, Math.round((fr * em / (fr * em + 1)) * 255)));
@@ -2240,24 +2416,27 @@ class RadianceViewer {
                     }
                     ctx.fillStyle = `rgb(${r},${g},${b})`;
                 } else {
-                    ctx.fillStyle = '#222';
+                    ctx.fillStyle = '#111';
                 }
 
-                const dx = lx + (px + halfPixels) * mag;
-                const dy = ly + (py + halfPixels) * mag;
                 ctx.fillRect(dx, dy, mag, mag);
 
                 // Highlight center pixel
                 if (px === 0 && py === 0) {
-                    ctx.strokeStyle = '#fff';
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
                     ctx.lineWidth = 1;
-                    ctx.strokeRect(dx, dy, mag, mag);
+                    ctx.strokeRect(dx + 0.5, dy + 0.5, mag - 1, mag - 1);
                 }
             }
         }
 
+        // Draw border
+        ctx.strokeStyle = this.theme.accent;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(lx, ly, size, size);
+
         // Draw crosshair
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(lx + size / 2, ly); ctx.lineTo(lx + size / 2, ly + size);
@@ -2552,7 +2731,7 @@ class RadianceViewer {
         this.zoom = z;
         this.panX = (w - this.imageWidth * this.zoom) / 2;
         this.panY = (h - this.imageHeight * this.zoom) / 2;
-        this.updateInfo();
+        this.updateBottomBar();
         this.render();
     }
 
@@ -2606,12 +2785,30 @@ class RadianceViewer {
             this.renderer.setFalseColor(this.falseColor || false);
             this.renderer.setZebra(this.zebra || false);
             this.renderer.setZebraThreshold(this.zebraThreshold || 0.95);
+            this.renderer.setGamutWarning(this.gamutWarning || false);
+            this.renderer.setClippingMonitor(this.clippingMonitor || false);
+
+            // v3.1: Masking (Power Windows)
+            this.renderer.setMask(this.maskState);
 
             // v2.2: Channel isolation + focus peaking + display LUT on GPU
             const chMap = { 'rgb': 0, 'r': 1, 'g': 2, 'b': 3, 'luma': 4, 'a': 5 };
             this.renderer.setChannelMode(chMap[this.channel] || 0);
             this.renderer.setFocusPeaking(this.focusPeaking || false);
-            const lutMap = { 'None': 0, 'sRGB': 1, 'Rec.709': 2, 'LogC3': 3, 'ACEScg': 4 };
+            const lutMap = {
+                'None': 0,
+                'sRGB (Display)': 1,
+                'Rec.709 (Broadcast)': 2,
+                'Filmic (Cinematic)': 3,
+                'Log C3 (ARRI)': 4,
+                'Log C4 (ARRI)': 11,
+                'Canon Log': 12,
+                'Fuji F-Log': 14,
+                'Blackmagic Gen5': 15,
+                'Linear to Log': 6,
+                'Reinhard Tonemap': 8,
+                'ACES Filmic': 9
+            };
             this.renderer.setDisplayLutMode(lutMap[this.displayLut] || 0);
 
             // v2.3: Denoise & Depth Eval
@@ -2623,6 +2820,13 @@ class RadianceViewer {
                 this.renderer.setDoFEnabled(true);
                 this.renderer.setFocusDistance(this.focusDistance || 0.5);
                 this.renderer.setAperture(this.aperture || 0.0);
+                this.renderer.setBokehPhysics(this.bokehHighlightBias || 0.0, this.bokehSoapBubble || 0.0, this.bokehOpticalVig || 0.0);
+
+                // v3.1: Optical shape
+                this.renderer.setApertureShape(this.apertureBlades || 0, this.apertureRotation || 0.0, this.apertureAnamorphic || 1.0);
+
+                this.renderer.setFrame(this.currentFrame || 0);
+                this.renderer.setTime(performance.now() / 1000.0);
             } else {
                 this.renderer.setDoFEnabled(false);
             }
@@ -2647,6 +2851,7 @@ class RadianceViewer {
 
             ctx.restore();
 
+            this.updateBottomBar();
             this.renderOverlay();
             return; // WebGL path complete
         } else {
@@ -2690,7 +2895,66 @@ class RadianceViewer {
             if (this.compareMode === 'wipe' && this.compareImage) this.renderWipe(ctx, w, h);
         }
 
+        this.updateBottomBar();
         this.renderOverlay();
+        this._updateAnalysisIndicator();
+    }
+
+    // P1: Visual viewport border for active analysis modes
+    _updateAnalysisIndicator() {
+        let borderColor = 'transparent';
+        let label = '';
+        if (this.falseColor) { borderColor = '#FFD600'; label = 'FALSE COLOR'; }
+        else if (this.zebra) { borderColor = '#FF4444'; label = 'ZEBRA'; }
+        else if (this.focusPeaking) { borderColor = '#FF6600'; label = 'FOCUS PEAK'; }
+        else if (this.showZdepth) { borderColor = '#00BBFF'; label = 'Z-DEPTH'; }
+        else if (this.gamutWarning) { borderColor = '#FF00FF'; label = 'GAMUT WARN'; }
+        else if (this.clippingMonitor) { borderColor = '#FF2222'; label = 'CLIPPING'; }
+
+        this.canvasWrapper.style.boxShadow = borderColor !== 'transparent'
+            ? `inset 0 0 0 2px ${borderColor}`
+            : 'none';
+
+        // Floating label in top-right of viewport
+        if (!this._analysisLabel) {
+            this._analysisLabel = document.createElement('div');
+            this._analysisLabel.style.cssText = `
+                position: absolute; top: 6px; right: 6px; z-index: 95;
+                padding: 2px 8px; border-radius: 3px; font-size: 10px;
+                font-family: ${this.theme?.mono || 'monospace'}; font-weight: 600;
+                letter-spacing: 0.5px; pointer-events: none; transition: opacity 0.15s;
+            `;
+            this.canvasWrapper.appendChild(this._analysisLabel);
+        }
+        if (label) {
+            this._analysisLabel.textContent = label;
+            this._analysisLabel.style.background = borderColor;
+            this._analysisLabel.style.color = '#000';
+            this._analysisLabel.style.opacity = '1';
+        } else {
+            this._analysisLabel.style.opacity = '0';
+        }
+
+        // Auto-tonemap indicator (shows when HDR + no explicit display LUT)
+        if (!this._autoTonemapBadge) {
+            this._autoTonemapBadge = document.createElement('div');
+            this._autoTonemapBadge.style.cssText = `
+                position: absolute; top: 6px; left: 6px; z-index: 95;
+                padding: 2px 8px; border-radius: 3px; font-size: 10px;
+                font-family: ${this.theme?.mono || 'monospace'}; font-weight: 600;
+                letter-spacing: 0.5px; pointer-events: none; transition: opacity 0.15s;
+                background: rgba(255, 160, 0, 0.85); color: #000;
+            `;
+            this.canvasWrapper.appendChild(this._autoTonemapBadge);
+        }
+        const isAutoACES = this.renderer && this.renderer.isLinearTexture &&
+            (this.displayLut === 'None' || !this.displayLut);
+        if (isAutoACES) {
+            this._autoTonemapBadge.textContent = 'ACES (Auto)';
+            this._autoTonemapBadge.style.opacity = '1';
+        } else {
+            this._autoTonemapBadge.style.opacity = '0';
+        }
     }
 
     renderImage(ctx, img) {
@@ -2904,9 +3168,14 @@ class RadianceViewer {
                 }
             }
         }
-        // ═══════════════════════════════════════════════════════════════════════════
-        //                          METADATA OVERLAY
-        // ═══════════════════════════════════════════════════════════════════════════
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //                          METADATA OVERLAY
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    createMetadataOverlay() {
+        if (this.metadataOverlay) return; // Already created — prevent duplicates
 
         this.metadataOverlay = document.createElement('div');
         this.metadataOverlay.style.cssText = `
@@ -2939,10 +3208,10 @@ class RadianceViewer {
         // Add to container (behind controls, above image)
         this.container.appendChild(this.metadataOverlay);
 
-        this.container.onwheel = (e) => {
+        this.container.addEventListener('wheel', () => {
             // Update Zoom display on scroll
             requestAnimationFrame(() => this.updateInfo());
-        };
+        }, { passive: true });
     }
 
     getFalseColor(l) {
@@ -2963,16 +3232,19 @@ class RadianceViewer {
     runWorkflow() {
         if (this.isQueueing) return;
         this.isQueueing = true;
-        this.runButton.textContent = '⏳';
 
-        // Use ComfyUI's queue prompt function
+        const oldText = this.runButton ? this.runButton.innerHTML : '▶ RUN';
+        if (this.runButton) this.runButton.innerHTML = '⏳ QUEUING...';
+
         app.queuePrompt(0).then(() => {
             this.isQueueing = false;
-            this.runButton.textContent = '▶';
+            if (this.runButton) this.runButton.innerHTML = oldText;
         }).catch(() => {
             this.isQueueing = false;
-            this.runButton.textContent = '❌';
-            setTimeout(() => this.runButton.textContent = '▶', 1000);
+            if (this.runButton) {
+                this.runButton.innerHTML = '❌ ERROR';
+                setTimeout(() => this.runButton.innerHTML = oldText, 1500);
+            }
         });
     }
 
@@ -3066,242 +3338,217 @@ class RadianceViewer {
         this.showPromptPanel = !this.showPromptPanel;
 
         if (this.showPromptPanel) {
-            this.promptButton.classList.add('active');
-            this.promptButton.style.background = this.theme.accent;
-            this.promptButton.style.color = '#fff';
-            this.createPromptPanel();
+            if (this.promptButton) {
+                this.promptButton.classList.add('active');
+                this.promptButton.style.background = this.theme.accent;
+                this.promptButton.style.color = '#fff';
+            }
+            // v2.4: Integrate with HUD
+            this.showControls = true;
+            if (this.controlsPanel) {
+                this.controlsPanel.style.display = 'flex';
+                this.controlsPanel.style.opacity = '1';
+                this.controlsPanel.style.transform = 'translateX(-50%) translateY(0)';
+                this.controlsPanel.style.pointerEvents = 'auto';
+            }
+            if (this.controlsToggle) {
+                this.controlsToggle.style.color = this.theme.accent;
+            }
+
+            // Switch to prompt tab
+            const promptTab = this._hudTabs?.find(t => t.id === 'prompt');
+            if (promptTab) {
+                promptTab.click();
+            }
         } else {
-            this.promptButton.classList.remove('active');
-            this.promptButton.style.background = '';
-            this.promptButton.style.color = this.theme.textDim;
+            if (this.promptButton) {
+                this.promptButton.classList.remove('active');
+                this.promptButton.style.background = '';
+                this.promptButton.style.color = this.theme.textDim;
+            }
+            // If we were toggling prompt specifically, maybe we hide HUD?
+            // Actually, stay consistent: if promptPanel is false, but showControls is true, keep HUD open but prompt tab is still active.
+            // But usually 'P' toggles the prompt UI. If prompt is now in HUD, 'P' should toggle HUD.
+            this.toggleControls(); // Toggle entire HUD for 'P' key consistency
             if (this.promptPanel) this.promptPanel.remove();
             this.promptPanel = null;
         }
     }
 
-    createPromptPanel() {
-        if (this.promptPanel) this.promptPanel.remove();
-
+    renderPromptTab(container) {
+        container.style.cssText = 'display: flex; flex-direction: column; gap: 10px; padding: 10px; max-height: 380px; overflow-y: auto; color: #fff;';
         const t = this.theme;
-        this.promptPanel = document.createElement('div');
-        this.promptPanel.style.cssText = `
-            position: absolute;
-            top: 40px;
-            right: 10px;
-            width: 300px;
-            max-height: 80%;
-            background: rgba(16, 16, 24, 0.95);
-            border: 1px solid ${t.panelBorder};
-            border-radius: 4px;
-            padding: 8px;
-            overflow-y: auto;
-            z-index: 100;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-        `;
-
-        // Heuristic: Scan for ANY node that looks like it has a text/prompt widget
+        // v2.4: ONLY show the Cinematic Encoder node in the HUD prompt tab
         const nodes = app.graph._nodes.filter(n => {
-            if (!n.widgets) return false;
-
-            // Check specific types first
-            if (n.type && (n.type.includes("CLIPTextEncode") || n.type.includes("Prompt"))) return true;
-
-            // Heuristic checking of widgets
-            const hasTextWidget = n.widgets.some(w => {
-                // Check widget names likely to be prompts
-                const name = (w.name || "").toLowerCase();
-                // check if value is string and not a small config string (like "enable")
-                const isString = typeof w.value === "string";
-
-                return isString && (
-                    name === "text" ||
-                    name === "string" ||
-                    name.includes("prompt") ||
-                    w.type === "customtext"
-                );
-            });
-
-            return hasTextWidget;
+            const nodeType = n.type || "";
+            const comfyClass = n.comfyClass || "";
+            return comfyClass === "FXTDCinematicPromptEncoder" ||
+                comfyClass === "RadianceCinematicPromptEncoder" ||
+                nodeType.includes("FXTDCinematicPromptEncoder") ||
+                nodeType.includes("RadianceCinematicPromptEncoder");
         });
 
-        // Sort by vertical position
-        nodes.sort((a, b) => a.pos[1] - b.pos[1]);
+        console.log("[Radiance] Found", nodes.length, "Cinematic Encoder nodes.");
 
         if (nodes.length === 0) {
             const msg = document.createElement('div');
-            msg.textContent = "No prompt nodes found.";
+            msg.textContent = "No Cinematic Encoder found.";
             msg.style.color = t.textDim;
             msg.style.fontSize = "11px";
-            this.promptPanel.appendChild(msg);
-        } else {
-            nodes.forEach(node => {
-                const wrapper = document.createElement('div');
-                wrapper.style.display = 'flex';
-                wrapper.style.flexDirection = 'column';
-                wrapper.style.gap = '4px';
-
-                const label = document.createElement('div');
-                label.textContent = node.title || node.type;
-                label.style.cssText = `color: ${t.accent}; font-size: 11px; font-weight: bold; cursor: pointer;`;
-                label.title = "Jump to node";
-                label.onclick = () => {
-                    app.canvas.centerOnNode(node);
-                    app.canvas.selectNode(node);
-                };
-
-                wrapper.appendChild(label);
-
-                // Render ALL widgets
-                if (node.widgets) {
-                    node.widgets.forEach(w => {
-                        // Skip converted or hidden widgets
-                        if (w.type === 'converted-widget' || w.name === '_temp') return;
-
-                        const wContainer = document.createElement('div');
-                        wContainer.style.cssText = 'display: flex; flex-direction: column; gap: 2px; margin-bottom: 4px;';
-
-                        // Label for parameters (skip for main prompt text to save space, or keep small?)
-                        const isMainText = (w.type === 'customtext' || w.name === 'text');
-                        if (!isMainText) {
-                            const wl = document.createElement('div');
-                            wl.textContent = w.name;
-                            wl.style.cssText = `color: ${t.textDim}; font-size: 9px;`;
-                            wContainer.appendChild(wl);
-                        }
-
-                        let input;
-
-                        // 1. Text / String
-                        if (w.type === 'customtext' || w.type === 'text' || (!w.type && typeof w.value === 'string')) {
-                            input = document.createElement('textarea');
-                            input.value = w.value;
-                            input.style.cssText = `
-                                width: 100%;
-                                height: ${isMainText ? '60px' : '30px'};
-                                background: #0a0a0f;
-                                border: 1px solid ${t.panelBorder};
-                                color: ${t.text};
-                                font-size: 11px;
-                                padding: 4px;
-                                resize: vertical;
-                                font-family: inherit;
-                            `;
-                            input.addEventListener('input', (e) => {
-                                w.value = e.target.value;
-                                if (w.callback) w.callback(w.value);
-                            });
-                            // Focus helpers
-                            input.addEventListener('focus', () => { app.canvas.selectNode(node); wrapper.style.borderLeft = `2px solid ${t.accent}`; });
-                            input.addEventListener('blur', () => { wrapper.style.borderLeft = 'none'; });
-                        }
-                        // 2. Number
-                        else if (w.type === 'number' || typeof w.value === 'number') {
-                            input = document.createElement('input');
-                            input.type = 'number';
-                            input.value = w.value;
-                            if (w.options) {
-                                if (w.options.min !== undefined) input.min = w.options.min;
-                                if (w.options.max !== undefined) input.max = w.options.max;
-                                if (w.options.step !== undefined) input.step = w.options.step;
-                            }
-                            input.style.cssText = `
-                                width: 100%;
-                                background: #0a0a0f;
-                                border: 1px solid ${t.panelBorder};
-                                color: ${t.text};
-                                font-size: 11px;
-                                padding: 2px 4px;
-                            `;
-                            input.addEventListener('input', (e) => {
-                                let val = parseFloat(e.target.value);
-                                if (w.options) {
-                                    if (w.options.min !== undefined) val = Math.max(w.options.min, val);
-                                    if (w.options.max !== undefined) val = Math.min(w.options.max, val);
-                                }
-                                w.value = val;
-                                if (w.callback) w.callback(w.value);
-                            });
-                        }
-                        // 3. Combo
-                        else if (w.type === 'combo') {
-                            input = document.createElement('select');
-                            input.style.cssText = `
-                                width: 100%;
-                                background: #0a0a0f;
-                                border: 1px solid ${t.panelBorder};
-                                color: ${t.text};
-                                font-size: 11px;
-                                padding: 2px;
-                            `;
-                            if (w.options && w.options.values) {
-                                w.options.values.forEach(v => {
-                                    const opt = document.createElement('option');
-                                    opt.value = v;
-                                    opt.textContent = v;
-                                    input.appendChild(opt);
-                                });
-                            }
-                            input.value = w.value;
-                            input.addEventListener('change', (e) => {
-                                w.value = e.target.value;
-                                if (w.callback) w.callback(w.value);
-                            });
-                        }
-                        // 4. Toggle / Boolean
-                        else if (w.type === 'toggle' || typeof w.value === 'boolean') {
-                            const row = document.createElement('div');
-                            row.style.cssText = 'display: flex; align-items: center; gap: 6px;';
-                            input = document.createElement('input');
-                            input.type = 'checkbox';
-                            input.checked = w.value;
-                            input.addEventListener('change', (e) => {
-                                w.value = e.target.checked;
-                                if (w.callback) w.callback(w.value);
-                            });
-                            row.appendChild(input);
-
-                            // Move label here for checkboxes
-                            if (wContainer.firstChild) wContainer.firstChild.remove(); // Remove top label
-                            const lbl = document.createElement('span');
-                            lbl.textContent = w.name;
-                            lbl.style.cssText = `color: ${t.textDim}; font-size: 11px;`;
-                            row.appendChild(lbl);
-
-                            wContainer.appendChild(row);
-                            input = null; // Handled wrappers
-                        }
-
-                        if (input) wContainer.appendChild(input);
-                        wrapper.appendChild(wContainer);
-                    });
-                }
-
-                this.promptPanel.appendChild(wrapper);
-            });
-
-            // Add Run Button Inside Panel
-            const runBtnPanel = document.createElement('button');
-            runBtnPanel.textContent = 'Apply & Queue (Shift+Enter)';
-            runBtnPanel.style.textTransform = 'uppercase';
-            runBtnPanel.style.cssText = `
-                margin-top: 8px;
-                padding: 6px;
-                background: ${t.accent};
-                color: white;
-                border: none;
-                border-radius: 4px;
-                cursor: pointer;
-                font-size: 11px;
-                font-weight: bold;
-            `;
-            runBtnPanel.onclick = () => this.runWorkflow();
-            this.promptPanel.appendChild(runBtnPanel);
+            container.appendChild(msg);
+            return;
         }
 
-        this.container.appendChild(this.promptPanel);
+        nodes.forEach(node => {
+            const wrapper = document.createElement('div');
+            wrapper.style.cssText = `display: flex; flex-direction: column; gap: 8px; padding: 10px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px;`;
+
+            const label = document.createElement('div');
+            label.textContent = (node.title || node.type).toUpperCase();
+            label.style.cssText = `color: ${t.accent}; font-size: 10px; font-weight: 800; cursor: pointer; letter-spacing: 0.5px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 6px; margin-bottom: 4px;`;
+            label.onclick = () => { app.canvas.centerOnNode(node); app.canvas.selectNode(node); };
+            wrapper.appendChild(label);
+
+            if (node.widgets) {
+                // Main text area (base_prompt)
+                const mainPrompt = node.widgets.find(w => w.name === 'base_prompt');
+                if (mainPrompt) {
+                    const pc = document.createElement('div');
+                    pc.style.cssText = 'display: flex; flex-direction: column; gap: 2px;';
+                    const textarea = document.createElement('textarea');
+                    textarea.value = mainPrompt.value || "";
+                    textarea.placeholder = "Enter your base cinematic prompt...";
+                    textarea.style.cssText = `width: 100%; height: 80px; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; color: ${t.text}; font-size: 12px; padding: 8px; resize: vertical; font-family: ${t.mono}; outline: none; transition: border-color 0.2s;`;
+                    textarea.onfocus = () => textarea.style.borderColor = t.accent;
+                    textarea.onblur = () => textarea.style.borderColor = 'rgba(255,255,255,0.1)';
+                    textarea.oninput = (e) => {
+                        mainPrompt.value = e.target.value;
+                        if (mainPrompt.callback) mainPrompt.callback(mainPrompt.value);
+                        node.setDirtyCanvas(true);
+                    };
+                    pc.appendChild(textarea);
+                    wrapper.appendChild(pc);
+                }
+
+                // Grid for dropdowns and numbers
+                const grid = document.createElement('div');
+                grid.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr; gap: 10px;';
+
+                node.widgets.forEach(w => {
+                    if (w.name === 'base_prompt' || w.name === 'prompt_preview' || w.type === 'converted-widget' || w.name === '_temp') return;
+
+                    const wWrap = document.createElement('div');
+                    wWrap.style.cssText = 'display: flex; flex-direction: column; gap: 4px;';
+
+                    const wl = document.createElement('div');
+                    wl.textContent = w.name.replace(/_/g, ' ').toUpperCase();
+                    wl.style.cssText = `color: ${t.textDim}; font-size: 9px; font-weight: 600; opacity: 0.8;`;
+                    wWrap.appendChild(wl);
+
+                    let input;
+                    if (w.type === 'combo') {
+                        input = document.createElement('select');
+                        input.style.cssText = `width: 100%; background: #0a0a0f; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; color: ${t.text}; font-size: 11px; padding: 4px; cursor: pointer; outline: none;`;
+                        if (w.options && w.options.values) {
+                            w.options.values.forEach(v => {
+                                const opt = document.createElement('option');
+                                opt.value = v; opt.textContent = v;
+                                input.appendChild(opt);
+                            });
+                        }
+                        input.value = w.value;
+                        input.onchange = (e) => {
+                            w.value = e.target.value;
+                            if (w.callback) w.callback(w.value);
+                            node.setDirtyCanvas(true);
+                        };
+                    } else if (w.type === 'number' || typeof w.value === 'number') {
+                        input = document.createElement('input');
+                        input.type = 'number';
+                        input.value = w.value;
+                        if (w.options) {
+                            if (w.options.min !== undefined) input.min = w.options.min;
+                            if (w.options.max !== undefined) input.max = w.options.max;
+                            if (w.options.step !== undefined) input.step = w.options.step;
+                        }
+                        input.style.cssText = `width: 100%; background: #0a0a0f; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; color: ${t.text}; font-size: 11px; padding: 4px; outline: none;`;
+                        input.oninput = (e) => {
+                            let val = parseFloat(e.target.value);
+                            if (w.options) {
+                                if (w.options.min !== undefined) val = Math.max(w.options.min, val);
+                                if (w.options.max !== undefined) val = Math.min(w.options.max, val);
+                            }
+                            w.value = val;
+                            if (w.callback) w.callback(w.value);
+                            node.setDirtyCanvas(true);
+                        };
+                    } else if (w.type === 'toggle' || typeof w.value === 'boolean') {
+                        const tr = document.createElement('div');
+                        tr.style.cssText = 'display: flex; align-items: center; gap: 8px;';
+                        const ck = document.createElement('input');
+                        ck.type = 'checkbox'; ck.checked = w.value;
+                        ck.onchange = (e) => {
+                            w.value = e.target.checked;
+                            if (w.callback) w.callback(w.value);
+                            node.setDirtyCanvas(true);
+                        };
+                        tr.appendChild(ck);
+                        const cl = document.createElement('span'); cl.textContent = w.value ? 'ON' : 'OFF'; cl.style.fontSize = '10px';
+                        ck.addEventListener('change', () => cl.textContent = ck.checked ? 'ON' : 'OFF');
+                        tr.appendChild(cl);
+                        input = tr;
+                    } else {
+                        input = document.createElement('textarea');
+                        input.value = w.value || "";
+                        input.style.cssText = `width: 100%; height: 30px; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; color: ${t.text}; font-size: 11px; padding: 4px; resize: vertical; font-family: ${t.mono}; outline: none;`;
+                        input.oninput = (e) => {
+                            w.value = e.target.value;
+                            if (w.callback) w.callback(w.value);
+                            node.setDirtyCanvas(true);
+                        };
+                    }
+
+                    if (input) wWrap.appendChild(input);
+                    grid.appendChild(wWrap);
+                });
+                wrapper.appendChild(grid);
+            }
+            container.appendChild(wrapper);
+        });
+
+        // v2.4: Move Run Button here from Toolbar
+        const runBtnWrapper = document.createElement('div');
+        runBtnWrapper.style.cssText = 'padding: 10px; display: flex; justify-content: center; border-top: 1px solid rgba(255,255,255,0.05); margin-top: 10px;';
+
+        const runBtn = document.createElement('button');
+        runBtn.innerHTML = '▶ RUN WORKFLOW';
+        runBtn.style.cssText = `
+        background: #1a4a1a;
+        color: #4f4;
+        border: 1px solid #2a6a2a;
+        border-radius: 8px;
+        padding: 10px 20px;
+        font-size: 12px;
+        font-weight: 800;
+        cursor: pointer;
+        letter-spacing: 1px;
+        transition: all 0.2s;
+        width: 100%;
+        font-family: ${t.font};
+    `;
+        runBtn.onmouseover = () => {
+            runBtn.style.background = '#226222';
+            runBtn.style.boxShadow = '0 0 15px rgba(79, 255, 79, 0.2)';
+        };
+        runBtn.onmouseout = () => {
+            runBtn.style.background = '#1a4a1a';
+            runBtn.style.boxShadow = 'none';
+        };
+        this.runButton = runBtn;
+        runBtn.onclick = () => this.runWorkflow();
+
+        runBtnWrapper.appendChild(runBtn);
+        container.appendChild(runBtnWrapper);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -3314,16 +3561,14 @@ class RadianceViewer {
         const t = this.theme;
         this.controlsPanel = document.createElement('div');
         this.controlsPanel.className = 'radiance-glass-dock';
+
         this.controlsPanel.style.cssText = `
             position: absolute;
-            bottom: 32px;
-            left: 50%;
-            transform: translateX(-50%);
             background: rgba(10, 10, 14, 0.75);
             border: 1px solid rgba(255, 255, 255, 0.08);
             border-radius: 20px;
             padding: 12px;
-            z-index: 50;
+            z-index: 100;
             display: flex;
             flex-direction: column;
             gap: 12px;
@@ -3331,31 +3576,47 @@ class RadianceViewer {
             -webkit-backdrop-filter: blur(24px);
             box-shadow: 0 16px 48px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.05) inset;
             transition: opacity 0.4s cubic-bezier(0.2, 0.8, 0.2, 1.0), transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1.0);
-            width: ${this.hudPanelWidth}px;
-            min-width: ${this.hudPanelMinWidth}px;
-            max-width: ${this.hudPanelMaxWidth}px;
-            resize: horizontal;
-            overflow: hidden;
+            width: ${this.hudPanelWidth || 640}px;
+            height: ${this.hudPanelHeight || 380}px;
+            min-width: 400px;
+            min-height: 240px;
+            max-width: 90vw;
+            max-height: 80vh;
+            bottom: 40px;
+            left: 50%;
+            transform: translateX(-50%);
+            overflow: auto;
+            resize: both;
             font-family: ${t.font};
             opacity: 1;
             pointer-events: auto;
         `;
 
-        // Observe resize (from CSS resize handle) and persist width
+        // Observe resize and persist dimensions
         const hudResizeObserver = new ResizeObserver((entries) => {
             for (const entry of entries) {
-                const newWidth = Math.round(entry.contentRect.width + 24); // +padding
-                if (newWidth >= this.hudPanelMinWidth && newWidth <= this.hudPanelMaxWidth) {
-                    this.hudPanelWidth = newWidth;
-                    localStorage.setItem('radiance_hud_width', newWidth);
-                }
+                const newWidth = Math.round(entry.contentRect.width);
+                const newHeight = Math.round(entry.contentRect.height);
+                this.hudPanelWidth = newWidth;
+                this.hudPanelHeight = newHeight;
+                localStorage.setItem('radiance_hud_width', newWidth);
+                localStorage.setItem('radiance_hud_height', newHeight);
             }
         });
         hudResizeObserver.observe(this.controlsPanel);
 
-        // 1. Tabs Header
+        // Docked HUD uses full width by default
+
+        // 1. Tabs Header (No longer draggable)
         const tabsHeader = document.createElement('div');
-        tabsHeader.style.cssText = 'display: flex; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid rgba(255,255,255,0.08); margin-bottom: 4px;';
+        tabsHeader.style.cssText = `
+            display: flex; 
+            gap: 4px; 
+            padding: 4px 8px 10px 8px; 
+            border-bottom: 1px solid rgba(255,255,255,0.08); 
+            margin-bottom: 2px;
+            user-select: none;
+        `;
 
         const activeTabStyle = `background: rgba(255,255,255,0.1); color: ${t.text}; border-bottom: 2px solid ${t.accent}`;
         const inactiveTabStyle = `background: transparent; color: ${t.textDim}; border-bottom: 2px solid transparent`;
@@ -3366,13 +3627,17 @@ class RadianceViewer {
         this.tabContentContainer = tabContentContainer;
 
         const tabs = [
+            { id: 'prompt', label: 'PROMPT' }, // v2.4: Integrated Prompt machine
             { id: 'primaries', label: 'PRIMARIES' },
             { id: 'curves', label: 'CURVES' },
             { id: 'film', label: 'FILM' },
             { id: 'lens', label: 'LENS' },
             { id: 'qualifiers', label: 'QUALIFIER' },
-            { id: 'scopes', label: 'SCOPES' }
+            { id: 'masks', label: 'MASKS' },
+            { id: 'scopes', label: 'SCOPES' },
+            { id: 'view', label: 'VIEW' }
         ];
+        this._hudTabs = []; // Save references
 
         const renderTabs = () => {
             tabsHeader.innerHTML = '';
@@ -3387,6 +3652,7 @@ class RadianceViewer {
                     renderTabs();
                     renderContent();
                 };
+                this._hudTabs.push(btn);
                 tabsHeader.appendChild(btn);
             });
         };
@@ -3399,7 +3665,9 @@ class RadianceViewer {
             tabContentContainer.innerHTML = '';
             tabContentContainer.style.cssText = 'min-height: 140px; display: flex; flex-direction: column; justify-content: center;';
 
-            if (activeTab === 'primaries') {
+            if (activeTab === 'prompt') {
+                this.renderPromptTab(tabContentContainer);
+            } else if (activeTab === 'primaries') {
                 this.renderPrimariesTab(tabContentContainer);
             } else if (activeTab === 'curves') {
                 this.renderCurvesTab(tabContentContainer);
@@ -3409,8 +3677,12 @@ class RadianceViewer {
                 this.renderLensTab(tabContentContainer);
             } else if (activeTab === 'qualifiers') {
                 this.renderQualifiersTab(tabContentContainer);
+            } else if (activeTab === 'masks') {
+                this.renderMasksTab(tabContentContainer);
             } else if (activeTab === 'scopes') {
                 this.renderScopesTab(tabContentContainer);
+            } else if (activeTab === 'view') {
+                this.renderViewTab(tabContentContainer);
             }
         };
 
@@ -3550,6 +3822,31 @@ class RadianceViewer {
                     e.preventDefault();
                     this.redo();
                 }
+
+                // --- Printer Lights (1-4) ---
+                if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+                    const step = e.shiftKey ? -0.01 : 0.01;
+                    let changed = false;
+
+                    if (e.key === '1') { // Red
+                        this.offset[0] += step; changed = true;
+                    } else if (e.key === '2') { // Green
+                        this.offset[1] += step; changed = true;
+                    } else if (e.key === '3') { // Blue
+                        this.offset[2] += step; changed = true;
+                    } else if (e.key === '4') { // Master
+                        this.offset[0] += step; this.offset[1] += step; this.offset[2] += step;
+                        changed = true;
+                    }
+
+                    if (changed) {
+                        e.preventDefault();
+                        this._pushUndoDebounced();
+                        if (this.renderer) this.renderer.setOffset(this.offset[0], this.offset[1], this.offset[2]);
+                        this.render();
+                        if (this._lastRenderContent) this._lastRenderContent(); // Refresh knobs
+                    }
+                }
             };
             document.addEventListener('keydown', this._undoKeyListener);
         }
@@ -3561,34 +3858,25 @@ class RadianceViewer {
         this.transportPanel = document.createElement('div');
         this.transportPanel.style.cssText = `
             position: absolute;
-            bottom: 20px;
+            bottom: 300px;
             left: 50%;
             transform: translateX(-50%);
-            display: flex;
+            display: ${this.totalFrames > 1 ? 'flex' : 'none'};
             align-items: center;
+            justify-content: center;
             gap: 12px;
             background: rgba(10, 10, 12, 0.9);
             border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 8px;
-            padding: 8px 16px;
+            padding: 6px 16px;
             backdrop-filter: blur(8px);
-            z-index: 100;
-            transition: opacity 0.2s;
-            opacity: 0; 
-            pointer-events: none;
+            z-index: 101;
+            transition: opacity 0.4s, transform 0.4s;
+            opacity: 1;
+            pointer-events: auto;
         `;
 
-        // Show transport on hover over container
-        this.container.addEventListener('mouseenter', () => {
-            if (this.totalFrames > 1) {
-                this.transportPanel.style.opacity = '1';
-                this.transportPanel.style.pointerEvents = 'auto';
-            }
-        });
-        this.container.addEventListener('mouseleave', () => {
-            this.transportPanel.style.opacity = '0';
-            this.transportPanel.style.pointerEvents = 'none';
-        });
+        // The controlsPanel and transportPanel will be appended to canvasWrapper to float over image
 
         // Loop Toggle
         const loopBtn = document.createElement('div');
@@ -3629,9 +3917,14 @@ class RadianceViewer {
         this.frameCounter.style.cssText = 'color: #888; font-size: 11px; font-family: monospace; margin-left: 8px; min-width: 50px; text-align: center;';
         this.transportPanel.appendChild(this.frameCounter);
 
-        this.container.appendChild(this.transportPanel);
-
+        // Float these over the canvas
+        this.canvasWrapper.appendChild(this.transportPanel);
         this.canvasWrapper.appendChild(this.controlsPanel);
+
+        // Relative ordering for info bar
+        if (this.bottomInfoBar) {
+            this.container.appendChild(this.bottomInfoBar);
+        }
     }
 
     renderPrimariesTab(container) {
@@ -3644,10 +3937,27 @@ class RadianceViewer {
         };
 
         // ═════════════════════════════════════════════════════════════════════
-        // 1. TOP BAR: Temp | Tint | Contrast | Pivot | Mid/Detail
+        // 1. TOP BAR: Exp | Temp | Tint | Contrast | Pivot | Mid/Detail
         // ═════════════════════════════════════════════════════════════════════
         const topBar = document.createElement('div');
-        topBar.style.cssText = 'display: grid; grid-template-columns: repeat(5, 1fr); gap: 2px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 8px; justify-items: center;';
+        topBar.style.cssText = 'display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 8px; justify-items: center;';
+
+        // Auto Balance Picker
+        const balanceBtn = document.createElement('div');
+        balanceBtn.innerHTML = '◎';
+        balanceBtn.title = 'Auto White Balance';
+        balanceBtn.style.cssText = 'width: 38px; height: 38px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: 0.2s; margin-top: 4px; font-size: 16px;';
+        balanceBtn.onmouseenter = () => balanceBtn.style.background = 'rgba(255,255,255,0.12)';
+        balanceBtn.onmouseleave = () => balanceBtn.style.background = 'rgba(255,255,255,0.05)';
+        balanceBtn.onclick = () => this.activateBalancePicker();
+        topBar.appendChild(balanceBtn);
+
+        // Exposure
+        topBar.appendChild(createMini('EXP', -10.0, 10.0, this.exposure || 0.0, 0.1, v => {
+            this.exposure = v;
+            if (this.renderer) this.renderer.setExposure(v);
+            this.render();
+        }));
 
         topBar.appendChild(createMini('TEMP', -2.0, 2.0, this.temperature || 0.0, 0.05, v => {
             this.temperature = v;
@@ -3710,7 +4020,6 @@ class RadianceViewer {
         }));
 
         // Offset (Global)
-        // Global Offset is usually additive.
         wheelsRow.appendChild(this.createColorWheel('OFFSET', -0.5, 0.5, this.offset || [0, 0, 0], 0.005, (r, g, b) => {
             this.offset = [r, g, b];
             if (this.renderer) this.renderer.setOffset(r, g, b);
@@ -3768,6 +4077,7 @@ class RadianceViewer {
             this.render();
         }));
 
+
         container.appendChild(botBar);
     }
 
@@ -3818,7 +4128,7 @@ class RadianceViewer {
         const presets = document.createElement('div');
         presets.style.cssText = 'display: flex; flex-wrap: wrap; gap: 6px;';
 
-        const btnStyle = `background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #aaa; padding: 4px 8px; border-radius: 4px; font-size: 10px; cursor: pointer; transition: background 0.15s;`;
+        const btnStyle = `background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: #aaa; padding: 4px 8px; border - radius: 4px; font - size: 10px; cursor: pointer; transition: background 0.15s; `;
 
         const addPreset = (lbl, gVal, sVal, cVal) => {
             const b = document.createElement('div');
@@ -3850,9 +4160,17 @@ class RadianceViewer {
         addPreset('65mm / IMAX', 0.06, 1.0, 0.05);
         addPreset('Kodak 500T', 0.12, 1.3, 0.1);
         addPreset('Kodak 50D', 0.05, 1.0, 0.05);
+        addPreset('Kodachrome 64', 0.08, 1.1, 0.1);
+        addPreset('Ektachrome 100', 0.10, 1.2, 0.15);
+        addPreset('Technicolor', 0.22, 2.2, 0.35);
         addPreset('Fuji Eterna', 0.10, 1.2, 0.08);
         addPreset('CineStill 800T', 0.18, 1.8, 0.2);
         addPreset('Tri-X 400', 0.25, 2.0, 0.0);
+        addPreset('Classic Noir', 0.32, 2.8, 0.0);
+        addPreset('Push (+2 Stop)', 0.45, 3.2, 0.25);
+        addPreset('Expired 35mm', 0.38, 2.6, 0.45);
+        addPreset('Vintage 1920s', 0.65, 4.0, 0.1);
+        addPreset('Polaroid 600', 0.28, 3.0, 0.2);
         addPreset('Digital Noise', 0.08, 1.0, 0.0);
 
         container.appendChild(presets);
@@ -3863,7 +4181,10 @@ class RadianceViewer {
 
         // 1. Focus & DoF Top Row
         const topRow = document.createElement('div');
-        topRow.style.cssText = 'display: flex; gap: 10px; align-items: center; margin-bottom: 5px;';
+        topRow.style.cssText = 'display: flex; gap: 10px; align-items: center; margin-bottom: 5px; justify-content: space-between;';
+
+        const dofLeft = document.createElement('div');
+        dofLeft.style.cssText = 'display: flex; align-items: center; gap: 8px;';
 
         const dofCheck = document.createElement('div');
         dofCheck.innerHTML = `
@@ -3875,7 +4196,19 @@ class RadianceViewer {
             if (this.renderer) this.renderer.setDoFEnabled(this.dofEnabled);
             this.render();
         };
-        topRow.appendChild(dofCheck);
+        dofLeft.appendChild(dofCheck);
+
+        // Pick Focus Tool
+        const pickBtn = document.createElement('button');
+        pickBtn.textContent = '◎ Pick Focus';
+        pickBtn.style.cssText = 'background: #333; color: #ccc; border: 1px solid #555; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px;';
+        pickBtn.onclick = () => this.activateFocusPicker(() => {
+            // Update the HUD slider if it exists, though knobs are reactive
+            this.renderLensTab(this.tabContentContainer);
+        });
+        dofLeft.appendChild(pickBtn);
+
+        topRow.appendChild(dofLeft);
         container.appendChild(topRow);
 
         // 2. Main Knobs Row (Focus, Aperture, Distortion)
@@ -3911,15 +4244,22 @@ class RadianceViewer {
         const presetRow = document.createElement('div');
         presetRow.style.cssText = 'display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap;';
 
-        const presetBtnStyle = `background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #aaa; padding: 4px 10px; border-radius: 4px; font-size: 10px; cursor: pointer; transition: background 0.15s;`;
-        const presetBtnActiveStyle = `background: rgba(100,140,255,0.2); border: 1px solid rgba(100,140,255,0.4); color: #9cf;`;
+        const presetBtnStyle = `background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: #aaa; padding: 4px 10px; border - radius: 4px; font - size: 10px; cursor: pointer; transition: background 0.15s; `;
+        const presetBtnActiveStyle = `background: rgba(100, 140, 255, 0.2); border: 1px solid rgba(100, 140, 255, 0.4); color: #9cf; `;
 
         const bokehPresets = [
             { label: '● Circle', blades: 0, angle: 0 },
-            { label: '⬠ Pentagon', blades: 5, angle: 0 },
-            { label: '⬡ Hexagon', blades: 6, angle: 0 },
-            { label: '⬡ Heptagon', blades: 7, angle: 0 },
-            { label: '⬡ Octagon', blades: 8, angle: 0 },
+            { label: '⬠ Pent', blades: 5, angle: 0 },
+            { label: '⬡ Hex', blades: 6, angle: 0 },
+            { label: '⬡ Oct', blades: 8, angle: 0 },
+        ];
+
+        const signaturePresets = [
+            { label: 'Zeiss MP', blades: 0, angle: 0, anamorphic: 1.0, distort: 0.0, fringe: 0.0, halation: 0.05, diffusion: 0.0 },
+            { label: 'Cooke S4', blades: 8, angle: 22, anamorphic: 1.0, distort: 0.04, fringe: 0.35, halation: 0.15, diffusion: 0.2 },
+            { label: 'Anamorphic', blades: 0, angle: 0, anamorphic: 2.0, distort: 0.18, fringe: 0.75, halation: 0.1, diffusion: 0.15 },
+            { label: 'Petzval', blades: 0, angle: 0, anamorphic: 1.0, distort: -0.1, fringe: 0.0, opticalVig: 0.85, highlight: 1.5 },
+            { label: 'Dreamy', blades: 0, angle: 0, anamorphic: 1.0, distort: 0.0, fringe: 0.2, halation: 0.4, diffusion: 0.6 }
         ];
 
         const currentBlades = this.apertureBlades || 0;
@@ -3941,6 +4281,46 @@ class RadianceViewer {
         });
 
         shapeGroup.appendChild(presetRow);
+
+        // ─── Lens Signature Row ──────────────────────────
+        const sigLabel = document.createElement('div');
+        sigLabel.style.cssText = 'color: #888; font-size: 10px; margin-bottom: 6px; text-transform: uppercase; margin-top: 8px;';
+        sigLabel.textContent = 'Lens Signatures';
+        shapeGroup.appendChild(sigLabel);
+
+        const sigRow = document.createElement('div');
+        sigRow.style.cssText = 'display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap;';
+
+        signaturePresets.forEach(p => {
+            const btn = document.createElement('div');
+            btn.textContent = p.label;
+            btn.style.cssText = presetBtnStyle;
+            btn.onmouseenter = () => btn.style.background = 'rgba(255,255,255,0.12)';
+            btn.onmouseleave = () => btn.style.background = 'rgba(255,255,255,0.05)';
+            btn.onclick = () => {
+                this.apertureBlades = p.blades;
+                this.apertureRotation = p.angle;
+                this.apertureAnamorphic = p.anamorphic || 1.0;
+                this.lensDistortion = p.distort || 0.0;
+                this.lensFringe = p.fringe || 0.0;
+                this.halation = p.halation || 0.0;
+                this.diffusion = p.diffusion || 0.0;
+                this.bokehOpticalVig = p.opticalVig || 0.0;
+                this.bokehHighlightBias = p.highlight || 0.0;
+
+                if (this.renderer) {
+                    this.renderer.setApertureShape(p.blades, p.angle, this.apertureAnamorphic);
+                    this.renderer.setLensDistortion(this.lensDistortion, this.lensFringe);
+                    this.renderer.setHalation(this.halation);
+                    this.renderer.setDiffusion(this.diffusion);
+                    this.renderer.setBokehPhysics(this.bokehHighlightBias, this.bokehSoapBubble || 0.0, this.bokehOpticalVig);
+                }
+                this.render();
+                this.renderLensTab(this.tabContentContainer);
+            };
+            sigRow.appendChild(btn);
+        });
+        shapeGroup.appendChild(sigRow);
 
         // ─── Manual Shape Knobs ──────────────────────────
         const shapeGrid = document.createElement('div');
@@ -4004,6 +4384,37 @@ class RadianceViewer {
         const fxGrid = document.createElement('div');
         fxGrid.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;';
 
+        const diffPresets = [
+            { label: 'Pro-Mist 1/4', bloom: 0.15, halation: 0.1, diffusion: 0.2 },
+            { label: 'Pro-Mist 1/2', bloom: 0.25, halation: 0.15, diffusion: 0.35 },
+            { label: 'Glimmerglass', bloom: 0.4, halation: 0.05, diffusion: 0.15 },
+            { label: 'H.Black Magic', bloom: 0.2, halation: 0.3, diffusion: 0.4 },
+        ];
+
+        const dfRow = document.createElement('div');
+        dfRow.style.cssText = 'display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap;';
+        diffPresets.forEach(p => {
+            const btn = document.createElement('button');
+            btn.textContent = p.label;
+            btn.style.cssText = presetBtnStyle;
+            btn.onmouseenter = () => btn.style.background = 'rgba(255,255,255,0.12)';
+            btn.onmouseleave = () => btn.style.background = 'rgba(255,255,255,0.05)';
+            btn.onclick = () => {
+                this.bloom = p.bloom;
+                this.halation = p.halation;
+                this.diffusion = p.diffusion;
+                if (this.renderer) {
+                    this.renderer.setBloom(p.bloom);
+                    this.renderer.setHalation(p.halation);
+                    this.renderer.setDiffusion(p.diffusion);
+                }
+                this.render();
+                this.renderLensTab(this.tabContentContainer);
+            };
+            dfRow.appendChild(btn);
+        });
+        fxGroup.appendChild(dfRow);
+
         fxGrid.appendChild(this.createKnob('BLOOM', 0.0, 1.0, this.bloom || 0.0, 0.01, v => {
             this.bloom = v;
             if (this.renderer) this.renderer.setBloom(v);
@@ -4024,19 +4435,48 @@ class RadianceViewer {
 
         fxGroup.appendChild(fxGrid);
         container.appendChild(fxGroup);
+
+        // 6. Bokeh Physics
+        const bokehGroup = document.createElement('div');
+        bokehGroup.style.marginTop = '10px';
+        bokehGroup.innerHTML = '<div style="color: #888; font-size: 10px; margin-bottom: 4px; text-transform: uppercase;">Bokeh Physics</div>';
+
+        const bokehGrid = document.createElement('div');
+        bokehGrid.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;';
+
+        bokehGrid.appendChild(this.createKnob('HIGHLIGHT', 0.0, 5.0, this.bokehHighlightBias || 0.0, 0.1, v => {
+            this.bokehHighlightBias = v;
+            if (this.renderer) this.renderer.setBokehPhysics(this.bokehHighlightBias, this.bokehSoapBubble || 0.0, this.bokehOpticalVig || 0.0);
+            this.render();
+        }));
+
+        bokehGrid.appendChild(this.createKnob('SOAP BBL', 0.0, 2.0, this.bokehSoapBubble || 0.0, 0.05, v => {
+            this.bokehSoapBubble = v;
+            if (this.renderer) this.renderer.setBokehPhysics(this.bokehHighlightBias || 0.0, this.bokehSoapBubble, this.bokehOpticalVig || 0.0);
+            this.render();
+        }));
+
+        bokehGrid.appendChild(this.createKnob('OPTIC VIG', 0.0, 1.0, this.bokehOpticalVig || 0.0, 0.05, v => {
+            this.bokehOpticalVig = v;
+            if (this.renderer) this.renderer.setBokehPhysics(this.bokehHighlightBias || 0.0, this.bokehSoapBubble || 0.0, this.bokehOpticalVig);
+            this.render();
+        }));
+
+        bokehGroup.appendChild(bokehGrid);
+        container.appendChild(bokehGroup);
     }
 
     renderCurvesTab(container) {
-        container.style.cssText = 'display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 10px; max-height: 400px; overflow-y: auto;';
+        container.style.cssText = 'display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 10px; height: 100%; overflow: hidden;';
 
         // 1. Create Editor Container
         const editorContainer = document.createElement('div');
-        editorContainer.style.cssText = 'position: relative; width: 280px; height: 280px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px;';
+        editorContainer.style.cssText = 'position: relative; flex: 1; min-height: 200px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden;';
         container.appendChild(editorContainer);
 
         // 2. Initialize Curve Editor
         if (!this.curveEditor) {
-            this.curveEditor = new RadianceCurveEditor(280, 280, (data) => {
+            this.curveEditor = new RadianceCurveEditor(280, 280, this.theme, (data) => {
                 if (this.renderer) {
                     this.renderer.updateCurveLut(data);
                     this.renderer.setCurveMix(this.curveMix !== undefined ? this.curveMix : 1.0);
@@ -4048,55 +4488,103 @@ class RadianceViewer {
 
         editorContainer.appendChild(this.curveEditor.canvas);
 
+        // Observe resize
+        const curveResizeObs = new ResizeObserver(entries => {
+            for (const entry of entries) {
+                const { width, height } = entry.contentRect;
+                if (width > 0 && height > 0) {
+                    this.curveEditor.resize(width, height);
+                }
+            }
+        });
+        curveResizeObs.observe(editorContainer);
+
         // 3. Channel Selectors (top-left overlay)
         const channels = document.createElement('div');
-        channels.style.cssText = 'position: absolute; top: 10px; left: 36px; display: flex; gap: 3px;';
+        channels.style.cssText = 'position: absolute; top: 10px; left: 36px; display: flex; gap: 4px; align-items: center;';
 
         ['RGB', 'R', 'G', 'B'].forEach(ch => {
             const btn = document.createElement('div');
             btn.textContent = ch;
             const isActive = this.curveEditor.activeChannel === ch;
-            const color = ch === 'R' ? '#ff5555' : ch === 'G' ? '#55ff55' : ch === 'B' ? '#5555ff' : '#ffffff';
+            const color = ch === 'R' ? '#ff4d4d' : ch === 'G' ? '#4dff4d' : ch === 'B' ? '#4d4dff' : '#ffffff';
 
             btn.style.cssText = `
-                width: 28px; height: 20px;
-                background: ${isActive ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.5)'};
-                color: ${color};
+                width: 32px; height: 20px;
+                background: ${isActive ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.6)'};
+                color: ${isActive ? '#fff' : color};
                 border: 1px solid ${isActive ? color : 'rgba(255,255,255,0.1)'};
                 border-radius: 3px;
                 display: flex; align-items: center; justify-content: center;
                 font-size: 10px; font-weight: bold; cursor: pointer;
-                transition: background 0.15s;
+                transition: all 0.15s;
+                text-shadow: ${isActive ? `0 0 5px ${color}` : 'none'};
             `;
             btn.onmouseenter = () => { if (!isActive) btn.style.background = 'rgba(255,255,255,0.1)'; };
-            btn.onmouseleave = () => { if (!isActive) btn.style.background = 'rgba(0,0,0,0.5)'; };
+            btn.onmouseleave = () => { if (!isActive) btn.style.background = 'rgba(0,0,0,0.6)'; };
             btn.onclick = () => {
                 this.curveEditor.setActiveChannel(ch);
                 this._lastRenderContent();
             };
             channels.appendChild(btn);
         });
+
+        // Copy to All Button
+        const copyBtn = document.createElement('div');
+        copyBtn.textContent = '📋';
+        copyBtn.title = 'Copy RGB to All Channels';
+        copyBtn.style.cssText = 'width: 28px; height: 20px; background: rgba(0,0,0,0.6); border: 1px solid rgba(255,255,255,0.1); border-radius: 3px; display: flex; align-items: center; justify-content: center; font-size: 10px; cursor: pointer; transition: all 0.15s; margin-left: 4px;';
+        copyBtn.onmouseenter = () => copyBtn.style.background = 'rgba(255,255,255,0.1)';
+        copyBtn.onmouseleave = () => copyBtn.style.background = 'rgba(0,0,0,0.6)';
+        copyBtn.onclick = () => {
+            this.curveEditor.copyRGBToAll();
+            this._lastRenderContent();
+        };
+        channels.appendChild(copyBtn);
+
         editorContainer.appendChild(channels);
 
-        // 4. Reset Buttons (top-right overlay)
+        // 4. Reset & Presets Group (top-right overlay)
+        const topButtons = document.createElement('div');
+        topButtons.style.cssText = 'position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; align-items: center;';
+
+        // Presets Dropdown
+        const presetsSelect = document.createElement('select');
+        presetsSelect.style.cssText = 'background: rgba(0,0,0,0.85); color: #ccc; border: 1px solid rgba(255,255,255,0.15); border-radius: 3px; font-size: 10px; padding: 2px 4px; outline: none; cursor: pointer; height: 20px;';
+
+        ['Presets...', 'Punchy', 'High Contrast', 'Flat / Log', 'Shadow Lift', 'S-Curve', 'Film Print', 'Bleach Bypass', 'Cross Process'].forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p === 'Presets...' ? '' : p;
+            opt.textContent = p;
+            presetsSelect.appendChild(opt);
+        });
+        presetsSelect.onchange = (e) => {
+            if (e.target.value) {
+                this.curveEditor.applyIndustryPreset(e.target.value);
+                e.target.value = '';
+                this._lastRenderContent();
+            }
+        };
+        topButtons.appendChild(presetsSelect);
+
         const resetGroup = document.createElement('div');
-        resetGroup.style.cssText = 'position: absolute; top: 10px; right: 10px; display: flex; gap: 4px;';
+        resetGroup.style.cssText = 'display: flex; gap: 4px;';
 
         const resetChBtn = document.createElement('div');
         resetChBtn.textContent = '↺';
-        resetChBtn.title = 'Reset Channel';
-        resetChBtn.style.cssText = 'color: #888; cursor: pointer; font-size: 13px; padding: 2px 4px; border-radius: 3px; transition: color 0.15s;';
-        resetChBtn.onmouseenter = () => resetChBtn.style.color = '#fff';
-        resetChBtn.onmouseleave = () => resetChBtn.style.color = '#888';
-        resetChBtn.onclick = () => { this.curveEditor.resetActiveChannel(); };
+        resetChBtn.title = 'Reset Active Channel';
+        resetChBtn.style.cssText = 'width: 24px; height: 20px; background: rgba(0,0,0,0.6); border: 1px solid rgba(255,255,255,0.1); border-radius: 3px; display: flex; align-items: center; justify-content: center; color: #888; cursor: pointer; font-size: 14px; transition: all 0.15s;';
+        resetChBtn.onmouseenter = () => { resetChBtn.style.color = '#fff'; resetChBtn.style.background = 'rgba(255,255,255,0.1)'; };
+        resetChBtn.onmouseleave = () => { resetChBtn.style.color = '#888'; resetChBtn.style.background = 'rgba(0,0,0,0.6)'; };
+        resetChBtn.onclick = () => { this.curveEditor.resetActiveChannel(); this._lastRenderContent(); };
         resetGroup.appendChild(resetChBtn);
 
         const resetAllBtn = document.createElement('div');
         resetAllBtn.textContent = '⟲';
         resetAllBtn.title = 'Reset All Channels';
-        resetAllBtn.style.cssText = 'color: #888; cursor: pointer; font-size: 13px; padding: 2px 4px; border-radius: 3px; transition: color 0.15s;';
-        resetAllBtn.onmouseenter = () => resetAllBtn.style.color = '#f55';
-        resetAllBtn.onmouseleave = () => resetAllBtn.style.color = '#888';
+        resetAllBtn.style.cssText = 'width: 24px; height: 20px; background: rgba(0,0,0,0.6); border: 1px solid rgba(255,255,255,0.1); border-radius: 3px; display: flex; align-items: center; justify-content: center; color: #888; cursor: pointer; font-size: 14px; transition: all 0.15s;';
+        resetAllBtn.onmouseenter = () => { resetAllBtn.style.color = '#ff4d4d'; resetAllBtn.style.background = 'rgba(255,0,0,0.1)'; };
+        resetAllBtn.onmouseleave = () => { resetAllBtn.style.color = '#888'; resetAllBtn.style.background = 'rgba(0,0,0,0.6)'; };
         resetAllBtn.onclick = () => {
             this.curveEditor.resetAll();
             this.curveMix = 1.0;
@@ -4105,14 +4593,15 @@ class RadianceViewer {
         };
         resetGroup.appendChild(resetAllBtn);
 
-        editorContainer.appendChild(resetGroup);
+        topButtons.appendChild(resetGroup);
+        editorContainer.appendChild(topButtons);
 
         // 5. Mix Slider
         const mixRow = document.createElement('div');
-        mixRow.style.cssText = 'display: flex; align-items: center; gap: 8px; width: 280px;';
+        mixRow.style.cssText = 'display: flex; align-items: center; gap: 10px; padding: 4px 5px; background: rgba(0,0,0,0.25); border-radius: 4px;';
 
         const mixLabel = document.createElement('div');
-        mixLabel.style.cssText = 'color: #888; font-size: 10px; text-transform: uppercase; min-width: 28px;';
+        mixLabel.style.cssText = `color: ${this.theme.textDim}; font-size: 10px; font-weight: 600; text-transform: uppercase; min-width: 35px;`;
         mixLabel.textContent = 'MIX';
         mixRow.appendChild(mixLabel);
 
@@ -4120,7 +4609,7 @@ class RadianceViewer {
         mixSlider.type = 'range';
         mixSlider.min = '0'; mixSlider.max = '100'; mixSlider.step = '1';
         mixSlider.value = String(Math.round((this.curveMix !== undefined ? this.curveMix : 1.0) * 100));
-        mixSlider.style.cssText = 'flex: 1; accent-color: #6a8aff; height: 4px; cursor: pointer;';
+        mixSlider.style.cssText = 'flex: 1; accent-color: #00a8ff; height: 4px; cursor: pointer;';
         mixSlider.oninput = (e) => {
             this.curveMix = parseInt(e.target.value) / 100;
             if (this.renderer) this.renderer.setCurveMix(this.curveMix);
@@ -4130,57 +4619,54 @@ class RadianceViewer {
         mixRow.appendChild(mixSlider);
 
         const mixValue = document.createElement('div');
-        mixValue.style.cssText = 'color: #aaa; font-size: 10px; min-width: 32px; text-align: right;';
+        mixValue.style.cssText = 'color: #aaa; font-size: 10px; min-width: 32px; text-align: right; font-family: ' + this.theme.mono + ';';
         mixValue.textContent = Math.round((this.curveMix !== undefined ? this.curveMix : 1.0) * 100) + '%';
         mixRow.appendChild(mixValue);
 
         container.appendChild(mixRow);
 
-        // 6. Curve Presets
-        const presetLabel = document.createElement('div');
-        presetLabel.style.cssText = 'color: #888; font-size: 10px; text-transform: uppercase; width: 280px;';
-        presetLabel.textContent = 'Presets';
-        container.appendChild(presetLabel);
+        // 6. Levels Controls
+        const levelsRow = document.createElement('div');
+        levelsRow.style.cssText = 'display: flex; flex-direction: column; gap: 4px; padding: 10px; background: rgba(0,0,0,0.25); border-radius: 4px; margin-top: 4px;';
 
-        const presetRow = document.createElement('div');
-        presetRow.style.cssText = 'display: flex; flex-wrap: wrap; gap: 5px; width: 280px;';
+        const createLevelSlider = (label, min, max, val, setter) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display: flex; align-items: center; gap: 10px;';
+            const lbl = document.createElement('div');
+            lbl.style.cssText = `color: ${this.theme.textDim}; font-size: 10px; font-weight: 600; text-transform: uppercase; min-width: 60px;`;
+            lbl.textContent = label;
+            row.appendChild(lbl);
 
-        const btnStyle = `background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #aaa; padding: 3px 8px; border-radius: 4px; font-size: 10px; cursor: pointer; transition: background 0.15s;`;
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.min = min; slider.max = max; slider.step = '1';
+            slider.value = val;
+            slider.style.cssText = 'flex: 1; accent-color: #00a8ff; height: 3px; cursor: pointer;';
 
-        const presets = [
-            { label: 'Linear', data: { RGB: [{ x: 0, y: 0 }, { x: 1, y: 1 }] } },
-            { label: 'S-Curve Soft', data: { RGB: [{ x: 0, y: 0 }, { x: 0.25, y: 0.20 }, { x: 0.75, y: 0.80 }, { x: 1, y: 1 }] } },
-            { label: 'S-Curve Hard', data: { RGB: [{ x: 0, y: 0 }, { x: 0.20, y: 0.10 }, { x: 0.80, y: 0.90 }, { x: 1, y: 1 }] } },
-            { label: 'Lift Shadows', data: { RGB: [{ x: 0, y: 0.08 }, { x: 0.5, y: 0.52 }, { x: 1, y: 1 }] } },
-            { label: 'Crush Blacks', data: { RGB: [{ x: 0, y: 0 }, { x: 0.15, y: 0.02 }, { x: 0.5, y: 0.45 }, { x: 1, y: 1 }] } },
-            { label: 'High Key', data: { RGB: [{ x: 0, y: 0.05 }, { x: 0.4, y: 0.55 }, { x: 1, y: 1 }] } },
-            { label: 'Low Key', data: { RGB: [{ x: 0, y: 0 }, { x: 0.6, y: 0.40 }, { x: 1, y: 0.90 }] } },
-            {
-                label: 'Cross Process', data: {
-                    RGB: [{ x: 0, y: 0 }, { x: 1, y: 1 }],
-                    R: [{ x: 0, y: 0.05 }, { x: 0.4, y: 0.50 }, { x: 1, y: 0.95 }],
-                    G: [{ x: 0, y: 0 }, { x: 0.5, y: 0.45 }, { x: 1, y: 1 }],
-                    B: [{ x: 0, y: 0.10 }, { x: 0.6, y: 0.55 }, { x: 1, y: 0.85 }]
-                }
-            },
-        ];
+            const valLabel = document.createElement('div');
+            valLabel.style.cssText = 'color: #aaa; font-size: 10px; min-width: 25px; text-align: right;';
+            valLabel.textContent = val;
 
-        presets.forEach(p => {
-            const btn = document.createElement('div');
-            btn.textContent = p.label;
-            btn.style.cssText = btnStyle;
-            btn.onmouseenter = () => btn.style.background = 'rgba(255,255,255,0.12)';
-            btn.onmouseleave = () => btn.style.background = 'rgba(255,255,255,0.05)';
-            btn.onclick = () => {
-                this.curveEditor.applyPreset(p.data);
-                this.curveMix = 1.0;
-                if (this.renderer) this.renderer.setCurveMix(1.0);
-                this._lastRenderContent();
+            slider.oninput = (e) => {
+                const v = parseInt(e.target.value);
+                valLabel.textContent = v;
+                setter(v);
             };
-            presetRow.appendChild(btn);
+            row.appendChild(slider);
+            row.appendChild(valLabel);
+            return row;
+        };
+
+        const inBlackRow = createLevelSlider('IN BLACK', 0, 100, this.curveEditor.levels.inBlack, (v) => {
+            this.curveEditor.setLevels(v, this.curveEditor.levels.inWhite);
+        });
+        const inWhiteRow = createLevelSlider('IN WHITE', 150, 255, this.curveEditor.levels.inWhite, (v) => {
+            this.curveEditor.setLevels(this.curveEditor.levels.inBlack, v);
         });
 
-        container.appendChild(presetRow);
+        levelsRow.appendChild(inBlackRow);
+        levelsRow.appendChild(inWhiteRow);
+        container.appendChild(levelsRow);
     }
 
     renderQualifiersTab(container) {
@@ -4248,7 +4734,7 @@ class RadianceViewer {
 
             const title = document.createElement('div');
             title.textContent = label;
-            title.style.cssText = `color: ${labelColor}; font-size: 10px; width: 30px; font-weight: bold;`;
+            title.style.cssText = `color: ${labelColor}; font - size: 10px; width: 30px; font - weight: bold; `;
             row.appendChild(title);
 
             // Center
@@ -4275,6 +4761,175 @@ class RadianceViewer {
         container.appendChild(createRow('HUE', 'h', '#f55'));
         container.appendChild(createRow('SAT', 's', '#5f5'));
         container.appendChild(createRow('LUM', 'l', '#aaa'));
+    }
+
+    renderMasksTab(container) {
+        container.style.cssText = 'display: flex; flex-direction: column; gap: 10px; padding: 10px; max-height: 280px; overflow-y: auto;';
+
+        const update = () => {
+            if (this.renderer) {
+                this.renderer.setMask(this.maskState);
+                this.render();
+            }
+        };
+
+        // 1. Top Controls (Type, Invert, Show Overlay)
+        const topRow = document.createElement('div');
+        topRow.style.cssText = 'display: flex; gap: 10px; align-items: center; justify-content: space-between; margin-bottom: 5px;';
+
+        // Mask Type
+        const typeSelect = document.createElement('select');
+        typeSelect.style.cssText = 'background: #333; color: #ccc; border: 1px solid #555; font-size: 11px; padding: 2px; border-radius: 4px;';
+        ['None', 'Circle', 'Box'].forEach((label, i) => {
+            const opt = document.createElement('option');
+            opt.value = i;
+            opt.textContent = label;
+            if (this.maskState.type === i) opt.selected = true;
+            typeSelect.appendChild(opt);
+        });
+        typeSelect.onchange = (e) => {
+            this.maskState.type = parseInt(e.target.value);
+            update();
+        };
+        topRow.appendChild(typeSelect);
+
+        // Invert
+        const invertCheck = document.createElement('div');
+        invertCheck.innerHTML = `
+            <input type="checkbox" id="mask-invert" ${this.maskState.invert ? 'checked' : ''}>
+            <label for="mask-invert" style="color: #ccc; font-size: 11px; margin-left: 4px;">Invert</label>
+        `;
+        invertCheck.querySelector('input').onchange = (e) => {
+            this.maskState.invert = e.target.checked;
+            update();
+        };
+        topRow.appendChild(invertCheck);
+
+        // Show Overlay
+        const overlayCheck = document.createElement('div');
+        overlayCheck.innerHTML = `
+            <input type="checkbox" id="mask-overlay" ${this.maskState.showOverlay ? 'checked' : ''}>
+            <label for="mask-overlay" style="color: #ccc; font-size: 11px; margin-left: 4px;">Overlay</label>
+        `;
+        overlayCheck.querySelector('input').onchange = (e) => {
+            this.maskState.showOverlay = e.target.checked;
+            update();
+        };
+        topRow.appendChild(overlayCheck);
+
+        container.appendChild(topRow);
+
+        // 2. Transform Controls
+        const createRow = (label, controls) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display: flex; flex-direction: column; gap: 4px; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 4px;';
+            const title = document.createElement('div');
+            title.textContent = label;
+            title.style.cssText = 'color: #888; font-size: 9px; font-weight: bold; letter-spacing: 0.5px;';
+            row.appendChild(title);
+            const ctrlGroup = document.createElement('div');
+            ctrlGroup.style.cssText = 'display: flex; gap: 10px; align-items: center;';
+            controls.forEach(c => ctrlGroup.appendChild(c));
+            row.appendChild(ctrlGroup);
+            return row;
+        };
+
+        // Center
+        container.appendChild(createRow('CENTER', [
+            this.createKnob('X', 0, 1, this.maskState.center[0], 0.01, (v) => { this.maskState.center[0] = v; update(); }),
+            this.createKnob('Y', 0, 1, this.maskState.center[1], 0.01, (v) => { this.maskState.center[1] = v; update(); })
+        ]));
+
+        // Scale
+        container.appendChild(createRow('SCALE', [
+            this.createKnob('X', 0.01, 2, this.maskState.scale[0], 0.01, (v) => { this.maskState.scale[0] = v; update(); }),
+            this.createKnob('Y', 0.01, 2, this.maskState.scale[1], 0.01, (v) => { this.maskState.scale[1] = v; update(); })
+        ]));
+
+        // Rotation & Feather
+        const rotFeatherGroup = document.createElement('div');
+        rotFeatherGroup.style.cssText = 'display: flex; gap: 10px; width: 100%;';
+
+        const rotRow = createRow('ROTATION', [
+            this.createKnob('Rad', -Math.PI, Math.PI, this.maskState.rotation, 0.01, (v) => { this.maskState.rotation = v; update(); })
+        ]);
+        rotRow.style.flex = '1';
+        rotFeatherGroup.appendChild(rotRow);
+
+        const featherRow = createRow('FEATHER', [
+            this.createKnob('Soft', 0, 1, this.maskState.feather, 0.01, (v) => { this.maskState.feather = v; update(); })
+        ]);
+        featherRow.style.flex = '1';
+        rotFeatherGroup.appendChild(featherRow);
+
+        container.appendChild(rotFeatherGroup);
+    }
+
+    activateBalancePicker() {
+        if (this.isPickingBalance) return;
+        this.isPickingBalance = true;
+
+        const overlay = document.createElement('div');
+        overlay.textContent = 'Click to Neutralize (Gray Balance)';
+        overlay.style.cssText = 'position: absolute; top: 10px; left: 50%; transform: translateX(-50%); background: rgba(100,200,100,0.85); color: #fff; padding: 6px 12px; border-radius: 4px; pointer-events: none; z-index: 200; font-size: 11px; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.5);';
+        this.container.appendChild(overlay);
+
+        this.container.style.cursor = 'crosshair';
+
+        const clickHandler = (e) => {
+            const rect = this.canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            const imgX = (x - this.panX) / this.zoom;
+            const imgY = (y - this.panY) / this.zoom;
+
+            if (imgX >= 0 && imgX < this.imageWidth && imgY >= 0 && imgY < this.imageHeight) {
+                let r = 0, g = 0, b = 0;
+
+                if (this.hdrData) {
+                    const ix = Math.floor(imgX);
+                    const iy = Math.floor(imgY);
+                    const idx = (iy * this.imageWidth + ix) * this.hdrData.channels;
+                    const d = this.hdrData.data;
+                    r = d[idx]; g = d[idx + 1]; b = d[idx + 2];
+                } else if (this.imageData) {
+                    const ix = Math.floor(imgX);
+                    const iy = Math.floor(imgY);
+                    const idx = (iy * this.imageWidth + ix) * 4;
+                    r = this.imageData[idx] / 255.0;
+                    g = this.imageData[idx + 1] / 255.0;
+                    b = this.imageData[idx + 2] / 255.0;
+                }
+
+                // Balance Logic: Neutralize to average luma
+                const avg = (r + g + b) / 3.0;
+                if (avg > 0) {
+                    const dr = avg - r;
+                    const dg = avg - g;
+                    const db = avg - b;
+
+                    this.offset = [
+                        (this.offset[0] || 0) + dr,
+                        (this.offset[1] || 0) + dg,
+                        (this.offset[2] || 0) + db
+                    ];
+
+                    if (this.renderer) {
+                        this.renderer.setOffset(this.offset[0], this.offset[1], this.offset[2]);
+                        this.render();
+                    }
+                    this.renderPrimariesTab(this.tabContentContainer);
+                }
+            }
+
+            this.container.style.cursor = 'default';
+            overlay.remove();
+            this.container.removeEventListener('click', clickHandler);
+            this.isPickingBalance = false;
+        };
+
+        this.container.addEventListener('click', clickHandler);
     }
 
     activateEyedropper(callback) {
@@ -4380,6 +5035,247 @@ class RadianceViewer {
         this.container.addEventListener('click', clickHandler);
     }
 
+    activateFocusPicker(callback) {
+        if (this.isPickingFocus) return;
+        this.isPickingFocus = true;
+
+        const overlay = document.createElement('div');
+        overlay.textContent = 'Click to Set Focus';
+        overlay.style.cssText = 'position: absolute; top: 10px; left: 50%; transform: translateX(-50%); background: rgba(106,138,255,0.85); color: #fff; padding: 6px 12px; border-radius: 4px; pointer-events: none; z-index: 200; font-size: 11px; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.5);';
+        this.container.appendChild(overlay);
+
+        this.container.style.cursor = 'crosshair';
+
+        const clickHandler = (e) => {
+            const rect = this.canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            const imgX = (x - this.panX) / this.zoom;
+            const imgY = (y - this.panY) / this.zoom;
+
+            if (imgX >= 0 && imgX < this.imageWidth && imgY >= 0 && imgY < this.imageHeight) {
+                if (this.zdepthImage) {
+                    // Sample from depth image
+                    const pickCanvas = document.createElement('canvas');
+                    pickCanvas.width = this.zdepthImage.width;
+                    pickCanvas.height = this.zdepthImage.height;
+                    const pctx = pickCanvas.getContext('2d');
+                    pctx.drawImage(this.zdepthImage, 0, 0);
+
+                    const ix = Math.floor(imgX * (this.zdepthImage.width / this.imageWidth));
+                    const iy = Math.floor(imgY * (this.zdepthImage.height / this.imageHeight));
+
+                    const pix = pctx.getImageData(ix, iy, 1, 1).data;
+                    // Depth is usually stored in R channel (grayscale)
+                    // In ComfyUI/Radiance, normalize it to 0..1
+                    this.focusDistance = pix[0] / 255.0;
+
+                    if (this.renderer) {
+                        this.renderer.setFocusDistance(this.focusDistance);
+                        this.render();
+                    }
+                    if (callback) callback(this.focusDistance);
+                } else {
+                    console.warn("[Radiance] No depth map available to pick focus from.");
+                }
+            }
+
+            this.container.style.cursor = 'default';
+            overlay.remove();
+            this.container.removeEventListener('click', clickHandler);
+            this.isPickingFocus = false;
+        };
+
+        this.container.addEventListener('click', clickHandler);
+    }
+
+    renderViewTab(container) {
+        container.style.cssText = 'display: flex; flex-direction: column; gap: 12px; padding: 12px; max-height: 300px; overflow-y: auto;';
+
+        // 1. Comparison Wipe
+        const wipeGroup = document.createElement('div');
+        wipeGroup.innerHTML = '<div style="color: #888; font-size: 10px; margin-bottom: 8px; text-transform: uppercase; font-weight: bold;">A/B Comparison (Split Screen)</div>';
+
+        const wipeControls = document.createElement('div');
+        wipeControls.style.cssText = 'display: flex; align-items: center; gap: 10px; background: rgba(255,255,255,0.03); padding: 8px; border-radius: 6px;';
+
+        const wipeCheck = document.createElement('input');
+        wipeCheck.type = 'checkbox';
+        wipeCheck.id = 'wipe-enable';
+        wipeCheck.checked = this.wipeEnabled || false;
+        wipeCheck.onchange = (e) => {
+            this.wipeEnabled = e.target.checked;
+            if (this.renderer) this.renderer.setWipe(this.wipe || 0.5, this.wipeEnabled);
+            this.render();
+        };
+        wipeControls.appendChild(wipeCheck);
+
+        const wipeLbl = document.createElement('label');
+        wipeLbl.htmlFor = 'wipe-enable';
+        wipeLbl.textContent = 'Enable Wipe';
+        wipeLbl.style.cssText = 'color: #ccc; font-size: 11px; cursor: pointer; flex: 1;';
+        wipeControls.appendChild(wipeLbl);
+
+        const wipeSlider = document.createElement('input');
+        wipeSlider.type = 'range'; wipeSlider.min = '0'; wipeSlider.max = '100'; wipeSlider.step = '1';
+        wipeSlider.value = String(Math.round((this.wipe || 0.5) * 100));
+        wipeSlider.style.cssText = 'width: 100px; accent-color: #6a8aff; height: 4px; cursor: pointer;';
+        wipeSlider.oninput = (e) => {
+            this.wipe = parseInt(e.target.value) / 100;
+            if (this.renderer) this.renderer.setWipe(this.wipe, this.wipeEnabled);
+            this.render();
+        };
+        wipeControls.appendChild(wipeSlider);
+
+        wipeGroup.appendChild(wipeControls);
+        container.appendChild(wipeGroup);
+
+        // 2. Reference Image
+        const refGroup = document.createElement('div');
+        refGroup.style.marginTop = '4px';
+        refGroup.innerHTML = '<div style="color: #888; font-size: 10px; margin-bottom: 8px; text-transform: uppercase; font-weight: bold;">Reference Gallery</div>';
+
+        const refRow = document.createElement('div');
+        refRow.style.cssText = 'display: flex; gap: 8px; align-items: center;';
+
+        const grabBtn = document.createElement('button');
+        grabBtn.textContent = '📸 GRAB STILL';
+        grabBtn.style.cssText = 'background: #2a2a30; color: #fff; border: 1px solid #444; padding: 6px 12px; border-radius: 4px; font-size: 10px; cursor: pointer; font-weight: bold; flex: 1;';
+        grabBtn.onclick = () => this.grabStill();
+        refRow.appendChild(grabBtn);
+
+        const refCheckGroup = document.createElement('div');
+        refCheckGroup.style.cssText = 'display: flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.03); padding: 5px 10px; border-radius: 4px;';
+
+        const refCheck = document.createElement('input');
+        refCheck.type = 'checkbox';
+        refCheck.id = 'wipe-ref';
+        refCheck.checked = this.wipeRefEnabled || false;
+        refCheck.onchange = (e) => {
+            this.wipeRefEnabled = e.target.checked;
+            if (this.renderer) this.renderer.setWipeRef(this.wipeRefEnabled);
+            this.render();
+        };
+        refCheckGroup.appendChild(refCheck);
+
+        const refLbl = document.createElement('label');
+        refLbl.htmlFor = 'wipe-ref';
+        refLbl.textContent = 'Use Ref';
+        refLbl.style.cssText = 'color: #888; font-size: 10px; cursor: pointer;';
+        refCheckGroup.appendChild(refLbl);
+        refRow.appendChild(refCheckGroup);
+
+        refGroup.appendChild(refRow);
+        container.appendChild(refGroup);
+
+        // 3. Overlays / Grids
+        const gridGroup = document.createElement('div');
+        gridGroup.style.marginTop = '4px';
+        gridGroup.innerHTML = '<div style="color: #888; font-size: 10px; margin-bottom: 8px; text-transform: uppercase; font-weight: bold;">Composition Overlays</div>';
+
+        const gridSelect = document.createElement('select');
+        gridSelect.style.cssText = 'width: 100%; background: #1a1a20; color: #ccc; border: 1px solid #333; padding: 6px; border-radius: 4px; font-size: 11px; cursor: pointer;';
+
+        const gridOptions = [
+            { id: 0, label: 'None' },
+            { id: 1, label: 'Rule of Thirds' },
+            { id: 2, label: '2.39:1 Cinematic Mask' },
+            { id: 3, label: 'Center Cross' }
+        ];
+
+        gridOptions.forEach(opt => {
+            const o = document.createElement('option');
+            o.value = opt.id;
+            o.textContent = opt.label;
+            if (opt.id === (this.gridMode || 0)) o.selected = true;
+            gridSelect.appendChild(o);
+        });
+
+        gridSelect.onchange = (e) => {
+            this.gridMode = parseInt(e.target.value);
+            if (this.renderer) this.renderer.setGridMode(this.gridMode);
+            this.render();
+        };
+        gridGroup.appendChild(gridSelect);
+        container.appendChild(gridGroup);
+
+        // 4. Grade Presets & Export
+        const exportGroup = document.createElement('div');
+        exportGroup.style.marginTop = '4px';
+        exportGroup.innerHTML = '<div style="color: #888; font-size: 10px; margin-bottom: 8px; text-transform: uppercase; font-weight: bold;">Presets & Export</div>';
+
+        const exportRow = document.createElement('div');
+        exportRow.style.cssText = 'display: flex; gap: 8px;';
+
+        const saveBtn = document.createElement('button');
+        saveBtn.textContent = '💾 SAVE PRESET';
+        saveBtn.style.cssText = 'background: #1a1a20; color: #fff; border: 1px solid #333; padding: 6px; border-radius: 4px; font-size: 10px; cursor: pointer; flex: 1;';
+        saveBtn.onclick = () => this.saveGrade();
+        exportRow.appendChild(saveBtn);
+
+        const cubeBtn = document.createElement('button');
+        cubeBtn.textContent = '📤 EXPORT .CUBE';
+        cubeBtn.style.cssText = 'background: #2a2a30; color: #ffca28; border: 1px solid #ffca2833; padding: 6px; border-radius: 4px; font-size: 10px; cursor: pointer; flex: 1; font-weight: bold;';
+        cubeBtn.onclick = () => this.exportToCube();
+        exportRow.appendChild(cubeBtn);
+
+        exportGroup.appendChild(exportRow);
+
+        // Preset List
+        const presets = JSON.parse(localStorage.getItem('radiance_presets') || '{}');
+        const presetNames = Object.keys(presets);
+        if (presetNames.length > 0) {
+            const list = document.createElement('div');
+            list.style.cssText = 'display: flex; flex-direction: column; gap: 4px; margin-top: 8px; max-height: 100px; overflow-y: auto; background: rgba(0,0,0,0.2); border-radius: 4px; padding: 4px;';
+            presetNames.forEach(name => {
+                const item = document.createElement('div');
+                item.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 4px 8px; background: rgba(255,255,255,0.03); border-radius: 3px; font-size: 10px; color: #ccc;';
+
+                const nameBtn = document.createElement('div');
+                nameBtn.textContent = name;
+                nameBtn.style.cssText = 'cursor: pointer; flex: 1;';
+                nameBtn.onclick = () => this.loadGrade(name);
+                item.appendChild(nameBtn);
+
+                const delBtn = document.createElement('div');
+                delBtn.textContent = '✕';
+                delBtn.style.cssText = 'cursor: pointer; color: #666; padding: 0 4px;';
+                delBtn.onmouseover = () => delBtn.style.color = '#ff6b6b';
+                delBtn.onmouseout = () => delBtn.style.color = '#666';
+                delBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    if (confirm(`Delete preset "${name}" ? `)) this.deleteGrade(name);
+                };
+                item.appendChild(delBtn);
+
+                list.appendChild(item);
+            });
+            exportGroup.appendChild(list);
+        }
+
+        container.appendChild(exportGroup);
+    }
+
+    async grabStill() {
+        if (!this.renderer || !this.canvas) return;
+
+        // Capture the current rendered output
+        const still = new Image();
+        still.src = this.canvas.toDataURL('image/png');
+
+        still.onload = () => {
+            // Upload to renderer as reference texture
+            if (this.renderer) {
+                this.renderer.updateReferenceStill(still);
+                console.log("[Radiance] Reference still captured.");
+                // Flash the screen briefly to indicate capture
+                this.canvas.style.filter = 'brightness(2)';
+                setTimeout(() => { this.canvas.style.filter = ''; }, 100);
+            }
+        };
+    }
+
     renderScopesTab(container) {
         container.style.cssText = 'display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px;';
 
@@ -4400,13 +5296,13 @@ class RadianceViewer {
             btn.textContent = m.label;
             const isActive = this.scopeMode === m.id;
             btn.style.cssText = `
-                flex: 1; text-align: center; padding: 3px 0;
-                background: ${isActive ? 'rgba(106,138,255,0.2)' : 'rgba(255,255,255,0.04)'};
-                color: ${isActive ? '#8aafff' : '#777'};
-                border: 1px solid ${isActive ? 'rgba(106,138,255,0.4)' : 'rgba(255,255,255,0.08)'};
-                border-radius: 3px; font-size: 9px; cursor: pointer;
-                transition: background 0.15s;
-            `;
+                flex: 1; text - align: center; padding: 3px 0;
+        background: ${isActive ? 'rgba(106,138,255,0.2)' : 'rgba(255,255,255,0.04)'};
+        color: ${isActive ? '#8aafff' : '#777'};
+        border: 1px solid ${isActive ? 'rgba(106,138,255,0.4)' : 'rgba(255,255,255,0.08)'};
+        border - radius: 3px; font - size: 9px; cursor: pointer;
+        transition: background 0.15s;
+        `;
             btn.onmouseenter = () => { if (!isActive) btn.style.background = 'rgba(255,255,255,0.08)'; };
             btn.onmouseleave = () => { if (!isActive) btn.style.background = 'rgba(255,255,255,0.04)'; };
             btn.onclick = () => {
@@ -4425,7 +5321,7 @@ class RadianceViewer {
         const canvas = document.createElement('canvas');
         canvas.width = cW;
         canvas.height = cH;
-        canvas.style.cssText = `background: #050508; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; width: 280px; height: ${cH}px;`;
+        canvas.style.cssText = `background: #050508; border: 1px solid rgba(255, 255, 255, 0.1); border - radius: 4px; width: 280px; height: ${cH} px; `;
         container.appendChild(canvas);
 
         // ─── Extract Pixel Data ─────────────────────────────
@@ -4534,7 +5430,7 @@ class RadianceViewer {
                 const luma = data[idx] * 0.2126 + data[idx + 1] * 0.7152 + data[idx + 2] * 0.0722;
                 const y = h - (luma / 255) * h;
                 const bright = Math.floor(40 + luma * 0.6);
-                ctx.fillStyle = `rgb(${bright},${Math.floor(bright * 1.4)},${bright})`;
+                ctx.fillStyle = `rgb(${bright}, ${Math.floor(bright * 1.4)}, ${bright})`;
                 ctx.fillRect(x, y, 1, 1);
             }
         }
@@ -4647,6 +5543,17 @@ class RadianceViewer {
             ctx.fillText(t.l, tx + 5, ty + 3);
         });
 
+        // Skin Tone Indicator (I-Line)
+        ctx.strokeStyle = 'rgba(255, 140, 100, 0.4)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([3, 3]);
+        const iLineAng = (123 - 90) * Math.PI / 180;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + Math.cos(iLineAng) * rad * 0.9, cy + Math.sin(iLineAng) * rad * 0.9);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
         // Plot pixels
         ctx.globalAlpha = 0.04;
         const step = Math.max(1, Math.floor(data.length / 4 / 25000));
@@ -4655,7 +5562,7 @@ class RadianceViewer {
             const y = r * 0.2126 + g * 0.7152 + b * 0.0722;
             const u = (b - y) * 0.492;
             const v = (r - y) * 0.877;
-            ctx.fillStyle = `rgb(${data[i]},${data[i + 1]},${data[i + 2]})`;
+            ctx.fillStyle = `rgb(${data[i]}, ${data[i + 1]}, ${data[i + 2]})`;
             ctx.fillRect(cx + u * rad * 2.2, cy - v * rad * 2.2, 1, 1);
         }
         ctx.globalAlpha = 1.0;
@@ -4732,7 +5639,7 @@ class RadianceViewer {
         ];
         const segH = barH / ireColors.length;
         ireColors.forEach((c, i) => {
-            ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
+            ctx.fillStyle = `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
             ctx.fillRect(barX, barY + (ireColors.length - 1 - i) * segH, 10, segH);
         });
     }
@@ -4803,6 +5710,16 @@ class RadianceViewer {
             this._undoStack.shift(); // Drop oldest
         }
         this._redoStack = []; // Clear redo on new action
+        this._lastUndoPush = performance.now();
+    }
+
+    // Debounced undo push for rapid-fire inputs (scroll wheel, printer lights)
+    // Only captures if last push was >500ms ago — prevents flooding the stack
+    _pushUndoDebounced() {
+        const now = performance.now();
+        if (!this._lastUndoPush || (now - this._lastUndoPush) > 500) {
+            this._pushUndo();
+        }
     }
 
     undo() {
@@ -4825,6 +5742,101 @@ class RadianceViewer {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    //                         GRADE EXPORT & PRESETS
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    saveGrade(name) {
+        if (!name) name = prompt("Enter preset name:", "New Grade");
+        if (!name) return;
+
+        const state = this._captureGradingState();
+        const presets = JSON.parse(localStorage.getItem('radiance_presets') || '{}');
+        presets[name] = state;
+        localStorage.setItem('radiance_presets', JSON.stringify(presets));
+        console.log(`[Radiance] Preset "${name}" saved.`);
+        if (this._lastRenderContent) this._lastRenderContent(); // Refresh UI
+    }
+
+    loadGrade(name) {
+        const presets = JSON.parse(localStorage.getItem('radiance_presets') || '{}');
+        const state = presets[name];
+        if (state) {
+            this._pushUndo();
+            this._restoreGradingState(state);
+            console.log(`[Radiance] Preset "${name}" applied.`);
+        }
+    }
+
+    deleteGrade(name) {
+        const presets = JSON.parse(localStorage.getItem('radiance_presets') || '{}');
+        delete presets[name];
+        localStorage.setItem('radiance_presets', JSON.stringify(presets));
+        if (this._lastRenderContent) this._lastRenderContent();
+    }
+
+    exportToCube() {
+        console.log("[Radiance] Generating 3D LUT (.cube)...");
+        const size = 33;
+        let cube = `TITLE "Radiance Export"\nLUT_3D_SIZE ${size} \nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 1 1 1\n\n`;
+
+        // Helper to apply math (matching radiance_webgl.js)
+        const applyMath = (c) => {
+            let r = c[0], g = c[1], b = c[2];
+
+            // 1. Offset
+            r += this.offset[0]; g += this.offset[1]; b += this.offset[2];
+
+            // 2. Lift (pivoted at white)
+            const luma = r * 0.2126 + g * 0.7152 + b * 0.0722;
+            const pivot = Math.max(0.0, Math.min(1.0, 1.0 - luma));
+            r += (this.lift[0] || 0) * pivot;
+            g += (this.lift[1] || 0) * pivot;
+            b += (this.lift[2] || 0) * pivot;
+
+            // 3. Gain
+            r *= (this.gain[0] || 1); g *= (this.gain[1] || 1); b *= (this.gain[2] || 1);
+
+            // 4. Gamma
+            r = Math.pow(Math.max(0.0, r), 1.0 / (this.gamma[0] || 1));
+            g = Math.pow(Math.max(0.0, g), 1.0 / (this.gamma[1] || 1));
+            b = Math.pow(Math.max(0.0, b), 1.0 / (this.gamma[2] || 1));
+
+            // 5. Contrast & Pivot
+            const con = this.contrast || 1.0;
+            const piv = this.pivot || 0.5;
+            r = (r - piv) * con + piv;
+            g = (g - piv) * con + piv;
+            b = (b - piv) * con + piv;
+
+            // 6. Saturation
+            const luma2 = r * 0.2126 + g * 0.7152 + b * 0.0722;
+            const sat = this.saturation || 1.0;
+            r = luma2 + (r - luma2) * sat;
+            g = luma2 + (g - luma2) * sat;
+            b = luma2 + (b - luma2) * sat;
+
+            return [r, g, b];
+        };
+
+        for (let b = 0; b < size; b++) {
+            for (let g = 0; g < size; g++) {
+                for (let r = 0; r < size; r++) {
+                    const result = applyMath([r / (size - 1), g / (size - 1), b / (size - 1)]);
+                    cube += `${result[0].toFixed(6)} ${result[1].toFixed(6)} ${result[2].toFixed(6)} \n`;
+                }
+            }
+        }
+
+        const blob = new Blob([cube], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = "radiance_grade.cube";
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     //                         KNOB CONTROL WIDGET
     // ═══════════════════════════════════════════════════════════════════════════
 
@@ -4837,7 +5849,10 @@ class RadianceViewer {
         lbl.textContent = label;
         lbl.style.cssText = `color: ${this.theme.textDim}; font-size: 10px; font-weight: 500; font-family: ${this.theme.font}; letter-spacing: 0.5px; text-transform: uppercase;`;
 
-        // 2. Knob SVG
+        // 2. Knob Wrapper (for centering value)
+        const knobWrapper = document.createElement('div');
+        knobWrapper.style.cssText = 'position: relative; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center;';
+
         const size = 48;
         const strokeWidth = 3;
         const radius = (size - strokeWidth) / 2;
@@ -4880,16 +5895,16 @@ class RadianceViewer {
             font-size: 10px;
             color: ${this.theme.text};
             position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -20%);
             pointer-events: none;
-            text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+            z-index: 10;
         `;
 
+        knobWrapper.appendChild(svg);
+        knobWrapper.appendChild(valDisplay);
+
         container.appendChild(lbl);
-        container.appendChild(svg);
-        container.appendChild(valDisplay);
+        container.appendChild(knobWrapper);
 
         // Logic
         let currentValue = initial;
@@ -4985,7 +6000,7 @@ class RadianceViewer {
                 position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
                 width: 48px; text-align: center; font-size: 10px;
                 font-family: ${this.theme.mono}; color: ${this.theme.text};
-                background: rgba(0,0,0,0.9); border: 1px solid ${this.theme.accent};
+                background: rgba(0, 0, 0, 0.9); border: 1px solid ${this.theme.accent};
                 border-radius: 4px; padding: 2px 4px; outline: none; z-index: 100;
             `;
             container.appendChild(input);
@@ -5022,188 +6037,163 @@ class RadianceViewer {
 
     createColorWheel(label, min, max, defaults, step, callback) {
         // defaults = [r, g, b] (Relative offsets usually 0,0,0)
-        // The wheel controls Tint (Hue) and Saturation (distance from center).
-        // The Slider below controls Luma (Master).
-        // callback returns (r, g, b) combined.
+        // Autodesk Flame Style: Wheel controls Chroma (Hue/Sat), Ring controls Master (Luma).
 
         const container = document.createElement('div');
-        container.style.cssText = 'display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 100px; flex: 1; position: relative;';
+        container.style.cssText = 'display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 120px; flex: 1; position: relative;';
 
         // Label
         const lbl = document.createElement('div');
         lbl.textContent = label;
-        lbl.style.cssText = `color: ${this.theme.textDim}; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px;`;
+        lbl.style.cssText = `color: ${this.theme.textDim}; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 2px; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);`;
         container.appendChild(lbl);
 
-        // 1. Wheel (Hue/Sat)
-        const size = 100; // slightly smaller to fit 4
+        // SVG Constants
+        const size = 110;
         const center = size / 2;
-        const radius = 36;
-        const knobRadius = 4;
+        const wheelRadius = 38;
+        const ringOuter = 52;
+        const ringInner = 46;
+        const puckRadius = 5;
 
         const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
         svg.setAttribute("width", size);
         svg.setAttribute("height", size);
-        svg.style.cssText = "cursor: default; touch-action: none; background: radial-gradient(circle, #222 0%, #111 60%, #08080c 100%); border-radius: 50%; box-shadow: 0 4px 8px rgba(0,0,0,0.3) inset;";
+        svg.style.cssText = "cursor: default; touch-action: none; filter: drop-shadow(0 4px 8px rgba(0,0,0,0.4));";
 
-        // Color Spectrum Ring (Visual)
-        const ring = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-        ring.setAttribute("cx", center);
-        ring.setAttribute("cy", center);
-        ring.setAttribute("r", radius);
-        ring.setAttribute("fill", "none");
-        ring.setAttribute("stroke", "rgba(255,255,255,0.05)");
-        ring.setAttribute("stroke-width", "1");
-        svg.appendChild(ring);
+        // 1. Master Ring Background
+        const ringBg = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        ringBg.setAttribute("cx", center); ringBg.setAttribute("cy", center);
+        ringBg.setAttribute("r", (ringOuter + ringInner) / 2);
+        ringBg.setAttribute("fill", "none");
+        ringBg.setAttribute("stroke", "rgba(0,0,0,0.4)");
+        ringBg.setAttribute("stroke-width", ringOuter - ringInner);
+        svg.appendChild(ringBg);
+
+        // 2. Master Ring Progress
+        const ringProgress = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        const ringCirc = 2 * Math.PI * ((ringOuter + ringInner) / 2);
+        ringProgress.setAttribute("cx", center); ringProgress.setAttribute("cy", center);
+        ringProgress.setAttribute("r", (ringOuter + ringInner) / 2);
+        ringProgress.setAttribute("fill", "none");
+        ringProgress.setAttribute("stroke", this.theme.accent);
+        ringProgress.setAttribute("stroke-width", ringOuter - ringInner - 2);
+        ringProgress.setAttribute("stroke-dasharray", ringCirc);
+        ringProgress.setAttribute("stroke-dashoffset", ringCirc); // Start empty
+        ringProgress.setAttribute("stroke-linecap", "round");
+        ringProgress.style.transformOrigin = "center";
+        ringProgress.style.transform = "rotate(-90deg)"; // Start from top
+        ringProgress.style.transition = "stroke-dashoffset 0.05s linear, stroke 0.2s";
+        svg.appendChild(ringProgress);
+
+        // 3. Inner Wheel Background
+        const wheelBg = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        wheelBg.setAttribute("cx", center); wheelBg.setAttribute("cy", center);
+        wheelBg.setAttribute("r", wheelRadius);
+        wheelBg.setAttribute("fill", "#111");
+        wheelBg.setAttribute("stroke", "rgba(255,255,255,0.05)");
+        svg.appendChild(wheelBg);
 
         // Crosshair
-        const crossH = document.createElementNS("http://www.w3.org/2000/svg", "line");
-        crossH.setAttribute("x1", center - 4); crossH.setAttribute("x2", center + 4);
-        crossH.setAttribute("y1", center); crossH.setAttribute("y2", center);
-        crossH.setAttribute("stroke", "rgba(255,255,255,0.1)");
-        svg.appendChild(crossH);
-        const crossV = document.createElementNS("http://www.w3.org/2000/svg", "line");
-        crossV.setAttribute("x1", center); crossV.setAttribute("x2", center);
-        crossV.setAttribute("y1", center - 4); crossV.setAttribute("y2", center + 4);
-        crossV.setAttribute("stroke", "rgba(255,255,255,0.1)");
-        svg.appendChild(crossV);
+        const crossStyle = "stroke: rgba(255,255,255,0.05); stroke-width: 1;";
+        const hLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        hLine.setAttribute("x1", center - wheelRadius); hLine.setAttribute("x2", center + wheelRadius);
+        hLine.setAttribute("y1", center); hLine.setAttribute("y2", center); hLine.setAttribute("style", crossStyle);
+        svg.appendChild(hLine);
+        const vLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        vLine.setAttribute("x1", center); vLine.setAttribute("x2", center);
+        vLine.setAttribute("y1", center - wheelRadius); vLine.setAttribute("y2", center + wheelRadius);
+        vLine.setAttribute("style", crossStyle);
+        svg.appendChild(vLine);
 
-        // Handle (Puck)
+        // 4. Puck (Hue/Sat handle)
         const puck = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-        puck.setAttribute("r", knobRadius);
-        puck.setAttribute("fill", "rgba(255,255,255,0.8)");
+        puck.setAttribute("r", puckRadius);
+        puck.setAttribute("fill", "#fff");
         puck.setAttribute("stroke", "#000");
-        puck.setAttribute("stroke-width", "1");
-        puck.style.cursor = "grab";
+        puck.setAttribute("stroke-width", "2");
+        puck.style.cursor = "crosshair";
+        puck.style.filter = "drop-shadow(0 2px 4px rgba(0,0,0,0.5))";
         svg.appendChild(puck);
-
-        // State
-        // We store RGB offsets. Convert to HSL for wheel position?
-        // Let's store internal H and S.
-        // H = angle, S = distance.
-        // Current defaults [r, g, b].
-        let currentRGB = [...defaults];
-        let masterLuma = (defaults[0] + defaults[1] + defaults[2]) / 3.0;
-
-        // Helper: RGB -> Hue/Sat (ignoring Luma)
-        // Simply: project RGB point to 2D plane perpendicular to (1,1,1).
-        // Or just standard RGB->HSL.
-        // Simplified: 
-        // x = (R - G) * cos(30) - (G - B) * cos(30)? 
-        // Let's use standard angle logic.
-
-        // Initial puck position
-        // We'll reset puck to center initially as parsing RGB back to wheel pos is complex and 'defaults' might be just 0,0,0
-        let px = center, py = center;
-
-        const updatePuck = (x, y) => {
-            puck.setAttribute("cx", x);
-            puck.setAttribute("cy", y);
-            // Draw line to center
-            // (Optional, cleaner without)
-        };
-        updatePuck(px, py);
 
         container.appendChild(svg);
 
-        // 2. Master Slider (Luma)
-        const sliderWrapper = document.createElement('div');
-        sliderWrapper.style.cssText = 'width: 100%; height: 16px; position: relative; margin-top: 4px; background: #08080c; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1);';
+        // Data State
+        let wheelR = 0, wheelG = 0, wheelB = 0; // Chroma offsets
+        let masterVal = (defaults[0] + defaults[1] + defaults[2]) / 3.0; // Master offset
 
-        const sliderFill = document.createElement('div');
-        sliderFill.style.cssText = `position: absolute; left: 50%; top: 0; bottom: 0; width: 0%; background: ${this.theme.accent}; opacity: 0.5; transition: none;`;
-        sliderWrapper.appendChild(sliderFill);
+        const updateVisuals = () => {
+            // Puck Position
+            const angleR = 0, angleG = 2 * Math.PI / 3, angleB = 4 * Math.PI / 3;
+            let dx = wheelR * Math.cos(angleR) + wheelG * Math.cos(angleG) + wheelB * Math.cos(angleB);
+            let dy = wheelR * Math.sin(angleR) + wheelG * Math.sin(angleG) + wheelB * Math.sin(angleB);
 
-        const sliderThumb = document.createElement('div');
-        sliderThumb.style.cssText = `position: absolute; left: 50%; top: -2px; bottom: -2px; width: 4px; background: #ccc; border-radius: 2px; cursor: ew-resize; transform: translateX(-50%);`;
-        sliderWrapper.appendChild(sliderThumb);
+            const pxSens = wheelRadius / 0.5;
+            let px = dx * pxSens;
+            let py = dy * pxSens;
 
-        // Slider Logic
-        // Sensitivity range: +/- 1.0?
-        let sliderVal = masterLuma; // -1 to 1?
-
-        const updateSliderVisuals = (v) => {
-            // v is -1 to 1 approx?
-            // Clamp visualization -1..1
-            const p = Math.max(-1, Math.min(1, v));
-            const pct = (p + 1) / 2 * 100; // 0..100
-
-            sliderThumb.style.left = `${pct}%`;
-
-            // Fill from center (50%)
-            if (p > 0) {
-                sliderFill.style.left = '50%';
-                sliderFill.style.width = `${p * 50}%`;
-            } else {
-                sliderFill.style.left = `${(p + 1) * 50}%`;
-                sliderFill.style.width = `${-p * 50}%`;
+            const dist = Math.sqrt(px * px + py * py);
+            if (dist > wheelRadius) {
+                px = (px / dist) * wheelRadius;
+                py = (py / dist) * wheelRadius;
             }
+
+            puck.setAttribute("cx", center + px);
+            puck.setAttribute("cy", center + py);
+
+            // Ring Position
+            const range = max - min;
+            const t = Math.max(0, Math.min(1, (masterVal - min) / range));
+            const offset = ringCirc * (1 - t);
+            ringProgress.setAttribute("stroke-dashoffset", offset);
+            ringProgress.setAttribute("stroke", Math.abs(masterVal - (defaults[0] + defaults[1] + defaults[2]) / 3) < 0.001 ? "rgba(255,255,255,0.2)" : this.theme.accent);
         };
-        updateSliderVisuals(sliderVal);
 
-        container.appendChild(sliderWrapper);
+        // Initialize from defaults
+        const initialAvg = (defaults[0] + defaults[1] + defaults[2]) / 3.0;
+        wheelR = defaults[0] - initialAvg;
+        wheelG = defaults[1] - initialAvg;
+        wheelB = defaults[2] - initialAvg;
+        masterVal = initialAvg;
+        updateVisuals();
 
-        // Wheel Logic
+        // Interaction
         svg.onpointerdown = (e) => {
             e.preventDefault();
             this._pushUndo();
             svg.setPointerCapture(e.pointerId);
 
+            const rect = svg.getBoundingClientRect();
+            const startX = e.clientX, startY = e.clientY;
+            const distToCenter = Math.sqrt(Math.pow(startX - (rect.left + center), 2) + Math.pow(startY - (rect.top + center), 2));
+
+            const isRingDrag = distToCenter > wheelRadius;
+            const initialMaster = masterVal;
+
             const onMove = (em) => {
-                const rect = svg.getBoundingClientRect();
-                let dx = em.clientX - (rect.left + center);
-                let dy = em.clientY - (rect.top + center);
-
-                // Limit to radius
-                const dist = Math.sqrt(dx * dx + dy * dy);
-                if (dist > radius) {
-                    dx = (dx / dist) * radius;
-                    dy = (dy / dist) * radius;
+                if (isRingDrag) {
+                    const deltaY = startY - em.clientY;
+                    let sens = (max - min) * 0.005;
+                    if (em.ctrlKey) sens *= 0.1;
+                    if (em.shiftKey) sens *= 3.0;
+                    masterVal = Math.max(min, Math.min(max, initialMaster + deltaY * sens));
+                } else {
+                    let dx = em.clientX - (rect.left + center);
+                    let dy = em.clientY - (rect.top + center);
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist > wheelRadius) {
+                        dx = (dx / dist) * wheelRadius;
+                        dy = (dy / dist) * wheelRadius;
+                    }
+                    const mag = dist / wheelRadius;
+                    const ang = Math.atan2(dy, dx);
+                    const strength = mag * 0.5;
+                    wheelR = Math.cos(ang) * strength;
+                    wheelG = Math.cos(ang - 2 * Math.PI / 3) * strength;
+                    wheelB = Math.cos(ang - 4 * Math.PI / 3) * strength;
                 }
-
-                updatePuck(center + dx, center + dy);
-
-                // Convert dx, dy to Color Balance (RGB offsets)
-                // Angle 0 (Right) = Red? 
-                // Standard: Top=Red? Resolve: Top=Red, Left=Green? 
-                // Let's use:
-                // angle 0 = Red
-                // angle 120 = Green
-                // angle 240 = Blue
-                // (This is standard vectorscope orientation usually)
-
-                const ang = Math.atan2(dy, dx); // radians
-                const mag = dist / radius; // 0..1 normal usage
-
-                // Boost magnitude for effect (wheel isn't limited to 0.1 shift)
-                const strength = mag * 0.5; // Max shift 0.5
-
-                // Convert polar to RGB
-                // Simple approx:
-                // R = cos(ang)
-                // G = cos(ang - 120deg)
-                // B = cos(ang - 240deg)
-
-                const deg = ang * 180 / Math.PI;
-                const r = Math.cos(ang) * strength;
-                const g = Math.cos(ang - 2 * Math.PI / 3) * strength;
-                const b = Math.cos(ang - 4 * Math.PI / 3) * strength;
-
-                // Combine with Master Luma
-                // currentRGB = [r + sliderVal, g + sliderVal, b + sliderVal]; 
-                // But wait, sliderVal changes luma, wheel changes balance (chroma).
-                // They overlap. 
-                // Let's store wheelRGB and sliderLuma separately?
-                // No, we need to return combined R,G,B to callback.
-
-                // Keep wheel state
-                container.wheelR = r; container.wheelG = g; container.wheelB = b;
-
-                const totalR = r + (container.sliderLuma || 0);
-                const totalG = g + (container.sliderLuma || 0);
-                const totalB = b + (container.sliderLuma || 0);
-
-                callback(totalR, totalG, totalB);
+                updateVisuals();
+                callback(wheelR + masterVal, wheelG + masterVal, wheelB + masterVal);
             };
 
             const onUp = () => {
@@ -5211,88 +6201,39 @@ class RadianceViewer {
                 svg.removeEventListener('pointerup', onUp);
                 svg.releasePointerCapture(e.pointerId);
             };
+
             svg.addEventListener('pointermove', onMove);
             svg.addEventListener('pointerup', onUp);
-
-            // Immediate update on click
-            onMove(e);
         };
 
-        // Reset wheel on double click
-        svg.ondblclick = () => {
+        svg.ondblclick = (e) => {
+            const rect = svg.getBoundingClientRect();
+            const distToCenter = Math.sqrt(Math.pow(e.clientX - (rect.left + center), 2) + Math.pow(e.clientY - (rect.top + center), 2));
             this._pushUndo();
-            updatePuck(center, center);
-            container.wheelR = 0; container.wheelG = 0; container.wheelB = 0;
-            const totalR = 0 + (container.sliderLuma || 0);
-            const totalG = 0 + (container.sliderLuma || 0);
-            const totalB = 0 + (container.sliderLuma || 0);
-            callback(totalR, totalG, totalB);
+            if (distToCenter > wheelRadius) {
+                masterVal = (defaults[0] + defaults[1] + defaults[2]) / 3.0;
+            } else {
+                wheelR = 0; wheelG = 0; wheelB = 0;
+            }
+            updateVisuals();
+            callback(wheelR + masterVal, wheelG + masterVal, wheelB + masterVal);
         };
 
-        // Slider Interactions
-        sliderWrapper.onpointerdown = (e) => {
+        svg.addEventListener('contextmenu', (e) => {
             e.preventDefault();
             this._pushUndo();
-            sliderWrapper.setPointerCapture(e.pointerId);
-            const rect = sliderWrapper.getBoundingClientRect();
+            wheelR = 0; wheelG = 0; wheelB = 0;
+            masterVal = (defaults[0] + defaults[1] + defaults[2]) / 3.0;
+            updateVisuals();
+            callback(wheelR + masterVal, wheelG + masterVal, wheelB + masterVal);
+        });
 
-            const updateS = (cx) => {
-                let x = cx - rect.left;
-                let pct = x / rect.width; // 0..1
-                // Map to -1..1 (or range)
-                let val = (pct - 0.5) * 2.0;
-                // Range scale? usually -0.5 to 0.5 is enough for lift/gamma
-                // Let's allow -1 to 1.
-
-                updateSliderVisuals(val);
-                container.sliderLuma = val; // Store luma
-
-                // Combine
-                const r = (container.wheelR || 0) + val;
-                const g = (container.wheelG || 0) + val;
-                const b = (container.wheelB || 0) + val;
-                callback(r, g, b);
-            };
-
-            const onMove = (em) => { updateS(em.clientX); };
-            const onUp = () => {
-                sliderWrapper.removeEventListener('pointermove', onMove);
-                sliderWrapper.removeEventListener('pointerup', onUp);
-                sliderWrapper.releasePointerCapture(e.pointerId);
-            };
-            sliderWrapper.addEventListener('pointermove', onMove);
-            sliderWrapper.addEventListener('pointerup', onUp);
-            updateS(e.clientX);
+        container.updateValue = (r, g, b) => {
+            const m = (r + g + b) / 3.0;
+            wheelR = r - m; wheelG = g - m; wheelB = b - m;
+            masterVal = m;
+            updateVisuals();
         };
-
-        sliderWrapper.ondblclick = () => {
-            this._pushUndo();
-            updateSliderVisuals(0);
-            container.sliderLuma = 0;
-            const r = (container.wheelR || 0);
-            const g = (container.wheelG || 0);
-            const b = (container.wheelB || 0);
-            callback(r, g, b);
-        };
-
-        // Initialize internal state from defaults
-        // This is tricky because we can't easily inverse RGB -> (Angle, Mag, Luma) uniquely.
-        // For now, assume started at 0. If reloading with existing values, visuals might not match exactly.
-        // Best effort: set Slider to average, and Wheel to difference?
-
-        const avg = (defaults[0] + defaults[1] + defaults[2]) / 3;
-        container.sliderLuma = avg;
-        updateSliderVisuals(avg);
-
-        // Wheel diff
-        const dr = defaults[0] - avg;
-        const dg = defaults[1] - avg;
-        const db = defaults[2] - avg;
-        // Project back to wheel? 
-        // Not strictly necessary for functionality, just visual sync.
-        // Let's skip precise wheel feedback for now to avoid complexity.
-        // Centered wheel is fine, user adjusts from there.
-        // (Resolve typically has encoders that don't have absolute position match)
 
         return container;
     }
@@ -5313,22 +6254,22 @@ class RadianceViewer {
         const lbl = document.createElement('div');
         lbl.textContent = label;
         lbl.style.cssText = `
-            color: ${this.theme.textDim};
-            font-size: 11px;
-            font-family: ${this.theme.font};
-            min-width: 50px;
-            font-weight: 500;
+        color: ${this.theme.textDim};
+        font - size: 11px;
+        font - family: ${this.theme.font};
+        min - width: 50px;
+        font - weight: 500;
         `;
 
         const value = document.createElement('div');
         value.textContent = initial.toFixed(2);
         value.style.cssText = `
-            font-family: ${this.theme.mono};
-            font-size: 11px;
-            color: ${this.theme.accent};
-            min-width: 40px;
-            text-align: right;
-            font-variant-numeric: tabular-nums;
+        font - family: ${this.theme.mono};
+        font - size: 11px;
+        color: ${this.theme.accent};
+        min - width: 40px;
+        text - align: right;
+        font - variant - numeric: tabular - nums;
         `;
 
         metaRow.appendChild(lbl);
@@ -5339,15 +6280,15 @@ class RadianceViewer {
 
         const sliderFill = document.createElement('div');
         sliderFill.style.cssText = `
-            position: absolute; left: 0; top: 0; height: 100%; background: #445;
-            width: 50%; pointer-events: none; border-radius: 2px;
+        position: absolute; left: 0; top: 0; height: 100 %; background: #445;
+        width: 50 %; pointer - events: none; border - radius: 2px;
         `;
 
         const sliderInput = document.createElement('input');
         sliderInput.type = 'range';
         sliderInput.min = min; sliderInput.max = max; sliderInput.step = step; sliderInput.value = initial;
         sliderInput.style.cssText = `
-            position: absolute; left: 0; top: -6px; width: 100%; height: 16px; opacity: 0; cursor: ew-resize; margin: 0;
+        position: absolute; left: 0; top: -6px; width: 100 %; height: 16px; opacity: 0; cursor: ew - resize; margin: 0;
         `;
 
         const updateVisuals = (val) => {
@@ -5396,42 +6337,42 @@ class RadianceViewer {
         const t = this.theme;
         this.progressContainer = document.createElement('div');
         this.progressContainer.style.cssText = `
-            position: absolute;
-            bottom: 0;
-            left: 0;
-            width: 100%;
-            height: 4px;
-            background: rgba(0,0,0,0.5);
-            z-index: 50;
-            pointer-events: none;
-            opacity: 0;
-            transition: opacity 0.3s ease;
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        width: 100 %;
+        height: 4px;
+        background: rgba(0, 0, 0, 0.5);
+        z - index: 50;
+        pointer - events: none;
+        opacity: 0;
+        transition: opacity 0.3s ease;
         `;
 
         this.progressBar = document.createElement('div');
         this.progressBar.style.cssText = `
-            width: 0%;
-            height: 100%;
-            background: linear-gradient(90deg, ${t.accent}, #4f4);
-            transition: width 0.1s linear;
-            box-shadow: 0 0 10px ${t.accent};
+        width: 0 %;
+        height: 100 %;
+        background: linear - gradient(90deg, ${t.accent}, #4f4);
+        transition: width 0.1s linear;
+        box - shadow: 0 0 10px ${t.accent};
         `;
 
         this.progressText = document.createElement('div');
         this.progressText.style.cssText = `
-            position: absolute;
-            bottom: 6px;
-            right: 10px;
-            font-size: 10px;
-            font-family: monospace;
-            color: rgba(255,255,255,0.8);
-            text-shadow: 0 1px 2px black;
-            pointer-events: none;
-            opacity: 0;
-            transition: opacity 0.3s ease;
-            background: rgba(0,0,0,0.6);
-            padding: 2px 6px;
-            border-radius: 4px;
+        position: absolute;
+        bottom: 6px;
+        right: 10px;
+        font - size: 10px;
+        font - family: monospace;
+        color: rgba(255, 255, 255, 0.8);
+        text - shadow: 0 1px 2px black;
+        pointer - events: none;
+        opacity: 0;
+        transition: opacity 0.3s ease;
+        background: rgba(0, 0, 0, 0.6);
+        padding: 2px 6px;
+        border - radius: 4px;
         `;
 
         this.progressContainer.appendChild(this.progressBar);
@@ -5448,7 +6389,7 @@ class RadianceViewer {
         api.addEventListener("progress", ({ detail }) => {
             const { value, max } = detail;
             const pct = (value / max) * 100;
-            this.progressBar.style.width = `${pct}%`;
+            this.progressBar.style.width = `${pct}% `;
 
             // ETA Calculation
             const now = Date.now();
@@ -5458,7 +6399,7 @@ class RadianceViewer {
                 const remaining = (max - value) * timePerStep;
 
                 // Simple formatting
-                const eta = remaining < 60 ? `${remaining.toFixed(1)}s` : `${Math.floor(remaining / 60)}m ${Math.floor(remaining % 60)}s`;
+                const eta = remaining < 60 ? `${remaining.toFixed(1)} s` : `${Math.floor(remaining / 60)}m ${Math.floor(remaining % 60)} s`;
                 this.progressText.textContent = `Step ${value}/${max} | ETA: ${eta}`;
             }
         });
@@ -5676,13 +6617,9 @@ class RadianceViewer {
         }
     }
 
-    // Synchronous zlib inflate wrapper (calls async internally)
+    // Synchronous zlib inflate — not supported. Use _zlibInflateAsync() instead.
     _zlibInflate(compressed) {
-        // For sync context, we use a pre-resolved promise approach
-        // Actually, parseHDRSidecar callers are already async — 
-        // we'll make this truly async in the fetch chain.
-        // This stub exists for structure; actual decompression happens in loadHDRData.
-        return null; // Will be replaced by async path
+        throw new Error('[Radiance] Synchronous zlib inflate is not supported. Use _zlibInflateAsync() instead.');
     }
 }
 
@@ -5749,6 +6686,8 @@ app.registerExtension({
             viewer.frameHDRData = [];
             viewer.totalFrames = mainImages.length;
             viewer.currentFrame = 0;
+            // FIX: Store the raw message data for robust metadata retrieval (foolproof EXR link)
+            viewer.lastResult = message.radiance_images;
             // FIX: Clear stale active HDR data to prevent display of previous run's data
             viewer.hdrData = null;
 
@@ -5909,11 +6848,26 @@ app.registerExtension({
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class RadianceCurveEditor {
-    constructor(width, height, onChange) {
+    /**
+     * Industry-standard curve editor (DaVinci Resolve / Nuke / Flame paradigm).
+     *
+     * Interpolation: Monotonic cubic Hermite (Fritsch–Carlson, 1980).
+     *   - Guaranteed no overshoot between control points
+     *   - Smooth C¹ continuity
+     *   - Same algorithm used by DaVinci Resolve and Nuke curve tools
+     *
+     * Points are simple {x, y} — tangents are auto-computed from neighbors.
+     * No manual tangent handles; auto-smooth only (Resolve behaviour).
+     *
+     * LUT output is Float32Array(256×4 = 1024) RGBA for full HDR precision.
+     * Master RGB curve is evaluated first, then per-channel R/G/B on top.
+     */
+    constructor(width, height, theme, onChange) {
         this.width = width;
         this.height = height;
+        this.theme = theme || { mono: 'monospace', textDim: '#888' };
         this.onChange = onChange;
-        this.padding = { left: 28, bottom: 18, top: 6, right: 6 };
+        this.padding = { left: 35, bottom: 25, top: 10, right: 10 };
 
         this.canvas = document.createElement('canvas');
         this.canvas.width = width;
@@ -5923,6 +6877,7 @@ class RadianceCurveEditor {
 
         this.histograms = { R: null, G: null, B: null, L: null };
 
+        // Simple {x, y} points — endpoints pinned at x=0 and x=1
         this.curves = {
             'RGB': [{ x: 0, y: 0 }, { x: 1, y: 1 }],
             'R': [{ x: 0, y: 0 }, { x: 1, y: 1 }],
@@ -5933,26 +6888,50 @@ class RadianceCurveEditor {
         this.activeChannel = 'RGB';
         this.hoverPoint = null;
         this.draggingPoint = null;
+        this.mousePos = { x: -1, y: -1 };
 
-        this.channelColors = { 'RGB': '#fff', 'R': '#f55', 'G': '#5f5', 'B': '#55f' };
+        this.channelColors = {
+            'RGB': '#ffffff',
+            'R': '#ff4d4d',
+            'G': '#4dff4d',
+            'B': '#4d88ff'
+        };
+
+        this.levels = { inBlack: 0, inWhite: 255 };
 
         this.setupEvents();
         this.draw();
     }
 
-    // ─── Coordinate helpers (account for padding) ─────────────
+    resize(width, height) {
+        this.width = width;
+        this.height = height;
+        this.canvas.width = width;
+        this.canvas.height = height;
+        this.draw();
+    }
+
+    // ─── Coordinate helpers ────────────────────────────────────
     get plotX() { return this.padding.left; }
     get plotY() { return this.padding.top; }
     get plotW() { return this.width - this.padding.left - this.padding.right; }
     get plotH() { return this.height - this.padding.top - this.padding.bottom; }
 
     normToCanvas(nx, ny) {
-        return { cx: this.plotX + nx * this.plotW, cy: this.plotY + (1 - ny) * this.plotH };
-    }
-    canvasToNorm(cx, cy) {
-        return { x: (cx - this.plotX) / this.plotW, y: 1.0 - (cy - this.plotY) / this.plotH };
+        return {
+            cx: this.plotX + nx * this.plotW,
+            cy: this.plotY + (1 - ny) * this.plotH
+        };
     }
 
+    canvasToNorm(cx, cy) {
+        return {
+            x: (cx - this.plotX) / this.plotW,
+            y: 1.0 - (cy - this.plotY) / this.plotH
+        };
+    }
+
+    // ─── Histogram ─────────────────────────────────────────────
     updateHistogram(img) {
         if (!img) return;
         const scale = Math.min(1.0, 256 / Math.max(img.width, img.height));
@@ -5973,20 +6952,34 @@ class RadianceCurveEditor {
             R[data[i]]++;
             G[data[i + 1]]++;
             B[data[i + 2]]++;
-            const luma = Math.min(255, Math.floor(data[i] * 0.2126 + data[i + 1] * 0.7152 + data[i + 2] * 0.0722));
+            const luma = Math.min(255, Math.floor(
+                data[i] * 0.2126 + data[i + 1] * 0.7152 + data[i + 2] * 0.0722
+            ));
             L[luma]++;
         }
 
+        // Normalize — ignore extremes (0 and 255 bins often spike)
         let max = 0;
-        for (let i = 0; i < buckets; i++) max = Math.max(max, L[i], R[i], G[i], B[i]);
+        for (let i = 1; i < buckets - 1; i++) {
+            max = Math.max(max, L[i], R[i], G[i], B[i]);
+        }
         if (max === 0) max = 1;
 
-        const norm = (arr) => { const r = new Float32Array(buckets); for (let i = 0; i < buckets; i++) r[i] = arr[i] / max; return r; };
+        const norm = (arr) => {
+            const r = new Float32Array(buckets);
+            for (let i = 0; i < buckets; i++) r[i] = Math.min(1.0, arr[i] / max);
+            return r;
+        };
         this.histograms = { R: norm(R), G: norm(G), B: norm(B), L: norm(L) };
         this.draw();
     }
 
-    setActiveChannel(ch) { this.activeChannel = ch; this.draw(); }
+    // ─── Channel control ───────────────────────────────────────
+    setActiveChannel(ch) {
+        this.activeChannel = ch;
+        this.draw();
+        if (this._onChannelSwitch) this._onChannelSwitch(ch);
+    }
 
     resetActiveChannel() {
         this.curves[this.activeChannel] = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
@@ -5998,101 +6991,213 @@ class RadianceCurveEditor {
         for (const ch of ['RGB', 'R', 'G', 'B']) {
             this.curves[ch] = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
         }
+        this.levels = { inBlack: 0, inWhite: 255 };
         this.notifyChange();
         this.draw();
     }
 
+    // Legacy compat
+    resetAllChannels() { this.resetAll(); }
+
     applyPreset(preset) {
-        // Preset is { RGB?: [...pts], R?: [...], G?: [...], B?: [...] }
         for (const ch of ['RGB', 'R', 'G', 'B']) {
             if (preset[ch]) {
                 this.curves[ch] = preset[ch].map(p => ({ x: p.x, y: p.y }));
-            } else {
-                this.curves[ch] = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
             }
         }
         this.notifyChange();
         this.draw();
     }
 
-    // ─── Events ───────────────────────────────────────────────
+    applyIndustryPreset(name) {
+        // Industry-standard curve presets (DaVinci Resolve reference values)
+        const presets = {
+            'Punchy': [
+                { x: 0, y: 0 }, { x: 0.15, y: 0.08 },
+                { x: 0.50, y: 0.52 }, { x: 0.85, y: 0.95 }, { x: 1, y: 1 }
+            ],
+            'High Contrast': [
+                { x: 0, y: 0 }, { x: 0.20, y: 0.05 },
+                { x: 0.50, y: 0.50 }, { x: 0.80, y: 0.95 }, { x: 1, y: 1 }
+            ],
+            'Flat / Log': [
+                { x: 0, y: 0.12 }, { x: 0.25, y: 0.30 },
+                { x: 0.50, y: 0.50 }, { x: 0.75, y: 0.70 }, { x: 1, y: 0.88 }
+            ],
+            'Shadow Lift': [
+                { x: 0, y: 0.08 }, { x: 0.15, y: 0.20 },
+                { x: 0.50, y: 0.52 }, { x: 1, y: 1 }
+            ],
+            'S-Curve': [
+                { x: 0, y: 0 }, { x: 0.25, y: 0.17 },
+                { x: 0.50, y: 0.50 }, { x: 0.75, y: 0.83 }, { x: 1, y: 1 }
+            ],
+            'Film Print': [
+                { x: 0, y: 0.02 }, { x: 0.10, y: 0.06 },
+                { x: 0.30, y: 0.28 }, { x: 0.60, y: 0.65 },
+                { x: 0.85, y: 0.90 }, { x: 1, y: 0.96 }
+            ],
+            'Bleach Bypass': [
+                { x: 0, y: 0 }, { x: 0.15, y: 0.03 },
+                { x: 0.40, y: 0.45 }, { x: 0.70, y: 0.82 }, { x: 1, y: 1 }
+            ],
+            'Cross Process': {
+                'R': [{ x: 0, y: 0.05 }, { x: 0.3, y: 0.2 }, { x: 0.7, y: 0.85 }, { x: 1, y: 0.95 }],
+                'G': [{ x: 0, y: 0 }, { x: 0.35, y: 0.4 }, { x: 0.65, y: 0.6 }, { x: 1, y: 1 }],
+                'B': [{ x: 0, y: 0.1 }, { x: 0.3, y: 0.35 }, { x: 0.7, y: 0.55 }, { x: 1, y: 0.85 }]
+            }
+        };
+
+        const preset = presets[name];
+        if (!preset) return;
+
+        if (Array.isArray(preset)) {
+            // Apply to active channel
+            this.curves[this.activeChannel] = preset.map(p => ({ x: p.x, y: p.y }));
+        } else {
+            // Multi-channel preset (like Cross Process)
+            for (const ch of ['RGB', 'R', 'G', 'B']) {
+                if (preset[ch]) {
+                    this.curves[ch] = preset[ch].map(p => ({ x: p.x, y: p.y }));
+                }
+            }
+        }
+        this.notifyChange();
+        this.draw();
+    }
+
+    copyRGBToAll() {
+        const src = this.curves['RGB'].map(p => ({ x: p.x, y: p.y }));
+        this.curves['R'] = src.map(p => ({ ...p }));
+        this.curves['G'] = src.map(p => ({ ...p }));
+        this.curves['B'] = src.map(p => ({ ...p }));
+        this.notifyChange();
+        this.draw();
+    }
+
+    // ─── Events ────────────────────────────────────────────────
     setupEvents() {
         const cvs = this.canvas;
+        const GRAB_RADIUS_PX = 8; // Hit radius in pixels
+
+        const hitTest = (e) => {
+            const rect = cvs.getBoundingClientRect();
+            const px = e.clientX - rect.left;
+            const py = e.clientY - rect.top;
+            const norm = this.canvasToNorm(px, py);
+
+            const pts = this.curves[this.activeChannel];
+            let best = null, bestDist = GRAB_RADIUS_PX * GRAB_RADIUS_PX;
+            for (const p of pts) {
+                const c = this.normToCanvas(p.x, p.y);
+                const d = (px - c.cx) ** 2 + (py - c.cy) ** 2;
+                if (d < bestDist) { bestDist = d; best = p; }
+            }
+            return { norm, best, px, py };
+        };
 
         cvs.onmousedown = (e) => {
-            const pt = this.getMousePos(e);
-            const existing = this.findPoint(pt);
+            if (e.button !== 0) return; // Left click only
+            const { norm, best } = hitTest(e);
 
-            if (existing) {
-                this.draggingPoint = existing;
+            if (best) {
+                this.draggingPoint = best;
                 cvs.style.cursor = 'grabbing';
-            } else {
+            } else if (norm.x > 0.005 && norm.x < 0.995) {
+                // Add new point (not at endpoints)
                 const pts = this.curves[this.activeChannel];
-                const newPt = { x: Math.max(0, Math.min(1, pt.x)), y: Math.max(0, Math.min(1, pt.y)) };
+                const newPt = {
+                    x: Math.max(0.005, Math.min(0.995, norm.x)),
+                    y: Math.max(0, Math.min(1, norm.y))
+                };
                 pts.push(newPt);
                 pts.sort((a, b) => a.x - b.x);
                 this.draggingPoint = newPt;
                 cvs.style.cursor = 'grabbing';
+                this.notifyChange();
             }
             this.draw();
         };
 
         cvs.onmousemove = (e) => {
-            if (!this.draggingPoint) {
-                const pt = this.getMousePos(e);
-                const hover = this.findPoint(pt);
-                if (hover !== this.hoverPoint) {
-                    this.hoverPoint = hover;
-                    cvs.style.cursor = hover ? 'grab' : 'crosshair';
-                    this.draw();
-                }
-            }
-        };
+            const rect = cvs.getBoundingClientRect();
+            const px = e.clientX - rect.left;
+            const py = e.clientY - rect.top;
+            const norm = this.canvasToNorm(px, py);
+            this.mousePos = norm;
 
-        window.addEventListener('mousemove', (e) => {
             if (this.draggingPoint) {
-                const rect = cvs.getBoundingClientRect();
-                const pos = this.canvasToNorm(e.clientX - rect.left, e.clientY - rect.top);
-                let x = Math.max(0, Math.min(1, pos.x));
-                let y = Math.max(0, Math.min(1, pos.y));
-
                 const pts = this.curves[this.activeChannel];
                 const idx = pts.indexOf(this.draggingPoint);
+                const p = this.draggingPoint;
 
-                if (idx === 0) x = 0;
-                else if (idx === pts.length - 1) x = 1;
-                else {
-                    if (x <= pts[idx - 1].x + 0.005) x = pts[idx - 1].x + 0.005;
-                    if (x >= pts[idx + 1].x - 0.005) x = pts[idx + 1].x - 0.005;
+                // Endpoints: lock X, allow Y
+                if (idx === 0) {
+                    p.y = Math.max(0, Math.min(1, norm.y));
+                } else if (idx === pts.length - 1) {
+                    p.y = Math.max(0, Math.min(1, norm.y));
+                } else {
+                    // Interior point: constrain X between neighbors
+                    const minX = pts[idx - 1].x + 0.005;
+                    const maxX = pts[idx + 1].x - 0.005;
+                    p.x = Math.max(minX, Math.min(maxX, norm.x));
+                    p.y = Math.max(0, Math.min(1, norm.y));
                 }
-
-                this.draggingPoint.x = x;
-                this.draggingPoint.y = y;
                 this.notifyChange();
-                this.draw();
+            } else {
+                const { best } = hitTest(e);
+                const newHover = best || null;
+                if (newHover !== this.hoverPoint) {
+                    this.hoverPoint = newHover;
+                    cvs.style.cursor = newHover ? 'grab' : 'crosshair';
+                }
             }
-        });
+            this.draw();
+        };
 
-        window.addEventListener('mouseup', () => {
+        const onMouseUp = () => {
             if (this.draggingPoint) {
                 this.draggingPoint = null;
                 cvs.style.cursor = 'crosshair';
                 this.draw();
             }
-        });
+        };
+        window.addEventListener('mouseup', onMouseUp);
 
+        // Double-click: remove interior point
         cvs.ondblclick = (e) => {
-            const pt = this.getMousePos(e);
-            const target = this.findPoint(pt);
-            if (target) {
-                const pts = this.curves[this.activeChannel];
-                const idx = pts.indexOf(target);
-                if (idx > 0 && idx < pts.length - 1) {
-                    this.curves[this.activeChannel] = pts.filter(p => p !== target);
-                    this.notifyChange();
-                    this.draw();
-                }
+            const { best } = hitTest(e);
+            if (!best) return;
+            const pts = this.curves[this.activeChannel];
+            const idx = pts.indexOf(best);
+            // Cannot delete first or last (endpoints)
+            if (idx > 0 && idx < pts.length - 1) {
+                pts.splice(idx, 1);
+                this.hoverPoint = null;
+                this.notifyChange();
+                this.draw();
             }
+        };
+
+        // Right-click: also remove
+        cvs.oncontextmenu = (e) => {
+            e.preventDefault();
+            const { best } = hitTest(e);
+            if (!best) return;
+            const pts = this.curves[this.activeChannel];
+            const idx = pts.indexOf(best);
+            if (idx > 0 && idx < pts.length - 1) {
+                pts.splice(idx, 1);
+                this.hoverPoint = null;
+                this.notifyChange();
+                this.draw();
+            }
+        };
+
+        // Mouse leave: hide crosshair
+        cvs.onmouseleave = () => {
+            this.mousePos = { x: -1, y: -1 };
+            if (!this.draggingPoint) this.draw();
         };
     }
 
@@ -6102,47 +7207,175 @@ class RadianceCurveEditor {
     }
 
     findPoint(pos) {
+        // Legacy compat
         const pts = this.curves[this.activeChannel];
         const threshX = 0.04, threshY = 0.04;
-        return pts.find(p => Math.abs(p.x - pos.x) < threshX && Math.abs(p.y - pos.y) < threshY);
+        return pts.find(p =>
+            Math.abs(p.x - pos.x) < threshX && Math.abs(p.y - pos.y) < threshY
+        );
     }
 
-    // ─── Drawing ──────────────────────────────────────────────
+    // ─── Monotonic Cubic Hermite (Fritsch–Carlson) ─────────────
+    /**
+     * Industry-standard spline interpolation.
+     * Guarantees no overshoot between control points — essential for
+     * color grading where overshoot means clipping or color inversions.
+     *
+     * Algorithm: Fritsch & Carlson (1980), "Monotone Piecewise Cubic Interpolation"
+     * Used by: DaVinci Resolve, Nuke, Flame, Baselight
+     *
+     * @param {Array} points - Sorted array of {x, y} control points
+     * @returns {Float32Array} 256-entry LUT
+     */
+    evaluateCurve(points) {
+        const n = points.length;
+        if (n === 0) return new Float32Array(256).fill(0);
+        if (n === 1) return new Float32Array(256).fill(
+            Math.max(0, Math.min(1, points[0].y))
+        );
+
+        const xs = points.map(p => p.x);
+        const ys = points.map(p => p.y);
+        const lut = new Float32Array(256);
+
+        // Step 1: Compute secant slopes (Δk)
+        const delta = new Float64Array(n - 1);
+        const h = new Float64Array(n - 1);
+        for (let i = 0; i < n - 1; i++) {
+            h[i] = xs[i + 1] - xs[i];
+            delta[i] = (h[i] > 1e-10) ? (ys[i + 1] - ys[i]) / h[i] : 0;
+        }
+
+        // Step 2: Compute initial tangents (Catmull-Rom style)
+        const m = new Float64Array(n);
+        if (n === 2) {
+            m[0] = delta[0];
+            m[1] = delta[0];
+        } else {
+            // Endpoint tangents: one-sided difference
+            m[0] = delta[0];
+            m[n - 1] = delta[n - 2];
+
+            // Interior tangents: weighted harmonic mean (Fritsch-Carlson)
+            for (let i = 1; i < n - 1; i++) {
+                if (delta[i - 1] * delta[i] <= 0) {
+                    // Sign change → flat tangent (prevents overshoot)
+                    m[i] = 0;
+                } else {
+                    // Weighted harmonic mean — adapts to non-uniform spacing
+                    const w1 = 2 * h[i] + h[i - 1];
+                    const w2 = h[i] + 2 * h[i - 1];
+                    m[i] = (w1 + w2) / (w1 / delta[i - 1] + w2 / delta[i]);
+                }
+            }
+        }
+
+        // Step 3: Fritsch-Carlson monotonicity preservation
+        for (let i = 0; i < n - 1; i++) {
+            if (Math.abs(delta[i]) < 1e-10) {
+                // Flat segment: force zero tangents at both ends
+                m[i] = 0;
+                m[i + 1] = 0;
+            } else {
+                const alpha = m[i] / delta[i];
+                const beta = m[i + 1] / delta[i];
+
+                // Fritsch-Carlson criterion: α² + β² ≤ 9
+                // If violated, scale tangents to satisfy
+                const tau = alpha * alpha + beta * beta;
+                if (tau > 9) {
+                    const s = 3.0 / Math.sqrt(tau);
+                    m[i] = s * alpha * delta[i];
+                    m[i + 1] = s * beta * delta[i];
+                }
+            }
+        }
+
+        // Step 4: Evaluate cubic Hermite at each LUT index
+        for (let i = 0; i < 256; i++) {
+            const t = i / 255;
+
+            // Clamp to endpoint values outside range
+            if (t <= xs[0]) { lut[i] = ys[0]; continue; }
+            if (t >= xs[n - 1]) { lut[i] = ys[n - 1]; continue; }
+
+            // Find segment (binary search for efficiency)
+            let lo = 0, hi = n - 2;
+            while (lo < hi) {
+                const mid = (lo + hi) >> 1;
+                if (xs[mid + 1] < t) lo = mid + 1; else hi = mid;
+            }
+            const k = lo;
+
+            // Hermite basis evaluation
+            const hk = h[k];
+            if (hk < 1e-10) { lut[i] = ys[k]; continue; }
+
+            const s = (t - xs[k]) / hk;
+            const s2 = s * s;
+            const s3 = s2 * s;
+
+            // Hermite basis functions:
+            // h00 = 2s³ - 3s² + 1,  h10 = s³ - 2s² + s
+            // h01 = -2s³ + 3s²,     h11 = s³ - s²
+            const h00 = 2 * s3 - 3 * s2 + 1;
+            const h10 = s3 - 2 * s2 + s;
+            const h01 = -2 * s3 + 3 * s2;
+            const h11 = s3 - s2;
+
+            lut[i] = h00 * ys[k] + h10 * hk * m[k] +
+                h01 * ys[k + 1] + h11 * hk * m[k + 1];
+        }
+
+        // Clamp output to [0, 1]
+        for (let i = 0; i < 256; i++) {
+            lut[i] = Math.max(0, Math.min(1, lut[i]));
+        }
+
+        return lut;
+    }
+
+    // Legacy compat aliases
+    solveBezierSpline(points) { return this.evaluateCurve(points); }
+    solveMonotonicSpline(points) { return this.evaluateCurve(points); }
+
+    // ─── Drawing ───────────────────────────────────────────────
     draw() {
         const ctx = this.ctx;
         const w = this.width, h = this.height;
         const pX = this.plotX, pY = this.plotY, pW = this.plotW, pH = this.plotH;
+        const dpr = window.devicePixelRatio || 1;
 
-        // Clear
-        ctx.fillStyle = '#1a1a1a';
+        // 1. Background
+        ctx.fillStyle = '#0d0d12';
         ctx.fillRect(0, 0, w, h);
 
-        // Plot area background
-        ctx.fillStyle = '#222';
+        // Plot area
+        ctx.fillStyle = '#111118';
         ctx.fillRect(pX, pY, pW, pH);
 
-        // ─── Grid Labels ─────────────────────────────────
-        ctx.fillStyle = '#555';
-        ctx.font = '9px monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'top';
-        const labels = [0, 25, 50, 75, 100];
-        labels.forEach(v => {
-            const nx = v / 100;
-            const { cx } = this.normToCanvas(nx, 0);
-            ctx.fillText(v + '', cx, pY + pH + 3);
-        });
-        ctx.textAlign = 'right';
-        ctx.textBaseline = 'middle';
-        labels.forEach(v => {
-            const ny = v / 100;
-            const { cy } = this.normToCanvas(0, ny);
-            ctx.fillText(v + '', pX - 4, cy);
-        });
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(pX, pY, pW, pH);
+        ctx.clip();
 
-        // ─── Grid Lines ──────────────────────────────────
-        ctx.strokeStyle = '#333';
+        // 2. Grid — 10-stop minor, 4-stop major (Resolve standard)
         ctx.lineWidth = 1;
+
+        // Minor grid (10 divisions)
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.03)';
+        ctx.beginPath();
+        for (let i = 1; i < 10; i++) {
+            const n = i * 0.1;
+            const { cx: gx } = this.normToCanvas(n, 0);
+            const { cy: gy } = this.normToCanvas(0, n);
+            ctx.moveTo(gx, pY); ctx.lineTo(gx, pY + pH);
+            ctx.moveTo(pX, gy); ctx.lineTo(pX + pW, gy);
+        }
+        ctx.stroke();
+
+        // Major grid (4 divisions = quarter-stop)
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.07)';
         ctx.beginPath();
         for (let i = 1; i < 4; i++) {
             const n = i * 0.25;
@@ -6153,218 +7386,272 @@ class RadianceCurveEditor {
         }
         ctx.stroke();
 
-        // Diagonal reference
-        ctx.strokeStyle = '#2a2a2a';
-        ctx.lineWidth = 1;
+        // Center cross (midpoint reference)
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.10)';
+        ctx.beginPath();
+        const mid = this.normToCanvas(0.5, 0.5);
+        ctx.moveTo(mid.cx - 6, mid.cy); ctx.lineTo(mid.cx + 6, mid.cy);
+        ctx.moveTo(mid.cx, mid.cy - 6); ctx.lineTo(mid.cx, mid.cy + 6);
+        ctx.stroke();
+
+        // Identity diagonal
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
+        ctx.setLineDash([3, 5]);
         ctx.beginPath();
         const d0 = this.normToCanvas(0, 0), d1 = this.normToCanvas(1, 1);
         ctx.moveTo(d0.cx, d0.cy); ctx.lineTo(d1.cx, d1.cy);
         ctx.stroke();
+        ctx.setLineDash([]);
 
-        // ─── Histogram ───────────────────────────────────
+        // 3. Histogram (soft fill, Resolve aesthetic)
         if (this.histograms.L) {
-            ctx.save();
-            ctx.beginPath();
-            ctx.rect(pX, pY, pW, pH);
-            ctx.clip();
-
-            ctx.globalAlpha = 0.25;
             const drawHist = (hist, color) => {
                 if (!hist) return;
+                ctx.globalAlpha = 0.25;
                 ctx.fillStyle = color;
                 ctx.beginPath();
                 const b0 = this.normToCanvas(0, 0);
                 ctx.moveTo(b0.cx, b0.cy);
                 for (let i = 0; i < 256; i++) {
-                    const { cx, cy } = this.normToCanvas(i / 255, hist[i]);
+                    // Perceptual compression — sqrt makes quiet areas visible
+                    const val = Math.pow(hist[i], 0.5) * 0.85;
+                    const { cx, cy } = this.normToCanvas(i / 255, val);
                     ctx.lineTo(cx, cy);
                 }
                 const bEnd = this.normToCanvas(1, 0);
                 ctx.lineTo(bEnd.cx, bEnd.cy);
+                ctx.closePath();
                 ctx.fill();
+                ctx.globalAlpha = 1.0;
             };
 
-            if (this.activeChannel === 'RGB') drawHist(this.histograms.L, '#888');
-            else if (this.activeChannel === 'R') drawHist(this.histograms.R, '#f44');
-            else if (this.activeChannel === 'G') drawHist(this.histograms.G, '#4f4');
-            else if (this.activeChannel === 'B') drawHist(this.histograms.B, '#44f');
-
-            ctx.globalAlpha = 1.0;
-            ctx.restore();
+            if (this.activeChannel === 'RGB') {
+                drawHist(this.histograms.L, 'rgba(140, 150, 190, 0.5)');
+            } else if (this.activeChannel === 'R') {
+                drawHist(this.histograms.R, 'rgba(255, 80, 80, 0.4)');
+            } else if (this.activeChannel === 'G') {
+                drawHist(this.histograms.G, 'rgba(80, 255, 80, 0.4)');
+            } else {
+                drawHist(this.histograms.B, 'rgba(80, 120, 255, 0.4)');
+            }
         }
 
-        // ─── Ghost Curves (inactive channels) ────────────
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(pX, pY, pW, pH);
-        ctx.clip();
-
-        const ghostChannels = this.activeChannel === 'RGB'
-            ? ['R', 'G', 'B']
-            : ['RGB'];
-
+        // 4. Ghost curves (inactive channels at low opacity)
+        const ghostChannels = this.activeChannel === 'RGB' ? ['R', 'G', 'B'] : ['RGB'];
         ghostChannels.forEach(ch => {
-            const ghostPts = this.curves[ch];
-            const ghostLut = this.solveCatmullRom(ghostPts);
-            const ghostColor = this.channelColors[ch];
-
+            const pts = this.curves[ch];
+            if (pts.length < 2) return;
+            const lut = this.evaluateCurve(pts);
             ctx.globalAlpha = 0.15;
-            ctx.strokeStyle = ghostColor;
+            ctx.strokeStyle = this.channelColors[ch];
             ctx.lineWidth = 1;
             ctx.beginPath();
             for (let i = 0; i < 256; i++) {
-                const { cx, cy } = this.normToCanvas(i / 255, ghostLut[i]);
+                const { cx, cy } = this.normToCanvas(i / 255, lut[i]);
                 if (i === 0) ctx.moveTo(cx, cy); else ctx.lineTo(cx, cy);
             }
             ctx.stroke();
+            ctx.globalAlpha = 1.0;
         });
-        ctx.globalAlpha = 1.0;
-        ctx.restore();
 
-        // ─── Active Curve ─────────────────────────────────
+        // 5. Active curve
         const pts = this.curves[this.activeChannel];
-        const lut = this.solveCatmullRom(pts);
+        const lut = this.evaluateCurve(pts);
         const color = this.channelColors[this.activeChannel];
 
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(pX, pY, pW, pH);
-        ctx.clip();
-
+        // Glow layer (bloom effect)
+        ctx.shadowBlur = 6;
+        ctx.shadowColor = color;
         ctx.strokeStyle = color;
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 1.5;
+        ctx.globalAlpha = 0.4;
         ctx.beginPath();
         for (let i = 0; i < 256; i++) {
             const { cx, cy } = this.normToCanvas(i / 255, lut[i]);
             if (i === 0) ctx.moveTo(cx, cy); else ctx.lineTo(cx, cy);
         }
         ctx.stroke();
+        ctx.shadowBlur = 0;
 
-        ctx.restore();
-
-        // ─── Clipping Indicators ──────────────────────────
-        const clipTop = lut[255] >= 0.995;    // whites clipped
-        const clipBot = lut[0] <= 0.005;       // blacks crushed
-        const clipHighMid = lut.some((v, i) => i > 128 && v >= 0.995);
-        const clipLowMid = lut.some((v, i) => i < 128 && v <= 0.005);
-
-        if (clipTop || clipHighMid) {
-            ctx.fillStyle = 'rgba(255,60,60,0.3)';
-            ctx.fillRect(pX, pY, pW, 3);
+        // Main curve line
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.8;
+        ctx.globalAlpha = 0.95;
+        ctx.beginPath();
+        for (let i = 0; i < 256; i++) {
+            const { cx, cy } = this.normToCanvas(i / 255, lut[i]);
+            if (i === 0) ctx.moveTo(cx, cy); else ctx.lineTo(cx, cy);
         }
-        if (!clipBot || clipLowMid) {
-            // Only show bottom indicator if blacks are lifted (y > 0 at x=0)
-            if (lut[0] > 0.01) {
-                ctx.fillStyle = 'rgba(60,60,255,0.3)';
-                ctx.fillRect(pX, pY + pH - 3, pW, 3);
-            }
+        ctx.stroke();
+        ctx.globalAlpha = 1.0;
+
+        ctx.restore(); // Unclip
+
+        // 6. Clipping indicators (top/bottom edge bars)
+        if (lut[255] >= 0.99) {
+            ctx.fillStyle = 'rgba(255, 60, 60, 0.3)';
+            ctx.fillRect(pX, pY, pW, 2);
+        }
+        if (lut[0] > 0.01) {
+            ctx.fillStyle = 'rgba(100, 140, 255, 0.3)';
+            ctx.fillRect(pX, pY + pH - 2, pW, 2);
         }
 
-        // ─── Control Points ───────────────────────────────
-        pts.forEach(p => {
+        // 7. Control points
+        ctx.save();
+        pts.forEach((p, idx) => {
             const { cx, cy } = this.normToCanvas(p.x, p.y);
             const isHover = (p === this.hoverPoint);
             const isDrag = (p === this.draggingPoint);
-            const radius = (isHover || isDrag) ? 6 : 5;
+            const isEndpoint = (idx === 0 || idx === pts.length - 1);
+            const r = (isHover || isDrag) ? 5.5 : isEndpoint ? 3.5 : 4;
 
             // Glow
             if (isHover || isDrag) {
-                ctx.beginPath();
-                ctx.arc(cx, cy, radius + 4, 0, Math.PI * 2);
-                ctx.fillStyle = color.replace(')', ',0.15)').replace('rgb', 'rgba').replace('#', '');
-                // Use a simpler glow approach
-                ctx.shadowColor = color;
                 ctx.shadowBlur = 8;
-                ctx.fill();
-                ctx.shadowBlur = 0;
+                ctx.shadowColor = color;
             }
 
-            // Point ring
+            // Endpoint: square. Interior: circle (DaVinci Resolve convention)
+            ctx.fillStyle = (isHover || isDrag) ? '#ffffff' : color;
+            if (isEndpoint) {
+                ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+                ctx.strokeStyle = '#1a1a1f';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(cx - r, cy - r, r * 2, r * 2);
+            } else {
+                ctx.beginPath();
+                ctx.arc(cx, cy, r, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = '#1a1a1f';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+            ctx.shadowBlur = 0;
+        });
+        ctx.restore();
+
+        // 8. Interactive crosshair + readout
+        if (this.mousePos.x >= 0 && this.mousePos.x <= 1 &&
+            this.mousePos.y >= 0 && this.mousePos.y <= 1) {
+            const mPos = this.normToCanvas(this.mousePos.x, this.mousePos.y);
+
+            ctx.save();
             ctx.beginPath();
-            ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-            ctx.fillStyle = '#111';
-            ctx.fill();
-            ctx.strokeStyle = color;
-            ctx.lineWidth = 2;
+            ctx.rect(pX, pY, pW, pH);
+            ctx.clip();
+
+            ctx.strokeStyle = 'rgba(0, 168, 255, 0.2)';
+            ctx.setLineDash([3, 4]);
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(mPos.cx, pY); ctx.lineTo(mPos.cx, pY + pH);
+            ctx.moveTo(pX, mPos.cy); ctx.lineTo(pX + pW, mPos.cy);
             ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.restore();
+        }
+
+        // 9. Dragging / hover readout
+        if (this.draggingPoint || this.hoverPoint) {
+            const target = this.draggingPoint || this.hoverPoint;
+            const inVal = Math.round(target.x * 255);
+            const outVal = Math.round(target.y * 255);
+            const { cx, cy } = this.normToCanvas(target.x, target.y);
+
+            // Background pill
+            const text = `${inVal} → ${outVal}`;
+            ctx.font = `bold 10px ${this.theme.mono}`;
+            const tw = ctx.measureText(text).width + 12;
+            const tx = Math.min(cx + 12, pX + pW - tw - 4);
+            const ty = Math.max(cy - 8, pY + 4);
+
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+            ctx.beginPath();
+            // Rounded rect (compat)
+            const rx = tx, ry = ty - 12, rw = tw, rh = 18, rr = 3;
+            ctx.moveTo(rx + rr, ry);
+            ctx.arcTo(rx + rw, ry, rx + rw, ry + rh, rr);
+            ctx.arcTo(rx + rw, ry + rh, rx, ry + rh, rr);
+            ctx.arcTo(rx, ry + rh, rx, ry, rr);
+            ctx.arcTo(rx, ry, rx + rw, ry, rr);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.fillStyle = '#ddd';
+            ctx.textAlign = 'left';
+            ctx.fillText(text, tx + 6, ty + 1);
+        }
+
+        // 10. Axis labels
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+        ctx.font = `9px ${this.theme.mono}`;
+        ctx.textAlign = 'center';
+        [0, 64, 128, 192, 255].forEach(v => {
+            const { cx } = this.normToCanvas(v / 255, 0);
+            ctx.fillText(v.toString(), cx, pY + pH + 13);
+        });
+        ctx.textAlign = 'right';
+        [0, 64, 128, 192, 255].forEach(v => {
+            const { cy } = this.normToCanvas(0, v / 255);
+            ctx.fillText(v.toString(), pX - 5, cy + 3);
         });
     }
 
-    // ─── Catmull-Rom Spline ───────────────────────────────
-    solveCatmullRom(points) {
-        const n = points.length;
-        const xs = points.map(p => p.x);
-        const ys = points.map(p => p.y);
-        const result = new Float32Array(256);
-
-        for (let i = 0; i < 256; i++) {
-            const val = i / 255;
-
-            if (val <= xs[0]) { result[i] = Math.max(0, Math.min(1, ys[0])); continue; }
-            if (val >= xs[n - 1]) { result[i] = Math.max(0, Math.min(1, ys[n - 1])); continue; }
-
-            // Find segment
-            let k = 0;
-            while (k < n - 2 && xs[k + 1] < val) k++;
-
-            const t = (val - xs[k]) / (xs[k + 1] - xs[k]);
-
-            // Catmull-Rom needs 4 points: p0, p1, p2, p3
-            const y0 = (k > 0) ? ys[k - 1] : 2 * ys[0] - ys[1]; // mirror
-            const y1 = ys[k];
-            const y2 = ys[k + 1];
-            const y3 = (k + 2 < n) ? ys[k + 2] : 2 * ys[n - 1] - ys[n - 2]; // mirror
-
-            // Catmull-Rom formula (tension = 0.5)
-            const t2 = t * t, t3 = t2 * t;
-            const v = 0.5 * (
-                (2 * y1) +
-                (-y0 + y2) * t +
-                (2 * y0 - 5 * y1 + 4 * y2 - y3) * t2 +
-                (-y0 + 3 * y1 - 3 * y2 + y3) * t3
-            );
-
-            result[i] = Math.max(0, Math.min(1, v));
-        }
-
-        return result;
-    }
-
-    // Keep old name as alias for backward compat
-    solveSpline(points) { return this.solveCatmullRom(points); }
-
+    // ─── LUT Generation → GPU ──────────────────────────────────
     notifyChange() {
         if (!this.onChange) return;
 
-        const lut = new Uint8Array(256 * 4);
+        // Evaluate all four curves
+        const master = this.evaluateCurve(this.curves['RGB']);
+        const rCurve = this.evaluateCurve(this.curves['R']);
+        const gCurve = this.evaluateCurve(this.curves['G']);
+        const bCurve = this.evaluateCurve(this.curves['B']);
 
-        const master = this.solveCatmullRom(this.curves['RGB']);
-        const rCurve = this.solveCatmullRom(this.curves['R']);
-        const gCurve = this.solveCatmullRom(this.curves['G']);
-        const bCurve = this.solveCatmullRom(this.curves['B']);
+        // Levels remapping
+        const inBlack = this.levels.inBlack / 255;
+        const inWhite = this.levels.inWhite / 255;
+        const inRange = Math.max(0.001, inWhite - inBlack);
+
+        // Float32 LUT: 256 × RGBA = 1024 floats
+        const lut = new Float32Array(256 * 4);
+
+        // Sub-sample lookup with linear interpolation for precision
+        const lookup = (curve, u) => {
+            const f = u * 255;
+            const k = Math.floor(f);
+            const frac = f - k;
+            if (k >= 255) return curve[255];
+            if (k < 0) return curve[0];
+            return curve[k] * (1 - frac) + curve[k + 1] * frac;
+        };
 
         for (let i = 0; i < 256; i++) {
-            const mVal = master[i];
+            // Apply input levels
+            const leveled = Math.max(0, Math.min(1, (i / 255 - inBlack) / inRange));
 
-            const lookup = (curve, u) => {
-                const idxF = u * 255;
-                const idx = Math.floor(idxF);
-                const fract = idxF - idx;
-                if (idx >= 255) return curve[255];
-                return curve[idx] * (1 - fract) + curve[idx + 1] * fract;
-            };
+            // Master curve (RGB)
+            const mVal = lookup(master, leveled);
 
-            const rVal = lookup(rCurve, mVal);
-            const gVal = lookup(gCurve, mVal);
-            const bVal = lookup(bCurve, mVal);
+            // Per-channel curves applied to master output
+            const r = lookup(rCurve, mVal);
+            const g = lookup(gCurve, mVal);
+            const b = lookup(bCurve, mVal);
 
-            lut[i * 4 + 0] = Math.min(255, Math.max(0, rVal * 255));
-            lut[i * 4 + 1] = Math.min(255, Math.max(0, gVal * 255));
-            lut[i * 4 + 2] = Math.min(255, Math.max(0, bVal * 255));
-            lut[i * 4 + 3] = 255;
+            lut[i * 4 + 0] = Math.max(0, Math.min(1, r));
+            lut[i * 4 + 1] = Math.max(0, Math.min(1, g));
+            lut[i * 4 + 2] = Math.max(0, Math.min(1, b));
+            lut[i * 4 + 3] = 1.0;
         }
 
         this.onChange(lut);
+    }
+
+    setLevels(inBlack, inWhite) {
+        this.levels.inBlack = inBlack;
+        this.levels.inWhite = inWhite;
+        this.notifyChange();
+        this.draw();
     }
 }
 

@@ -15,7 +15,7 @@ v2.1.0 Fixes & Features (February 2026):
 - NEW: Progress logging during multi-model load sequence
 - NEW: Load summary with timing
 
-v2.0.1 Fixes:
+v2.1 Fixes:
 - Fixed VRAM reporting (was returning total instead of free)
 - Fixed built-in `type` shadowing → renamed to `model_type`
 - Fixed bare except clause
@@ -24,7 +24,7 @@ v2.0.1 Fixes:
 - ControlNet output gracefully returns None without breaking downstream
 - LoRA failures raise errors instead of silent swallowing
 
-v2.0 Features:
+v2.1 Features:
 - Checkpoint presets with auto-configuration
 - VRAM estimation before loading
 - ControlNet bundling
@@ -36,7 +36,6 @@ v1.1 Features:
 - LoRA stacking support
 """
 
-import os
 import time
 import logging
 import torch
@@ -171,6 +170,7 @@ CHECKPOINT_PRESETS = {
 #                         VRAM UTILITIES
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def estimate_vram_usage(
     model_type: str,
     weight_dtype: str,
@@ -198,21 +198,36 @@ def estimate_vram_usage(
 
     # UNET dtype multiplier
     unet_multiplier = {
-        "fp32": 2.0, "fp16": 1.0, "bf16": 1.0,
-        "fp8_e4m3fn": 0.6, "fp8_e5m2": 0.6, "default": 1.0,
+        "fp32": 2.0,
+        "fp16": 1.0,
+        "bf16": 1.0,
+        "fp8_e4m3fn": 0.6,
+        "fp8_e5m2": 0.6,
+        "default": 1.0,
     }.get(weight_dtype, 1.0)
 
     # CLIP contribution (T5XXL is huge — dtype matters)
     clip_vram = {
-        "flux": 4.5, "sd3": 3.0, "sd3.5": 3.5,
-        "sdxl": 1.5, "sd1.5": 0.8,
-        "hunyuan_video": 4.5, "wan": 3.0, "ltx": 2.0,
-        "pixart": 2.0, "aura_flow": 2.0, "kolors": 3.0,
+        "flux": 4.5,
+        "sd3": 3.0,
+        "sd3.5": 3.5,
+        "sdxl": 1.5,
+        "sd1.5": 0.8,
+        "hunyuan_video": 4.5,
+        "wan": 3.0,
+        "ltx": 2.0,
+        "pixart": 2.0,
+        "aura_flow": 2.0,
+        "kolors": 3.0,
     }.get(model_type, 2.0)
 
     clip_multiplier = {
-        "fp32": 2.0, "fp16": 1.0, "bf16": 1.0,
-        "fp8_e4m3fn": 0.55, "fp8_e5m2": 0.55, "default": 1.0,
+        "fp32": 2.0,
+        "fp16": 1.0,
+        "bf16": 1.0,
+        "fp8_e4m3fn": 0.55,
+        "fp8_e5m2": 0.55,
+        "default": 1.0,
     }.get(clip_dtype, 1.0)
 
     # Total: UNET (scaled) + CLIP (scaled) + overhead
@@ -232,7 +247,7 @@ def get_available_vram() -> float:
         if torch.cuda.is_available():
             free_mem, _ = torch.cuda.mem_get_info(0)
             return round(free_mem / (1024**3), 1)
-    except Exception:
+    except Exception:  # nosec B110
         pass
     return 0.0
 
@@ -243,7 +258,7 @@ def get_total_vram() -> float:
         if torch.cuda.is_available():
             total_mem = torch.cuda.get_device_properties(0).total_memory
             return round(total_mem / (1024**3), 1)
-    except Exception:
+    except Exception:  # nosec B110
         pass
     return 0.0
 
@@ -251,6 +266,7 @@ def get_total_vram() -> float:
 # ═══════════════════════════════════════════════════════════════════════════════
 #                        CLIP TYPE MAPPING (v2.1 — explicit)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def get_clip_type_enum(model_type: str):
     """
@@ -297,6 +313,7 @@ def get_clip_type_enum(model_type: str):
 #                        MODEL CACHE (v2.1)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class _LRUCache:
     """
     Least-Recently-Used cache to prevent memory leaks.
@@ -319,14 +336,14 @@ class _LRUCache:
 
     def put(self, key: str, obj):
         if key in self._cache:
-             # Update existing
-             self._access_order.remove(key)
+            # Update existing
+            self._access_order.remove(key)
         elif len(self._cache) >= self._max_size:
-             # Evict least recently used (first in list)
-             oldest_key = self._access_order.pop(0)
-             del self._cache[oldest_key]
-             logger.info(f"Evicted from cache: {oldest_key}")
-        
+            # Evict least recently used (first in list)
+            oldest_key = self._access_order.pop(0)
+            del self._cache[oldest_key]
+            logger.info(f"Evicted from cache: {oldest_key}")
+
         self._cache[key] = obj
         self._access_order.append(key)
 
@@ -351,8 +368,19 @@ _cache = _LRUCache(max_size=4)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Supported model types — keep in sync with presets + CLIPType mapping
-MODEL_TYPES = ["sdxl", "sd3", "flux", "sd3.5", "sd1.5",
-               "hunyuan_video", "wan", "ltx", "pixart", "aura_flow", "kolors"]
+MODEL_TYPES = [
+    "sdxl",
+    "sd3",
+    "flux",
+    "sd3.5",
+    "sd1.5",
+    "hunyuan_video",
+    "wan",
+    "ltx",
+    "pixart",
+    "aura_flow",
+    "kolors",
+]
 
 WEIGHT_DTYPES = ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"]
 
@@ -374,114 +402,207 @@ class RadianceUnifiedLoader:
         return {
             "required": {
                 # ── Preset ──
-                "preset": (list(CHECKPOINT_PRESETS.keys()), {
-                    "default": "None (Manual)",
-                    "tooltip": (
-                        "Quick preset for common models. Auto-configures type, dtype, "
-                        "device, and CLIP mode. Overridden values are logged."
-                    ),
-                }),
+                "preset": (
+                    list(CHECKPOINT_PRESETS.keys()),
+                    {
+                        "default": "None (Manual)",
+                        "tooltip": (
+                            "Quick preset for common models. Auto-configures type, dtype, "
+                            "device, and CLIP mode. Overridden values are logged."
+                        ),
+                    },
+                ),
                 # ── UNET ──
-                "unet_name": (folder_paths.get_filename_list("diffusion_models"), {
-                    "tooltip": "Select the main diffusion model (UNET/Transformer).",
-                }),
-                "weight_dtype": (WEIGHT_DTYPES, {
-                    "default": "default",
-                    "tooltip": "UNET weight precision. 'fp8_e4m3fn' saves ~40% VRAM on Flux.",
-                }),
+                "unet_name": (
+                    folder_paths.get_filename_list("diffusion_models"),
+                    {
+                        "tooltip": "Select the main diffusion model (UNET/Transformer).",
+                    },
+                ),
+                "weight_dtype": (
+                    WEIGHT_DTYPES,
+                    {
+                        "default": "default",
+                        "tooltip": "UNET weight precision. 'fp8_e4m3fn' saves ~40% VRAM on Flux.",
+                    },
+                ),
                 # ── CLIP ──
-                "clip_name1": (folder_paths.get_filename_list("text_encoders"), {
-                    "tooltip": "Primary Text Encoder (e.g., T5XXL for Flux, CLIP-L for SDXL).",
-                }),
-                "model_type": (MODEL_TYPES, {
-                    "default": "flux",
-                    "tooltip": "Model architecture type. Controls CLIP loading strategy.",
-                }),
-                "clip_dtype": (CLIP_DTYPES, {
-                    "default": "default",
-                    "tooltip": (
-                        "CLIP weight precision. Independent from UNET dtype. "
-                        "For Flux: T5XXL fp8 saves ~4.7GB vs fp16."
-                    ),
-                }),
-                "device": (["default", "cpu"], {
-                    "default": "default",
-                    "tooltip": "Device for CLIP loading. 'cpu' offloads CLIP to save VRAM.",
-                }),
+                "clip_name1": (
+                    folder_paths.get_filename_list("text_encoders"),
+                    {
+                        "tooltip": "Primary Text Encoder (e.g., T5XXL for Flux, CLIP-L for SDXL).",
+                    },
+                ),
+                "model_type": (
+                    MODEL_TYPES,
+                    {
+                        "default": "flux",
+                        "tooltip": "Model architecture type. Controls CLIP loading strategy.",
+                    },
+                ),
+                "clip_dtype": (
+                    CLIP_DTYPES,
+                    {
+                        "default": "default",
+                        "tooltip": (
+                            "CLIP weight precision. Independent from UNET dtype. "
+                            "For Flux: T5XXL fp8 saves ~4.7GB vs fp16."
+                        ),
+                    },
+                ),
+                "device": (
+                    ["default", "cpu"],
+                    {
+                        "default": "default",
+                        "tooltip": "Device for CLIP loading. 'cpu' offloads CLIP to save VRAM.",
+                    },
+                ),
                 # ── VAE ──
-                "vae_name": (folder_paths.get_filename_list("vae"), {
-                    "tooltip": "VAE for encoding/decoding latents.",
-                }),
+                "vae_name": (
+                    folder_paths.get_filename_list("vae"),
+                    {
+                        "tooltip": "VAE for encoding/decoding latents.",
+                    },
+                ),
             },
             "optional": {
                 # ── CLIP (secondary) ──
-                "clip_name2": (clip_list, {
-                    "default": "None",
-                    "tooltip": (
-                        "Secondary CLIP (e.g., CLIP-L for Flux, CLIP-G for SDXL). "
-                        "Leave 'None' for single-CLIP architectures (SD1.5, PixArt, etc.)."
-                    ),
-                }),
+                "clip_name2": (
+                    clip_list,
+                    {
+                        "default": "None",
+                        "tooltip": (
+                            "Secondary CLIP (e.g., CLIP-L for Flux, CLIP-G for SDXL). "
+                            "Leave 'None' for single-CLIP architectures (SD1.5, PixArt, etc.)."
+                        ),
+                    },
+                ),
                 # ── LoRA 1 (separate model/clip strengths) ──
                 "lora_1": (lora_list, {"default": "None"}),
-                "lora_1_model_str": ("FLOAT", {
-                    "default": 1.0, "min": -2.0, "max": 2.0, "step": 0.05,
-                    "tooltip": "LoRA 1 strength applied to the UNET/diffusion model.",
-                }),
-                "lora_1_clip_str": ("FLOAT", {
-                    "default": 1.0, "min": -2.0, "max": 2.0, "step": 0.05,
-                    "tooltip": "LoRA 1 strength applied to CLIP text encoder.",
-                }),
+                "lora_1_model_str": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": -2.0,
+                        "max": 2.0,
+                        "step": 0.05,
+                        "tooltip": "LoRA 1 strength applied to the UNET/diffusion model.",
+                    },
+                ),
+                "lora_1_clip_str": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": -2.0,
+                        "max": 2.0,
+                        "step": 0.05,
+                        "tooltip": "LoRA 1 strength applied to CLIP text encoder.",
+                    },
+                ),
                 # ── LoRA 2 ──
                 "lora_2": (lora_list, {"default": "None"}),
-                "lora_2_model_str": ("FLOAT", {
-                    "default": 1.0, "min": -2.0, "max": 2.0, "step": 0.05,
-                }),
-                "lora_2_clip_str": ("FLOAT", {
-                    "default": 1.0, "min": -2.0, "max": 2.0, "step": 0.05,
-                }),
+                "lora_2_model_str": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": -2.0,
+                        "max": 2.0,
+                        "step": 0.05,
+                    },
+                ),
+                "lora_2_clip_str": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": -2.0,
+                        "max": 2.0,
+                        "step": 0.05,
+                    },
+                ),
                 # ── LoRA 3 ──
                 "lora_3": (lora_list, {"default": "None"}),
-                "lora_3_model_str": ("FLOAT", {
-                    "default": 1.0, "min": -2.0, "max": 2.0, "step": 0.05,
-                }),
-                "lora_3_clip_str": ("FLOAT", {
-                    "default": 1.0, "min": -2.0, "max": 2.0, "step": 0.05,
-                }),
+                "lora_3_model_str": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": -2.0,
+                        "max": 2.0,
+                        "step": 0.05,
+                    },
+                ),
+                "lora_3_clip_str": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": -2.0,
+                        "max": 2.0,
+                        "step": 0.05,
+                    },
+                ),
                 # ── ControlNet (v2.1: with application controls) ──
-                "controlnet_name": (controlnet_list, {
-                    "default": "None",
-                    "tooltip": "Optional ControlNet to load alongside model.",
-                }),
-                "controlnet_strength": ("FLOAT", {
-                    "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05,
-                    "tooltip": "ControlNet application strength.",
-                }),
-                "controlnet_start": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "ControlNet start percent (0.0 = from beginning).",
-                }),
-                "controlnet_end": ("FLOAT", {
-                    "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "ControlNet end percent (1.0 = until end).",
-                }),
+                "controlnet_name": (
+                    controlnet_list,
+                    {
+                        "default": "None",
+                        "tooltip": "Optional ControlNet to load alongside model.",
+                    },
+                ),
+                "controlnet_strength": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 2.0,
+                        "step": 0.05,
+                        "tooltip": "ControlNet application strength.",
+                    },
+                ),
+                "controlnet_start": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.01,
+                        "tooltip": "ControlNet start percent (0.0 = from beginning).",
+                    },
+                ),
+                "controlnet_end": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.01,
+                        "tooltip": "ControlNet end percent (1.0 = until end).",
+                    },
+                ),
                 # ── Options ──
-                "check_vram": (["On", "Off"], {
-                    "default": "On",
-                    "tooltip": "Estimate VRAM and warn if insufficient before loading.",
-                }),
-                "use_cache": (["On", "Off"], {
-                    "default": "On",
-                    "tooltip": (
-                        "Cache loaded models in memory. Skips disk reload when "
-                        "re-queuing with the same configuration."
-                    ),
-                }),
-                "lora_on_error": (["warn", "raise"], {
-                    "default": "raise",
-                    "tooltip": "'warn' logs and continues, 'raise' stops execution on LoRA failure.",
-                }),
-            }
+                "check_vram": (
+                    ["On", "Off"],
+                    {
+                        "default": "On",
+                        "tooltip": "Estimate VRAM and warn if insufficient before loading.",
+                    },
+                ),
+                "use_cache": (
+                    ["On", "Off"],
+                    {
+                        "default": "On",
+                        "tooltip": (
+                            "Cache loaded models in memory. Skips disk reload when "
+                            "re-queuing with the same configuration."
+                        ),
+                    },
+                ),
+                "lora_on_error": (
+                    ["warn", "raise"],
+                    {
+                        "default": "raise",
+                        "tooltip": "'warn' logs and continues, 'raise' stops execution on LoRA failure.",
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("MODEL", "CLIP", "VAE", "CONTROL_NET", "STRING")
@@ -497,14 +618,31 @@ class RadianceUnifiedLoader:
 
     def load_radiance_stack(
         self,
-        preset, unet_name, weight_dtype, clip_name1, model_type, clip_dtype, device, vae_name,
+        preset,
+        unet_name,
+        weight_dtype,
+        clip_name1,
+        model_type,
+        clip_dtype,
+        device,
+        vae_name,
         clip_name2="None",
-        lora_1="None", lora_1_model_str=1.0, lora_1_clip_str=1.0,
-        lora_2="None", lora_2_model_str=1.0, lora_2_clip_str=1.0,
-        lora_3="None", lora_3_model_str=1.0, lora_3_clip_str=1.0,
+        lora_1="None",
+        lora_1_model_str=1.0,
+        lora_1_clip_str=1.0,
+        lora_2="None",
+        lora_2_model_str=1.0,
+        lora_2_clip_str=1.0,
+        lora_3="None",
+        lora_3_model_str=1.0,
+        lora_3_clip_str=1.0,
         controlnet_name="None",
-        controlnet_strength=1.0, controlnet_start=0.0, controlnet_end=1.0,
-        check_vram="On", use_cache="On", lora_on_error="raise",
+        controlnet_strength=1.0,
+        controlnet_start=0.0,
+        controlnet_end=1.0,
+        check_vram="On",
+        use_cache="On",
+        lora_on_error="raise",
     ):
         load_start = time.time()
         info_lines = []
@@ -596,7 +734,7 @@ class RadianceUnifiedLoader:
             info_lines.append(f"⚡ UNET: {unet_name} (cached)")
         else:
             model_options = {}
-            is_gguf = unet_name.lower().endswith('.gguf')
+            is_gguf = unet_name.lower().endswith(".gguf")
 
             if is_gguf:
                 logger.info(f"✓ GGUF quantized model detected: {unet_name}")
@@ -617,10 +755,14 @@ class RadianceUnifiedLoader:
                     model_options["dtype"] = dtype_map[weight_dtype]
 
             try:
-                model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
+                model = comfy.sd.load_diffusion_model(
+                    unet_path, model_options=model_options
+                )
                 elapsed = time.time() - t0
                 logger.info(f"✓ Loaded UNET: {unet_name} ({elapsed:.1f}s)")
-                info_lines.append(f"✓ UNET: {unet_name} [{weight_dtype}] ({elapsed:.1f}s)")
+                info_lines.append(
+                    f"✓ UNET: {unet_name} [{weight_dtype}] ({elapsed:.1f}s)"
+                )
                 if caching:
                     _cache.put(unet_cache_key, model)
             except Exception as e:
@@ -647,7 +789,9 @@ class RadianceUnifiedLoader:
         else:
             clip_paths = [clip_path1]
 
-        clip_cache_key = f"clip:{':'.join(clip_paths)}:{model_type}:{clip_dtype}:{device}"
+        clip_cache_key = (
+            f"clip:{':'.join(clip_paths)}:{model_type}:{clip_dtype}:{device}"
+        )
         if caching and _cache.has(clip_cache_key):
             clip = _cache.get(clip_cache_key)
             clip_label = f"{clip_name1}" + (f" + {clip_name2}" if use_dual_clip else "")
@@ -681,12 +825,16 @@ class RadianceUnifiedLoader:
                     model_options=clip_model_options if clip_model_options else {},
                 )
                 elapsed = time.time() - t0
-                clip_label = f"{clip_name1}" + (f" + {clip_name2}" if use_dual_clip else "")
+                clip_label = f"{clip_name1}" + (
+                    f" + {clip_name2}" if use_dual_clip else ""
+                )
                 logger.info(
                     f"✓ Loaded CLIP: {clip_label} "
                     f"(type={model_type}, dtype={clip_dtype}, {elapsed:.1f}s)"
                 )
-                info_lines.append(f"✓ CLIP: {clip_label} [{clip_dtype}] ({elapsed:.1f}s)")
+                info_lines.append(
+                    f"✓ CLIP: {clip_label} [{clip_dtype}] ({elapsed:.1f}s)"
+                )
                 if caching:
                     _cache.put(clip_cache_key, clip)
             except Exception as e:
@@ -790,7 +938,7 @@ class RadianceUnifiedLoader:
                         f"[str={controlnet_strength}, {controlnet_start}-{controlnet_end}] "
                         f"({elapsed:.1f}s)"
                     )
-                    
+
                     # Attach metadata for downstream use (RadianceControlNetApply)
                     # We bypass standard ComfyUI immutability by setting attributes directly
                     # This works because ControlNetModel is a Python object.
@@ -802,7 +950,9 @@ class RadianceUnifiedLoader:
                         logger.warning(f"Could not attach metadata to ControlNet: {e}")
 
                 except Exception as e:
-                    logger.warning(f"⚠ Failed to load ControlNet '{controlnet_name}': {e}")
+                    logger.warning(
+                        f"⚠ Failed to load ControlNet '{controlnet_name}': {e}"
+                    )
                     info_lines.append(f"⚠ ControlNet: {controlnet_name} (load failed)")
 
         # ═══════════════════════════════════════════════════════════════

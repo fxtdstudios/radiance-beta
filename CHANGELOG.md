@@ -2,7 +2,17 @@
 
 All notable changes to FXTD Radiance will be documented in this file.
 
-## [2.0.0] - 2026-02-18
+## [2.1.0] - 2026-02-22
+
+### Added
+- **Pixel Loupe**: Enhanced pixel inspector with HDR support and magnification controls.
+- **Improved QC**: Technical QC analysis now includes tonemapping for more accurate defect detection.
+
+### Fixed
+- **Pixel Loupe Smearing**: Resolved issue where the loupe would smear across the screen.
+- **Sampler Noise**: Confirmed fixes for historical noise bugs (BUG-15, BUG-16, BUG-17).
+
+## [2.1.0] - 2026-02-18
 
 ### Added - New Features
 - **Radiance Manager**: Cinematic prompt generator with real-world camera interaction (ARRI, RED, Sony).
@@ -10,7 +20,6 @@ All notable changes to FXTD Radiance will be documented in this file.
 - **Video IO Suite**:
   - `RadianceReadVideo`: Import MP4/MOV/AVI with bit-depth support.
   - `RadianceReadSequence`: Efficient EXR/PNG sequence loader.
-  - `RadianceWriteVideo`: Export ProRes 4444/422 and H.264/H.265.
 
 ### Fixed & Improved
 - **Radiance Viewer**

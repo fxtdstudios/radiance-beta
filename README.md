@@ -3,7 +3,7 @@
 ![RADIANCE](docs/RADIANCE.png)
 
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue)
+![Version](https://img.shields.io/badge/version-2.1.0-blue)
 ![License](https://img.shields.io/badge/license-GPL--3.0-green)
 ![ComfyUI](https://img.shields.io/badge/ComfyUI-Compatible-purple)
 ![GPU](https://img.shields.io/badge/GPU-CUDA%20%7C%20Apple%20MPS-orange)
@@ -18,11 +18,15 @@
 
 ---
 
-## Release Notes (v2.0.0) 🚀
+## Release Notes (v2.1.0) 🚀
+
+### 🔍 Enhanced Analysis
+- **Pixel Loupe**: Real-time magnified pixel inspector with HDR support and magnification controls.
+- **Improved QC**: Technical QC now uses tonemapping for accurate defect detection on HDR images.
 
 ### 🎬 Cinema & Video Suite
 - **Radiance Manager**: Generate Hollywood-grade prompts with real-world camera and lens physics (ARRI, RED, Sony).
-- **Professional Video IO**: Native support for ProRes (4444/422), H.264, and H.265. Import/Export 10-bit and 12-bit video directly.
+- **Professional Video IO**: Native support for ProRes (4444/422), H.264, and H.265.
 
 ### ☀️ Highlight Recovery
 - **Highlight Synthesis**: New "Texture from Neighbors" algorithm to reconstruct clipped highlights in overexposed footage.
@@ -152,7 +156,7 @@ Then use keyboard shortcuts: `F` fit, `1` 100%, `H` histogram, `W` waveform, `V`
 ### Log Curves
 | Node | Description |
 |------|-------------|
-| Log Curve Encode | ARRI LogC3/4, S-Log3, V-Log, ACEScct |
+| Log Curve Encode | ARRI LogC3/4, V-Log, ACEScct |
 | Log Curve Decode | Decode log footage to linear |
 
 ### Color Spaces
@@ -358,7 +362,7 @@ GPL-3.0 License - See [LICENSE](LICENSE)
 **Camera & Film Emulation**
 
 - **Digital Cinema Cameras:** ARRI (Alexa 35, ARRI IMAX), RED (V-Raptor, Komodo), Sony (Venice 2, FX6), Blackmagic (Pocket 4K/6K), Canon (C70, R5C), Panavision (DXL2)
-- **Log Curves:** ARRI (LogC3/C4), Sony (S-Log3), RED (Log3G10), Panasonic (V-Log), Canon (Log3)
+- **Log Curves:** ARRI (LogC3/C4), RED (Log3G10), Panasonic (V-Log), Canon (Log3)
 - **Film Stocks:** Kodak Vision3 (500T, 250D, 50D, 200T), Fujifilm Eterna (500T, Vivid), Kodak Ektachrome
 - **Lens Presets:** Panavision C-Series, Cooke Anamorphic/i, Zeiss Supreme Prime, Canon K35, Lomo Round Front
 - **ARRI Textures:** ARRI Look Library compatible grain/halation characteristics

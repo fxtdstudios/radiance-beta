@@ -45,7 +45,7 @@ import torch
 import os
 import math
 import logging
-from typing import Dict, Any, Tuple, Optional, List
+from typing import Dict, Any, Tuple
 
 import folder_paths
 
@@ -59,46 +59,42 @@ logger = logging.getLogger("radiance.resolution")
 # Format: (width, height, category, aspect_ratio_label)
 PRESETS: Dict[str, Tuple[int, int, str, str]] = {
     # ── Cinema / Film ──
-    "4K DCI (4096×2160)":           (4096, 2160, "Cinema",  "1.90:1"),
-    "4K UHD (3840×2160)":           (3840, 2160, "Cinema",  "16:9"),
-    "2K DCI (2048×1080)":           (2048, 1080, "Cinema",  "1.90:1"),
-    "HD 1080p (1920×1080)":         (1920, 1080, "Cinema",  "16:9"),
-    "HD 720p (1280×720)":           (1280,  720, "Cinema",  "16:9"),
-    "Anamorphic 2.39:1 (2048×856)": (2048,  856, "Cinema",  "2.39:1"),
-    "Anamorphic 2.39:1 (4096×1712)":(4096, 1712, "Cinema",  "2.39:1"),
-    "Super 35 (2048×1552)":         (2048, 1552, "Cinema",  "1.32:1"),
-    "IMAX (5616×4096)":             (5616, 4096, "Cinema",  "1.37:1"),
-    "Academy 4:3 (1440×1080)":      (1440, 1080, "Cinema",  "4:3"),
-    "VistaVision (3072×2048)":      (3072, 2048, "Cinema",  "3:2"),
-    "8K UHD (7680×4320)":           (7680, 4320, "Cinema",  "16:9"),
-
+    "4K DCI (4096×2160)": (4096, 2160, "Cinema", "1.90:1"),
+    "4K UHD (3840×2160)": (3840, 2160, "Cinema", "16:9"),
+    "2K DCI (2048×1080)": (2048, 1080, "Cinema", "1.90:1"),
+    "HD 1080p (1920×1080)": (1920, 1080, "Cinema", "16:9"),
+    "HD 720p (1280×720)": (1280, 720, "Cinema", "16:9"),
+    "Anamorphic 2.39:1 (2048×856)": (2048, 856, "Cinema", "2.39:1"),
+    "Anamorphic 2.39:1 (4096×1712)": (4096, 1712, "Cinema", "2.39:1"),
+    "Super 35 (2048×1552)": (2048, 1552, "Cinema", "1.32:1"),
+    "IMAX (5616×4096)": (5616, 4096, "Cinema", "1.37:1"),
+    "Academy 4:3 (1440×1080)": (1440, 1080, "Cinema", "4:3"),
+    "VistaVision (3072×2048)": (3072, 2048, "Cinema", "3:2"),
+    "8K UHD (7680×4320)": (7680, 4320, "Cinema", "16:9"),
     # ── Social / Delivery ──
-    "Instagram Square (1080×1080)": (1080, 1080, "Social",  "1:1"),
-    "Instagram Story (1080×1920)":  (1080, 1920, "Social",  "9:16"),
-    "YouTube Thumb (1280×720)":     (1280,  720, "Social",  "16:9"),
-    "TikTok (1080×1920)":           (1080, 1920, "Social",  "9:16"),
-
+    "Instagram Square (1080×1080)": (1080, 1080, "Social", "1:1"),
+    "Instagram Story (1080×1920)": (1080, 1920, "Social", "9:16"),
+    "YouTube Thumb (1280×720)": (1280, 720, "Social", "16:9"),
+    "TikTok (1080×1920)": (1080, 1920, "Social", "9:16"),
     # ── Flux (1 megapixel target) ──
-    "Flux Square (1024×1024)":      (1024, 1024, "Flux",    "1:1"),
-    "Flux 16:9 (1360×768)":         (1360,  768, "Flux",    "16:9"),
-    "Flux 9:16 (768×1360)":         ( 768, 1360, "Flux",    "9:16"),
-    "Flux 3:2 (1256×832)":          (1256,  832, "Flux",    "3:2"),
-    "Flux 2:3 (832×1256)":          ( 832, 1256, "Flux",    "2:3"),
-    "Flux 21:9 (1536×656)":         (1536,  656, "Flux",    "21:9"),
-    "Flux 4:3 (1184×888)":          (1184,  888, "Flux",    "4:3"),
-    "Flux 2.39:1 (1568×656)":       (1568,  656, "Flux",    "2.39:1"),
-
+    "Flux Square (1024×1024)": (1024, 1024, "Flux", "1:1"),
+    "Flux 16:9 (1360×768)": (1360, 768, "Flux", "16:9"),
+    "Flux 9:16 (768×1360)": (768, 1360, "Flux", "9:16"),
+    "Flux 3:2 (1256×832)": (1256, 832, "Flux", "3:2"),
+    "Flux 2:3 (832×1256)": (832, 1256, "Flux", "2:3"),
+    "Flux 21:9 (1536×656)": (1536, 656, "Flux", "21:9"),
+    "Flux 4:3 (1184×888)": (1184, 888, "Flux", "4:3"),
+    "Flux 2.39:1 (1568×656)": (1568, 656, "Flux", "2.39:1"),
     # ── SDXL (1 megapixel target) ──
-    "SDXL Square (1024×1024)":      (1024, 1024, "SDXL",    "1:1"),
-    "SDXL 16:9 (1216×832)":         (1216,  832, "SDXL",    "3:2"),
-    "SDXL 9:16 (832×1216)":         ( 832, 1216, "SDXL",    "2:3"),
-    "SDXL 4:3 (1152×896)":          (1152,  896, "SDXL",    "9:7"),
-    "SDXL 3:4 (896×1152)":          ( 896, 1152, "SDXL",    "7:9"),
-
+    "SDXL Square (1024×1024)": (1024, 1024, "SDXL", "1:1"),
+    "SDXL 16:9 (1216×832)": (1216, 832, "SDXL", "3:2"),
+    "SDXL 9:16 (832×1216)": (832, 1216, "SDXL", "2:3"),
+    "SDXL 4:3 (1152×896)": (1152, 896, "SDXL", "9:7"),
+    "SDXL 3:4 (896×1152)": (896, 1152, "SDXL", "7:9"),
     # ── SD 1.5 ──
-    "SD 1.5 Square (512×512)":      ( 512,  512, "SD 1.5",  "1:1"),
-    "SD 1.5 Wide (768×512)":        ( 768,  512, "SD 1.5",  "3:2"),
-    "SD 1.5 Tall (512×768)":        ( 512,  768, "SD 1.5",  "2:3"),
+    "SD 1.5 Square (512×512)": (512, 512, "SD 1.5", "1:1"),
+    "SD 1.5 Wide (768×512)": (768, 512, "SD 1.5", "3:2"),
+    "SD 1.5 Tall (512×768)": (512, 768, "SD 1.5", "2:3"),
 }
 
 PRESET_NAMES = ["Custom"] + list(PRESETS.keys())
@@ -120,6 +116,7 @@ LATENT_SCALE = 8  # VAE downscale factor
 # ═══════════════════════════════════════════════════════════════════════════════
 #                         HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def _align8(val: int) -> int:
     """Round to nearest multiple of 8 (VAE requirement)."""
@@ -146,10 +143,20 @@ def _gcd_ratio(w: int, h: int) -> str:
     if rw > 50 or rh > 50:
         ratio = w / h
         # Check common cinema ratios
-        for name, val in [("1:1", 1.0), ("4:3", 4/3), ("3:2", 3/2),
-                          ("16:9", 16/9), ("21:9", 21/9), ("2.39:1", 2.39),
-                          ("1.85:1", 1.85), ("1.90:1", 1.9), ("1.37:1", 1.37),
-                          ("9:16", 9/16), ("2:3", 2/3), ("3:4", 3/4)]:
+        for name, val in [
+            ("1:1", 1.0),
+            ("4:3", 4 / 3),
+            ("3:2", 3 / 2),
+            ("16:9", 16 / 9),
+            ("21:9", 21 / 9),
+            ("2.39:1", 2.39),
+            ("1.85:1", 1.85),
+            ("1.90:1", 1.9),
+            ("1.37:1", 1.37),
+            ("9:16", 9 / 16),
+            ("2:3", 2 / 3),
+            ("3:4", 3 / 4),
+        ]:
             if abs(ratio - val) < 0.02:
                 return name
         return f"{ratio:.2f}:1"
@@ -186,23 +193,22 @@ def _render_preview_card(
     │                                              │
     └──────────────────────────────────────────────┘
     """
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw
 
     # Card dimensions (fixed size for consistent display)
     card_w, card_h = 512, 512
-    bg_color = (24, 24, 28)         # Flame dark
-    box_border = (180, 120, 50)     # Radiance orange
-    box_fill = (32, 32, 36)         # Slightly lighter
+    bg_color = (24, 24, 28)  # Flame dark
+    box_border = (180, 120, 50)  # Radiance orange
+    box_fill = (32, 32, 36)  # Slightly lighter
     text_bright = (220, 220, 220)
     text_dim = (140, 140, 140)
-    text_accent = (220, 150, 60)    # Orange accent
-    cross_color = (80, 80, 85)      # Crosshair
+    text_accent = (220, 150, 60)  # Orange accent
+    cross_color = (80, 80, 85)  # Crosshair
 
     img = Image.new("RGB", (card_w, card_h), bg_color)
     draw = ImageDraw.Draw(img)
 
     # Try to load a monospace font, fall back to default
-    font_large = None
     font_small = None
     font_label = None
     font_title = None
@@ -217,12 +223,13 @@ def _render_preview_card(
         if os.path.exists(fp):
             try:
                 from PIL import ImageFont as IF
+
                 font_title = IF.truetype(fp, 18)
-                font_large = IF.truetype(fp, 24)
+                IF.truetype(fp, 24)
                 font_small = IF.truetype(fp, 13)
                 font_label = IF.truetype(fp, 13)
                 break
-            except Exception:
+            except Exception:  # nosec B112
                 continue
 
     # ── Aspect ratio box ──
@@ -249,7 +256,12 @@ def _render_preview_card(
     box_y = 50
 
     # Draw box
-    draw.rectangle([box_x, box_y, box_x + bw, box_y + bh], fill=box_fill, outline=box_border, width=2)
+    draw.rectangle(
+        [box_x, box_y, box_x + bw, box_y + bh],
+        fill=box_fill,
+        outline=box_border,
+        width=2,
+    )
 
     # Crosshair
     cx, cy = box_x + bw // 2, box_y + bh // 2
@@ -269,12 +281,14 @@ def _render_preview_card(
 
     # Dimension labels — width below box, height to the right
     dim_text = f"{width} × {height}"
-    draw.text((cx, box_y + bh + 12), dim_text, fill=text_accent, font=font_small, anchor="mt")
+    draw.text(
+        (cx, box_y + bh + 12), dim_text, fill=text_accent, font=font_small, anchor="mt"
+    )
 
     # ── Info section ──
     info_y = box_y + bh + 35
-    left_col = 50     # Label x
-    right_col = 220   # Value x
+    left_col = 50  # Label x
+    right_col = 220  # Value x
     line_h = 24
 
     aspect_str = _gcd_ratio(width, height)
@@ -283,13 +297,13 @@ def _render_preview_card(
     lat_h = height // LATENT_SCALE
 
     rows = [
-        ("RESOLUTION",   f"{width} × {height}"),
+        ("RESOLUTION", f"{width} × {height}"),
         ("ASPECT RATIO", aspect_str),
-        ("MEGAPIXELS",   f"{megapixels:.2f} MP"),
-        ("LATENT",       f"{lat_w} × {lat_h} × {latent_c}ch"),
-        ("PRESET",       preset_name if preset_name != "Custom" else "Custom"),
-        ("MODEL",        model_type.split("(")[0].strip()),
-        ("BATCH",        str(batch_size)),
+        ("MEGAPIXELS", f"{megapixels:.2f} MP"),
+        ("LATENT", f"{lat_w} × {lat_h} × {latent_c}ch"),
+        ("PRESET", preset_name if preset_name != "Custom" else "Custom"),
+        ("MODEL", model_type.split("(")[0].strip()),
+        ("BATCH", str(batch_size)),
     ]
 
     for i, (label, value) in enumerate(rows):
@@ -298,14 +312,22 @@ def _render_preview_card(
         draw.text((right_col, y), value, fill=text_bright, font=font_label)
 
     # ── Title bar ──
-    draw.text((card_w // 2, 16), "RADIANCE RESOLUTION", fill=text_accent, font=font_title, anchor="mt")
+    draw.text(
+        (card_w // 2, 16),
+        "RADIANCE RESOLUTION",
+        fill=text_accent,
+        font=font_title,
+        anchor="mt",
+    )
 
     # ── Bottom border line ──
     draw.line([20, card_h - 20, card_w - 20, card_h - 20], fill=(50, 50, 55), width=1)
 
     # ── Footer ──
     footer = f"{width}×{height}  {aspect_str}  {megapixels:.1f}MP  lat:{lat_w}×{lat_h}×{latent_c}"
-    draw.text((card_w // 2, card_h - 10), footer, fill=text_dim, font=font_small, anchor="mb")
+    draw.text(
+        (card_w // 2, card_h - 10), footer, fill=text_dim, font=font_small, anchor="mb"
+    )
 
     return img
 
@@ -313,6 +335,7 @@ def _render_preview_card(
 # ═══════════════════════════════════════════════════════════════════════════════
 #                        NODE IMPLEMENTATION
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class RadianceResolution:
     """
@@ -329,53 +352,92 @@ class RadianceResolution:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "preset": (PRESET_NAMES, {
-                    "default": "Flux Square (1024×1024)",
-                    "tooltip": (
-                        "Resolution preset. Cinema, Social, Flux, SDXL, SD 1.5 presets available. "
-                        "Select 'Custom' to use manual width/height."
-                    ),
-                }),
-                "width": ("INT", {
-                    "default": 1024, "min": 64, "max": 16384, "step": 8,
-                    "tooltip": "Custom width (only used when preset is 'Custom'). Auto-aligned to 8px.",
-                }),
-                "height": ("INT", {
-                    "default": 1024, "min": 64, "max": 16384, "step": 8,
-                    "tooltip": "Custom height (only used when preset is 'Custom'). Auto-aligned to 8px.",
-                }),
-                "orientation": (ORIENTATIONS, {
-                    "default": "As Preset",
-                    "tooltip": "Override orientation. 'As Preset' uses the preset's native orientation.",
-                }),
-                "model_type": (MODEL_TYPES, {
-                    "default": "Auto (Flux 16ch)",
-                    "tooltip": (
-                        "Determines latent channel count. "
-                        "Flux/SD3 = 16 channels. SDXL/SD 1.5 = 4 channels."
-                    ),
-                }),
-                "batch_size": ("INT", {
-                    "default": 1, "min": 1, "max": 64, "step": 1,
-                    "tooltip": "Number of latent frames in batch.",
-                }),
+                "preset": (
+                    PRESET_NAMES,
+                    {
+                        "default": "Flux Square (1024×1024)",
+                        "tooltip": (
+                            "Resolution preset. Cinema, Social, Flux, SDXL, SD 1.5 presets available. "
+                            "Select 'Custom' to use manual width/height."
+                        ),
+                    },
+                ),
+                "width": (
+                    "INT",
+                    {
+                        "default": 1024,
+                        "min": 64,
+                        "max": 16384,
+                        "step": 8,
+                        "tooltip": "Custom width (only used when preset is 'Custom'). Auto-aligned to 8px.",
+                    },
+                ),
+                "height": (
+                    "INT",
+                    {
+                        "default": 1024,
+                        "min": 64,
+                        "max": 16384,
+                        "step": 8,
+                        "tooltip": "Custom height (only used when preset is 'Custom'). Auto-aligned to 8px.",
+                    },
+                ),
+                "orientation": (
+                    ORIENTATIONS,
+                    {
+                        "default": "As Preset",
+                        "tooltip": "Override orientation. 'As Preset' uses the preset's native orientation.",
+                    },
+                ),
+                "model_type": (
+                    MODEL_TYPES,
+                    {
+                        "default": "Auto (Flux 16ch)",
+                        "tooltip": (
+                            "Determines latent channel count. "
+                            "Flux/SD3 = 16 channels. SDXL/SD 1.5 = 4 channels."
+                        ),
+                    },
+                ),
+                "batch_size": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 1,
+                        "max": 64,
+                        "step": 1,
+                        "tooltip": "Number of latent frames in batch.",
+                    },
+                ),
             },
             "optional": {
-                "scale_factor": ("FLOAT", {
-                    "default": 1.0, "min": 0.25, "max": 4.0, "step": 0.25,
-                    "tooltip": (
-                        "Scale the resolution by this factor. "
-                        "0.5 = half res, 2.0 = double res. Applied after preset/custom."
-                    ),
-                }),
-                "latent_channels": ("INT", {
-                    "default": 0, "min": 0, "max": 256, "step": 1,
-                    "tooltip": (
-                        "Override latent channel count. 0 = use model_type default. "
-                        "Common: 4 (SD/SDXL), 16 (Flux/SD3). "
-                        "Set manually for custom architectures or experimentation."
-                    ),
-                }),
+                "scale_factor": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.25,
+                        "max": 4.0,
+                        "step": 0.25,
+                        "tooltip": (
+                            "Scale the resolution by this factor. "
+                            "0.5 = half res, 2.0 = double res. Applied after preset/custom."
+                        ),
+                    },
+                ),
+                "latent_channels": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 256,
+                        "step": 1,
+                        "tooltip": (
+                            "Override latent channel count. 0 = use model_type default. "
+                            "Common: 4 (SD/SDXL), 16 (Flux/SD3). "
+                            "Set manually for custom architectures or experimentation."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -414,8 +476,7 @@ class RadianceResolution:
             w, h, category, ar_label = PRESETS[preset]
         else:
             w, h = width, height
-            category = "Custom"
-            ar_label = _gcd_ratio(w, h)
+            _gcd_ratio(w, h)
 
         # Apply scale factor
         if scale_factor != 1.0:
@@ -457,9 +518,12 @@ class RadianceResolution:
         # ── Render internal preview card ──
         preview_images = []
         try:
-            display_model = f"Manual ({latent_c}ch)" if latent_channels > 0 else model_type
+            display_model = (
+                f"Manual ({latent_c}ch)" if latent_channels > 0 else model_type
+            )
             preview_img = _render_preview_card(
-                width=w, height=h,
+                width=w,
+                height=h,
                 preset_name=preset,
                 model_type=display_model,
                 latent_c=latent_c,
@@ -469,16 +533,19 @@ class RadianceResolution:
             # Save to ComfyUI temp directory
             output_dir = folder_paths.get_temp_directory()
             import uuid
+
             preview_filename = f"radiance_resolution_{uuid.uuid4().hex[:8]}.png"
             preview_path = os.path.join(output_dir, preview_filename)
 
             preview_img.save(preview_path, "PNG")
 
-            preview_images.append({
-                "filename": preview_filename,
-                "subfolder": "",
-                "type": "temp",
-            })
+            preview_images.append(
+                {
+                    "filename": preview_filename,
+                    "subfolder": "",
+                    "type": "temp",
+                }
+            )
 
             logger.debug(f"[RadianceResolution] Preview saved: {preview_path}")
 

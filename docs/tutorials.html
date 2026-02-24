@@ -358,7 +358,7 @@
                 padding-left: 2.5rem;
             }
         }
-    
+
         /* SVG Icon Styles */
         svg.feature-icon {
             width: 1.5em;
@@ -367,7 +367,7 @@
             margin-right: 0.5rem;
             display: inline-block;
         }
-        </style>
+    </style>
 
     <style>
         /* Interactive Enhancements */
@@ -379,31 +379,33 @@
             cursor: pointer;
             transition: transform 0.2s;
         }
+
         .step-check:hover {
             transform: scale(1.1);
         }
-        
+
         .step h3 {
             display: flex;
             align-items: center;
         }
-        
-        .step.completed h3, 
+
+        .step.completed h3,
         .step.completed p {
             opacity: 0.6;
-            text-decoration: none; /* simple dimming */
+            text-decoration: none;
+            /* simple dimming */
         }
-        
+
         .workflow-container {
             position: relative;
             margin: 1rem 0;
         }
-        
+
         .copy-btn {
             position: absolute;
             top: 0.5rem;
             right: 0.5rem;
-            background: rgba(0,0,0,0.3);
+            background: rgba(0, 0, 0, 0.3);
             border: 1px solid var(--border-default);
             color: var(--text-secondary);
             padding: 0.3rem 0.6rem;
@@ -416,16 +418,17 @@
             transition: all 0.2s;
             backdrop-filter: blur(4px);
         }
-        
+
         .copy-btn:hover {
             background: var(--bg-card-hover);
             color: var(--accent-gold);
             border-color: var(--accent-gold);
         }
-        
+
         .tutorial-nav {
             position: sticky;
-            top: 5rem; /* Below main nav */
+            top: 5rem;
+            /* Below main nav */
             z-index: 90;
         }
     </style>
@@ -481,7 +484,18 @@
                 <p>Generate 360° environment maps for 3D rendering</p>
             </a>
             <a href="#logc" class="tutorial-link">
-                <h3><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="17" x2="22" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/></svg> Cinema-Quality LogC Export</h3>
+                <h3><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                        class="feature-icon">
+                        <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18" />
+                        <line x1="7" y1="2" x2="7" y2="22" />
+                        <line x1="17" y1="2" x2="17" y2="22" />
+                        <line x1="2" y1="12" x2="22" y2="12" />
+                        <line x1="2" y1="7" x2="7" y2="7" />
+                        <line x1="2" y1="17" x2="7" y2="17" />
+                        <line x1="17" y1="17" x2="22" y2="17" />
+                        <line x1="17" y1="7" x2="22" y2="7" />
+                    </svg> Cinema-Quality LogC Export</h3>
                 <p>Professional log encoding for color grading</p>
             </a>
             <a href="#prompt-machine" class="tutorial-link">
@@ -502,7 +516,13 @@
                     the FXTD Radiance Sampler.</p>
                 <div class="tutorial-meta">
                     <span class="meta-item">⏱️ <strong>10 min</strong></span>
-                    <span class="meta-item"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> <strong>Beginner</strong></span>
+                    <span class="meta-item"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" class="feature-icon">
+                            <line x1="18" y1="20" x2="18" y2="10" />
+                            <line x1="12" y1="20" x2="12" y2="4" />
+                            <line x1="6" y1="20" x2="6" y2="14" />
+                        </svg> <strong>Beginner</strong></span>
                     <span class="meta-item"> <strong>Essential Foundation</strong></span>
                 </div>
             </div>
@@ -511,7 +531,8 @@
                 <h3><input type="checkbox" class="step-check">Load Your Model</h3>
                 <p>Start by loading your Flux model. Add a <strong>Load Checkpoint</strong> or <strong>Load Diffusion
                         Model</strong> node:</p>
-                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋 Copy</button>
+                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋
+                        Copy</button>
                     <span class="comment"># For Flux models, use:</span><br>
                     <span class="node">[Load Diffusion Model]</span> → Select your flux1-dev.safetensors or
                     flux1-schnell.safetensors
@@ -538,7 +559,8 @@
             <div class="step" data-step="2">
                 <h3><input type="checkbox" class="step-check">Load CLIP and VAE</h3>
                 <p>Flux requires dual CLIP encoders and a VAE:</p>
-                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋 Copy</button>
+                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋
+                        Copy</button>
                     <span class="node">[DualCLIPLoader]</span> → clip_l.safetensors + t5xxl_fp16.safetensors<br><br>
                     <span class="node">[VAELoader]</span> → ae.safetensors (Flux VAE)
                 </div>
@@ -548,7 +570,8 @@
                 <h3><input type="checkbox" class="step-check">Create Your Prompt</h3>
                 <p>Add a <strong>CLIP Text Encode</strong> node for your prompt. Connect the CLIP output from
                     DualCLIPLoader:</p>
-                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋 Copy</button>
+                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋
+                        Copy</button>
                     <span class="node">[DualCLIPLoader]</span>
                     <span class="arrow"> → </span>
                     <span class="node">[CLIP Text Encode (Prompt)]</span>
@@ -563,7 +586,8 @@
             <div class="step" data-step="4">
                 <h3><input type="checkbox" class="step-check">Set Up Empty Latent</h3>
                 <p>Create an empty latent image as your canvas:</p>
-                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋 Copy</button>
+                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋
+                        Copy</button>
                     <span class="node">[EmptySD3LatentImage]</span> <span class="comment"># or EmptyLatentImage</span>
                 </div>
                 <table class="settings-table">
@@ -594,13 +618,19 @@
                 <h3><input type="checkbox" class="step-check">Add the FXTD Radiance Sampler ⭐</h3>
                 <p>This is the heart of your workflow. The <strong>FXTD Radiance Sampler</strong> is optimized for Flux
                     models:</p>
-                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋 Copy</button>
+                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋
+                        Copy</button>
                     <span class="node">[Load Diffusion Model]</span> → <strong>model</strong><br>
                     <span class="node">[CLIP Text Encode]</span> → <strong>positive</strong><br>
                     <span class="node">[CLIP Text Encode]</span> → <strong>negative</strong> <span
                         class="comment">(empty for Flux)</span><br>
                     <span class="node">[EmptySD3LatentImage]</span> → <strong>latent_image</strong><br><br>
-                    <span class="arrow">All connect to → </span><span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> FXTD Radiance Sampler]</span>
+                    <span class="arrow">All connect to → </span><span class="node">[<svg
+                            xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+                            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                            class="feature-icon">
+                            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                        </svg> FXTD Radiance Sampler]</span>
                 </div>
                 <table class="settings-table">
                     <tr>
@@ -644,8 +674,13 @@
             <div class="step" data-step="6">
                 <h3><input type="checkbox" class="step-check">Decode the Image</h3>
                 <p>Convert the latent back to a visible image:</p>
-                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋 Copy</button>
-                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> FXTD Radiance Sampler]</span>
+                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋
+                        Copy</button>
+                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" class="feature-icon">
+                            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                        </svg> FXTD Radiance Sampler]</span>
                     <span class="arrow"> → </span>
                     <span class="node">[VAE Decode]</span>
                     <span class="arrow"> ← </span>
@@ -656,10 +691,22 @@
             <div class="step" data-step="7">
                 <h3><input type="checkbox" class="step-check">Preview with Radiance Pro Viewer</h3>
                 <p>Use the <strong>Radiance Pro Viewer</strong> to analyze your image with professional scopes:</p>
-                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋 Copy</button>
+                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋
+                        Copy</button>
                     <span class="node">[VAE Decode]</span>
                     <span class="arrow"> → </span>
-                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="17" x2="22" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/></svg> Radiance Pro Viewer]</span>
+                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" class="feature-icon">
+                            <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18" />
+                            <line x1="7" y1="2" x2="7" y2="22" />
+                            <line x1="17" y1="2" x2="17" y2="22" />
+                            <line x1="2" y1="12" x2="22" y2="12" />
+                            <line x1="2" y1="7" x2="7" y2="7" />
+                            <line x1="2" y1="17" x2="7" y2="17" />
+                            <line x1="17" y1="17" x2="22" y2="17" />
+                            <line x1="17" y1="7" x2="22" y2="7" />
+                        </svg> Radiance Pro Viewer]</span>
                 </div>
                 <p style="margin-top: 0.5rem;">The Radiance Pro Viewer gives you histogram, waveform, false color, and
                     more.
@@ -673,7 +720,8 @@
             <div class="step" data-step="8">
                 <h3><input type="checkbox" class="step-check">Save Your Image</h3>
                 <p>Finally, save your image to disk:</p>
-                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋 Copy</button>
+                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋
+                        Copy</button>
                     <span class="node">[VAE Decode]</span>
                     <span class="arrow"> → </span>
                     <span class="node">[Save Image]</span>
@@ -683,7 +731,12 @@
             </div>
 
             <div class="tip">
-                <h4><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg> Complete Workflow Summary</h4>
+                <h4><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                        class="feature-icon">
+                        <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+                        <rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
+                    </svg> Complete Workflow Summary</h4>
                 <div class="workflow" style="margin-top: 0.5rem;">
                     <span class="node">[Load Diffusion Model]</span> ─────────────────────────────┐<br>
                     <span class="node">[DualCLIPLoader]</span> → <span class="node">[CLIP Text Encode]</span>
@@ -691,12 +744,28 @@
                     <span class="node">[EmptySD3LatentImage]</span> ──────────────────────────────┤<br>
                     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↓<br>
                     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span
-                        class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> FXTD Radiance Sampler]</span><br>
+                        class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
+                            fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                            stroke-linejoin="round" class="feature-icon">
+                            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                        </svg> FXTD Radiance Sampler]</span><br>
                     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↓<br>
                     <span class="node">[VAELoader]</span> → <span class="node">[VAE Decode]</span>
                     ──────────────────────────┤<br>
                     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↓<br>
-                    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="17" x2="22" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/></svg> Radiance Pro Viewer]</span> →
+                    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="node">[<svg
+                            xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+                            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                            class="feature-icon">
+                            <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18" />
+                            <line x1="7" y1="2" x2="7" y2="22" />
+                            <line x1="17" y1="2" x2="17" y2="22" />
+                            <line x1="2" y1="12" x2="22" y2="12" />
+                            <line x1="2" y1="7" x2="7" y2="7" />
+                            <line x1="2" y1="17" x2="7" y2="17" />
+                            <line x1="17" y1="17" x2="22" y2="17" />
+                            <line x1="17" y1="7" x2="22" y2="7" />
+                        </svg> Radiance Pro Viewer]</span> →
                     <span class="node">[Save Image]</span>
                 </div>
             </div>
@@ -730,7 +799,13 @@
                     applications.</p>
                 <div class="tutorial-meta">
                     <span class="meta-item">⏱️ <strong>15 min</strong></span>
-                    <span class="meta-item"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> <strong>Intermediate</strong></span>
+                    <span class="meta-item"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" class="feature-icon">
+                            <line x1="18" y1="20" x2="18" y2="10" />
+                            <line x1="12" y1="20" x2="12" y2="4" />
+                            <line x1="6" y1="20" x2="6" y2="14" />
+                        </svg> <strong>Intermediate</strong></span>
                     <span class="meta-item"> <strong>3D Rendering, VFX</strong></span>
                 </div>
             </div>
@@ -743,7 +818,8 @@
                     <li>Studio environments with controlled lighting</li>
                     <li>Dramatic skies (sunset, sunrise, overcast)</li>
                 </ul>
-                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋 Copy</button>
+                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋
+                        Copy</button>
                     <span class="comment"># Example HDRI prompts:</span><br>
                     "equirectangular 360 panorama, sunset over ocean, golden hour, dramatic clouds, high dynamic
                     range"<br><br>
@@ -787,16 +863,39 @@
             <div class="step" data-step="3">
                 <h3><input type="checkbox" class="step-check">Build the HDR Pipeline</h3>
                 <p>Connect these nodes to expand dynamic range and create a true HDRI:</p>
-                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋 Copy</button>
+                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋
+                        Copy</button>
                     <span class="node">[VAE Decode]</span>
                     <span class="arrow"> → </span>
-                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><circle cx="12" cy="12" r="10"/></svg> Image to Float32]</span>
+                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" class="feature-icon">
+                            <circle cx="12" cy="12" r="10" />
+                        </svg> Image to Float32]</span>
                     <span class="arrow"> → </span>
-                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg> HDR Expand Dynamic Range]</span><br>
+                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" class="feature-icon">
+                            <circle cx="12" cy="12" r="5" />
+                            <line x1="12" y1="1" x2="12" y2="3" />
+                            <line x1="12" y1="21" x2="12" y2="23" />
+                            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+                            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+                            <line x1="1" y1="12" x2="3" y2="12" />
+                            <line x1="21" y1="12" x2="23" y2="12" />
+                            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+                            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+                        </svg> HDR Expand Dynamic Range]</span><br>
                     <span class="arrow"> → </span>
                     <span class="node">[ HDR 360 Generate]</span>
                     <span class="arrow"> → </span>
-                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg> Save HDRI]</span>
+                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" class="feature-icon">
+                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+                            <polyline points="17 21 17 13 7 13 7 21" />
+                            <polyline points="7 3 7 8 15 8" />
+                        </svg> Save HDRI]</span>
                 </div>
             </div>
 
@@ -869,11 +968,28 @@
         <!-- Tutorial 2: LogC Export -->
         <section class="tutorial" id="logc">
             <div class="tutorial-header">
-                <h2><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="17" x2="22" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/></svg> Cinema-Quality LogC Export</h2>
+                <h2><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                        class="feature-icon">
+                        <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18" />
+                        <line x1="7" y1="2" x2="7" y2="22" />
+                        <line x1="17" y1="2" x2="17" y2="22" />
+                        <line x1="2" y1="12" x2="22" y2="12" />
+                        <line x1="2" y1="7" x2="7" y2="7" />
+                        <line x1="2" y1="17" x2="7" y2="17" />
+                        <line x1="17" y1="17" x2="22" y2="17" />
+                        <line x1="17" y1="7" x2="22" y2="7" />
+                    </svg> Cinema-Quality LogC Export</h2>
                 <p>Create DaVinci Resolve and Premiere Pro ready footage with professional log encoding.</p>
                 <div class="tutorial-meta">
                     <span class="meta-item">⏱️ <strong>10 min</strong></span>
-                    <span class="meta-item"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> <strong>Professional</strong></span>
+                    <span class="meta-item"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" class="feature-icon">
+                            <line x1="18" y1="20" x2="18" y2="10" />
+                            <line x1="12" y1="20" x2="12" y2="4" />
+                            <line x1="6" y1="20" x2="6" y2="14" />
+                        </svg> <strong>Professional</strong></span>
                     <span class="meta-item"> <strong>Color Grading, Film Production</strong></span>
                 </div>
             </div>
@@ -892,16 +1008,31 @@
             <div class="step" data-step="2">
                 <h3><input type="checkbox" class="step-check">Build the LogC Pipeline</h3>
                 <p>This workflow converts AI-generated images to cinema-grade log footage:</p>
-                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋 Copy</button>
+                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋
+                        Copy</button>
                     <span class="node">[VAE Decode]</span>
                     <span class="arrow"> → </span>
-                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><circle cx="12" cy="12" r="10"/></svg> Image to Float32]</span>
+                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" class="feature-icon">
+                            <circle cx="12" cy="12" r="10" />
+                        </svg> Image to Float32]</span>
                     <span class="arrow"> → </span>
                     <span class="node">[ Color Space: sRGB → ACEScg]</span><br>
                     <span class="arrow"> → </span>
-                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> Log Curve Encode: ARRI LogC3]</span>
+                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" class="feature-icon">
+                            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+                        </svg> Log Curve Encode: ARRI LogC3]</span>
                     <span class="arrow"> → </span>
-                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg> Save EXR (16-bit)]</span>
+                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" class="feature-icon">
+                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+                            <polyline points="17 21 17 13 7 13 7 21" />
+                            <polyline points="7 3 7 8 15 8" />
+                        </svg> Save EXR (16-bit)]</span>
                 </div>
             </div>
 
@@ -924,11 +1055,7 @@
                         <td>Latest ARRI cameras (ALEXA 35)</td>
                         <td>DaVinci, Baselight</td>
                     </tr>
-                    <tr>
-                        <td><code>Sony S-Log3</code></td>
-                        <td>Matching Sony camera footage</td>
-                        <td>All NLEs</td>
-                    </tr>
+
                     <tr>
                         <td><code>DaVinci Intermediate</code></td>
                         <td>Pure DaVinci Resolve workflow</td>
@@ -1006,7 +1133,13 @@
                 <p>Generate industry-standard cinematic prompts with granular control over every visual aspect.</p>
                 <div class="tutorial-meta">
                     <span class="meta-item">⏱️ <strong>5 min</strong></span>
-                    <span class="meta-item"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> <strong>Beginner</strong></span>
+                    <span class="meta-item"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" class="feature-icon">
+                            <line x1="18" y1="20" x2="18" y2="10" />
+                            <line x1="12" y1="20" x2="12" y2="4" />
+                            <line x1="6" y1="20" x2="6" y2="14" />
+                        </svg> <strong>Beginner</strong></span>
                     <span class="meta-item"> <strong>Any Generation</strong></span>
                 </div>
             </div>
@@ -1025,8 +1158,20 @@
 
             <div class="step" data-step="2">
                 <h3><input type="checkbox" class="step-check">Connect the Node</h3>
-                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋 Copy</button>
-                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="17" x2="22" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/></svg> FXTD Cinematic Prompt Machine]</span>
+                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋
+                        Copy</button>
+                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" class="feature-icon">
+                            <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18" />
+                            <line x1="7" y1="2" x2="7" y2="22" />
+                            <line x1="17" y1="2" x2="17" y2="22" />
+                            <line x1="2" y1="12" x2="22" y2="12" />
+                            <line x1="2" y1="7" x2="7" y2="7" />
+                            <line x1="2" y1="17" x2="7" y2="17" />
+                            <line x1="17" y1="17" x2="22" y2="17" />
+                            <line x1="17" y1="7" x2="22" y2="7" />
+                        </svg> FXTD Cinematic Prompt Machine]</span>
                     <span class="arrow"> → </span>
                     <span class="node">[CLIP Text Encode]</span>
                     <span class="arrow"> → </span>
@@ -1151,7 +1296,8 @@
                 <h3><input type="checkbox" class="step-check">Add Your Subject</h3>
                 <p>Enter your main subject description in the <code>subject</code> field. The Prompt Machine will wrap
                     it with all your cinematic settings.</p>
-                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋 Copy</button>
+                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋
+                        Copy</button>
                     <span class="comment"># Example subject inputs:</span><br>
                     "a woman walking through rain-soaked streets at night"<br>
                     "an astronaut on the surface of Mars"<br>
@@ -1186,7 +1332,13 @@
                     science.</p>
                 <div class="tutorial-meta">
                     <span class="meta-item">⏱️ <strong>10 min</strong></span>
-                    <span class="meta-item"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> <strong>Intermediate</strong></span>
+                    <span class="meta-item"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" class="feature-icon">
+                            <line x1="18" y1="20" x2="18" y2="10" />
+                            <line x1="12" y1="20" x2="12" y2="4" />
+                            <line x1="6" y1="20" x2="6" y2="14" />
+                        </svg> <strong>Intermediate</strong></span>
                     <span class="meta-item"> <strong>Cinematic Output</strong></span>
                 </div>
             </div>
@@ -1194,14 +1346,30 @@
             <div class="step" data-step="1">
                 <h3><input type="checkbox" class="step-check">The Film Look Pipeline</h3>
                 <p>Connect nodes in this order for authentic film emulation:</p>
-                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋 Copy</button>
+                <div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋
+                        Copy</button>
                     <span class="node">[VAE Decode]</span>
                     <span class="arrow"> → </span>
                     <span class="node">[⬆️ FXTD Pro Upscale 2x]</span>
                     <span class="arrow"> → </span>
-                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><circle cx="12" cy="12" r="10"/></svg> Radiance Grade]</span><br>
+                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" class="feature-icon">
+                            <circle cx="12" cy="12" r="10" />
+                        </svg> Radiance Grade]</span><br>
                     <span class="arrow"> → </span>
-                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="17" x2="22" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/></svg> FXTD Film Look]</span>
+                    <span class="node">[<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" class="feature-icon">
+                            <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18" />
+                            <line x1="7" y1="2" x2="7" y2="22" />
+                            <line x1="17" y1="2" x2="17" y2="22" />
+                            <line x1="2" y1="12" x2="22" y2="12" />
+                            <line x1="2" y1="7" x2="7" y2="7" />
+                            <line x1="2" y1="17" x2="7" y2="17" />
+                            <line x1="17" y1="17" x2="22" y2="17" />
+                            <line x1="17" y1="7" x2="22" y2="7" />
+                        </svg> FXTD Film Look]</span>
                     <span class="arrow"> → </span>
                     <span class="node">[ FXTD Lens Effects]</span>
                     <span class="arrow"> → </span>
@@ -1336,23 +1504,23 @@
             steps.forEach(step => {
                 const checkbox = step.querySelector('.step-check');
                 if (!checkbox) return;
-                
+
                 // Unique ID based on tutorial section + step number
                 const tutorialId = step.closest('.tutorial').id;
                 const stepNum = step.getAttribute('data-step');
                 const storageId = `radiance-tutorial-${tutorialId}-step-${stepNum}`;
-                
+
                 // Restore state
                 const isChecked = localStorage.getItem(storageId) === 'true';
                 checkbox.checked = isChecked;
                 if (isChecked) step.classList.add('completed');
-                
+
                 // Handle change
                 checkbox.addEventListener('change', (e) => {
                     const checked = e.target.checked;
                     localStorage.setItem(storageId, checked);
                     step.classList.toggle('completed', checked);
-                    
+
                     // Celebration if all steps in tutorial are done? 
                     // (Optional enhancement)
                 });
@@ -1363,7 +1531,7 @@
                 btn.addEventListener('click', () => {
                     const workflowDiv = btn.nextElementSibling; // The .workflow div
                     if (!workflowDiv) return;
-                    
+
                     const text = workflowDiv.innerText;
                     navigator.clipboard.writeText(text).then(() => {
                         const originalHTML = btn.innerHTML;

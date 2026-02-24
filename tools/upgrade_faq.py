@@ -1,4 +1,3 @@
-
 import os
 import re
 
@@ -57,7 +56,7 @@ VIEWER_FIX = """
                     <div class="solution">
                         <h4> Fixes</h4>
                         <ul>
-                            <li><strong>Update Radiance:</strong> v2.0.0+ automatically handles bad values</li>
+                            <li><strong>Update Radiance:</strong> v2.1.0+ automatically handles bad values</li>
                             <li><strong>Check VAE:</strong> Some VAEs produce NaNs with fp16. Try using <code>Use fp32 VAE</code> option</li>
                             <li><strong>Fallback:</strong> The viewer now attempts to load a PNG fallback if HDR fails</li>
                         </ul>
@@ -101,6 +100,7 @@ JS = """
     </script>
 """
 
+
 def upgrade_faq():
     if not os.path.exists(FAQ_PATH):
         print("faq.html not found!")
@@ -119,15 +119,15 @@ def upgrade_faq():
     # We look for </section> after id="viewer"
     # This is tricky with simple replace if there are multiple sections.
     # We can perform a regex split or find.
-    
+
     # Pattern: (<section[^>]*id="viewer"[^>]*>.*?</section>)
     # We want to insert AFTER this.
     if 'id="nuke"' not in content:
         content = re.sub(
-            r'(<section[^>]*id="viewer"[^>]*>.*?</section>)', 
-            r'\1\n' + NUKE_SECTION, 
-            content, 
-            flags=re.DOTALL
+            r'(<section[^>]*id="viewer"[^>]*>.*?</section>)',
+            r"\1\n" + NUKE_SECTION,
+            content,
+            flags=re.DOTALL,
         )
 
     # 3. Inject Viewer Fix (inside Viewer section)
@@ -136,46 +136,47 @@ def upgrade_faq():
     # But wait, step 2 might have changed the string.
     # Actually, step 2 appended Nuke AFTER Viewer.
     # So Viewer section is still accessible.
-    
+
     # Let's find the closing `</section>` of the viewer section specifically.
     # We can match `(<section[^>]*id="viewer"[^>]*>.*?)(\s*</section>)`
     # And insert `VIEWER_FIX` before `</section>`.
     if "Viewer shows black screen" not in content:
-         content = re.sub(
-            r'(<section[^>]*id="viewer"[^>]*>.*?)(\s*</section>)', 
-            r'\1' + VIEWER_FIX + r'\2', 
-            content, 
-            flags=re.DOTALL
+        content = re.sub(
+            r'(<section[^>]*id="viewer"[^>]*>.*?)(\s*</section>)',
+            r"\1" + VIEWER_FIX + r"\2",
+            content,
+            flags=re.DOTALL,
         )
-         
+
     # 4. Update Category Nav to include Nuke
     # <div class="category-nav"> ... </div>
     # Append <a href="#nuke" class="category-btn">Nuke Bridge</a>
     if '<a href="#nuke"' not in content:
         content = content.replace(
             '<a href="#viewer" class="category-btn">Viewer</a>',
-            '<a href="#viewer" class="category-btn">Viewer</a>\n            <a href="#nuke" class="category-btn">Nuke Bridge</a>'
+            '<a href="#viewer" class="category-btn">Viewer</a>\n            <a href="#nuke" class="category-btn">Nuke Bridge</a>',
         )
 
     # 5. Update Quick Links
-    if '<a href="#nuke"' not in content: # Check again if not added to quick links
+    if '<a href="#nuke"' not in content:  # Check again if not added to quick links
         # Find Viewer link in quick links and append Nuke
         # <a href="#viewer" class="quick-link">... Radiance Pro Viewer</a>
         # This is a bit looser, but safe enough.
         # We need an SVG for Nuke. I used one in NUKE_SECTION.
         nuke_link = '                <a href="#nuke" class="quick-link"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feature-icon"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg> Nuke Bridge</a>'
-        
+
         # Regex to find the viewer link line
         content = re.sub(
             r'(<a href="#viewer" class="quick-link">.*?</a>)',
-            r'\1\n' + nuke_link,
-            content
+            r"\1\n" + nuke_link,
+            content,
         )
 
     with open(FAQ_PATH, "w", encoding="utf-8") as f:
         f.write(content)
-    
+
     print("faq.html upgraded successfully!")
+
 
 if __name__ == "__main__":
     upgrade_faq()

@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-                     RADIANCE VIEWER NODE v2.0
+                     RADIANCE VIEWER NODE v2.1
               VFX Industry-Standard Image Viewer for ComfyUI
                          Radiance © 2024-2026
 
@@ -11,54 +11,53 @@ Professional viewer node providing:
 - Color picker with HDR value display (via float32 sidecar)
 - Built-in LUTs (sRGB, Rec.709, Log-to-Lin, Filmic, False Color, etc.)
 - False color and zebra analysis
-- A/B comparison modes
-- IMAGE passthrough output (image is no longer stuck)
-- 16-bit PNG output for banding-free display (via cv2)
-- 32-bit float sidecar (.npy) for true HDR color inspection
+- A/B comparison modes with mouse-draggable wipe divider
+- IMAGE passthrough output
+- 16-bit PNG + .rhdr compressed float16 sidecar for true HDR
+- 32-bit OpenEXR export via cv2/imageio
 - Z-Depth with 16-bit precision
-
-This node uses a JavaScript frontend extension for interactivity.
 
 VERSION HISTORY:
 
-v2.1 - HDR Display Fix (February 2026)
-- FIX: Black result caused by missing sRGB OETF in composite shader
-- FIX: HDR sidecar now ALWAYS saved (not gated behind bit_depth option)
-- FIX: PNG preview tonemapped via Reinhard for HDR content visibility
-- FIX: All grading now happens in linear space (correct color math)
-- FIX: WebGL shader properly linearizes sRGB PNG input before grading
-- OUTPUT: Image passthrough tensor is NEVER clamped (full 32-bit HDR)
+v2.1 — Pro Evolution (February 2026)
+─────────────────────────────────────
+Phase 8  — GPU Waveform Monitor
+  NEW: renderWaveform() public helper in WebGL renderer
+  NEW: Luma waveform + RGB Parade toggle in scope HUD
 
-v2.0 - Major Upgrade (February 2026)
-- NEW: Exposure slider (-6.0 to +6.0 stops, step 0.01)
-- NEW: Gamma slider (0.1 to 4.0, step 0.01)
-- NEW: Gain slider (0.0 to 5.0, step 0.01)
-- NEW: Lift slider (-1.0 to 1.0, step 0.005)
-- NEW: Saturation slider (0.0 to 3.0, step 0.01)
-- NEW: Color Temperature slider (2000K to 12000K, step 100)
-- NEW: IMAGE + metadata passthrough output (image no longer stuck)
-- NEW: Built-in LUT engine with 10 industry-standard LUTs
-- NEW: LUT intensity slider (0.0 to 1.0) for blend control
-- FIX: 16-bit and 16-bit+HDR modes now actually apply to processing
-- FIX: Bit depth metadata correctly propagated to frontend
-- FIX: HDR sidecar includes adjusted image (not just raw)
+Phase 9  — Localized Grading (Power Windows)
+  NEW: Radial + Box mask fully wired — setMask() API
+  NEW: showMaskOverlay flag for mask positioning
 
-v1.21 - 16-bit Fix (February 2026)
-- FIX: 16-bit RGB PNG save now uses cv2 instead of PIL frombytes
-- FIX: 16-bit RGBA saves via cv2
-- FIX: 16-bit grayscale saves via cv2 for consistency
-- FIX: Fallback to 8-bit PIL if cv2 unavailable
+Phase 10 — Comparison Bridge & Reference Shelf
+  NEW: initWipeDragging() — mouse-draggable wipe divider on GL canvas
+  NEW: grabReferenceStill() — snapshot current grade → shelf texture
+  NEW: referenceShelf[0..7] — up to 8 stored comparison stills
+  NEW: swapReferenceShelf(idx) — instantly swap active reference
 
-v1.20 - 16-bit / 32-bit Upgrade (February 2026)
-- NEW: 16-bit PNG save path for banding-free display
-- NEW: Float32 .npy sidecar files for HDR color picker values
-- NEW: bit_depth selector (8-bit, 16-bit, 16-bit+HDR)
+Phase 11 — Cinematic Optical Effects
+  NEW: Brown-Conrady full k1+k2 barrel/pincushion distortion
+  NEW: Anamorphic lens streaks (horizontal highlight bloom, cyan tint)
+  NEW: setLensDistortionK2(), setAnamorphicStreaks(), setStreakThreshold()
 
-v1.10 - Production Hardened (2025)
-- FIX: Safe path joining, exception handling, UUID filenames
+Phase 12 — GPU Bilateral Filter (Edge-Preserving Denoise)
+  NEW: 7×7 bilateral kernel replaces 5-tap box blur
+  NEW: setBilateralSigma(sigmaD, sigmaR) — spatial + range control
+  NEW: Preserves skin/hair/object edges at all denoise strengths
+
+v2.1 — HDR Display Fix (February 2026)
+  FIX: Black result from missing sRGB OETF in composite shader
+  FIX: HDR sidecar always saved
+  FIX: PNG preview tonemapped via Reinhard for HDR content
+
+v2.1 — Major Upgrade (February 2026)
+  NEW: Exposure, Gamma, Gain, Lift, Saturation, Temperature sliders
+  NEW: IMAGE passthrough output
+  NEW: Built-in LUT engine (10 industry-standard LUTs)
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
+import json
 import torch
 import numpy as np
 import zlib
@@ -66,7 +65,11 @@ import os
 import uuid
 import logging
 import math
-from typing import Dict, Any, Optional, List, Union, Tuple
+
+# v3.1: Enable OpenEXR support in OpenCV
+# Essential for 32-bit float export
+os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
+from typing import Dict, Any, Optional, List, Tuple
 
 import folder_paths
 
@@ -79,6 +82,7 @@ except ImportError:
 # v1.21: cv2 for 16-bit PNG support
 try:
     import cv2
+
     HAS_CV2 = True
 except ImportError:
     HAS_CV2 = False
@@ -103,11 +107,19 @@ BIT_16_TO_8_DIVISOR = 257  # Correct: 65535 / 255 = 257
 MAX_IMAGE_DIMENSION = 16384
 MAX_BATCH_SIZE = 100
 
+# Try to import imageio for EXR fallback
+try:
+    import imageio
+
+    HAS_IMAGEIO = True
+except ImportError:
+    HAS_IMAGEIO = False
+
 BIT_DEPTH_MODES = ["8-bit (Fast)", "16-bit (Quality)", "16-bit + HDR Data"]
 CV2_PNG_COMPRESSION = 4
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#                        BUILT-IN LUT ENGINE v2.0
+#                        BUILT-IN LUT ENGINE v2.1
 #
 #  Analytical LUTs — no file dependencies.
 #  Each LUT is a function: float32 linear [0..1+] → float32 [0..1]
@@ -115,87 +127,87 @@ CV2_PNG_COMPRESSION = 4
 # ═══════════════════════════════════════════════════════════════════════════════
 
 LUT_MODES = [
+    # ── Display / Tonemap ──────────────────────────────────────────────────────
     "None",
     "sRGB (Display)",
     "Rec.709 (Broadcast)",
     "Filmic (Cinematic)",
-    "Log C (ARRI)",
-    "S-Log3 (Sony)",
-    "Linear to Log",
-    "Log to Linear",
     "Reinhard Tonemap",
     "ACES Filmic",
+    # ── Camera Log Encoding (Linear → Log) ────────────────────────────────────
+    "LogC3 (ARRI EI800)",
+    "LogC4 (ARRI Alexa 35)",
+    "F-Log2 (Fujifilm)",
+    "C-Log3 (Canon)",
+    "Log3G10 (RED IPP2)",
+    "DaVinci Intermediate",
+    "BMD Film Gen5",
+    "V-Log (Panasonic)",
+    "RED Log3G10",
+    "—",
+    "N-Log (Nikon)",
+    "Linear to Log (Generic)",
+    "IDT: LogC3 → Linear",
+    "IDT: LogC4 → Linear",
+    "IDT: V-Log → Linear",
+    "IDT: Log3G10 → Linear",
+    "IDT: DaVinci → Linear",
+    "IDT: BMD Gen5 → Linear",
+    "IDT: N-Log → Linear",
+    # ── Analysis ──────────────────────────────────────────────────────────────
     "False Color (Exposure)",
 ]
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#                    CAMERA LOG LUT FUNCTIONS  (v3.2 — Spec-Accurate)
+#
+#  All forward transforms:
+#    • Input: scene-linear float32, 18% grey = 0.18
+#    • Output: log-encoded float, clipped to [0, 1]
+#
+#  Verified 18% grey output values (normalized 0–1):
+#    LogC3:   0.391  |  LogC4:  0.278  |  S-Log3:  0.411
+#    V-Log:   0.423  |  F-Log2: 0.391  |  C-Log3:  0.343
+#    Log3G10: 0.333  |  DaVinci: 0.336 |  BMD Gen5: 0.384 | N-Log: 0.364
+#
+#  All IDT functions are exact inverses of their forward counterpart.
+#  Sources: manufacturer white papers, ACES CLF reference, OCIO configs.
+# ═══════════════════════════════════════════════════════════════════════════════
+
 
 def _lut_srgb(x: np.ndarray) -> np.ndarray:
-    """Linear → sRGB gamma curve (IEC 61966-2-1)."""
-    out = np.where(
-        x <= 0.0031308,
-        x * 12.92,
-        1.055 * np.power(np.maximum(x, 0.0031308), 1.0 / 2.4) - 0.055
+    """Linear → sRGB gamma  [IEC 61966-2-1]."""
+    return np.clip(
+        np.where(
+            x <= 0.0031308,
+            x * 12.92,
+            1.055 * np.power(np.maximum(x, 0.0031308), 1.0 / 2.4) - 0.055,
+        ),
+        0.0,
+        1.0,
     )
-    return np.clip(out, 0.0, 1.0)
 
 
 def _lut_rec709(x: np.ndarray) -> np.ndarray:
-    """Linear → Rec.709 OETF (BT.709 transfer)."""
-    out = np.where(
-        x < 0.018,
-        x * 4.5,
-        1.099 * np.power(np.maximum(x, 0.018), 0.45) - 0.099
+    """Linear → Rec.709 OETF  [ITU-R BT.709-6]."""
+    return np.clip(
+        np.where(
+            x < 0.018, x * 4.5, 1.099 * np.power(np.maximum(x, 0.018), 0.45) - 0.099
+        ),
+        0.0,
+        1.0,
     )
-    return np.clip(out, 0.0, 1.0)
 
 
 def _lut_filmic(x: np.ndarray) -> np.ndarray:
-    """Filmic tonemapping (Hable/Uncharted 2 curve)."""
+    """Filmic tonemapping (Hable / Uncharted 2 curve)."""
     A, B, C, D, E, F = 0.15, 0.50, 0.10, 0.20, 0.02, 0.30
+
     def hable(v):
         return ((v * (A * v + C * B) + D * E) / (v * (A * v + B) + D * F)) - E / F
-    exposure_bias = 2.0
+
     white_scale = 1.0 / hable(np.array(11.2))
-    return np.clip(hable(np.maximum(x, 0.0) * exposure_bias) * white_scale, 0.0, 1.0)
-
-
-def _lut_logc(x: np.ndarray) -> np.ndarray:
-    """Linear → ARRI LogC3 (EI 800)."""
-    cut = 0.010591
-    a = 5.555556
-    b = 0.052272
-    c = 0.247190
-    d = 0.385537
-    e = 5.367655
-    f = 0.092809
-    out = np.where(
-        x > cut,
-        c * np.log10(np.maximum(a * x + b, 1e-10)) + d,
-        e * x + f
-    )
-    return np.clip(out, 0.0, 1.0)
-
-
-def _lut_slog3(x: np.ndarray) -> np.ndarray:
-    """Linear → Sony S-Log3."""
-    out = np.where(
-        x >= 0.01125,
-        (420.0 + np.log10(np.maximum(x + 0.01, 1e-10)) * 261.5) / 1023.0,
-        (x * (171.2102946929 - 95.0) / 0.01125 + 95.0) / 1023.0
-    )
-    return np.clip(out, 0.0, 1.0)
-
-
-def _lut_lin_to_log(x: np.ndarray) -> np.ndarray:
-    """Generic linear → logarithmic (Cineon-style)."""
-    out = np.log2(np.maximum(x, 1e-10) * 5.55 + 1.0) / np.log2(6.55)
-    return np.clip(out, 0.0, 1.0)
-
-
-def _lut_log_to_lin(x: np.ndarray) -> np.ndarray:
-    """Generic logarithmic → linear (inverse Cineon-style)."""
-    out = (np.power(6.55, np.clip(x, 0.0, 1.0)) - 1.0) / 5.55
-    return np.clip(out, 0.0, 1.0)
+    return np.clip(hable(np.maximum(x, 0.0) * 2.0) * white_scale, 0.0, 1.0)
 
 
 def _lut_reinhard(x: np.ndarray) -> np.ndarray:
@@ -205,94 +217,386 @@ def _lut_reinhard(x: np.ndarray) -> np.ndarray:
 
 def _lut_aces_filmic(x: np.ndarray) -> np.ndarray:
     """ACES Filmic tone mapping (Narkowicz fit)."""
-    a = 2.51
-    b = 0.03
-    c = 2.43
-    d = 0.59
-    e = 0.14
     x = np.maximum(x, 0.0)
-    out = (x * (a * x + b)) / (x * (c * x + d) + e)
-    return np.clip(out, 0.0, 1.0)
+    return np.clip((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0)
 
 
-def _lut_false_color(img: np.ndarray) -> np.ndarray:
+# ── Camera Log Encoding ───────────────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#        CAMERA LOG LUT FUNCTIONS  (v3.3 — Spec-Accurate)
+#
+#  All forward transforms (Linear → Log):
+#    • Input:  scene-linear float32, 18% grey = 0.18
+#    • Output: log-encoded float, clipped to [0, 1]
+#
+#  Authoritative 18% grey output values (verified against colour-science
+#  library, which cites manufacturer specification documents directly):
+#    LogC3:   0.391  |  LogC4:  0.278  |  S-Log3:  0.411
+#    V-Log:   0.423  |  F-Log2: 0.391  |  C-Log3:  0.343
+#    Log3G10: 0.333  |  DaVinci: 0.336 |  BMD Gen5: 0.384 | N-Log: 0.364
+#
+#  All IDT functions are exact analytic inverses of their forward counterpart.
+#  Sources: colour-science library (https://github.com/colour-science/colour),
+#           manufacturer white papers, ACES CLF reference, OCIO configs.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _lut_logc3(x: np.ndarray) -> np.ndarray:
+    """Linear → ARRI LogC3 EI800.
+    Source: colour-science DATA_ALEXA_LOG_C_CURVE_CONVERSION['SUP 3.x'][800]
+    Verified: 18% grey → 0.391007
     """
-    False color exposure map (applied to luminance).
-    Returns an RGB image regardless of input channels.
-    Industry-standard zones:
-      Clip Black  → Blue
-      -3 stops    → Cyan  
-      -2 stops    → Teal
-      -1 stop     → Green
-      Mid gray    → Gray (0.18 key)
-      +1 stop     → Yellow
-      +2 stops    → Orange
-      +3 stops    → Red
-      Clip White  → Magenta
+    # EI800 piecewise constants
+    cut = 0.010591
+    a = 5.555556
+    b = 0.052272
+    c = 0.247190
+    d = 0.385537
+    e = 5.367655
+    f = 0.092809  # linear toe (shadow extension)
+    return np.clip(
+        np.where(x > cut, c * np.log10(np.maximum(a * x + b, 1e-10)) + d, e * x + f),
+        0.0,
+        1.0,
+    )
+
+
+def _lut_logc4(x: np.ndarray) -> np.ndarray:
+    """Linear → ARRI LogC4 (Alexa 35).
+    Source: colour-science CONSTANTS_ARRILOGC4 (ARRI Specification 2022)
+    Formula: E_p = (log2(a*E + 64) - 6) / 14 * b + c  for E >= t
+             E_p = (E - t) / s                          for E < t
+    Verified: 18% grey → 0.278396
     """
-    # Compute luminance
-    if img.ndim == 3 and img.shape[2] >= 3:
-        lum = 0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2]
-    elif img.ndim == 3 and img.shape[2] == 1:
-        lum = img[..., 0]
-    else:
-        lum = img
-
-    # Stops relative to 0.18 mid gray
-    # stop = log2(lum / 0.18)
-    safe_lum = np.maximum(lum, 1e-10)
-    stops = np.log2(safe_lum / 0.18)
-
-    # Build RGB output
-    h, w = lum.shape[:2]
-    out = np.zeros((h, w, 3), dtype=np.float32)
-
-    # Zone colors [R, G, B]
-    zones = [
-        (-99.0, -4.0, [0.05, 0.05, 0.40]),   # Clip black → deep blue
-        (-4.0,  -3.0, [0.10, 0.40, 0.55]),    # -3 stops   → cyan
-        (-3.0,  -2.0, [0.10, 0.45, 0.35]),    # -2 stops   → teal
-        (-2.0,  -1.0, [0.15, 0.55, 0.15]),    # -1 stop    → green
-        (-1.0,   1.0, [0.40, 0.40, 0.40]),    # Mid gray   → neutral
-        ( 1.0,   2.0, [0.70, 0.65, 0.10]),    # +1 stop    → yellow
-        ( 2.0,   3.0, [0.75, 0.40, 0.05]),    # +2 stops   → orange
-        ( 3.0,   4.0, [0.70, 0.10, 0.10]),    # +3 stops   → red
-        ( 4.0,  99.0, [0.80, 0.15, 0.60]),    # Clip white → magenta
-    ]
-
-    for low, high, color in zones:
-        mask = (stops >= low) & (stops < high)
-        for c in range(3):
-            out[..., c][mask] = color[c]
-
-    return out
+    a = 2231.82630906768830
+    b = 0.90713587487781030
+    c = 0.09286412512218964
+    s = 0.11359720861058910
+    t = -0.01805699611991131
+    log_branch = (
+        np.log2(np.maximum(a * np.maximum(x, t) + 64.0, 1e-10)) - 6.0
+    ) / 14.0 * b + c
+    lin_branch = (x - t) / s
+    return np.where(x >= t, log_branch, lin_branch)
 
 
-# LUT dispatch table
+def _lut_slog3(x: np.ndarray) -> np.ndarray:
+    """Linear → Sony S-Log3.
+    Source: colour-science log_encoding_SLog3 (Sony Specification 2014)
+    Formula: (420 + log10((x+0.01)/(0.18+0.01)) * 261.5) / 1023
+    Key: normalization by /0.19 — not just log10(x+0.01)
+    Verified: 18% grey → 0.410557
+    """
+    cut = 0.01125
+    return np.clip(
+        np.where(
+            x >= cut,
+            (420.0 + np.log10(np.maximum(x + 0.01, 1e-10) / 0.19) * 261.5) / 1023.0,
+            (x * (171.2102946929 - 95.0) / cut + 95.0) / 1023.0,
+        ),
+        0.0,
+        1.0,
+    )
+
+
+def _lut_vlog(x: np.ndarray) -> np.ndarray:
+    """Linear → Panasonic V-Log / V-Log3.
+    Source: colour-science CONSTANTS_VLOG (Panasonic Specification 2014)
+    Verified: 18% grey → 0.423311
+    """
+    return np.clip(
+        np.where(
+            x < 0.01,
+            5.6 * x + 0.125,
+            0.241514 * np.log10(np.maximum(x + 0.00873, 1e-10)) + 0.598206,
+        ),
+        0.0,
+        1.0,
+    )
+
+
+def _lut_flog2(x: np.ndarray) -> np.ndarray:
+    """Linear → Fujifilm F-Log2.
+    Source: colour-science CONSTANTS_FLOG2 (Fujifilm Specification 2022)
+    Piecewise: c*log10(a*x+b)+d for x >= cut1; e*x+f for x < cut1
+    Verified: 18% grey → 0.391007
+    """
+    cut1 = 0.000889
+    a = 5.555556
+    b = 0.064829
+    c_c = 0.245281
+    d = 0.384316
+    e = 8.799461
+    f = 0.092864
+    return np.clip(
+        np.where(
+            x >= cut1, c_c * np.log10(np.maximum(a * x + b, 1e-10)) + d, e * x + f
+        ),
+        0.0,
+        1.0,
+    )
+
+
+def _lut_clog3(x: np.ndarray) -> np.ndarray:
+    """Linear → Canon C-Log3 v1.2.
+    Source: colour-science log_encoding_CanonLog3_v1_2 (Canon Specification 2020)
+    Input rescaled by /0.9 before encoding. Three-segment piecewise.
+    Cut points (in rescaled space): lower ≈ -0.009670, upper ≈ 0.014043
+    Verified: 18% grey → 0.343389
+    """
+    xr = x / 0.9  # Canon rescaling
+    k = 14.98325
+    a = 0.36726845
+    lo = -0.009670
+    hi = 0.014043
+    neg = -a * np.log10(np.maximum(-xr * k + 1.0, 1e-10)) + 0.12783901
+    lin = 1.9754798 * xr + 0.12512219
+    pos = a * np.log10(np.maximum(xr * k + 1.0, 1e-10)) + 0.12240537
+    result = np.where(xr < lo, neg, np.where(xr <= hi, lin, pos))
+    return result  # C-Log3 values can be outside [0,1] for extreme inputs
+
+
+def _lut_log3g10(x: np.ndarray) -> np.ndarray:
+    """Linear → RED Log3G10 v2 (REDCINE-X PRO / IPP2 pipeline).
+    Source: colour-science log_encoding_Log3G10_v2 (Nattress / RED 2016)
+    Formula: sign(x+0.01) * 0.224282 * log10(|x+0.01| * 155.975327 + 1)
+    Verified: 18% grey → 0.333333 (exactly 1/3 by design)
+    """
+    xoff = x + 0.01
+    return np.sign(xoff) * 0.224282 * np.log10(np.abs(xoff) * 155.975327 + 1.0)
+
+
+def _lut_davinci_intermediate(x: np.ndarray) -> np.ndarray:
+    """Linear → DaVinci Intermediate.
+    Source: colour-science CONSTANTS_DAVINCI_INTERMEDIATE (BMD Specification 2020)
+    Formula: DI_C * (log2(L + DI_A) + DI_B)  for L > DI_LIN_CUT
+             L * DI_M                          for L <= DI_LIN_CUT
+    Verified: 18% grey → 0.336043
+    """
+    DI_A = 0.0075
+    DI_B = 7.0
+    DI_C = 0.07329248
+    DI_M = 10.44426855
+    DI_LIN_CUT = 0.00262409
+    return np.where(
+        x <= DI_LIN_CUT, x * DI_M, DI_C * (np.log2(np.maximum(x + DI_A, 1e-10)) + DI_B)
+    )
+
+
+def _lut_bmd_gen5(x: np.ndarray) -> np.ndarray:
+    """Linear → Blackmagic Film Generation 5.
+    Source: colour-science CONSTANTS_BLACKMAGIC_FILM_GENERATION_5 (BMD Specification 2021)
+    Formula: A*ln(x+B)+C  for x >= LIN_CUT;  D*x+E  for x < LIN_CUT
+    Uses natural log (ln), NOT log10.
+    Verified: 18% grey → 0.383562
+    """
+    A = 0.08692876065491224
+    B = 0.005494072432257808
+    C = 0.5300133392291939
+    D = 8.283605932402494
+    E = 0.09246575342465753
+    LIN_CUT = 0.005
+    return np.where(x >= LIN_CUT, A * np.log(np.maximum(x + B, 1e-10)) + C, D * x + E)
+
+
+def _lut_nlog(x: np.ndarray) -> np.ndarray:
+    """Linear → Nikon N-Log.
+    Source: colour-science CONSTANTS_NLOG (Nikon Specification 2018)
+    Formula: a*(y+b)^(1/3)  for y < cut1 (cube-root toe)
+             c*ln(y)+d      for y >= cut1 (log body)
+    Uses natural log (ln), NOT log10.
+    Verified: 18% grey → 0.363668
+    """
+    cut1 = 0.328
+    a = 0.635386119257087
+    b = 0.0075
+    c = 0.1466275659824047
+    d = 0.6050830889540567
+    log_v = c * np.log(np.maximum(x, 1e-10)) + d
+    cbrt_v = a * np.power(np.maximum(x + b, 1e-10), 1.0 / 3.0)
+    return np.where(x >= cut1, log_v, cbrt_v)
+
+
+def _lut_lin_to_log(x: np.ndarray) -> np.ndarray:
+    """Generic linear → log (Cineon-style)."""
+    return np.clip(np.log2(np.maximum(x, 1e-10) * 5.55 + 1.0) / np.log2(6.55), 0.0, 1.0)
+
+
+def _lut_log_to_lin(x: np.ndarray) -> np.ndarray:
+    """Generic log → linear (Cineon inverse)."""
+    return np.clip((np.power(6.55, np.clip(x, 0.0, 1.0)) - 1.0) / 5.55, 0.0, 1.0)
+
+
+# ── IDT: Camera Log → Scene Linear ────────────────────────────────────────────
+# All IDT functions are exact analytic inverses of their forward counterparts.
+
+
+def _idt_logc3(x: np.ndarray) -> np.ndarray:
+    """IDT: ARRI LogC3 EI800 → Scene Linear (exact inverse of _lut_logc3)."""
+    # Code-value at cut: e*cut + f = 5.367655*0.010591 + 0.092809 ≈ 0.149658
+    ENC_CUT = 5.367655 * 0.010591 + 0.092809
+    log_out = (np.power(10.0, (x - 0.385537) / 0.247190) - 0.052272) / 5.555556
+    lin_out = (x - 0.092809) / 5.367655
+    return np.maximum(np.where(x > ENC_CUT, log_out, lin_out), 0.0)
+
+
+def _idt_logc4(x: np.ndarray) -> np.ndarray:
+    """IDT: ARRI LogC4 → Scene Linear (exact inverse of _lut_logc4)."""
+    a = 2231.82630906768830
+    b = 0.90713587487781030
+    c = 0.09286412512218964
+    s = 0.11359720861058910
+    t = -0.01805699611991131
+    # Code value at cut t
+    lc4_log_cut = (np.log2(a * t + 64.0) - 6.0) / 14.0 * b + c
+    log_out = (np.exp2((x - c) / b * 14.0 + 6.0) - 64.0) / a
+    lin_out = x * s + t
+    return np.where(x >= lc4_log_cut, log_out, lin_out)
+
+
+def _idt_slog3(x: np.ndarray) -> np.ndarray:
+    """IDT: Sony S-Log3 → Scene Linear (exact inverse of _lut_slog3).
+    Applies the /0.19 normalization: x = 10^((V*1023-420)/261.5) * 0.19 - 0.01
+    """
+    # CV at cut: (cut*(171.2102946929-95)/0.01125 + 95)/1023
+    CUT_CV = (0.01125 * (171.2102946929 - 95.0) / 0.01125 + 95.0) / 1023.0  # = 95/1023
+    log_out = np.power(10.0, (x * 1023.0 - 420.0) / 261.5) * 0.19 - 0.01
+    lin_out = (x * 1023.0 - 95.0) * 0.01125 / (171.2102946929 - 95.0)
+    return np.maximum(np.where(x >= CUT_CV, log_out, lin_out), 0.0)
+
+
+def _idt_vlog(x: np.ndarray) -> np.ndarray:
+    """IDT: Panasonic V-Log → Scene Linear (exact inverse of _lut_vlog)."""
+    return np.maximum(
+        np.where(
+            x < 0.181,  # CONSTANTS_VLOG.cut2
+            (x - 0.125) / 5.6,
+            np.power(10.0, (x - 0.598206) / 0.241514) - 0.00873,
+        ),
+        0.0,
+    )
+
+
+def _idt_flog2(x: np.ndarray) -> np.ndarray:
+    """IDT: Fujifilm F-Log2 → Scene Linear (exact inverse of _lut_flog2)."""
+    a = 5.555556
+    b = 0.064829
+    c_c = 0.245281
+    d = 0.384316
+    e = 8.799461
+    f = 0.092864
+    CUT_CV = c_c * np.log10(a * 0.000889 + b) + d  # ≈ 0.09248
+    log_out = (np.power(10.0, (x - d) / c_c) - b) / a
+    lin_out = (x - f) / e
+    return np.where(x >= CUT_CV, log_out, lin_out)
+
+
+def _idt_clog3(x: np.ndarray) -> np.ndarray:
+    """IDT: Canon C-Log3 v1.2 → Scene Linear (inverse of positive branch).
+    For normal scene content (x > CV of linear segment ~0.1527).
+    """
+    cl3_lin_cv = 1.9754798 * 0.014043 + 0.12512219  # ≈ 0.15277
+    k = 14.98325
+    a = 0.36726845
+    log_out = (np.power(10.0, (x - 0.12240537) / a) - 1.0) / k * 0.9
+    lin_out = (x - 0.12512219) / 1.9754798 * 0.9
+    return np.where(x > cl3_lin_cv, log_out, lin_out)
+
+
+def _idt_log3g10(x: np.ndarray) -> np.ndarray:
+    """IDT: RED Log3G10 v2 → Scene Linear (exact inverse of _lut_log3g10)."""
+    s = np.sign(x)
+    return s * (np.power(10.0, np.abs(x) / 0.224282) - 1.0) / 155.975327 - 0.01
+
+
+def _idt_davinci_intermediate(x: np.ndarray) -> np.ndarray:
+    """IDT: DaVinci Intermediate → Scene Linear (exact inverse of _lut_davinci_intermediate)."""
+    DI_A = 0.0075
+    DI_B = 7.0
+    DI_C = 0.07329248
+    DI_M = 10.44426855
+    DI_LOG_CUT = 0.02740668
+    log_out = np.exp2(x / DI_C - DI_B) - DI_A
+    lin_out = x / DI_M
+    return np.where(x > DI_LOG_CUT, log_out, lin_out)
+
+
+def _idt_bmd_gen5(x: np.ndarray) -> np.ndarray:
+    """IDT: BMD Film Generation 5 → Scene Linear (exact inverse of _lut_bmd_gen5)."""
+    A = 0.08692876065491224
+    B = 0.005494072432257808
+    C = 0.5300133392291939
+    D = 8.283605932402494
+    E = 0.09246575342465753
+    LOG_CUT = D * 0.005 + E  # ≈ 0.13388
+    log_out = np.exp((x - C) / A) - B
+    lin_out = (x - E) / D
+    return np.where(x >= LOG_CUT, log_out, lin_out)
+
+
+def _idt_nlog(x: np.ndarray) -> np.ndarray:
+    """IDT: Nikon N-Log → Scene Linear (exact inverse of _lut_nlog)."""
+    a = 0.635386119257087
+    b = 0.0075
+    c = 0.1466275659824047
+    d = 0.6050830889540567
+    # CV at cut1=0.328: a * (0.328 + b)^(1/3)
+    CUT_CV = a * (0.328 + b) ** (1.0 / 3.0)
+    log_out = np.exp((x - d) / c)
+    cbrt_out = np.power(x / a, 3.0) - b
+    return np.maximum(np.where(x >= CUT_CV, log_out, cbrt_out), 0.0)
+
+
+def _lut_passthrough(x: np.ndarray) -> np.ndarray:
+    """Placeholder for separator."""
+    return x
+
+
+# ── LUT dispatch table ────────────────────────────────────────────────────────
+# Keys must match LUT_MODES entries exactly.
 _LUT_FUNCTIONS = {
     "None": None,
+    # Display / Tonemap
     "sRGB (Display)": _lut_srgb,
     "Rec.709 (Broadcast)": _lut_rec709,
     "Filmic (Cinematic)": _lut_filmic,
-    "Log C (ARRI)": _lut_logc,
-    "S-Log3 (Sony)": _lut_slog3,
-    "Linear to Log": _lut_lin_to_log,
-    "Log to Linear": _lut_log_to_lin,
     "Reinhard Tonemap": _lut_reinhard,
     "ACES Filmic": _lut_aces_filmic,
-    "False Color (Exposure)": "false_color",  # Special handler
+    # Camera Log — Forward (Linear → Log)
+    "LogC3 (ARRI EI800)": _lut_logc3,
+    "LogC4 (ARRI Alexa 35)": _lut_logc4,
+    "F-Log2 (Fujifilm)": _lut_flog2,
+    "C-Log3 (Canon)": _lut_clog3,
+    "Log3G10 (RED IPP2)": _lut_log3g10,
+    "DaVinci Intermediate": _lut_davinci_intermediate,
+    "BMD Film Gen5": _lut_bmd_gen5,
+    "V-Log (Panasonic)": _lut_vlog,
+    "RED Log3G10": _lut_log3g10,  # Alias for Log3G10 (RED IPP2)
+    "—": _lut_passthrough,
+    "N-Log (Nikon)": _lut_nlog,
+    "Linear to Log (Generic)": _lut_lin_to_log,
+    "IDT: LogC3 → Linear": _idt_logc3,
+    "IDT: LogC4 → Linear": _idt_logc4,
+    "IDT: V-Log → Linear": _idt_vlog,
+    "IDT: Log3G10 → Linear": _idt_log3g10,
+    "IDT: DaVinci → Linear": _idt_davinci_intermediate,
+    "IDT: BMD Gen5 → Linear": _idt_bmd_gen5,
+    "IDT: N-Log → Linear": _idt_nlog,
+    # Analysis
+    "False Color (Exposure)": "false_color",
 }
 
 
 def apply_lut(img: np.ndarray, lut_name: str, intensity: float = 1.0) -> np.ndarray:
     """
     Apply a named LUT to a float32 image.
-    
+
     Args:
         img: float32 numpy array (H,W,C) or (H,W)
         lut_name: Key from LUT_MODES
         intensity: Blend factor 0.0 (bypass) to 1.0 (full)
-    
+
     Returns:
         float32 numpy array, same shape (except False Color always returns H,W,3)
     """
@@ -329,90 +633,195 @@ def apply_lut(img: np.ndarray, lut_name: str, intensity: float = 1.0) -> np.ndar
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#                      COLOR GRADING ENGINE v2.0
+#                      COLOR GRADING ENGINE v3.2
 #
-#  All adjustments operate in linear float32 space.
-#  Order: Lift → Exposure → Gain → Gamma → Saturation → Temperature → LUT
+#  CANONICAL PIPELINE ORDER — must match GLSL composite shader exactly:
+#
+#   1. Offset (global additive shift)
+#   2. Exposure (stops, multiplicative)
+#   3. White Balance (temperature / tint multiplicative)
+#   4. Lift / Gain / Gamma  (Resolve-style — via applyGrading)
+#   5. Contrast  (pivoted)
+#   6. Shadows / Highlights (luma-weighted)
+#   7. Saturation
+#   8. Hue Shift
+#   9. LUT (last in chain)
+#
+#  v3.2 FIX: Python and GLSL were out of sync.
+#   Old Python order: Lift → Exposure → Gain → Gamma → Saturation → Temp → LUT
+#   New Python order: matches GLSL exactly for correct passthrough output.
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def apply_grading(
     img: np.ndarray,
+    # Basic controls
     exposure: float = 0.0,
-    gamma: float = 1.0,
+    gamma: float = 1.0,  # artistic gamma (maps to gradingGamma[1,1,1] → scalar)
     gain: float = 1.0,
     lift: float = 0.0,
     saturation: float = 1.0,
     temperature: float = 6500.0,
+    # Extended Resolve-style controls (v3.2 sync)
+    offset: float = 0.0,  # global additive offset (applied first)
+    contrast: float = 1.0,  # contrast multiplier (pivoted)
+    pivot: float = 0.18,  # contrast pivot point
+    shadows: float = 0.0,  # shadow lift/crush (-1..1)
+    highlights: float = 0.0,  # highlight expand/compress (-1..1)
+    hue_shift: float = 0.0,  # degrees (-180..180)
+    # LUT
     lut_name: str = "None",
     lut_intensity: float = 1.0,
 ) -> np.ndarray:
     """
     Apply full grading stack to a float32 image.
-    
-    Pipeline order (industry standard):
-        Lift → Exposure → Gain → Gamma → Saturation → Temperature → LUT
-    
+
+    Pipeline order is IDENTICAL to the GLSL composite shader so that the
+    passthrough IMAGE output matches what the WebGL viewer displays.
+
     Args:
-        img: float32 (H,W,C), values can exceed [0,1] for HDR
-        exposure: Stops of exposure compensation (-6 to +6)
-        gamma: Display gamma (0.1 to 4.0, 1.0 = linear)
-        gain: Multiplicative gain (0.0 to 5.0, 1.0 = unity)
-        lift: Additive offset to shadows (-1.0 to 1.0)
-        saturation: Color saturation (0.0 = mono, 1.0 = normal, 3.0 = hyper)
+        img:         float32 (H,W,C), values can exceed [0,1] for HDR
+        exposure:    Stops of exposure compensation (-6 to +6)
+        gamma:       Artistic midtone gamma (0.1–4.0, 1.0 = identity)
+        gain:        Multiplicative gain (0.0–5.0, 1.0 = unity)
+        lift:        Shadow additive offset (-1.0–1.0, luma-pivoted)
+        saturation:  Color saturation (0.0 = mono, 1.0 = normal, 3.0 = hyper)
         temperature: Color temperature in Kelvin (2000 = warm, 12000 = cool)
-        lut_name: Name of built-in LUT to apply
-        lut_intensity: LUT blend factor (0.0 to 1.0)
-    
+        offset:      Global additive offset applied before everything else
+        contrast:    Contrast multiplier around pivot (1.0 = identity)
+        pivot:       Contrast pivot point (default 0.18 = 18% grey)
+        shadows:     Shadow region brightness (-1..1)
+        highlights:  Highlight region brightness (-1..1)
+        hue_shift:   Hue rotation in degrees
+        lut_name:    Name of built-in LUT to apply
+        lut_intensity: LUT blend factor (0.0–1.0)
+
     Returns:
-        float32 numpy array, same shape
+        float32 numpy array, same shape as input
     """
     out = img.astype(np.float32, copy=True)
 
-    # Skip if all defaults (fast path)
+    # Fast-path: skip if all controls are at identity
     is_default = (
         abs(exposure) < 0.001
         and abs(gamma - 1.0) < 0.001
         and abs(gain - 1.0) < 0.001
         and abs(lift) < 0.001
+        and abs(offset) < 0.001
         and abs(saturation - 1.0) < 0.001
+        and abs(contrast - 1.0) < 0.001
+        and abs(shadows) < 0.001
+        and abs(highlights) < 0.001
+        and abs(hue_shift) < 0.1
         and abs(temperature - 6500.0) < 10.0
         and lut_name == "None"
     )
     if is_default:
         return out
 
-    # ── Lift (shadow offset) ──
-    if abs(lift) > 0.001:
-        out += lift
+    # ── 1. Offset ──────────────────────────────────────────────────────────────
+    if abs(offset) > 0.001:
+        out += np.float32(offset)
 
-    # ── Exposure (stops) ──
+    # ── 2. Exposure ────────────────────────────────────────────────────────────
     if abs(exposure) > 0.001:
-        out *= np.float32(2.0 ** exposure)
+        out *= np.float32(2.0**exposure)
 
-    # ── Gain (multiplier) ──
-    if abs(gain - 1.0) > 0.001:
-        out *= np.float32(gain)
-
-    # ── Gamma (power curve on positive values) ──
-    if abs(gamma - 1.0) > 0.001:
-        inv_gamma = np.float32(1.0 / max(gamma, 0.01))
-        positive = out > 0
-        out[positive] = np.power(out[positive], inv_gamma)
-
-    # ── Saturation ──
-    if abs(saturation - 1.0) > 0.001 and out.ndim == 3 and out.shape[2] >= 3:
-        lum = (0.2126 * out[..., 0] + 0.7152 * out[..., 1] + 0.0722 * out[..., 2])
-        for c in range(min(out.shape[2], 3)):
-            out[..., c] = lum + saturation * (out[..., c] - lum)
-
-    # ── Color Temperature (Tanner Helland approximation) ──
+    # ── 3. White Balance ───────────────────────────────────────────────────────
     if abs(temperature - 6500.0) > 10.0 and out.ndim == 3 and out.shape[2] >= 3:
         r_mult, g_mult, b_mult = _kelvin_to_rgb_multipliers(temperature)
         out[..., 0] *= np.float32(r_mult)
         out[..., 1] *= np.float32(g_mult)
         out[..., 2] *= np.float32(b_mult)
 
-    # ── LUT (last in chain) ──
+    # ── 4. Lift / Gain / Gamma  (Resolve-style) ───────────────────────────────
+    # Lift: additive shift to shadows, pivoted by luma so whites are unaffected
+    if abs(lift) > 0.001 and out.ndim == 3 and out.shape[2] >= 3:
+        luma = 0.2126 * out[..., 0] + 0.7152 * out[..., 1] + 0.0722 * out[..., 2]
+        pivot_lift = np.clip(1.0 - luma, 0.0, 1.0)[..., np.newaxis]
+        out += np.float32(lift) * pivot_lift
+
+    # Gain: multiplicative slope
+    if abs(gain - 1.0) > 0.001:
+        out *= np.float32(gain)
+
+    # Gamma: power curve on positives only
+    if abs(gamma - 1.0) > 0.001:
+        inv_gamma = np.float32(1.0 / max(gamma, 0.01))
+        positive = out > 0
+        out[positive] = np.power(out[positive], inv_gamma)
+
+    # ── 5. Contrast ────────────────────────────────────────────────────────────
+    if abs(contrast - 1.0) > 0.001:
+        out = (out - np.float32(pivot)) * np.float32(contrast) + np.float32(pivot)
+
+    # ── 6. Shadows / Highlights ────────────────────────────────────────────────
+    if (
+        (abs(shadows) > 0.001 or abs(highlights) > 0.001)
+        and out.ndim == 3
+        and out.shape[2] >= 3
+    ):
+        luma = 0.2126 * out[..., 0] + 0.7152 * out[..., 1] + 0.0722 * out[..., 2]
+        # Quadratic weights — matches GLSL smoothstep approach
+        s_weight = np.power(np.clip(1.0 - luma, 0.0, 1.0), 2.0)[..., np.newaxis]
+        h_weight = np.power(np.clip(luma, 0.0, 1.0), 2.0)[..., np.newaxis]
+        out *= 1.0 + np.float32(shadows) * s_weight * 0.5
+        out *= 1.0 + np.float32(highlights) * h_weight * 0.5
+        out = np.maximum(out, 0.0)
+
+    # ── 7. Saturation ──────────────────────────────────────────────────────────
+    if abs(saturation - 1.0) > 0.001 and out.ndim == 3 and out.shape[2] >= 3:
+        luma = 0.2126 * out[..., 0] + 0.7152 * out[..., 1] + 0.0722 * out[..., 2]
+        for c in range(min(out.shape[2], 3)):
+            out[..., c] = luma + saturation * (out[..., c] - luma)
+
+    # ── 8. Hue Shift ───────────────────────────────────────────────────────────
+    if abs(hue_shift) > 0.1 and out.ndim == 3 and out.shape[2] >= 3:
+        pass
+
+        h_shift = hue_shift / 360.0
+        rgb = out[..., :3]
+        # Vectorised HSV shift using numpy
+        r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+        cmax = np.maximum(np.maximum(r, g), b)
+        cmin = np.minimum(np.minimum(r, g), b)
+        delta = cmax - cmin + 1e-10
+
+        h = (
+            np.where(
+                cmax == r,
+                (g - b) / delta % 6,
+                np.where(cmax == g, (b - r) / delta + 2, (r - g) / delta + 4),
+            )
+            / 6.0
+        )
+        s = np.where(cmax > 1e-10, delta / cmax, 0.0)
+        v = cmax
+
+        h = (h + h_shift) % 1.0
+
+        i = (h * 6).astype(int)
+        f = h * 6 - i
+        p = v * (1 - s)
+        q = v * (1 - f * s)
+        t = v * (1 - (1 - f) * s)
+
+        i6 = i % 6
+        r_out = np.select(
+            [i6 == 0, i6 == 1, i6 == 2, i6 == 3, i6 == 4, i6 == 5], [v, q, p, p, t, v]
+        )
+        g_out = np.select(
+            [i6 == 0, i6 == 1, i6 == 2, i6 == 3, i6 == 4, i6 == 5], [t, v, v, q, p, p]
+        )
+        b_out = np.select(
+            [i6 == 0, i6 == 1, i6 == 2, i6 == 3, i6 == 4, i6 == 5], [p, p, t, v, v, q]
+        )
+
+        out[..., 0] = r_out
+        out[..., 1] = g_out
+        out[..., 2] = b_out
+
+    # ── 9. LUT (last in chain) ─────────────────────────────────────────────────
     if lut_name != "None" and lut_intensity > 0.0:
         out = apply_lut(out, lut_name, lut_intensity)
 
@@ -466,6 +875,7 @@ def _kelvin_to_rgb_multipliers(kelvin: float) -> Tuple[float, float, float]:
 #                      TENSOR UTILITIES
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def safe_tensor_to_numpy(tensor: torch.Tensor) -> np.ndarray:
     """
     Safely convert a torch tensor to numpy, handling all dtypes.
@@ -499,14 +909,15 @@ def compute_data_range(img_np: np.ndarray) -> Tuple[float, float, bool]:
 #                      16-BIT PNG SAVE (v1.21)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def save_16bit_png(filepath: str, img_uint16: np.ndarray) -> bool:
     """
     Save a uint16 numpy array as a true 16-bit PNG using cv2.
-    
+
     Args:
         filepath: Output file path
         img_uint16: uint16 array — (H,W,3) RGB, (H,W,4) RGBA, or (H,W) gray
-        
+
     Returns:
         True on success, False on failure
     """
@@ -518,24 +929,22 @@ def save_16bit_png(filepath: str, img_uint16: np.ndarray) -> bool:
         if img_uint16.ndim == 3 and img_uint16.shape[2] == 3:
             bgr = cv2.cvtColor(img_uint16, cv2.COLOR_RGB2BGR)
             return cv2.imwrite(
-                filepath, bgr,
-                [cv2.IMWRITE_PNG_COMPRESSION, CV2_PNG_COMPRESSION]
+                filepath, bgr, [cv2.IMWRITE_PNG_COMPRESSION, CV2_PNG_COMPRESSION]
             )
         elif img_uint16.ndim == 3 and img_uint16.shape[2] == 4:
             bgra = cv2.cvtColor(img_uint16, cv2.COLOR_RGBA2BGRA)
             return cv2.imwrite(
-                filepath, bgra,
-                [cv2.IMWRITE_PNG_COMPRESSION, CV2_PNG_COMPRESSION]
+                filepath, bgra, [cv2.IMWRITE_PNG_COMPRESSION, CV2_PNG_COMPRESSION]
             )
         elif img_uint16.ndim == 3 and img_uint16.shape[2] == 1:
             return cv2.imwrite(
-                filepath, img_uint16[:, :, 0],
-                [cv2.IMWRITE_PNG_COMPRESSION, CV2_PNG_COMPRESSION]
+                filepath,
+                img_uint16[:, :, 0],
+                [cv2.IMWRITE_PNG_COMPRESSION, CV2_PNG_COMPRESSION],
             )
         elif img_uint16.ndim == 2:
             return cv2.imwrite(
-                filepath, img_uint16,
-                [cv2.IMWRITE_PNG_COMPRESSION, CV2_PNG_COMPRESSION]
+                filepath, img_uint16, [cv2.IMWRITE_PNG_COMPRESSION, CV2_PNG_COMPRESSION]
             )
         else:
             logger.warning(f"Unsupported shape for 16-bit save: {img_uint16.shape}")
@@ -546,8 +955,9 @@ def save_16bit_png(filepath: str, img_uint16: np.ndarray) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#                     RADIANCE VIEWER NODE v2.0
+#                     RADIANCE VIEWER NODE v2.1
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class RadianceViewer:
     """
@@ -570,38 +980,44 @@ class RadianceViewer:
                 "image": ("IMAGE",),
             },
             "optional": {
-                "bit_depth": (BIT_DEPTH_MODES, {
-                    "default": "16-bit (Quality)",
-                    "tooltip": (
-                        "8-bit: Fast, 256 levels. "
-                        "16-bit: Quality, 65536 levels. "
-                        "16-bit + HDR: Adds float32 sidecar for true HDR color picker."
-                    ),
-                }),
+                "bit_depth": (
+                    BIT_DEPTH_MODES,
+                    {
+                        "default": "16-bit (Quality)",
+                        "tooltip": (
+                            "8-bit: Fast, 256 levels. "
+                            "16-bit: Quality, 65536 levels. "
+                            "16-bit + HDR: Adds float32 sidecar for true HDR color picker."
+                        ),
+                    },
+                ),
                 # ── Compare / Depth ──
                 "compare_image": ("IMAGE",),
-                "zdepth": ("IMAGE", {
-                    "tooltip": "Z-Depth map to display when pressing Z button"
-                }),
+                "zdepth": (
+                    "IMAGE",
+                    {"tooltip": "Z-Depth map to display when pressing Z button"},
+                ),
             },
             "hidden": {
                 "prompt": "PROMPT",
                 "extra_pnginfo": "EXTRA_PNGINFO",
-            }
+            },
         }
 
-    # v2.0: IMAGE passthrough + metadata outputs
+    # v2.1: IMAGE passthrough + metadata outputs
     RETURN_TYPES = ("IMAGE", "STRING")
     RETURN_NAMES = ("image", "metadata")
     FUNCTION = "view"
     CATEGORY = "FXTD Studios/Radiance/Views"
     OUTPUT_NODE = True
-    DESCRIPTION = """VFX Industry-Standard Viewer with IMAGE passthrough:
-• Channel viewing (RGB/R/G/B/Alpha/Luma)
-• Z-Depth visualization
-• False color & zebra analysis
-• A/B comparison modes
-• 16-bit PNG / HDR sidecar
+    DESCRIPTION = """VFX Industry-Standard Viewer v3.2 — Pro Evolution:
+• GPU Waveform / RGB Parade / Vectorscope / Histogram scopes
+• Power Windows masking (Radial + Box, feather, rotation)
+• Comparison Bridge — mouse-draggable wipe + reference shelf (8 stills)
+• Anamorphic lens streaks + Brown-Conrady k1/k2 distortion
+• Edge-preserving Bilateral Filter denoising (7×7 GPU kernel)
+• Channel viewing (RGB/R/G/B/Alpha/Luma), False Color, Zebra
+• 16-bit PNG + .rhdr HDR sidecar + .exr export
 • IMAGE passthrough — no longer a dead-end node"""
 
     def view(
@@ -613,7 +1029,7 @@ class RadianceViewer:
         zdepth: Optional[torch.Tensor] = None,
         # Hidden
         prompt: Optional[Any] = None,
-        extra_pnginfo: Optional[Any] = None
+        extra_pnginfo: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Process and display the image in the Radiance Viewer."""
 
@@ -650,7 +1066,9 @@ class RadianceViewer:
             for frame_idx in range(batch_size):
                 try:
                     frame_result = self._process_frame(
-                        image, frame_idx, output_dir,
+                        image,
+                        frame_idx,
+                        output_dir,
                         use_16bit=use_16bit,
                         save_hdr_sidecar=save_hdr_sidecar,
                         prefix="radiance_viewer",
@@ -666,7 +1084,8 @@ class RadianceViewer:
             # Compare image
             if compare_image is not None:
                 compare_list = self._process_compare_image(
-                    compare_image, output_dir,
+                    compare_image,
+                    output_dir,
                     use_16bit=use_16bit,
                     save_hdr_sidecar=save_hdr_sidecar,
                 )
@@ -675,7 +1094,8 @@ class RadianceViewer:
             # Z-Depth
             if zdepth is not None:
                 zdepth_list = self._process_zdepth_image(
-                    zdepth, output_dir,
+                    zdepth,
+                    output_dir,
                     use_16bit=use_16bit,
                     save_hdr_sidecar=save_hdr_sidecar,
                 )
@@ -733,7 +1153,7 @@ class RadianceViewer:
         return None
 
     # ─────────────────────────────────────────────────────────────────────
-    # Frame Processing (v2.0: grading + LUT + 16-bit)
+    # Frame Processing (v2.1: grading + LUT + 16-bit)
     # ─────────────────────────────────────────────────────────────────────
 
     def _process_frame(
@@ -766,7 +1186,7 @@ class RadianceViewer:
         # FIX v2.1: Do NOT apply grading to the preview image saved to disk.
         # The frontend viewer applies grading in real-time via WebGL.
         # If we bake it here, it gets applied twice.
-        
+
         # ── v2.2 ARCHITECTURE: RHDR is the primary display format ──
         # Like DJV/RV viewing EXR natively: viewer loads compressed half-float
         # directly into GPU and tonemaps in real-time. PNG is reduced to a
@@ -778,38 +1198,40 @@ class RadianceViewer:
 
         unique_id = uuid.uuid4().hex[:12]
 
+        # ── Data Prep ──
+        h_frame, w_frame = frame.shape[:2]
+        c_frame = frame.shape[2] if frame.ndim == 3 else 1
+
+        # Pad RGB to RGBA for WebGL/OpenCV consistency
+        # Many Windows/NVIDIA WebGL drivers fail with 3-channel float textures
+        if c_frame == 3:
+            frame_to_save = np.ones((h_frame, w_frame, 4), dtype=np.float32)
+            frame_to_save[..., :3] = frame
+            c_frame = 4
+        else:
+            frame_to_save = frame
+
         # ── 1. PRIMARY: Save .rhdr compressed float16 ──
         # Only if usage of 16-bit is requested.
         rhdr_filename = f"{prefix}_{unique_id}_{frame_idx}.rhdr"
         rhdr_saved = False
-        
+
         if use_16bit:
             try:
                 import struct
-                # Pad RGB to RGBA for WebGL compatibility
-                # Many Windows/NVIDIA WebGL drivers fail with 3-channel float textures (incomplete texture)
-                h_frame, w_frame = frame.shape[:2]
-                c_frame = frame.shape[2] if frame.ndim == 3 else 1
-                
-                if c_frame == 3:
-                    # Create 4-channel array with Alpha=1.0
-                    padded = np.ones((h_frame, w_frame, 4), dtype=np.float32)
-                    padded[..., :3] = frame
-                    frame_to_save = padded
-                    c_frame = 4
-                else:
-                    frame_to_save = frame
 
                 rhdr_filepath = safe_join(output_dir, rhdr_filename)
                 fp16_data = frame_to_save.astype(np.float16).tobytes()
                 compressed = zlib.compress(fp16_data, level=6)
-                
-                header = struct.pack('<4sHHHH', b'RHDR', w_frame, h_frame, c_frame, 0)
-                with open(rhdr_filepath, 'wb') as rhdr_f:
+
+                header = struct.pack("<4sHHHH", b"RHDR", w_frame, h_frame, c_frame, 0)
+                with open(rhdr_filepath, "wb") as rhdr_f:
                     rhdr_f.write(header)
                     rhdr_f.write(compressed)
                 rhdr_saved = True
-                ratio = len(compressed) / len(fp16_data) * 100 if len(fp16_data) > 0 else 0
+                ratio = (
+                    len(compressed) / len(fp16_data) * 100 if len(fp16_data) > 0 else 0
+                )
                 logger.debug(
                     f"RHDR primary saved: {rhdr_filename} "
                     f"({len(compressed)//1024}KB, {ratio:.0f}% ratio | "
@@ -821,23 +1243,40 @@ class RadianceViewer:
         # ── 2. SECONDARY: Save .exr (OpenEXR 32-bit float) for external use ──
         # Requested by users for "Save Image" to export true HDR.
         exr_filename = f"{prefix}_{unique_id}_{frame_idx}.exr"
-        if HAS_CV2 and has_hdr:
+        exr_saved = False
+        if HAS_CV2 or HAS_IMAGEIO:
             try:
                 exr_filepath = safe_join(output_dir, exr_filename)
-                # OpenCV expects BGR
-                if frame_to_save.ndim == 3 and frame_to_save.shape[2] >= 3:
-                     # RGB -> BGR
-                    exr_data = frame_to_save[..., [2, 1, 0] + list(range(3, frame_to_save.shape[2]))]
-                else:
-                    exr_data = frame_to_save
-                
-                # Save as float32
-                cv2.imwrite(exr_filepath, exr_data.astype(np.float32))
+
+                # Check if we have valid float data
+                save_data = frame_to_save.astype(np.float32)
+
+                if HAS_CV2:
+                    # OpenCV expects BGR
+                    if save_data.ndim == 3 and save_data.shape[2] >= 3:
+                        # RGB -> BGR (handles 3 or 4+ channels safely)
+                        bgr_order = [2, 1, 0] + list(range(3, save_data.shape[2]))
+                        exr_data = save_data[..., np.array(bgr_order)]
+                    else:
+                        exr_data = save_data
+
+                    success = cv2.imwrite(exr_filepath, exr_data)
+                    if success:
+                        exr_saved = True
+
+                # Fallback to imageio if cv2 failed or not available
+                if not exr_saved and HAS_IMAGEIO:
+                    imageio.imwrite(exr_filepath, save_data, format="EXR-FI")
+                    exr_saved = True
+
             except Exception as e:
-                logger.warning(f"Failed to save EXR: {e}")
-                exr_filename = None  # Failed
+                logger.warning(f"Failed to save EXR for frame {frame_idx}: {e}")
+                exr_filename = None
         else:
-             exr_filename = None
+            exr_filename = None
+
+        if not exr_saved:
+            exr_filename = None
 
         # v3.1 FIX: Always save full-resolution PNG as fallback.
         # Previously 256px thumbnail was used when RHDR was saved, but if RHDR
@@ -858,11 +1297,11 @@ class RadianceViewer:
             try:
                 if HAS_CV2:
                     preview_thumb = cv2.resize(
-                        preview_image, (new_w, new_h),
-                        interpolation=cv2.INTER_AREA
+                        preview_image, (new_w, new_h), interpolation=cv2.INTER_AREA
                     )
                 else:
                     from PIL import Image as PILImage
+
                     pil_full = self._frame_to_pil_8bit(preview_image)
                     if pil_full:
                         pil_full = pil_full.resize((new_w, new_h), PILImage.LANCZOS)
@@ -898,7 +1337,9 @@ class RadianceViewer:
 
         if rhdr_saved:
             result["hdr_sidecar"] = rhdr_filename
-            result["hdr_primary"] = True  # v2.2: tells viewer to load .rhdr as display source
+            result["hdr_primary"] = (
+                True  # v2.2: tells viewer to load .rhdr as display source
+            )
 
         return result
 
@@ -913,13 +1354,13 @@ class RadianceViewer:
         img_8bit = self._convert_to_8bit(frame)
 
         if img_8bit.ndim == 3 and img_8bit.shape[2] == 4:
-            return PILImage.fromarray(img_8bit, mode='RGBA')
+            return PILImage.fromarray(img_8bit, mode="RGBA")
         elif img_8bit.ndim == 3 and img_8bit.shape[2] == 3:
-            return PILImage.fromarray(img_8bit, mode='RGB')
+            return PILImage.fromarray(img_8bit, mode="RGB")
         elif img_8bit.ndim == 3 and img_8bit.shape[2] == 1:
-            return PILImage.fromarray(img_8bit[:, :, 0], mode='L')
+            return PILImage.fromarray(img_8bit[:, :, 0], mode="L")
         elif img_8bit.ndim == 2:
-            return PILImage.fromarray(img_8bit, mode='L')
+            return PILImage.fromarray(img_8bit, mode="L")
 
         logger.warning(f"Unexpected 8-bit image shape: {img_8bit.shape}")
         return None
@@ -933,7 +1374,7 @@ class RadianceViewer:
         compare_image: torch.Tensor,
         output_dir: str,
         use_16bit: bool = True,
-        save_hdr_sidecar: bool = False
+        save_hdr_sidecar: bool = False,
     ) -> List[Dict[str, Any]]:
         """Process comparison image. Returns list of image metadata."""
         result: List[Dict[str, Any]] = []
@@ -949,10 +1390,12 @@ class RadianceViewer:
         for cmp_idx in range(cmp_batch):
             try:
                 frame_result = self._process_frame(
-                    compare_image, cmp_idx, output_dir,
+                    compare_image,
+                    cmp_idx,
+                    output_dir,
                     use_16bit=use_16bit,
                     save_hdr_sidecar=save_hdr_sidecar,
-                    prefix="radiance_compare"
+                    prefix="radiance_compare",
                 )
                 if frame_result is not None:
                     frame_result["is_compare"] = True
@@ -973,7 +1416,7 @@ class RadianceViewer:
         zdepth: torch.Tensor,
         output_dir: str,
         use_16bit: bool = True,
-        save_hdr_sidecar: bool = False
+        save_hdr_sidecar: bool = False,
     ) -> List[Dict[str, Any]]:
         """Process Z-depth map. 16-bit = 65536 depth levels via cv2."""
         result: List[Dict[str, Any]] = []
@@ -1037,14 +1480,16 @@ class RadianceViewer:
                         success = save_16bit_png(depth_filepath, depth_16bit)
                         if not success:
                             from PIL import Image as PILImage
+
                             depth_8bit = (depth_normalized * BIT_8_MAX).astype(np.uint8)
-                            PILImage.fromarray(depth_8bit, mode='L').save(
+                            PILImage.fromarray(depth_8bit, mode="L").save(
                                 depth_filepath, compress_level=DEFAULT_PNG_COMPRESSION
                             )
                     else:
                         from PIL import Image as PILImage
+
                         depth_8bit = (depth_normalized * BIT_8_MAX).astype(np.uint8)
-                        PILImage.fromarray(depth_8bit, mode='L').save(
+                        PILImage.fromarray(depth_8bit, mode="L").save(
                             depth_filepath, compress_level=DEFAULT_PNG_COMPRESSION
                         )
                 except (IOError, OSError) as e:
@@ -1065,13 +1510,14 @@ class RadianceViewer:
                     npy_filename = f"radiance_zdepth_{unique_id}_{depth_idx}_float.rhdr"
                     try:
                         import struct
+
                         npy_filepath = safe_join(output_dir, npy_filename)
                         fp16_data = depth_np.astype(np.float16).tobytes()
                         compressed = zlib.compress(fp16_data, level=6)
                         dh, dw = depth_np.shape[:2]
                         dc = depth_np.shape[2] if depth_np.ndim == 3 else 1
-                        header = struct.pack('<4sHHHH', b'RHDR', dw, dh, dc, 0)
-                        with open(npy_filepath, 'wb') as rhdr_f:
+                        header = struct.pack("<4sHHHH", b"RHDR", dw, dh, dc, 0)
+                        with open(npy_filepath, "wb") as rhdr_f:
                             rhdr_f.write(header)
                             rhdr_f.write(compressed)
                         frame_meta["hdr_sidecar"] = npy_filename
@@ -1095,7 +1541,9 @@ class RadianceViewer:
         if img_np.dtype in (np.float32, np.float64):
             return (np.clip(img_np, 0.0, 1.0) * BIT_16_MAX).astype(np.uint16)
         elif img_np.dtype == np.float16:
-            return (np.clip(img_np.astype(np.float32), 0.0, 1.0) * BIT_16_MAX).astype(np.uint16)
+            return (np.clip(img_np.astype(np.float32), 0.0, 1.0) * BIT_16_MAX).astype(
+                np.uint16
+            )
         elif img_np.dtype == np.uint16:
             return img_np
         elif img_np.dtype == np.uint8:
@@ -1110,7 +1558,9 @@ class RadianceViewer:
     def _convert_to_8bit(self, img_np: np.ndarray) -> np.ndarray:
         """Convert float32 image to uint8."""
         if img_np.dtype in (np.float32, np.float64, np.float16):
-            return (np.clip(img_np.astype(np.float32), 0.0, 1.0) * BIT_8_MAX).astype(np.uint8)
+            return (np.clip(img_np.astype(np.float32), 0.0, 1.0) * BIT_8_MAX).astype(
+                np.uint8
+            )
         elif img_np.dtype == np.uint16:
             return (img_np // BIT_16_TO_8_DIVISOR).astype(np.uint8)
         elif img_np.dtype == np.uint8:
@@ -1126,9 +1576,6 @@ class RadianceViewer:
 # ═══════════════════════════════════════════════════════════════════════════════
 #                           NODE REGISTRATION
 # ═══════════════════════════════════════════════════════════════════════════════
-
-# Need json for metadata output
-import json
 
 NODE_CLASS_MAPPINGS = {
     "FXTD_RadianceViewer": RadianceViewer,

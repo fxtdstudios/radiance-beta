@@ -1,18 +1,17 @@
-
 from .upscale import (
-    RadianceProUpscale, 
+    RadianceProUpscale,
     RadianceUpscaleBySize,
     RadianceDownscale32bit,
     RadianceBitDepthConvert,
-    RadianceAIUpscale
+    RadianceAIUpscale,
 )
 from .resolution import RadianceResolution
 
 __all__ = [
     "RadianceProUpscale",
-    "RadianceUpscaleBySize", 
+    "RadianceUpscaleBySize",
     "RadianceDownscale32bit",
     "RadianceBitDepthConvert",
     "RadianceAIUpscale",
-    "RadianceResolution"
+    "RadianceResolution",
 ]

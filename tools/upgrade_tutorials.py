@@ -1,4 +1,3 @@
-
 import os
 import re
 
@@ -120,6 +119,7 @@ JS = """
     </script>
 """
 
+
 def upgrade_tutorials():
     if not os.path.exists(TUTORIALS_PATH):
         print("tutorials.html not found!")
@@ -140,27 +140,27 @@ def upgrade_tutorials():
     # Find all <div class="step" ...> ... <h3> and insert checkbox
     # Using regex to match specific structure
     # Match: <div class="step" data-step="1"> \n <h3> -> <div...> \n <h3><input...>
-    
+
     # We'll use a reliable replacement pattern
     # Replace '<h3>' with '<h3><input type="checkbox" class="step-check">' BUT only if it's inside a step?
     # Actually, the file structure is consistent. All <h3> inside the body content are either headers (already handled?) or step headers.
     # The tutorial links used <h3> too! We don't want checkboxes there.
     # The links are <a href... class="tutorial-link"> <h3>...</h3> </a>
     # The Step headers are inside <div class="step"...>
-    
+
     # Let's iterate line by line or use specific regex for the step container
     # Complex regex: (<div class="step"[^>]*>\s*<h3>)
     content = re.sub(
-        r'(<div class="step"[^>]*>\s*<h3>)', 
-        r'\1<input type="checkbox" class="step-check">', 
-        content
+        r'(<div class="step"[^>]*>\s*<h3>)',
+        r'\1<input type="checkbox" class="step-check">',
+        content,
     )
 
     # 4. Inject Copy Buttons
     # Wrap .workflow in a container? Or just prepend button if we make it absolute?
     # Current: <div class="workflow">...</div>
     # New: <div class="workflow-container"><button...>Copy</button><div class="workflow">...</div></div>
-    
+
     # Regex for workflow div
     # We match the opening tag and wrap it
     # note: We need to close the container too. This is hard with regex if we don't know where it ends.
@@ -168,23 +168,24 @@ def upgrade_tutorials():
     # If I just inject the button *inside* the `.workflow` div (at the start), and make `.workflow` relative?
     # That changes the DOM.
     # Better: Wrap it.
-    
+
     # Let's try injecting the button *immediately before* `<div class="workflow">` and wrap both in a `div`?
     # No, simple is best.
     # Let's add `position: relative` to `.workflow` styles (I can allow that in CSS).
     # And inject the button *inside* `<div class="workflow">`.
     # Replace `<div class="workflow">` with `<div class="workflow" style="position:relative"><button class="copy-btn">📋 Copy</button>`
     content = re.sub(
-        r'(<div class="workflow">)', 
-        r'<div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋 Copy</button>', 
-        content
+        r'(<div class="workflow">)',
+        r'<div class="workflow" style="position: relative; padding-top: 2.5rem;"><button class="copy-btn">📋 Copy</button>',
+        content,
     )
     # Added padding-top to make room for the button so it doesn't overlap text.
 
     with open(TUTORIALS_PATH, "w", encoding="utf-8") as f:
         f.write(content)
-    
+
     print("tutorials.html upgraded successfully!")
+
 
 if __name__ == "__main__":
     upgrade_tutorials()

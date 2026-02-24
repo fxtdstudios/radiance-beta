@@ -60,7 +60,6 @@ v3.0 — 23 bugs fixed from v1.0:
 import torch
 import numpy as np
 import os
-import json
 import time
 import logging
 import hashlib
@@ -86,6 +85,7 @@ logger = logging.getLogger("radiance.nuke.bridge")
 # ═══════════════════════════════════════════════════════════════════════════════
 #                              HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def _get_bridge_temp_dir() -> str:
     """
@@ -113,7 +113,7 @@ def _cleanup_old_files(bridge_dir: str, stream_name: str, max_age: float = 300.0
                         os.remove(fpath)
                 except OSError:
                     pass
-    except Exception:
+    except Exception:  # nosec B110
         pass
 
 
@@ -179,7 +179,9 @@ def _write_exr_all_channels(
 
         if write_exr_cv2(filepath, img_cv, bit_depth, compression):
             if depth is not None:
-                logger.warning("OpenCV: Depth (Z) channel omitted (not supported by cv2.imwrite)")
+                logger.warning(
+                    "OpenCV: Depth (Z) channel omitted (not supported by cv2.imwrite)"
+                )
             logger.debug(f"EXR via OpenCV: {filepath}")
             return True
     except Exception as e:
@@ -213,12 +215,13 @@ def _perceptual_hash(img_np: np.ndarray) -> str:
     step_h = max(1, h // 32)
     step_w = max(1, w // 32)
     sample = img_np[::step_h, ::step_w, :3].astype(np.float16)
-    return hashlib.md5(sample.tobytes()).hexdigest()
+    return hashlib.md5(sample.tobytes()).hexdigest()  # nosec B324
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                           NUKE BRIDGE NODE
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class RadianceNukeBridge:
     """
@@ -251,75 +254,111 @@ class RadianceNukeBridge:
         return {
             "required": {
                 "images": ("IMAGE",),
-                "host": ("STRING", {
-                    "default": "127.0.0.1",
-                    "tooltip": "Nuke machine IP address. 127.0.0.1 for same machine.",
-                }),
-                "port": ("INT", {
-                    "default": 1986,
-                    "min": 1024,
-                    "max": 65535,
-                    "tooltip": "TCP port matching scripts/start_nuke_server.py in Nuke.",
-                }),
-                "stream_name": ("STRING", {
-                    "default": "RadianceStream",
-                    "tooltip": (
-                        "Nuke Read node name. Reused across updates — "
-                        "no duplicate nodes created."
-                    ),
-                }),
+                "host": (
+                    "STRING",
+                    {
+                        "default": "127.0.0.1",
+                        "tooltip": "Nuke machine IP address. 127.0.0.1 for same machine.",
+                    },
+                ),
+                "port": (
+                    "INT",
+                    {
+                        "default": 1986,
+                        "min": 1024,
+                        "max": 65535,
+                        "tooltip": "TCP port matching scripts/start_nuke_server.py in Nuke.",
+                    },
+                ),
+                "stream_name": (
+                    "STRING",
+                    {
+                        "default": "RadianceStream",
+                        "tooltip": (
+                            "Nuke Read node name. Reused across updates — "
+                            "no duplicate nodes created."
+                        ),
+                    },
+                ),
             },
             "optional": {
-                "send_mode": (["Always", "On Change", "Never"], {
-                    "default": "Always",
-                    "tooltip": (
-                        "Always: send every execution. "
-                        "On Change: skip if image unchanged (perceptual hash). "
-                        "Never: write EXR to disk only, don't command Nuke."
-                    ),
-                }),
-                "color_space": (cls.NUKE_COLOR_SPACES, {
-                    "default": "linear",
-                    "tooltip": (
-                        "Color space for Nuke's Read node. Must match your "
-                        "pipeline. 'linear' for float32 HDR data."
-                    ),
-                }),
-                "bit_depth": (["32-bit Float", "16-bit Half Float"], {
-                    "default": "32-bit Float",
-                    "tooltip": "EXR precision. Float32 for max quality, Half for smaller files.",
-                }),
-                "compression": (["ZIP", "ZIPS", "PIZ", "DWAA", "None"], {
-                    "default": "ZIP",
-                    "tooltip": "EXR compression. ZIP = fast + good ratio. PIZ = best for noisy.",
-                }),
-                "connect_viewer": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "Auto-connect the Read node to Nuke's Viewer input 0.",
-                }),
-                "raw": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": (
-                        "Bypass Nuke's color management on Read. "
-                        "True = data passes through exactly as written in EXR."
-                    ),
-                }),
-                "start_frame": ("INT", {
-                    "default": 1001,
-                    "min": 0,
-                    "max": 999999,
-                    "tooltip": "First frame number for sequence naming (VFX convention: 1001).",
-                }),
-                "depth_map": ("IMAGE", {
-                    "tooltip": "Optional depth map → EXR 'Z' channel. Visible in Nuke as depth.",
-                }),
-                "output_path": ("STRING", {
-                    "default": "",
-                    "tooltip": (
-                        "Custom output directory for EXR files. Use a shared drive "
-                        "path for remote Nuke machines. Empty = ComfyUI temp dir."
-                    ),
-                }),
+                "send_mode": (
+                    ["Always", "On Change", "Never"],
+                    {
+                        "default": "Always",
+                        "tooltip": (
+                            "Always: send every execution. "
+                            "On Change: skip if image unchanged (perceptual hash). "
+                            "Never: write EXR to disk only, don't command Nuke."
+                        ),
+                    },
+                ),
+                "color_space": (
+                    cls.NUKE_COLOR_SPACES,
+                    {
+                        "default": "linear",
+                        "tooltip": (
+                            "Color space for Nuke's Read node. Must match your "
+                            "pipeline. 'linear' for float32 HDR data."
+                        ),
+                    },
+                ),
+                "bit_depth": (
+                    ["32-bit Float", "16-bit Half Float"],
+                    {
+                        "default": "32-bit Float",
+                        "tooltip": "EXR precision. Float32 for max quality, Half for smaller files.",
+                    },
+                ),
+                "compression": (
+                    ["ZIP", "ZIPS", "PIZ", "DWAA", "None"],
+                    {
+                        "default": "ZIP",
+                        "tooltip": "EXR compression. ZIP = fast + good ratio. PIZ = best for noisy.",
+                    },
+                ),
+                "connect_viewer": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "Auto-connect the Read node to Nuke's Viewer input 0.",
+                    },
+                ),
+                "raw": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": (
+                            "Bypass Nuke's color management on Read. "
+                            "True = data passes through exactly as written in EXR."
+                        ),
+                    },
+                ),
+                "start_frame": (
+                    "INT",
+                    {
+                        "default": 1001,
+                        "min": 0,
+                        "max": 999999,
+                        "tooltip": "First frame number for sequence naming (VFX convention: 1001).",
+                    },
+                ),
+                "depth_map": (
+                    "IMAGE",
+                    {
+                        "tooltip": "Optional depth map → EXR 'Z' channel. Visible in Nuke as depth.",
+                    },
+                ),
+                "output_path": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "tooltip": (
+                            "Custom output directory for EXR files. Use a shared drive "
+                            "path for remote Nuke machines. Empty = ComfyUI temp dir."
+                        ),
+                    },
+                ),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -448,8 +487,13 @@ class RadianceNukeBridge:
 
             # Write using full Radiance IO writer chain
             ok = _write_exr_all_channels(
-                filepath, rgb, alpha, depth,
-                bit_depth, compression, metadata,
+                filepath,
+                rgb,
+                alpha,
+                depth,
+                bit_depth,
+                compression,
+                metadata,
             )
 
             if ok:

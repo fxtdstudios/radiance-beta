@@ -31,7 +31,7 @@ class RadianceAdvancedReroute:
     """
 
     COLOR_OPTIONS = [
-        "Auto",      # Picks color based on connected type
+        "Auto",  # Picks color based on connected type
         "Gray",
         "Red",
         "Orange",
@@ -51,13 +51,12 @@ class RadianceAdvancedReroute:
                 "data": ("*",),
             },
             "optional": {
-                "label": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "Label..."
-                }),
+                "label": (
+                    "STRING",
+                    {"default": "", "multiline": False, "placeholder": "Label..."},
+                ),
                 "color": (s.COLOR_OPTIONS, {"default": "Auto"}),
-            }
+            },
         }
 
     RETURN_TYPES = ("*",)

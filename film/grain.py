@@ -34,7 +34,7 @@ import torch
 import torch.nn.functional as F
 import math
 import logging
-from typing import Tuple, Dict, Any, Optional
+from typing import Dict, Any
 
 logger = logging.getLogger("radiance.film.grain")
 
@@ -49,7 +49,6 @@ logger = logging.getLogger("radiance.film.grain")
 
 PROFILES = {
     # ─── FILM STOCKS ──────────────────────────────────────────────────────
-
     # Kodak Motion Picture Negative
     "Kodak Vision3 500T 5219": {
         "type": "film",
@@ -58,16 +57,16 @@ PROFILES = {
         "grain_intensity": 0.22,
         "grain_size": 1.2,
         "grain_softness": 0.45,
-        "grain_character": 0.6,        # 0=Gaussian, 1=full silver-halide clumping
+        "grain_character": 0.6,  # 0=Gaussian, 1=full silver-halide clumping
         "color_sensitivity": [1.15, 1.0, 0.90],  # RGB emulsion response
-        "shadow_grain_boost": 2.0,      # Underexposed film = more visible grain
-        "highlight_shoulder": 0.70,     # Where grain starts to roll off (HDR-aware)
-        "halation": 0.35,              # Red-channel antihalation layer bleed
+        "shadow_grain_boost": 2.0,  # Underexposed film = more visible grain
+        "highlight_shoulder": 0.70,  # Where grain starts to roll off (HDR-aware)
+        "halation": 0.35,  # Red-channel antihalation layer bleed
         "halation_color": [1.0, 0.25, 0.08],
         "film_base": [1.02, 0.99, 0.96],  # Orange mask (neg stock)
         "contrast": 1.1,
         "saturation": 0.95,
-        "gate_weave": 0.0003,          # Sub-pixel film registration jitter
+        "gate_weave": 0.0003,  # Sub-pixel film registration jitter
     },
     "Kodak Vision3 250D 5207": {
         "type": "film",
@@ -105,7 +104,6 @@ PROFILES = {
         "saturation": 1.05,
         "gate_weave": 0.00015,
     },
-
     # Fujifilm
     "Fuji Eterna 500T 8573": {
         "type": "film",
@@ -143,7 +141,6 @@ PROFILES = {
         "saturation": 1.1,
         "gate_weave": 0.0003,
     },
-
     # CineStill (remjet-removed motion picture stock)
     "CineStill 800T": {
         "type": "film",
@@ -156,7 +153,7 @@ PROFILES = {
         "color_sensitivity": [1.12, 1.0, 0.88],
         "shadow_grain_boost": 2.2,
         "highlight_shoulder": 0.55,
-        "halation": 0.65,              # Extreme — no antihalation backing
+        "halation": 0.65,  # Extreme — no antihalation backing
         "halation_color": [1.0, 0.20, 0.05],
         "film_base": [1.03, 0.98, 0.94],
         "contrast": 1.05,
@@ -181,7 +178,6 @@ PROFILES = {
         "saturation": 1.02,
         "gate_weave": 0.00015,
     },
-
     # B&W
     "Kodak Double-X 5222": {
         "type": "film",
@@ -198,7 +194,7 @@ PROFILES = {
         "halation_color": [0.9, 0.9, 0.9],
         "film_base": [1.0, 1.0, 1.0],
         "contrast": 1.25,
-        "saturation": 0.0,            # B&W
+        "saturation": 0.0,  # B&W
         "gate_weave": 0.0003,
     },
     "Kodak Tri-X 400 7266": {
@@ -219,7 +215,6 @@ PROFILES = {
         "saturation": 0.0,
         "gate_weave": 0.00035,
     },
-
     # Vintage / Specialty
     "Super 8mm (Kodachrome)": {
         "type": "film",
@@ -257,9 +252,7 @@ PROFILES = {
         "saturation": 1.15,
         "gate_weave": 0.001,
     },
-
     # ─── DIGITAL CAMERA SENSORS ───────────────────────────────────────────
-
     # ARRI
     "ARRI Alexa 35": {
         "type": "digital",
@@ -268,18 +261,19 @@ PROFILES = {
         "grain_intensity": 0.12,
         "grain_size": 0.8,
         "grain_softness": 0.30,
-        "grain_character": 0.15,        # Digital = mostly Gaussian
+        "grain_character": 0.15,  # Digital = mostly Gaussian
         "color_sensitivity": [1.0, 0.95, 1.1],  # Bayer pattern sensitivity
         "shadow_grain_boost": 1.4,
         "highlight_shoulder": 0.85,
-        "halation": 0.0,               # No halation on digital
+        "halation": 0.0,  # No halation on digital
         "halation_color": [1.0, 0.3, 0.1],
         "film_base": [1.0, 1.0, 1.0],  # No film base
         "contrast": 1.0,
         "saturation": 1.0,
-        "gate_weave": 0.0,             # No gate weave
-        "noise_floor": 0.008,          # Digital-specific: read noise floor
-        "color_science": "LogC4",
+        "gate_weave": 0.0,  # No gate weave
+        "noise_floor": 0.008,  # Digital-specific: read noise floor
+        "color_science": "LogC4",  # Informational only — not used by grain processing
+        # (used by Radiance Manager display node)
     },
     "ARRI Alexa Mini LF": {
         "type": "digital",
@@ -321,7 +315,6 @@ PROFILES = {
         "noise_floor": 0.010,
         "color_science": "LogC3",
     },
-
     # RED
     "RED V-Raptor XL 8K": {
         "type": "digital",
@@ -383,7 +376,6 @@ PROFILES = {
         "noise_floor": 0.006,
         "color_science": "IPP2",
     },
-
     # Sony
     "Sony Venice 2": {
         "type": "digital",
@@ -465,7 +457,6 @@ PROFILES = {
         "noise_floor": 0.004,
         "color_science": "S-Log3",
     },
-
     # Blackmagic
     "Blackmagic URSA Mini Pro 12K": {
         "type": "digital",
@@ -507,7 +498,6 @@ PROFILES = {
         "noise_floor": 0.012,
         "color_science": "BMD Film Gen5",
     },
-
     # Canon
     "Canon C70": {
         "type": "digital",
@@ -529,7 +519,6 @@ PROFILES = {
         "noise_floor": 0.007,
         "color_science": "Canon Log 3",
     },
-
     # Panasonic
     "Panasonic Varicam LT": {
         "type": "digital",
@@ -551,7 +540,6 @@ PROFILES = {
         "noise_floor": 0.007,
         "color_science": "V-Log",
     },
-
     # IMAX
     "IMAX Digital": {
         "type": "digital",
@@ -580,16 +568,17 @@ PROFILES = {
 #                          HDR-SAFE HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def _hdr_luma(img: torch.Tensor) -> torch.Tensor:
     """
     Compute luminance from HDR image using Reinhard tonemap for mask range.
-    
+
     Critical difference from v2.0: does NOT clamp. Uses Reinhard L/(1+L)
     to compress [0, ∞) → [0, 1) for mask calculation. This means:
     - SDR content (0-1): maps ~linearly (L/(1+L) ≈ L for small L)
     - HDR highlights (1-10): smoothly compressed, still get unique mask values
     - Extreme HDR (>10): asymptotically approaches 1.0
-    
+
     The image itself is NEVER modified — only the mask operates in [0,1).
     """
     c = img.shape[-1]
@@ -599,7 +588,11 @@ def _hdr_luma(img: torch.Tensor) -> torch.Tensor:
     else:
         luma = img[..., 0]
 
-    # Reinhard tonemap for mask only — handles negative values too
+    # Reinhard tonemap for mask only — handles HDR range.
+    # abs() ensures negative linear values (possible after heavy colour grading /
+    # out-of-gamut data) don't produce negative Reinhard outputs.  Side effect:
+    # very negative pixels map to the same mask bucket as equivalent-magnitude
+    # positives — shadow masks may be slightly wrong for extreme out-of-gamut data.
     luma_abs = torch.abs(luma)
     luma_mapped = luma_abs / (1.0 + luma_abs)
     return luma_mapped
@@ -617,7 +610,7 @@ def _gaussian_blur_2d(
 
     coords = torch.arange(kernel_size, dtype=torch.float32, device=tensor.device)
     coords -= kernel_size // 2
-    gauss = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+    gauss = torch.exp(-(coords**2) / (2 * sigma**2))
     gauss /= gauss.sum()
 
     kernel_2d = gauss[:, None] * gauss[None, :]
@@ -628,14 +621,18 @@ def _gaussian_blur_2d(
     kernel = kernel_2d.expand(c, 1, kernel_size, kernel_size)
     padding = kernel_size // 2
 
-    blurred = F.conv2d(x, kernel, padding=padding, groups=c)
+    # Reflect-pad before conv so edges don't get a dark halo from zero-padding.
+    # This matches gpu_gaussian_blur in camera.py and is critical for large
+    # halation/grain-softness kernels (CineStill 800T: kernel up to 33px).
+    x_padded = F.pad(x, (padding, padding, padding, padding), mode="reflect")
+    blurred = F.conv2d(x_padded, kernel, padding=0, groups=c)
     return blurred.permute(0, 2, 3, 1)
 
 
 def _overlay_blend_hdr(bg: torch.Tensor, fg_centered: torch.Tensor) -> torch.Tensor:
     """
     HDR-safe Overlay blend.
-    
+
     v2.0 problem: clamped both inputs to [0,1] — destroyed HDR.
     v3.0 fix: decompose image into [0,1] body + HDR residual,
     blend only the body, then restore residual.
@@ -650,9 +647,7 @@ def _overlay_blend_hdr(bg: torch.Tensor, fg_centered: torch.Tensor) -> torch.Ten
     # Standard overlay
     mask = bg_body < 0.5
     result = torch.where(
-        mask,
-        2.0 * bg_body * fg_01,
-        1.0 - 2.0 * (1.0 - bg_body) * (1.0 - fg_01)
+        mask, 2.0 * bg_body * fg_01, 1.0 - 2.0 * (1.0 - bg_body) * (1.0 - fg_01)
     )
 
     # Restore HDR residual
@@ -674,7 +669,10 @@ def _soft_light_blend_hdr(bg: torch.Tensor, fg_centered: torch.Tensor) -> torch.
 
 
 def _generate_grain_texture(
-    b: int, h: int, w: int, c: int,
+    b: int,
+    h: int,
+    w: int,
+    c: int,
     grain_size: float,
     grain_character: float,
     color_sensitivity: list,
@@ -683,12 +681,12 @@ def _generate_grain_texture(
 ) -> torch.Tensor:
     """
     Generate grain texture with physically-based characteristics.
-    
+
     grain_character controls the distribution:
       0.0 = Pure Gaussian (digital sensor noise)
       0.5 = Moderate clumping (fine grain film)
       1.0 = Heavy silver halide clusters (coarse/vintage film)
-    
+
     Real film grain is NOT Gaussian — silver halide crystals form
     irregular clusters. We approximate this by:
     1. Base Gaussian noise at grain-scaled resolution
@@ -702,7 +700,7 @@ def _generate_grain_texture(
     # Base Gaussian noise
     noise = torch.randn((b, noise_h, noise_w, c), device=device, generator=generator)
 
-    # Silver halide clumping: square → re-center
+    # Silver halide clumping: square → re-center → normalize
     if grain_character > 0.01:
         # Squared noise creates positive-biased clumps
         clumped = noise * torch.abs(noise)  # Preserves sign, adds weight to extremes
@@ -712,7 +710,10 @@ def _generate_grain_texture(
         # Blend
         noise = noise * (1.0 - grain_character) + clumped * grain_character
 
-    # Per-channel spectral sensitivity
+    # Per-channel spectral sensitivity.
+    # NOTE: applied BEFORE final std normalization so the normalization accounts
+    # for the channel scaling — previous code normalized first, then scaled,
+    # leaving per-channel variance mis-matched against the target std.
     if c >= 3 and len(color_sensitivity) >= 3:
         noise[..., 0] *= color_sensitivity[0]
         noise[..., 1] *= color_sensitivity[1]
@@ -723,8 +724,7 @@ def _generate_grain_texture(
     # Resize to image dimensions
     if noise_h != h or noise_w != w:
         noise = F.interpolate(
-            noise.permute(0, 3, 1, 2),
-            size=(h, w), mode='bilinear', align_corners=False
+            noise.permute(0, 3, 1, 2), size=(h, w), mode="bilinear", align_corners=False
         ).permute(0, 2, 3, 1)
 
     return noise
@@ -739,7 +739,7 @@ def _apply_halation(
 ) -> torch.Tensor:
     """
     Halation: light scattering through film base around bright areas.
-    
+
     v2.0 problem: used luma.clamp(0.7, 1.0) — missed all HDR highlights.
     v3.0 fix: uses Reinhard-mapped luma, so HDR values 1→∞ produce
     progressively brighter halation (physically correct).
@@ -756,9 +756,12 @@ def _apply_halation(
     # corresponds to real value of 1.0 (perfect for HDR)
     hal_source = (luma - 0.5).clamp(min=0.0) * 2.0  # [0, ~1]
 
-    # Blur to create glow
-    kernel = max(15, int(halation * 50) | 1)
+    # Blur to create glow.
+    # Kernel sized to 6*sigma (covers ±3σ of the Gaussian) with minimum 3.
+    # Previous code used max(15,...) — at low halation values (e.g. 0.05, sigma=0.75)
+    # this produced a 15-pixel kernel for a near-zero-width Gaussian: pure waste.
     sigma = halation * 15.0
+    kernel = max(3, int(sigma * 6) | 1)
     hal_expanded = hal_source.unsqueeze(-1).expand(img.shape[0], -1, -1, min(c, 3))
     glow = _gaussian_blur_2d(hal_expanded, kernel, sigma)
 
@@ -785,38 +788,63 @@ def _apply_gate_weave(
 
     b, h, w, c = img.shape
 
-    # Random offset in pixels (weave_amount is fraction of frame height)
+    # Random offset in pixels (weave_amount is fraction of frame height).
+    # Each frame in the batch gets its own independent shift — a single shared
+    # offset (previous behaviour) made every frame in an animation batch identical.
     max_shift_px = weave_amount * h
-    dx = (torch.rand(1, generator=generator, device=device).item() - 0.5) * 2.0 * max_shift_px
-    dy = (torch.rand(1, generator=generator, device=device).item() - 0.5) * 2.0 * max_shift_px
+    results = []
+    for i in range(b):
+        dx = (
+            (torch.rand(1, generator=generator, device=device).item() - 0.5)
+            * 2.0
+            * max_shift_px
+        )
+        dy = (
+            (torch.rand(1, generator=generator, device=device).item() - 0.5)
+            * 2.0
+            * max_shift_px
+        )
 
-    # Normalized shift for grid_sample
-    shift_x = dx / w * 2.0
-    shift_y = dy / h * 2.0
+        shift_x = dx / w * 2.0
+        shift_y = dy / h * 2.0
 
-    # Build identity grid + offset
-    theta = torch.tensor([
-        [1.0, 0.0, shift_x],
-        [0.0, 1.0, shift_y],
-    ], device=device, dtype=torch.float32).unsqueeze(0).expand(b, -1, -1)
+        theta = torch.tensor(
+            [
+                [1.0, 0.0, shift_x],
+                [0.0, 1.0, shift_y],
+            ],
+            device=device,
+            dtype=torch.float32,
+        ).unsqueeze(
+            0
+        )  # (1, 2, 3)
 
-    grid = F.affine_grid(theta, [b, c, h, w], align_corners=False)
-    img_bchw = img.permute(0, 3, 1, 2)
-    shifted = F.grid_sample(img_bchw, grid, mode='bilinear', padding_mode='border', align_corners=False)
-    return shifted.permute(0, 2, 3, 1)
+        grid = F.affine_grid(theta, [1, c, h, w], align_corners=False)
+        frame_bchw = img[i : i + 1].permute(0, 3, 1, 2)
+        shifted = F.grid_sample(
+            frame_bchw,
+            grid,
+            mode="bilinear",
+            padding_mode="border",
+            align_corners=False,
+        )
+        results.append(shifted.permute(0, 2, 3, 1))
+
+    return torch.cat(results, dim=0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                         UNIFIED GRAIN NODE
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class RadianceFilmGrain:
     """
     Unified photographic grain simulation.
-    
+
     Combines film stock emulation and digital camera noise profiles
     into one node with full float32/HDR support.
-    
+
     Pipeline order (matches real image formation):
     1. Film base color cast (if film stock)
     2. Halation (light scatter before grain)
@@ -834,42 +862,83 @@ class RadianceFilmGrain:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "profile": (list(PROFILES.keys()), {
-                    "default": "Kodak Vision3 500T 5219",
-                    "tooltip": "Camera or film stock profile. Film stocks include halation, gate weave, and silver halide grain character.",
-                }),
-                "intensity": ("FLOAT", {
-                    "default": 1.0, "min": 0.0, "max": 3.0, "step": 0.05,
-                    "tooltip": "Global grain intensity multiplier. 1.0 = profile default.",
-                }),
-                "seed": ("INT", {
-                    "default": 0, "min": 0, "max": 0xffffffffffffffff,
-                    "tooltip": "Random seed for reproducible grain patterns.",
-                }),
+                "profile": (
+                    list(PROFILES.keys()),
+                    {
+                        "default": "Kodak Vision3 500T 5219",
+                        "tooltip": "Camera or film stock profile. Film stocks include halation, gate weave, and silver halide grain character.",
+                    },
+                ),
+                "intensity": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 3.0,
+                        "step": 0.05,
+                        "tooltip": "Global grain intensity multiplier. 1.0 = profile default.",
+                    },
+                ),
+                "seed": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 0xFFFFFFFFFFFFFFFF,
+                        "tooltip": "Random seed for reproducible grain patterns.",
+                    },
+                ),
             },
             "optional": {
-                "size": ("FLOAT", {
-                    "default": 1.0, "min": 0.2, "max": 4.0, "step": 0.1,
-                    "tooltip": "Grain particle size multiplier. >1 = coarser, <1 = finer.",
-                }),
-                "iso": ("INT", {
-                    "default": 0, "min": 0, "max": 12800, "step": 100,
-                    "tooltip": "Override ISO (0 = use profile default). Higher ISO = more noise.",
-                }),
-                "halation": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 2.0, "step": 0.05,
-                    "tooltip": "Override halation strength (0 = use profile default).",
-                }),
-                "blend_mode": (["Additive", "Overlay", "Soft Light"], {
-                    "default": "Additive",
-                    "tooltip": "Grain compositing mode. All modes are HDR-safe in v3.0.",
-                }),
-                "gate_weave": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 0.01, "step": 0.0001,
-                    "tooltip": "Override gate weave (0 = use profile default). Film registration jitter.",
-                }),
+                "size": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.2,
+                        "max": 4.0,
+                        "step": 0.1,
+                        "tooltip": "Grain particle size multiplier. >1 = coarser, <1 = finer.",
+                    },
+                ),
+                "iso": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 12800,
+                        "step": 100,
+                        "tooltip": "Override ISO (0 = use profile default). Higher ISO = more noise.",
+                    },
+                ),
+                "halation": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 2.0,
+                        "step": 0.05,
+                        "tooltip": "Override halation strength (0 = use profile default).",
+                    },
+                ),
+                "blend_mode": (
+                    ["Additive", "Overlay", "Soft Light"],
+                    {
+                        "default": "Additive",
+                        "tooltip": "Grain compositing mode. All modes are HDR-safe in v3.0.",
+                    },
+                ),
+                "gate_weave": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 0.01,
+                        "step": 0.0001,
+                        "tooltip": "Override gate weave (0 = use profile default). Film registration jitter.",
+                    },
+                ),
                 "use_gpu": ("BOOLEAN", {"default": True}),
-            }
+            },
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -906,7 +975,11 @@ class RadianceFilmGrain:
         # ── Device ──
         if use_gpu and torch.cuda.is_available():
             device = torch.device("cuda")
-        elif use_gpu and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        elif (
+            use_gpu
+            and hasattr(torch.backends, "mps")
+            and torch.backends.mps.is_available()
+        ):
             device = torch.device("mps")
         else:
             device = torch.device("cpu")
@@ -919,7 +992,9 @@ class RadianceFilmGrain:
 
         # ── Load Profile ──
         if profile not in PROFILES:
-            logger.warning(f"Unknown profile '{profile}', using Kodak Vision3 500T 5219")
+            logger.warning(
+                f"Unknown profile '{profile}', using Kodak Vision3 500T 5219"
+            )
             profile = "Kodak Vision3 500T 5219"
         prof = PROFILES[profile]
 
@@ -970,27 +1045,34 @@ class RadianceFilmGrain:
 
         # ── Step 4: Contrast / saturation (film stock character) ──
         if contrast != 1.0 and c >= 3:
-            # Apply contrast around midpoint (0.5 in tonemapped space)
-            # For HDR: apply in Reinhard-mapped space, then unmapped
-            # Simpler: just scale relative to mean luminance
-            mean_luma = luma.mean()
-            img = img.clone() if not img.requires_grad else img
-            # Scale channels relative to their mean
-            for ch in range(min(c, 3)):
-                ch_mean = img[..., ch].mean()
-                img[..., ch] = ch_mean + (img[..., ch] - ch_mean) * contrast
+            # Pivot all channels around the single scene mean luminance.
+            # Using a per-channel pivot (previous code) shifts each channel by a
+            # different amount, introducing a color cast whenever R/G/B means differ
+            # (which is almost always).  A shared luma pivot preserves hue/saturation
+            # while correctly tightening or expanding tonal contrast.
+            img = img.clone()
+            pivot = luma.mean().unsqueeze(-1)  # scalar, broadcast-safe
+            img[..., :3] = pivot + (img[..., :3] - pivot) * contrast
 
         if saturation != 1.0 and c >= 3:
             # BT.709 desaturation in linear space
-            luma_3ch = (0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2]).unsqueeze(-1)
-            img = img.clone() if not img.requires_grad else img
+            img = img.clone()
+            luma_3ch = (
+                0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2]
+            ).unsqueeze(-1)
             img[..., :3] = luma_3ch + (img[..., :3] - luma_3ch) * saturation
 
         # ── Step 5: Generate grain texture ──
         noise = _generate_grain_texture(
-            b, h, w, c,
-            grain_size, grain_character, color_sensitivity,
-            device, generator
+            b,
+            h,
+            w,
+            c,
+            grain_size,
+            grain_character,
+            color_sensitivity,
+            device,
+            generator,
         )
 
         # ── Step 6: Grain softness (emulsion scatter / sensor read blur) ──
@@ -1018,14 +1100,29 @@ class RadianceFilmGrain:
         shadow_factor = 1.0 + (shadow_boost - 1.0) * torch.pow(1.0 - luma, 2.0)
 
         # Highlight shoulder: smoothstep rolloff
-        shoulder_t = ((luma - highlight_shoulder) / max(1.0 - highlight_shoulder, 0.01))
+        shoulder_t = (luma - highlight_shoulder) / max(1.0 - highlight_shoulder, 0.01)
         shoulder_t = shoulder_t.clamp(0.0, 1.0)
         # Smoothstep: 3t² - 2t³
-        highlight_fade = 1.0 - (3.0 * shoulder_t ** 2 - 2.0 * shoulder_t ** 3)
+        highlight_fade = 1.0 - (3.0 * shoulder_t**2 - 2.0 * shoulder_t**3)
 
         density_mask = (shadow_factor * highlight_fade).unsqueeze(-1)
 
         # ── Step 8: Composite grain ──
+        # For B&W profiles (saturation == 0.0) the image has already been desaturated,
+        # but the grain texture can carry per-channel colour from color_sensitivity.
+        # Desaturate the grain too so B&W stocks never re-introduce colour on blend.
+        if saturation == 0.0 and c >= 3:
+            grain_luma = (
+                0.2126 * noise[..., 0] + 0.7152 * noise[..., 1] + 0.0722 * noise[..., 2]
+            ).unsqueeze(-1)
+            noise = (
+                torch.cat(
+                    [grain_luma.expand_as(noise[..., :3]), noise[..., 3:]], dim=-1
+                )
+                if c == 4
+                else grain_luma.expand_as(noise)
+            )
+
         final_grain = noise * grain_intensity * density_mask
 
         if blend_mode == "Overlay":

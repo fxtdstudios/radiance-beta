@@ -1,0 +1,26 @@
+[MASTER]
+ignore=__pycache__,.pytest_cache,venv,.venv,node_modules,build,dist
+
+[MESSAGES CONTROL]
+disable=
+    missing-module-docstring,
+    missing-class-docstring,
+    missing-function-docstring,
+    too-few-public-methods,
+    too-many-locals,
+    too-many-arguments,
+    too-many-instance-attributes,
+    too-many-branches,
+    too-many-statements,
+    too-many-return-statements,
+    no-else-return,
+    invalid-name,
+    line-too-long,
+    too-many-positional-arguments,
+    broad-exception-caught,
+    logging-fstring-interpolation,
+    import-outside-toplevel
+
+[BASIC]
+# ComfyUI often uses uppercase dictionary methods and properties!
+good-names=INPUT_TYPES,RETURN_TYPES,RETURN_NAMES,FUNCTION,CATEGORY,IS_CHANGED,VALIDATE_INPUTS,x,y,c,d,r,g,b,a,h,w

@@ -14,38 +14,38 @@ logger = logging.getLogger("radiance.dna")
 try:
     from . import __version__ as RADIANCE_VERSION
 except ImportError:
-    RADIANCE_VERSION = "3.3.0"
+    RADIANCE_VERSION = "2.1.0"
 
 
 class RadianceDigitalDNA:
     """
-    Core engine for Radiance Digital DNA (Signature Architecture) v2.0.
+    Core engine for Radiance Digital DNA (Signature Architecture) v2.1.
     Embeds invisible, lossless metadata into 32-bit floating point images.
-    
-    v2.0 Fixes:
+
+    v2.1 Fixes:
         - Special value preservation (NaN/Inf pixels skipped)
         - Explicit error reporting (no silent failures)
         - Full batch decode support (all frames, not just first)
         - Memory-optimized vectorized pipeline
         - Data validation on decode with status messages
     """
-    
+
     # Magic header to identify Radiance DNA (32 bits)
     # "FXTD" in ASCII binary: 01000110 01011000 01010100 01000100
     MAGIC_HEADER = "01000110010110000101010001000100"
-    VERSION = "2.0"
+    VERSION = "2.1"
 
     # ── Bit-level helpers ─────────────────────────────────────────────
 
     @staticmethod
     def _float_to_int_bits(f_val):
         """Reinterpret float32 bits as uint32."""
-        return struct.unpack('>I', struct.pack('>f', f_val))[0]
+        return struct.unpack(">I", struct.pack(">f", f_val))[0]
 
     @staticmethod
     def _int_bits_to_float(i_val):
         """Reinterpret uint32 bits as float32."""
-        return struct.unpack('>f', struct.pack('>I', i_val))[0]
+        return struct.unpack(">f", struct.pack(">I", i_val))[0]
 
     @staticmethod
     def _build_safe_mask(flat_img: np.ndarray) -> np.ndarray:
@@ -53,7 +53,7 @@ class RadianceDigitalDNA:
         Build a boolean mask of pixels SAFE for LSB modification.
         Skips NaN, Inf, -Inf, and denormalized values to prevent
         corruption of special float32 values in HDR/EXR workflows.
-        
+
         Returns:
             Boolean array — True = safe to modify, False = skip.
         """
@@ -69,15 +69,17 @@ class RadianceDigitalDNA:
     # ── Encode ────────────────────────────────────────────────────────
 
     @classmethod
-    def encode(cls, image: torch.Tensor, metadata: Dict[str, Any]) -> Tuple[torch.Tensor, bool, str]:
+    def encode(
+        cls, image: torch.Tensor, metadata: Dict[str, Any]
+    ) -> Tuple[torch.Tensor, bool, str]:
         """
         Embed metadata into the image tensor's LSBs.
-        
-        v2.0 changes:
+
+        v2.1 changes:
             - Returns (tensor, success, status_message) instead of silently returning unsigned image
             - Skips special float values (NaN/Inf/denormal) to prevent HDR corruption
             - Memory-optimized: only copies pixels that need modification
-        
+
         Returns:
             (encoded_image, success_bool, status_message)
         """
@@ -85,16 +87,13 @@ class RadianceDigitalDNA:
         img_np = image.detach().cpu().numpy().astype(np.float32).copy()
 
         # ── Prepare payload ──
-        payload = {
-            "dna_ver": cls.VERSION,
-            "data": metadata
-        }
-        json_str = json.dumps(payload, separators=(',', ':'))  # compact JSON
-        compressed = zlib.compress(json_str.encode('utf-8'), level=9)
+        payload = {"dna_ver": cls.VERSION, "data": metadata}
+        json_str = json.dumps(payload, separators=(",", ":"))  # compact JSON
+        compressed = zlib.compress(json_str.encode("utf-8"), level=9)
 
         # Convert to bit stream
-        bits = ''.join(f'{byte:08b}' for byte in compressed)
-        length_bin = f'{len(bits):032b}'
+        bits = "".join(f"{byte:08b}" for byte in compressed)
+        length_bin = f"{len(bits):032b}"
 
         # Full stream: Header (32) + Length (32) + Data
         full_stream = cls.MAGIC_HEADER + length_bin + bits
@@ -107,9 +106,11 @@ class RadianceDigitalDNA:
         total_safe = len(safe_indices)
 
         if stream_len > total_safe:
-            msg = (f"Insufficient safe pixels for signature: need {stream_len} bits, "
-                   f"only {total_safe} safe pixels available "
-                   f"(total={flat_img.size}, skipped={flat_img.size - total_safe} special values)")
+            msg = (
+                f"Insufficient safe pixels for signature: need {stream_len} bits, "
+                f"only {total_safe} safe pixels available "
+                f"(total={flat_img.size}, skipped={flat_img.size - total_safe} special values)"
+            )
             logger.error(msg)
             return (image, False, msg)
 
@@ -134,8 +135,10 @@ class RadianceDigitalDNA:
         result_np = flat_img.reshape(img_np.shape)
 
         skipped = flat_img.size - total_safe
-        msg = (f"✓ DNA signed: {stream_len} bits embedded "
-               f"({len(compressed)} bytes compressed, {skipped} special pixels preserved)")
+        msg = (
+            f"✓ DNA signed: {stream_len} bits embedded "
+            f"({len(compressed)} bytes compressed, {skipped} special pixels preserved)"
+        )
         logger.info(msg)
 
         return (torch.from_numpy(result_np).to(device), True, msg)
@@ -146,12 +149,12 @@ class RadianceDigitalDNA:
     def decode(cls, image: torch.Tensor) -> Tuple[bool, Optional[Dict[str, Any]], str]:
         """
         Attempt to read Radiance DNA from an image.
-        
-        v2.0 changes:
+
+        v2.1 changes:
             - Returns (is_valid, metadata_dict, status_message) for explicit reporting
             - Safe-pixel-aware decoding (mirrors encode skip logic)
             - Validates payload integrity before returning
-        
+
         Returns:
             (is_valid, metadata_dict_or_None, status_message)
         """
@@ -167,7 +170,11 @@ class RadianceDigitalDNA:
         check_len = header_len + 32  # Header + Length field
 
         if total_safe < check_len:
-            return (False, None, f"Not enough safe pixels to read header ({total_safe} < {check_len})")
+            return (
+                False,
+                None,
+                f"Not enough safe pixels to read header ({total_safe} < {check_len})",
+            )
 
         # ── Extract header + length from safe pixels ──
         header_pixels = flat_img[safe_indices[:check_len]]
@@ -181,7 +188,7 @@ class RadianceDigitalDNA:
             return (False, None, "No valid DNA signature (header mismatch)")
 
         # Read payload length
-        length_bin = extracted_bits[header_len:header_len + 32]
+        length_bin = extracted_bits[header_len : header_len + 32]
         try:
             payload_len = int(length_bin, 2)
         except ValueError:
@@ -193,8 +200,11 @@ class RadianceDigitalDNA:
 
         total_needed = check_len + payload_len
         if total_safe < total_needed:
-            return (False, None,
-                    f"Truncated signature: need {total_needed} safe pixels, only {total_safe} available")
+            return (
+                False,
+                None,
+                f"Truncated signature: need {total_needed} safe pixels, only {total_safe} available",
+            )
 
         # ── Extract payload bits from safe pixels ──
         payload_pixels = flat_img[safe_indices[check_len:total_needed]]
@@ -206,11 +216,11 @@ class RadianceDigitalDNA:
         try:
             byte_array = bytearray()
             for i in range(0, len(payload_bits), 8):
-                byte = payload_bits[i:i + 8]
+                byte = payload_bits[i : i + 8]
                 if len(byte) == 8:
                     byte_array.append(int(byte, 2))
 
-            json_str = zlib.decompress(bytes(byte_array)).decode('utf-8')
+            json_str = zlib.decompress(bytes(byte_array)).decode("utf-8")
             data = json.loads(json_str)
 
             # Validate structure
@@ -219,7 +229,11 @@ class RadianceDigitalDNA:
             if "dna_ver" not in data:
                 return (False, None, "Decoded payload missing dna_ver field")
 
-            return (True, data, f"✓ Valid DNA v{data.get('dna_ver', '?')} signature decoded")
+            return (
+                True,
+                data,
+                f"✓ Valid DNA v{data.get('dna_ver', '?')} signature decoded",
+            )
 
         except zlib.error as e:
             return (False, None, f"Decompression failed: {e}")
@@ -231,7 +245,9 @@ class RadianceDigitalDNA:
     # ── Batch helpers ─────────────────────────────────────────────────
 
     @classmethod
-    def decode_batch(cls, images: torch.Tensor) -> List[Tuple[bool, Optional[Dict[str, Any]], str]]:
+    def decode_batch(
+        cls, images: torch.Tensor
+    ) -> List[Tuple[bool, Optional[Dict[str, Any]], str]]:
         """
         Decode ALL frames in a batch (not just the first).
         Returns a list of (is_valid, data, status) per frame.
@@ -248,12 +264,15 @@ class RadianceDigitalDNA:
 class RadianceSignatureMixin:
     """
     Mixin for ComfyUI Nodes to easily sign their output.
-    v2.0: Now reports success/failure status.
+    v2.1: Now reports success/failure status.
     """
-    def sign_image(self, image: torch.Tensor, extra_metadata: Dict[str, Any] = None) -> Tuple[torch.Tensor, bool, str]:
+
+    def sign_image(
+        self, image: torch.Tensor, extra_metadata: Dict[str, Any] = None
+    ) -> Tuple[torch.Tensor, bool, str]:
         """
         Sign the image with this node's signature.
-        
+
         Returns:
             (signed_image, success, status_message)
         """
@@ -263,7 +282,7 @@ class RadianceSignatureMixin:
             "created_by": "Radiance",
             "node": node_class,
             "timestamp": time.time(),
-            "fxtd_ver": RADIANCE_VERSION
+            "fxtd_ver": RADIANCE_VERSION,
         }
 
         if extra_metadata:
@@ -276,11 +295,13 @@ class RadianceSignatureMixin:
 #                              NODES
 # ═══════════════════════════════════════════════════════════════════════
 
+
 class RadianceDNAReader:
     """
     Reads and reports DNA signature from images.
-    v2.0: Full batch decode — checks every frame, not just the first.
+    v2.1: Full batch decode — checks every frame, not just the first.
     """
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -302,7 +323,7 @@ class RadianceDNAReader:
 
         # Aggregate results
         all_valid = all(r[0] for r in results)
-        any_valid = any(r[0] for r in results)
+        any(r[0] for r in results)
 
         if batch_size == 1:
             is_valid, data, status = results[0]
@@ -322,7 +343,9 @@ class RadianceDNAReader:
                 meta = data.get("data", {})
                 node = meta.get("node", "unknown")
                 ver = meta.get("fxtd_ver", "?")
-                report_lines.append(f"  Frame {i:>4d}: ✓ Signed by {node} (Radiance {ver})")
+                report_lines.append(
+                    f"  Frame {i:>4d}: ✓ Signed by {node} (Radiance {ver})"
+                )
             else:
                 report_lines.append(f"  Frame {i:>4d}: ✗ {status}")
 
@@ -335,7 +358,9 @@ class RadianceDNAReader:
             if len(unsigned) <= 10:
                 report_lines.append(f"Unsigned frames: {unsigned}")
             else:
-                report_lines.append(f"Unsigned frames: {unsigned[:10]}... (+{len(unsigned)-10} more)")
+                report_lines.append(
+                    f"Unsigned frames: {unsigned[:10]}... (+{len(unsigned)-10} more)"
+                )
 
         info_str = "\n".join(report_lines)
         logger.info(f"DNA Reader: {valid_count}/{batch_size} frames valid")
@@ -348,6 +373,7 @@ class RadianceDNAWriter:
     Signs images with Radiance Digital DNA metadata.
     Provides explicit success/failure feedback.
     """
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -358,21 +384,23 @@ class RadianceDNAWriter:
                 "project": ("STRING", {"default": "", "multiline": False}),
                 "artist": ("STRING", {"default": "", "multiline": False}),
                 "notes": ("STRING", {"default": "", "multiline": True}),
-            }
+            },
         }
 
     RETURN_TYPES = ("IMAGE", "BOOLEAN", "STRING")
     RETURN_NAMES = ("image", "success", "status")
     FUNCTION = "write_dna"
     CATEGORY = "FXTD Studios/Radiance/Data"
-    DESCRIPTION = "Signs images with Radiance DNA metadata (preserves HDR special values)."
+    DESCRIPTION = (
+        "Signs images with Radiance DNA metadata (preserves HDR special values)."
+    )
 
     def write_dna(self, image, project="", artist="", notes=""):
         metadata = {
             "created_by": "Radiance",
             "node": "RadianceDNAWriter",
             "timestamp": time.time(),
-            "fxtd_ver": RADIANCE_VERSION
+            "fxtd_ver": RADIANCE_VERSION,
         }
 
         # Add optional fields (skip empty)
@@ -390,7 +418,9 @@ class RadianceDNAWriter:
             all_success = True
 
             for i in range(image.shape[0]):
-                frame_signed, success, status = RadianceDigitalDNA.encode(image[i], metadata)
+                frame_signed, success, status = RadianceDigitalDNA.encode(
+                    image[i], metadata
+                )
                 if frame_signed.dim() == 3:
                     frame_signed = frame_signed.unsqueeze(0)
                 signed_frames.append(frame_signed)
@@ -421,6 +451,7 @@ class RadianceDNAValidator:
     QC gate: validates DNA signature presence.
     Can optionally block unsigned images from proceeding.
     """
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -435,9 +466,13 @@ class RadianceDNAValidator:
     FUNCTION = "validate"
     CATEGORY = "FXTD Studios/Radiance/Data"
     OUTPUT_NODE = True
-    DESCRIPTION = "QC gate — validates DNA signature (optionally blocks unsigned images)."
+    DESCRIPTION = (
+        "QC gate — validates DNA signature (optionally blocks unsigned images)."
+    )
 
-    def validate(self, image: torch.Tensor, require_signed: bool = True) -> Tuple[torch.Tensor, bool, str]:
+    def validate(
+        self, image: torch.Tensor, require_signed: bool = True
+    ) -> Tuple[torch.Tensor, bool, str]:
         results = RadianceDigitalDNA.decode_batch(image)
         batch_size = len(results)
         valid_count = sum(1 for r in results if r[0])

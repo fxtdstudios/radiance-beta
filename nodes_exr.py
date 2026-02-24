@@ -2,6 +2,7 @@
 Radiance EXR Saver - Facade
 Redirects to the modular implementation in radiance.hdr.io.
 """
+
 import logging
 
 try:
@@ -13,12 +14,15 @@ except ImportError:
         from radiance.hdr.io import RadianceSaveEXR
     except ImportError:
         try:
-             # 3. Direct module import (Dev/Test env where CWD is package root)
+            # 3. Direct module import (Dev/Test env where CWD is package root)
             from hdr.io import RadianceSaveEXR
         except ImportError:
             # Fallback/Dummy if import into fails
             logging.error("Radiance: Failed to import RadianceSaveEXR from hdr.io")
-            class RadianceSaveEXR: pass
+
+            class RadianceSaveEXR:
+                pass
+
             """
             Save images as EXR files with full HDR and metadata support.
             """

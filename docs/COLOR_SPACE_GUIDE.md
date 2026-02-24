@@ -25,7 +25,7 @@ Radiance supports professional color space conversions for VFX, color grading, a
 | **ACEScg** | AP1 | Linear | ACES workflows, VFX pipelines |
 | **ARRI LogC3** | ✅ **AWG** | Log | ARRI Alexa workflows, DaVinci Resolve |
 | **ARRI LogC4** | ✅ **AWG** | Log | ARRI Alexa 35 workflows |
-| **Sony S-Log3** | ✅ **S-Gamut3.Cine** | Log | Sony Venice/FX workflows |
+
 | **Linear (Scene-Referred)** | None | None | **Bypass all conversions** |
 | **Same as Input** | Original | Original | Preserve input encoding |
 
@@ -67,32 +67,7 @@ Input (sRGB) → Linear → ARRI Wide Gamut → LogC3/4 → EXR
 
 ---
 
-### Sony S-Log3 Workflows
 
-#### Correct Workflow
-```
-Input (sRGB) → Linear → S-Gamut3.Cine → S-Log3 → EXR
-```
-
-**Conversion Chain:**
-1. Linearize: sRGB gamma → linear light
-2. **Gamut Transform:** Rec.709 primaries → S-Gamut3.Cine
-3. Log Encode: Linear → S-Log3 curve
-4. Save: EXR with correct metadata
-
-**DaVinci Resolve/Nuke Setup:**
-- Input Color Space: `Sony S-Log3 / S-Gamut3.Cine`
-- Workflow: Sony Venice, FX9, FX6 emulation
-
-**Gamut Matrix Used:**
-```python
-# sRGB (Rec.709) to S-Gamut3.Cine
-[[0.599083, 0.248351, 0.152566],
- [0.020984, 0.975065, 0.003951],
- [-0.001247, 0.005419, 0.995828]]
-```
-
----
 
 ### ACEScg Workflows
 
@@ -163,13 +138,7 @@ output_color_space = "ARRI LogC3"  # Or LogC4 for Alexa 35
 # DaVinci Resolve: Set to "ARRI LogC3 / AWG"
 ```
 
-#### Sony Camera Workflow
-```python
-input_color_space = "sRGB"
-output_color_space = "Sony S-Log3"
-# Result: Proper S-Gamut3.Cine primaries + S-Log3 curve
-# DaVinci Resolve: Set to "Sony S-Log3 / S-Gamut3.Cine"
-```
+
 
 #### HDR Mastering
 ```python
@@ -193,7 +162,7 @@ Input Image
     ↓
 Linear Rec.709 Working Space
     ↓
-[Gamut Conversion] (if LogC/S-Log3)
+[Gamut Conversion] (if LogC)
     ↓
 Target Primaries
     ↓
@@ -227,14 +196,14 @@ All matrices are D65 white point, derived from official manufacturer specificati
 
 ## Migration Guide
 
-### If You Used Old LogC/S-Log3
+### If You Used Old LogC
 
 **What Changed:**
 - **Before 2026-01-22:** Only curve applied (WRONG colors)
 - **After 2026-01-22:** Gamut + curve (CORRECT colors)
 
 **Action Required:**
-1. Re-export files using LogC3/LogC4/S-Log3
+1. Re-export files using LogC3/LogC4
 2. Colors will be different (this is correct)
 3. DaVinci Resolve/Nuke will now show accurate results
 
@@ -258,7 +227,7 @@ output_color_space = "ARRI LogC3"
 
 **Solution:**
 - If exported as `ARRI LogC3`: Set DaVinci input to `ARRI LogC3 / AWG`
-- If exported as `Sony S-Log3`: Set DaVinci input to `Sony S-Log3 / S-Gamut3.Cine`
+
 - If exported as `ACEScg`: Set DaVinci input to `ACEScg / AP1`
 
 ### Image Too Dark/Bright
@@ -297,10 +266,10 @@ output_color_space = "Linear (Scene-Referred)"
 
 - [ACES Documentation](https://acescentral.com)
 - [ARRI LogC White Paper](https://www.arri.com/en/learn-help/learn-help-camera-system/camera-workflow)
-- [Sony S-Log3 Technical Summary](https://pro.sony/en_GB/technology/s-log)
+
 - [DaVinci Resolve Color Management](https://www.blackmagicdesign.com/products/davinciresolve/color)
 
 ---
 
-**Last Updated:** 2026-01-22  
-**Version:** 1.1.0 (Professional Color Science Update)
+**Last Updated:** 2026-02-23  
+**Version:** 2.1.0 (Professional Color Science Update)

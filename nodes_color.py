@@ -1,4 +1,3 @@
-
 from .color import (
     RadianceLUTApply,
     RadianceLUTBlend,
@@ -9,7 +8,7 @@ from .color import (
     RadianceLogCurveEncode,
     RadianceACES2OutputTransform,
     RadianceOCIODisplayView,
-    RadianceOCIOCDL
+    RadianceOCIOCDL,
 )
 
 NODE_CLASS_MAPPINGS = {

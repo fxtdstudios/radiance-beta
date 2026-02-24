@@ -1,9 +1,7 @@
-
 import torch
 import numpy as np
 import logging
-import os
-from typing import Tuple, Optional, Dict, Any, List
+from typing import Tuple, Dict, Any
 
 # Local imports
 from .utils import tensor_to_numpy_float32, numpy_to_tensor_float32, linear_to_srgb
@@ -12,39 +10,49 @@ from .utils import tensor_to_numpy_float32, numpy_to_tensor_float32, linear_to_s
 try:
     from ..color_utils import (
         # Matrices
-        SRGB_TO_ACESCG, ACESCG_TO_SRGB, ACES_AP0_TO_AP1, ACESCG_TO_REC2020, ACESCG_TO_P3D65,
+        SRGB_TO_ACESCG,
+        ACESCG_TO_SRGB,
+        ACES_AP0_TO_AP1,
+        ACESCG_TO_REC2020,
+        ACESCG_TO_P3D65,
         # Log curves (numpy)
-        linear_to_logc3, logc3_to_linear, linear_to_logc4, logc4_to_linear,
-        linear_to_slog3, slog3_to_linear, linear_to_vlog, vlog_to_linear,
-        linear_to_canonlog3, canonlog3_to_linear, linear_to_acescct, acescct_to_linear,
-        linear_to_davinci_intermediate, davinci_intermediate_to_linear,
+        linear_to_logc3,
+        logc3_to_linear,
+        linear_to_logc4,
+        logc4_to_linear,
+        linear_to_slog3,
+        slog3_to_linear,
+        linear_to_vlog,
+        vlog_to_linear,
+        linear_to_canonlog3,
+        canonlog3_to_linear,
+        linear_to_acescct,
+        acescct_to_linear,
+        linear_to_davinci_intermediate,
+        davinci_intermediate_to_linear,
         # HDR transfer functions
-        linear_to_pq, pq_to_linear, linear_to_hlg, hlg_to_linear,
+        linear_to_pq,
+        pq_to_linear,
+        linear_to_hlg,
+        hlg_to_linear,
         # Color space conversions
-        linear_srgb_to_acescg, acescg_to_linear_srgb,
+        linear_srgb_to_acescg,
+        acescg_to_linear_srgb,
         # Tensor log curves (GPU)
-        tensor_linear_to_logc4, tensor_logc4_to_linear,
-        tensor_linear_to_slog3, tensor_slog3_to_linear,
-        tensor_linear_to_log3g10, tensor_log3g10_to_linear,
-        tensor_linear_to_vlog, tensor_vlog_to_linear,
-        tensor_linear_to_davinci_intermediate, tensor_davinci_intermediate_to_linear,
+        tensor_linear_to_logc4,
+        tensor_logc4_to_linear,
+        tensor_linear_to_slog3,
+        tensor_slog3_to_linear,
+        tensor_linear_to_log3g10,
+        tensor_log3g10_to_linear,
+        tensor_linear_to_vlog,
+        tensor_vlog_to_linear,
+        tensor_linear_to_davinci_intermediate,
+        tensor_davinci_intermediate_to_linear,
     )
 except ImportError:
     # Fallback if imported from elsewhere (though structure dictates ..color_utils)
-    from color_utils import (
-        SRGB_TO_ACESCG, ACESCG_TO_SRGB, ACES_AP0_TO_AP1, ACESCG_TO_REC2020, ACESCG_TO_P3D65,
-        linear_to_logc3, logc3_to_linear, linear_to_logc4, logc4_to_linear,
-        linear_to_slog3, slog3_to_linear, linear_to_vlog, vlog_to_linear,
-        linear_to_canonlog3, canonlog3_to_linear, linear_to_acescct, acescct_to_linear,
-        linear_to_davinci_intermediate, davinci_intermediate_to_linear,
-        linear_to_pq, pq_to_linear, linear_to_hlg, hlg_to_linear,
-        linear_srgb_to_acescg, acescg_to_linear_srgb,
-        tensor_linear_to_logc4, tensor_logc4_to_linear,
-        tensor_linear_to_slog3, tensor_slog3_to_linear,
-        tensor_linear_to_log3g10, tensor_log3g10_to_linear,
-        tensor_linear_to_vlog, tensor_vlog_to_linear,
-        tensor_linear_to_davinci_intermediate, tensor_davinci_intermediate_to_linear,
-    )
+    pass
 
 logger = logging.getLogger("radiance.hdr.color")
 
@@ -64,6 +72,7 @@ LUMA_REC2020 = (0.2627, 0.6780, 0.0593)
 #                     SIGN-PRESERVING POWER UTILITY
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def _sign_pow_torch(x: torch.Tensor, exp: float) -> torch.Tensor:
     """
     Sign-preserving power function for HDR data.
@@ -82,6 +91,7 @@ def _sign_pow_np(x: np.ndarray, exp: float) -> np.ndarray:
 #                          CORE 32-BIT NODES
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class ImageToFloat32:
     """
     Convert images to 32-bit float precision for HDR processing.
@@ -99,11 +109,24 @@ class ImageToFloat32:
                 "image": ("IMAGE",),
             },
             "optional": {
-                "normalize": ("BOOLEAN", {"default": False,
-                    "tooltip": "Normalize each frame independently to [0,1] range."}),
-                "source_gamma": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 4.0, "step": 0.01,
-                    "tooltip": "Source gamma to linearize. 1.0 = already linear, 2.2 = sRGB-ish, 2.6 = DCI."}),
-            }
+                "normalize": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Normalize each frame independently to [0,1] range.",
+                    },
+                ),
+                "source_gamma": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.1,
+                        "max": 4.0,
+                        "step": 0.01,
+                        "tooltip": "Source gamma to linearize. 1.0 = already linear, 2.2 = sRGB-ish, 2.6 = DCI.",
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -112,8 +135,9 @@ class ImageToFloat32:
     CATEGORY = "FXTD Studios/Radiance/Color"
     DESCRIPTION = "Convert images to 32-bit float precision for HDR processing. Preserves full dynamic range without clamping."
 
-    def convert(self, image: torch.Tensor, normalize: bool = False,
-                source_gamma: float = 1.0) -> Tuple[torch.Tensor]:
+    def convert(
+        self, image: torch.Tensor, normalize: bool = False, source_gamma: float = 1.0
+    ) -> Tuple[torch.Tensor]:
         # Ensure float32
         img = image.float()
 
@@ -158,58 +182,135 @@ class Float32ColorCorrect:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "image": ("IMAGE", {"tooltip": "Input image to color correct. Processed in 32-bit float precision."}),
-                "exposure": ("FLOAT", {
-                    "default": 0.0, "min": -10.0, "max": 10.0, "step": 0.1,
-                    "tooltip": "Exposure adjustment in stops. +1 = double brightness, -1 = half brightness."
-                }),
-                "contrast": ("FLOAT", {
-                    "default": 1.0, "min": 0.0, "max": 4.0, "step": 0.05,
-                    "tooltip": "Contrast multiplier around mid-gray (0.18 in linear). >1 = more contrast, <1 = less."
-                }),
-                "brightness": ("FLOAT", {
-                    "default": 0.0, "min": -1.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "Additive brightness offset. Applied last so it works in the final output space."
-                }),
-                "saturation": ("FLOAT", {
-                    "default": 1.0, "min": 0.0, "max": 3.0, "step": 0.05,
-                    "tooltip": "Color saturation. 0 = grayscale, 1 = original, >1 = boosted."
-                }),
+                "image": (
+                    "IMAGE",
+                    {
+                        "tooltip": "Input image to color correct. Processed in 32-bit float precision."
+                    },
+                ),
+                "exposure": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": -10.0,
+                        "max": 10.0,
+                        "step": 0.1,
+                        "tooltip": "Exposure adjustment in stops. +1 = double brightness, -1 = half brightness.",
+                    },
+                ),
+                "contrast": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 4.0,
+                        "step": 0.05,
+                        "tooltip": "Contrast multiplier around mid-gray (0.18 in linear). >1 = more contrast, <1 = less.",
+                    },
+                ),
+                "brightness": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": -1.0,
+                        "max": 1.0,
+                        "step": 0.01,
+                        "tooltip": "Additive brightness offset. Applied last so it works in the final output space.",
+                    },
+                ),
+                "saturation": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 3.0,
+                        "step": 0.05,
+                        "tooltip": "Color saturation. 0 = grayscale, 1 = original, >1 = boosted.",
+                    },
+                ),
             },
             "optional": {
-                "gamma": ("FLOAT", {
-                    "default": 1.0, "min": 0.1, "max": 4.0, "step": 0.01,
-                    "tooltip": "Gamma correction (power curve). <1 = brighten midtones, >1 = darken. Sign-preserving for HDR."
-                }),
-                "lift_r": ("FLOAT", {
-                    "default": 0.0, "min": -0.5, "max": 0.5, "step": 0.01,
-                    "tooltip": "Red channel lift (shadow offset). Applied first in the chain."
-                }),
-                "lift_g": ("FLOAT", {
-                    "default": 0.0, "min": -0.5, "max": 0.5, "step": 0.01,
-                }),
-                "lift_b": ("FLOAT", {
-                    "default": 0.0, "min": -0.5, "max": 0.5, "step": 0.01,
-                }),
-                "gain_r": ("FLOAT", {
-                    "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01,
-                    "tooltip": "Red channel gain (multiplier). Applied after lift, before contrast."
-                }),
-                "gain_g": ("FLOAT", {
-                    "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01,
-                }),
-                "gain_b": ("FLOAT", {
-                    "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01,
-                }),
-                "luma_space": (list(cls.LUMA_WEIGHTS.keys()), {
-                    "default": "Rec.709 / sRGB",
-                    "tooltip": "Luminance weights for saturation. Match your working colorspace."
-                }),
-                "clamp_output": ("BOOLEAN", {
-                    "default": False,
-                    "tooltip": "Clamp output to [0,1]. OFF = HDR pass-through (preserves super-whites/negatives)."
-                }),
-            }
+                "gamma": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.1,
+                        "max": 4.0,
+                        "step": 0.01,
+                        "tooltip": "Gamma correction (power curve). <1 = brighten midtones, >1 = darken. Sign-preserving for HDR.",
+                    },
+                ),
+                "lift_r": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": -0.5,
+                        "max": 0.5,
+                        "step": 0.01,
+                        "tooltip": "Red channel lift (shadow offset). Applied first in the chain.",
+                    },
+                ),
+                "lift_g": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": -0.5,
+                        "max": 0.5,
+                        "step": 0.01,
+                    },
+                ),
+                "lift_b": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": -0.5,
+                        "max": 0.5,
+                        "step": 0.01,
+                    },
+                ),
+                "gain_r": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 2.0,
+                        "step": 0.01,
+                        "tooltip": "Red channel gain (multiplier). Applied after lift, before contrast.",
+                    },
+                ),
+                "gain_g": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 2.0,
+                        "step": 0.01,
+                    },
+                ),
+                "gain_b": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 2.0,
+                        "step": 0.01,
+                    },
+                ),
+                "luma_space": (
+                    list(cls.LUMA_WEIGHTS.keys()),
+                    {
+                        "default": "Rec.709 / sRGB",
+                        "tooltip": "Luminance weights for saturation. Match your working colorspace.",
+                    },
+                ),
+                "clamp_output": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Clamp output to [0,1]. OFF = HDR pass-through (preserves super-whites/negatives).",
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -219,21 +320,39 @@ class Float32ColorCorrect:
     CATEGORY = "FXTD Studios/Radiance/Color"
     DESCRIPTION = "Professional 32-bit color correction with exposure, contrast, saturation, gamma, and per-channel lift/gain controls."
 
-    def correct(self, image: torch.Tensor, exposure: float = 0.0,
-                contrast: float = 1.0, brightness: float = 0.0,
-                saturation: float = 1.0, gamma: float = 1.0,
-                lift_r: float = 0.0, lift_g: float = 0.0, lift_b: float = 0.0,
-                gain_r: float = 1.0, gain_g: float = 1.0,
-                gain_b: float = 1.0,
-                luma_space: str = "Rec.709 / sRGB",
-                clamp_output: bool = False) -> Tuple[torch.Tensor]:
+    def correct(
+        self,
+        image: torch.Tensor,
+        exposure: float = 0.0,
+        contrast: float = 1.0,
+        brightness: float = 0.0,
+        saturation: float = 1.0,
+        gamma: float = 1.0,
+        lift_r: float = 0.0,
+        lift_g: float = 0.0,
+        lift_b: float = 0.0,
+        gain_r: float = 1.0,
+        gain_g: float = 1.0,
+        gain_b: float = 1.0,
+        luma_space: str = "Rec.709 / sRGB",
+        clamp_output: bool = False,
+    ) -> Tuple[torch.Tensor]:
 
         # ── Fast path: all defaults → no-op ──
-        if (exposure == 0.0 and contrast == 1.0 and brightness == 0.0
-                and saturation == 1.0 and gamma == 1.0
-                and lift_r == 0.0 and lift_g == 0.0 and lift_b == 0.0
-                and gain_r == 1.0 and gain_g == 1.0 and gain_b == 1.0
-                and not clamp_output):
+        if (
+            exposure == 0.0
+            and contrast == 1.0
+            and brightness == 0.0
+            and saturation == 1.0
+            and gamma == 1.0
+            and lift_r == 0.0
+            and lift_g == 0.0
+            and lift_b == 0.0
+            and gain_r == 1.0
+            and gain_g == 1.0
+            and gain_b == 1.0
+            and not clamp_output
+        ):
             return (image,)
 
         img = image.clone().float()
@@ -255,7 +374,7 @@ class Float32ColorCorrect:
 
         # 2. EXPOSURE (in stops — multiplicative, before gain)
         if exposure != 0.0:
-            img = img * (2.0 ** exposure)
+            img = img * (2.0**exposure)
 
         # 3. GAIN (per-channel multiplier — after exposure)
         if img.shape[-1] >= 3:
@@ -288,9 +407,11 @@ class Float32ColorCorrect:
         # which are wrong for ACEScg data (should be 0.2722, 0.6741, 0.0537).
         if saturation != 1.0 and img.shape[-1] >= 3:
             weights = self.LUMA_WEIGHTS.get(luma_space, LUMA_REC709)
-            luma = (weights[0] * img[..., 0]
-                    + weights[1] * img[..., 1]
-                    + weights[2] * img[..., 2])
+            luma = (
+                weights[0] * img[..., 0]
+                + weights[1] * img[..., 1]
+                + weights[2] * img[..., 2]
+            )
             luma = luma.unsqueeze(-1)
             img = luma + saturation * (img - luma)
 
@@ -328,63 +449,93 @@ class ColorSpaceConvert:
         "Display_P3",
         "DaVinci Wide Gamut",
         "ARRI Wide Gamut 4",
-        "S-Gamut3.Cine"
+        "S-Gamut3.Cine",
     ]
 
     CHROMATIC_ADAPTATIONS = ["Bradford", "Von Kries", "XYZ Scaling", "None"]
 
     # Industry-standard precomputed matrices
     FAST_MATRICES = {
-        "sRGB_to_ACEScg": np.array([
-            [0.613097, 0.339523, 0.047379],
-            [0.070194, 0.916354, 0.013452],
-            [0.020616, 0.109570, 0.869815]
-        ], dtype=np.float32),
-        "ACEScg_to_sRGB": np.array([
-            [1.704858, -0.621716, -0.083299],
-            [-0.130078, 1.140735, -0.010560],
-            [-0.023964, -0.128975, 1.153014]
-        ], dtype=np.float32),
-        "Rec709_to_Rec2020": np.array([
-            [0.627404, 0.329283, 0.043313],
-            [0.069097, 0.919540, 0.011362],
-            [0.016392, 0.088013, 0.895595]
-        ], dtype=np.float32),
-        "Rec2020_to_Rec709": np.array([
-            [1.660496, -0.587656, -0.072840],
-            [-0.124547, 1.132895, -0.008348],
-            [-0.018154, -0.100597, 1.118751]
-        ], dtype=np.float32),
-        "Rec709_to_DWG": np.array([
-            [0.582254, 0.298395, 0.119351],
-            [0.050855, 0.908687, 0.040458],
-            [0.015735, 0.121737, 0.862528]
-        ], dtype=np.float32),
-        "DWG_to_Rec709": np.array([
-            [1.751098, -0.568044, -0.183054],
-            [-0.097606, 1.116203, -0.018597],
-            [-0.035373, -0.163816, 1.199189]
-        ], dtype=np.float32),
-        "Rec709_to_AWG4": np.array([
-            [0.550823, 0.338419, 0.110759],
-            [0.056937, 0.867987, 0.075076],
-            [0.014080, 0.098117, 0.887803]
-        ], dtype=np.float32),
-        "AWG4_to_Rec709": np.array([
-            [1.858410, -0.728057, -0.130353],
-            [-0.122735, 1.181503, -0.058768],
-            [-0.030110, -0.126855, 1.156965]
-        ], dtype=np.float32),
-        "Rec709_to_SGamut3Cine": np.array([
-            [0.599083, 0.248925, 0.151992],
-            [0.054813, 0.943549, 0.001638],
-            [-0.003276, 0.017454, 0.985822]
-        ], dtype=np.float32),
-        "SGamut3Cine_to_Rec709": np.array([
-            [1.764564, -0.473984, -0.290580],
-            [-0.102593, 1.073170, 0.029423],
-            [0.007069, -0.019043, 1.011974]
-        ], dtype=np.float32),
+        "sRGB_to_ACEScg": np.array(
+            [
+                [0.613097, 0.339523, 0.047379],
+                [0.070194, 0.916354, 0.013452],
+                [0.020616, 0.109570, 0.869815],
+            ],
+            dtype=np.float32,
+        ),
+        "ACEScg_to_sRGB": np.array(
+            [
+                [1.704858, -0.621716, -0.083299],
+                [-0.130078, 1.140735, -0.010560],
+                [-0.023964, -0.128975, 1.153014],
+            ],
+            dtype=np.float32,
+        ),
+        "Rec709_to_Rec2020": np.array(
+            [
+                [0.627404, 0.329283, 0.043313],
+                [0.069097, 0.919540, 0.011362],
+                [0.016392, 0.088013, 0.895595],
+            ],
+            dtype=np.float32,
+        ),
+        "Rec2020_to_Rec709": np.array(
+            [
+                [1.660496, -0.587656, -0.072840],
+                [-0.124547, 1.132895, -0.008348],
+                [-0.018154, -0.100597, 1.118751],
+            ],
+            dtype=np.float32,
+        ),
+        "Rec709_to_DWG": np.array(
+            [
+                [0.582254, 0.298395, 0.119351],
+                [0.050855, 0.908687, 0.040458],
+                [0.015735, 0.121737, 0.862528],
+            ],
+            dtype=np.float32,
+        ),
+        "DWG_to_Rec709": np.array(
+            [
+                [1.751098, -0.568044, -0.183054],
+                [-0.097606, 1.116203, -0.018597],
+                [-0.035373, -0.163816, 1.199189],
+            ],
+            dtype=np.float32,
+        ),
+        "Rec709_to_AWG4": np.array(
+            [
+                [0.550823, 0.338419, 0.110759],
+                [0.056937, 0.867987, 0.075076],
+                [0.014080, 0.098117, 0.887803],
+            ],
+            dtype=np.float32,
+        ),
+        "AWG4_to_Rec709": np.array(
+            [
+                [1.858410, -0.728057, -0.130353],
+                [-0.122735, 1.181503, -0.058768],
+                [-0.030110, -0.126855, 1.156965],
+            ],
+            dtype=np.float32,
+        ),
+        "Rec709_to_SGamut3Cine": np.array(
+            [
+                [0.599083, 0.248925, 0.151992],
+                [0.054813, 0.943549, 0.001638],
+                [-0.003276, 0.017454, 0.985822],
+            ],
+            dtype=np.float32,
+        ),
+        "SGamut3Cine_to_Rec709": np.array(
+            [
+                [1.764564, -0.473984, -0.290580],
+                [-0.102593, 1.073170, 0.029423],
+                [0.007069, -0.019043, 1.011974],
+            ],
+            dtype=np.float32,
+        ),
     }
 
     @classmethod
@@ -396,13 +547,32 @@ class ColorSpaceConvert:
                 "target_space": (cls.COLOR_SPACES, {"default": "ACEScg"}),
             },
             "optional": {
-                "exposure": ("FLOAT", {"default": 0.0, "min": -10.0, "max": 10.0, "step": 0.01,
-                    "tooltip": "Exposure adjustment in stops (EV)"}),
-                "gamma_adjust": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 5.0, "step": 0.01,
-                    "tooltip": "Gamma adjustment (1.0 = no change)"}),
-                "chromatic_adaptation": (cls.CHROMATIC_ADAPTATIONS, {"default": "Bradford"}),
+                "exposure": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": -10.0,
+                        "max": 10.0,
+                        "step": 0.01,
+                        "tooltip": "Exposure adjustment in stops (EV)",
+                    },
+                ),
+                "gamma_adjust": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.1,
+                        "max": 5.0,
+                        "step": 0.01,
+                        "tooltip": "Gamma adjustment (1.0 = no change)",
+                    },
+                ),
+                "chromatic_adaptation": (
+                    cls.CHROMATIC_ADAPTATIONS,
+                    {"default": "Bradford"},
+                ),
                 "use_gpu": ("BOOLEAN", {"default": True}),
-            }
+            },
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -426,8 +596,12 @@ class ColorSpaceConvert:
         # from DCI-P3 (R=[0.680, 0.320]). Actual DWG has much wider gamut
         # with R=[0.800, 0.313]. This caused all dynamic matrix generation
         # for DWG to silently produce P3 conversions instead.
-        "DaVinci Wide Gamut": np.array([[0.8000, 0.3130], [0.1682, 0.9877], [0.0790, -0.1155]]),
-        "ARRI Wide Gamut 4": np.array([[0.7347, 0.2653], [0.1424, 0.8576], [0.0991, -0.0308]]),
+        "DaVinci Wide Gamut": np.array(
+            [[0.8000, 0.3130], [0.1682, 0.9877], [0.0790, -0.1155]]
+        ),
+        "ARRI Wide Gamut 4": np.array(
+            [[0.7347, 0.2653], [0.1424, 0.8576], [0.0991, -0.0308]]
+        ),
         "S-Gamut3.Cine": np.array([[0.766, 0.275], [0.225, 0.800], [0.089, -0.087]]),
     }
 
@@ -463,10 +637,13 @@ class ColorSpaceConvert:
             return "SGamut3Cine"
         return space
 
-    def _primaries_to_matrix(self, primaries: np.ndarray, white: np.ndarray) -> np.ndarray:
+    def _primaries_to_matrix(
+        self, primaries: np.ndarray, white: np.ndarray
+    ) -> np.ndarray:
         """Calculate RGB to XYZ matrix from primaries and white point."""
+
         def xy_to_XYZ(xy):
-            return np.array([xy[0]/xy[1], 1.0, (1-xy[0]-xy[1])/xy[1]])
+            return np.array([xy[0] / xy[1], 1.0, (1 - xy[0] - xy[1]) / xy[1]])
 
         r_XYZ = xy_to_XYZ(primaries[0])
         g_XYZ = xy_to_XYZ(primaries[1])
@@ -489,7 +666,7 @@ class ColorSpaceConvert:
         return np.where(
             rgb <= 0.04045,
             rgb / 12.92,
-            np.power(np.maximum((rgb + 0.055) / 1.055, 0.0), 2.4)
+            np.power(np.maximum((rgb + 0.055) / 1.055, 0.0), 2.4),
         ).astype(np.float32)
 
     def _linear_to_srgb(self, rgb: np.ndarray) -> np.ndarray:
@@ -497,7 +674,7 @@ class ColorSpaceConvert:
         return np.where(
             rgb <= 0.0031308,
             rgb * 12.92,
-            1.055 * np.power(np.maximum(rgb, 1e-10), 1/2.4) - 0.055
+            1.055 * np.power(np.maximum(rgb, 1e-10), 1 / 2.4) - 0.055,
         ).astype(np.float32)
 
     def _acescg_to_acescct(self, x: np.ndarray) -> np.ndarray:
@@ -525,15 +702,22 @@ class ColorSpaceConvert:
         if np.allclose(src_white, tgt_white):
             return torch.eye(3, device=device)
 
-        M_bradford = torch.tensor([
-            [0.8951, 0.2664, -0.1614],
-            [-0.7502, 1.7135, 0.0367],
-            [0.0389, -0.0685, 1.0296]
-        ], dtype=torch.float32, device=device)
+        M_bradford = torch.tensor(
+            [
+                [0.8951, 0.2664, -0.1614],
+                [-0.7502, 1.7135, 0.0367],
+                [0.0389, -0.0685, 1.0296],
+            ],
+            dtype=torch.float32,
+            device=device,
+        )
 
         def xy_to_XYZ(xy):
-            return torch.tensor([xy[0]/xy[1], 1.0, (1-xy[0]-xy[1])/xy[1]],
-                              dtype=torch.float32, device=device)
+            return torch.tensor(
+                [xy[0] / xy[1], 1.0, (1 - xy[0] - xy[1]) / xy[1]],
+                dtype=torch.float32,
+                device=device,
+            )
 
         src_w_node = torch.tensor(src_white, dtype=torch.float32, device=device)
         tgt_w_node = torch.tensor(tgt_white, dtype=torch.float32, device=device)
@@ -548,19 +732,23 @@ class ColorSpaceConvert:
         M_adapt = torch.linalg.inv(M_bradford) @ torch.diag(scale) @ M_bradford
         return M_adapt
 
-    def convert(self, image: torch.Tensor, source_space: str = "sRGB",
-                target_space: str = "ACEScg",
-                exposure: float = 0.0,
-                gamma_adjust: float = 1.0,
-                chromatic_adaptation: str = "Bradford",
-                use_gpu: bool = True) -> Tuple[torch.Tensor]:
+    def convert(
+        self,
+        image: torch.Tensor,
+        source_space: str = "sRGB",
+        target_space: str = "ACEScg",
+        exposure: float = 0.0,
+        gamma_adjust: float = 1.0,
+        chromatic_adaptation: str = "Bradford",
+        use_gpu: bool = True,
+    ) -> Tuple[torch.Tensor]:
 
         if source_space == target_space:
             # Still apply exposure/gamma if requested
             if exposure != 0.0 or gamma_adjust != 1.0:
                 img = image.clone()
                 if exposure != 0.0:
-                    img = img * (2.0 ** exposure)
+                    img = img * (2.0**exposure)
                 if gamma_adjust != 1.0:
                     img = _sign_pow_torch(img, gamma_adjust)
                 return (img,)
@@ -583,7 +771,7 @@ class ColorSpaceConvert:
 
             # Apply exposure
             if exposure != 0.0:
-                rgb = rgb * (2.0 ** exposure)
+                rgb = rgb * (2.0**exposure)
 
             # Apply gamma adjustment (sign-preserving)
             if gamma_adjust != 1.0:
@@ -627,25 +815,26 @@ class ColorSpaceConvert:
 # v2.1: These were duplicated across DaVinciWideGamut and ARRIWideGamut4
 # classes. Extracted to module level for single source of truth.
 
-_SRGB_TO_XYZ = np.array([
-    [0.4124564, 0.3575761, 0.1804375],
-    [0.2126729, 0.7151522, 0.0721750],
-    [0.0193339, 0.1191920, 0.9503041]
-], dtype=np.float32)
+_SRGB_TO_XYZ = np.array(
+    [
+        [0.4124564, 0.3575761, 0.1804375],
+        [0.2126729, 0.7151522, 0.0721750],
+        [0.0193339, 0.1191920, 0.9503041],
+    ],
+    dtype=np.float32,
+)
 
 _XYZ_TO_SRGB = np.linalg.inv(_SRGB_TO_XYZ).astype(np.float32)
 
-_XYZ_TO_AP1 = np.array([
-    [1.6410, -0.3249, -0.2365],
-    [-0.6636, 1.6153, 0.0168],
-    [0.0117, -0.0084, 0.9884]
-], dtype=np.float32)
+_XYZ_TO_AP1 = np.array(
+    [[1.6410, -0.3249, -0.2365], [-0.6636, 1.6153, 0.0168], [0.0117, -0.0084, 0.9884]],
+    dtype=np.float32,
+)
 
-_AP1_TO_XYZ = np.array([
-    [0.6624, 0.1340, 0.1561],
-    [0.2722, 0.6741, 0.0537],
-    [-0.0056, 0.0040, 1.0103]
-], dtype=np.float32)
+_AP1_TO_XYZ = np.array(
+    [[0.6624, 0.1340, 0.1561], [0.2722, 0.6741, 0.0537], [-0.0056, 0.0040, 1.0103]],
+    dtype=np.float32,
+)
 
 
 class DaVinciWideGamut:
@@ -678,17 +867,25 @@ class DaVinciWideGamut:
     DESCRIPTION = "Convert to/from DaVinci Wide Gamut and DaVinci Intermediate."
 
     # DaVinci Wide Gamut to/from XYZ (D65)
-    DWG_TO_XYZ = np.array([
-        [0.7006, 0.1487, 0.1014],
-        [0.2741, 0.8736, -0.1477],
-        [-0.0099, -0.0315, 0.9417]
-    ], dtype=np.float32)
+    DWG_TO_XYZ = np.array(
+        [
+            [0.7006, 0.1487, 0.1014],
+            [0.2741, 0.8736, -0.1477],
+            [-0.0099, -0.0315, 0.9417],
+        ],
+        dtype=np.float32,
+    )
 
-    XYZ_TO_DWG = np.linalg.inv(np.array([
-        [0.7006, 0.1487, 0.1014],
-        [0.2741, 0.8736, -0.1477],
-        [-0.0099, -0.0315, 0.9417]
-    ], dtype=np.float32)).astype(np.float32)
+    XYZ_TO_DWG = np.linalg.inv(
+        np.array(
+            [
+                [0.7006, 0.1487, 0.1014],
+                [0.2741, 0.8736, -0.1477],
+                [-0.0099, -0.0315, 0.9417],
+            ],
+            dtype=np.float32,
+        )
+    ).astype(np.float32)
 
     # v2.1: Use shared module-level matrices
     SRGB_TO_XYZ = _SRGB_TO_XYZ
@@ -705,7 +902,7 @@ class DaVinciWideGamut:
         return np.where(
             linear < lin_cut,
             linear * m,
-            c * np.log2(np.maximum(linear + a, 1e-10)) + b * 0.1
+            c * np.log2(np.maximum(linear + a, 1e-10)) + b * 0.1,
         ).astype(np.float32)
 
     def _davinci_intermediate_decode(self, encoded: np.ndarray) -> np.ndarray:
@@ -717,9 +914,7 @@ class DaVinciWideGamut:
         log_cut = 0.02740668
 
         return np.where(
-            encoded < log_cut,
-            encoded / m,
-            np.power(2.0, (encoded - b * 0.1) / c) - a
+            encoded < log_cut, encoded / m, np.power(2.0, (encoded - b * 0.1) / c) - a
         ).astype(np.float32)
 
     def convert(self, image: torch.Tensor, transform: str) -> Tuple[torch.Tensor]:
@@ -766,9 +961,15 @@ class ARRIWideGamut4:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "direction": (["AWG4 to ACEScg", "ACEScg to AWG4",
-                              "AWG4 to Linear sRGB", "Linear sRGB to AWG4"],
-                             {"default": "AWG4 to ACEScg"}),
+                "direction": (
+                    [
+                        "AWG4 to ACEScg",
+                        "ACEScg to AWG4",
+                        "AWG4 to Linear sRGB",
+                        "Linear sRGB to AWG4",
+                    ],
+                    {"default": "AWG4 to ACEScg"},
+                ),
             }
         }
 
@@ -779,17 +980,25 @@ class ARRIWideGamut4:
     DESCRIPTION = "Convert to/from ARRI Wide Gamut 4 (AWG4) for Alexa 35."
 
     # ARRI Wide Gamut 4 to XYZ (D65)
-    AWG4_TO_XYZ = np.array([
-        [0.7048583, 0.1290112, 0.1166296],
-        [0.2540892, 0.7814076, -0.0354969],
-        [-0.0094877, -0.0324927, 0.8954361]
-    ], dtype=np.float32)
+    AWG4_TO_XYZ = np.array(
+        [
+            [0.7048583, 0.1290112, 0.1166296],
+            [0.2540892, 0.7814076, -0.0354969],
+            [-0.0094877, -0.0324927, 0.8954361],
+        ],
+        dtype=np.float32,
+    )
 
-    XYZ_TO_AWG4 = np.linalg.inv(np.array([
-        [0.7048583, 0.1290112, 0.1166296],
-        [0.2540892, 0.7814076, -0.0354969],
-        [-0.0094877, -0.0324927, 0.8954361]
-    ], dtype=np.float32)).astype(np.float32)
+    XYZ_TO_AWG4 = np.linalg.inv(
+        np.array(
+            [
+                [0.7048583, 0.1290112, 0.1166296],
+                [0.2540892, 0.7814076, -0.0354969],
+                [-0.0094877, -0.0324927, 0.8954361],
+            ],
+            dtype=np.float32,
+        )
+    ).astype(np.float32)
 
     # v2.1: Use shared module-level matrices
     SRGB_TO_XYZ = _SRGB_TO_XYZ
@@ -849,25 +1058,70 @@ class ACES2OutputTransform:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "input_colorspace": (["ACEScg", "ACES2065-1", "Linear_sRGB", "Linear_Rec2020"],
-                                    {"default": "ACEScg",
-                                     "tooltip": "Input color space. ACEScg = ACES working space (AP1). Linear_sRGB = standard linear."}),
-                "output_transform": (cls.OUTPUT_TRANSFORMS,
-                                    {"default": "ACES 2.0 SDR (sRGB/Rec.709)",
-                                     "tooltip": "Target output. SDR for web/broadcast, HDR for HDR10/Dolby Vision, Cinema for theatrical."}),
+                "input_colorspace": (
+                    ["ACEScg", "ACES2065-1", "Linear_sRGB", "Linear_Rec2020"],
+                    {
+                        "default": "ACEScg",
+                        "tooltip": "Input color space. ACEScg = ACES working space (AP1). Linear_sRGB = standard linear.",
+                    },
+                ),
+                "output_transform": (
+                    cls.OUTPUT_TRANSFORMS,
+                    {
+                        "default": "ACES 2.0 SDR (sRGB/Rec.709)",
+                        "tooltip": "Target output. SDR for web/broadcast, HDR for HDR10/Dolby Vision, Cinema for theatrical.",
+                    },
+                ),
             },
             "optional": {
-                "peak_luminance": ("FLOAT", {"default": 100.0, "min": 48.0, "max": 10000.0, "step": 1.0,
-                                            "tooltip": "SDR peak luminance in nits. Standard SDR = 100."}),
-                "surround": (["Dark", "Dim", "Average"], {"default": "Dim",
-                            "tooltip": "Viewing surround. Dark = cinema, Dim = home theater, Average = office."}),
-                "creative_white_scale": ("FLOAT", {"default": 1.0, "min": 0.5, "max": 1.5, "step": 0.01,
-                                                   "tooltip": "Creative exposure adjustment before tone mapping."}),
-                "exposure_adjust": ("FLOAT", {"default": 0.0, "min": -4.0, "max": 4.0, "step": 0.1,
-                                              "tooltip": "Exposure adjustment in stops."}),
-                "gamut_compress": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05,
-                                             "tooltip": "Gamut compression strength. 1.0 = standard. Higher = more compression."}),
-            }
+                "peak_luminance": (
+                    "FLOAT",
+                    {
+                        "default": 100.0,
+                        "min": 48.0,
+                        "max": 10000.0,
+                        "step": 1.0,
+                        "tooltip": "SDR peak luminance in nits. Standard SDR = 100.",
+                    },
+                ),
+                "surround": (
+                    ["Dark", "Dim", "Average"],
+                    {
+                        "default": "Dim",
+                        "tooltip": "Viewing surround. Dark = cinema, Dim = home theater, Average = office.",
+                    },
+                ),
+                "creative_white_scale": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.5,
+                        "max": 1.5,
+                        "step": 0.01,
+                        "tooltip": "Creative exposure adjustment before tone mapping.",
+                    },
+                ),
+                "exposure_adjust": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": -4.0,
+                        "max": 4.0,
+                        "step": 0.1,
+                        "tooltip": "Exposure adjustment in stops.",
+                    },
+                ),
+                "gamut_compress": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 2.0,
+                        "step": 0.05,
+                        "tooltip": "Gamut compression strength. 1.0 = standard. Higher = more compression.",
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("IMAGE", "STRING")
@@ -877,45 +1131,59 @@ class ACES2OutputTransform:
     DESCRIPTION = "Apply ACES 2.0 Output Transform with proper gamut mapping for SDR, HDR, or Cinema output."
 
     # === Color Space Matrices ===
-    ACES_AP0_TO_AP1 = np.array([
-        [1.4514393161, -0.2365107469, -0.2149285693],
-        [-0.0765537734, 1.1762296998, -0.0996759264],
-        [0.0083161484, -0.0060324498, 0.9977163014]
-    ], dtype=np.float32)
+    ACES_AP0_TO_AP1 = np.array(
+        [
+            [1.4514393161, -0.2365107469, -0.2149285693],
+            [-0.0765537734, 1.1762296998, -0.0996759264],
+            [0.0083161484, -0.0060324498, 0.9977163014],
+        ],
+        dtype=np.float32,
+    )
 
-    ACES_AP1_TO_sRGB = np.array([
-        [1.7050509, -0.6217921, -0.0832588],
-        [-0.1302564, 1.1408047, -0.0105483],
-        [-0.0240033, -0.1289690, 1.1529723]
-    ], dtype=np.float32)
+    ACES_AP1_TO_sRGB = np.array(
+        [
+            [1.7050509, -0.6217921, -0.0832588],
+            [-0.1302564, 1.1408047, -0.0105483],
+            [-0.0240033, -0.1289690, 1.1529723],
+        ],
+        dtype=np.float32,
+    )
 
-    ACES_AP1_TO_P3D65 = np.array([
-        [1.3792141, -0.3088546, -0.0703595],
-        [-0.0693257, 1.0823507, -0.0130250],
-        [-0.0021522, -0.0454616, 1.0476138]
-    ], dtype=np.float32)
+    ACES_AP1_TO_P3D65 = np.array(
+        [
+            [1.3792141, -0.3088546, -0.0703595],
+            [-0.0693257, 1.0823507, -0.0130250],
+            [-0.0021522, -0.0454616, 1.0476138],
+        ],
+        dtype=np.float32,
+    )
 
-    ACES_AP1_TO_Rec2020 = np.array([
-        [1.0258246, -0.0200540, -0.0057706],
-        [-0.0023054, 1.0045847, -0.0022793],
-        [-0.0050569, -0.0252857, 1.0303426]
-    ], dtype=np.float32)
+    ACES_AP1_TO_Rec2020 = np.array(
+        [
+            [1.0258246, -0.0200540, -0.0057706],
+            [-0.0023054, 1.0045847, -0.0022793],
+            [-0.0050569, -0.0252857, 1.0303426],
+        ],
+        dtype=np.float32,
+    )
 
-    sRGB_TO_AP1 = np.array([
-        [0.6131, 0.3395, 0.0474],
-        [0.0702, 0.9164, 0.0134],
-        [0.0206, 0.1096, 0.8698]
-    ], dtype=np.float32)
+    sRGB_TO_AP1 = np.array(
+        [[0.6131, 0.3395, 0.0474], [0.0702, 0.9164, 0.0134], [0.0206, 0.1096, 0.8698]],
+        dtype=np.float32,
+    )
 
-    Rec2020_TO_AP1 = np.array([
-        [0.9788, 0.0165, 0.0047],
-        [0.0014, 0.9983, 0.0003],
-        [0.0044, 0.0235, 0.9721]
-    ], dtype=np.float32)
+    Rec2020_TO_AP1 = np.array(
+        [[0.9788, 0.0165, 0.0047], [0.0014, 0.9983, 0.0003], [0.0044, 0.0235, 0.9721]],
+        dtype=np.float32,
+    )
 
     def _compute_luminance(self, rgb: np.ndarray) -> np.ndarray:
         """Compute luminance using ACEScg (AP1) weights."""
-        return LUMA_AP1[0] * rgb[..., 0] + LUMA_AP1[1] * rgb[..., 1] + LUMA_AP1[2] * rgb[..., 2]
+        return (
+            LUMA_AP1[0] * rgb[..., 0]
+            + LUMA_AP1[1] * rgb[..., 1]
+            + LUMA_AP1[2] * rgb[..., 2]
+        )
 
     def _gamut_compress(self, rgb: np.ndarray, strength: float = 1.0) -> np.ndarray:
         """
@@ -941,8 +1209,10 @@ class ACES2OutputTransform:
             above = dist > threshold
             compressed = np.where(
                 above,
-                threshold + (dist - threshold) / (1.0 + ((dist - threshold) / (limit - threshold)) * strength),
-                dist
+                threshold
+                + (dist - threshold)
+                / (1.0 + ((dist - threshold) / (limit - threshold)) * strength),
+                dist,
             )
             return compressed
 
@@ -950,17 +1220,24 @@ class ACES2OutputTransform:
         dist_g_comp = compress_channel(dist_g, threshold_magenta)
         dist_b_comp = compress_channel(dist_b, threshold_yellow)
 
-        result = np.stack([
-            achromatic * (1.0 - dist_r_comp),
-            achromatic * (1.0 - dist_g_comp),
-            achromatic * (1.0 - dist_b_comp)
-        ], axis=-1)
+        result = np.stack(
+            [
+                achromatic * (1.0 - dist_r_comp),
+                achromatic * (1.0 - dist_g_comp),
+                achromatic * (1.0 - dist_b_comp),
+            ],
+            axis=-1,
+        )
 
         return result
 
-    def _apply_tonescale_drt(self, rgb: np.ndarray, peak_luminance: float = 100.0,
-                              surround: str = "Dim",
-                              is_hdr: bool = False) -> np.ndarray:
+    def _apply_tonescale_drt(
+        self,
+        rgb: np.ndarray,
+        peak_luminance: float = 100.0,
+        surround: str = "Dim",
+        is_hdr: bool = False,
+    ) -> np.ndarray:
         """
         Apply ACES 2.0 DRT-style tonescale.
         Uses per-channel path-to-white for natural highlight rolloff.
@@ -991,23 +1268,31 @@ class ACES2OutputTransform:
             channel_contrast = np.power(2.0, log_contrast) * pivot
 
             # Toe (shadows)
-            channel_toe = np.power(
-                np.power(channel_contrast, toe_power) /
-                (np.power(channel_contrast, toe_power) + np.power(0.01, toe_power)),
-                1.0 / toe_power
-            ) * channel_contrast
+            channel_toe = (
+                np.power(
+                    np.power(channel_contrast, toe_power)
+                    / (
+                        np.power(channel_contrast, toe_power)
+                        + np.power(0.01, toe_power)
+                    ),
+                    1.0 / toe_power,
+                )
+                * channel_contrast
+            )
 
             # Shoulder (highlights)
             white_scale = peak_scale
             channel_shoulder = white_scale * np.power(
-                np.maximum(channel_toe / white_scale, 1e-10),
-                shoulder_power
+                np.maximum(channel_toe / white_scale, 1e-10), shoulder_power
             )
             channel_shoulder = np.where(
                 channel_toe < white_scale * 0.9,
                 channel_toe,
-                white_scale - (white_scale - channel_shoulder) *
-                np.tanh((channel_toe - white_scale * 0.9) / (white_scale * 0.5 + 1e-10))
+                white_scale
+                - (white_scale - channel_shoulder)
+                * np.tanh(
+                    (channel_toe - white_scale * 0.9) / (white_scale * 0.5 + 1e-10)
+                ),
             )
 
             result[..., c] = channel_shoulder / peak_scale
@@ -1023,7 +1308,10 @@ class ACES2OutputTransform:
         else:
             sat_factor = np.clip(1.0 - np.power(luma, 3.0), 0.3, 1.0)
 
-        result_desat = luma[..., np.newaxis] + (result - luma[..., np.newaxis]) * sat_factor[..., np.newaxis]
+        result_desat = (
+            luma[..., np.newaxis]
+            + (result - luma[..., np.newaxis]) * sat_factor[..., np.newaxis]
+        )
 
         # v2.1 FIX: Clip to appropriate range based on output type.
         # OLD: return np.clip(result_desat, 0, 1)  ← killed HDR headroom
@@ -1065,17 +1353,24 @@ class ACES2OutputTransform:
         c = 0.55991073
 
         hlg = np.where(
-            linear <= 1/12,
+            linear <= 1 / 12,
             np.sqrt(3 * np.maximum(linear, 0)),
-            a * np.log(np.maximum(12 * linear - b, 1e-10)) + c
+            a * np.log(np.maximum(12 * linear - b, 1e-10)) + c,
         )
 
         return np.clip(hlg, 0, 1)
 
-    def apply_transform(self, image: torch.Tensor, input_colorspace: str,
-                       output_transform: str, peak_luminance: float = 100.0,
-                       surround: str = "Dim", creative_white_scale: float = 1.0,
-                       exposure_adjust: float = 0.0, gamut_compress: float = 1.0) -> Tuple[torch.Tensor, str]:
+    def apply_transform(
+        self,
+        image: torch.Tensor,
+        input_colorspace: str,
+        output_transform: str,
+        peak_luminance: float = 100.0,
+        surround: str = "Dim",
+        creative_white_scale: float = 1.0,
+        exposure_adjust: float = 0.0,
+        gamut_compress: float = 1.0,
+    ) -> Tuple[torch.Tensor, str]:
 
         img = tensor_to_numpy_float32(image)
         if img.ndim == 4:
@@ -1083,7 +1378,7 @@ class ACES2OutputTransform:
 
         # 1. Apply exposure
         if exposure_adjust != 0:
-            img = img * (2.0 ** exposure_adjust)
+            img = img * (2.0**exposure_adjust)
 
         # 2. Convert to ACEScg working space
         if input_colorspace == "ACES2065-1":
@@ -1144,7 +1439,7 @@ class ACES2OutputTransform:
             output = self._hlg_encode(output)
         elif is_cinema:
             # DCI gamma 2.6
-            output = np.power(np.clip(output, 0, 1), 1/2.6)
+            output = np.power(np.clip(output, 0, 1), 1 / 2.6)
         else:
             # sRGB gamma
             output = linear_to_srgb(np.clip(output, 0, 1))
