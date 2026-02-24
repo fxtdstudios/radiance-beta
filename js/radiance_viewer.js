@@ -3944,17 +3944,7 @@ class RadianceViewer {
         // 1. TOP BAR: Exp | Temp | Tint | Contrast | Pivot | Mid/Detail
         // ═════════════════════════════════════════════════════════════════════
         const topBar = document.createElement('div');
-        topBar.style.cssText = 'display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 8px; justify-items: center;';
-
-        // Auto Balance Picker
-        const balanceBtn = document.createElement('div');
-        balanceBtn.innerHTML = '◎';
-        balanceBtn.title = 'Auto White Balance';
-        balanceBtn.style.cssText = 'width: 38px; height: 38px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: 0.2s; margin-top: 4px; font-size: 16px;';
-        balanceBtn.onmouseenter = () => balanceBtn.style.background = 'rgba(255,255,255,0.12)';
-        balanceBtn.onmouseleave = () => balanceBtn.style.background = 'rgba(255,255,255,0.05)';
-        balanceBtn.onclick = () => this.activateBalancePicker();
-        topBar.appendChild(balanceBtn);
+        topBar.style.cssText = 'display: grid; grid-template-columns: repeat(6, 1fr); gap: 2px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 8px; justify-items: center;';
 
         // Exposure
         topBar.appendChild(createMini('EXP', -10.0, 10.0, this.exposure || 0.0, 0.1, v => {
@@ -4867,73 +4857,6 @@ class RadianceViewer {
         rotFeatherGroup.appendChild(featherRow);
 
         container.appendChild(rotFeatherGroup);
-    }
-
-    activateBalancePicker() {
-        if (this.isPickingBalance) return;
-        this.isPickingBalance = true;
-
-        const overlay = document.createElement('div');
-        overlay.textContent = 'Click to Neutralize (Gray Balance)';
-        overlay.style.cssText = 'position: absolute; top: 10px; left: 50%; transform: translateX(-50%); background: rgba(100,200,100,0.85); color: #fff; padding: 6px 12px; border-radius: 4px; pointer-events: none; z-index: 200; font-size: 11px; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.5);';
-        this.container.appendChild(overlay);
-
-        this.container.style.cursor = 'crosshair';
-
-        const clickHandler = (e) => {
-            const rect = this.canvas.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
-
-            const imgX = (x - this.panX) / this.zoom;
-            const imgY = (y - this.panY) / this.zoom;
-
-            if (imgX >= 0 && imgX < this.imageWidth && imgY >= 0 && imgY < this.imageHeight) {
-                let r = 0, g = 0, b = 0;
-
-                if (this.hdrData) {
-                    const ix = Math.floor(imgX);
-                    const iy = Math.floor(imgY);
-                    const idx = (iy * this.imageWidth + ix) * this.hdrData.channels;
-                    const d = this.hdrData.data;
-                    r = d[idx]; g = d[idx + 1]; b = d[idx + 2];
-                } else if (this.imageData) {
-                    const ix = Math.floor(imgX);
-                    const iy = Math.floor(imgY);
-                    const idx = (iy * this.imageWidth + ix) * 4;
-                    r = this.imageData[idx] / 255.0;
-                    g = this.imageData[idx + 1] / 255.0;
-                    b = this.imageData[idx + 2] / 255.0;
-                }
-
-                // Balance Logic: Neutralize to average luma
-                const avg = (r + g + b) / 3.0;
-                if (avg > 0) {
-                    const dr = avg - r;
-                    const dg = avg - g;
-                    const db = avg - b;
-
-                    this.offset = [
-                        (this.offset[0] || 0) + dr,
-                        (this.offset[1] || 0) + dg,
-                        (this.offset[2] || 0) + db
-                    ];
-
-                    if (this.renderer) {
-                        this.renderer.setOffset(this.offset[0], this.offset[1], this.offset[2]);
-                        this.render();
-                    }
-                    this.renderPrimariesTab(this.tabContentContainer);
-                }
-            }
-
-            this.container.style.cursor = 'default';
-            overlay.remove();
-            this.container.removeEventListener('click', clickHandler);
-            this.isPickingBalance = false;
-        };
-
-        this.container.addEventListener('click', clickHandler);
     }
 
     activateEyedropper(callback) {
