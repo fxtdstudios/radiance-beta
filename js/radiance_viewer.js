@@ -3413,21 +3413,23 @@ class RadianceViewer {
         runBtnWrapper.appendChild(runBtn);
         container.appendChild(runBtnWrapper);
 
-        // v2.4: ONLY show the Cinematic Encoder node in the HUD prompt tab
+        // Get Generation Settings Nodes
         const nodes = app.graph._nodes.filter(n => {
             const nodeType = n.type || "";
-            const comfyClass = n.comfyClass || "";
-            return comfyClass === "FXTDCinematicPromptEncoder" ||
-                comfyClass === "RadianceCinematicPromptEncoder" ||
-                nodeType.includes("FXTDCinematicPromptEncoder") ||
-                nodeType.includes("RadianceCinematicPromptEncoder");
+            const comfyClass = n.comfyClass || nodeType;
+
+            const isEncoder = comfyClass.includes("CinematicPromptEncoder");
+            const isUnet = comfyClass === "CheckpointLoaderSimple" || comfyClass === "UNETLoader" || comfyClass.includes("DualCLIPLoader");
+            const isLatent = comfyClass === "EmptyLatentImage" || comfyClass === "EmptySD3LatentImage";
+
+            return isEncoder || isUnet || isLatent;
         });
 
-        console.log("[Radiance] Found", nodes.length, "Cinematic Encoder nodes.");
+        console.log("[Radiance] Found", nodes.length, "Generation settings nodes.");
 
         if (nodes.length === 0) {
             const msg = document.createElement('div');
-            msg.textContent = "No Cinematic Encoder found.";
+            msg.textContent = "No Generation Nodes found.";
             msg.style.color = t.textDim;
             msg.style.fontSize = "11px";
             container.appendChild(msg);
