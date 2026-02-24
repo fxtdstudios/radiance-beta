@@ -244,10 +244,13 @@ class RadianceReadVideo:
                 ),
                 "extract_audio": ("BOOLEAN", {"default": True}),
             },
+            "optional": {
+                "vhs_video": ("VHS_VIDEO",),
+            },
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT", "INT", "FLOAT", "AUDIO")
-    RETURN_NAMES = ("IMAGE", "MASK", "frame_count", "width", "height", "fps", "audio")
+    RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT", "INT", "FLOAT", "AUDIO", "VHS_VIDEO")
+    RETURN_NAMES = ("IMAGE", "MASK", "frame_count", "width", "height", "fps", "audio", "video")
     FUNCTION = "read_video"
     CATEGORY = "FXTD Studios/Radiance/IO"
     DESCRIPTION = (
@@ -262,7 +265,16 @@ class RadianceReadVideo:
         input_colorspace,
         frame_stride,
         extract_audio=True,
+        vhs_video=None,
     ):
+        if vhs_video is not None:
+            if isinstance(vhs_video, str):
+                video_path = vhs_video
+            elif isinstance(vhs_video, dict) and "source" in vhs_video:
+                video_path = vhs_video["source"]
+            elif isinstance(vhs_video, list) and len(vhs_video) > 0:
+                video_path = vhs_video[0]
+
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video file not found: {video_path}")
 
@@ -331,7 +343,7 @@ class RadianceReadVideo:
         if extract_audio:
             audio = _extract_audio_ffmpeg(video_path)
 
-        return (frames_linear, mask, len(frames), width, height, fps, audio)
+        return (frames_linear, mask, len(frames), width, height, fps, audio, video_path)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -578,10 +590,12 @@ class RadianceWrite:
     RETURN_TYPES = (
         "IMAGE",
         "STRING",
+        "VHS_VIDEO",
     )
     RETURN_NAMES = (
         "IMAGE",
         "file_path",
+        "video",
     )
     FUNCTION = "write"
     OUTPUT_NODE = True
@@ -652,7 +666,7 @@ class RadianceWrite:
         logger.info(f"Saved: {filepath}")
 
         # IMAGE passthrough — return original input images for chaining
-        return (images, filepath)
+        return (images, filepath, filepath)
 
     # ─── Video Writer (FFmpeg via imageio) ────────────────────────────────
 
