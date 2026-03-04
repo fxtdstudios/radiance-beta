@@ -6,6 +6,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FAQ — Radiance</title>
     <meta name="description" content="Frequently Asked Questions and troubleshooting for Radiance v2.1.0.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
     <link rel="stylesheet" href="wiki.css">
 </head>
 
@@ -27,9 +32,30 @@
         </div>
         <div class="nav-spacer"></div>
         <button id="themeToggle">◎ Light</button>
+        <button class="nav-hamburger" id="navHamburger" aria-label="Open menu">
+            <span></span><span></span><span></span>
+        </button>
     </nav>
 
+    <!-- MOBILE NAV DRAWER -->
+    <div class="mobile-nav-drawer" id="mobileNavDrawer">
+        <div class="mobile-nav-overlay" id="mobileNavOverlay"></div>
+        <nav class="mobile-nav-panel">
+            <a href="index.html">Home</a>
+            <a href="installation.html">Install</a>
+            <a href="node_reference.html">Nodes</a>
+            <a href="radiance_viewer.html">Viewer</a>
+            <a href="tutorials.html">Tutorials</a>
+            <a href="faq.html" class="active">FAQ</a>
+            <a href="changelog.html">Changelog</a>
+            <a href="architecture.html">Architecture</a>
+            <button class="mobile-theme-btn" id="mobileThemeToggle">◎ Light</button>
+        </nav>
+    </div>
+
     <div class="wiki-layout">
+        <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+        <button class="sidebar-toggle-btn" id="sidebarToggle" aria-label="Toggle navigation">☰</button>
         <aside class="wiki-sidebar">
             <div class="sidebar-header">
                 <div
@@ -655,89 +681,32 @@ R / G / B — Isolate channels
     </div>
 
     <script>
-        // FAQ Toggle
-        document.querySelectorAll('.faq-question').forEach(question => {
-            question.addEventListener('click', () => {
-                const item = question.parentElement;
-                item.classList.toggle('open');
-            });
-        });
-
-        // Search functionality
-        const searchInput = document.querySelector('.search-box input');
-        if (searchInput) {
-            searchInput.addEventListener('input', (e) => {
-                const query = e.target.value.toLowerCase();
-                document.querySelectorAll('.faq-item').forEach(item => {
-                    const text = item.textContent.toLowerCase();
-                    item.style.display = text.includes(query) ? 'block' : 'none';
-                });
-            });
+        function applyTheme(isLight) {
+            document.body.classList.toggle('light', isLight);
+            const label = isLight ? '◎ Dark' : '◎ Light';
+            document.querySelectorAll('#themeToggle, #mobileThemeToggle').forEach(b => b && (b.textContent = label));
+            localStorage.setItem('radiance-theme', isLight ? 'light' : 'dark');
         }
-    </script>
-
-    <script>
-        document.addEventListener('DOMContentLoaded', () => {
-            // FAQ Accordion
-            const questions = document.querySelectorAll('.faq-question');
-            questions.forEach(q => {
-                q.addEventListener('click', () => {
-                    const item = q.parentElement;
-                    const isOpen = item.classList.contains('open');
-
-                    // Close others? Optional. Let's keep multiple open allowed.
-
-                    item.classList.toggle('open');
-
-                    // Rotate icon
-                    const icon = q.querySelector('.icon');
-                    if (icon) icon.style.transform = isOpen ? 'rotate(0deg)' : 'rotate(45deg)';
-                });
+        applyTheme(localStorage.getItem('radiance-theme') === 'light');
+        document.getElementById('themeToggle').addEventListener('click', () => applyTheme(!document.body.classList.contains('light')));
+        document.getElementById('mobileThemeToggle').addEventListener('click', () => applyTheme(!document.body.classList.contains('light')));
+        const hamburger = document.getElementById('navHamburger');
+        const mobileDrawer = document.getElementById('mobileNavDrawer');
+        hamburger.addEventListener('click', () => { hamburger.classList.toggle('open'); mobileDrawer.classList.toggle('open'); });
+        document.getElementById('mobileNavOverlay').addEventListener('click', () => { hamburger.classList.remove('open'); mobileDrawer.classList.remove('open'); });
+        const sidebar = document.querySelector('.wiki-sidebar');
+        const backdrop = document.getElementById('sidebarBackdrop');
+        document.getElementById('sidebarToggle').addEventListener('click', () => { sidebar.classList.toggle('open'); backdrop.classList.toggle('open'); });
+        backdrop.addEventListener('click', () => { sidebar.classList.remove('open'); backdrop.classList.remove('open'); });
+        document.querySelectorAll('.faq-question').forEach(q => {
+            q.addEventListener('click', () => {
+                const item = q.parentElement;
+                item.classList.toggle('open');
+                const icon = q.querySelector('.icon');
+                if (icon) icon.style.transform = item.classList.contains('open') ? 'rotate(45deg)' : 'rotate(0deg)';
             });
-
-            // Search Functionality
-            const searchInput = document.querySelector('.search-box input');
-            if (searchInput) {
-                searchInput.addEventListener('input', (e) => {
-                    const term = e.target.value.toLowerCase();
-                    document.querySelectorAll('.faq-item').forEach(item => {
-                        const text = item.innerText.toLowerCase();
-                        item.style.display = text.includes(term) ? 'block' : 'none';
-                    });
-                });
-            }
         });
     </script>
-
-    <script>
-        (function () {
-            var btn = document.getElementById('themeToggle');
-            if (!btn) return;
-            var saved = localStorage.getItem('radiance-theme');
-            if (saved === 'light') { document.body.classList.add('light'); btn.textContent = '\u{1F319} Dark'; }
-            btn.addEventListener('click', function () {
-                document.body.classList.toggle('light');
-                var isLight = document.body.classList.contains('light');
-                btn.textContent = isLight ? '\u{1F319} Dark' : '\u2600 Light';
-                localStorage.setItem('radiance-theme', isLight ? 'light' : 'dark');
-            });
-        })();
-    </script>
-    </main>
-    </div>
-    <footer class="wiki-footer">
-        <div style="display:flex; gap:1.5rem; justify-content:center; flex-wrap:wrap; margin-bottom:1rem; opacity:0.8;">
-            <a href="https://fxtd.org/" target="_blank">Website</a>
-            <a href="https://github.com/fxtdstudios/radiance" target="_blank">GitHub</a>
-            <a href="https://linkedin.com/company/fxtdstudios" target="_blank">LinkedIn</a>
-            <a href="https://instagram.com/fxtdstudios" target="_blank">Instagram</a>
-            <a href="https://vimeo.com/fxtdstudios" target="_blank">Vimeo</a>
-            <a href="https://discord.gg/fxtdstudios" target="_blank">Discord</a>
-            <a href="https://facebook.com/fxtdstudios" target="_blank">Facebook</a>
-        </div>
-        <p><strong>Radiance v2.1.0</strong> · © FXTD Studios</p>
-    </footer>
 </body>
 
 </html>
-```

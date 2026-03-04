@@ -6,6 +6,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Changelog — Radiance</title>
     <meta name="description" content="Version history and release notes for Radiance v2.1.0.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
     <link rel="stylesheet" href="wiki.css">
 </head>
 
@@ -27,9 +32,30 @@
         </div>
         <div class="nav-spacer"></div>
         <button id="themeToggle">◎ Light</button>
+        <button class="nav-hamburger" id="navHamburger" aria-label="Open menu">
+            <span></span><span></span><span></span>
+        </button>
     </nav>
 
+    <!-- MOBILE NAV DRAWER -->
+    <div class="mobile-nav-drawer" id="mobileNavDrawer">
+        <div class="mobile-nav-overlay" id="mobileNavOverlay"></div>
+        <nav class="mobile-nav-panel">
+            <a href="index.html">Home</a>
+            <a href="installation.html">Install</a>
+            <a href="node_reference.html">Nodes</a>
+            <a href="radiance_viewer.html">Viewer</a>
+            <a href="tutorials.html">Tutorials</a>
+            <a href="faq.html">FAQ</a>
+            <a href="changelog.html" class="active">Changelog</a>
+            <a href="architecture.html">Architecture</a>
+            <button class="mobile-theme-btn" id="mobileThemeToggle">◎ Light</button>
+        </nav>
+    </div>
+
     <div class="wiki-layout">
+        <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+        <button class="sidebar-toggle-btn" id="sidebarToggle" aria-label="Toggle navigation">☰</button>
         <!-- SIDEBAR NAV -->
         <aside class="wiki-sidebar">
             <div class="sidebar-header">
@@ -319,15 +345,26 @@
     </footer>
 
     <script>
-        const btn = document.getElementById('themeToggle');
-        const saved = localStorage.getItem('radiance-theme');
-        if (saved === 'light') { document.body.classList.add('light'); btn.textContent = '◎ Dark'; }
-        btn.addEventListener('click', () => {
-            document.body.classList.toggle('light');
-            const isLight = document.body.classList.contains('light');
-            btn.textContent = isLight ? '◎ Dark' : '◎ Light';
+        function applyTheme(isLight) {
+            document.body.classList.toggle('light', isLight);
+            const label = isLight ? '◎ Dark' : '◎ Light';
+            document.querySelectorAll('#themeToggle, #mobileThemeToggle').forEach(b => b && (b.textContent = label));
             localStorage.setItem('radiance-theme', isLight ? 'light' : 'dark');
-        });
+        }
+        applyTheme(localStorage.getItem('radiance-theme') === 'light');
+        document.getElementById('themeToggle').addEventListener('click', () => applyTheme(!document.body.classList.contains('light')));
+        document.getElementById('mobileThemeToggle').addEventListener('click', () => applyTheme(!document.body.classList.contains('light')));
+        const hamburger = document.getElementById('navHamburger');
+        const mobileDrawer = document.getElementById('mobileNavDrawer');
+        hamburger.addEventListener('click', () => { hamburger.classList.toggle('open'); mobileDrawer.classList.toggle('open'); });
+        document.getElementById('mobileNavOverlay').addEventListener('click', () => { hamburger.classList.remove('open'); mobileDrawer.classList.remove('open'); });
+        const sidebar = document.querySelector('.wiki-sidebar');
+        const backdrop = document.getElementById('sidebarBackdrop');
+        document.getElementById('sidebarToggle').addEventListener('click', () => { sidebar.classList.toggle('open'); backdrop.classList.toggle('open'); });
+        backdrop.addEventListener('click', () => { sidebar.classList.remove('open'); backdrop.classList.remove('open'); });
+        const links = document.querySelectorAll('.sidebar-link');
+        new IntersectionObserver(entries => entries.forEach(e => { if (e.isIntersecting) links.forEach(l => l.classList.toggle('active', l.getAttribute('href') === '#' + e.target.id)); }), { rootMargin: '-20% 0px -70% 0px' }).observe = (() => { const orig = IntersectionObserver.prototype.observe; return function (el) { if (el) orig.call(this, el); }; })();
+        document.querySelectorAll('.wiki-content [id]').forEach(el => { const obs = new IntersectionObserver(entries => entries.forEach(e => { if (e.isIntersecting) links.forEach(l => l.classList.toggle('active', l.getAttribute('href') === '#' + e.target.id)); }), { rootMargin: '-20% 0px -70% 0px' }); obs.observe(el); });
     </script>
 </body>
 

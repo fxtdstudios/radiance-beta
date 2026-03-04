@@ -145,6 +145,7 @@ img {
   align-items: center;
   padding: 0 1.5rem;
   gap: 1rem;
+  position: relative;
 }
 
 body.light .wiki-nav {
@@ -833,40 +834,310 @@ body.light .wiki-table td {
   background: var(--text-muted);
 }
 
-/* ── RESPONSIVE ── */
-@media (max-width: 900px) {
-  .wiki-layout {
-    grid-template-columns: 1fr;
-  }
+/* ── HAMBURGER BUTTON ── */
+.nav-hamburger {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 5px;
+  width: 38px;
+  height: 38px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  padding: 0;
+  z-index: 300;
+  margin-left: auto;
+  transition: background .2s;
+  flex-shrink: 0;
+}
 
-  .wiki-sidebar {
-    display: none;
-  }
+.nav-hamburger span {
+  display: block;
+  width: 18px;
+  height: 2px;
+  background: var(--text-secondary);
+  border-radius: 2px;
+  transition: transform .25s, opacity .2s;
+}
+
+.nav-hamburger.open span:nth-child(1) {
+  transform: translateY(7px) rotate(45deg);
+}
+.nav-hamburger.open span:nth-child(2) {
+  opacity: 0;
+}
+.nav-hamburger.open span:nth-child(3) {
+  transform: translateY(-7px) rotate(-45deg);
+}
+
+/* ── MOBILE NAV DRAWER ── */
+.mobile-nav-drawer {
+  display: none;
+  position: fixed;
+  top: var(--nav-h);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 250;
+}
+
+.mobile-nav-drawer.open {
+  display: block;
+}
+
+.mobile-nav-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,.6);
+  backdrop-filter: blur(4px);
+}
+
+.mobile-nav-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: min(320px, 85vw);
+  height: 100%;
+  background: var(--bg-surface);
+  border-left: 1px solid var(--border);
+  padding: 1.5rem 1rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: .25rem;
+}
+
+.mobile-nav-panel a {
+  display: block;
+  color: var(--text-secondary);
+  font-size: 1rem;
+  font-weight: 500;
+  padding: .75rem 1rem;
+  border-radius: var(--radius-sm);
+  transition: background .2s, color .2s;
+}
+
+.mobile-nav-panel a:hover,
+.mobile-nav-panel a.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.mobile-nav-panel .mobile-theme-btn {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  padding: .6rem 1rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: .9rem;
+  font-family: inherit;
+  margin-top: 1rem;
+  text-align: left;
+  transition: all .2s;
+}
+
+/* ── MOBILE SIDEBAR DRAWER ── */
+.sidebar-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.5);
+  z-index: 190;
+  backdrop-filter: blur(2px);
+}
+
+.sidebar-toggle-btn {
+  display: none;
+  position: fixed;
+  bottom: 1.5rem;
+  left: 1.5rem;
+  z-index: 200;
+  background: var(--accent);
+  color: #111;
+  border: none;
+  border-radius: 50%;
+  width: 48px;
+  height: 48px;
+  font-size: 1.2rem;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 20px rgba(212,168,83,.4);
+  transition: transform .2s, box-shadow .2s;
+}
+
+.sidebar-toggle-btn:hover {
+  transform: scale(1.1);
+}
+
+/* ── RESPONSIVE — TABLET (768px – 1024px) ── */
+@media (max-width: 1024px) and (min-width: 769px) {
+  :root { --sidebar-w: 220px; }
 
   .wiki-content {
-    padding: 1.5rem;
+    padding: 2rem 2rem;
   }
 
-  .wiki-nav .nav-links {
-    display: none;
+  .wiki-nav .nav-links a {
+    font-size: .8rem;
+    padding: .3rem .5rem;
+  }
+
+  .whats-new-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .wiki-table {
+    font-size: .82rem;
   }
 }
 
-@media (max-width: 600px) {
+/* ── RESPONSIVE — MOBILE (≤768px) ── */
+@media (max-width: 768px) {
+  /* Nav: show hamburger, hide links and theme toggle */
+  .wiki-nav .nav-links,
+  .wiki-nav .nav-spacer,
+  .wiki-nav #themeToggle {
+    display: none;
+  }
+
+  .nav-hamburger {
+    display: flex;
+  }
+
+  /* Layout: collapse grid to single column */
+  .wiki-layout {
+    grid-template-columns: 1fr;
+    min-height: auto;
+  }
+
+  /* Sidebar: hidden but slide-in when .open */
+  .wiki-sidebar {
+    position: fixed;
+    top: var(--nav-h);
+    left: -100%;
+    width: min(280px, 82vw);
+    height: calc(100vh - var(--nav-h));
+    z-index: 195;
+    transition: left .3s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .wiki-sidebar.open {
+    left: 0;
+  }
+
+  .sidebar-backdrop.open {
+    display: block;
+  }
+
+  .sidebar-toggle-btn {
+    display: flex;
+  }
+
+  /* Content: full width */
+  .wiki-content {
+    padding: 1.25rem 1rem 5rem;
+    max-width: 100%;
+  }
+
+  /* Typography: scale down */
   .wiki-content h1 {
-    font-size: 1.6rem;
+    font-size: 1.65rem;
   }
 
   .wiki-content h2 {
     font-size: 1.2rem;
   }
 
-  .shortcuts-grid {
+  /* Tables: allow horizontal scroll */
+  .wiki-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .wiki-table {
+    min-width: 480px;
+  }
+
+  /* Grids: single column */
+  .shortcuts-grid,
+  .whats-new-grid,
+  .tutorial-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* Buttons: stack vertically */
+  .btn-group {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .btn {
+    justify-content: center;
+  }
+
+  /* Code blocks: font size */
+  .wiki-content pre {
+    font-size: .78rem;
+    padding: 1rem;
+  }
+
+  /* Tab bar: smaller */
+  .tab-bar {
+    gap: 1rem;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 2px;
+  }
+
+  .tab-btn {
+    font-size: .75rem;
+    flex-shrink: 0;
+  }
+
+  .tab-container {
+    margin-left: -1rem;
+    margin-right: -1rem;
+    padding: 0 1rem;
+  }
+
+  /* Node cards */
+  .node-card {
+    padding: 1rem;
+  }
+
+  /* FAQ quick links grid */
+  .quick-links-grid {
     grid-template-columns: 1fr 1fr;
   }
 
-  .whats-new-grid {
+  /* Category nav */
+  .category-nav {
+    flex-wrap: wrap;
+  }
+}
+
+/* ── RESPONSIVE — SMALL MOBILE (≤480px) ── */
+@media (max-width: 480px) {
+  .wiki-content h1 {
+    font-size: 1.4rem;
+  }
+
+  .wiki-nav .brand span {
+    display: none;
+  }
+
+  .quick-links-grid {
     grid-template-columns: 1fr;
+  }
+
+  .breadcrumb {
+    font-size: .8rem;
   }
 }
 

@@ -6,6 +6,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Installation — Radiance v2.1.0</title>
     <link rel="icon" type="image/png" href="icon.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
     <link rel="stylesheet" href="wiki.css">
 </head>
 
@@ -27,9 +32,32 @@
         </div>
         <div class="nav-spacer"></div>
         <button id="themeToggle">◎ Light</button>
+        <button class="nav-hamburger" id="navHamburger" aria-label="Open menu">
+            <span></span><span></span><span></span>
+        </button>
     </nav>
 
+    <!-- MOBILE NAV DRAWER -->
+    <div class="mobile-nav-drawer" id="mobileNavDrawer">
+        <div class="mobile-nav-overlay" id="mobileNavOverlay"></div>
+        <nav class="mobile-nav-panel">
+            <a href="index.html">Home</a>
+            <a href="installation.html" class="active">Install</a>
+            <a href="node_reference.html">Nodes</a>
+            <a href="radiance_viewer.html">Viewer</a>
+            <a href="tutorials.html">Tutorials</a>
+            <a href="faq.html">FAQ</a>
+            <a href="changelog.html">Changelog</a>
+            <a href="architecture.html">Architecture</a>
+            <button class="mobile-theme-btn" id="mobileThemeToggle">◎ Light</button>
+        </nav>
+    </div>
+
     <div class="wiki-layout">
+        <!-- Sidebar backdrop for mobile -->
+        <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+        <!-- Sidebar toggle button (mobile) -->
+        <button class="sidebar-toggle-btn" id="sidebarToggle" aria-label="Toggle navigation">☰</button>
         <!-- SIDEBAR NAV -->
         <aside class="wiki-sidebar">
             <div class="sidebar-header">
@@ -89,7 +117,8 @@ git clone https://github.com/fxtdstudios/radiance.git</code></pre>
 
                         <h4>3. Restart ComfyUI</h4>
                         <p>Launch ComfyUI. Check the terminal for the
-                            <code>[FXTDStudio Radiance] Loaded 50+ nodes</code> confirmation.</p>
+                            <code>[FXTDStudio Radiance] Loaded 50+ nodes</code> confirmation.
+                        </p>
                     </div>
                 </div>
             </section>
@@ -242,16 +271,57 @@ pip install -r requirements.txt</code></pre>
     </footer>
 
     <script>
-        // Theme toggle
-        const btn = document.getElementById('themeToggle');
-        const saved = localStorage.getItem('radiance-theme');
-        if (saved === 'light') { document.body.classList.add('light'); btn.textContent = '◎ Dark'; }
-        btn.addEventListener('click', () => {
-            document.body.classList.toggle('light');
-            const isLight = document.body.classList.contains('light');
-            btn.textContent = isLight ? '◎ Dark' : '◎ Light';
+        // Theme toggle (desktop + mobile)
+        function applyTheme(isLight) {
+            document.body.classList.toggle('light', isLight);
+            const label = isLight ? '◎ Dark' : '◎ Light';
+            document.querySelectorAll('#themeToggle, #mobileThemeToggle').forEach(b => b && (b.textContent = label));
             localStorage.setItem('radiance-theme', isLight ? 'light' : 'dark');
+        }
+        const savedTheme = localStorage.getItem('radiance-theme') === 'light';
+        applyTheme(savedTheme);
+        document.getElementById('themeToggle').addEventListener('click', () => applyTheme(!document.body.classList.contains('light')));
+        document.getElementById('mobileThemeToggle').addEventListener('click', () => applyTheme(!document.body.classList.contains('light')));
+
+        // Hamburger / mobile nav
+        const hamburger = document.getElementById('navHamburger');
+        const mobileDrawer = document.getElementById('mobileNavDrawer');
+        const mobileOverlay = document.getElementById('mobileNavOverlay');
+        hamburger.addEventListener('click', () => {
+            hamburger.classList.toggle('open');
+            mobileDrawer.classList.toggle('open');
         });
+        mobileOverlay.addEventListener('click', () => {
+            hamburger.classList.remove('open');
+            mobileDrawer.classList.remove('open');
+        });
+
+        // Sidebar toggle (mobile)
+        const sidebarToggle = document.getElementById('sidebarToggle');
+        const sidebar = document.querySelector('.wiki-sidebar');
+        const backdrop = document.getElementById('sidebarBackdrop');
+        if (sidebarToggle && sidebar) {
+            sidebarToggle.addEventListener('click', () => {
+                sidebar.classList.toggle('open');
+                backdrop.classList.toggle('open');
+            });
+            backdrop.addEventListener('click', () => {
+                sidebar.classList.remove('open');
+                backdrop.classList.remove('open');
+            });
+        }
+
+        // Intersection Observer for Sidebar Links
+        const links = document.querySelectorAll('.sidebar-link');
+        const observer = new IntersectionObserver(entries => {
+            entries.forEach(e => {
+                if (e.isIntersecting) {
+                    const id = e.target.id;
+                    links.forEach(l => l.classList.toggle('active', l.getAttribute('href') === '#' + id));
+                }
+            });
+        }, { rootMargin: '-20% 0px -70% 0px' });
+        document.querySelectorAll('.wiki-content [id]').forEach(el => observer.observe(el));
     </script>
 </body>
 
