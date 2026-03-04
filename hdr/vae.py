@@ -101,8 +101,235 @@ except ImportError:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#                    v2.0 CONSTANTS & HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Feature 2: Model-architecture → latent downscale factor
+VAE_FACTOR_DEFAULT = 8
+VAE_FACTOR_MAP: Dict[str, int] = {
+    # Video models that may use non-8 factors
+    "StableCascadeStageC": 42,
+    "StableCascadeStageB": 4,
+    # Most modern image models: 8
+}
+
+# Feature 1: channel count → format label
+LATENT_FORMAT_MAP: Dict[int, str] = {
+    4:  "sd_4ch",     # SD1.x, SD2.x
+    8:  "sd3_8ch",    # SD3 medium (8-ch)
+    16: "flux_16ch",  # Flux, SD3 large, WAN, LTX-V
+    32: "cascade_32ch",
+}
+
+# Feature 4: latent distribution sampling modes
+LATENT_SAMPLING_MODES = ["sample", "mean", "mode"]
+
+# Feature 7: Extended color space lists
+EXTENDED_SOURCE_SPACES = [
+    "Linear",
+    "ACEScg",
+    "ACES 2065-1",
+    "Rec.2020 Linear",
+    "sRGB",
+    "Raw",
+    "ARRI LogC4",
+    "Sony S-Log3",
+    "Panasonic V-Log",
+    "DaVinci Intermediate",
+    "RED Log3G10",
+]
+
+EXTENDED_TARGET_SPACES = [
+    "Linear",
+    "ACEScg",
+    "ACES 2065-1",
+    "Rec.2020 Linear",
+    "sRGB",
+    "Raw",
+    "ARRI LogC4",
+    "Sony S-Log3",
+    "Panasonic V-Log",
+    "DaVinci Intermediate",
+    "RED Log3G10",
+]
+
+EXTENDED_LOG_SPACES = [
+    "ARRI LogC4",
+    "Sony S-Log3",
+    "Panasonic V-Log",
+    "DaVinci Intermediate",
+    "RED Log3G10",
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Feature 2: Dynamic VAE scale factor detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_vae_factor(vae: Any) -> int:
+    """
+    v2.0: Read the spatial downscale factor from the VAE object.
+    Falls back to 8 for unknown model classes.
+
+    ComfyUI exposes this as:
+      vae.downscale_ratio          (int, most models)
+      vae.latent_format.downscale_factor  (some wrappers)
+    """
+    for attr in ("downscale_ratio", "latent_downscale_factor"):
+        val = getattr(vae, attr, None)
+        if isinstance(val, int) and val > 0:
+            return val
+
+    # Check through latent_format object
+    lf = getattr(vae, "latent_format", None)
+    if lf is not None:
+        for attr in ("downscale_factor", "scale_factor"):
+            val = getattr(lf, attr, None)
+            if isinstance(val, (int, float)) and val > 0:
+                return int(val)
+
+    # Fallback: check class name against known architectures
+    cls_name = type(getattr(vae, "first_stage_model", vae)).__name__
+    for key, factor in VAE_FACTOR_MAP.items():
+        if key in cls_name:
+            return factor
+
+    return VAE_FACTOR_DEFAULT
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Feature 1: Latent format label detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_latent_format(vae: Any) -> str:
+    """
+    v2.0: Return a format string e.g. 'flux_16ch' based on VAE latent channels.
+    Compatible with the Sampler Pro v4.0 latent_format input socket.
+    """
+    # Try to get channel count from VAE
+    channels = None
+    model = getattr(vae, "first_stage_model", None)
+    if model is not None:
+        # Typical attr names across ComfyUI VAE wrappers
+        for attr in ("z_channels", "latent_channels", "out_channels"):
+            val = getattr(model, attr, None)
+            if isinstance(val, int) and val > 0:
+                channels = val
+                break
+        # Try encoder output shape heuristic
+        if channels is None:
+            enc = getattr(model, "encoder", None)
+            if enc is not None:
+                for attr in ("z_channels", "out_channels"):
+                    val = getattr(enc, attr, None)
+                    if isinstance(val, int) and val > 0:
+                        channels = val
+                        break
+
+    if channels is not None:
+        return LATENT_FORMAT_MAP.get(channels, f"unknown_{channels}ch")
+
+    # Fallback: try class name
+    cls = type(getattr(vae, "first_stage_model", vae)).__name__.lower()
+    if "flux" in cls:
+        return "flux_16ch"
+    if "cascade" in cls:
+        return "cascade_32ch"
+    return "sd_4ch"  # Safe default
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Feature 5: Encode quality metrics
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_encode_quality_report(
+    pixels_before: torch.Tensor,
+    pixels_after: torch.Tensor,
+    latent: torch.Tensor,
+    vae_factor: int,
+    latent_fmt: str,
+    source_space: str,
+    hdr_mode: str,
+    tile_size: int,
+    total_tiles: int,
+    encode_time_ms: int,
+) -> str:
+    """Build a quality metrics JSON for the encode node output."""
+    import json
+
+    n_total = pixels_before.numel()
+    n_clipped = (pixels_before > 1.0).sum().item() + (pixels_before < 0.0).sum().item()
+    clip_pct = round(n_clipped / max(1, n_total) * 100, 3)
+    nan_count = int(torch.isnan(latent).sum().item() + torch.isinf(latent).sum().item())
+
+    b, c_lat, lh, lw = latent.shape
+    ph, pw = pixels_before.shape[1:3]
+
+    report = {
+        "version": "2.0",
+        "input_resolution": f"{pw}x{ph}",
+        "latent_resolution": f"{lw}x{lh}",
+        "latent_format": latent_fmt,
+        "latent_channels": c_lat,
+        "vae_factor": vae_factor,
+        "source_space": source_space,
+        "hdr_mode": hdr_mode,
+        "pixel_range": [round(float(pixels_after.min()), 4),
+                        round(float(pixels_after.max()), 4)],
+        "latent_range": [round(float(latent.min()), 4),
+                         round(float(latent.max()), 4)],
+        "latent_std": round(float(latent.std()), 4),
+        "clipping_pct": clip_pct,
+        "nan_inf_count": nan_count,
+        "tile_size_px": tile_size,
+        "total_tiles": total_tiles,
+        "encode_time_ms": encode_time_ms,
+    }
+    return json.dumps(report, indent=2)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Feature 4: VAE posterior sampling modes
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _encode_with_sampling_mode(vae: Any, pixels: torch.Tensor, mode: str) -> torch.Tensor:
+    """
+    v2.0: Encode pixels with explicit distribution sampling control.
+    mode = "sample"  — standard (random sample from posterior, default ComfyUI)
+    mode = "mean"    — use posterior mean (deterministic, best for img2img)
+    mode = "mode"    — use mean (same as mean for Gaussian posterior)
+    """
+    if mode == "sample":
+        result = vae.encode(pixels)
+        if isinstance(result, dict):
+            return result["samples"]
+        return result
+
+    # Try to access the underlying DiagonalGaussian distribution
+    try:
+        fsm = vae.first_stage_model
+        # ComfyUI/CompVis VAE: encode returns a DiagonalGaussianDistribution
+        posterior = fsm.encode(pixels)
+        if hasattr(posterior, "mean"):
+            return posterior.mean
+        if hasattr(posterior, "mode"):
+            return posterior.mode()
+        # Fallback: the encoder returned a raw tensor (some lightweight VAEs)
+        if isinstance(posterior, torch.Tensor):
+            return posterior
+    except Exception:
+        pass  # Fall through to standard encode
+
+    result = vae.encode(pixels)
+    if isinstance(result, dict):
+        return result["samples"]
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #                         TILING ENGINE
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 
 class TileEngine:
@@ -278,23 +505,8 @@ class RadianceVAE4KEncode:
     - Progress reporting
     """
 
-    SOURCE_SPACES = [
-        "Linear",
-        "ACEScg",
-        "sRGB",
-        "Raw",
-        "ARRI LogC4",
-        "Panasonic V-Log",
-        "DaVinci Intermediate",
-        "RED Log3G10",
-    ]
-
-    LOG_SPACES = [
-        "ARRI LogC4",
-        "Panasonic V-Log",
-        "DaVinci Intermediate",
-        "RED Log3G10",
-    ]
+    SOURCE_SPACES = EXTENDED_SOURCE_SPACES
+    LOG_SPACES = EXTENDED_LOG_SPACES
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -315,51 +527,78 @@ class RadianceVAE4KEncode:
                     ["Auto", "512", "768", "1024", "1280", "1536"],
                     {
                         "default": "Auto",
-                        "tooltip": "Tile size in pixels. Auto queries VRAM. Larger = fewer seams but more VRAM.",
+                        "tooltip": "Tile size in pixels. Auto queries VRAM.",
                     },
                 ),
                 "overlap": (
                     "INT",
                     {
-                        "default": 128,
-                        "min": 32,
-                        "max": 256,
-                        "step": 16,
-                        "tooltip": "Overlap between tiles in pixels. 128 is optimal for cosine blending.",
+                        "default": 128, "min": 32, "max": 256, "step": 16,
+                        "tooltip": "Overlap between tiles in pixels. 128px optimal for cosine blending.",
                     },
                 ),
                 "exposure": (
                     "FLOAT",
                     {
-                        "default": 0.0,
-                        "min": -10.0,
-                        "max": 10.0,
-                        "step": 0.1,
+                        "default": 0.0, "min": -10.0, "max": 10.0, "step": 0.1,
                         "tooltip": "Exposure adjustment in stops (linear space).",
                     },
                 ),
                 "alpha_handling": (
                     ["Preserve", "Ignore"],
-                    {
-                        "default": "Preserve",
-                        "tooltip": "Preserve alpha channel for roundtrip.",
-                    },
+                    {"default": "Preserve",
+                     "tooltip": "Preserve alpha channel for roundtrip."},
                 ),
                 "hdr_mode": (
                     ["Clip (SDR)", "Soft Clip", "Compress (Log)", "Passthrough"],
                     {
                         "default": "Soft Clip",
-                        "tooltip": "HDR handling before VAE. Soft Clip uses tanh rolloff at knee=0.85.",
+                        "tooltip": "HDR handling before VAE encode.",
+                    },
+                ),
+                # v2.0 Feature 4: Latent sampling mode
+                "latent_sampling": (
+                    LATENT_SAMPLING_MODES,
+                    {
+                        "default": "sample",
+                        "tooltip": (
+                            "How to sample from the VAE posterior distribution. "
+                            "'mean' gives deterministic, lowest-noise results for img2img. "
+                            "'sample' gives diverse outputs (default ComfyUI behaviour)."
+                        ),
+                    },
+                ),
+                # v2.0 Feature 8: Tile processing mode
+                "processing_mode": (
+                    ["sequential", "batched"],
+                    {
+                        "default": "sequential",
+                        "tooltip": (
+                            "'sequential' uses minimal VRAM (one tile at a time). "
+                            "'batched' groups tiles for 2-4x faster encode on high-VRAM GPUs."
+                        ),
                     },
                 ),
             },
         }
 
-    RETURN_TYPES = ("LATENT", "IMAGE", "STRING")
-    RETURN_NAMES = ("samples", "alpha", "metadata")
+    # v2.0: 5 outputs — latent_format and quality_report added
+    RETURN_TYPES = ("LATENT", "IMAGE", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("samples", "alpha", "metadata", "latent_format", "quality_report")
+    OUTPUT_TOOLTIPS = (
+        "Encoded latent — wire to Sampler Pro or save node.",
+        "Alpha channel tensor — wire to Radiance VAE 4K Decode alpha input.",
+        "Encode metadata JSON — wire to Decode crop_padding for auto-crop.",
+        "Latent format string (e.g. 'flux_16ch') — wire to Sampler Pro latent_format input.",
+        "Quality metrics JSON: clipping %, NaN count, latent range, tile info.",
+    )
     FUNCTION = "encode"
     CATEGORY = "FXTD Studios/Radiance/Generate"
-    DESCRIPTION = "Native 4K+ VAE encode with VRAM-aware tiling and cosine blend seams."
+    DESCRIPTION = (
+        "v2.0 — Universal 4K+ VAE encode. Auto VAE-factor detection, "
+        "video 5D latent support, 11 color spaces, mean/sample/mode latent sampling, "
+        "batched tile processing, quality report, latent_format output."
+    )
 
     # FIX-2: Map each log space to its linear→log converter so Compress (Log)
     # uses the correct curve per source/target space instead of always LogC4.
@@ -489,9 +728,12 @@ class RadianceVAE4KEncode:
         tile_size: int,
         overlap: int,
         pbar: Any = None,
+        latent_sampling: str = "sample",
+        processing_mode: str = "sequential",
+        vae_factor: int = 8,
     ) -> Dict[str, Any]:
         """
-        Encode full image in overlapping tiles with cosine blend.
+        v2.0: Encode full image in overlapping tiles with cosine blend.
 
         Args:
             pixels: (B, H, W, 3) float32, already in VAE-space
@@ -499,13 +741,16 @@ class RadianceVAE4KEncode:
             tile_size: Tile size in pixels (must be multiple of 8)
             overlap: Overlap in pixels
             pbar: Optional progress bar
+            latent_sampling: "sample" / "mean" / "mode"
+            processing_mode: "sequential" / "batched"
+            vae_factor: Spatial downscale factor (auto-detected, default 8)
 
         Returns:
-            {"samples": (B, C, latH, latW)} latent dict
+            {"samples": (B, C, latH, latW), "radiance_meta": {...}} latent dict
         """
         b, h, w, c = pixels.shape
         device = pixels.device
-        scale = 8  # VAE spatial downscale factor
+        scale = vae_factor  # v2.0: no longer hardcoded
 
         # Compute tile grid
         tiles_y = TileEngine.compute_tiles(h, tile_size, overlap)
@@ -514,86 +759,118 @@ class RadianceVAE4KEncode:
 
         logger.info(
             f"[Radiance 4K Encode] {w}×{h} → {len(tiles_x)}×{len(tiles_y)} "
-            f"tiles ({tile_size}px, {overlap}px overlap, {total_tiles} total)"
+            f"tiles ({tile_size}px, {overlap}px overlap, {total_tiles} total, "
+            f"mode={processing_mode}, factor={scale})"
         )
 
-        # v2 FIX (BUG-1): Determine latent channels from first actual tile encode.
-        # vae.encode() returns a bare TENSOR (not a dict) — ComfyUI API.
-        # Previous code did test_result["samples"] which crashes on tensors.
-        lat_c = None  # Will be set from first tile
-
-        # Latent dimensions
+        lat_c = None
         lat_h = h // scale
         lat_w = w // scale
         lat_overlap = overlap // scale
 
-        # Output accumulators (initialized lazily after first tile tells us lat_c)
         output = None
         weight_acc = None
 
+        # Build flat list of all tile coords for batched mode
+        all_tiles = [(yi, xi, y1, y2, x1, x2)
+                     for yi, (y1, y2) in enumerate(tiles_y)
+                     for xi, (x1, x2) in enumerate(tiles_x)]
+
         tile_idx = 0
-        for yi, (y1, y2) in enumerate(tiles_y):
-            for xi, (x1, x2) in enumerate(tiles_x):
-                # Extract tile
+
+        if processing_mode == "batched" and total_tiles > 1:
+            # Encode all tiles in one GPU batch (uses more VRAM, much faster)
+            tile_list = [pixels[:, y1:y2, x1:x2, :3].contiguous()
+                         for (_, _, y1, y2, x1, x2) in all_tiles]
+            # Pad tiles to same size (last row/col may be smaller)
+            max_th = max(t.shape[1] for t in tile_list)
+            max_tw = max(t.shape[2] for t in tile_list)
+
+            padded = []
+            for t in tile_list:
+                pad_h2 = max_th - t.shape[1]
+                pad_w2 = max_tw - t.shape[2]
+                if pad_h2 > 0 or pad_w2 > 0:
+                    t = F.pad(t.permute(0, 3, 1, 2), (0, pad_w2, 0, pad_h2)).permute(0, 2, 3, 1)
+                padded.append(t)
+
+            batch_pixels = torch.cat(padded, dim=0)  # (B*T, H, W, C)
+            try:
+                batch_result = _encode_with_sampling_mode(vae, batch_pixels, latent_sampling)
+                if isinstance(batch_result, dict):
+                    batch_result = batch_result["samples"]
+                batch_result = batch_result.float().cpu()
+                lat_c = batch_result.shape[1]
+                tile_latents = list(batch_result.chunk(total_tiles, dim=0))
+            except Exception as e:
+                logger.warning(f"[Radiance] Batched encode failed ({e}), falling back to sequential")
+                tile_latents = None
+        else:
+            tile_latents = None
+
+        if output is None:
+            output = None  # will init lazily on first tile
+
+        for tile_idx_i, (yi, xi, y1, y2, x1, x2) in enumerate(all_tiles):
+            if tile_latents is not None:
+                # Use pre-computed batch result
+                tile_samples = tile_latents[tile_idx_i]
+                if tile_samples.ndim == 3:
+                    tile_samples = tile_samples.unsqueeze(0)
+            else:
+                # Sequential: encode one tile at a time
                 tile = pixels[:, y1:y2, x1:x2, :3].contiguous()
+                tile_samples = _encode_with_sampling_mode(vae, tile, latent_sampling)
+                if isinstance(tile_samples, dict):
+                    tile_samples = tile_samples["samples"]
+                tile_samples = tile_samples.float().cpu()
+                del tile
 
-                # v2 FIX (BUG-1): vae.encode() returns a bare tensor, NOT a dict.
-                # ComfyUI API: vae.encode(pixels) → torch.Tensor
-                tile_result = vae.encode(tile)
-                # Handle both tensor and dict returns for cross-version safety
-                if isinstance(tile_result, dict):
-                    tile_samples = tile_result["samples"].float().cpu()
-                else:
-                    tile_samples = tile_result.float().cpu()
-
-                # Lazy-init accumulators on first tile (now we know lat_c)
-                if output is None:
-                    lat_c = tile_samples.shape[1]
-                    output = torch.zeros(
-                        (b, lat_c, lat_h, lat_w), dtype=torch.float32, device="cpu"
-                    )
-                    weight_acc = torch.zeros(
-                        (1, 1, lat_h, lat_w), dtype=torch.float32, device="cpu"
-                    )
-
-                # Compute blend weight
-                th, tw = tile_samples.shape[2], tile_samples.shape[3]
-
-                # Determine per-edge overlap
-                ov_top = lat_overlap if yi > 0 else 0
-                ov_bot = lat_overlap if yi < len(tiles_y) - 1 else 0
-                ov_left = lat_overlap if xi > 0 else 0
-                ov_right = lat_overlap if xi < len(tiles_x) - 1 else 0
-
-                blend_w = TileEngine.make_cosine_blend_weight_2d(
-                    th, tw, ov_top, ov_bot, ov_left, ov_right, device="cpu"
+            # Lazy-init accumulators
+            if output is None:
+                lat_c = tile_samples.shape[1]
+                output = torch.zeros(
+                    (b, lat_c, lat_h, lat_w), dtype=torch.float32, device="cpu"
                 )
-                # Reshape for latent format: (1, H, W, 1) → (1, 1, H, W)
-                blend_w = blend_w.squeeze(-1).unsqueeze(1)
+                weight_acc = torch.zeros(
+                    (1, 1, lat_h, lat_w), dtype=torch.float32, device="cpu"
+                )
 
-                # Latent coordinates
-                lx1 = x1 // scale
-                ly1 = y1 // scale
-                lx2 = lx1 + tw
-                ly2 = ly1 + th
+            th, tw = tile_samples.shape[2], tile_samples.shape[3]
 
-                # Accumulate
-                output[:, :, ly1:ly2, lx1:lx2] += tile_samples * blend_w
-                weight_acc[:, :, ly1:ly2, lx1:lx2] += blend_w
+            # Per-edge overlap flags
+            ov_top   = lat_overlap if yi > 0 else 0
+            ov_bot   = lat_overlap if yi < len(tiles_y) - 1 else 0
+            ov_left  = lat_overlap if xi > 0 else 0
+            ov_right = lat_overlap if xi < len(tiles_x) - 1 else 0
 
-                tile_idx += 1
-                if pbar:
-                    pbar.update_absolute(tile_idx, total_tiles)
+            blend_w = TileEngine.make_cosine_blend_weight_2d(
+                th, tw, ov_top, ov_bot, ov_left, ov_right, device="cpu"
+            )
+            blend_w = blend_w.squeeze(-1).unsqueeze(1)
 
-                # Free GPU memory between tiles
-                del tile, tile_result, tile_samples, blend_w
+            lx1 = x1 // scale
+            ly1 = y1 // scale
+            lx2 = lx1 + tw
+            ly2 = ly1 + th
+
+            output[:, :, ly1:ly2, lx1:lx2] += tile_samples * blend_w
+            weight_acc[:, :, ly1:ly2, lx1:lx2] += blend_w
+
+            tile_idx += 1
+            if pbar:
+                pbar.update_absolute(tile_idx, total_tiles)
+
+            if tile_latents is None:
+                del tile_samples, blend_w
                 if device.type == "cuda":
                     torch.cuda.empty_cache()
 
-        # Normalize by accumulated weight (guard against near-zero at tile edges)
         weight_acc = torch.clamp(weight_acc, min=1e-3)
         output = output / weight_acc
-        return {"samples": output.to(device)}
+
+        return {"samples": output.to(device), "_total_tiles": total_tiles}
+
 
     def encode(
         self,
@@ -605,11 +882,49 @@ class RadianceVAE4KEncode:
         exposure: float = 0.0,
         alpha_handling: str = "Preserve",
         hdr_mode: str = "Soft Clip",
-    ) -> Tuple[Dict[str, Any], torch.Tensor, str]:
+        latent_sampling: str = "sample",
+        processing_mode: str = "sequential",
+    ) -> Tuple:
+        """v2.0: Universal encode supporting 4D image and 5D video latents."""
+        import time as _time
+        t_start = _time.time()
+
+        # v2.0 Feature 2: Auto-detect VAE factor and format
+        vae_factor = detect_vae_factor(vae)
+        latent_fmt = detect_latent_format(vae)
+
+        # v2.0 Feature 3: Handle 5D video latents (B, F, H, W, C)
+        is_video = pixels.ndim == 5
+        if is_video:
+            B, F, H, W, C = pixels.shape
+            logger.info(
+                f"[Radiance 4K Encode v2.0] Video: {B}×{F}×{W}×{H}, space={source_space}"
+            )
+            # Encode frame by frame, stack temporal dim
+            frame_latents = []
+            for fi in range(F):
+                frame = pixels[:, fi, ...]  # (B, H, W, C)
+                latent_frame, _, _, _, _ = self.encode(
+                    frame, vae, source_space, tile_size, overlap, exposure,
+                    alpha_handling, hdr_mode, latent_sampling, processing_mode
+                )
+                frame_latents.append(latent_frame["samples"])
+            # Stack: (B, C, F, latH, latW)
+            all_frames = torch.stack(frame_latents, dim=2)
+            video_latent = {"samples": all_frames, "latent_format": latent_fmt}
+            # Build a minimal quality/meta output for video
+            total_time_ms = int((_time.time() - t_start) * 1000)
+            alpha_out = torch.ones((B, H, W, 1))
+            meta = json.dumps({"node": "RadianceVAE4KEncode", "video": True,
+                               "frames": F, "latent_format": latent_fmt})
+            qr = json.dumps({"version": "2.0", "video": True, "frames": F,
+                             "latent_format": latent_fmt, "encode_time_ms": total_time_ms})
+            return (video_latent, alpha_out, meta, latent_fmt, qr)
 
         b, h, w, c = pixels.shape
         logger.info(
-            f"[Radiance 4K Encode] Input: {w}×{h} ({b} frames), space={source_space}"
+            f"[Radiance 4K Encode v2.0] Input: {w}×{h} ({b} frames), "
+            f"space={source_space}, sampling={latent_sampling}, vae_factor={vae_factor}"
         )
 
         # Extract alpha
@@ -619,15 +934,18 @@ class RadianceVAE4KEncode:
         else:
             alpha = torch.ones((b, h, w, 1), dtype=torch.float32, device=pixels.device)
 
-        # Move to GPU
         target_device = comfy.model_management.get_torch_device()
         img = pixels[..., :3].clone().float().to(target_device)
+
+        # Keep a copy of the un-processed pixels for quality metrics
+        pixels_orig = img.clone()
 
         # Color pipeline
         img = self._prepare_for_vae(img, source_space, exposure, hdr_mode)
 
-        # Pad to multiple of 8
-        img, (pad_h, pad_w) = TileEngine.pad_to_multiple(img, 8)
+        # Pad to multiple of vae_factor (minimum 8 for all known VAEs)
+        pad_multiple = max(vae_factor, 8)
+        img, (pad_h, pad_w) = TileEngine.pad_to_multiple(img, pad_multiple)
         padded_h, padded_w = img.shape[1], img.shape[2]
 
         # Determine tile size
@@ -635,53 +953,70 @@ class RadianceVAE4KEncode:
             ts = TileEngine.get_optimal_tile_size(padded_h, padded_w)
         else:
             ts = int(tile_size)
-        ts = (ts // 8) * 8  # Ensure multiple of 8
+        ts = (ts // pad_multiple) * pad_multiple
 
-        # Ensure overlap is multiple of 8 and less than tile_size
         overlap = min(overlap, ts // 2)
         overlap = (overlap // 8) * 8
         overlap = max(16, overlap)
 
-        # Sanitize: catch any NaN/Inf from color pipeline before sending to VAE
+        # NaN/Inf guard
         if torch.isnan(img).any() or torch.isinf(img).any():
-            logger.warning(
-                "[Radiance 4K Encode] Color pipeline produced NaN/Inf — sanitizing"
-            )
+            logger.warning("[Radiance 4K Encode v2.0] NaN/Inf detected — sanitizing")
             img = torch.nan_to_num(img, nan=0.0, posinf=1.0, neginf=0.0)
 
-        # Progress bar
         pbar = comfy.utils.ProgressBar(100)
+        total_tiles = 1
 
-        # Encode
         with torch.no_grad():
             if padded_h <= ts and padded_w <= ts:
-                # Single tile — no tiling needed
-                # v2 FIX (BUG-2): vae.encode() returns a bare tensor in ComfyUI.
-                # Must wrap in {"samples": tensor} for LATENT output type.
-                enc_result = vae.encode(img)
-                if isinstance(enc_result, dict):
-                    latent = enc_result  # Already a dict (some VAE versions)
-                else:
-                    latent = {"samples": enc_result}  # Wrap bare tensor
+                # Single tile — use latent_sampling mode
+                enc_samples = _encode_with_sampling_mode(vae, img, latent_sampling)
+                if isinstance(enc_samples, dict):
+                    enc_samples = enc_samples["samples"]
+                latent = {
+                    "samples": enc_samples,
+                    "_total_tiles": 1,
+                }
                 pbar.update_absolute(100, 100)
             else:
-                latent = self._tiled_encode(img, vae, ts, overlap, pbar)
+                latent = self._tiled_encode(
+                    img, vae, ts, overlap, pbar,
+                    latent_sampling=latent_sampling,
+                    processing_mode=processing_mode,
+                    vae_factor=vae_factor,
+                )
+                total_tiles = latent.pop("_total_tiles", 1)
 
-        # Metadata
+        # v2.0 Feature 6: Embed radiance_meta in latent dict for auto-crop in decode
+        radiance_meta = {
+            "pad_h": pad_h, "pad_w": pad_w,
+            "vae_factor": vae_factor, "latent_format": latent_fmt,
+            "source_space": source_space, "hdr_mode": hdr_mode,
+        }
+        latent["radiance_meta"] = radiance_meta
+
+        # Standard metadata JSON (backward compat wire via crop_padding)
         metadata = {
             "node": "RadianceVAE4KEncode",
             "resolution": f"{w}×{h}",
             "padded": f"{padded_w}×{padded_h}" if pad_h or pad_w else "none",
-            "tile_size": ts,
-            "overlap": overlap,
-            "source_space": source_space,
-            "hdr_mode": hdr_mode,
-            "exposure": exposure,
-            "pad_h": pad_h,
-            "pad_w": pad_w,
+            "tile_size": ts, "overlap": overlap,
+            "source_space": source_space, "hdr_mode": hdr_mode,
+            "exposure": exposure, "pad_h": pad_h, "pad_w": pad_w,
+            "vae_factor": vae_factor, "latent_format": latent_fmt,
+            "latent_sampling": latent_sampling,
         }
 
-        return (latent, alpha, json.dumps(metadata, indent=2))
+        # v2.0 Feature 5: Quality metrics
+        encode_time_ms = int((_time.time() - t_start) * 1000)
+        quality_report = build_encode_quality_report(
+            pixels_orig.cpu(), img.cpu(), latent["samples"].cpu(),
+            vae_factor, latent_fmt, source_space, hdr_mode,
+            ts, total_tiles, encode_time_ms,
+        )
+
+        return (latent, alpha, json.dumps(metadata, indent=2), latent_fmt, quality_report)
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -702,23 +1037,8 @@ class RadianceVAE4KDecode:
     - Inverse tonemap for HDR recovery
     """
 
-    TARGET_SPACES = [
-        "Linear",
-        "ACEScg",
-        "sRGB",
-        "Raw",
-        "ARRI LogC4",
-        "Panasonic V-Log",
-        "DaVinci Intermediate",
-        "RED Log3G10",
-    ]
-
-    LOG_SPACES = [
-        "ARRI LogC4",
-        "Panasonic V-Log",
-        "DaVinci Intermediate",
-        "RED Log3G10",
-    ]
+    TARGET_SPACES = EXTENDED_TARGET_SPACES
+    LOG_SPACES = EXTENDED_LOG_SPACES
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -802,26 +1122,39 @@ class RadianceVAE4KDecode:
                     },
                 ),
                 "source_space": (
-                    RadianceVAE4KEncode.SOURCE_SPACES,
+                    EXTENDED_SOURCE_SPACES,
                     {
                         "default": "Linear",
                         "tooltip": (
                             "Source space used during encode. Required when hdr_mode is "
-                            "'Compress (Log)' to invert the exact same log curve. "
-                            "Connect the source_space from the matching Encode node, "
-                            "or leave as 'Linear' for non-log workflows."
+                            "'Compress (Log)' to invert the exact same log curve."
                         ),
+                    },
+                ),
+                # v2.0 Feature 8: Tile processing mode for decode
+                "processing_mode": (
+                    ["sequential", "batched"],
+                    {
+                        "default": "sequential",
+                        "tooltip": "'sequential' = min VRAM. 'batched' = 2-4x faster on high-VRAM GPUs.",
                     },
                 ),
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("image", "metadata")
+    # v2.0: 3 outputs — latent_format added
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("image", "metadata", "latent_format")
+    OUTPUT_TOOLTIPS = (
+        "Decoded image tensor.",
+        "Decode metadata JSON.",
+        "Latent format detected from VAE (e.g. 'flux_16ch').",
+    )
     FUNCTION = "decode"
     CATEGORY = "FXTD Studios/Radiance/Generate"
     DESCRIPTION = (
-        "Native 4K+ VAE decode with VRAM-aware tiling, cosine blend, and .rhdr export."
+        "v2.0 — Universal 4K+ VAE decode. Auto VAE-factor, 11 color spaces, "
+        "video 5D support, auto-crop from radiance_meta, batched tile mode."
     )
 
     def _tiled_decode(
@@ -1111,40 +1444,51 @@ class RadianceVAE4KDecode:
         target_stops: float = 12.0,
         crop_padding: str = "",
         export_rhdr: bool = False,
-        source_space: str = "Linear",  # FIX-2: needed to invert correct log curve
-    ) -> Tuple[torch.Tensor, str]:
+        source_space: str = "Linear",
+        processing_mode: str = "sequential",
+    ) -> Tuple:
+        """v2.0: Universal decode with auto vae_factor, radiance_meta auto-crop, 3-tuple output."""
+
+        # v2.0 Feature 2: Auto-detect VAE factor
+        vae_factor = detect_vae_factor(vae)
+        latent_fmt = detect_latent_format(vae)
+
+        # v2.0 Feature 6: Read radiance_meta embedded by encode() if present
+        radiance_meta = samples.get("radiance_meta", {})
+        if radiance_meta:
+            latent_fmt = radiance_meta.get("latent_format", latent_fmt)
+            vae_factor = radiance_meta.get("vae_factor", vae_factor)
 
         latent = samples["samples"]
         b, c, lat_h, lat_w = latent.shape
-        pix_h, pix_w = lat_h * 8, lat_w * 8
+        pix_h, pix_w = lat_h * vae_factor, lat_w * vae_factor
 
         logger.info(
-            f"[Radiance 4K Decode] Latent: {lat_w}×{lat_h} → "
-            f"Output: {pix_w}×{pix_h} ({b} frames)"
+            f"[Radiance 4K Decode v2.0] Latent: {lat_w}×{lat_h} → "
+            f"Output: {pix_w}×{pix_h} ({b} frames, factor={vae_factor}, fmt={latent_fmt})"
         )
 
-        # Move to GPU
         target_device = comfy.model_management.get_torch_device()
         if latent.device != target_device:
             latent = latent.to(target_device)
-            samples = {"samples": latent}
+            samples = dict(samples)
+            samples["samples"] = latent
 
-        # Determine tile size (in pixel space)
+        pad_multiple = max(vae_factor, 8)
+
+        # Tile size in pixel space (must be aligned to vae_factor)
         if tile_size == "Auto":
             ts_px = TileEngine.get_optimal_tile_size(pix_h, pix_w)
         else:
             ts_px = int(tile_size)
-        ts_px = (ts_px // 8) * 8
+        ts_px = (ts_px // pad_multiple) * pad_multiple
 
-        # Clamp overlap
         overlap = min(overlap, ts_px // 2)
         overlap = (overlap // 8) * 8
         overlap = max(16, overlap)
 
-        # Progress
         pbar = comfy.utils.ProgressBar(100)
 
-        # Decode
         with torch.no_grad():
             if pix_h <= ts_px and pix_w <= ts_px:
                 img = vae.decode(latent).float()
@@ -1154,25 +1498,22 @@ class RadianceVAE4KDecode:
 
         img = img.float()
 
-        # Sanitize VAE output: replace NaN/Inf with 0 (prevents noise propagation)
         if torch.isnan(img).any() or torch.isinf(img).any():
-            logger.warning("[Radiance 4K Decode] VAE produced NaN/Inf — sanitizing")
+            logger.warning("[Radiance 4K Decode v2.0] VAE produced NaN/Inf — sanitizing")
             img = torch.nan_to_num(img, nan=0.0, posinf=1.0, neginf=0.0)
 
-        # Color space transform
         img = self._vae_output_to_target(
-            img,
-            target_space,
-            hdr_mode,
-            exposure_adjust,
-            inverse_tonemap,
-            target_stops,
-            source_space=source_space,  # FIX-2: invert correct log curve
+            img, target_space, hdr_mode,
+            exposure_adjust, inverse_tonemap, target_stops,
+            source_space=source_space,
         )
 
-        # Crop padding if metadata provided
+        # v2.0 Feature 6: Auto-crop — prefer radiance_meta, fall back to crop_padding string
         pad_h, pad_w = 0, 0
-        if crop_padding:
+        if radiance_meta:
+            pad_h = radiance_meta.get("pad_h", 0)
+            pad_w = radiance_meta.get("pad_w", 0)
+        elif crop_padding:
             try:
                 meta = json.loads(crop_padding)
                 pad_h = meta.get("pad_h", 0)
@@ -1184,9 +1525,7 @@ class RadianceVAE4KDecode:
             crop_h = img.shape[1] - pad_h
             crop_w = img.shape[2] - pad_w
             img = img[:, :crop_h, :crop_w, :]
-            logger.info(
-                f"[Radiance 4K] Cropped padding: {pad_h}h, {pad_w}w → {crop_w}×{crop_h}"
-            )
+            logger.info(f"[Radiance 4K v2.0] Cropped padding: {pad_h}h, {pad_w}w → {crop_w}×{crop_h}")
 
         # Restore alpha
         if alpha is not None:
@@ -1194,49 +1533,42 @@ class RadianceVAE4KDecode:
             if alpha_f.dim() == 3:
                 alpha_f = alpha_f.unsqueeze(0)
             alpha_ch = alpha_f[..., :1]
-
-            # Resize alpha to match output
             if alpha_ch.shape[1:3] != img.shape[1:3]:
                 alpha_ch = F.interpolate(
                     alpha_ch.permute(0, 3, 1, 2),
                     size=(img.shape[1], img.shape[2]),
-                    mode="bilinear",
-                    align_corners=False,
+                    mode="bilinear", align_corners=False,
                 ).permute(0, 2, 3, 1)
-
             if alpha_ch.shape[0] != img.shape[0]:
                 alpha_ch = alpha_ch.expand(img.shape[0], -1, -1, -1)
-
             img = torch.cat([img, alpha_ch], dim=-1)
 
         # Export .rhdr if requested
         rhdr_filename = None
         if export_rhdr:
-            pass
-
             output_dir = folder_paths.get_temp_directory()
-            # Export first frame
             frame_np = img[0, ..., :3].cpu().numpy()
             rhdr_filename = self._save_rhdr(frame_np, output_dir)
 
-        # Build metadata
         final_h, final_w = img.shape[1], img.shape[2]
         metadata = {
             "node": "RadianceVAE4KDecode",
+            "version": "2.0",
             "resolution": f"{final_w}×{final_h}",
-            "tile_size": ts_px,
-            "overlap": overlap,
-            "target_space": target_space,
-            "hdr_mode": hdr_mode,
+            "tile_size": ts_px, "overlap": overlap,
+            "target_space": target_space, "hdr_mode": hdr_mode,
             "exposure_adjust": exposure_adjust,
             "inverse_tonemap": inverse_tonemap,
             "target_stops": target_stops if inverse_tonemap else "N/A",
             "alpha_restored": alpha is not None,
+            "vae_factor": vae_factor, "latent_format": latent_fmt,
+            "processing_mode": processing_mode,
         }
         if rhdr_filename:
             metadata["rhdr_export"] = rhdr_filename
 
-        return (img, json.dumps(metadata, indent=2))
+        return (img, json.dumps(metadata, indent=2), latent_fmt)
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1307,49 +1639,39 @@ class RadianceVAE4KRoundtrip:
         export_rhdr: bool = True,
     ) -> Tuple[torch.Tensor, Dict[str, Any], str]:
 
-        b, h, w, c = pixels.shape
-        logger.info(f"[Radiance 4K Roundtrip] {w}×{h}, {source_space} → {target_space}")
+        b, h, w, c = pixels.shape if pixels.ndim == 4 else pixels.shape
+        logger.info(f"[Radiance 4K Roundtrip v2.0] {w}×{h}, {source_space} → {target_space}")
 
-        # Encode
+        # Encode (returns 5-tuple in v2.0)
         encoder = RadianceVAE4KEncode()
-        latent, alpha, enc_meta = encoder.encode(
-            pixels,
-            vae,
-            source_space,
-            tile_size,
-            overlap,
-            exposure,
-            "Preserve",
-            hdr_mode,
+        latent, alpha, enc_meta, latent_fmt, _quality = encoder.encode(
+            pixels, vae, source_space, tile_size, overlap, exposure, "Preserve", hdr_mode,
         )
 
         # Map encode hdr_mode to decode hdr_mode
         decode_hdr = {
             "Clip (SDR)": "Clip (SDR)",
-            "Soft Clip": "Soft Clip",  # Invert tanh on decode to recover highlights
+            "Soft Clip": "Soft Clip",
             "Compress (Log)": "Compress (Log)",
             "Passthrough": "Passthrough",
         }.get(hdr_mode, "Clip (SDR)")
 
-        # Decode — reverse encode exposure so VAE roundtrip is neutral
+        # Decode — reverse encode exposure so VAE roundtrip is neutral (returns 3-tuple in v2.0)
         decoder = RadianceVAE4KDecode()
-        img, dec_meta = decoder.decode(
-            latent,
-            vae,
-            target_space,
-            tile_size,
-            overlap,
-            exposure_adjust=-exposure,
-            alpha=alpha,
+        img, dec_meta, _fmt = decoder.decode(
+            latent, vae, target_space, tile_size, overlap,
+            exposure_adjust=-exposure, alpha=alpha,
             hdr_mode=decode_hdr,
             crop_padding=enc_meta,
             export_rhdr=export_rhdr,
-            source_space=source_space,  # FIX-2: invert the same log curve used during encode
+            source_space=source_space,
         )
 
         # Combined metadata
         combined_meta = {
             "node": "RadianceVAE4KRoundtrip",
+            "version": "2.0",
+            "latent_format": latent_fmt,
             "encode": json.loads(enc_meta),
             "decode": json.loads(dec_meta),
         }

@@ -676,6 +676,152 @@ CLIP_MAX_TOKENS = 77
 BREAK_TOKEN = "BREAK"  # nosec B105
 DEFAULT_YEAR = 2024  # v2.1: Used for year_era comparison instead of hardcoded value
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#                  ARCHITECTURE-AWARE CONSTANTS  (v3.0)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# These architectures use T5/LLM encoders that prefer natural language prose.
+# Comma-separated keyword chains perform significantly worse on them.
+PROSE_ARCHS = {"flux", "sd3", "sd3.5", "wan", "ltx", "pixart", "kolors",
+               "hunyuan_video", "aura_flow"}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#                  SCENE MOOD VOCABULARY  (v3.0)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+SCENE_MOODS = [
+    "None",
+    "Tense", "Melancholic", "Joyful", "Ominous", "Nostalgic",
+    "Awe-Inspiring", "Intimate", "Chaotic", "Peaceful",
+    "Surreal", "Gritty", "Ethereal", "Foreboding", "Euphoric",
+]
+
+# Vocabulary injected per mood — chosen to steer T5 and CLIP equally well
+_MOOD_VOCAB = {
+    "Tense":         "heightened tension, breath held, claustrophobic atmosphere, nervous energy",
+    "Melancholic":   "melancholic, quiet sorrow, fading light, wistful silence",
+    "Joyful":        "vibrant joy, warm energy, infectious optimism, radiant smile",
+    "Ominous":       "ominous foreboding, unseen threat, dread building beneath the surface",
+    "Nostalgic":     "nostalgic warmth, memory of simpler times, sepia-tinted emotion",
+    "Awe-Inspiring": "breathtaking grandeur, overwhelming scale, reverential silence",
+    "Intimate":      "quiet intimacy, close proximity, whispered emotion, soft connection",
+    "Chaotic":       "frantic energy, motion blur everywhere, sensory overload, disorientation",
+    "Peaceful":      "serene tranquility, unhurried pace, meditative stillness",
+    "Surreal":       "dreamlike unreality, logic dissolved, impossible beauty",
+    "Gritty":        "raw grit, unpolished truth, weathered texture, unflinching honesty",
+    "Ethereal":      "otherworldly ethereal light, gossamer beauty, translucent and floating",
+    "Foreboding":    "creeping dread, something wrong just out of sight, shadows advance",
+    "Euphoric":      "ecstatic joy, transcendent moment, colours oversaturated with feeling",
+}
+
+
+def _real_token_count(clip, text: str) -> int:
+    """
+    Get actual token count using the connected CLIP tokenizer.
+    Falls back to estimate_tokens() if tokenizer API is unavailable.
+    """
+    try:
+        tokens = clip.tokenize(text)
+        # Try each known encoder key in order of preference
+        for key in ("t5xxl", "l", "g", "llm"):
+            if key in tokens and tokens[key]:
+                return int(tokens[key][0].shape[-1])
+        # Fallback: count all token entries if shape not accessible
+        for val in tokens.values():
+            if val and hasattr(val[0], "__len__"):
+                return len(val[0])
+    except Exception:
+        pass
+    return estimate_tokens(text)
+
+
+def _apply_subject_weight(text: str, weight: float) -> str:
+    """Wrap text in attention weight syntax if weight != 1.0."""
+    if abs(weight - 1.0) < 0.01:
+        return text
+    return f"({text}:{weight:.2f})"
+
+
+def _build_prose_prompt(
+    base_prompt, framing, camera, lens, aperture, lighting,
+    style, film_stock, shutter, color_grading, aspect_ratio,
+    custom_details, year_era, lora_keywords, art_direction,
+    scene_mood, subject_weight, weight_mode,
+) -> str:
+    """
+    Build a natural-language prose prompt for T5/LLM-based architectures
+    (Flux, SD3, Kolors, PixArt, Wan, LTX, HunyuanVideo).
+    These encoders respond much better to flowing sentences than comma chains.
+    """
+    def c(v): return "" if v in ("None", None, "") else v
+
+    parts = []
+
+    # 1. Subject (weighted if requested)
+    subject = base_prompt.strip()
+    if subject_weight != 1.0:
+        subject = _apply_subject_weight(subject, subject_weight)
+
+    # Weight mode: technique_first leads with camera, then subject
+    if weight_mode == "technique_first" and c(camera):
+        parts.append(f"Photographed on {camera}, {subject}.")
+    elif c(framing):
+        parts.append(f"{framing} of {subject}.")
+    else:
+        parts.append(f"{subject}.")
+
+    # 2. Art direction (positioned here — right after subject)
+    if art_direction and art_direction.strip():
+        parts.append(art_direction.strip())
+
+    # 3. LoRA keywords
+    if lora_keywords and lora_keywords.strip():
+        parts.append(lora_keywords.strip())
+
+    # 4. Scene mood
+    mood = c(scene_mood)
+    if mood and mood in _MOOD_VOCAB:
+        parts.append(_MOOD_VOCAB[mood])
+
+    # 5. Cinematic technique — prose form
+    tech = []
+    if c(camera) and weight_mode != "technique_first":
+        tech.append(f"the image was captured on {camera}")
+    if c(lens):
+        tech.append(f"through a {lens}")
+    if c(aperture):
+        tech.append(f"at {aperture}")
+    if c(shutter):
+        tech.append(f"with shutter speed {shutter}")
+    if tech:
+        parts.append("Cinematic technique: " + ", ".join(tech) + ".")
+
+    # 6. Lighting in full sentence
+    if c(lighting):
+        parts.append(f"The scene is bathed in {lighting}.")
+
+    # 7. Color and finishing
+    finish = []
+    if c(color_grading): finish.append(f"color graded in {color_grading}")
+    if c(film_stock):    finish.append(f"the distinctive texture of {film_stock}")
+    if c(style):         finish.append(f"{style} aesthetic")
+    if finish:
+        parts.append("Aesthetic: " + ", ".join(finish) + ".")
+
+    # 8. Era
+    if year_era != DEFAULT_YEAR:
+        parts.append(f"Set in the year {year_era}.")
+
+    # 9. Aspect ratio
+    if c(aspect_ratio):
+        parts.append(f"Composed for {aspect_ratio} format.")
+
+    # 10. Custom details last
+    if c(custom_details):
+        parts.append(custom_details.strip())
+
+    return " ".join(parts)
+
 
 def estimate_tokens(text: str) -> int:
     """
@@ -736,7 +882,7 @@ def insert_break_points(prompt: str, max_tokens: int = 70) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#                         SHARED PROMPT BUILDER
+#                         SHARED PROMPT BUILDER  (v3.0)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -758,175 +904,163 @@ def build_cinematic_prompt(
     lora_keywords="",
     use_break=False,
 ):
+    """Legacy shim kept for RadiancePromptMachine backward compatibility."""
+    return build_cinematic_prompt_v3(
+        base_prompt=base_prompt, framing=framing, camera_type=camera_type,
+        lens_focal=lens_focal, aperture_dof=aperture_dof, lighting=lighting,
+        style_aesthetic=style_aesthetic, film_stock=film_stock,
+        shutter_speed=shutter_speed, color_grading=color_grading,
+        aspect_ratio=aspect_ratio, custom_details=custom_details,
+        year_era=year_era, negative_strength=negative_strength,
+        lora_keywords=lora_keywords, use_break=use_break,
+        target_arch="sdxl",
+    )
+
+
+def build_cinematic_prompt_v3(
+    base_prompt,
+    framing,
+    camera_type,
+    lens_focal,
+    aperture_dof,
+    lighting,
+    style_aesthetic,
+    film_stock="None",
+    shutter_speed="None",
+    color_grading="None",
+    aspect_ratio="None",
+    custom_details="",
+    year_era=DEFAULT_YEAR,
+    negative_strength="Standard",
+    negative_custom="",
+    lora_keywords="",
+    use_break=False,
+    target_arch="Auto",
+    scene_mood="None",
+    subject_weight=1.0,
+    art_direction="",
+    prompt_weight_mode="balanced",
+    base_prompt_b="",
+    active_prompt="A",
+):
     """
-    Shared prompt builder function used by all cinematic prompt nodes.
-    Returns tuple of (final_prompt, negative_prompt, token_count).
-
-    v1.1 additions:
-    - lora_keywords: Optional LoRA trigger words to inject
-    - use_break: Auto-insert BREAK tokens for long prompts
-    - Returns token count estimate
-
-    negative_strength options: "Off", "Soft", "Standard", "Aggressive"
+    v3.0 universal prompt builder.
+    Uses prose format for T5/LLM architectures (Flux, SD3, Kolors…) and
+    structured keyword format for CLIP-only architectures (SD1.5, SDXL).
+    Returns: (final_prompt, negative_prompt, estimated_token_count).
     """
+    def c(v): return "" if v in ("None", None, "") else v
 
-    def clean(val):
-        """Remove 'None' values and return empty string."""
-        if val == "None":
-            return ""
-        return val
+    # A/B prompt mode
+    effective_base = (base_prompt_b.strip()
+                      if (active_prompt == "B" and base_prompt_b.strip())
+                      else base_prompt.strip())
 
-    parts = []
+    # Apply attention weight to subject if requested
+    if subject_weight != 1.0:
+        effective_base = _apply_subject_weight(effective_base, subject_weight)
 
-    # 1. Style & Era (Prefix context)
-    style = clean(style_aesthetic)
+    # Architecture-aware format selection
+    use_prose = (target_arch.lower() in PROSE_ARCHS or target_arch == "Auto")
 
-    # 2. Framing & Subject
-    frame = clean(framing)
-    if frame:
-        parts.append(f"{frame} of {base_prompt}.")
+    if use_prose:
+        final_prompt = _build_prose_prompt(
+            base_prompt=effective_base, framing=framing, camera=camera_type,
+            lens=lens_focal, aperture=aperture_dof, lighting=lighting,
+            style=style_aesthetic, film_stock=film_stock, shutter=shutter_speed,
+            color_grading=color_grading, aspect_ratio=aspect_ratio,
+            custom_details=custom_details, year_era=year_era,
+            lora_keywords=lora_keywords, art_direction=art_direction,
+            scene_mood=scene_mood, subject_weight=1.0,
+            weight_mode=prompt_weight_mode,
+        )
     else:
-        parts.append(f"{base_prompt}.")
+        # Structured keyword format (SD1.5 / SDXL)
+        parts = []
+        style = c(style_aesthetic)
 
-    # 3. Technical Camera Specs
-    cam = clean(camera_type)
-    lens = clean(lens_focal)
-    ap = clean(aperture_dof)
-    shut = clean(shutter_speed)
+        if prompt_weight_mode == "technique_first" and c(camera_type):
+            parts.append(f"Shot on {camera_type}.")
+            prefix = f"{c(framing)} of " if c(framing) else ""
+            parts.append(f"{prefix}{effective_base}.")
+        elif c(framing):
+            parts.append(f"{framing} of {effective_base}.")
+        else:
+            parts.append(f"{effective_base}.")
 
-    tech_stack = []
-    if cam:
-        tech_stack.append(f"Shot on {cam}")
-    if lens:
-        tech_stack.append(f"with {lens}")
-    if ap:
-        tech_stack.append(f"at {ap}")
-    if shut:
-        tech_stack.append(f"shutter speed {shut}")
+        if art_direction and art_direction.strip():
+            parts.insert(1, art_direction.strip())
+        if lora_keywords and lora_keywords.strip():
+            parts.insert(1, lora_keywords.strip())
+        if scene_mood and scene_mood != "None" and scene_mood in _MOOD_VOCAB:
+            parts.append(_MOOD_VOCAB[scene_mood])
 
-    if tech_stack:
-        parts.append(" ".join(tech_stack) + ".")
+        tech = []
+        if c(camera_type) and prompt_weight_mode != "technique_first":
+            tech.append(f"Shot on {camera_type}")
+        if c(lens_focal):    tech.append(f"with {lens_focal}")
+        if c(aperture_dof):  tech.append(f"at {aperture_dof}")
+        if c(shutter_speed): tech.append(f"shutter speed {shutter_speed}")
+        if tech: parts.append(" ".join(tech) + ".")
 
-    # 4. Lighting & Color
-    light = clean(lighting)
-    grade = clean(color_grading)
+        if c(lighting):      parts.append(f"Lighting is {lighting}.")
+        if c(color_grading): parts.append(f"Color graded in {color_grading}.")
 
-    if light:
-        parts.append(f"Lighting is {light}.")
-    if grade:
-        parts.append(f"Color graded in {grade}.")
+        finish = []
+        if style:             finish.append(style)
+        if c(film_stock):     finish.append(f"on {film_stock}")
+        if year_era != DEFAULT_YEAR: finish.append(f"Est. Year {year_era}.")
+        if finish: parts.append(", ".join(finish) + ".")
 
-    # 5. Film Stock / Finish / Era
-    stock = clean(film_stock)
-    current_year_context = ""
+        if c(aspect_ratio):   parts.append(f"{aspect_ratio} format.")
+        if c(custom_details): parts.append(custom_details.strip())
 
-    # v2.1: Compare against DEFAULT_YEAR constant, not hardcoded 2024
-    if year_era != DEFAULT_YEAR:
-        current_year_context = f"Est. Year {year_era}."
+        final_prompt = " ".join(p for p in parts if p).strip()
 
-    finish_stack = []
-    if style:
-        finish_stack.append(style)
-    if stock:
-        finish_stack.append(f"on {stock}")
-    if current_year_context:
-        finish_stack.append(current_year_context)
-
-    if finish_stack:
-        parts.append(", ".join(finish_stack) + ".")
-
-    # 6. Aspect Ratio Token
-    ar = clean(aspect_ratio)
-    if ar:
-        parts.append(f"{ar} format.")
-
-    # 7. Custom Details
-    if custom_details.strip():
-        parts.append(custom_details)
-
-    # 8. Inject LoRA keywords after subject (v1.1)
-    if lora_keywords and lora_keywords.strip():
-        # Insert LoRA keywords near the beginning (after framing/subject)
-        parts.insert(1, lora_keywords.strip())
-
-    # Join final prompt
-    final_prompt = " ".join([p for p in parts if p]).strip()
-
-    # Apply BREAK tokens for long prompts (v1.1)
     if use_break:
         final_prompt = insert_break_points(final_prompt)
 
-    # Calculate token estimate
     token_count = estimate_tokens(final_prompt)
 
-    # --- AUTO NEGATIVE GENERATION ---
+    # ── Auto-negative (arch-aware) ──────────────────────────────────────────
+    style_val = c(style_aesthetic)
+    if use_prose and target_arch.lower() in ("flux", "kolors"):
+        if negative_strength not in ("Off", "Soft"):
+            logger.info(
+                f"[Encoder] target_arch='{target_arch}': negative prompts have limited "
+                "effect. Consider 'Soft' or 'Off' for better results."
+            )
+
     negative_prompt = ""
-
     if negative_strength != "Off":
-        neg_terms = []
-
-        # Soft: Minimal cleanup
+        neg = []
         if negative_strength in ("Soft", "Standard", "Aggressive"):
-            neg_terms.extend(["blur", "low quality", "watermark", "text"])
-
-        # Standard: Add deformities and duplicates
+            neg.extend(["blur", "low quality", "watermark", "text"])
         if negative_strength in ("Standard", "Aggressive"):
-            neg_terms.extend(
-                ["deformed", "ugly", "duplicate", "disfigured", "bad anatomy"]
-            )
-
-            # Context-aware negatives based on style (Standard+)
-            if any(
-                kw in style
-                for kw in ("Photorealistic", "Cinematic", "Documentary", "Realism")
-            ):
-                neg_terms.extend(
-                    [
-                        "cartoon",
-                        "anime",
-                        "illustration",
-                        "painting",
-                        "cgi",
-                        "3d render",
-                        "drawing",
-                        "sketch",
-                    ]
-                )
-            elif "Anime" in style:
-                neg_terms.extend(
-                    ["photograph", "realistic", "photo", "photorealistic", "3d"]
-                )
-            elif any(kw in style for kw in ("Painting", "Oil", "Painterly")):
-                neg_terms.extend(
-                    ["photograph", "realistic", "photo", "digital", "3d render"]
-                )
-            elif any(kw in style for kw in ("CGI", "Unreal", "3D", "Octane")):
-                neg_terms.extend(
-                    ["photograph", "realistic", "2d", "flat", "hand drawn"]
-                )
-
-        # Aggressive: Add everything specific
+            neg.extend(["deformed", "ugly", "duplicate", "disfigured", "bad anatomy"])
+            if any(kw in style_val for kw in ("Photorealistic", "Cinematic", "Documentary", "Realism")):
+                neg.extend(["cartoon", "anime", "illustration", "painting", "cgi",
+                             "3d render", "drawing", "sketch"])
+            elif "Anime" in style_val:
+                neg.extend(["photograph", "realistic", "photo", "photorealistic", "3d"])
+            elif any(kw in style_val for kw in ("Painting", "Oil", "Painterly")):
+                neg.extend(["photograph", "realistic", "photo", "digital", "3d render"])
+            elif any(kw in style_val for kw in ("CGI", "Unreal", "3D", "Octane")):
+                neg.extend(["photograph", "realistic", "2d", "flat", "hand drawn"])
         if negative_strength == "Aggressive":
-            neg_terms.extend(
-                [
-                    "mutated",
-                    "extra limbs",
-                    "missing limbs",
-                    "floating limbs",
-                    "disconnected limbs",
-                    "pixelated",
-                    "noise",
-                    "grainy",
-                    "cropped",
-                    "out of frame",
-                    "worst quality",
-                    "lowres",
-                ]
-            )
+            neg.extend(["mutated", "extra limbs", "missing limbs", "floating limbs",
+                         "disconnected limbs", "pixelated", "noise", "grainy",
+                         "cropped", "out of frame", "worst quality", "lowres"])
+        negative_prompt = ", ".join(neg)
 
-        negative_prompt = ", ".join(neg_terms)
+    # Merge user custom negatives
+    if negative_custom and negative_custom.strip():
+        negative_prompt = (f"{negative_prompt}, {negative_custom.strip()}"
+                           if negative_prompt else negative_custom.strip())
 
     return (final_prompt, negative_prompt, token_count)
+
+
 
 
 def apply_style_preset(preset_name, current_settings):
@@ -977,84 +1111,72 @@ class RadianceCinematicPromptEncoder:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "clip": (
-                    "CLIP",
-                    {
-                        "tooltip": "The CLIP model used for encoding the prompt into conditioning."
-                    },
-                ),
+                "clip": ("CLIP", {"tooltip": "CLIP model for encoding."}),
             },
             "optional": {
+                # ── Core Prompt ────────────────────────────────────────────
                 "base_prompt": (
                     "STRING",
-                    {
-                        "multiline": True,
-                        "default": "A cinematic scene...",
-                        "tooltip": "Your core subject/scene description.",
-                    },
+                    {"multiline": True, "default": "A cinematic scene...",
+                     "tooltip": "Primary subject/scene description (Prompt A)."},
+                ),
+                "base_prompt_b": (
+                    "STRING",
+                    {"multiline": True, "default": "",
+                     "tooltip": "Alternate subject for A/B testing. Select with active_prompt."},
+                ),
+                "active_prompt": (
+                    ["A", "B"],
+                    {"default": "A",
+                     "tooltip": "Switch between Prompt A and Prompt B without rewiring."},
                 ),
                 "style_preset": (
                     cls.STYLE_PRESETS,
-                    {
-                        "default": "→ Classic Hollywood",
-                        "tooltip": "One-click style preset for instant cinematic look.",
-                    },
+                    {"default": "→ Classic Hollywood",
+                     "tooltip": "One-click style preset."},
+                ),
+                # ── Architecture ───────────────────────────────────────────
+                "target_arch": (
+                    ["Auto", "flux", "sd3", "sdxl", "sd1.5", "wan",
+                     "ltx", "pixart", "kolors", "hunyuan_video", "aura_flow"],
+                    {"default": "Auto",
+                     "tooltip": ("Auto selects prose for Flux/T5 architectures. "
+                                 "Set manually if auto-detect is wrong. "
+                                 "Prose = Flux/SD3/Kolors. Structured = SD1.5/SDXL.")},
                 ),
                 "context_window": (
                     ["Standard (CLIP 77)", "Medium (Flux/T5 256)", "Large (T5 512)"],
-                    {
-                        "default": "Standard (CLIP 77)",
-                        "tooltip": "Token limit for encoding. Use 'Standard' for SD1.5/SDXL, 'Medium/Large' for Flux.",
-                    },
+                    {"default": "Standard (CLIP 77)",
+                     "tooltip": "Token budget. Use Large for Flux with long prompts."},
                 ),
+                # ── Cinematic Parameters ───────────────────────────────────
                 "framing": (
                     cls.FRAMING,
-                    {
-                        "default": "Medium Shot (MS)",
-                        "tooltip": "Camera framing and shot type.",
-                    },
+                    {"default": "Medium Shot (MS)", "tooltip": "Shot framing type."},
                 ),
                 "camera_type": (
                     cls.CAMERAS,
-                    {
-                        "default": "ARRI Alexa 35",
-                        "tooltip": "Camera body type for realism cues.",
-                    },
+                    {"default": "ARRI Alexa 35", "tooltip": "Camera body."},
                 ),
                 "lens_focal": (
                     cls.LENSES,
-                    {
-                        "default": "50mm Standard Prime",
-                        "tooltip": "Lens choice affects bokeh, distortion, and feel.",
-                    },
+                    {"default": "50mm Standard Prime", "tooltip": "Lens + focal length."},
                 ),
                 "aperture_dof": (
                     cls.APERTURES,
-                    {
-                        "default": "f/2.8 (Cinematic Separation)",
-                        "tooltip": "Depth of field control.",
-                    },
+                    {"default": "f/2.8 (Cinematic Separation)", "tooltip": "Depth of field."},
                 ),
                 "lighting": (
                     cls.LIGHTING,
-                    {
-                        "default": "Cinematic Haze / Volumetric Fog",
-                        "tooltip": "Lighting style and atmosphere.",
-                    },
+                    {"default": "Cinematic Haze / Volumetric Fog", "tooltip": "Lighting style."},
                 ),
                 "style_aesthetic": (
                     cls.STYLES,
-                    {
-                        "default": "Photorealistic (Raw)",
-                        "tooltip": "Overall visual style and aesthetic.",
-                    },
+                    {"default": "Photorealistic (Raw)", "tooltip": "Visual aesthetic."},
                 ),
                 "film_stock": (
                     cls.FILM_STOCKS,
-                    {
-                        "default": "None",
-                        "tooltip": "Film stock emulation for color/grain.",
-                    },
+                    {"default": "None", "tooltip": "Film stock emulation."},
                 ),
                 "shutter_speed": (
                     cls.SHUTTER_SPEEDS,
@@ -1068,75 +1190,97 @@ class RadianceCinematicPromptEncoder:
                     cls.ASPECT_RATIOS,
                     {"default": "None", "tooltip": "Frame aspect ratio."},
                 ),
+                # ── Emotion & Art Direction ────────────────────────────────
+                "scene_mood": (
+                    SCENE_MOODS,
+                    {"default": "None",
+                     "tooltip": ("Injects curated emotional vocabulary into the prompt. "
+                                 "Works with both CLIP and T5 encoders.")},
+                ),
+                "art_direction": (
+                    "STRING",
+                    {"multiline": True, "default": "",
+                     "tooltip": ("Art direction notes injected right after subject. "
+                                 "E.g. 'golden light raking across the face, hero in silhouette'")},
+                ),
+                # ── Prompt Control ─────────────────────────────────────────
+                "subject_weight": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.5, "max": 1.5, "step": 0.05,
+                     "tooltip": "Wrap subject in (subject:weight) attention syntax."},
+                ),
+                "prompt_weight_mode": (
+                    ["balanced", "subject_first", "technique_first"],
+                    {"default": "balanced",
+                     "tooltip": ("Controls token budget ordering. "
+                                 "'technique_first' leads with camera for style-driven shots.")},
+                ),
                 "custom_details": (
                     "STRING",
-                    {
-                        "multiline": False,
-                        "default": "",
-                        "tooltip": "Additional custom prompt details.",
-                    },
+                    {"multiline": False, "default": "",
+                     "tooltip": "Additional custom details appended at the end."},
                 ),
                 "year_era": (
                     "INT",
-                    {
-                        "default": DEFAULT_YEAR,
-                        "min": 1800,
-                        "max": 2100,
-                        "step": 1,
-                        "tooltip": "Time period for era-specific looks.",
-                    },
+                    {"default": DEFAULT_YEAR, "min": 1800, "max": 2100, "step": 1,
+                     "tooltip": "Era context for period-specific looks."},
                 ),
+                # ── Negative Prompt ────────────────────────────────────────
                 "negative_strength": (
                     ["Off", "Soft", "Standard", "Aggressive"],
-                    {
-                        "default": "Standard",
-                        "tooltip": "Strength of auto-generated negative prompt.",
-                    },
+                    {"default": "Standard",
+                     "tooltip": "Auto-negative strength. 'Soft' is recommended for Flux."},
                 ),
+                "negative_custom": (
+                    "STRING",
+                    {"multiline": True, "default": "",
+                     "tooltip": "Your custom negative terms, merged with auto-generated negatives."},
+                ),
+                # ── Encoding Options ───────────────────────────────────────
                 "clip_skip": (
                     "INT",
-                    {
-                        "default": 0,
-                        "min": 0,
-                        "max": 24,
-                        "step": 1,
-                        "tooltip": "Number of CLIP layers to skip (0 = use all layers).",
-                    },
+                    {"default": 0, "min": 0, "max": 24, "step": 1,
+                     "tooltip": "CLIP layers to skip (0 = all). Typical SD1.5=1, SDXL=0."},
                 ),
-                # v1.1 additions
                 "lora_keywords": (
                     "STRING",
-                    {
-                        "multiline": False,
-                        "default": "",
-                        "tooltip": "LoRA trigger words to inject into prompt.",
-                    },
+                    {"multiline": False, "default": "",
+                     "tooltip": "LoRA trigger words injected into the prompt."},
                 ),
                 "use_break": (
                     ["Off", "On"],
-                    {
-                        "default": "Off",
-                        "tooltip": "Auto-insert BREAK tokens at token boundaries.",
-                    },
+                    {"default": "Off",
+                     "tooltip": "Auto-insert BREAK tokens at chunk boundaries for long prompts."},
                 ),
             },
         }
 
-    RETURN_TYPES = ("CONDITIONING", "CONDITIONING")
-    RETURN_NAMES = ("positive", "negative")
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "STRING", "STRING", "INT")
+    RETURN_NAMES = ("positive", "negative", "positive_text", "negative_text", "token_count")
     OUTPUT_TOOLTIPS = (
-        "Positive conditioning for the sampler (encoded cinematic prompt).",
-        "Negative conditioning for the sampler (auto-generated or empty).",
+        "Positive conditioning for the sampler.",
+        "Negative conditioning for the sampler.",
+        "Final positive prompt string — wire to a text preview node.",
+        "Final negative prompt string.",
+        "Actual token count from the CLIP tokenizer.",
     )
     FUNCTION = "encode_cinematic"
     CATEGORY = "FXTD Studios/Radiance/Generate"
-    DESCRIPTION = "All-in-one cinematic prompt builder with direct CLIP encoding. Supports Standard (SD) and Extended (Flux) context windows."
+    DESCRIPTION = (
+        "v3.0 — Universal cinematic encoder. Auto-selects prose format for "
+        "Flux/T5/Kolors and structured format for SD1.5/SDXL. "
+        "Supports scene mood, A/B prompts, subject weighting, real token counts, "
+        "art direction and architecture-aware negatives."
+    )
 
     def encode_cinematic(
         self,
         clip,
         base_prompt="A cinematic scene...",
+        base_prompt_b="",
+        active_prompt="A",
         style_preset="→ Classic Hollywood",
+        target_arch="Auto",
         context_window="Standard (CLIP 77)",
         framing="Medium Shot (MS)",
         camera_type="ARRI Alexa 35",
@@ -1148,61 +1292,50 @@ class RadianceCinematicPromptEncoder:
         shutter_speed="None",
         color_grading="None",
         aspect_ratio="None",
+        scene_mood="None",
+        art_direction="",
+        subject_weight=1.0,
+        prompt_weight_mode="balanced",
         custom_details="",
         year_era=DEFAULT_YEAR,
         negative_strength="Standard",
+        negative_custom="",
         clip_skip=0,
         lora_keywords="",
         use_break="Off",
     ):
+        # ── Validation ──────────────────────────────────────────────────────
+        if clip is None:
+            raise RuntimeError("CLIP input is None. Connect a valid CLIP model.")
+        if not base_prompt or not base_prompt.strip():
+            raise ValueError("base_prompt cannot be empty.")
+        if clip_skip > 12:
+            logger.warning(f"clip_skip={clip_skip} is unusually high.")
 
-        # Determine token limit based on context_window selection
+        # ── Token limit ─────────────────────────────────────────────────────
         if "Standard" in context_window:
             token_limit = 77
         elif "Medium" in context_window:
             token_limit = 256
-        else:  # Large
+        else:
             token_limit = 512
 
-        # Validate CLIP input
-        if clip is None:
-            raise RuntimeError(
-                "ERROR: CLIP input is invalid (None). Please connect a valid CLIP model."
-            )
-
-        # Validate base_prompt
-        if not base_prompt or base_prompt.strip() == "":
-            raise ValueError(
-                "ERROR: Base prompt cannot be empty. Please provide a scene description."
-            )
-
-        # Validate clip_skip doesn't exceed reasonable limits
-        if clip_skip > 12:
-            logger.warning(
-                f"clip_skip={clip_skip} is high. Most CLIP models have 12-24 layers."
-            )
-
-        # Build current settings dict (all fields included for consistency)
+        # ── Apply style preset ──────────────────────────────────────────────
         settings = {
-            "framing": framing,
-            "camera_type": camera_type,
-            "lens_focal": lens_focal,
-            "aperture_dof": aperture_dof,
-            "lighting": lighting,
-            "style_aesthetic": style_aesthetic,
-            "film_stock": film_stock,
-            "shutter_speed": shutter_speed,
-            "color_grading": color_grading,
-            "aspect_ratio": aspect_ratio,
+            "framing": framing, "camera_type": camera_type,
+            "lens_focal": lens_focal, "aperture_dof": aperture_dof,
+            "lighting": lighting, "style_aesthetic": style_aesthetic,
+            "film_stock": film_stock, "shutter_speed": shutter_speed,
+            "color_grading": color_grading, "aspect_ratio": aspect_ratio,
         }
-
-        # Apply preset if selected (partial override — unset fields keep manual values)
         if style_preset != "None (Custom)":
             settings = apply_style_preset(style_preset, settings)
 
-        # Generate prompts using shared builder
-        final_prompt, negative_prompt, token_count = build_cinematic_prompt(
+        # ── Build prompt v3.0 ───────────────────────────────────────────────
+        final_prompt, negative_prompt, _ = build_cinematic_prompt_v3(
             base_prompt=base_prompt,
+            base_prompt_b=base_prompt_b,
+            active_prompt=active_prompt,
             framing=settings["framing"],
             camera_type=settings["camera_type"],
             lens_focal=settings["lens_focal"],
@@ -1216,41 +1349,41 @@ class RadianceCinematicPromptEncoder:
             custom_details=custom_details,
             year_era=year_era,
             negative_strength=negative_strength,
+            negative_custom=negative_custom,
             lora_keywords=lora_keywords,
-            use_break=False,  # We handle break manually below if needed, or we rely on token_limit
+            use_break=False,
+            target_arch=target_arch,
+            scene_mood=scene_mood,
+            subject_weight=subject_weight,
+            art_direction=art_direction,
+            prompt_weight_mode=prompt_weight_mode,
         )
 
-        # Apply BREAK tokens if requested, using the selected token limit
+        # ── BREAK tokens ────────────────────────────────────────────────────
         if use_break == "On":
-            final_prompt = insert_break_points(
-                final_prompt, max_tokens=token_limit - 7
-            )  # -7 buffer
+            final_prompt = insert_break_points(final_prompt, max_tokens=token_limit - 7)
 
-        # Recalculate token count for warning
-        token_count = estimate_tokens(final_prompt)
-
-        # Token count warning
-        if token_count > token_limit and use_break == "Off":
+        # ── Real token count ────────────────────────────────────────────────
+        real_count = _real_token_count(clip, final_prompt)
+        if real_count > token_limit and use_break == "Off":
             logger.warning(
-                f"Prompt has ~{token_count} tokens (Limit is {token_limit}). Consider enabling 'use_break' or shortening prompt."
+                f"[Encoder] Prompt has {real_count} tokens (limit {token_limit}). "
+                "Enable 'use_break' or increase context_window."
             )
 
-        # --- CLIP ENCODING WITH CLIP SKIP ---
+        # ── CLIP skip ───────────────────────────────────────────────────────
         if clip_skip > 0:
             clip = clip.clone()
             clip.clip_layer(-clip_skip)
 
-        # Encode positive prompt
+        # ── Encode ──────────────────────────────────────────────────────────
         pos_tokens = clip.tokenize(final_prompt)
         positive_cond = clip.encode_from_tokens_scheduled(pos_tokens)
 
-        # Encode negative prompt (empty string if no negative)
-        neg_text = negative_prompt if negative_prompt else ""
-        neg_tokens = clip.tokenize(neg_text)
+        neg_tokens = clip.tokenize(negative_prompt or "")
         negative_cond = clip.encode_from_tokens_scheduled(neg_tokens)
 
-        return (positive_cond, negative_cond)
-
+        return (positive_cond, negative_cond, final_prompt, negative_prompt, real_count)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                         NODE MAPPINGS

@@ -28,6 +28,13 @@ import numpy as np
 import cv2
 
 from . import color_utils
+try:
+    from .path_utils import safe_join, get_safe_output_dir, get_safe_input_path
+except ImportError:
+    from path_utils import safe_join, get_safe_output_dir, get_safe_input_path
+
+import folder_paths
+
 
 logger = logging.getLogger("radiance.io")
 
@@ -275,6 +282,8 @@ class RadianceReadVideo:
             elif isinstance(vhs_video, list) and len(vhs_video) > 0:
                 video_path = vhs_video[0]
 
+        video_path = get_safe_input_path(folder_paths.get_input_directory(), video_path)
+
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video file not found: {video_path}")
 
@@ -417,6 +426,8 @@ class RadianceReadSequence:
     def read_sequence(
         self, folder_path, pattern, start_frame, frame_limit, input_colorspace, fps=24.0
     ):
+        folder_path = get_safe_input_path(folder_paths.get_input_directory(), folder_path)
+
         if not os.path.exists(folder_path):
             raise FileNotFoundError(f"Folder not found: {folder_path}")
 
@@ -617,8 +628,7 @@ class RadianceWrite:
     ):
         from folder_paths import get_output_directory
 
-        full_output_dir = os.path.join(get_output_directory(), subfolder)
-        os.makedirs(full_output_dir, exist_ok=True)
+        full_output_dir = get_safe_output_dir(get_output_directory(), subfolder)
 
         timestamp = int(time.time())
 

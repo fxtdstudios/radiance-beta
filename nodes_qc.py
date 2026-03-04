@@ -6,8 +6,23 @@ Author: FXTD Studios Pipeline Team
 
 import torch
 import json
+import os
+import logging
 from typing import Dict, Tuple
 from .image import defects
+
+try:
+    from .path_utils import get_safe_output_dir
+except ImportError:
+    from path_utils import get_safe_output_dir
+
+try:
+    import folder_paths
+    _OUTPUT_DIR = folder_paths.get_output_directory()
+except Exception:
+    _OUTPUT_DIR = os.path.abspath("output")
+
+logger = logging.getLogger("radiance.qc")
 
 
 class RadianceQC:
@@ -384,9 +399,11 @@ class RadianceQCExport:
             # Parse JSON
             report = json.loads(qc_report_json)
 
-            # Create output directory
-            output_dir = Path(output_path)
-            output_dir.mkdir(parents=True, exist_ok=True)
+            # Security: validate output path via safe_join
+            try:
+                output_dir = Path(get_safe_output_dir(_OUTPUT_DIR, output_path))
+            except ValueError as e:
+                return (f"✗ Export failed: Invalid output path — {e}",)
 
             # Timestamp for filename
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

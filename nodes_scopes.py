@@ -311,12 +311,147 @@ class RadianceVectorscope:
         return (torch.stack(results),)
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  RadianceFalseColor  (v1.0 — batch pipeline version)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Industry false-color zones (scene-linear luma thresholds):
+#   Clipped   ≥1.0   → white
+#   Hot       0.90-1.0 → red
+#   Over      0.75-0.90 → orange/yellow
+#   Correct   0.45-0.75 → green (neutral)
+#   Dim       0.18-0.45 → light blue
+#   Under     0.05-0.18 → dark blue/purple
+#   Crushed   <0.05     → black/pink
+
+_FC_ZONES = [
+    # (upper_threshold, R, G, B)  — upper exclusive bound for the zone BELOW
+    (0.05,  0.95, 0.00, 0.95),   # Crushed   → purple-pink
+    (0.18,  0.18, 0.18, 0.90),   # Under     → dark blue
+    (0.45,  0.40, 0.70, 1.00),   # Dim       → light blue
+    (0.75,  0.30, 0.80, 0.30),   # Correct   → green (mid-grey ~0.18 is at ~0.46 sRGB)
+    (0.90,  1.00, 0.80, 0.00),   # Over      → yellow-orange
+    (1.00,  1.00, 0.30, 0.00),   # Hot       → orange-red
+    (float("inf"), 1.00, 1.00, 1.00),  # Clipped → white
+]
+
+
+class RadianceFalseColor:
+    """
+    Bake a calibrated false-color exposure visualization as an IMAGE.
+    Useful in headless/batch pipelines where the viewer is not open.
+    Also outputs the original image unchanged on the second pin.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "is_linear": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "True = input is scene-linear (HDR). False = sRGB-encoded (PNG).",
+                    },
+                ),
+                "blend": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.05,
+                        "tooltip": "0 = original image, 1 = pure false-color.",
+                    },
+                ),
+                "exposure_offset": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": -6.0,
+                        "max": 6.0,
+                        "step": 0.25,
+                        "tooltip": "Shift analysis by N stops before zone classification.",
+                    },
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE")
+    RETURN_NAMES = ("false_color", "original")
+    OUTPUT_TOOLTIPS = (
+        "False-color exposure visualization (7-zone industry palette).",
+        "Original image passthrough.",
+    )
+    FUNCTION = "render"
+    CATEGORY = "FXTD Studios/Radiance/Analyze"
+    DESCRIPTION = "Bake a 7-zone false-color exposure overlay as an IMAGE for pipeline/batch use."
+
+    def render(
+        self,
+        image: torch.Tensor,
+        is_linear: bool = True,
+        blend: float = 1.0,
+        exposure_offset: float = 0.0,
+    ):
+        img = image.float().clone()
+
+        # Linearize if sRGB input
+        if not is_linear:
+            img = torch.where(
+                img <= 0.04045,
+                img / 12.92,
+                ((img + 0.055) / 1.055) ** 2.4,
+            )
+
+        # Apply exposure offset in stops
+        if exposure_offset != 0.0:
+            img = img * (2.0 ** exposure_offset)
+
+        # Compute luma for zone classification
+        if img.shape[-1] >= 3:
+            luma = 0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2]
+        else:
+            luma = img[..., 0]
+
+        # Build false-color RGB image
+        B, H, W = luma.shape[0], luma.shape[-2], luma.shape[-3]
+        fc = torch.zeros((*luma.shape, 3), dtype=torch.float32, device=image.device)
+
+        prev_thresh = 0.0
+        for upper, r, g, b in _FC_ZONES:
+            mask = (luma >= prev_thresh) & (luma < upper)  # (..., H, W)
+            mask = mask.unsqueeze(-1)                       # (..., H, W, 1)
+            color = torch.tensor([r, g, b], device=image.device, dtype=torch.float32)
+            fc = torch.where(mask.expand_as(fc), color.expand_as(fc), fc)
+            prev_thresh = upper
+
+        # Blend with original (re-encode original to sRGB for display consistency)
+        if is_linear:
+            display = img.clamp(0, 1) ** (1.0 / 2.2)
+        else:
+            display = image.float().clamp(0, 1)
+
+        if display.shape[-1] > 3:
+            display = display[..., :3]
+        if fc.shape[-1] > display.shape[-1]:
+            fc = fc[..., :display.shape[-1]]
+
+        out = display * (1.0 - blend) + fc * blend
+
+        return (out.clamp(0, 1), image)
+
+
 NODE_CLASS_MAPPINGS = {
-    "RadianceWaveform": RadianceWaveform,
+    "RadianceWaveform":   RadianceWaveform,
     "RadianceVectorscope": RadianceVectorscope,
+    "RadianceFalseColor": RadianceFalseColor,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceWaveform": "◎ Radiance Waveform",
+    "RadianceWaveform":    "◎ Radiance Waveform",
     "RadianceVectorscope": "◎ Radiance Vectorscope",
+    "RadianceFalseColor":  "◎ Radiance False Color",
 }

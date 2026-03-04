@@ -68,6 +68,9 @@ local_settings.py
 db.sqlite3
 /output/
 /temp/
+/temp_pwn/
+/tmp_qa_test/
+/tmp_qa_output/
 
 # --- Security (Double Check) ---
 .env

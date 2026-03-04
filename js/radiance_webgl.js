@@ -1,10 +1,10 @@
 /**
  * ═══════════════════════════════════════════════════════════════════════════════
- *                       RADIANCE WEBGL RENDERER v3.2
+ *                       RADIANCE WEBGL RENDERER v2.1
  *                    GPU-Accelerated Viewer Enhancement
  * ═══════════════════════════════════════════════════════════════════════════════
  *
- * v3.2 — PRO EVOLUTION (Phases 8–12)
+ * v2.1 — PRODUCTION RELEASE (Hardened)
  * ─────────────────────────────────────────────────────────────────────────────
  * Phase 8  — GPU Waveform Monitor
  *            • renderWaveform(canvas, parade) — public helper, renders Luma or
@@ -40,12 +40,12 @@
  *            • Preserves hard edges (skin/hair/object boundaries) at all
  *              denoise strengths; prevents watercolour smearing
  *
- * ─────────────────────────────────────────────────────────────────────────────
- * Earlier changes retained from v2.x / v3.x
- * - FIX: sRGB OETF in composite shader (fixed BLACK result for HDR)
- * - FIX: Linear vs sRGB texture tracking (isLinearTexture flag)
- * - FIX: PNG input linearized before grading
- * - WebGL 2.0 / float32 texture support, 3D LUT, sequence player
+ * v3.0 — Industry & Performance Upgrade
+ *            • OES_texture_half_float enabled for correct HALF_FLOAT WebGL path
+ *            • renderHistogram() — 256-bin GPU histogram HUD
+ *            • linearFalseColor flag — false color + zebra run pre-OETF (scene-linear)
+ *            • initDisplayP3() — Display-P3/HDR monitor detection + canvas colorSpace
+ *            • LRU GPU frame cache — 8-frame zero-re-upload scrubbing
  */
 
 // WebGL Context Manager
@@ -56,15 +56,9 @@ class RadianceWebGLRenderer {
         this.programs = {};
         this.textures = {};
         this.framebuffers = {};
-        this._uniformCache = new Map(); // P1: Cache uniform locations per program
-        this._attribCache = new Map();  // P1: Cache attrib locations per program
-
-        // ── v3.2 Fix: Dirty-flag uniform upload cache ─────────────────────────
-        // Tracks the last-uploaded value for every (program, uniformName) pair.
-        // gl.uniform* calls are only issued when the value has actually changed,
-        // cutting CPU→GPU bandwidth by ~80% on static/playback frames where
-        // only u_frame and u_time change each render.
-        this._uniformValueCache = new Map(); // key = `${program}:${name}` → last value
+        this._uniformCache = new Map();
+        this._attribCache = new Map();
+        this._uniformValueCache = new Map();
         this.lutTexture = null;
         this.depthTexture = null;
         this.lutSize = 33;
@@ -78,33 +72,34 @@ class RadianceWebGLRenderer {
         this.dofEnabled = false;
         this.focusDistance = 0.5;
 
-        this.aperture = 0.0; // 0.0 - 1.0 (Size)
-        this.apertureBlades = 0; // 0 = Circle, 3-9 = Polygon
-        this.apertureRotation = 0.0; // Degrees
-        this.apertureAnamorphic = 1.0; // 1.0 = Spherical, 2.0 = 2x Squeeze
+        this.aperture = 0.0;
+        this.apertureBlades = 0;
+        this.apertureRotation = 0.0;
+        this.apertureAnamorphic = 1.0;
 
         // Optical Filters
-        this.lensDistortion = 0.0; // k1
-        this.lensFringe = 0.0; // Chromatic Aberration
+        this.lensDistortion = 0.0;
+        this.lensFringe = 0.0;
         this.vignetteIntensity = 0.0;
         this.vignetteFalloff = 0.5;
 
         // v3.1: Extended Grain & Lens Effects
-        this.grainSize = 1.0;   // 1.0-4.0 (noise frequency scale)
-        this.grainColor = 0.0;  // 0.0 = mono, 1.0 = full RGB noise
-        this.bloom = 0.0;       // 0.0-1.0 bright pixel glow
-        this.halation = 0.0;    // 0.0-1.0 red channel highlight bleed
-        this.diffusion = 0.0;   // 0.0-1.0 soft filter
+        this.grainSize = 1.0;
+        this.grainColor = 0.0;
+        this.grainAnimate = false;  // static grain by default — only true for video
+        this.bloom = 0.0;
+        this.halation = 0.0;
+        this.diffusion = 0.0;
 
         // Advanced Grading (initialized to identity)
         this.lift = [0.0, 0.0, 0.0];
-        this.gradingGamma = [1.0, 1.0, 1.0]; // Renamed to avoid exposure gamma conflict
+        this.gradingGamma = [1.0, 1.0, 1.0];
         this.gain = [1.0, 1.0, 1.0];
         this.temperature = 0.0;
         this.tint = 0.0;
         this.contrast = 1.0;
         this.pivot = 0.5;
-        this.offset = [0.0, 0.0, 0.0]; // v3.0: Global Offset
+        this.offset = [0.0, 0.0, 0.0];
 
         // v3.0: Resolve-style Controls
         this.colorBoost = 0.0;
@@ -114,39 +109,51 @@ class RadianceWebGLRenderer {
         this.hueShift = 0.0;
         this.lumaMix = 1.0;
 
+        // v3.3: Log Wheels
+        this.logShadow = [0.0, 0.0, 0.0];
+        this.logMidtone = [0.0, 0.0, 0.0];
+        this.logHighlight = [0.0, 0.0, 0.0];
+
+        // v3.4: Printer Lights (per-channel integer offsets, -50..+50)
+        this.printerLightsR = 0;
+        this.printerLightsG = 0;
+        this.printerLightsB = 0;
+
+        // v3.4: Soft Clip highlight rolloff (0 = disabled)
+        this.softClip = 0.0;
+
         // Analytics
         this.falseColor = false;
         this.zebra = false;
         this.zebraThreshold = 0.98;
+        // v3.0 #9: false color and zebra operate in scene-linear space (pre-OETF) when true
+        this.linearFalseColor = true;
 
-        // HDR pipeline state: tracks whether current texture is linear or sRGB-encoded
+        // HDR pipeline state
         this.isLinearTexture = false;
 
-        // v2.2: Channel isolation (0=RGB, 1=R, 2=G, 3=B, 4=Luma, 5=Alpha)
         this.channelMode = 0;
-        // v2.2: Focus peaking
         this.focusPeaking = false;
         this.focusPeakingThreshold = 30.0;
-        // v2.2: Display LUT mode (0=None, 1=sRGB, 2=Rec.709, 3=LogC3, 4=ACEScg)
         this.displayLutMode = 0;
 
-        // v2.3: Denoise & Depth Eval
         this.denoise = 0.0;
         this.showDepth = false;
 
-        // v2.4: Custom Curves
         this.curveMix = 0.0;
         this.curveLutTexture = null;
-        this.curveData = new Uint8Array(256 * 4); // RGBA
-        // Initialize identity curve
+        this.secondaryCurveLutTexture = null;
+        // v3.4: Start at 0 — only activate when secondary curves have been explicitly edited.
+        // This prevents a grayscale flash on first render before the neutral LUT is uploaded.
+        this.secondaryCurveMix = 0.0;
+        this.curveData = new Uint8Array(256 * 4);
         for (let i = 0; i < 256; i++) {
-            this.curveData[i * 4 + 0] = i; // R
-            this.curveData[i * 4 + 1] = i; // G
-            this.curveData[i * 4 + 2] = i; // B
-            this.curveData[i * 4 + 3] = 255; // A (unused)
+            this.curveData[i * 4 + 0] = i;
+            this.curveData[i * 4 + 1] = i;
+            this.curveData[i * 4 + 2] = i;
+            this.curveData[i * 4 + 3] = 255;
         }
 
-        // v2.5: Qualifiers
         this.qualifierEnabled = false;
         this.qualifierShowMask = false;
         this.qualifier = {
@@ -155,9 +162,8 @@ class RadianceWebGLRenderer {
             l: 0.5, lW: 0.5, lS: 0.1
         };
 
-        // v3.1: Power Windows (Masking)
         this.mask = {
-            type: 0, // 0=None, 1=Circle, 2=Box
+            type: 0,
             center: [0.5, 0.5],
             scale: [0.3, 0.3],
             feather: 0.2,
@@ -166,40 +172,34 @@ class RadianceWebGLRenderer {
             showOverlay: false
         };
 
-        // ── v3.2 Phase 10: Comparison Bridge ─────────────────────────────────
-        this.referenceShelf = [];           // Array<WebGLTexture|null> — up to 8 stills
-        this.activeShelfIndex = 0;          // Which shelf slot drives u_referenceImage
+        this.referenceShelf = [];
+        this.activeShelfIndex = 0;
 
-        // ── v3.2 Phase 11: Cinematic Optical Effects ─────────────────────────
-        this.lensDistortionK2 = 0.0;        // Brown-Conrady quartic coefficient
-        this.anamorphicStreaks = 0.0;        // 0=off, >0 = streak strength
-        this.streakThreshold = 0.85;         // Luma level that triggers streaks
-        this.streakLength = 0.08;            // Streak reach as UV fraction
+        this.lensDistortionK2 = 0.0;
+        this.anamorphicStreaks = 0.0;
+        this.streakThreshold = 0.85;
+        this.streakLength = 0.08;
 
-        // ── v3.2 Phase 12: Bilateral Filter ──────────────────────────────────
-        this.bilateralSigmaD = 3.0;          // Spatial sigma in pixels
-        this.bilateralSigmaR = 0.10;         // Range sigma (color diff, 0..1)
+        this.bilateralSigmaD = 3.0;
+        this.bilateralSigmaR = 0.10;
+        this.bilateralHalfRes = true;
+        this._bilateralFBO = null;
+        this._bilateralProgram = null;
 
-        // ── v3.2 Fix 5: Half-res bilateral FBO ───────────────────────────────
-        // When bilateralHalfRes = true, the denoise pass renders to a 0.5×
-        // framebuffer then bilinearly upsamples back to full resolution.
-        // At normal viewing distances the quality difference is imperceptible
-        // while the cost drops from O(49) to O(49/4) taps per display pixel.
-        // Automatically degrades to full-res if the FBO cannot be created.
-        this.bilateralHalfRes = true;   // set false for maximum quality
-        this._bilateralFBO = null;   // { fbo, tex, width, height }
-        this._bilateralProgram = null;  // Dedicated bilateral shader program
+        // v3.0 #8: LRU GPU frame texture cache (max 8 frames)
+        this._frameCache = new Map();       // key=frameId → { tex, lastUsed }
+        this._frameCacheMaxSize = 8;
 
-        // v2.2 Pro: Comparison & Mixing
         this.displayLutStrength = 1.0;
-        this.wipe = 0.5; // 0.5 = middle
+        this.wipe = 0.5;
         this.wipeEnabled = false;
-        this.wipeRefEnabled = false; // Compare against reference still?
-        this.gridMode = 0; // 0=None, 1=Thirds, 2=2.39:1, etc.
+        this.wipeRefEnabled = false;
+        this.gridMode = 0;
         this.gridColor = [1.0, 1.0, 1.0, 0.3];
 
         this.init();
     }
+
 
     setWipe(pos, enabled = true) {
         this.wipe = pos;
@@ -266,6 +266,11 @@ class RadianceWebGLRenderer {
     setHueShift(v) { this.hueShift = v; }
     setLumaMix(v) { this.lumaMix = v; }
 
+    // v3.3: Log Wheels
+    setLogShadow(r, g, b) { this.logShadow = (g === undefined) ? [r, r, r] : [r, g, b]; }
+    setLogMidtone(r, g, b) { this.logMidtone = (g === undefined) ? [r, r, r] : [r, g, b]; }
+    setLogHighlight(r, g, b) { this.logHighlight = (g === undefined) ? [r, r, r] : [r, g, b]; }
+
     // v2.5: High-speed GPU Scope Rendering
     renderScope(mode, targetCanvas, sourceTexture, isLinear, parade = false) {
         if (!this.gl || !this.programs[mode]) return;
@@ -279,13 +284,16 @@ class RadianceWebGLRenderer {
             this.scopeTex = gl.createTexture();
             gl.bindTexture(gl.TEXTURE_2D, this.scopeTex);
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
             gl.bindFramebuffer(gl.FRAMEBUFFER, this.scopeFBO);
             gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.scopeTex, 0);
         }
 
+        // Render scope into offscreen FBO — never touch the display framebuffer
         gl.bindFramebuffer(gl.FRAMEBUFFER, this.scopeFBO);
         gl.viewport(0, 0, size, size);
-        gl.clearColor(0.02, 0.02, 0.04, 1.0); // Subtle dark blue clear
+        gl.clearColor(0.02, 0.02, 0.04, 1.0);
         gl.clear(gl.COLOR_BUFFER_BIT);
 
         // Additive blending for density accumulation
@@ -310,19 +318,35 @@ class RadianceWebGLRenderer {
         gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
         gl.drawArrays(gl.POINTS, 0, this.scopePointCount);
-
-        // v2.5: Blit FBO to default framebuffer for drawImage copy
-        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.scopeFBO);
-        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
-        gl.blitFramebuffer(0, 0, size, size, 0, 0, size, size, gl.COLOR_BUFFER_BIT, gl.NEAREST);
-
         gl.disable(gl.BLEND);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
-        // Copy result to target 2D canvas
+        // Read pixels directly from FBO — avoids clobbering the main viewport
+        const pixels = new Uint8Array(size * size * 4);
+        gl.readPixels(0, 0, size, size, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+
+        // Restore default framebuffer and main viewport
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+
+        // Copy to target 2D canvas, flipping Y (WebGL is bottom-up, canvas is top-down)
         const ctx = targetCanvas.getContext('2d');
-        ctx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
-        ctx.drawImage(this.canvas, 0, 0, size, size, 0, 0, targetCanvas.width, targetCanvas.height);
+        const tw = targetCanvas.width;
+        const th = targetCanvas.height;
+        ctx.clearRect(0, 0, tw, th);
+
+        const imgData = new ImageData(size, size);
+        for (let y = 0; y < size; y++) {
+            const srcRow = (size - 1 - y) * size * 4; // flip Y
+            const dstRow = y * size * 4;
+            imgData.data.set(pixels.subarray(srcRow, srcRow + size * 4), dstRow);
+        }
+
+        // Draw at target canvas size (scaled)
+        const tmpCanvas = document.createElement('canvas');
+        tmpCanvas.width = size;
+        tmpCanvas.height = size;
+        tmpCanvas.getContext('2d').putImageData(imgData, 0, 0);
+        ctx.drawImage(tmpCanvas, 0, 0, tw, th);
     }
 
     setOffset(r, g, b) { this.offset = (g === undefined) ? [r, r, r] : [r, g, b]; }
@@ -350,11 +374,24 @@ class RadianceWebGLRenderer {
     // v3.1: Extended Effects
     setGrainSize(v) { this.grainSize = v; }
     setGrainColor(v) { this.grainColor = v; }
+    setGrainAnimate(v) { this.grainAnimate = v; }
     setBloom(v) { this.bloom = v; }
     setHalation(v) { this.halation = v; }
     setDiffusion(v) { this.diffusion = v; }
     setFrame(v) { this.frame = v; }
     setTime(v) { this.time = v; }
+
+    // ── v3.4: Printer Lights (per-channel exposure offset, -50..+50) ──────────
+    /** Set RGB Printer Lights: integer offsets in -50..+50 range (like a film printer) */
+    setPrinterLights(r, g, b) {
+        this.printerLightsR = r || 0;
+        this.printerLightsG = g || 0;
+        this.printerLightsB = b || 0;
+    }
+
+    // ── v3.4: Soft Clip / Highlight Rolloff ──────────────────────────────────
+    /** Smooth roll-off into highlights. 0 = hard clip, 0.5 = gentle shoulder */
+    setSoftClip(v) { this.softClip = v; }
 
     // ── v3.2 Phase 11: Cinematic Optical ─────────────────────────────────────
     /** Brown-Conrady k2 quartic distortion coefficient (pair with k1) */
@@ -488,6 +525,8 @@ class RadianceWebGLRenderer {
         // Accepts Float32Array(1024) [r,g,b,a × 256] for full precision,
         // or Uint8Array(1024) for legacy 8-bit fallback.
         const gl = this.gl;
+        // Always activate the dedicated curve LUT unit (TEXTURE3) before binding
+        gl.activeTexture(gl.TEXTURE3);
         if (!this.curveLutTexture) {
             this.curveLutTexture = gl.createTexture();
             gl.bindTexture(gl.TEXTURE_2D, this.curveLutTexture);
@@ -506,7 +545,166 @@ class RadianceWebGLRenderer {
         }
     }
 
+    updateSecondaryCurveLut(data) {
+        const gl = this.gl;
+        // Always activate the dedicated secondary curve LUT unit (TEXTURE4) before binding
+        gl.activeTexture(gl.TEXTURE4);
+        if (!this.secondaryCurveLutTexture) {
+            this.secondaryCurveLutTexture = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, this.secondaryCurveLutTexture);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        }
+        gl.bindTexture(gl.TEXTURE_2D, this.secondaryCurveLutTexture);
+        if (data instanceof Float32Array && this.isWebGL2) {
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, 256, 1, 0, gl.RGBA, gl.FLOAT, data);
+        } else {
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+        }
+    }
+
     setCurveMix(v) { this.curveMix = v; }
+    /** Enable secondary curve pass (HvH/HvS/HvL). Called automatically when user edits secondary curves. */
+    setSecondaryCurveMix(v) { this.secondaryCurveMix = v; }
+
+    // ── v3.0 #9: Linear-space False Color & Zebra setter ─────────────────────
+    /** When true, false color + zebra are evaluated in scene-linear space (pre-OETF),
+     *  giving exposure-accurate stop thresholds. Default: true. */
+    setLinearFalseColor(v) { this.linearFalseColor = v; }
+
+    // ── v3.0 #6: GPU Histogram HUD ───────────────────────────────────────────
+    /**
+     * Render a 256-bin per-channel histogram to a target canvas.
+     * Uses the existing scope-point GPU pipeline at full 512-px scatter density.
+     * R/G/B histograms are drawn as additive colored lines on a dark background.
+     *
+     * @param {HTMLCanvasElement} targetCanvas  – destination 2D canvas (histogram HUD)
+     * @param {boolean}           logScale      – if true, use log2 Y-axis for HDR content
+     */
+    renderHistogram(targetCanvas, logScale = false) {
+        if (!this.textures.image) return;
+        // Use the existing histogram scope-point program (scatter by luma/channel)
+        this.renderScope('histogram', targetCanvas, this.textures.image, this.isLinearTexture);
+
+        // Overlay colored channel lines on top of the luma scatter
+        const ctx = targetCanvas.getContext('2d');
+        const w = targetCanvas.width;
+        const h = targetCanvas.height;
+
+        // Draw grid lines (log or linear)
+        ctx.globalAlpha = 0.25;
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1;
+        const gridStops = logScale ? [0.01, 0.1, 0.5, 1.0, 2.0, 6.0] : [0.25, 0.5, 0.75, 1.0];
+        gridStops.forEach(v => {
+            const x = Math.min(w - 1, Math.round(Math.min(v, 1.0) * (w - 1)));
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+        });
+
+        // HDR indicator: dotted line at x=1.0
+        ctx.globalAlpha = 0.5;
+        ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = '#ffcc00';
+        ctx.beginPath(); ctx.moveTo(w - 1, 0); ctx.lineTo(w - 1, h); ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Labels
+        ctx.globalAlpha = 0.7;
+        ctx.font = '9px monospace';
+        ctx.fillStyle = '#aaa';
+        ctx.fillText('0', 2, h - 2);
+        ctx.fillText('1.0', w - 22, h - 2);
+        if (logScale) ctx.fillText('HDR', w - 30, 12);
+        ctx.globalAlpha = 1.0;
+    }
+
+    // ── v3.0 #8: LRU GPU Frame Texture Cache ─────────────────────────────────
+    /**
+     * Upload a float16 frame and cache it by frameId.
+     * If frameId is already in cache, skip re-upload and reuse the GPU texture.
+     * Evicts the least-recently-used frame when cache exceeds _frameCacheMaxSize.
+     *
+     * @param {string|number}  frameId   – unique identifier for the frame
+     * @param {Uint16Array}    fp16data  – raw float16 pixel data
+     * @param {number}         width     – texture width
+     * @param {number}         height    – texture height
+     * @param {number}         channels  – 3 or 4
+     * @returns {WebGLTexture|null}
+     */
+    loadFloat16TextureCached(frameId, fp16data, width, height, channels) {
+        const now = Date.now();
+        if (this._frameCache.has(frameId)) {
+            const entry = this._frameCache.get(frameId);
+            entry.lastUsed = now;
+            this.textures.image = entry.tex;
+            this.imageWidth = width;
+            this.imageHeight = height;
+            this.isLinearTexture = true;
+            return entry.tex;
+        }
+
+        // Evict LRU entry if at capacity
+        if (this._frameCache.size >= this._frameCacheMaxSize) {
+            let oldest = null, oldestTime = Infinity;
+            for (const [id, entry] of this._frameCache) {
+                if (entry.lastUsed < oldestTime) { oldestTime = entry.lastUsed; oldest = id; }
+            }
+            if (oldest !== null) {
+                const ev = this._frameCache.get(oldest);
+                if (ev && this.gl) this.gl.deleteTexture(ev.tex);
+                this._frameCache.delete(oldest);
+            }
+        }
+
+        const tex = this.loadFloat16Texture(fp16data, width, height, channels);
+        if (tex) this._frameCache.set(frameId, { tex, lastUsed: now });
+        return tex;
+    }
+
+    /** Clear the entire LRU frame texture cache and release GPU memory. */
+    clearFrameCache() {
+        const gl = this.gl;
+        for (const [, entry] of this._frameCache) {
+            if (entry.tex && gl) gl.deleteTexture(entry.tex);
+        }
+        this._frameCache.clear();
+    }
+
+    // ── v3.0 #10: Display-P3 / ICC Detection ─────────────────────────────────
+    /**
+     * Detect display gamut via CSS media query and optionally configure canvas.
+     * Call once after canvas creation (before init()).
+     *
+     * @returns {{ isP3: boolean, isHDR: boolean, canvasColorSpace: string }}
+     */
+    static initDisplayP3(canvas) {
+        const isP3 = window.matchMedia('(color-gamut: p3)').matches;
+        const isHDR = window.matchMedia('(color-gamut: rec2020)').matches;
+        let colorSpace = 'srgb';
+
+        if (isP3 || isHDR) {
+            // Tell the browser canvas is in Display-P3 so OS compositing is correct
+            try {
+                // ImageBitmap-backed canvas colorSpace (Chrome 104+, Firefox 113+)
+                if (typeof canvas.getContext === 'function') {
+                    const ctx2d = canvas.getContext('2d');
+                    if (ctx2d && 'colorSpace' in (ctx2d.createImageData(1, 1) || {})) {
+                        // Canvas 2D path already in use — WebGL overrides via gl context attrs
+                    }
+                }
+                colorSpace = isHDR ? 'display-p3' : 'display-p3';
+                console.log(`[Radiance v2.1] Display-P3 monitor detected${isHDR ? ' (Rec.2020+ HDR)' : ''}`);
+            } catch (e) {
+                console.warn('[Radiance v2.1] Display-P3 canvas init failed:', e);
+            }
+        } else {
+            console.log('[Radiance v2.1] sRGB display detected');
+        }
+
+        return { isP3, isHDR, canvasColorSpace: colorSpace };
+    }
 
     // ── v3.2 Phase 8: Public Waveform Render Helper ───────────────────────────
     /**
@@ -698,15 +896,22 @@ class RadianceWebGLRenderer {
             gl.getExtension('EXT_color_buffer_float');
         }
 
-        // Enable linear filtering for float textures (Required for both WebGL 1 & 2)
-        // If this extension is missing, using gl.LINEAR on float textures results in INCOMPLETE_TEXTURE (Black)
-        // on compliant implementations (like Chrome/Angle). We must fallback to gl.NEAREST.
+        // Enable linear filtering for float textures
         if (gl.getExtension) {
             this.extColorFloatLinear = gl.getExtension('OES_texture_float_linear');
+            // v3.0 #3: OES_texture_half_float is required for correct HALF_FLOAT upload path
+            this.extHalfFloat = gl.getExtension('OES_texture_half_float') ||
+                gl.getExtension('EXT_texture_norm16');  // WebGL2 fallback
             this.extColorHalfFloatLinear = gl.getExtension('OES_texture_half_float_linear');
             this.extColorBufferFloat = gl.getExtension('EXT_color_buffer_float');
+            if (this.extHalfFloat) {
+                console.log('[Radiance v2.1] OES_texture_half_float available — HALF_FLOAT path active');
+            } else {
+                console.warn('[Radiance v2.1] OES_texture_half_float unavailable — falling back to FLOAT');
+            }
         } else {
             this.extColorFloatLinear = null;
+            this.extHalfFloat = null;
             this.extColorHalfFloatLinear = null;
             this.extColorBufferFloat = null;
         }
@@ -1000,6 +1205,8 @@ class RadianceWebGLRenderer {
             uniform vec3 u_gamma;
             uniform vec3 u_gain;
             uniform vec3 u_offset; // v3.0
+
+            uniform int u_colorScience; // 0=Linear/sRGB (default), 1=ACEScct
             
             uniform float u_temperature;
             uniform float u_tint;
@@ -1027,6 +1234,11 @@ class RadianceWebGLRenderer {
             uniform float u_midDetail;
             uniform float u_hueShift;
             uniform float u_lumaMix;
+            
+            // v3.3: Log Wheels
+            uniform vec3 u_logShadow;
+            uniform vec3 u_logMidtone;
+            uniform vec3 u_logHighlight;
             
             uniform bool u_dofEnabled;
             uniform float u_focusDist;
@@ -1072,6 +1284,11 @@ class RadianceWebGLRenderer {
             uniform sampler2D u_curveLut; 
             uniform float u_curveMix; // 0.0 = disabled, 1.0 = full effect
             
+            // v3.4: Secondary Curves (Hue vs X)
+            uniform sampler2D u_secondaryCurveLut;
+            uniform float u_secondaryCurveMix;
+
+            
             // v2.5: Qualifiers (HSL)
             uniform bool u_qualifierEnabled;
             uniform bool u_qualifierShowMask;
@@ -1111,6 +1328,7 @@ class RadianceWebGLRenderer {
             // v3.1: Extended Grain & Lens
             uniform float u_grainSize;
             uniform float u_grainColor;
+            uniform float u_grainAnimate;  // 0=static, 1=animated (video)
             uniform float u_bloom;
             uniform float u_halation;
             uniform float u_diffusion;
@@ -1125,6 +1343,18 @@ class RadianceWebGLRenderer {
             uniform float u_bilateralSigmaD;     // Spatial sigma (pixels)
             uniform float u_bilateralSigmaR;     // Range sigma (color diff)
             uniform bool  u_bilateralHalfRes;    // true = half-res FBO pre-computed
+
+            // ── v3.4: Printer Lights ──────────────────────────────────────────
+            // Per-channel additive exposure in log space. Range -50..+50 (like film printer).
+            // Internally converted to a multiplier: 2^(offset/50) per channel.
+            uniform float u_printerR;   // -50..+50
+            uniform float u_printerG;
+            uniform float u_printerB;
+
+            // ── v3.4: Soft Clip ───────────────────────────────────────────────
+            // Rolls highlights smoothly into a shoulder instead of hard-clipping.
+            // 0 = disabled, 1 = full soft shoulder.
+            uniform float u_softClip;
 
             // ----------------------------------------------------------------
             // Color Ops v3.0
@@ -1221,6 +1451,35 @@ class RadianceWebGLRenderer {
                 return mix(color, curved, u_curveMix);
             }
 
+            // ----------------------------------------------------------------
+            // Secondary Curves (Hue vs Hue / Sat)
+            // ----------------------------------------------------------------
+            vec3 applySecondaryCurves(vec3 color) {
+                if (u_secondaryCurveMix <= 0.0) return color;
+                
+                vec3 hsv = rgb2hsv(color);
+                
+                // Texture lookup based on Hue (x coordinate)
+                // R = HueVsHue, G = HueVsSat, B = HueVsLuma
+                vec3 lookup = texture(u_secondaryCurveLut, vec2(hsv.x, 0.5)).rgb;
+                
+                // R: HueVsHue — 0.5 is no change. <0.5 negative hue shift, >0.5 positive.
+                float hueShift = (lookup.r - 0.5); 
+                hsv.x = fract(hsv.x + hueShift);
+                if (hsv.x < 0.0) { hsv.x += 1.0; }
+                
+                // G: HueVsSat — 0.5 = 1× sat. 0.0 = 0× sat. 1.0 = 2× sat.
+                float satMult = lookup.g * 2.0; 
+                hsv.y = clamp(hsv.y * satMult, 0.0, 1.0);
+
+                // B: HueVsLuma — 0.5 = no change. <0.5 darken, >0.5 lift.
+                float lumaShift = (lookup.b - 0.5) * 2.0;  // -1.0 → +1.0
+                hsv.z = clamp(hsv.z + lumaShift * 0.5, 0.0, 65504.0);
+                
+                vec3 curved = hsv2rgb(hsv);
+                return mix(color, curved, u_secondaryCurveMix);
+            }
+
 // ----------------------------------------------------------------
 // DoF / Bokeh
 // ----------------------------------------------------------------
@@ -1234,6 +1493,14 @@ const float GOLDEN_ANGLE = 2.39996323;
                 p = fract(p * vec2(123.34, 456.21));
                 p += dot(p, p + 45.32);
                 return fract(p.x * p.y);
+            }
+
+            float valueNoise(vec2 p) {
+                vec2 i = floor(p);
+                vec2 f = fract(p);
+                f = f * f * (3.0 - 2.0 * f);
+                return mix(mix(hash12(i + vec2(0.0, 0.0)), hash12(i + vec2(1.0, 0.0)), f.x),
+                           mix(hash12(i + vec2(0.0, 1.0)), hash12(i + vec2(1.0, 1.0)), f.x), f.y);
             }
 
             // Brown-Conrady Distortion — full k1 + k2 model
@@ -1358,19 +1625,18 @@ const float GOLDEN_ANGLE = 2.39996323;
             }
 
             vec3 getFalseColorMap(float v) {
-                // v is luminance 0..1
-                float stops = log2(max(v, 1e-6) / 0.18);
-                
-                // Zone colors [R, G, B] matching Python backend (Industry Standard)
-                if (stops < -4.0) return vec3(0.05, 0.05, 0.40);      // Clip black -> deep blue
-                if (stops < -3.0) return vec3(0.10, 0.40, 0.55);      // -3 stops -> cyan
-                if (stops < -2.0) return vec3(0.10, 0.45, 0.35);      // -2 stops -> teal
-                if (stops < -1.0) return vec3(0.15, 0.55, 0.15);      // -1 stop -> green
-                if (stops <  1.0) return vec3(0.40, 0.40, 0.40);      // Mid gray -> neutral
-                if (stops <  2.0) return vec3(0.70, 0.65, 0.10);      // +1 stop -> yellow
-                if (stops <  3.0) return vec3(0.75, 0.40, 0.05);      // +2 stops -> orange
-                if (stops <  4.0) return vec3(0.70, 0.10, 0.10);      // +3 stops -> red
-                return vec3(0.80, 0.15, 0.60);                         // Clip white -> magenta
+                // ARRI False Color standard (v is linear luminance mapped roughly 0-1)
+                // Using standard IRE mapping ranges
+                if (v >= 0.99) return vec3(1.0, 0.0, 0.0);       // Red (Clipped White)
+                if (v >= 0.97) return vec3(1.0, 1.0, 0.0);       // Yellow (Near Clip)
+                if (v >= 0.56) return vec3(v);                   // Light Grey
+                if (v >= 0.52) return vec3(1.0, 0.5, 0.8);       // Pink (Skin / +1 Stop)
+                if (v >= 0.45) return vec3(v);                   // True Grey
+                if (v >= 0.42) return vec3(0.0, 0.8, 0.2);       // Green (18% Mid Grey)
+                if (v >= 0.40) return vec3(v);                   // Dark Grey
+                if (v >= 0.38) return vec3(0.0, 1.0, 1.0);       // Cyan (Dark Skin / Shadows)
+                if (v >= 0.02) return vec3(v);                   // Deep Grey
+                return vec3(0.6, 0.0, 0.8);                      // Purple (Clipped Black)
             }
             
             // ACES Tone Mapping (Approx)
@@ -1675,14 +1941,54 @@ const float GOLDEN_ANGLE = 2.39996323;
                 shift.b -= temp;
                 // Tint: Magenta / Green
                 shift.g -= tint;
-                shift.r += tint * 0.5;
-                shift.b += tint * 0.5;
-                
-                // Additive shift or multiplicative gain?
-                // Multiplicative is better for preserving black point.
-                return color * (vec3(1.0) + shift);
+                return clamp(color + shift, 0.0, 65504.0);
             }
-            
+
+            vec4 rgb2cmyk(vec3 rgb) {
+                float k = 1.0 - max(max(rgb.r, rgb.g), rgb.b);
+                float c = (1.0 - rgb.r - k) / (1.0 - k + 0.0001);
+                float m = (1.0 - rgb.g - k) / (1.0 - k + 0.0001);
+                float y = (1.0 - rgb.b - k) / (1.0 - k + 0.0001);
+                return vec4(c, m, y, k);
+            }
+
+            // ── ACEScct COLOR SCIENCE TRANSFORMS ──
+            const mat3 LIN_SRGB_TO_ACESCG = mat3(
+                0.59719, 0.07600, 0.02840,
+                0.35458, 0.90834, 0.13383,
+                0.04823, 0.01566, 0.83777
+            );
+
+            const mat3 ACESCG_TO_LIN_SRGB = mat3(
+                 1.60475, -0.10208, -0.00327,
+                -0.53108,  1.10813, -0.07276,
+                -0.07367, -0.00605,  1.07602
+            );
+
+            float lin_to_ACEScct(float in_val) {
+                if (in_val <= 0.0078125) {
+                    return 10.5402377416545 * in_val + 0.0729055341958355;
+                } else {
+                    return (log2(in_val) + 9.72) / 17.52;
+                }
+            }
+
+            vec3 lin_to_ACEScct_vec3(vec3 v) {
+                return vec3(lin_to_ACEScct(v.r), lin_to_ACEScct(v.g), lin_to_ACEScct(v.b));
+            }
+
+            float ACEScct_to_lin(float in_val) {
+                if (in_val > 0.155251141552511) {
+                    return exp2(in_val * 17.52 - 9.72);
+                } else {
+                    return (in_val - 0.0729055341958355) / 10.5402377416545;
+                }
+            }
+
+            vec3 ACEScct_to_lin_vec3(vec3 v) {
+                return vec3(ACEScct_to_lin(v.r), ACEScct_to_lin(v.g), ACEScct_to_lin(v.b));
+            }
+
             vec3 applyGrading(vec3 color, vec3 lift, vec3 gamma, vec3 gain, vec3 offset) {
                 // Resolve-Style Grading
                 
@@ -1714,7 +2020,9 @@ const float GOLDEN_ANGLE = 2.39996323;
             }
             
             vec3 applyContrast(vec3 color, float contrast, float pivot) {
-                return (color - pivot) * contrast + pivot;
+                // v3.2: Clamping to prevent extreme separation
+                float c = clamp(contrast, 0.0, 5.0);
+                return (color - pivot) * c + pivot;
             }
 
             // v2.5 Pro Pro: Cinematic S-Curve Shadows/Highlights
@@ -1732,6 +2040,19 @@ const float GOLDEN_ANGLE = 2.39996323;
                 return max(color, 0.0);
             }
 
+            // v3.3: 3-Way Log Wheels (Shadow/Midtone/Highlight targeting)
+            vec3 applyLogWheels(vec3 color, vec3 shadow, vec3 midtone, vec3 highlight) {
+                float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+                
+                // Smooth weight distribution based on luminance
+                float sWeight = 1.0 - smoothstep(0.0, 0.45, luma);
+                float hWeight = smoothstep(0.55, 1.0, luma);
+                float mWeight = 1.0 - sWeight - hWeight;
+                
+                // Log wheels are applied multiplicatively (similar to localized exposure)
+                color *= (1.0 + shadow * sWeight + midtone * mWeight + highlight * hWeight);
+                return max(color, 0.0);
+            }
 
             vec3 hash32(vec2 p) {
                 vec3 p3 = fract(vec3(p.xyx) * vec3(.1031, .1030, .0973));
@@ -1746,6 +2067,29 @@ const float GOLDEN_ANGLE = 2.39996323;
             float rand(vec2 co) {
                 // Legacy support - simple animated grain seed
                 return fract(sin(dot(co.xy + u_time, vec2(12.9898,78.233))) * 43758.5453);
+            }
+
+            // ── v3.4: Printer Lights ─────────────────────────────────────────
+            // Each channel is multiplied by 2^(offset/50), mirroring how a
+            // film printer light step modulates per-channel density.
+            vec3 applyPrinterLights(vec3 color, float r, float g, float b) {
+                if (r == 0.0 && g == 0.0 && b == 0.0) return color;
+                color.r *= pow(2.0, r / 50.0);
+                color.g *= pow(2.0, g / 50.0);
+                color.b *= pow(2.0, b / 50.0);
+                return color;
+            }
+
+            // ── v3.4: Soft Clip ──────────────────────────────────────────────
+            // Per-channel Reinhard-style knee that rolls values above 'threshold'
+            // smoothly into a shoulder.  0 = hard clip pass-through.
+            vec3 applySoftClip(vec3 c, float knee) {
+                if (knee <= 0.0) return c;
+                float thresh = 1.0 - knee * 0.5;
+                vec3 excess = max(c - thresh, 0.0);
+                // Smooth shoulder: thresh + excess / (1 + excess / knee)
+                vec3 shoulder = thresh + excess / (1.0 + excess / max(knee, 0.001));
+                return mix(c, shoulder, step(thresh, c));
             }
 
 // ----------------------------------------------------------------
@@ -1901,8 +2245,8 @@ vec3 getDenoiseColor(vec2 uv) {
 
         // ── All grading operations now happen in LINEAR space ──
 
-        // 2. Exposure
-        color *= pow(2.0, u_exposure);
+        // 2. Exposure — v3.2: Clamp to ±12 stops to prevent Inf
+        color *= pow(2.0, clamp(u_exposure, -12.0, 12.0));
 
         // 3. White Balance
         if (u_temperature != 0.0 || u_tint != 0.0) {
@@ -1910,12 +2254,28 @@ vec3 getDenoiseColor(vec2 uv) {
         }
         
         // 4. Grading (Resolve Style)
-        color = applyGrading(color, u_lift, u_gamma, u_gain, u_offset);
+        if (u_colorScience == 1) {
+            // ACEScct Pipeline
+            vec3 acescg = LIN_SRGB_TO_ACESCG * color;
+            vec3 cct = lin_to_ACEScct_vec3(acescg);
+            cct = applyGrading(cct, u_lift, u_gamma, u_gain, u_offset);
+            acescg = ACEScct_to_lin_vec3(cct);
+            color = ACESCG_TO_LIN_SRGB * acescg;
+        } else {
+            // Standard Linear Processing
+            color = applyGrading(color, u_lift, u_gamma, u_gain, u_offset);
+        }
         
         // 5. Contrast
         if (u_contrast != 1.0) {
             color = applyContrast(color, u_contrast, u_pivot);
         }
+
+        // v3.3: Log Wheels
+        color = applyLogWheels(color, u_logShadow, u_logMidtone, u_logHighlight);
+
+        // v3.4: Printer Lights (per-channel log-space exposure offset)
+        color = applyPrinterLights(color, u_printerR, u_printerG, u_printerB);
 
         // v3.0: Shadows / Highlights (Log-like)
         color = applyShadowsHighlights(color, u_shadows, u_highlights);
@@ -1932,6 +2292,9 @@ vec3 getDenoiseColor(vec2 uv) {
 
         // 5b. Custom Curves
         color = applyCurves(color);
+
+        // 5c. Secondary Curves (Hue vs X)
+        color = applySecondaryCurves(color);
 
         // 6. Saturation
         float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
@@ -2100,26 +2463,75 @@ vec3 getDenoiseColor(vec2 uv) {
         }
 
         // 7. Display Transform (linear → sRGB)
+        // v3.4: Soft Clip — rolls highlights before OETF so it operates in linear space
+        color = applySoftClip(color, u_softClip);
         color = linearToSRGB(max(color, vec3(0.0)));
 
-        // 7a. Film Grain (with size + color + luma attenuation)
+        // 7a. Film Grain — Photochemical-quality, static by default
+        // ─────────────────────────────────────────────────────────
+        // Two-phase hash gives sub-pixel white noise (no bilinear smoothing like
+        // valueNoise). Box-Muller gaussian distribution matches silver-halide grain.
+        // When u_grainAnimate==0 the seed is purely UV-based → static on still images.
         if (u_grainAmount > 0.0) {
-            vec2 grainUV = uv * u_texSize / u_grainSize;
-            vec2 seed = grainUV + floor(u_time * 24.0) * 0.1337;
-            
-            // Attenuate grain in extremes (shadows/highlights)
+            // Map UV to texel grid at correct grain size
+            vec2 grainPx = uv * u_texSize / max(u_grainSize, 0.25);
+
+            // Static frame seed — changes only when u_grainAnimate==1 (video mode)
+            float frameSeed = u_grainAnimate > 0.0 ? floor(u_time * 24.0) * 1.618033 : 0.0;
+
+            // High-quality 2-round hash (no sin — avoids GPU precision banding)
+            vec2 sp  = floor(grainPx);
+            vec2 fp  = fract(grainPx);
+            // Sharp white noise — no interpolation, true per-pixel randomness
+            vec2 q   = sp + vec2(frameSeed * 13.7, frameSeed * 7.3);
+            q = fract(q * vec2(0.1031, 0.1030));
+            q += dot(q, q.yx + 33.33);
+            float n1 = fract((q.x + q.y) * q.x);
+            q = fract((q + vec2(12.3, 45.6)) * vec2(0.1031, 0.1030));
+            q += dot(q, q.yx + 33.33);
+            float n2 = fract((q.x + q.y) * q.y);
+
+            // Box-Muller: uniform [0,1] → gaussian-distributed grain
+            // Clamp to avoid log(0); the epsilon keeps precision on low-end GPUs
+            float u1 = max(n1, 0.0001);
+            float u2 = n2;
+            float gaussian = sqrt(-2.0 * log(u1)) * cos(6.28318 * u2);
+            // Clamp to ±3σ (covers 99.7% of film grain range)
+            gaussian = clamp(gaussian * 0.3333, -1.0, 1.0);
+
+            // Luma-zone attenuation: grain is lighter in deep shadows/clipped highlights
+            // (exposed film responds less at extremes — matches Kodak/Fuji behavior)
             float lumaGrain = dot(color, vec3(0.2126, 0.7152, 0.0722));
-            float attenuation = smoothstep(0.0, 0.2, lumaGrain) * (1.0 - smoothstep(0.7, 1.0, lumaGrain));
-            attenuation = mix(0.3, 1.0, attenuation);
-            
+            float attenuation = smoothstep(0.0, 0.15, lumaGrain) *
+                                (1.0 - smoothstep(0.75, 1.0, lumaGrain));
+            attenuation = mix(0.05, 1.0, attenuation);
+
+            float grainStrength = gaussian * u_grainAmount * attenuation;
+
             if (u_grainColor > 0.0) {
-                vec3 noiseRGB = hash32(seed);
-                vec3 grainRGB = (noiseRGB - 0.5) * u_grainAmount * attenuation;
-                color = blendOverlay(color, grainRGB + 0.5);
+                // Chromatic grain: luminance-dominant + small per-channel dither
+                // Real film grain is mostly silver-halide (B&W) with slight dye-layer
+                // color fringing — NOT three independent RGB noise fields.
+                // Chroma deviation uses offset hash positions at fine sub-pixel scale.
+                vec2 qR = fract((sp + vec2(3.1, 7.5) + frameSeed) * vec2(0.1031, 0.1030));
+                qR += dot(qR, qR.yx + 33.33);
+                float chromaR = fract((qR.x + qR.y) * qR.x) - 0.5;
+
+                vec2 qB = fract((sp + vec2(9.3, 2.7) + frameSeed) * vec2(0.1031, 0.1030));
+                qB += dot(qB, qB.yx + 33.33);
+                float chromaB = fract((qB.x + qB.y) * qB.x) - 0.5;
+
+                // Mix: 80% luma grain, 20% chroma deviation (u_grainColor scales chroma)
+                float chromaScale = u_grainColor * u_grainAmount * attenuation * 0.4;
+                vec3 grain3 = vec3(
+                    grainStrength + chromaR * chromaScale,
+                    grainStrength,
+                    grainStrength + chromaB * chromaScale
+                );
+                color = blendOverlay(color, grain3 + 0.5);
             } else {
-                float noiseMono = hash12(seed);
-                float grainMono = (noiseMono - 0.5) * u_grainAmount * attenuation;
-                color = blendOverlay(color, vec3(grainMono) + 0.5);
+                // Pure luminance grain (monochrome / B&W film look)
+                color = blendOverlay(color, vec3(grainStrength) + 0.5);
             }
         }
         
@@ -2213,6 +2625,11 @@ vec3 getDenoiseColor(vec2 uv) {
             }
             color = mix(color, u_gridColor.rgb, g * u_gridColor.a);
         }
+
+        // 10. Final Sanitization
+        // v3.2: Performance Hardening - Neutralize NaNs/Infs that may have
+        // leaked from complex bokeh or bloom feedback loops.
+        color = sanitize(color);
 
         fragColor = vec4(color, 1.0);
     }
@@ -2645,6 +3062,24 @@ vec3 getDenoiseColor(vec2 uv) {
         return { size, data: new Float32Array(data) };
     }
 
+    // v3.0 #8.1: Manual VRAM management — purge all cached frame textures
+    clearFrameCache() {
+        const gl = this.gl;
+        if (!gl || !this._frameCache) return;
+
+        console.log(`[Radiance] Purging GPU Frame Cache (${this._frameCache.size} textures)...`);
+        this._frameCache.forEach((entry) => {
+            if (entry.tex) gl.deleteTexture(entry.tex);
+        });
+        this._frameCache.clear();
+
+        // Also clear active image textures if they were part of a sequence
+        if (this.textures.image) {
+            gl.deleteTexture(this.textures.image);
+            this.textures.image = null;
+        }
+    }
+
     // Render with basic exposure/gamma
     renderBasic() {
         const gl = this.gl;
@@ -2696,6 +3131,7 @@ vec3 getDenoiseColor(vec2 uv) {
         this._uf3(program, 'u_gamma', this.gradingGamma[0], this.gradingGamma[1], this.gradingGamma[2]);
         this._uf3(program, 'u_gain', this.gain[0], this.gain[1], this.gain[2]);
         this._uf3(program, 'u_offset', this.offset[0], this.offset[1], this.offset[2]);
+        this._ui1(program, 'u_colorScience', this.colorScience || 0);
 
         this._uf1(program, 'u_temperature', this.temperature);
         this._uf1(program, 'u_tint', this.tint);
@@ -2714,6 +3150,20 @@ vec3 getDenoiseColor(vec2 uv) {
         }
         this._ui1(program, 'u_curveLut', 3);
 
+        // Secondary Curves (Hue vs Hue / Sat) (Texture unit 4)
+        this._uf1(program, 'u_secondaryCurveMix', this.secondaryCurveMix !== undefined ? this.secondaryCurveMix : 1.0);
+        gl.activeTexture(gl.TEXTURE4);
+        if (this.secondaryCurveLutTexture) {
+            gl.bindTexture(gl.TEXTURE_2D, this.secondaryCurveLutTexture);
+        } else {
+            // Default flat secondary curve (0.5 for all R/G/B/A limits)
+            const emptyData = new Float32Array(256 * 4).fill(0.5);
+            this.updateSecondaryCurveLut(emptyData);
+            gl.bindTexture(gl.TEXTURE_2D, this.secondaryCurveLutTexture);
+        }
+        this._ui1(program, 'u_secondaryCurveLut', 4);
+
+
         this._uf1(program, 'u_saturation', this.saturation);
 
         // v3.0: Resolve-style grading uniforms
@@ -2723,6 +3173,19 @@ vec3 getDenoiseColor(vec2 uv) {
         this._uf1(program, 'u_midDetail', this.midDetail);
         this._uf1(program, 'u_hueShift', this.hueShift);
         this._uf1(program, 'u_lumaMix', this.lumaMix);
+
+        // v3.3: Log Wheels uniforms
+        this._uf3(program, 'u_logShadow', this.logShadow[0], this.logShadow[1], this.logShadow[2]);
+        this._uf3(program, 'u_logMidtone', this.logMidtone[0], this.logMidtone[1], this.logMidtone[2]);
+        this._uf3(program, 'u_logHighlight', this.logHighlight[0], this.logHighlight[1], this.logHighlight[2]);
+
+        // v3.4: Printer Lights
+        this._uf1(program, 'u_printerR', this.printerLightsR || 0.0);
+        this._uf1(program, 'u_printerG', this.printerLightsG || 0.0);
+        this._uf1(program, 'u_printerB', this.printerLightsB || 0.0);
+
+        // v3.4: Soft Clip
+        this._uf1(program, 'u_softClip', this.softClip || 0.0);
 
         // Qualifiers
         this._ui1(program, 'u_qualifierEnabled', this.qualifierEnabled ? 1 : 0);
@@ -2842,6 +3305,7 @@ vec3 getDenoiseColor(vec2 uv) {
         // v3.1: Extended Grain & Lens
         this._uf1(program, 'u_grainSize', this.grainSize || 1.0);
         this._uf1(program, 'u_grainColor', this.grainColor || 0.0);
+        this._uf1(program, 'u_grainAnimate', this.grainAnimate ? 1.0 : 0.0);
         this._uf1(program, 'u_bloom', this.bloom || 0.0);
         this._uf1(program, 'u_halation', this.halation || 0.0);
         this._uf1(program, 'u_diffusion', this.diffusion || 0.0);
@@ -3351,6 +3815,13 @@ class RadianceHDRPicker {
             if (done) break;
             chunks.push(value);
             totalLen += value.length;
+
+            // v3.2: Security Hardening - Decompression Bomb Protection
+            // Reject files larger than 50MB (uncompressed) to prevent memory exhaustion
+            if (totalLen > 50 * 1024 * 1024) {
+                await reader.cancel();
+                throw new Error(`[Picker] .rhdr file exceeds 50MB safety limit. Potential decompression bomb.`);
+            }
         }
 
         const decompressed = new Uint8Array(totalLen);

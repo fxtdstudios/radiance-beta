@@ -1,11 +1,11 @@
 opencv-python>=4.8.0,<5.0.0
 imageio>=2.31.0,<3.0.0
+Pillow>=10.0.0,<12.0.0
 OpenEXR>=3.2.0,<4.0.0
 Imath>=3.1.0,<4.0.0
 opencolorio>=2.3.0,<3.0.0
 colour-science>=0.4.4,<1.0.0
 transformers>=4.36.0,<5.0.0
-scipy>=1.11.0,<2.0.0
 
 # Linux Note:
 # Ensure you have system libraries installed if build fails:

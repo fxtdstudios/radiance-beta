@@ -1,6 +1,6 @@
 """
-═══════════════════════════════════════════════════════════════════════════════
-                     RADIANCE VIEWER NODE v2.1
+═════════════════════════════════════════════════════════════════════════════
+                     RADIANCE VIEWER NODE v3.0
               VFX Industry-Standard Image Viewer for ComfyUI
                          Radiance © 2024-2026
 
@@ -8,53 +8,41 @@ Professional viewer node providing:
 - Interactive zoom/pan with canvas-based rendering
 - Real-time exposure, gamma, gain, lift, saturation, temperature controls
 - Channel viewing modes (RGB, R, G, B, Alpha, Luminance)
-- Color picker with HDR value display (via float32 sidecar)
-- Built-in LUTs (sRGB, Rec.709, Log-to-Lin, Filmic, False Color, etc.)
-- False color and zebra analysis
+- True fp32 HDR color picker (via .rpick scene-linear sidecar)
+- Built-in LUTs: sRGB, Rec.709, Log-to-Lin, Filmic, False Color, etc.
+- False color and zebra analysis in *linear* space (pre-OETF)
 - A/B comparison modes with mouse-draggable wipe divider
 - IMAGE passthrough output
-- 16-bit PNG + .rhdr compressed float16 sidecar for true HDR
-- 32-bit OpenEXR export via cv2/imageio
+- 16-bit PNG + .rhdr compressed float16 for native WebGL texture upload
+- Full fp32 OpenEXR export (always-on via cv2/imageio)
+- .rpick compressed fp32 picking sidecar (256px, scene-linear)
 - Z-Depth with 16-bit precision
+- CDL export: ASC CDL XML from current grading state
+- GPU histogram (256-bin, per-channel, linear-space)
+- Display-P3 / HDR monitor ICC detection
+- 8-frame LRU GPU texture cache for instant frame scrubbing
 
 VERSION HISTORY:
 
+v3.0 — Industry & Performance Upgrade (February 2026)
+──────────────────────────────────────
+  #1  EXR always-on as primary float sidecar (cv2/imageio)
+  #3  HALF_FLOAT WebGL verified with OES_texture_half_float
+  #5  .rpick fp32 picking buffer — true HDR color values in picker
+  #6  GPU Histogram: 256-bin per-channel GLSL pass
+  #7  CDL Export/Import: ASC CDL XML — roundtrip with Nuke/Resolve
+  #8  LRU GPU frame cache: 8-frame texture cache, zero re-uploads
+  #9  False color + Zebra in scene-linear (pre-OETF GLSL)
+  #10 Display-P3 / ICC gamut detection + canvas colorSpace init
+
 v2.1 — Pro Evolution (February 2026)
-─────────────────────────────────────
-Phase 8  — GPU Waveform Monitor
-  NEW: renderWaveform() public helper in WebGL renderer
-  NEW: Luma waveform + RGB Parade toggle in scope HUD
-
-Phase 9  — Localized Grading (Power Windows)
-  NEW: Radial + Box mask fully wired — setMask() API
-  NEW: showMaskOverlay flag for mask positioning
-
-Phase 10 — Comparison Bridge & Reference Shelf
-  NEW: initWipeDragging() — mouse-draggable wipe divider on GL canvas
-  NEW: grabReferenceStill() — snapshot current grade → shelf texture
-  NEW: referenceShelf[0..7] — up to 8 stored comparison stills
-  NEW: swapReferenceShelf(idx) — instantly swap active reference
-
-Phase 11 — Cinematic Optical Effects
-  NEW: Brown-Conrady full k1+k2 barrel/pincushion distortion
-  NEW: Anamorphic lens streaks (horizontal highlight bloom, cyan tint)
-  NEW: setLensDistortionK2(), setAnamorphicStreaks(), setStreakThreshold()
-
-Phase 12 — GPU Bilateral Filter (Edge-Preserving Denoise)
-  NEW: 7×7 bilateral kernel replaces 5-tap box blur
-  NEW: setBilateralSigma(sigmaD, sigmaR) — spatial + range control
-  NEW: Preserves skin/hair/object edges at all denoise strengths
-
-v2.1 — HDR Display Fix (February 2026)
-  FIX: Black result from missing sRGB OETF in composite shader
-  FIX: HDR sidecar always saved
-  FIX: PNG preview tonemapped via Reinhard for HDR content
-
-v2.1 — Major Upgrade (February 2026)
-  NEW: Exposure, Gamma, Gain, Lift, Saturation, Temperature sliders
-  NEW: IMAGE passthrough output
-  NEW: Built-in LUT engine (10 industry-standard LUTs)
-═══════════════════════════════════════════════════════════════════════════════
+─────────────────────
+  Phase 8  — GPU Waveform Monitor
+  Phase 9  — Localized Grading (Power Windows)
+  Phase 10 — Comparison Bridge & Reference Shelf
+  Phase 11 — Cinematic Optical Effects (barrel distortion, anamorphic)
+  Phase 12 — GPU Bilateral Filter (edge-preserving denoise)
+═════════════════════════════════════════════════════════════════════════════
 """
 
 import json
@@ -107,6 +95,11 @@ BIT_16_TO_8_DIVISOR = 257  # Correct: 65535 / 255 = 257
 MAX_IMAGE_DIMENSION = 16384
 MAX_BATCH_SIZE = 100
 
+# ── v3.0 Constants ────────────────────────────────────────────────────────────
+PICK_MAX_DIM = 256          # fp32 picking buffer max dimension (per side)
+RHDR_MAGIC = b"RHDR"       # fp16 display sidecar magic
+RPICK_MAGIC = b"RPIC"      # fp32 picking sidecar magic (v3.0 NEW)
+
 # Try to import imageio for EXR fallback
 try:
     import imageio
@@ -117,6 +110,102 @@ except ImportError:
 
 BIT_DEPTH_MODES = ["8-bit (Fast)", "16-bit (Quality)", "16-bit + HDR Data"]
 CV2_PNG_COMPRESSION = 4
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#                v3.0 HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _save_pick_buffer(
+    frame: np.ndarray,
+    filepath: str,
+    max_dim: int = PICK_MAX_DIM,
+) -> bool:
+    """Save a scene-linear fp32 picking buffer (.rpick) for the color picker.
+
+    Format: 12-byte header  + zlib-compressed IEEE 754 float32 bytes
+    Header: magic(4) + width(H) + height(H) + channels(H) + flags(H)
+    Flags:  bit0=fp32 (always set), bit1=downsampled
+
+    The buffer is downsampled to max_dim on the longest side so it's cheap
+    to fetch (256px ≈ 4 × 256 × 256 × 4 = 256KB uncompressed → ~30KB zlib).
+    Float precision is kept full (fp32) so color picker reports true HDR values.
+    """
+    import struct
+
+    try:
+        h, w = frame.shape[:2]
+        c = frame.shape[2] if frame.ndim == 3 else 1
+        rgb = frame[..., :3] if c >= 3 else frame
+
+        # Downsample if larger than max_dim
+        flags = 1  # bit0 = fp32
+        if max(h, w) > max_dim:
+            scale = max_dim / max(h, w)
+            new_w = max(1, int(w * scale))
+            new_h = max(1, int(h * scale))
+            if HAS_CV2:
+                rgb = cv2.resize(rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            else:
+                # Simple numpy area-average downsampling fallback
+                from PIL import Image as PILImage
+                pil = PILImage.fromarray(
+                    np.clip(rgb, 0.0, 1.0).astype(np.float32), mode="RGB"
+                    if c >= 3 else "L"
+                )
+                pil = pil.resize((new_w, new_h), PILImage.LANCZOS)
+                rgb = np.array(pil, dtype=np.float32)
+            h, w = rgb.shape[:2]
+            c = rgb.shape[2] if rgb.ndim == 3 else 1
+            flags |= 2  # bit1 = downsampled
+
+        buf = rgb.astype(np.float32).tobytes()
+        compressed = zlib.compress(buf, level=3)  # level 3 = fast
+        header = struct.pack("<4sHHHH", RPICK_MAGIC, w, h, c, flags)
+        with open(filepath, "wb") as f:
+            f.write(header)
+            f.write(compressed)
+        return True
+    except Exception as e:
+        logger.debug(f"[Radiance v3.0] pick buffer save failed: {e}")
+        return False
+
+
+def build_cdl_xml(
+    slope: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+    offset: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+    power: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+    saturation: float = 1.0,
+    description: str = "Radiance Viewer Grade",
+) -> str:
+    """Build an ASC CDL XML string compatible with Nuke, DaVinci Resolve, OCIO.
+
+    ASC CDL v1.2 spec: https://kencolorist.com/p/the-asc-cdl
+    SOP order: out = CLAMP( (in * Slope + Offset) ^ Power )
+    """
+    s = " ".join(f"{v:.6f}" for v in slope)
+    o = " ".join(f"{v:.6f}" for v in offset)
+    p = " ".join(f"{v:.6f}" for v in power)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<ColorDecisionList xmlns="urn:ASC:CDL:v1.2">\n'
+        '  <ColorDecision>\n'
+        f'    <!-- {description} -->\n'
+        '    <ColorCorrection id="radiance_grade">\n'
+        '      <SOPNode>\n'
+        f'        <Slope>{s}</Slope>\n'
+        f'        <Offset>{o}</Offset>\n'
+        f'        <Power>{p}</Power>\n'
+        '      </SOPNode>\n'
+        '      <SatNode>\n'
+        f'        <Saturation>{saturation:.6f}</Saturation>\n'
+        '      </SatNode>\n'
+        '    </ColorCorrection>\n'
+        '  </ColorDecision>\n'
+        '</ColorDecisionList>\n'
+    )
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                        BUILT-IN LUT ENGINE v2.1
@@ -157,6 +246,7 @@ LUT_MODES = [
     # ── Analysis ──────────────────────────────────────────────────────────────
     "False Color (Exposure)",
 ]
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                    CAMERA LOG LUT FUNCTIONS  (v3.2 — Spec-Accurate)
@@ -588,6 +678,33 @@ _LUT_FUNCTIONS = {
 }
 
 
+def _lut_false_color(img: np.ndarray) -> np.ndarray:
+    """ARRI False Color mapping (IRE proxy via sRGB luma)."""
+    out = np.empty_like(img)
+    if img.ndim == 3 and img.shape[2] >= 3:
+        luma = 0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2]
+        out[..., 0] = luma
+        out[..., 1] = luma
+        out[..., 2] = luma
+
+        m_red = luma >= 0.99
+        m_yel = (luma >= 0.97) & (luma < 0.99)
+        m_pnk = (luma >= 0.52) & (luma < 0.56)
+        m_grn = (luma >= 0.42) & (luma < 0.45)
+        m_cya = (luma >= 0.38) & (luma < 0.40)
+        m_pur = luma <= 0.02
+
+        out[m_red] = [1.0, 0.0, 0.0]
+        out[m_yel] = [1.0, 1.0, 0.0]
+        out[m_pnk] = [1.0, 0.5, 0.8]
+        out[m_grn] = [0.0, 0.8, 0.2]
+        out[m_cya] = [0.0, 1.0, 1.0]
+        out[m_pur] = [0.6, 0.0, 0.8]
+    else:
+        out = img.copy()
+    return out
+
+
 def apply_lut(img: np.ndarray, lut_name: str, intensity: float = 1.0) -> np.ndarray:
     """
     Apply a named LUT to a float32 image.
@@ -672,6 +789,8 @@ def apply_grading(
     # LUT
     lut_name: str = "None",
     lut_intensity: float = 1.0,
+    # Color Science
+    color_science: int = 0, # 0 = Linear/sRGB, 1 = ACEScct
 ) -> np.ndarray:
     """
     Apply full grading stack to a float32 image.
@@ -695,6 +814,7 @@ def apply_grading(
         hue_shift:   Hue rotation in degrees
         lut_name:    Name of built-in LUT to apply
         lut_intensity: LUT blend factor (0.0–1.0)
+        color_science: 0 = Linear/sRGB, 1 = ACEScct
 
     Returns:
         float32 numpy array, same shape as input
@@ -735,21 +855,66 @@ def apply_grading(
         out[..., 2] *= np.float32(b_mult)
 
     # ── 4. Lift / Gain / Gamma  (Resolve-style) ───────────────────────────────
-    # Lift: additive shift to shadows, pivoted by luma so whites are unaffected
-    if abs(lift) > 0.001 and out.ndim == 3 and out.shape[2] >= 3:
-        luma = 0.2126 * out[..., 0] + 0.7152 * out[..., 1] + 0.0722 * out[..., 2]
-        pivot_lift = np.clip(1.0 - luma, 0.0, 1.0)[..., np.newaxis]
-        out += np.float32(lift) * pivot_lift
+    
+    def do_lift_gamma_gain(color: np.ndarray) -> np.ndarray:
+        c = color.copy()
+        # Lift: additive shift to shadows, pivoted by luma so whites are unaffected
+        if abs(lift) > 0.001 and c.ndim == 3 and c.shape[2] >= 3:
+            luma = 0.2126 * c[..., 0] + 0.7152 * c[..., 1] + 0.0722 * c[..., 2]
+            pivot_lift = np.clip(1.0 - luma, 0.0, 1.0)[..., np.newaxis]
+            c += np.float32(lift) * pivot_lift
 
-    # Gain: multiplicative slope
-    if abs(gain - 1.0) > 0.001:
-        out *= np.float32(gain)
+        # Gain: multiplicative slope
+        if abs(gain - 1.0) > 0.001:
+            c *= np.float32(gain)
 
-    # Gamma: power curve on positives only
-    if abs(gamma - 1.0) > 0.001:
-        inv_gamma = np.float32(1.0 / max(gamma, 0.01))
-        positive = out > 0
-        out[positive] = np.power(out[positive], inv_gamma)
+        # Gamma: power curve on positives only
+        if abs(gamma - 1.0) > 0.001:
+            inv_gamma = np.float32(1.0 / max(gamma, 0.01))
+            positive = c > 0
+            c[positive] = np.power(c[positive], inv_gamma)
+        return c
+
+    if color_science == 1 and out.ndim == 3 and out.shape[2] >= 3:
+        # ACEScct Pipeline
+        # 1. Linear sRGB -> ACEScg (AP1)
+        LIN_SRGB_TO_ACESCG = np.array([
+            [0.59719, 0.35458, 0.04823],
+            [0.07600, 0.90834, 0.01566],
+            [0.02840, 0.13383, 0.83777]
+        ], dtype=np.float32)
+        
+        ACESCG_TO_LIN_SRGB = np.array([
+            [ 1.60475, -0.53108, -0.07367],
+            [-0.10208,  1.10813, -0.00605],
+            [-0.00327, -0.07276,  1.07602]
+        ], dtype=np.float32)
+
+        # Matmul expects (..., 3) but dot works if we do reshaping or einsum
+        # A @ x for each pixel: out = out @ M.T
+        acescg = np.tensordot(out[..., :3], LIN_SRGB_TO_ACESCG, axes=([2], [1]))
+        
+        # 2. ACEScg -> ACEScct
+        cct = np.empty_like(acescg)
+        mask = acescg <= 0.0078125
+        cct[mask] = 10.5402377416545 * acescg[mask] + 0.0729055341958355
+        # Prevent log domain error
+        clamped = np.clip(acescg[~mask], 1e-10, None)
+        cct[~mask] = (np.log2(clamped) + 9.72) / 17.52
+        
+        # 3. Apply Grading
+        cct = do_lift_gamma_gain(cct)
+        
+        # 4. ACEScct -> ACEScg
+        acescg_back = np.empty_like(cct)
+        mask2 = cct > 0.155251141552511
+        acescg_back[mask2] = np.exp2(cct[mask2] * 17.52 - 9.72)
+        acescg_back[~mask2] = (cct[~mask2] - 0.0729055341958355) / 10.5402377416545
+        
+        # 5. ACEScg -> Linear sRGB
+        out[..., :3] = np.tensordot(acescg_back, ACESCG_TO_LIN_SRGB, axes=([2], [1]))
+    else:
+        out = do_lift_gamma_gain(out)
 
     # ── 5. Contrast ────────────────────────────────────────────────────────────
     if abs(contrast - 1.0) > 0.001:
@@ -1337,11 +1502,20 @@ class RadianceViewer:
 
         if rhdr_saved:
             result["hdr_sidecar"] = rhdr_filename
-            result["hdr_primary"] = (
-                True  # v2.2: tells viewer to load .rhdr as display source
-            )
+            result["hdr_primary"] = True  # tells viewer to load .rhdr as display source
+
+        # v3.0 Feature #5: fp32 picking buffer — true scene-linear HDR color picker
+        pick_filename = f"{prefix}_{unique_id}_{frame_idx}.rpick"
+        try:
+            pick_filepath = safe_join(output_dir, pick_filename)
+            if _save_pick_buffer(frame, pick_filepath):
+                result["pick_filename"] = pick_filename
+                logger.debug(f"[Radiance v3.0] Pick buffer saved: {pick_filename}")
+        except ValueError as e:
+            logger.debug(f"[Radiance v3.0] Pick buffer path error: {e}")
 
         return result
+
 
     # ─────────────────────────────────────────────────────────────────────
     # PIL 8-bit
@@ -1573,14 +1747,102 @@ class RadianceViewer:
             return np.zeros_like(img_f, dtype=np.uint8)
 
 
+class RadianceGradeApply:
+    """
+    Dedicated node to bake Radiance Viewer grading math into an image tensor.
+    Useful for exporting or passing a graded image downstream in the pipeline.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                # Global
+                "exposure": ("FLOAT", {"default": 0.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                "offset": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
+                # Wheels
+                "lift": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
+                "gamma": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 4.0, "step": 0.01}),
+                "gain": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01}),
+                # Tone
+                "contrast": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.01}),
+                "pivot": ("FLOAT", {"default": 0.18, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "shadows": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.01}),
+                "highlights": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.01}),
+                # Color
+                "saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.01}),
+                "temperature": ("FLOAT", {"default": 6500.0, "min": 2000.0, "max": 12000.0, "step": 10.0}),
+                "hue_shift": ("FLOAT", {"default": 0.0, "min": -180.0, "max": 180.0, "step": 0.1}),
+                # LUT
+                "lut_name": (LUT_MODES, {"default": "None"}),
+                "lut_intensity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                # Color Science
+                "color_science": (["Linear (sRGB)", "ACEScct"], {"default": "Linear (sRGB)"}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "apply_grade"
+    CATEGORY = "FXTD Studios/Radiance/Color"
+    DESCRIPTION = "Bakes Radiance grading math into the image tensor permanently."
+
+    def apply_grade(
+        self,
+        image: torch.Tensor,
+        exposure: float, offset: float,
+        lift: float, gamma: float, gain: float,
+        contrast: float, pivot: float,
+        shadows: float, highlights: float,
+        saturation: float, temperature: float, hue_shift: float,
+        lut_name: str, lut_intensity: float,
+        color_science: str = "Linear (sRGB)"
+    ) -> Tuple[torch.Tensor]:
+        
+        batch_size = image.shape[0]
+        out_batch = []
+        
+        for i in range(batch_size):
+            frame = image[i].cpu().numpy()
+            
+            # Apply identical pipeline as RadianceViewer
+            graded = apply_grading(
+                img=frame,
+                exposure=exposure,
+                gamma=gamma,
+                gain=gain,
+                lift=lift,
+                saturation=saturation,
+                temperature=temperature,
+                offset=offset,
+                contrast=contrast,
+                pivot=pivot,
+                shadows=shadows,
+                highlights=highlights,
+                hue_shift=hue_shift,
+                lut_name=lut_name,
+                lut_intensity=lut_intensity,
+                color_science=1 if color_science == "ACEScct" else 0
+            )
+            
+            # Clamp output and convert back to Tensor
+            graded_tensor = torch.from_numpy(np.clip(graded, 0.0, 1.0))
+            out_batch.append(graded_tensor)
+            
+        return (torch.stack(out_batch),)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #                           NODE REGISTRATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
 NODE_CLASS_MAPPINGS = {
     "FXTD_RadianceViewer": RadianceViewer,
+    "FXTD_RadianceGradeApply": RadianceGradeApply,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "FXTD_RadianceViewer": "◎ Radiance Viewer",
+    "FXTD_RadianceGradeApply": "◎ Radiance Grade Apply",
 }

@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-    Radiance Resolution v3.0 — Professional Resolution Selector
+    Radiance Resolution v2.1 — Professional Resolution Selector
                     Radiance © 2024-2026 FXTD STUDIOS
 
 Place this at: radiance/nodes_resolution.py

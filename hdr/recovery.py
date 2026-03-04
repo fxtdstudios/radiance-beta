@@ -66,6 +66,7 @@ class RadianceHighlightSynthesis:
                     },
                 ),
                 "blend_mode": (["Screen", "Add", "Soft Light"], {"default": "Screen"}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
             }
         }
 
@@ -83,6 +84,7 @@ class RadianceHighlightSynthesis:
         detail_amount: float = 0.2,
         detail_scale: float = 1.0,
         blend_mode: str = "Screen",
+        seed: int = 0,
     ) -> Tuple[torch.Tensor]:
 
         # Working in numpy for complex masking/noise generation
@@ -97,6 +99,9 @@ class RadianceHighlightSynthesis:
 
         for b in range(batch_size):
             frame = img_np[b]
+            
+            # v3.1: Deterministic noise per frame using seed + batch index
+            rng = np.random.default_rng(seed + b)
 
             # 1. Calculate Luminance
             if c >= 3:
@@ -142,8 +147,8 @@ class RadianceHighlightSynthesis:
             )
 
             # 4. Synthesize Detail (Grain/Noise)
-            # Generate gaussian noise
-            noise = np.random.normal(0, 0.5, (h, w)).astype(np.float32)
+            # Generate gaussian noise using seeded RNG
+            noise = rng.normal(0, 0.5, (h, w)).astype(np.float32)
 
             # Scale noise (simulate grain size)
             if detail_scale != 1.0:
@@ -153,7 +158,7 @@ class RadianceHighlightSynthesis:
                     # Generate smaller noise and upscale it
                     h_small = int(h / detail_scale)
                     w_small = int(w / detail_scale)
-                    noise_small = np.random.normal(0, 0.5, (h_small, w_small)).astype(
+                    noise_small = rng.normal(0, 0.5, (h_small, w_small)).astype(
                         np.float32
                     )
                     noise = zoom(noise_small, (h / h_small, w / w_small), order=1)

@@ -20,7 +20,7 @@ license = {file = "LICENSE"}
 #     "Environment :: GPU :: Apple Metal",    # Apple Metal support
 # ]
 
-dependencies = ["opencv-python", "imageio", "OpenEXR", "Imath", "opencolorio", "colour-science", "transformers", "scipy"]
+dependencies = ["opencv-python", "imageio", "Pillow", "OpenEXR", "Imath", "opencolorio", "colour-science", "transformers"]
 
 [project.urls]
 Repository = "https://github.com/fxtdstudios/radiance"

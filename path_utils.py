@@ -8,7 +8,7 @@
 
 import os
 
-__all__ = ["safe_join", "validate_output_path", "get_safe_output_dir"]
+__all__ = ["safe_join", "validate_output_path", "get_safe_output_dir", "get_safe_input_path"]
 
 
 def safe_join(base: str, *paths: str) -> str:
@@ -105,3 +105,23 @@ def get_safe_output_dir(base_dir: str, subfolder: str = "") -> str:
     os.makedirs(output_dir, exist_ok=True)
 
     return output_dir
+
+def get_safe_input_path(base_dir: str, filename: str) -> str:
+    """
+    Validate and construct a safe input file path within the input directory.
+
+    Args:
+        base_dir: The base input directory (from ComfyUI)
+        filename: The filename or subpath to read
+
+    Returns:
+        Safe absolute path for the input file
+
+    Raises:
+        ValueError: If the path would escape the base directory
+    """
+    # Ensure base_dir is absolute
+    base_dir = os.path.normpath(os.path.abspath(base_dir))
+    
+    # Construction via safe_join ensures no traversal out of base_dir
+    return safe_join(base_dir, filename)

@@ -23,17 +23,142 @@ import { RadianceWebGLRenderer } from "./radiance_webgl.js?v=2.1.0";
 
 
 class RadianceViewer {
+    static singletonHUD = null;
+    static activeInstance = null;
+    static allInstances = new Set();
+
+    /**
+     * Security: Escape HTML special characters to prevent XSS.
+     * Use this before inserting any backend-supplied or user-supplied
+     * string into innerHTML.
+     */
+    static escapeHtml(str) {
+        if (typeof str !== 'string') str = String(str);
+        return str
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     constructor(node, container) {
         this.node = node;
         this.container = container;
+        RadianceViewer.allInstances.add(this);
+        RadianceViewer.activeInstance = this;
 
-        // v3.0: Cinema Scope Fonts
+        // v2.1: Cinema Scope Fonts
         if (!document.getElementById('radiance-fonts')) {
             const fontLink = document.createElement('link');
             fontLink.id = 'radiance-fonts';
             fontLink.rel = 'stylesheet';
             fontLink.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap';
             document.head.appendChild(fontLink);
+        }
+
+        // v2.4: Global HUD Styles
+        if (!document.getElementById('radiance-hud-styles')) {
+            const style = document.createElement('style');
+            style.id = 'radiance-hud-styles';
+            style.innerHTML = `
+                .radiance-glass-dock {
+                    position: fixed;
+                    z-index: 10000;
+                    background: rgba(16, 16, 24, 0.75);
+                    backdrop-filter: blur(14px) saturate(180%);
+                    border: 1px solid rgba(255, 255, 255, 0.1);
+                    border-radius: 12px;
+                    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255,255,255,0.05);
+                    display: flex;
+                    flex-direction: column;
+                    transition: opacity 0.25s ease;
+                    overflow: visible;
+                }
+                /* Panel-embedded mode: overrides fixed positioning */
+                .radiance-glass-dock.radiance-panel-embedded {
+                    position: relative !important;
+                    z-index: 1 !important;
+                    border-radius: 0 !important;
+                    border: none !important;
+                    box-shadow: none !important;
+                    width: 100% !important;
+                    height: 100% !important;
+                    flex: 1 !important;
+                    overflow: hidden !important;
+                    background: transparent !important;
+                    backdrop-filter: none !important;
+                }
+                .radiance-right-control-panel {
+                    flex: 0 0 var(--rcp-width, 580px);
+                    display: flex;
+                    flex-direction: column;
+                    background: rgba(14, 14, 22, 0.97);
+                    border-left: 1px solid rgba(60, 70, 100, 0.3);
+                    overflow: hidden;
+                    position: relative;
+                    min-width: 320px;
+                    max-width: 900px;
+                    transition: flex-basis 0.15s;
+                }
+                .radiance-right-control-panel .rcp-resize-handle {
+                    position: absolute;
+                    left: 0; top: 0; width: 4px; height: 100%;
+                    cursor: ew-resize;
+                    background: transparent;
+                    transition: background 0.2s;
+                    z-index: 10;
+                }
+                .radiance-right-control-panel .rcp-resize-handle:hover {
+                    background: #00a8ff;
+                }
+                .radiance-glass-dock input[type="range"] { accent-color: #00a8ff; }
+                
+                /* Help Overlay Styles */
+                .radiance-help-overlay {
+                    position: absolute;
+                    top: 0; left: 0; width: 100%; height: 100%;
+                    background: rgba(10, 10, 15, 0.9);
+                    backdrop-filter: blur(20px);
+                    z-index: 20000;
+                    display: none;
+                    flex-direction: column;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 40px;
+                    color: #fff;
+                    font-family: 'Inter', sans-serif;
+                    opacity: 0;
+                    transition: opacity 0.3s ease;
+                }
+                .radiance-help-content {
+                    max-width: 800px;
+                    width: 100%;
+                    background: rgba(255, 255, 255, 0.03);
+                    border: 1px solid rgba(255, 255, 255, 0.1);
+                    border-radius: 16px;
+                    padding: 30px;
+                    display: grid;
+                    grid-template-columns: 1fr 1fr;
+                    gap: 20px 40px;
+                    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+                }
+                .help-group h3 {
+                    font-size: 11px; color: #00a8ff; text-transform: uppercase;
+                    letter-spacing: 2px; margin-bottom: 12px; border-bottom: 1px solid rgba(0, 168, 255, 0.2);
+                    padding-bottom: 4px;
+                }
+                .help-item {
+                    display: flex; justify-content: space-between; font-size: 13px; margin: 6px 0;
+                }
+                .help-key {
+                    background: rgba(255,255,255,0.1); padding: 2px 6px; border-radius: 4px;
+                    font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #6af;
+                    min-width: 20px; text-align: center;
+                }
+                .help-desc { color: #aaa; }
+            `;
+            document.head.appendChild(style);
         }
 
         this.theme = {
@@ -66,6 +191,7 @@ class RadianceViewer {
         this.apertureBlades = 0;
         this.apertureRotation = 0.0;
         this.apertureAnamorphic = 1.0;
+        this.activeLensSignature = null; // tracks active lens signature preset
         this.lensDistortion = 0.0;
         this.lensFringe = 0.0;
         this.vignetteIntensity = 0.0;
@@ -93,6 +219,19 @@ class RadianceViewer {
         this.zdepthImage = null;       // Current zdepth image
         this.showZdepth = false;       // Toggle for zdepth display
 
+        // ── Real-time Video Playback ──────────────────────────────────────────
+        this.videoMode = false;         // true when a video file is loaded
+        this.videoEl = null;            // HTMLVideoElement source
+        this._videoRAF = null;          // requestAnimationFrame handle
+        this._videoCanvas = null;       // offscreen canvas for frame capture
+        this._videoCtx = null;          // 2D context of _videoCanvas
+        this.playbackSpeed = 1.0;       // 0.25 / 0.5 / 1 / 2 / 4
+        this.playbackFps = 24;          // target fps for frame-sequence playback
+        this.isPlaying = false;
+        this.loop = true;
+        this.lastFrameTime = 0;
+        // ─────────────────────────────────────────────────────────────────────
+
         // Safe Area Guides
         this.safeAreaMode = 'none'; // none, action, title, both
 
@@ -118,6 +257,7 @@ class RadianceViewer {
         this.scopeOverlay = false;
         this.waveformParadeMode = true; // true = RGB parade
         this.scopeMode = localStorage.getItem('radiance_scope_mode') || 'parade'; // parade|waveform|histogram|vectorscope|falsecolor
+        this.generationID = 0; // v3.1: Unique ID per execution to cancel stale async loads
 
         // Annotations
         this.annotations = [];
@@ -219,13 +359,16 @@ class RadianceViewer {
         // HUD Panel Sizing and Position (persisted)
         const savedHudWidth = localStorage.getItem('radiance_hud_width');
         this.hudPanelWidth = savedHudWidth ? parseInt(savedHudWidth) : 580;
-        this.hudPanelMinWidth = 480;
-        this.hudPanelMaxWidth = 960;
+        this.hudPanelMinWidth = 360;
+        this.hudPanelMaxWidth = 1200;
+        const savedHudHeight = localStorage.getItem('radiance_hud_height2');
+        this.hudPanelHeight = savedHudHeight ? parseInt(savedHudHeight) : null; // null = auto
 
         const savedHudX = localStorage.getItem('radiance_hud_x');
         const savedHudY = localStorage.getItem('radiance_hud_y');
         this.hudX = savedHudX !== null ? parseFloat(savedHudX) : null; // null means default (bottom center)
         this.hudY = savedHudY !== null ? parseFloat(savedHudY) : null;
+        this.hudMinimized = localStorage.getItem('radiance_hud_minimized') === 'true';
 
         // Scope update debouncing (for performance)
         this.scopeUpdateTimer = null;
@@ -270,18 +413,131 @@ class RadianceViewer {
         this.setupKeyboardShortcuts();
         requestAnimationFrame(() => this.resize());
 
-        // Immersive Mode: Disabled by user request
-        // (UI remains permanently visible)
+        // Continuous grain ticker — only fires when grain is active
+        this._startGrainTicker();
+
+        // Wire ComfyUI events → terminal
+        this._termWireEvents();
+    }
+
+    // ── v3.4: Continuous Grain Ticker ────────────────────────────────────────
+    // Drives a ~24fps RAF loop that re-renders only when grain is active,
+    // so the noise pattern animates even when the user isn't touching any control.
+    _startGrainTicker() {
+        let lastT = 0;
+        const FPS = 24;
+        const INTERVAL = 1000 / FPS;
+
+        const tick = (t) => {
+            this._grainRAF = requestAnimationFrame(tick);
+            // Only animate if grain is on AND animate mode is enabled
+            if ((this.grain || 0) <= 0.0) return;
+            if (!this.grainAnimate) return;
+            if (t - lastT < INTERVAL) return;
+            lastT = t;
+            if (!this.renderer || !this.renderer.textures.image) return;
+            this.renderer.setTime(t / 1000.0);
+            this.render();
+        };
+        this._grainRAF = requestAnimationFrame(tick);
+    }
+
+    _stopGrainTicker() {
+        if (this._grainRAF) { cancelAnimationFrame(this._grainRAF); this._grainRAF = null; }
+    }
+
+    // ── v3.4: Eyedropper White Balance ───────────────────────────────────────
+    // Clicking a neutral/grey pixel auto-computes the temperature+tint deviation
+    // from D65 and sets the WB controls to correct it in one click.
+    _toggleWBPicker(btn) {
+        this._wbPickerActive = !this._wbPickerActive;
+        if (btn) {
+            btn.style.borderColor = this._wbPickerActive ? '#6af' : 'rgba(255,255,255,0.15)';
+            btn.style.background = this._wbPickerActive ? 'rgba(80,160,255,0.2)' : 'rgba(255,255,255,0.05)';
+            btn.style.color = this._wbPickerActive ? '#6af' : '#aaa';
+        }
+        if (this._wbPickerActive) {
+            this.canvas.style.cursor = 'crosshair';
+            this._wbPickHandler = (e) => {
+                const rect = this.canvas.getBoundingClientRect();
+                const cx = (e.clientX - rect.left) / rect.width;
+                const cy = (e.clientY - rect.top) / rect.height;
+
+                // Sample from raw HDR picker if available, else fall back to 2D canvas
+                let r, g, b;
+                if (this.hdrPicker && this.hdrPicker.loaded) {
+                    const px = this.hdrPicker.sample(cx, cy);
+                    if (!px) return;
+                    r = px.r; g = px.g; b = px.b;
+                } else {
+                    const imgX = Math.round(cx * this.imageWidth);
+                    const imgY = Math.round(cy * this.imageHeight);
+                    const tmp = document.createElement('canvas');
+                    tmp.width = 1; tmp.height = 1;
+                    const tctx = tmp.getContext('2d');
+                    tctx.drawImage(this.image, -imgX, -imgY);
+                    const d = tctx.getImageData(0, 0, 1, 1).data;
+                    r = d[0] / 255; g = d[1] / 255; b = d[2] / 255;
+                }
+
+                // Avoid picking near black or pure white (unreliable neutral)
+                const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                if (luma < 0.05 || luma > 0.95) {
+                    console.warn('[WB] Picked pixel is too dark/bright — choose a neutral grey');
+                    return;
+                }
+
+                // Normalize to equal energy: compute how far each channel deviates from grey
+                const avg = (r + g + b) / 3.0;
+                const devR = r / avg - 1.0;  // +ve = too warm (too much R)
+                const devG = g / avg - 1.0;
+                const devB = b / avg - 1.0;
+
+                // Map RGB deviation → temperature/tint:
+                // Temperature opposes R-B axis (warm↔cool)
+                // Tint opposes R+B-G axis (magenta↔green)
+                const newTemp = -(devR - devB) * 0.5;
+                const newTint = -(devR + devB - 2 * devG) * 0.25;
+
+                this.temperature = Math.max(-2, Math.min(2, newTemp));
+                this.tint = Math.max(-2, Math.min(2, newTint));
+                if (this.renderer) {
+                    this.renderer.setTemperature(this.temperature);
+                    this.renderer.setTint(this.tint);
+                }
+                this.render();
+                console.log(`[WB] Set temp=${this.temperature.toFixed(3)} tint=${this.tint.toFixed(3)} from luma=${luma.toFixed(3)}`);
+
+                // Auto-deactivate after pick
+                this._wbPickerActive = false;
+                if (btn) {
+                    btn.style.borderColor = 'rgba(255,255,255,0.15)';
+                    btn.style.background = 'rgba(255,255,255,0.05)';
+                    btn.style.color = '#aaa';
+                }
+                this.canvas.removeEventListener('click', this._wbPickHandler);
+                this.canvas.style.cursor = 'crosshair';
+                // Rebuild primaries tab to refresh knob values
+                if (this._lastRenderContent) this._lastRenderContent();
+            };
+            this.canvas.addEventListener('click', this._wbPickHandler, { once: true });
+        } else {
+            if (this._wbPickHandler) this.canvas.removeEventListener('click', this._wbPickHandler);
+            this.canvas.style.cursor = 'crosshair';
+        }
     }
 
     showUI(visible) {
         const opacity = visible ? '1' : '0';
         const pointerEvents = visible ? 'all' : 'none';
 
-        if (this.controlsPanel) {
+        if (this.rightControlPanel) {
+            // Panel-embedded: fade the whole panel
+            this.rightControlPanel.style.opacity = opacity;
+            this.rightControlPanel.style.pointerEvents = pointerEvents;
+        } else if (this.controlsPanel) {
             this.controlsPanel.style.opacity = opacity;
             this.controlsPanel.style.pointerEvents = pointerEvents;
-            this.controlsPanel.style.transform = visible ? 'translateX(-50%)' : 'translate(-50%, 20px)';
         }
         if (this.toolbar) {
             this.toolbar.style.opacity = opacity;
@@ -296,6 +552,82 @@ class RadianceViewer {
             this.transportPanel.style.pointerEvents = pointerEvents;
             this.transportPanel.style.transform = visible ? 'translateX(-50%)' : 'translate(-50%, 10px)';
         }
+    }
+
+    // --- Multi-Layer Grading Setup ---
+    createGradeLayer() {
+        return {
+            exposure: 0.0,
+            temperature: 0.0,
+            tint: 0.0,
+            contrast: 1.0,
+            pivot: 0.5,
+            saturation: 1.0,
+            lift: [0, 0, 0],
+            gamma: [1, 1, 1],
+            gain: [1, 1, 1],
+            offset: [0, 0, 0],
+            colorScience: 0,
+            denoise: 0.0,
+            grain: 0.0,
+            maskState: {
+                type: 0, center: [0.5, 0.5], scale: [0.3, 0.3],
+                feather: 0.2, rotation: 0.0, invert: false, showOverlay: false
+            },
+            qualifierState: {
+                enabled: false, showMask: false,
+                h: 0.0, hW: 0.1, hS: 0.05,
+                s: 0.5, sW: 0.5, sS: 0.1,
+                l: 0.5, lW: 0.5, lS: 0.1
+            }
+        };
+    }
+
+    addGradeLayer() {
+        this.grades.push(this.createGradeLayer());
+        this.activeGradeIndex = this.grades.length - 1;
+        this.applyGradeLayer(this.activeGradeIndex);
+    }
+
+    applyGradeLayer(index) {
+        if (!this.grades || !this.grades[index]) return;
+        const g = this.grades[index];
+        this.exposure = g.exposure;
+        this.temperature = g.temperature;
+        this.tint = g.tint;
+        this.contrast = g.contrast;
+        this.pivot = g.pivot;
+        this.saturation = g.saturation;
+        this.lift = [...g.lift];
+        this.gamma = [...g.gamma];
+        this.gain = [...g.gain];
+        this.offset = [...g.offset];
+        this.colorScience = g.colorScience;
+        this.denoise = g.denoise;
+        this.grain = g.grain;
+        this.maskState = JSON.parse(JSON.stringify(g.maskState));
+        this.qualifierState = JSON.parse(JSON.stringify(g.qualifierState));
+        this.render();
+    }
+
+    syncActiveGradeLayer() {
+        if (!this.grades || !this.grades[this.activeGradeIndex]) return;
+        const g = this.grades[this.activeGradeIndex];
+        g.exposure = this.exposure;
+        g.temperature = this.temperature;
+        g.tint = this.tint;
+        g.contrast = this.contrast;
+        g.pivot = this.pivot;
+        g.saturation = this.saturation;
+        g.lift = [...this.lift];
+        g.gamma = [...this.gamma];
+        g.gain = [...this.gain];
+        g.offset = [...this.offset];
+        g.colorScience = this.colorScience;
+        g.denoise = this.denoise;
+        g.grain = this.grain;
+        g.maskState = JSON.parse(JSON.stringify(this.maskState));
+        g.qualifierState = JSON.parse(JSON.stringify(this.qualifierState));
     }
 
     createUI() {
@@ -341,6 +673,38 @@ class RadianceViewer {
         this.canvasWrapper.style.cssText = `flex: 1; position: relative; overflow: hidden;`;
         this.mainArea.appendChild(this.canvasWrapper);
 
+        // ── Right Control Panel (HUD host) ────────────────────────────────────
+        const rcpWidth = parseInt(localStorage.getItem('radiance_rcp_width') || '580');
+        this.rightControlPanel = document.createElement('div');
+        this.rightControlPanel.className = 'radiance-right-control-panel';
+        this.rightControlPanel.style.setProperty('--rcp-width', rcpWidth + 'px');
+        this.rightControlPanel.style.flex = `0 0 ${rcpWidth}px`;
+        // Resize handle on left edge
+        const rcpHandle = document.createElement('div');
+        rcpHandle.className = 'rcp-resize-handle';
+        this.rightControlPanel.appendChild(rcpHandle);
+        let _rcpResizing = false;
+        rcpHandle.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            _rcpResizing = true;
+            const startX = e.clientX;
+            const startW = this.rightControlPanel.offsetWidth;
+            const onMove = (me) => {
+                const newW = Math.min(900, Math.max(320, startW - (me.clientX - startX)));
+                this.rightControlPanel.style.flex = `0 0 ${newW}px`;
+                localStorage.setItem('radiance_rcp_width', newW);
+            };
+            const onUp = () => {
+                _rcpResizing = false;
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+            };
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+        this.mainArea.appendChild(this.rightControlPanel);
+
         // Create HUD (floating controls)
         this.createHUD();
 
@@ -371,6 +735,17 @@ class RadianceViewer {
         } catch (e) {
             console.warn("[Radiance] WebGL init failed:", e);
             this.useWebGL = false;
+        }
+
+        // v3.0 #10: Detect Display-P3 / HDR monitor and configure canvas
+        try {
+            const p3info = RadianceWebGLRenderer.initDisplayP3(this.glCanvas);
+            this._displayP3 = p3info;
+            if (p3info.isP3) {
+                console.log('[Radiance v3.0] Display-P3 monitor — canvas color management active');
+            }
+        } catch (e) {
+            this._displayP3 = { isP3: false, isHDR: false };
         }
 
         // If WebGL failed, hide the canvas and use 2D fallback
@@ -464,14 +839,17 @@ class RadianceViewer {
             display: none; align-items: center; gap: 4px; height: 100%;
         `;
         const fcMap = [
-            { s: '-4', c: '#0d0d66' }, { s: '-3', c: '#1a668c' }, { s: '-2', c: '#1a7359' },
-            { s: '-1', c: '#268c26' }, { s: 'MD', c: '#666666' }, { s: '+1', c: '#b3a61a' },
-            { s: '+2', c: '#bf660d' }, { s: '+3', c: '#b31a1a' }, { s: 'CLIP', c: '#cc2699' }
+            { s: 'CLIP B', c: '#9900cc' }, // Purple
+            { s: 'SHAD', c: '#00ffff' },   // Cyan
+            { s: 'MID', c: '#00cc33' },    // Green
+            { s: 'SKIN', c: '#ff80cc' },   // Pink
+            { s: 'NEAR W', c: '#ffff00' }, // Yellow
+            { s: 'CLIP W', c: '#ff0000' }  // Red
         ];
         fcMap.forEach(item => {
             const block = document.createElement('div');
             block.style.cssText = `display: flex; align-items: center; gap: 3px;`;
-            block.innerHTML = `<div style="width:8px; height:8px; background:${item.c}; border:1px solid rgba(255,255,255,0.2)"></div><span style="font-size:8.5px; color:#888">${item.s}</span>`;
+            block.innerHTML = `<div style="width:8px; height:8px; background:${item.c}; border:1px solid rgba(255,255,255,0.2)"></div><span style="font-size:8.5px; color:#aaa">${item.s}</span>`;
             this.fcLegend.appendChild(block);
         });
         this.bottomInfoBar.appendChild(this.fcLegend);
@@ -560,6 +938,830 @@ class RadianceViewer {
 
         // Create metadata overlay (once, not per-render)
         this.createMetadataOverlay();
+
+        // ── v3.4: Professional Terminal ──────────────────────────────────────
+        this.createTerminal();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //                        PROFESSIONAL TERMINAL  v3.4
+    // ═══════════════════════════════════════════════════════════════════════════
+    createTerminal() {
+        const t = this.theme;
+
+        // ── Resize handle ────────────────────────────────────────────────────
+        const resizeHandle = document.createElement('div');
+        resizeHandle.style.cssText = `
+            flex: 0 0 4px;
+            width: 100%;
+            background: transparent;
+            cursor: ns-resize;
+            transition: background 0.15s;
+            border-top: 1px solid ${t.panelBorder};
+        `;
+        resizeHandle.onmouseenter = () => resizeHandle.style.background = t.accent + '55';
+        resizeHandle.onmouseleave = () => { if (!this._termResizing) resizeHandle.style.background = 'transparent'; };
+
+        // ── Terminal container ───────────────────────────────────────────────
+        const termContainer = document.createElement('div');
+        this._termContainer = termContainer;
+        const savedH = parseInt(localStorage.getItem('radiance_term_height') || '180');
+        termContainer.style.cssText = `
+            flex: 0 0 ${savedH}px;
+            display: flex;
+            flex-direction: column;
+            background: #080b0f;
+            border-top: 1px solid ${t.panelBorder};
+            overflow: hidden;
+            font-family: ${t.mono};
+            font-size: 11px;
+        `;
+
+        // ── Header bar ───────────────────────────────────────────────────────
+        const header = document.createElement('div');
+        header.style.cssText = `
+            flex: 0 0 22px;
+            display: flex;
+            align-items: center;
+            padding: 0 8px;
+            gap: 8px;
+            background: #0d1117;
+            border-bottom: 1px solid ${t.panelBorder};
+            cursor: ns-resize;
+            user-select: none;
+        `;
+
+        const termTitle = document.createElement('span');
+        termTitle.style.cssText = `font-size: 9px; font-weight: 600; letter-spacing: 0.08em; color: #3d8; text-transform: uppercase;`;
+        termTitle.textContent = '● RADIANCE TERMINAL';
+        header.appendChild(termTitle);
+
+        // Session counter badge
+        const badge = document.createElement('span');
+        badge.style.cssText = `font-size: 8px; color: #555; margin-left: auto;`;
+        badge.textContent = 'v3.4 · fxtd';
+        header.appendChild(badge);
+
+        // Clear button
+        const clearBtn = document.createElement('span');
+        clearBtn.textContent = 'CLEAR';
+        clearBtn.style.cssText = `font-size: 8px; color: #555; cursor: pointer; padding: 1px 5px; border: 1px solid #222; border-radius: 2px; letter-spacing: 0.06em; transition: color 0.15s;`;
+        clearBtn.onmouseenter = () => clearBtn.style.color = '#aaa';
+        clearBtn.onmouseleave = () => clearBtn.style.color = '#555';
+        clearBtn.onclick = () => { outputEl.innerHTML = ''; this._termLog('system', 'Terminal cleared.'); };
+        header.appendChild(clearBtn);
+
+        // Collapse toggle
+        let collapsed = false;
+        const collapseBtn = document.createElement('span');
+        collapseBtn.textContent = '▾';
+        collapseBtn.style.cssText = `font-size: 11px; color: #555; cursor: pointer; line-height: 1; transition: color 0.15s;`;
+        collapseBtn.onmouseenter = () => collapseBtn.style.color = '#aaa';
+        collapseBtn.onmouseleave = () => collapseBtn.style.color = '#555';
+        collapseBtn.onclick = () => {
+            collapsed = !collapsed;
+            outputEl.style.display = collapsed ? 'none' : 'block';
+            inputRow.style.display = collapsed ? 'none' : 'flex';
+            collapseBtn.textContent = collapsed ? '▸' : '▾';
+            termContainer.style.flex = collapsed ? '0 0 22px' : `0 0 ${savedH}px`;
+        };
+        header.appendChild(collapseBtn);
+        termContainer.appendChild(header);
+
+        // ── Output area ──────────────────────────────────────────────────────
+        const outputEl = document.createElement('div');
+        outputEl.style.cssText = `
+            flex: 1;
+            overflow-y: auto;
+            padding: 6px 10px;
+            line-height: 1.55;
+            color: #c8d3e0;
+            scroll-behavior: smooth;
+            word-break: break-all;
+        `;
+        // Scrollbar styling
+        outputEl.style.scrollbarWidth = 'thin';
+        outputEl.style.scrollbarColor = '#222 transparent';
+        termContainer.appendChild(outputEl);
+        this._termOutput = outputEl;
+
+        // ── Input row ────────────────────────────────────────────────────────
+        const inputRow = document.createElement('div');
+        inputRow.style.cssText = `
+            flex: 0 0 26px;
+            display: flex;
+            align-items: center;
+            border-top: 1px solid #111;
+            background: #080b0f;
+        `;
+
+        const promptLabel = document.createElement('span');
+        promptLabel.textContent = 'FXTD ❯';
+        promptLabel.style.cssText = `color: #3d8; font-size: 10px; padding: 0 8px; flex-shrink: 0; letter-spacing: 0.05em;`;
+        inputRow.appendChild(promptLabel);
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.placeholder = 'enter command  (try: help, status, lut list, grade reset)';
+        input.style.cssText = `
+            flex: 1;
+            background: transparent;
+            border: none;
+            outline: none;
+            color: #c8d3e0;
+            font-family: ${t.mono};
+            font-size: 10.5px;
+            caret-color: #3d8;
+            padding: 0 6px 0 0;
+        `;
+        inputRow.appendChild(input);
+        termContainer.appendChild(inputRow);
+        this._termInput = input;
+
+        // ── Append to container ──────────────────────────────────────────────
+        this.container.appendChild(resizeHandle);
+        this.container.appendChild(termContainer);
+
+        // ── Resize drag ──────────────────────────────────────────────────────
+        let startY = 0, startH = 0;
+        const startDrag = (e) => {
+            this._termResizing = true;
+            startY = e.clientY;
+            startH = termContainer.getBoundingClientRect().height;
+            document.addEventListener('mousemove', onDrag);
+            document.addEventListener('mouseup', endDrag);
+        };
+        const onDrag = (e) => {
+            const delta = startY - e.clientY;
+            const newH = Math.max(80, Math.min(600, startH + delta));
+            termContainer.style.flex = `0 0 ${newH}px`;
+            localStorage.setItem('radiance_term_height', newH);
+        };
+        const endDrag = () => {
+            this._termResizing = false;
+            resizeHandle.style.background = 'transparent';
+            document.removeEventListener('mousemove', onDrag);
+            document.removeEventListener('mouseup', endDrag);
+        };
+        resizeHandle.addEventListener('mousedown', startDrag);
+        header.addEventListener('mousedown', (e) => { if (e.target === header || e.target === termTitle) startDrag(e); });
+
+        // ── Command history ──────────────────────────────────────────────────
+        this._termHistory = [];
+        this._termHistoryIdx = -1;
+        // IMPORTANT: Use capture phase + stopImmediatePropagation to prevent
+        // ComfyUI's global keyboard handlers from intercepting Enter/arrows/etc.
+        input.addEventListener('keydown', (e) => {
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+
+            if (e.key === 'ArrowUp') {
+                this._termHistoryIdx = Math.min(this._termHistoryIdx + 1, this._termHistory.length - 1);
+                input.value = this._termHistory[this._termHistoryIdx] || '';
+                e.preventDefault();
+            } else if (e.key === 'ArrowDown') {
+                this._termHistoryIdx = Math.max(this._termHistoryIdx - 1, -1);
+                input.value = this._termHistoryIdx >= 0 ? this._termHistory[this._termHistoryIdx] : '';
+                e.preventDefault();
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                const cmd = input.value.trim();
+                if (!cmd) return;
+                this._termHistory.unshift(cmd);
+                this._termHistoryIdx = -1;
+                input.value = '';
+                this._termLog('cmd', `❯ ${cmd}`);
+                this._termExec(cmd);
+            } else if (e.key === 'Escape') {
+                input.value = '';
+                input.blur();
+            }
+        }, true);
+
+        // ── Console intercept ────────────────────────────────────────────────
+        const origLog = console.log.bind(console);
+        const origWarn = console.warn.bind(console);
+        const origError = console.error.bind(console);
+
+        const fmtArgs = (args) => args.map(a => {
+            if (typeof a === 'object') { try { return JSON.stringify(a, null, 0); } catch { return String(a); } }
+            return String(a);
+        }).join(' ');
+
+        console.log = (...args) => {
+            origLog(...args);
+            const msg = fmtArgs(args);
+            if (msg.includes('[Radiance') || msg.includes('[WB') || msg.includes('[FXTD')) {
+                this._termLog('info', msg);
+            }
+        };
+        console.warn = (...args) => {
+            origWarn(...args);
+            this._termLog('warn', fmtArgs(args));
+        };
+        console.error = (...args) => {
+            origError(...args);
+            this._termLog('error', fmtArgs(args));
+        };
+
+        // ── Boot message ─────────────────────────────────────────────────────
+        this._termLog('system', '╔══════════════════════════════════════════════╗');
+        this._termLog('system', '║    FXTD RADIANCE TERMINAL  ·  v2.1           ║');
+        this._termLog('system', '║    Type  help  for available commands        ║');
+        this._termLog('system', '╚══════════════════════════════════════════════╝');
+    }
+
+    // ── Log a line to the terminal ───────────────────────────────────────────
+    _termLog(type, msg) {
+        if (!this._termOutput) return;
+        const line = document.createElement('div');
+        line.style.cssText = 'padding: 0.5px 0; white-space: pre-wrap;';
+
+        const ts = new Date().toTimeString().slice(0, 8);
+        const tsSpan = `<span style="color:#2a3540;user-select:none">[${ts}]</span> `;
+
+        const colors = {
+            system: '#3d6060',
+            info: '#6af',
+            warn: '#fa0',
+            error: '#f44',
+            cmd: '#3d8',
+            success: '#4d8',
+            grade: '#bf7',
+            event: '#a78',
+            result: '#8cf',
+        };
+        const c = colors[type] || '#c8d3e0';
+
+        // Sanitize backend-supplied messages against XSS
+        const escaped = RadianceViewer.escapeHtml(msg);
+        const highlighted = escaped.replace(/(\[[\w\s·\.]+\])/g, `<span style="color:${c};font-weight:600">$1</span>`);
+
+        line.innerHTML = tsSpan + `<span style="color:${c}">${highlighted}</span>`;
+        this._termOutput.appendChild(line);
+
+        // Keep max 500 lines
+        while (this._termOutput.children.length > 500) {
+            this._termOutput.removeChild(this._termOutput.firstChild);
+        }
+        this._termOutput.scrollTop = this._termOutput.scrollHeight;
+    }
+
+    // ── Command executor ─────────────────────────────────────────────────────
+    _termExec(cmd) {
+        const parts = cmd.trim().split(/\s+/);
+        const verb = parts[0].toLowerCase();
+        const args = parts.slice(1);
+
+        switch (verb) {
+            case 'help': {
+                const cmds = [
+                    ['help', 'Show this help'],
+                    ['status', 'Show viewer + renderer state'],
+                    ['grade', 'Show current grade values'],
+                    ['grade reset', 'Reset all grading to defaults'],
+                    ['grade save <name>', 'Save current grade to slot'],
+                    ['lut list', 'List available display LUTs'],
+                    ['lut <name>', 'Set display LUT (e.g. lut sRGB)'],
+                    ['exposure <val>', 'Set exposure (e.g. exposure 0.5)'],
+                    ['sat <val>', 'Set saturation (e.g. sat 1.2)'],
+                    ['gamma <val>', 'Set master gamma (e.g. gamma 1.1)'],
+                    ['zoom <pct>', 'Set zoom (e.g. zoom 100)'],
+                    ['zoom fit', 'Fit image to view'],
+                    ['channel <r|g|b|rgb|luma>', 'Isolate channel'],
+                    ['scope <mode>', 'Set scope: parade|waveform|histogram|vector|falsecolor'],
+                    ['scope log', 'Toggle log view on scopes'],
+                    ['printer r|g|b <v>', 'Set printer light offset (-50..+50)'],
+                    ['softclip <v>', 'Set soft clip (0–1)'],
+                    ['wb pick', 'Activate white balance eyedropper'],
+                    ['wb reset', 'Reset temperature and tint to 0'],
+                    ['info', 'Show image info'],
+                    ['run', 'Queue ComfyUI workflow'],
+                    ['queue', 'Show ComfyUI queue status'],
+                    ['clear', 'Clear terminal'],
+                    ['eval <js>', 'Evaluate JS (advanced)'],
+                ];
+                cmds.forEach(([c, d]) => this._termLog('result', `  ${c.padEnd(26)} ${d}`));
+                break;
+            }
+
+            case 'status': {
+                const r = this.renderer;
+                this._termLog('result', `Viewer  : ${this.imageWidth || '—'}×${this.imageHeight || '—'}  zoom:${((this.zoom || 1) * 100).toFixed(0)}%`);
+                this._termLog('result', `WebGL   : ${this.useWebGL ? 'ON' : 'OFF'}  Channel: ${this.channel || 'rgb'}`);
+                this._termLog('result', `Display : LUT=${this.displayLut || 'None'}  CS=${this.colorScience === 1 ? 'ACEScct' : 'Linear'}`);
+                this._termLog('result', `Grain   : ${(this.grain || 0).toFixed(2)}  Denoise: ${(this.denoise || 0).toFixed(2)}`);
+                this._termLog('result', `Bloom   : ${(this.bloom || 0).toFixed(2)}  Halation: ${(this.halation || 0).toFixed(2)}`);
+                break;
+            }
+
+            case 'grade': {
+                if (args[0] === 'reset') {
+                    // Replicate the same reset logic as RESET ALL button
+                    this._pushUndo();
+                    this.exposure = 0.0; this.lift = [0, 0, 0]; this.gamma = [1, 1, 1]; this.gain = [1, 1, 1];
+                    this.temperature = 0.0; this.tint = 0.0; this.contrast = 1.0; this.pivot = 0.5; this.saturation = 1.0;
+                    this.grain = 0.0; this.denoise = 0.0;
+                    this.printerR = 0; this.printerG = 0; this.printerB = 0; this.softClip = 0.0;
+                    if (this.curveEditor) this.curveEditor.resetAllChannels?.();
+                    if (this.renderer) {
+                        this.renderer.setExposure(0); this.renderer.setLift(0, 0, 0); this.renderer.setGamma(1, 1, 1); this.renderer.setGain(1, 1, 1);
+                        this.renderer.setTemperature(0); this.renderer.setTint(0); this.renderer.setContrast(1); this.renderer.setPivot(0.5);
+                        this.renderer.setSaturation(1); this.renderer.setGrain(0); this.renderer.setDenoise(0);
+                        this.renderer.setPrinterLights(0, 0, 0); this.renderer.setSoftClip(0);
+                    }
+                    this.render();
+                    if (this._lastRenderContent) this._lastRenderContent();
+                    this._termLog('success', '[Grade] Reset to defaults.');
+                } else if (args[0] === 'save') {
+                    const name = args[1] || `grade_${Date.now()}`;
+                    const state = this._captureGradingState();
+                    if (!this._savedGrades) this._savedGrades = {};
+                    this._savedGrades[name] = state;
+                    this._termLog('success', `[Grade] Saved as "${name}"`);
+                } else if (args[0] === 'load') {
+                    const name = args[1];
+                    if (this._savedGrades && this._savedGrades[name]) {
+                        this._restoreGradingState(this._savedGrades[name]);
+                        if (this._lastRenderContent) this._lastRenderContent();
+                        this._termLog('success', `[Grade] Loaded "${name}"`);
+                    } else {
+                        this._termLog('warn', `[Grade] No saved grade named "${name}"`);
+                    }
+                } else {
+                    const g = this._captureGradingState();
+                    this._termLog('grade', `  Exposure   : ${(g.exposure || 0).toFixed(3)}`);
+                    this._termLog('grade', `  Temp/Tint  : ${(g.temperature || 0).toFixed(3)} / ${(g.tint || 0).toFixed(3)}`);
+                    this._termLog('grade', `  Contrast   : ${(g.contrast || 1).toFixed(3)}  Pivot: ${(g.pivot || 0.5).toFixed(3)}`);
+                    this._termLog('grade', `  Saturation : ${(g.saturation || 1).toFixed(3)}`);
+                    this._termLog('grade', `  Lift       : ${(g.lift || [0, 0, 0]).map(v => v.toFixed(3)).join('  ')}`);
+                    this._termLog('grade', `  Gamma      : ${(g.gamma || [1, 1, 1]).map(v => v.toFixed(3)).join('  ')}`);
+                    this._termLog('grade', `  Gain       : ${(g.gain || [1, 1, 1]).map(v => v.toFixed(3)).join('  ')}`);
+                    this._termLog('grade', `  Printer    : R${g.printerR || 0}  G${g.printerG || 0}  B${g.printerB || 0}`);
+                    this._termLog('grade', `  SoftClip   : ${(g.softClip || 0).toFixed(3)}`);
+                }
+                break;
+            }
+
+            case 'lut': {
+                if (args[0] === 'list') {
+                    (this.lutOptions || []).forEach(l => {
+                        const active = l === this.displayLut ? ' ◀ active' : '';
+                        this._termLog('result', `  ${l}${active}`);
+                    });
+                } else {
+                    const name = args.join(' ');
+                    const found = (this.lutOptions || []).find(l => l.toLowerCase().includes(name.toLowerCase()));
+                    if (found) {
+                        this.displayLut = found;
+                        if (this.renderer) this.renderer.setDisplayLutMode(({
+                            'None': 0, 'sRGB (Display)': 1, 'Rec.709 (Broadcast)': 2, 'Filmic (Cinematic)': 3,
+                            'Log C3 (ARRI)': 4, 'Log C4 (ARRI)': 11, 'ACES Filmic': 9, 'Reinhard Tonemap': 8
+                        })[found] || 0);
+                        this.render();
+                        this._termLog('success', `[LUT] Set to "${found}"`);
+                    } else {
+                        this._termLog('warn', `[LUT] Not found: "${name}". Use  lut list  to see options.`);
+                    }
+                }
+                break;
+            }
+
+            case 'exposure': {
+                const v = parseFloat(args[0]);
+                if (isNaN(v)) { this._termLog('warn', `usage: exposure <number>`); break; }
+                this.exposure = v;
+                if (this.renderer) this.renderer.setExposure(v);
+                this.render();
+                if (this._lastRenderContent) this._lastRenderContent();
+                this._termLog('success', `[EXP] → ${v.toFixed(3)}`);
+                break;
+            }
+
+            case 'sat': {
+                const v = parseFloat(args[0]);
+                if (isNaN(v)) { this._termLog('warn', `usage: sat <number>`); break; }
+                this.saturation = v;
+                if (this.renderer) this.renderer.setSaturation(v);
+                this.render();
+                if (this._lastRenderContent) this._lastRenderContent();
+                this._termLog('success', `[SAT] → ${v.toFixed(3)}`);
+                break;
+            }
+
+            case 'gamma': {
+                const v = parseFloat(args[0]);
+                if (isNaN(v) || v <= 0) { this._termLog('warn', `usage: gamma <positive number>`); break; }
+                this.gamma = [v, v, v];
+                if (this.renderer) this.renderer.setGamma(v, v, v);
+                this.render();
+                if (this._lastRenderContent) this._lastRenderContent();
+                this._termLog('success', `[GAMMA] → ${v.toFixed(3)}`);
+                break;
+            }
+
+            case 'zoom': {
+                if (args[0] === 'fit') {
+                    this.fitToView();
+                    this._termLog('success', '[ZOOM] Fit to view');
+                } else {
+                    const v = parseFloat(args[0]);
+                    if (isNaN(v)) { this._termLog('warn', `usage: zoom <percent>  or  zoom fit`); break; }
+                    this.setZoom(v / 100);
+                    this._termLog('success', `[ZOOM] → ${v.toFixed(0)}%`);
+                }
+                break;
+            }
+
+            case 'channel': {
+                const ch = args[0]?.toLowerCase();
+                const validChannels = { r: 'r', g: 'g', b: 'b', rgb: 'rgb', luma: 'luma', l: 'luma', a: 'a' };
+                if (!validChannels[ch]) { this._termLog('warn', `usage: channel <r|g|b|rgb|luma>`); break; }
+                this.channel = validChannels[ch];
+                this.showZdepth = false; // channel switch always exits depth view
+                this.render();
+                this._termLog('success', `[CH] → ${this.channel}`);
+                break;
+            }
+
+            case 'scope': {
+                if (args[0] === 'log') {
+                    this.scopeLogView = !this.scopeLogView;
+                    localStorage.setItem('radiance_scope_log', this.scopeLogView ? '1' : '0');
+                    if (this.activeTab === 'scopes' && this._lastRenderContent) this._lastRenderContent();
+                    this._termLog('success', `[SCOPE] Log view: ${this.scopeLogView ? 'ON' : 'OFF'}`);
+                } else {
+                    const modeMap = { parade: 'parade', waveform: 'waveform', histogram: 'histogram', vector: 'vectorscope', vectorscope: 'vectorscope', falsecolor: 'falsecolor', 'false': 'falsecolor' };
+                    const m = modeMap[args[0]?.toLowerCase()];
+                    if (!m) { this._termLog('warn', `usage: scope <parade|waveform|histogram|vector|falsecolor>`); break; }
+                    this.scopeMode = m;
+                    localStorage.setItem('radiance_scope_mode', m);
+                    if (this._lastRenderContent) this._lastRenderContent();
+                    this._termLog('success', `[SCOPE] → ${m}`);
+                }
+                break;
+            }
+
+            case 'printer': {
+                const ch = args[0]?.toLowerCase();
+                const v = parseInt(args[1]);
+                if (!['r', 'g', 'b'].includes(ch) || isNaN(v)) { this._termLog('warn', `usage: printer <r|g|b> <-50..+50>`); break; }
+                const clamped = Math.max(-50, Math.min(50, v));
+                if (ch === 'r') this.printerR = clamped;
+                else if (ch === 'g') this.printerG = clamped;
+                else this.printerB = clamped;
+                if (this.renderer) this.renderer.setPrinterLights(this.printerR || 0, this.printerG || 0, this.printerB || 0);
+                this.render();
+                if (this._lastRenderContent) this._lastRenderContent();
+                this._termLog('success', `[PRINTER] ${ch.toUpperCase()} → ${clamped}`);
+                break;
+            }
+
+            case 'softclip': {
+                const v = parseFloat(args[0]);
+                if (isNaN(v)) { this._termLog('warn', `usage: softclip <0..1>`); break; }
+                this.softClip = Math.max(0, Math.min(1, v));
+                if (this.renderer) this.renderer.setSoftClip(this.softClip);
+                this.render();
+                if (this._lastRenderContent) this._lastRenderContent();
+                this._termLog('success', `[SOFTCLIP] → ${this.softClip.toFixed(3)}`);
+                break;
+            }
+
+            case 'wb': {
+                if (args[0] === 'pick') {
+                    this._toggleWBPicker(null);
+                    this._termLog('success', '[WB] Click a neutral pixel on the canvas.');
+                } else if (args[0] === 'reset') {
+                    this.temperature = 0; this.tint = 0;
+                    if (this.renderer) { this.renderer.setTemperature(0); this.renderer.setTint(0); }
+                    this.render();
+                    if (this._lastRenderContent) this._lastRenderContent();
+                    this._termLog('success', '[WB] Reset to neutral.');
+                } else {
+                    this._termLog('warn', `usage: wb pick  |  wb reset`);
+                }
+                break;
+            }
+
+            case 'info': {
+                if (!this.image) { this._termLog('warn', '[Info] No image loaded.'); break; }
+                this._termLog('result', `  Dimensions  : ${this.imageWidth}×${this.imageHeight}`);
+                this._termLog('result', `  Format      : ${this.hdrData ? (this.hdrData.format === 'rhdr' ? 'RHDR fp16' : 'Float32 HDR') : 'PNG 8-bit'}`);
+                this._termLog('result', `  Frame       : ${(this.currentFrame || 0) + 1} / ${(this.frameImages || []).length || 1}`);
+                this._termLog('result', `  Zoom        : ${((this.zoom || 1) * 100).toFixed(0)}%`);
+                this._termLog('result', `  WebGL       : ${this.useWebGL ? '✓ Active' : '✗ Fallback (2D)'}`);
+                break;
+            }
+
+            case 'run': {
+                this._termLog('event', '[Workflow] Queuing prompt…');
+                this.runWorkflow();
+                break;
+            }
+
+            case 'queue': {
+                api.fetchApi('/queue').then(r => r.json()).then(data => {
+                    const running = (data.queue_running || []).length;
+                    const pending = (data.queue_pending || []).length;
+                    this._termLog('result', `[Queue] Running: ${running}  Pending: ${pending}`);
+                }).catch(e => this._termLog('error', `[Queue] Fetch failed: ${e.message}`));
+                break;
+            }
+
+            case 'clear': {
+                this._termOutput.innerHTML = '';
+                this._termLog('system', 'Terminal cleared.');
+                break;
+            }
+
+            case 'eval': {
+                const code = args.join(' ');
+                try {
+                    // eslint-disable-next-line no-new-func
+                    const result = new Function('viewer', 'app', 'api', `return (${code})`)(this, app, api);
+                    if (result !== undefined) {
+                        const str = typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result);
+                        this._termLog('result', `  ← ${str}`);
+                    } else {
+                        this._termLog('result', '  ← (undefined)');
+                    }
+                } catch (e) {
+                    this._termLog('error', `  ✗ ${e.message}`);
+                }
+                break;
+            }
+
+            default: {
+                this._termLog('warn', `Unknown command: "${verb}". Type  help  for available commands.`);
+                break;
+            }
+        }
+    }
+
+    // ── Wire ComfyUI events into the terminal (called from init) ────────────
+    _termWireEvents() {
+        // Internal state for this generation session
+        const S = {
+            startTime: 0,
+            nodeStart: 0,
+            stepStart: 0,
+            lastStep: 0,
+            promptId: null,
+            nodeMap: {},   // id → title
+            nodeOrder: [],   // execution order
+            totalSteps: 0,
+            doneSteps: 0,
+            currentNode: null,
+            stepTimes: [],   // ms per step (rolling avg)
+            nodeStats: {},   // id → { start, steps, ms }
+        };
+
+        // Helper: resolve node title from app.graph
+        const nodeTitle = (id) => {
+            if (S.nodeMap[id]) return S.nodeMap[id];
+            try {
+                const n = app.graph._nodes.find(n => String(n.id) === String(id));
+                if (n) { S.nodeMap[id] = n.title || n.type || `Node ${id}`; return S.nodeMap[id]; }
+            } catch { }
+            return `Node ${id}`;
+        };
+
+        // Helper: format ms duration
+        const fmtMs = (ms) => ms < 1000 ? `${ms.toFixed(0)}ms` : `${(ms / 1000).toFixed(2)}s`;
+
+        // Helper: ETA progress bar  ████████░░░░  50%
+        const progressBar = (pct, w = 20) => {
+            const filled = Math.round(pct * w / 100);
+            return '█'.repeat(filled) + '░'.repeat(w - filled) + `  ${pct.toFixed(0)}%`;
+        };
+
+        // Helper: steps/sec
+        const stepsPerSec = () => {
+            if (S.stepTimes.length < 2) return null;
+            const recent = S.stepTimes.slice(-8);
+            const avg = recent.reduce((a, b) => a + b, 0) / recent.length;
+            return (1000 / avg).toFixed(2);
+        };
+
+        // ── execution_cached ──────────────────────────────────────────────
+        api.addEventListener('execution_cached', ({ detail }) => {
+            if (!detail?.nodes) return;
+            detail.nodes.forEach(id => {
+                this._termLog('info', `  ⚡ cached      ${nodeTitle(id)}`);
+            });
+        });
+
+        // ── execution_start ───────────────────────────────────────────────
+        api.addEventListener('execution_start', ({ detail }) => {
+            S.startTime = performance.now();
+            S.nodeStart = S.startTime;
+            S.promptId = detail?.prompt_id || '—';
+            S.nodeMap = {};
+            S.nodeOrder = [];
+            S.totalSteps = 0;
+            S.doneSteps = 0;
+            S.currentNode = null;
+            S.stepTimes = [];
+            S.nodeStats = {};
+
+            this._termLog('system', '─'.repeat(52));
+            this._termLog('event', `▶  GENERATION STARTED`);
+            this._termLog('info', `   prompt_id  : ${S.promptId}`);
+            try {
+                const pending = app.graph._nodes?.length || '?';
+                this._termLog('info', `   graph nodes: ${pending}`);
+            } catch { }
+            this._termLog('system', '─'.repeat(52));
+        });
+
+        // ── executing (node starts) ───────────────────────────────────────
+        api.addEventListener('executing', ({ detail }) => {
+            const id = detail;
+            if (!id) return;
+            const title = nodeTitle(id);
+            S.currentNode = id;
+            S.nodeStart = performance.now();
+            S.lastStep = 0;
+
+            if (!S.nodeStats[id]) S.nodeStats[id] = { start: S.nodeStart, steps: 0, ms: 0 };
+            else S.nodeStats[id].start = S.nodeStart;
+
+            S.nodeOrder.push(id);
+            this._termLog('event', `  ▷ executing   ${title}  (id:${id})`);
+        });
+
+        // ── progress (diffusion steps) ────────────────────────────────────
+        api.addEventListener('progress', ({ detail }) => {
+            const { value, max, node, prompt_id } = detail;
+            S.totalSteps = max;
+            S.doneSteps = value;
+
+            const now = performance.now();
+
+            // Track per-step timing
+            if (S.stepStart > 0) {
+                S.stepTimes.push(now - S.stepStart);
+                if (S.stepTimes.length > 20) S.stepTimes.shift();
+            }
+            S.stepStart = now;
+
+            // Per-node step count
+            const nid = node || S.currentNode;
+            if (nid && S.nodeStats[nid]) S.nodeStats[nid].steps++;
+
+            const pct = (value / max) * 100;
+            const bar = progressBar(pct, 24);
+            const sps = stepsPerSec();
+            const elapsed = ((now - S.startTime) / 1000).toFixed(1);
+
+            // ETA
+            let etaStr = '';
+            if (sps && value < max) {
+                const remaining = (max - value) / parseFloat(sps);
+                etaStr = `  ETA ${remaining < 60 ? remaining.toFixed(1) + 's' : Math.floor(remaining / 60) + 'm' + Math.floor(remaining % 60) + 's'}`;
+            }
+
+            const title = nid ? nodeTitle(nid) : '';
+            const spsStr = sps ? `  ${sps} it/s` : '';
+
+            // Log every step if ≤20 total, else every 5% + first + last
+            const logInterval = max <= 20 ? 1 : Math.max(1, Math.floor(max / 20));
+            if (value === 1 || value === max || value % logInterval === 0) {
+                this._termLog('event',
+                    `     ${bar}  step ${String(value).padStart(3)}/${max}` +
+                    `${spsStr}${etaStr}  +${elapsed}s`
+                );
+            }
+
+            // Update terminal header live badge
+            if (this._termContainer) {
+                const badge = this._termContainer.querySelector('span[data-gen-badge]');
+                if (badge) badge.textContent = `${pct.toFixed(0)}%  ${spsStr}`;
+            }
+        });
+
+        // ── execution_error ───────────────────────────────────────────────
+        api.addEventListener('execution_error', ({ detail }) => {
+            this._termLog('error', `❌ EXECUTION ERROR`);
+            if (detail?.exception_type) this._termLog('error', `   Type : ${detail.exception_type}`);
+            if (detail?.exception_message) this._termLog('error', `   Msg  : ${detail.exception_message}`);
+            if (detail?.node_id) {
+                const title = nodeTitle(detail.node_id);
+                this._termLog('error', `   Node : ${title} (${detail.node_id})`);
+            }
+            this._termLog('system', '─'.repeat(52));
+        });
+
+        // ── execution_interrupted ─────────────────────────────────────────
+        api.addEventListener('execution_interrupted', ({ detail }) => {
+            this._termLog('warn', `⚠️  EXECUTION INTERRUPTED`);
+            if (detail?.node_id) {
+                const title = nodeTitle(detail.node_id);
+                this._termLog('warn', `   Node: ${title}`);
+            }
+            this._termLog('system', '─'.repeat(52));
+        });
+
+        // ── executed (node finished) ──────────────────────────────────────
+        api.addEventListener('executed', ({ detail }) => {
+            if (!detail) return;
+            const id = detail.node || detail.node_id;
+            const title = id ? nodeTitle(id) : '?';
+            const now = performance.now();
+
+            let duration = '';
+            if (id && S.nodeStats[id] && S.nodeStats[id].start) {
+                const ms = now - S.nodeStats[id].start;
+                S.nodeStats[id].ms = ms;
+                duration = `  ${fmtMs(ms)}`;
+            }
+
+            // Detect output images
+            const output = detail.output;
+            if (output) {
+                const imgCount = output.images?.length || 0;
+                const vidCount = output.videos?.length || 0;
+                const textCount = output.text?.length || 0;
+                const latCount = output.latent?.length || 0;
+
+                let outSummary = '';
+                if (imgCount) outSummary += `  🖼  ${imgCount} image${imgCount > 1 ? 's' : ''}`;
+                if (vidCount) outSummary += `  🎞  ${vidCount} video${vidCount > 1 ? 's' : ''}`;
+                if (textCount) outSummary += `  📝  text`;
+                if (latCount) outSummary += `  🔷  latent`;
+
+                if (outSummary) {
+                    this._termLog('success', `  ✓ done        ${title}${duration}${outSummary}`);
+
+                    // Show image filename/details
+                    if (imgCount && output.images) {
+                        output.images.forEach((img, i) => {
+                            const fn = img.filename || img.name || `output_${i}`;
+                            const sub = img.subfolder ? `${img.subfolder}/` : '';
+                            this._termLog('result', `     image[${i}]   ${sub}${fn}  (${img.type || 'output'})`);
+                        });
+                    }
+                } else {
+                    this._termLog('success', `  ✓ done        ${title}${duration}`);
+                }
+            } else {
+                this._termLog('success', `  ✓ done        ${title}${duration}`);
+            }
+        });
+
+        // ── execution_error ───────────────────────────────────────────────
+        api.addEventListener('execution_error', ({ detail }) => {
+            const node_id = detail?.node_id || detail?.node;
+            const title = node_id ? nodeTitle(node_id) : 'unknown';
+            const msg = detail?.exception_message || detail?.message || JSON.stringify(detail);
+            const type = detail?.exception_type || '';
+
+            this._termLog('system', '─'.repeat(52));
+            this._termLog('error', `✗  EXECUTION ERROR`);
+            this._termLog('error', `   node    : ${title} (id:${node_id})`);
+            if (type) this._termLog('error', `   type    : ${type}`);
+            this._termLog('error', `   message : ${msg}`);
+
+            // Traceback lines (keep last 6)
+            if (detail?.traceback) {
+                const lines = detail.traceback.slice(-6);
+                lines.forEach(l => this._termLog('error', `   ${l.trim()}`));
+            }
+            this._termLog('system', '─'.repeat(52));
+        });
+
+        // ── status (queue updates) ────────────────────────────────────────
+        api.addEventListener('status', ({ detail }) => {
+            const q = detail?.exec_info?.queue_remaining ?? null;
+            if (q === 0 && S.startTime > 0) {
+                const total = ((performance.now() - S.startTime) / 1000).toFixed(2);
+
+                this._termLog('system', '─'.repeat(52));
+                this._termLog('success', `✓  GENERATION COMPLETE  — ${total}s total`);
+
+                // Per-node timing summary
+                const done = Object.entries(S.nodeStats)
+                    .filter(([, v]) => v.ms > 0)
+                    .sort((a, b) => b[1].ms - a[1].ms)
+                    .slice(0, 8);
+
+                if (done.length) {
+                    this._termLog('result', `   Node timing (slowest first):`);
+                    done.forEach(([id, v]) => {
+                        const name = nodeTitle(id).slice(0, 32).padEnd(32);
+                        const bar = '▪'.repeat(Math.round(v.ms / done[0][1].ms * 12));
+                        const steps = v.steps > 0 ? `  ${v.steps} steps` : '';
+                        this._termLog('result', `   ${name}  ${fmtMs(v.ms).padStart(7)}  ${bar}${steps}`);
+                    });
+                }
+                this._termLog('system', '─'.repeat(52));
+
+                S.startTime = 0;  // reset so next run shows fresh
+            } else if (q !== null && q > 0) {
+                this._termLog('info', `   queue remaining: ${q}`);
+            }
+        });
     }
 
     createScopes() {
@@ -660,6 +1862,25 @@ class RadianceViewer {
         if (this._docUpHandler) document.removeEventListener('mouseup', this._docUpHandler);
         if (this._docKeyHandler) document.removeEventListener('keydown', this._docKeyHandler);
         if (this._winUpHandler) window.removeEventListener('mouseup', this._winUpHandler);
+        if (this._hudResizeListener) window.removeEventListener('resize', this._hudResizeListener);
+        // BUG FIX: _undoKeyListener was never removed, causing stale handler accumulation
+        if (this._undoKeyListener) { document.removeEventListener('keydown', this._undoKeyListener); this._undoKeyListener = null; }
+
+        // Video cleanup
+        this.unloadVideo();
+        if (this._transportSpaceHandler) {
+            document.removeEventListener('keydown', this._transportSpaceHandler);
+            this._transportSpaceHandler = null;
+        }
+
+        // BUG FIX: Was only checking document.body; now removes from any parent (e.g. rightControlPanel)
+        if (this.controlsPanel && this.controlsPanel.parentNode) {
+            this.controlsPanel.parentNode.removeChild(this.controlsPanel);
+        }
+        // Remove rightControlPanel from DOM
+        if (this.rightControlPanel && this.rightControlPanel.parentNode) {
+            this.rightControlPanel.parentNode.removeChild(this.rightControlPanel);
+        }
 
         // Disconnect ResizeObserver
         if (this.resizeObserver) this.resizeObserver.disconnect();
@@ -748,6 +1969,7 @@ class RadianceViewer {
         ['RGB', 'R', 'G', 'B', 'A', 'L'].forEach(ch => {
             this.addButton(ch, () => {
                 this.channel = ch.toLowerCase() === 'l' ? 'luma' : ch.toLowerCase();
+                this.showZdepth = false; // channel switch always exits depth view
                 this.render();
             }, ch === 'A' ? 'Alpha Channel' : '');
         });
@@ -762,12 +1984,28 @@ class RadianceViewer {
         this.nextFrameBtn = this.addButton('▶', () => this.nextFrame(), 'Next Frame (→)');
         this.addSep();
 
+        // ── Video load button ──────────────────────────────────────────────────
+        const vidFileInput = document.createElement('input');
+        vidFileInput.type = 'file';
+        vidFileInput.accept = 'video/mp4,video/webm,video/quicktime,video/x-matroska,video/*';
+        vidFileInput.style.display = 'none';
+        vidFileInput.onchange = (e) => {
+            const f = e.target.files[0];
+            if (!f) return;
+            if (this._fileNameLabel) this._fileNameLabel.textContent = f.name;
+            if (this.transportPanel) this.transportPanel.style.display = 'flex';
+            this.loadVideo(f);
+        };
+        this.toolbar.appendChild(vidFileInput);
+        this.addButton('🎬', () => vidFileInput.click(), 'Load Video File (MP4 / WebM / MOV)');
+        this.addSep();
+
         // View
         this.addButton('FC', () => { this.falseColor = !this.falseColor; this.zebra = false; this.focusPeaking = false; this.showZdepth = false; this.gamutWarning = false; this.clippingMonitor = false; this.render(); }, 'False Color (E)');
         this.addButton('GW', () => { this.gamutWarning = !this.gamutWarning; this.clippingMonitor = false; this.falseColor = false; this.render(); }, 'Gamut Warning');
         this.addButton('CLP', () => { this.clippingMonitor = !this.clippingMonitor; this.gamutWarning = false; this.falseColor = false; this.render(); }, 'Clipping Monitor');
         this.addButton('Z', () => this.toggleZdepth(), 'Z-Depth / Zebra (Z)');
-        this.focusPeakingBtn = this.addButton('FP', () => { this.focusPeaking = !this.focusPeaking; this.falseColor = false; this.zebra = false; this.render(); }, 'Focus Peaking (K)');
+        this.focusPeakingBtn = this.addButton('FP', () => { this.focusPeaking = !this.focusPeaking; this.falseColor = false; this.zebra = false; this.showZdepth = false; this.render(); }, 'Focus Peaking (K)');
         this.gridBtn = this.addButton('▦', () => this.cycleGridMode(), 'Grid / Safe Areas (G)');
         this.addButton('📺', () => this.cycleSafeAreas(), 'Safe Areas (S)');
         this.loupeBtn = this.addButton('🔍', () => {
@@ -1125,6 +2363,18 @@ class RadianceViewer {
     }
 
     loadCurrentFrame() {
+        // v3.2: VRAM Pressure Monitor — purge LRU cache if batch is very large (>64 frames)
+        // Helps prevent "Out of Memory" crashes on lower-end GPUs when scrubbing long sequences.
+        if (this.totalFrames > 64 && this.renderer?._frameCache?.size > 32) {
+            const currentTime = performance.now();
+            // Only log once every 5 seconds to avoid spamming the terminal
+            if (!this._lastVramWarn || (currentTime - this._lastVramWarn > 5000)) {
+                this._termLog('warn', `[VRAM] High pressure: ${this.totalFrames} frames. Purging GPU cache.`);
+                this._lastVramWarn = currentTime;
+            }
+            this.renderer.clearFrameCache();
+        }
+
         if (this.frameImages[this.currentFrame]) {
             this.image = this.frameImages[this.currentFrame];
             this.imageWidth = this.image.width;
@@ -1245,6 +2495,64 @@ class RadianceViewer {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    //                          HELP & SHORTCUTS
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    toggleHelp() {
+        if (!this.helpOverlay) {
+            const overlay = document.createElement('div');
+            overlay.className = 'radiance-help-overlay';
+            overlay.innerHTML = `
+                <div style="margin-bottom:20px; text-align:center">
+                    <h2 style="margin:0; font-weight:600; font-size:24px; letter-spacing:-0.5px">Radiance Shortcuts</h2>
+                    <p style="color:#777; margin:5px 0 0 0; font-size:14px">VFX Industry-Standard Viewport Controls</p>
+                </div>
+                <div class="radiance-help-content">
+                    <div class="help-group">
+                        <h3>Viewport</h3>
+                        <div class="help-item"><span class="help-desc">Fit to View</span><span class="help-key">F</span></div>
+                        <div class="help-item"><span class="help-desc">Zoom 100%</span><span class="help-key">1</span></div>
+                        <div class="help-item"><span class="help-desc">Toggle Fullscreen</span><span class="help-key">Ctrl+F</span></div>
+                        <div class="help-item"><span class="help-desc">Toggle Help</span><span class="help-key">?</span></div>
+                    </div>
+                    <div class="help-group">
+                        <h3>Channels</h3>
+                        <div class="help-item"><span class="help-desc">RGB Toggle</span><span class="help-key">C</span></div>
+                        <div class="help-item"><span class="help-desc">Red / Green / Blue / Alpha</span><span class="help-key">R / G / B / Shift+A</span></div>
+                        <div class="help-item"><span class="help-desc">Luminance</span><span class="help-key">L</span></div>
+                        <div class="help-item"><span class="help-desc">False Color / Peaking</span><span class="help-key">E / K</span></div>
+                        <div class="help-item"><span class="help-desc">Z-Depth Overlay</span><span class="help-key">Z</span></div>
+                    </div>
+                    <div class="help-group">
+                        <h3>Scopes</h3>
+                        <div class="help-item"><span class="help-desc">Histogram / Waveform</span><span class="help-key">H / W</span></div>
+                        <div class="help-item"><span class="help-desc">Vectorscope</span><span class="help-key">V</span></div>
+                        <div class="help-item"><span class="help-desc">RGB Parade Toggle</span><span class="help-key">M</span></div>
+                    </div>
+                    <div class="help-group">
+                        <h3>Grading (Numpad)</h3>
+                        <div class="help-item"><span class="help-desc">Printer Lights (RGB)</span><span class="help-key">7,9 / 4,6 / 1,3</span></div>
+                        <div class="help-item"><span class="help-desc">Global Offset</span><span class="help-key">8,2</span></div>
+                        <div class="help-item"><span class="help-desc">Exposure Adjustment</span><span class="help-key">+ / -</span></div>
+                        <div class="help-item"><span class="help-desc">Reset All</span><span class="help-key">0</span></div>
+                    </div>
+                </div>
+                <div style="margin-top:25px; color:#555; font-size:12px; font-family:'JetBrains Mono'">ESC to Dismiss</div>
+            `;
+            overlay.onclick = () => this.toggleHelp();
+            this.container.appendChild(overlay);
+            this.helpOverlay = overlay;
+        }
+
+        const isVisible = this.helpOverlay.style.display === 'flex';
+        this.helpOverlay.style.display = isVisible ? 'none' : 'flex';
+        this.showHelp = !isVisible;
+        setTimeout(() => {
+            if (this.helpOverlay) this.helpOverlay.style.opacity = isVisible ? '0' : '1';
+        }, 10);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     //                          KEYBOARD SHORTCUTS
     // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1269,17 +2577,52 @@ class RadianceViewer {
     }
 
     handleKey(e) {
+        // Printer Lights (Numpad) mapped to Offset for Scene-Linear manipulation
+        if (e.code && e.code.startsWith('Numpad')) {
+            const step = 0.01;
+            const prevOffset = [...this.offset];
+
+            switch (e.code) {
+                // Red
+                case 'Numpad7': this.offset[0] -= step; break;
+                case 'Numpad9': this.offset[0] += step; break;
+                // Green
+                case 'Numpad4': this.offset[1] -= step; break;
+                case 'Numpad6': this.offset[1] += step; break;
+                // Blue
+                case 'Numpad1': this.offset[2] -= step; break;
+                case 'Numpad3': this.offset[2] += step; break;
+                // Master (All Channels)
+                case 'Numpad8': this.offset[0] += step; this.offset[1] += step; this.offset[2] += step; break;
+                case 'Numpad2': this.offset[0] -= step; this.offset[1] -= step; this.offset[2] -= step; break;
+                // Exposure
+                case 'NumpadAdd': this.adjustEV(0.25); return;
+                case 'NumpadSubtract': this.adjustEV(-0.25); return;
+            }
+
+            // Only update if changed
+            if (this.offset[0] !== prevOffset[0] || this.offset[1] !== prevOffset[1] || this.offset[2] !== prevOffset[2]) {
+                if (this.renderer) {
+                    this.renderer.setOffset(this.offset[0], this.offset[1], this.offset[2]);
+                    this._pushUndoDebounced();
+                }
+                if (this._lastRenderContent) this._lastRenderContent(); // Update HUD wheels
+                this.render();
+                return; // Handled
+            }
+        }
+
         const key = e.key.toLowerCase();
         switch (key) {
             case '?': case '/': if (e.shiftKey) this.toggleHelp(); break;
             case 'f': this.fitToView(); break;
             case '1': this.setZoom(1.0); break;
-            case 'r': this.channel = 'r'; this.render(); break;
-            case 'g': if (e.shiftKey) { this.cycleGridMode(); } else if (!e.ctrlKey) { this.channel = 'g'; this.render(); } break;
-            case 'b': this.channel = 'b'; this.render(); break;
-            case 'l': this.channel = 'luma'; this.render(); break;
-            case 'c': this.channel = 'rgb'; this.render(); break;
-            case 'h': this.toggleScope('histogram'); break;
+            case 'r': this.channel = 'r'; this.showZdepth = false; this.render(); break;
+            case 'g': if (e.shiftKey) { this.cycleGridMode(); } else if (!e.ctrlKey) { this.channel = 'g'; this.showZdepth = false; this.render(); } break;
+            case 'b': this.channel = 'b'; this.showZdepth = false; this.render(); break;
+            case 'l': this.channel = 'luma'; this.showZdepth = false; this.render(); break;
+            case 'c': this.channel = 'rgb'; this.showZdepth = false; this.render(); break;
+            case 'h': this.toggleHelp(); break;
             case 'w': this.toggleScope('waveform'); break;
             case 'm': this.toggleParadeMode(); break;
             case 'v': this.toggleScope('vectorscope'); break;
@@ -1304,6 +2647,7 @@ class RadianceViewer {
             case 'escape':
                 if (this.showHelp) { this.toggleHelp(); }
                 else if (this.isFullscreen) { this.exitFullscreen(); }
+                else if (this.showPromptPanel) { this.togglePromptPanel(); }
                 break;
             case '=': case '+': this.adjustEV(0.5); break;
             case '-': this.adjustEV(-0.5); break;
@@ -1316,9 +2660,38 @@ class RadianceViewer {
         }
     }
 
+    resetControls() {
+        this._pushUndo();
+        this.exposure = 0.0;
+        this.contrast = 1.0;
+        this.saturation = 1.0;
+        this.temperature = 0.0;
+        this.tint = 0.0;
+        this.offset = [0.0, 0.0, 0.0];
+        this.gain = [1.0, 1.0, 1.0];
+        this.gamma = [1.0, 1.0, 1.0];
+        this.lift = [0.0, 0.0, 0.0];
+
+        if (this.renderer) {
+            this.renderer.setExposure(this.exposure);
+            this.renderer.setContrast(this.contrast);
+            this.renderer.setSaturation(this.saturation);
+            this.renderer.setTemperature(this.temperature);
+            this.renderer.setTint(this.tint);
+            this.renderer.setOffset(...this.offset);
+            this.renderer.setGain(...this.gain);
+            this.renderer.setGamma(...this.gamma);
+            this.renderer.setLift(...this.lift);
+        }
+
+        // Update HUD UI
+        if (this._lastRenderContent) this._lastRenderContent();
+        this.render();
+    }
+
     adjustEV(delta) {
         this._pushUndoDebounced();
-        this.exposure = Math.max(-5, Math.min(5, this.exposure + delta));
+        this.exposure = Math.max(-12.0, Math.min(12.0, this.exposure + delta));
         // v2.2: Update HUD slider (replaces crashed evSlider.setValue)
         if (this.evControl) {
             const input = this.evControl.querySelector('input[type="range"]');
@@ -1383,7 +2756,6 @@ class RadianceViewer {
             backdrop-filter: blur(10px);
         `;
 
-        // Position menu above/near the button
         const rect = e.target.getBoundingClientRect();
         menu.style.left = rect.left + 'px';
         menu.style.top = (rect.bottom + 5) + 'px';
@@ -1411,17 +2783,18 @@ class RadianceViewer {
             menu.appendChild(opt);
         };
 
-        // v2.3: Foolproof metadata retrieval - use the last known message data
-        // This prevents metadata loss when 'this.image' is replaced by a canvas placeholder
         const imgData = (this.lastResult || []).find(d => d.frame === this.currentFrame && !d.is_compare && !d.is_zdepth);
         const hasEXR = !!(imgData && imgData.exr_filename);
 
         addOption('Save PNG (Result)', '🖼️', () => this.exportSnapshot('png'));
         addOption('Save EXR (Source)', '🏗️', () => this.exportSnapshot('exr'), !hasEXR);
 
+        // v3.0 #7: CDL Export — ASC CDL XML from current grading state
+        addOption('Export CDL (Grade)', '🎨', () => this._exportCDL());
+        addOption('Import CDL (Grade)', '📥', () => this._importCDL());
+
         document.body.appendChild(menu);
 
-        // Close on click outside
         const closeMenu = (ev) => {
             if (!menu.contains(ev.target) && ev.target !== e.target) {
                 menu.remove();
@@ -1430,6 +2803,95 @@ class RadianceViewer {
         };
         setTimeout(() => document.addEventListener('mousedown', closeMenu), 10);
     }
+
+    // v3.0 #7: ASC CDL Export — writes current grading state as .cdl XML
+    _exportCDL() {
+        // Gain (slope), Lift (offset), Power (gamma), Saturation
+        const slope = this.gain || [1, 1, 1];
+        const offset = this.lift || [0, 0, 0];
+        // Power: inverse of gamma (CDL power = 1/gamma for gamma>0)
+        const gamma = this.gamma && Array.isArray(this.gamma) ? this.gamma : [1, 1, 1];
+        const power = gamma.map(g => g > 0 ? (1.0 / g).toFixed(6) : '1.000000');
+        const sat = (this.saturation !== undefined ? this.saturation : 1.0).toFixed(6);
+
+        const s = slope.map(v => v.toFixed(6)).join(' ');
+        const o = offset.map(v => v.toFixed(6)).join(' ');
+        const p = power.join(' ');
+
+        const xml = [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            '<ColorDecisionList xmlns="urn:ASC:CDL:v1.2">',
+            '  <ColorDecision>',
+            '    <!-- Radiance Viewer v3.0 Grade Export -->',
+            '    <ColorCorrection id="radiance_grade">',
+            '      <SOPNode>',
+            `        <Slope>${s}</Slope>`,
+            `        <Offset>${o}</Offset>`,
+            `        <Power>${p}</Power>`,
+            '      </SOPNode>',
+            '      <SatNode>',
+            `        <Saturation>${sat}</Saturation>`,
+            '      </SatNode>',
+            '    </ColorCorrection>',
+            '  </ColorDecision>',
+            '</ColorDecisionList>',
+        ].join('\n');
+
+        const blob = new Blob([xml], { type: 'text/xml' });
+        const link = document.createElement('a');
+        link.download = `radiance_grade_${Date.now()}.cdl`;
+        link.href = URL.createObjectURL(blob);
+        link.click();
+        URL.revokeObjectURL(link.href);
+        console.log('[Radiance v3.0] CDL exported');
+    }
+
+    // v3.0 #7: ASC CDL Import — reads .cdl XML and applies to current grading state
+    _importCDL() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.cdl,.xml';
+        input.onchange = (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                try {
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(ev.target.result, 'text/xml');
+                    const slope = doc.querySelector('Slope')?.textContent?.trim().split(/\s+/).map(Number);
+                    const offset = doc.querySelector('Offset')?.textContent?.trim().split(/\s+/).map(Number);
+                    const power = doc.querySelector('Power')?.textContent?.trim().split(/\s+/).map(Number);
+                    const satEl = doc.querySelector('Saturation');
+                    const sat = satEl ? parseFloat(satEl.textContent) : 1.0;
+
+                    if (slope && slope.length === 3) {
+                        this.gain = slope;
+                        if (this.renderer) this.renderer.setGain(...slope);
+                    }
+                    if (offset && offset.length === 3) {
+                        this.lift = offset;
+                        if (this.renderer) this.renderer.setLift(...offset);
+                    }
+                    if (power && power.length === 3) {
+                        // CDL Power → gamma: g = 1/power
+                        const gamma = power.map(p => p > 0 ? 1.0 / p : 1.0);
+                        this.gamma = gamma;
+                        if (this.renderer) this.renderer.setGamma(...gamma);
+                    }
+                    this.saturation = sat;
+                    if (this.renderer) this.renderer.setSaturation(sat);
+                    this.render();
+                    console.log('[Radiance v3.0] CDL imported:', { slope, offset, power, sat });
+                } catch (err) {
+                    console.error('[Radiance v3.0] CDL import failed:', err);
+                }
+            };
+            reader.readAsText(file);
+        };
+        input.click();
+    }
+
 
     exportSnapshot(format = 'png') {
         if (!this.image) return;
@@ -1579,6 +3041,91 @@ class RadianceViewer {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    //                          AUTO GRADE MATCHING
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    matchGrade(shelfSlot) {
+        if (!this.renderer || !this.renderer.gl || !this.renderer.referenceShelf[shelfSlot]) {
+            console.warn("[Radiance] Cannot match: no reference at slot", shelfSlot);
+            return;
+        }
+
+        const gl = this.renderer.gl;
+
+        // Helper to compute average RGB of a currently bound texture via FBO pixel read
+        const getAverageRGB = (tex, width, height) => {
+            const fbo = gl.createFramebuffer();
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+
+            // Note: If width/height > max limits, we'd need to resize.
+            // But reading a large tensor completely is slow.
+            // Faster: bind it and draw it tiny, then read.
+            // For now, we'll read a 256x256 subsample from the center.
+            const size = Math.min(256, width, height);
+            const cx = Math.floor(width / 2 - size / 2);
+            const cy = Math.floor(height / 2 - size / 2);
+
+            const pixels = new Uint8Array(size * size * 4);
+            gl.readPixels(cx, cy, size, size, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.deleteFramebuffer(fbo);
+
+            let rSum = 0, gSum = 0, bSum = 0;
+            const len = size * size;
+            for (let i = 0; i < pixels.length; i += 4) {
+                // Approximate linear back from 8-bit read
+                rSum += Math.pow(pixels[i] / 255.0, 2.2);
+                gSum += Math.pow(pixels[i + 1] / 255.0, 2.2);
+                bSum += Math.pow(pixels[i + 2] / 255.0, 2.2);
+            }
+            return [rSum / len, gSum / len, bSum / len];
+        };
+
+        try {
+            this._pushUndo(); // Save state before auto-match
+
+            // 1. Get Reference mean
+            const refTex = this.renderer.referenceShelf[shelfSlot];
+            // The shelf texture size is same as WebGL canvas
+            const refMean = getAverageRGB(refTex, this.renderer.canvas.width, this.renderer.canvas.height);
+
+            // 2. Get Current image mean (without current grade)
+            // It's tricky to read the RAW texture because it's Float16 and readPixels usually demands Uint8.
+            // Read from the processed output instead, but reset offset first.
+            const prevOffset = [...this.offset];
+            this.offset = [0, 0, 0];
+            this.renderer.setOffset(0, 0, 0);
+            this.render(); // force render without offset
+
+            const curMean = getAverageRGB(this.renderer.textures.image, this.renderer.imageWidth || 512, this.renderer.imageHeight || 512);
+
+            // 3. Compute difference in Scene-Linear 
+            // We want to add an offset such that curMean + offset = refMean
+            const dr = refMean[0] - curMean[0];
+            const dg = refMean[1] - curMean[1];
+            const db = refMean[2] - curMean[2];
+
+            // Add difference to previous offset, blend it 80% to avoid extreme blowing out
+            this.offset = [
+                prevOffset[0] + dr * 0.8,
+                prevOffset[1] + dg * 0.8,
+                prevOffset[2] + db * 0.8
+            ];
+
+            // Broadcast to renderer and UI
+            this.renderer.setOffset(this.offset[0], this.offset[1], this.offset[2]);
+            if (this._lastRenderContent) this._lastRenderContent(); // update HUD wheels
+            this.render();
+
+            console.log(`[Radiance] Shot Match applied. Offset shifted by [${dr.toFixed(3)}, ${dg.toFixed(3)}, ${db.toFixed(3)}]`);
+
+        } catch (e) {
+            console.error("[Radiance] Auto match failed:", e);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     //                          SCOPES
     // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1602,6 +3149,16 @@ class RadianceViewer {
         this.scopePanel.style.display = any ? 'flex' : 'none';
         if (this.image) this.updateScopes();
     }
+
+    // v3.0 #6: Route histogram scope to renderer.renderHistogram() for GPU-based rendering
+    _renderGPUHistogram() {
+        if (this.renderer && this.histogramCanvas && this.showHistogram) {
+            // Use log scale for HDR images (data_range max > 1.0)
+            const isHDR = this.hdrData && this.hdrData.data_range && this.hdrData.data_range[1] > 1.05;
+            this.renderer.renderHistogram(this.histogramCanvas, isHDR);
+        }
+    }
+
 
     // v2.2: HDR-aware histogram — reads float32 data, maps to 256 bins (log scale for >1.0)
     _updateHistogramHDR() {
@@ -1706,11 +3263,8 @@ class RadianceViewer {
     updateHistogram() {
         if (!this.image || !this.renderer) return;
 
-        // v2.5: GPU-Accelerated HDR Histogram
-        const tex = this.renderer.textures.image;
-        if (tex) {
-            this.renderer.renderScope('histogram', this.histogramCanvas, tex, this.renderer.isLinearTexture);
-        }
+        // Use renderHistogram() which adds log-scale grid, HDR dotted line, and labels
+        this.renderer.renderHistogram(this.histogramCanvas, this.scopeLogView || false);
     }
 
     toggleParadeMode() {
@@ -1821,6 +3375,11 @@ class RadianceViewer {
 
         // Scope overlay
         if (this.scopeOverlay && this.histogramData) this.drawHistogramOverlay(ctx, w, h);
+
+        // Interactive Mask / Power Window Overlay
+        if (this.maskState && this.maskState.type > 0 && this.maskState.showOverlay && !this.wipeEnabled) {
+            this.drawMaskInteractiveOverlay(ctx);
+        }
     }
 
     drawGrid(ctx, w, h) {
@@ -2003,6 +3562,16 @@ class RadianceViewer {
                 this.isDraggingWipe = true; return;
             }
 
+            // Check Mask UI Handles
+            const handle = this.getMaskHandleAt(x, y);
+            if (handle && e.button === 0) {
+                this.maskDragMode = handle;
+                this.maskDragStart = { x, y };
+                this.maskStateStart = JSON.parse(JSON.stringify(this.maskState));
+                this.canvas.style.cursor = handle === 'rotation' ? 'alias' : 'crosshair';
+                return;
+            }
+
             if (this.isAnnotating && e.button === 0) {
                 if (this.annotationTool === 'text') {
                     // v2.2: Inline text input instead of blocking prompt()
@@ -2051,6 +3620,7 @@ class RadianceViewer {
             }
 
             if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
+                e.preventDefault(); // Prevent middle-click auto-scroll which swallows mouseup
                 this.isPanning = true;
                 this.lastMouseX = e.clientX;
                 this.lastMouseY = e.clientY;
@@ -2065,6 +3635,46 @@ class RadianceViewer {
             if (this.isDraggingWipe) {
                 this.wipePosition = Math.max(0.02, Math.min(0.98, mx / rect.width));
                 this.render(); return;
+            }
+
+            if (this.maskDragMode) {
+                const x = (mx - this.panX) / this.zoom;
+                const y = (my - this.panY) / this.zoom;
+                const m = this.maskState;
+                const s = this.maskStateStart;
+
+                if (this.maskDragMode === 'center') {
+                    m.center[0] = s.center[0] + (x - this.maskDragStart.x) / this.imageWidth;
+                    m.center[1] = s.center[1] + (y - this.maskDragStart.y) / this.imageHeight;
+                } else if (this.maskDragMode === 'scale_x' || this.maskDragMode === 'scale_y') {
+                    const dx = x - (m.center[0] * this.imageWidth);
+                    const dy = y - (m.center[1] * this.imageHeight);
+                    const cosR = Math.cos(-m.rotation);
+                    const sinR = Math.sin(-m.rotation);
+                    const tx = dx * cosR - dy * sinR;
+                    const ty = dx * sinR + dy * cosR;
+
+                    if (this.maskDragMode === 'scale_x') {
+                        m.scale[0] = Math.max(0.01, Math.abs(tx) * 2 / this.imageWidth);
+                    } else {
+                        m.scale[1] = Math.max(0.01, Math.abs(ty) * 2 / this.imageHeight);
+                    }
+                } else if (this.maskDragMode === 'rotation') {
+                    const dx = x - (m.center[0] * this.imageWidth);
+                    const dy = y - (m.center[1] * this.imageHeight);
+                    m.rotation = Math.atan2(dy, dx) + Math.PI / 2;
+                }
+
+                if (this.activeTab === 'masks' && this.tabContentContainer) {
+                    // Update the visible GUI sliders without fully rebuilding the DOM to avoid losing focus
+                    const centerInputs = this.tabContentContainer.querySelectorAll('.knob-value');
+                    // We'll just force a full re-render of the tab for now if it's easiest, but it might flicker
+                    // Need to find a cleaner way. Let's just update the WebGL for now.
+                }
+
+                if (this.renderer) this.renderer.setMask(m);
+                this.render();
+                return;
             }
 
             if (this.isPanning) {
@@ -2177,7 +3787,16 @@ class RadianceViewer {
 
             this.isPanning = false;
             this.isDraggingWipe = false;
-            if (!this.isAnnotating) this.canvas.style.cursor = 'crosshair';
+
+            if (this.maskDragMode) {
+                this.maskDragMode = null;
+                // Re-render the mask tab to update sliders if it's the active tab
+                if (this.activeTab === 'masks' && this._lastRenderContent) {
+                    this._lastRenderContent();
+                }
+            }
+
+            if (!this.isAnnotating && !this.maskDragMode) this.canvas.style.cursor = 'crosshair';
         });
 
         this.canvas.addEventListener('click', (e) => {
@@ -2610,29 +4229,240 @@ class RadianceViewer {
     }
 
     togglePlayback() {
+        if (this.videoMode && this.videoEl) {
+            // Video element mode — delegate to native play/pause
+            if (this.videoEl.paused) {
+                this.videoEl.play();
+            } else {
+                this.videoEl.pause();
+            }
+            return; // isPlaying/icon updated via event listeners in loadVideo()
+        }
+
+        // Frame-sequence mode
         this.isPlaying = !this.isPlaying;
-        if (this.playBtn) this.playBtn.textContent = this.isPlaying ? '⏸' : '▶';
+        this._updatePlayBtn();
 
         if (this.isPlaying) {
             this.lastFrameTime = performance.now();
-            this.playbackLoop();
+            this._seqPlaybackLoop();
         }
     }
 
-    playbackLoop() {
-        if (!this.isPlaying) return;
+    _updatePlayBtn() {
+        if (this.playBtn) this.playBtn.textContent = this.isPlaying ? '⏸' : '▶';
+        if (this.videoMode && this.videoEl) {
+            if (this.playBtn) this.playBtn.textContent = this.videoEl.paused ? '▶' : '⏸';
+        }
+    }
+
+    // ── Frame-sequence playback loop (RAF, timing-compensated) ───────────────
+    _seqPlaybackLoop() {
+        if (!this.isPlaying || this.videoMode) return;
 
         const now = performance.now();
-        const fps = 24; // Target FPS, could be configurable
-        const interval = 1000 / fps;
+        const interval = 1000 / (this.playbackFps || 24);
 
-        if (now - this.lastFrameTime > interval) {
+        if (now - this.lastFrameTime >= interval) {
             this.nextFrame();
             this.lastFrameTime = now - ((now - this.lastFrameTime) % interval);
         }
 
-        requestAnimationFrame(() => this.playbackLoop());
+        this._seqRAF = requestAnimationFrame(() => this._seqPlaybackLoop());
     }
+
+    // ── Video file playback ───────────────────────────────────────────────────
+    /**
+     * Load a File or Blob (mp4/webm/mov/avi/mkv) into the viewer for real-time playback.
+     * Frames are captured via an offscreen canvas and pushed into the WebGL renderer.
+     */
+    loadVideo(fileOrUrl) {
+        this.unloadVideo(); // clean previous state
+
+        const url = (fileOrUrl instanceof File || fileOrUrl instanceof Blob)
+            ? URL.createObjectURL(fileOrUrl)
+            : fileOrUrl;
+
+        const vid = document.createElement('video');
+        vid.src = url;
+        vid.loop = this.loop;
+        vid.muted = true; // required for autoplay policies
+        vid.playsInline = true;
+        vid.crossOrigin = 'anonymous';
+        vid.preload = 'metadata';
+        vid.playbackRate = this.playbackSpeed || 1.0;
+
+        // Offscreen canvas for frame capture
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: false });
+
+        this._videoCanvas = canvas;
+        this._videoCtx = ctx;
+        this.videoEl = vid;
+        this.videoMode = true;
+        this._videoUrl = url;
+
+        vid.addEventListener('loadedmetadata', () => {
+            canvas.width = vid.videoWidth;
+            canvas.height = vid.videoHeight;
+            this.totalFrames = Math.max(1, Math.round(vid.duration * (this._videoNativeFps || 25)));
+            this.currentFrame = 0;
+            this._updateVideoTimeline();
+            this._updateScrubberRange();
+        });
+
+        vid.addEventListener('play', () => {
+            this.isPlaying = true;
+            this._updatePlayBtn();
+            this._videoRenderLoop();
+        });
+
+        vid.addEventListener('pause', () => {
+            this.isPlaying = false;
+            this._updatePlayBtn();
+            if (this._videoRAF) { cancelAnimationFrame(this._videoRAF); this._videoRAF = null; }
+            // Still capture the paused frame
+            this._captureVideoFrame();
+        });
+
+        vid.addEventListener('ended', () => {
+            this.isPlaying = false;
+            this._updatePlayBtn();
+            if (this._videoRAF) { cancelAnimationFrame(this._videoRAF); this._videoRAF = null; }
+        });
+
+        vid.addEventListener('timeupdate', () => {
+            // Update scrubber & timecode during playback
+            this._updateVideoTimeline();
+        });
+
+        vid.addEventListener('seeked', () => {
+            this._captureVideoFrame();
+        });
+
+        // Show video info in bottom bar
+        vid.addEventListener('loadeddata', () => {
+            this._updateVideoTimeline();
+            this._captureVideoFrame();
+        });
+
+        this.videoEl = vid;
+        this._updatePlayBtn();
+
+        // Show transport if hidden
+        if (this.transportPanel) this.transportPanel.style.display = 'flex';
+    }
+
+    unloadVideo() {
+        if (this._videoRAF) { cancelAnimationFrame(this._videoRAF); this._videoRAF = null; }
+        if (this.videoEl) {
+            this.videoEl.pause();
+            this.videoEl.src = '';
+            this.videoEl.load();
+            this.videoEl = null;
+        }
+        if (this._videoUrl && this._videoUrl.startsWith('blob:')) {
+            URL.revokeObjectURL(this._videoUrl);
+        }
+        this._videoUrl = null;
+        this._videoCanvas = null;
+        this._videoCtx = null;
+        this.videoMode = false;
+        this.isPlaying = false;
+        this._updatePlayBtn();
+    }
+
+    // ── RAF loop for video frame capture → WebGL ─────────────────────────────
+    _videoRenderLoop() {
+        if (!this.videoMode || !this.videoEl || this.videoEl.paused || this.videoEl.ended) {
+            this._videoRAF = null;
+            return;
+        }
+        this._captureVideoFrame();
+        this._videoRAF = requestAnimationFrame(() => this._videoRenderLoop());
+    }
+
+    _captureVideoFrame() {
+        const vid = this.videoEl;
+        const canvas = this._videoCanvas;
+        const ctx = this._videoCtx;
+        if (!vid || !canvas || !ctx || vid.readyState < 2) return;
+
+        if (canvas.width !== vid.videoWidth || canvas.height !== vid.videoHeight) {
+            canvas.width = vid.videoWidth;
+            canvas.height = vid.videoHeight;
+        }
+
+        ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
+
+        // Push into WebGL renderer via ImageBitmap for zero-copy GPU path
+        if (this.renderer) {
+            if (typeof createImageBitmap !== 'undefined') {
+                createImageBitmap(canvas).then(bmp => {
+                    if (this.renderer && this.videoMode) {
+                        this.renderer.loadImageTexture(bmp);
+                        bmp.close();
+                        this.render();
+                    }
+                }).catch(() => {
+                    // Fallback: direct canvas
+                    if (this.renderer && this.videoMode) {
+                        this.renderer.loadImageTexture(canvas);
+                        this.render();
+                    }
+                });
+            } else {
+                this.renderer.loadImageTexture(canvas);
+                this.render();
+            }
+        }
+
+        this.imageWidth = canvas.width;
+        this.imageHeight = canvas.height;
+        this._updateVideoTimeline();
+    }
+
+    _updateVideoTimeline() {
+        const vid = this.videoEl;
+        if (!vid) return;
+        const t = vid.currentTime;
+        const dur = vid.duration || 1;
+        const pct = t / dur;
+
+        // Update scrubber
+        if (this._videoScrubber) this._videoScrubber.value = String(Math.round(pct * 10000));
+
+        // Update timecode display
+        const fmt = (s) => {
+            const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
+            const fr = Math.floor((s % 1) * (this._videoNativeFps || 25));
+            return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}:${String(fr).padStart(2, '0')}`;
+        };
+        if (this._videoTimecode) this._videoTimecode.textContent = fmt(t);
+        if (this._videoDuration) this._videoDuration.textContent = fmt(dur);
+
+        // Frame counter approximation
+        const fps = this._videoNativeFps || 25;
+        const approxFrame = Math.round(t * fps);
+        if (this.frameCounter) this.frameCounter.textContent = `${approxFrame} / ${Math.round(dur * fps)}`;
+    }
+
+    _updateScrubberRange() {
+        if (this._videoScrubber) {
+            this._videoScrubber.min = '0';
+            this._videoScrubber.max = '10000';
+            this._videoScrubber.step = '1';
+        }
+    }
+
+    // ── Video seek to position ────────────────────────────────────────────────
+    seekVideoTo(pct) {
+        if (!this.videoEl || isNaN(this.videoEl.duration)) return;
+        this.videoEl.currentTime = Math.max(0, Math.min(1, pct)) * this.videoEl.duration;
+    }
+
+    // playbackLoop stays as alias for the sequence version
+    playbackLoop() { this._seqPlaybackLoop(); }
 
     nextFrame() {
         if (!this.totalFrames || this.totalFrames <= 1) return;
@@ -2705,12 +4535,47 @@ class RadianceViewer {
     }
 
     updateFrameDisplay() {
-        if (this.frameCounter) {
+        if (this.videoMode) return; // video mode manages its own timeline
+
+        // Update frame counter text
+        if (this.frameCounter && this.frameCounter.tagName !== 'INPUT') {
             this.frameCounter.textContent = `${this.currentFrame + 1} / ${this.totalFrames}`;
         }
-        // Also show transport if frames > 1
+
+        // Sync scrubber position
+        if (this._videoScrubber && this.totalFrames > 1) {
+            const pct = this.currentFrame / Math.max(1, this.totalFrames - 1);
+            this._videoScrubber.value = String(Math.round(pct * 10000));
+            this._videoScrubber.style.background =
+                `linear-gradient(to right, ${this.theme.accent} ${pct * 100}%, rgba(255,255,255,0.15) ${pct * 100}%)`;
+        }
+
+        // Timecode in HH:MM:SS:FF format based on playbackFps
+        if (this._videoTimecode && this.playbackFps) {
+            const fps = this.playbackFps;
+            const totalSec = this.currentFrame / fps;
+            const h = Math.floor(totalSec / 3600);
+            const m = Math.floor((totalSec % 3600) / 60);
+            const s = Math.floor(totalSec % 60);
+            const f = this.currentFrame % Math.round(fps);
+            this._videoTimecode.textContent =
+                `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(f).padStart(2, '0')}`;
+        }
+
+        if (this._videoDuration && this.playbackFps && this.totalFrames > 1) {
+            const fps = this.playbackFps;
+            const totalSec = (this.totalFrames - 1) / fps;
+            const h = Math.floor(totalSec / 3600);
+            const m = Math.floor((totalSec % 3600) / 60);
+            const s = Math.floor(totalSec % 60);
+            const f = (this.totalFrames - 1) % Math.round(fps);
+            this._videoDuration.textContent =
+                `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(f).padStart(2, '0')}`;
+        }
+
+        // Show transport if we have frames
         if (this.totalFrames > 1 && this.transportPanel) {
-            // ensure it's visible if it was hidden
+            this.transportPanel.style.display = 'flex';
         }
     }
 
@@ -2791,6 +4656,15 @@ class RadianceViewer {
             // v3.1: Masking (Power Windows)
             this.renderer.setMask(this.maskState);
 
+            // v3.4 FIX: Qualifier must be pushed every frame, not just when the masks tab is open.
+            // Pass showMask=true only while the masks tab is active — switching away hides the overlay.
+            if (this.renderer.setQualifier && this.qualifierState) {
+                const qState = this.activeTab === 'masks'
+                    ? this.qualifierState
+                    : { ...this.qualifierState, showMask: false };
+                this.renderer.setQualifier(qState);
+            }
+
             // v2.2: Channel isolation + focus peaking + display LUT on GPU
             const chMap = { 'rgb': 0, 'r': 1, 'g': 2, 'b': 3, 'luma': 4, 'a': 5 };
             this.renderer.setChannelMode(chMap[this.channel] || 0);
@@ -2815,6 +4689,15 @@ class RadianceViewer {
             this.renderer.setDenoise(this.denoise || 0.0);
             this.renderer.setShowDepth(this.showZdepth || false);
 
+            // v3.4: Printer Lights + Soft Clip
+            this.renderer.setPrinterLights(this.printerR || 0, this.printerG || 0, this.printerB || 0);
+            this.renderer.setSoftClip(this.softClip || 0.0);
+
+            // Time + frame must always be updated so grain, zebra-blink, and other
+            // time-driven effects animate even when DoF is disabled.
+            this.renderer.setTime(performance.now() / 1000.0);
+            this.renderer.setFrame(this.currentFrame || 0);
+
             // DoF controls
             if (this.dofEnabled && this.renderer.textures.depth) {
                 this.renderer.setDoFEnabled(true);
@@ -2824,9 +4707,6 @@ class RadianceViewer {
 
                 // v3.1: Optical shape
                 this.renderer.setApertureShape(this.apertureBlades || 0, this.apertureRotation || 0.0, this.apertureAnamorphic || 1.0);
-
-                this.renderer.setFrame(this.currentFrame || 0);
-                this.renderer.setTime(performance.now() / 1000.0);
             } else {
                 this.renderer.setDoFEnabled(false);
             }
@@ -3315,7 +5195,6 @@ class RadianceViewer {
                     <span style="color:${this.theme.accent}">${this.imageWidth} × ${this.imageHeight}</span>
                 </div>
                 <div style="margin-bottom: 6px;">
-                    <span style="color:${this.theme.textDim}">Format:</span><br/>
                     <span style="color:${formatStr.includes('RHDR') ? '#4ade80' : this.theme.text}">${formatStr}</span>
                 </div>
                 <div style="margin-bottom: 6px;">
@@ -3343,12 +5222,13 @@ class RadianceViewer {
                 this.promptButton.style.background = this.theme.accent;
                 this.promptButton.style.color = '#fff';
             }
-            // v2.4: Integrate with HUD
+            // v2.4: Integrate with HUD — panel-embedded mode
             this.showControls = true;
-            if (this.controlsPanel) {
+            if (this.rightControlPanel) {
+                this.rightControlPanel.style.display = 'flex';
+            } else if (this.controlsPanel) {
                 this.controlsPanel.style.display = 'flex';
                 this.controlsPanel.style.opacity = '1';
-                this.controlsPanel.style.transform = 'translateX(-50%) translateY(0)';
                 this.controlsPanel.style.pointerEvents = 'auto';
             }
             if (this.controlsToggle) {
@@ -3356,7 +5236,7 @@ class RadianceViewer {
             }
 
             // Switch to prompt tab
-            const promptTab = this._hudTabs?.find(t => t.id === 'prompt');
+            const promptTab = this._hudTabs?.find(t => t.dataset?.tabId === 'prompt');
             if (promptTab) {
                 promptTab.click();
             }
@@ -3419,13 +5299,32 @@ class RadianceViewer {
             const comfyClass = n.comfyClass || nodeType;
 
             const isEncoder = comfyClass.includes("CinematicPromptEncoder");
-            const isUnet = comfyClass === "CheckpointLoaderSimple" || comfyClass === "UNETLoader" || comfyClass.includes("DualCLIPLoader");
-            const isLatent = comfyClass === "EmptyLatentImage" || comfyClass === "EmptySD3LatentImage";
+            const isUnet = comfyClass === "CheckpointLoaderSimple" || comfyClass === "CheckpointLoader" || comfyClass === "UNETLoader" || comfyClass.includes("DualCLIPLoader") || comfyClass === "RadianceUnifiedLoader";
+            const isLatent = comfyClass === "EmptyLatentImage" || comfyClass === "EmptySD3LatentImage" || comfyClass === "RadianceResolution";
 
             return isEncoder || isUnet || isLatent;
         });
 
         console.log("[Radiance] Found", nodes.length, "Generation settings nodes.");
+
+        // Sort nodes to ensure CinematicPromptEncoder is rendered first, and RadianceUnifiedLoader is rendered last
+        nodes.sort((a, b) => {
+            const aClass = a.comfyClass || a.type || "";
+            const bClass = b.comfyClass || b.type || "";
+
+            const aIsEncoder = aClass.includes("CinematicPromptEncoder");
+            const bIsEncoder = bClass.includes("CinematicPromptEncoder");
+            const aIsUnified = aClass === "RadianceUnifiedLoader";
+            const bIsUnified = bClass === "RadianceUnifiedLoader";
+
+            if (aIsEncoder && !bIsEncoder) return -1;
+            if (!aIsEncoder && bIsEncoder) return 1;
+
+            if (aIsUnified && !bIsUnified) return 1;
+            if (!aIsUnified && bIsUnified) return -1;
+
+            return 0;
+        });
 
         if (nodes.length === 0) {
             const msg = document.createElement('div');
@@ -3467,15 +5366,15 @@ class RadianceViewer {
                     wrapper.appendChild(pc);
                 }
 
-                // Grid for dropdowns and numbers
+                // Flex container for horizontal layout
                 const grid = document.createElement('div');
-                grid.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr; gap: 10px;';
+                grid.style.cssText = 'display: flex; flex-direction: row; gap: 10px; align-items: flex-end; flex-wrap: wrap;';
 
                 node.widgets.forEach(w => {
                     if (w.name === 'base_prompt' || w.name === 'prompt_preview' || w.type === 'converted-widget' || w.name === '_temp') return;
 
                     const wWrap = document.createElement('div');
-                    wWrap.style.cssText = 'display: flex; flex-direction: column; gap: 4px;';
+                    wWrap.style.cssText = 'display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 100px;';
 
                     const wl = document.createElement('div');
                     wl.textContent = w.name.replace(/_/g, ' ').toUpperCase();
@@ -3555,140 +5454,218 @@ class RadianceViewer {
 
     }
 
+
     // ═══════════════════════════════════════════════════════════════════════════
     //                          HUD / CONTROLS
     // ═══════════════════════════════════════════════════════════════════════════
 
     createHUD() {
-        if (this.controlsPanel) this.controlsPanel.remove();
+        // Singleton pattern: Check if HUD already exists
+        if (RadianceViewer.singletonHUD) {
+            this.controlsPanel = RadianceViewer.singletonHUD;
+            // Attach to THIS instance's rightControlPanel (not document.body)
+            if (this.controlsPanel.parentNode !== this.rightControlPanel) {
+                if (this.controlsPanel.parentNode) this.controlsPanel.parentNode.removeChild(this.controlsPanel);
+                this.rightControlPanel.appendChild(this.controlsPanel);
+            }
+
+            // v2.4: Sync active instance and re-render content immediately on creation if HUD already exists
+            RadianceViewer.activeInstance = this;
+            if (this._lastRenderContent) this._lastRenderContent();
+            return;
+        }
+
+        if (this._hudResizeListener) {
+            window.removeEventListener('resize', this._hudResizeListener);
+            this._hudResizeListener = null;
+        }
 
         const t = this.theme;
         this.controlsPanel = document.createElement('div');
         this.controlsPanel.className = 'radiance-glass-dock';
+        this.controlsPanel.id = 'radiance-singleton-hud';
+        RadianceViewer.singletonHUD = this.controlsPanel;
 
-        this.controlsPanel.style.cssText = `
-            position: absolute;
-            background: rgba(10, 10, 14, 0.75);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 20px;
-            padding: 12px;
-            z-index: 100;
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-            backdrop-filter: blur(24px);
-            -webkit-backdrop-filter: blur(24px);
-            box-shadow: 0 16px 48px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.05) inset;
-            transition: opacity 0.4s cubic-bezier(0.2, 0.8, 0.2, 1.0), transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1.0);
-            width: ${this.hudPanelWidth || 640}px;
-            height: ${this.hudPanelHeight || 380}px;
-            min-width: 400px;
-            min-height: 240px;
-            max-width: 90vw;
-            max-height: 80vh;
-            bottom: 40px;
-            left: 50%;
-            transform: translateX(-50%);
-            overflow: auto;
-            resize: both;
-            font-family: ${t.font};
-            opacity: 1;
-            pointer-events: auto;
+        // v3.0 #15: High Contrast Mode Initialization
+        // Restores accessibility preference from localStorage and applies the CSS hook.
+        this.highContrast = localStorage.getItem('radiance_high_contrast') === '1';
+        if (this.highContrast) {
+            this.controlsPanel.classList.add('high-contrast');
+        }
+
+        // ─── Core helpers ────────────────────────────────────────────────────────
+        const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+        const MIN_W = 320, MIN_H = 120;
+
+        const persistSize = () => {
+            localStorage.setItem('radiance_hud_width', Math.round(this.hudPanelWidth));
+            if (this.hudPanelHeight) localStorage.setItem('radiance_hud_height2', Math.round(this.hudPanelHeight));
+            else localStorage.removeItem('radiance_hud_height2');
+        };
+
+        // Panel-embedded mode: position/size controlled by rightControlPanel — these are no-ops
+        const applyHUDPosition = (x, y) => { /* no-op in panel mode */ };
+        const applyHUDSize = (w, h) => { /* no-op in panel mode */ };
+
+        // No window resize re-clamping needed in panel mode
+
+
+        // ─── Panel-embedded mode: no floating resize handles needed ─────────────
+        // (Resize is handled by the rightControlPanel's left-edge drag handle)
+
+
+
+        // ─── Inner scroll wrapper (all HUD content lives here) ───────────────────
+        const innerWrap = document.createElement('div');
+        innerWrap.style.cssText = `
+            display: flex; flex-direction: column; gap: 10px;
+            padding: 10px 14px 12px;
+            overflow-x: hidden; overflow-y: auto;
+            flex: 1; min-height: 0;
+            box-sizing: border-box;
         `;
+        this._hudInnerWrap = innerWrap;
+        this.controlsPanel.appendChild(innerWrap);
 
-        // Observe resize and persist dimensions
-        const hudResizeObserver = new ResizeObserver((entries) => {
-            for (const entry of entries) {
-                const newWidth = Math.round(entry.contentRect.width);
-                const newHeight = Math.round(entry.contentRect.height);
-                this.hudPanelWidth = newWidth;
-                this.hudPanelHeight = newHeight;
-                localStorage.setItem('radiance_hud_width', newWidth);
-                localStorage.setItem('radiance_hud_height', newHeight);
-            }
-        });
-        hudResizeObserver.observe(this.controlsPanel);
-
-        // Docked HUD uses full width by default
-
-        // 1. Tabs Header (No longer draggable)
+        // ─── Title bar: minimize | grip | reset ──────────────────────────────────
         const tabsHeader = document.createElement('div');
         tabsHeader.style.cssText = `
-            display: flex; 
-            gap: 4px; 
-            padding: 4px 8px 10px 8px; 
-            border-bottom: 1px solid rgba(255,255,255,0.08); 
-            margin-bottom: 2px;
-            user-select: none;
+            display: flex; flex-direction: column; gap: 0;
+            border-bottom: 1px solid rgba(255,255,255,0.07);
+            padding-bottom: 6px; margin-bottom: 0;
+            user-select: none; flex-shrink: 0;
         `;
+
+        // Panel-embedded: gripRow is now a simple header bar (no drag)
+        const gripRow = document.createElement('div');
+        gripRow.style.cssText = `
+            display: flex; align-items: center; justify-content: space-between;
+            height: 28px; padding: 0 8px; gap: 4px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        `;
+
+        // Minimize / expand button
+        const minBtn = document.createElement('div');
+        minBtn.title = this.hudMinimized ? 'Expand panel' : 'Collapse panel';
+        const updateMinBtn = () => {
+            minBtn.innerHTML = this.hudMinimized
+                ? `<svg width="13" height="13" viewBox="0 0 13 13"><line x1="2" y1="6.5" x2="11" y2="6.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><line x1="6.5" y1="2" x2="6.5" y2="11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`
+                : `<svg width="13" height="13" viewBox="0 0 13 13"><line x1="2" y1="6.5" x2="11" y2="6.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`;
+            minBtn.title = this.hudMinimized ? 'Expand panel' : 'Collapse panel';
+        };
+        updateMinBtn();
+        minBtn.style.cssText = `
+            width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;
+            color: rgba(255,255,255,0.3); cursor: pointer; border-radius: 6px;
+            transition: color 0.15s, background 0.15s; flex-shrink: 0;
+        `;
+        minBtn.onmouseenter = () => { minBtn.style.color = '#fff'; minBtn.style.background = 'rgba(255,255,255,0.08)'; };
+        minBtn.onmouseleave = () => { minBtn.style.color = 'rgba(255,255,255,0.3)'; minBtn.style.background = ''; };
+        minBtn.addEventListener('mousedown', e => e.stopPropagation());
+        minBtn.onclick = () => {
+            this.hudMinimized = !this.hudMinimized;
+            localStorage.setItem('radiance_hud_minimized', this.hudMinimized);
+            updateMinBtn();
+            if (innerWrap._contentNode) {
+                innerWrap._contentNode.style.display = this.hudMinimized ? 'none' : '';
+            }
+            // Also hide the footer inside innerWrap
+            if (innerWrap._footerNode) {
+                innerWrap._footerNode.style.display = this.hudMinimized ? 'none' : '';
+            }
+            this.controlsPanel.style.height = 'auto';
+            this.hudPanelHeight = null;
+            persistSize();
+        };
+
+        // Title label for the panel
+        const panelTitle = document.createElement('div');
+        panelTitle.textContent = 'GRADING CONTROLS';
+        panelTitle.style.cssText = `flex: 1; font-size: 10px; font-weight: 700; letter-spacing: 1.2px; color: rgba(255,255,255,0.28); user-select: none;`;
+
+        gripRow.appendChild(minBtn);
+        gripRow.appendChild(panelTitle);
+
+        tabsHeader.appendChild(gripRow);
+
+        // Tabs row
+        const tabsRow = document.createElement('div');
+        tabsRow.style.cssText = `display: flex; gap: 4px; padding: 4px 6px 10px 6px;`;
 
         const activeTabStyle = `background: rgba(255,255,255,0.1); color: ${t.text}; border-bottom: 2px solid ${t.accent}`;
         const inactiveTabStyle = `background: transparent; color: ${t.textDim}; border-bottom: 2px solid transparent`;
         const baseTabStyle = `flex: 1; text-align: center; padding: 6px 0; font-size: 11px; font-weight: 600; letter-spacing: 0.5px; cursor: pointer; border-radius: 4px; transition: all 0.2s;`;
 
         let activeTab = 'primaries';
+        this.activeTab = 'primaries';
         const tabContentContainer = document.createElement('div');
         this.tabContentContainer = tabContentContainer;
 
         const tabs = [
-            { id: 'prompt', label: 'PROMPT' }, // v2.4: Integrated Prompt machine
+            { id: 'prompt', label: 'PROMPT' },
             { id: 'primaries', label: 'PRIMARIES' },
             { id: 'curves', label: 'CURVES' },
-            { id: 'film', label: 'FILM' },
-            { id: 'lens', label: 'LENS' },
-            { id: 'qualifiers', label: 'QUALIFIER' },
+            { id: 'effects', label: 'EFFECTS' },
             { id: 'masks', label: 'MASKS' },
             { id: 'scopes', label: 'SCOPES' },
             { id: 'view', label: 'VIEW' }
         ];
-        this._hudTabs = []; // Save references
+        this._hudTabs = [];
 
         const renderTabs = () => {
-            tabsHeader.innerHTML = '';
+            tabsRow.innerHTML = '';
             tabs.forEach(tab => {
                 const btn = document.createElement('div');
                 btn.textContent = tab.label;
+                btn.dataset.tabId = tab.id;
                 btn.style.cssText = baseTabStyle + (activeTab === tab.id ? activeTabStyle : inactiveTabStyle);
                 btn.onmouseover = () => { if (activeTab !== tab.id) btn.style.background = 'rgba(255,255,255,0.05)'; };
                 btn.onmouseout = () => { if (activeTab !== tab.id) btn.style.background = 'transparent'; };
                 btn.onclick = () => {
+                    const active = RadianceViewer.activeInstance || this;
                     activeTab = tab.id;
+                    active.activeTab = tab.id;
+                    // Switching any tab clears depth/overlay modes that override rendering
+                    active.showZdepth = false;
+                    if (active.renderer) active.renderer.setShowDepth(false);
                     renderTabs();
                     renderContent();
+                    active.render();
                 };
                 this._hudTabs.push(btn);
-                tabsHeader.appendChild(btn);
+                tabsRow.appendChild(btn);
             });
         };
 
-        this.controlsPanel.appendChild(tabsHeader);
-        this.controlsPanel.appendChild(tabContentContainer);
+        tabsHeader.appendChild(tabsRow);
+        innerWrap.appendChild(tabsHeader);
 
-        // 2. Tab Content Renderer
+
         const renderContent = () => {
+            const active = RadianceViewer.activeInstance || this;
             tabContentContainer.innerHTML = '';
-            tabContentContainer.style.cssText = 'min-height: 140px; display: flex; flex-direction: column; justify-content: center;';
+            tabContentContainer.style.cssText = 'display: flex; flex-direction: column;';
 
             if (activeTab === 'prompt') {
-                this.renderPromptTab(tabContentContainer);
+                active.renderPromptTab(tabContentContainer);
             } else if (activeTab === 'primaries') {
-                this.renderPrimariesTab(tabContentContainer);
+                active.renderPrimariesTab(tabContentContainer);
             } else if (activeTab === 'curves') {
-                this.renderCurvesTab(tabContentContainer);
-            } else if (activeTab === 'film') {
-                this.renderEffectsTab(tabContentContainer);
-            } else if (activeTab === 'lens') {
-                this.renderLensTab(tabContentContainer);
-            } else if (activeTab === 'qualifiers') {
-                this.renderQualifiersTab(tabContentContainer);
+                active.renderCurvesTab(tabContentContainer);
+            } else if (activeTab === 'effects') {
+                active.renderEffectsTab(tabContentContainer);
+                active.renderLensTab(tabContentContainer);
             } else if (activeTab === 'masks') {
-                this.renderMasksTab(tabContentContainer);
+                active.renderQualifiersTab(tabContentContainer);
+                active.renderMasksTab(tabContentContainer);
             } else if (activeTab === 'scopes') {
-                this.renderScopesTab(tabContentContainer);
+                active.renderScopesTab(tabContentContainer);
             } else if (activeTab === 'view') {
-                this.renderViewTab(tabContentContainer);
+                active.renderViewTab(tabContentContainer);
             }
         };
+
+        innerWrap.appendChild(tabContentContainer);
 
         // Initialize
         renderTabs();
@@ -3696,46 +5673,50 @@ class RadianceViewer {
         // Save reference for undo/redo panel refresh
         this._lastRenderContent = renderContent;
 
+        // Track nodes for minimize toggle
+        innerWrap._contentNode = tabContentContainer;
+        if (this.hudMinimized) tabContentContainer.style.display = 'none';
+
         // Footer: A/B Bypass + Reset All
         const footer = document.createElement('div');
         footer.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.05); margin-top: 4px;';
+        if (this.hudMinimized) footer.style.display = 'none';
+        innerWrap._footerNode = footer;
 
         // A/B Bypass Toggle
         const bypassBtn = document.createElement('div');
-        bypassBtn.textContent = this._gradingBypassed ? '● BYPASSED' : 'A/B';
-        bypassBtn.title = 'Toggle grading bypass (compare original)';
-        bypassBtn.style.cssText = `font-size: 9px; color: ${this._gradingBypassed ? '#ff6b6b' : '#666'}; cursor: pointer; letter-spacing: 1px; padding: 2px 6px; border: 1px solid ${this._gradingBypassed ? 'rgba(255,100,100,0.3)' : 'rgba(255,255,255,0.08)'}; border-radius: 4px;`;
         bypassBtn.onclick = () => {
-            this._gradingBypassed = !this._gradingBypassed;
-            if (this._gradingBypassed) {
+            const active = RadianceViewer.activeInstance || this;
+            active._gradingBypassed = !active._gradingBypassed;
+            if (active._gradingBypassed) {
                 // Save current state and set identity
-                this._savedGrading = {
-                    exposure: this.exposure, lift: [...(this.lift || [0, 0, 0])], gamma: [...(this.gamma || [1, 1, 1])], gain: [...(this.gain || [1, 1, 1])],
-                    temperature: this.temperature, tint: this.tint, contrast: this.contrast, pivot: this.pivot, saturation: this.saturation,
-                    grain: this.grain, denoise: this.denoise,
-                    lensDistortion: this.lensDistortion, lensFringe: this.lensFringe,
-                    vignetteIntensity: this.vignetteIntensity, vignetteFalloff: this.vignetteFalloff,
+                active._savedGrading = {
+                    exposure: active.exposure, lift: [...(active.lift || [0, 0, 0])], gamma: [...(active.gamma || [1, 1, 1])], gain: [...(active.gain || [1, 1, 1])],
+                    temperature: active.temperature, tint: active.tint, contrast: active.contrast, pivot: active.pivot, saturation: active.saturation,
+                    grain: active.grain, denoise: active.denoise,
+                    lensDistortion: active.lensDistortion, lensFringe: active.lensFringe,
+                    vignetteIntensity: active.vignetteIntensity, vignetteFalloff: active.vignetteFalloff,
                 };
-                if (this.renderer) {
-                    this.renderer.setExposure(0); this.renderer.setLift(0, 0, 0); this.renderer.setGamma(1, 1, 1); this.renderer.setGain(1, 1, 1);
-                    this.renderer.setTemperature(0); this.renderer.setTint(0); this.renderer.setContrast(1); this.renderer.setPivot(0.5); this.renderer.setSaturation(1);
-                    this.renderer.setGrain(0); this.renderer.setDenoise(0);
-                    this.renderer.setLensDistortion(0, 0); this.renderer.setVignette(0, 0.5);
+                if (active.renderer) {
+                    active.renderer.setExposure(0); active.renderer.setLift(0, 0, 0); active.renderer.setGamma(1, 1, 1); active.renderer.setGain(1, 1, 1);
+                    active.renderer.setTemperature(0); active.renderer.setTint(0); active.renderer.setContrast(1); active.renderer.setPivot(0.5); active.renderer.setSaturation(1);
+                    active.renderer.setGrain(0); active.renderer.setDenoise(0);
+                    active.renderer.setLensDistortion(0, 0); active.renderer.setVignette(0, 0.5);
                 }
                 bypassBtn.textContent = '● BYPASSED'; bypassBtn.style.color = '#ff6b6b'; bypassBtn.style.borderColor = 'rgba(255,100,100,0.3)';
             } else {
                 // Restore saved state
-                const s = this._savedGrading;
-                if (s && this.renderer) {
-                    this.renderer.setExposure(s.exposure); this.renderer.setLift(s.lift[0], s.lift[1], s.lift[2]);
-                    this.renderer.setGamma(s.gamma[0], s.gamma[1], s.gamma[2]); this.renderer.setGain(s.gain[0], s.gain[1], s.gain[2]);
-                    this.renderer.setTemperature(s.temperature); this.renderer.setTint(s.tint); this.renderer.setContrast(s.contrast); this.renderer.setPivot(s.pivot); this.renderer.setSaturation(s.saturation);
-                    this.renderer.setGrain(s.grain); this.renderer.setDenoise(s.denoise);
-                    this.renderer.setLensDistortion(s.lensDistortion, s.lensFringe); this.renderer.setVignette(s.vignetteIntensity, s.vignetteFalloff);
+                const s = active._savedGrading;
+                if (s && active.renderer) {
+                    active.renderer.setExposure(s.exposure); active.renderer.setLift(s.lift[0], s.lift[1], s.lift[2]);
+                    active.renderer.setGamma(s.gamma[0], s.gamma[1], s.gamma[2]); active.renderer.setGain(s.gain[0], s.gain[1], s.gain[2]);
+                    active.renderer.setTemperature(s.temperature); active.renderer.setTint(s.tint); active.renderer.setContrast(s.contrast); active.renderer.setPivot(s.pivot); active.renderer.setSaturation(s.saturation);
+                    active.renderer.setGrain(s.grain); active.renderer.setDenoise(s.denoise);
+                    active.renderer.setLensDistortion(s.lensDistortion, s.lensFringe); active.renderer.setVignette(s.vignetteIntensity, s.vignetteFalloff);
                 }
                 bypassBtn.textContent = 'A/B'; bypassBtn.style.color = '#666'; bypassBtn.style.borderColor = 'rgba(255,255,255,0.08)';
             }
-            this.render();
+            active.render();
         };
         footer.appendChild(bypassBtn);
 
@@ -3749,15 +5730,18 @@ class RadianceViewer {
         undoBtn.style.cssText = 'font-size: 14px; color: #555; cursor: pointer; padding: 0 4px; user-select: none; transition: color 0.15s;';
         undoBtn.onmouseenter = () => { undoBtn.style.color = this._undoStack.length > 0 ? this.theme.accent : '#555'; };
         undoBtn.onmouseleave = () => { undoBtn.style.color = '#555'; };
-        undoBtn.onclick = () => { this.undo(); };
+        undoBtn.onclick = () => { (RadianceViewer.activeInstance || this).undo(); };
 
         const redoBtn = document.createElement('div');
         redoBtn.textContent = '↷';
         redoBtn.title = 'Redo (Ctrl+Shift+Z)';
         redoBtn.style.cssText = 'font-size: 14px; color: #555; cursor: pointer; padding: 0 4px; user-select: none; transition: color 0.15s;';
-        redoBtn.onmouseenter = () => { redoBtn.style.color = this._redoStack.length > 0 ? this.theme.accent : '#555'; };
+        redoBtn.onmouseenter = () => {
+            const active = RadianceViewer.activeInstance || this;
+            redoBtn.style.color = active._redoStack.length > 0 ? active.theme.accent : '#555';
+        };
         redoBtn.onmouseleave = () => { redoBtn.style.color = '#555'; };
-        redoBtn.onclick = () => { this.redo(); };
+        redoBtn.onclick = () => { (RadianceViewer.activeInstance || this).redo(); };
 
         undoRedoGroup.appendChild(undoBtn);
         undoRedoGroup.appendChild(redoBtn);
@@ -3768,63 +5752,67 @@ class RadianceViewer {
         resetBtn.textContent = 'RESET ALL';
         resetBtn.style.cssText = 'font-size: 9px; color: #666; cursor: pointer; letter-spacing: 1px;';
         resetBtn.onclick = () => {
+            const active = RadianceViewer.activeInstance || this;
             // Push undo before resetting
-            this._pushUndo();
+            active._pushUndo();
             // Primaries
-            this.exposure = 0.0;
-            this.lift = [0, 0, 0]; this.gamma = [1, 1, 1]; this.gain = [1, 1, 1];
-            this.temperature = 0.0; this.tint = 0.0;
-            this.contrast = 1.0; this.pivot = 0.5; this.saturation = 1.0;
+            active.exposure = 0.0;
+            active.lift = [0, 0, 0]; active.gamma = [1, 1, 1]; active.gain = [1, 1, 1];
+            active.temperature = 0.0; active.tint = 0.0;
+            active.contrast = 1.0; active.pivot = 0.5; active.saturation = 1.0;
             // Film / Effects
-            this.grain = 0.0; this.denoise = 0.0;
+            active.grain = 0.0; active.denoise = 0.0;
             // Lens
-            this.focusDistance = 0.5; this.aperture = 0.0; this.dofEnabled = false;
-            this.apertureBlades = 0; this.apertureRotation = 0.0; this.apertureAnamorphic = 1.0;
-            this.lensDistortion = 0.0; this.lensFringe = 0.0;
-            this.vignetteIntensity = 0.0; this.vignetteFalloff = 0.5;
+            active.focusDistance = 0.5; active.aperture = 0.0; active.dofEnabled = false;
+            active.apertureBlades = 0; active.apertureRotation = 0.0; active.apertureAnamorphic = 1.0;
+            active.lensDistortion = 0.0; active.lensFringe = 0.0;
+            active.vignetteIntensity = 0.0; active.vignetteFalloff = 0.5;
             // Curves
-            if (this.curveEditor) this.curveEditor.resetAllChannels?.();
+            if (active.curveEditor) active.curveEditor.resetAllChannels?.();
             // Qualifier
-            if (this.qualifierState) {
-                this.qualifierState.enabled = false; this.qualifierState.showMask = false;
+            if (active.qualifierState) {
+                active.qualifierState.enabled = false; active.qualifierState.showMask = false;
             }
 
-            if (this.renderer) {
-                this.renderer.setExposure(0);
-                this.renderer.setLift(0, 0, 0); this.renderer.setGamma(1, 1, 1); this.renderer.setGain(1, 1, 1);
-                this.renderer.setTemperature(0); this.renderer.setTint(0);
-                this.renderer.setContrast(1); this.renderer.setPivot(0.5); this.renderer.setSaturation(1);
-                this.renderer.setGrain(0); this.renderer.setDenoise(0);
-                this.renderer.setDoFEnabled(false); this.renderer.setFocusDistance(0.5); this.renderer.setAperture(0);
-                this.renderer.setApertureShape(0, 0, 1.0);
-                this.renderer.setLensDistortion(0, 0); this.renderer.setVignette(0, 0.5);
-                this.renderer.setCurveMix(0);
-                if (this.qualifierState && this.renderer.setQualifier) {
-                    this.renderer.setQualifier(this.qualifierState);
+            if (active.renderer) {
+                active.renderer.setExposure(0);
+                active.renderer.setLift(0, 0, 0); active.renderer.setGamma(1, 1, 1); active.renderer.setGain(1, 1, 1);
+                active.renderer.setTemperature(0); active.renderer.setTint(0);
+                active.renderer.setContrast(1); active.renderer.setPivot(0.5); active.renderer.setSaturation(1);
+                active.renderer.setGrain(0); active.renderer.setDenoise(0);
+                active.renderer.setDoFEnabled(false); active.renderer.setFocusDistance(0.5); active.renderer.setAperture(0);
+                active.renderer.setApertureShape(0, 0, 1.0);
+                active.renderer.setLensDistortion(0, 0); active.renderer.setVignette(0, 0.5);
+                active.renderer.setCurveMix(0);
+                if (active.qualifierState && active.renderer.setQualifier) {
+                    active.renderer.setQualifier(active.qualifierState);
                 }
             }
-            this._gradingBypassed = false;
-            this.render();
+            active._gradingBypassed = false;
+            active.render();
             renderContent();
         };
         footer.appendChild(resetBtn);
-        this.controlsPanel.appendChild(footer);
+        innerWrap.appendChild(footer);
 
         // Keyboard shortcuts for undo/redo (scoped to document when HUD is visible)
         if (!this._undoKeyListener) {
             this._undoKeyListener = (e) => {
                 // Only respond when HUD is visible and not in a text input
-                if (!this.showControls) return;
+                if (!RadianceViewer.singletonHUD || RadianceViewer.singletonHUD.style.opacity === '0') return;
+                const active = RadianceViewer.activeInstance;
+                if (!active) return;
+
                 if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
                 if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
                     e.preventDefault();
-                    this.undo();
+                    active.undo();
                 } else if ((e.ctrlKey || e.metaKey) && e.key === 'z' && e.shiftKey) {
                     e.preventDefault();
-                    this.redo();
+                    active.redo();
                 } else if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
                     e.preventDefault();
-                    this.redo();
+                    active.redo();
                 }
 
                 // --- Printer Lights (1-4) ---
@@ -3833,22 +5821,22 @@ class RadianceViewer {
                     let changed = false;
 
                     if (e.key === '1') { // Red
-                        this.offset[0] += step; changed = true;
+                        active.offset[0] += step; changed = true;
                     } else if (e.key === '2') { // Green
-                        this.offset[1] += step; changed = true;
+                        active.offset[1] += step; changed = true;
                     } else if (e.key === '3') { // Blue
-                        this.offset[2] += step; changed = true;
+                        active.offset[2] += step; changed = true;
                     } else if (e.key === '4') { // Master
-                        this.offset[0] += step; this.offset[1] += step; this.offset[2] += step;
+                        active.offset[0] += step; active.offset[1] += step; active.offset[2] += step;
                         changed = true;
                     }
 
                     if (changed) {
                         e.preventDefault();
-                        this._pushUndoDebounced();
-                        if (this.renderer) this.renderer.setOffset(this.offset[0], this.offset[1], this.offset[2]);
-                        this.render();
-                        if (this._lastRenderContent) this._lastRenderContent(); // Refresh knobs
+                        active._pushUndoDebounced();
+                        if (active.renderer) active.renderer.setOffset(active.offset[0], active.offset[1], active.offset[2]);
+                        active.render();
+                        if (active._lastRenderContent) active._lastRenderContent(); // Refresh knobs
                     }
                 }
             };
@@ -3856,74 +5844,346 @@ class RadianceViewer {
         }
 
         // ═══════════════════════════════════════════════════════════════════════════
-        //                          TRANSPORT CONTROLS
+        //               TRANSPORT CONTROLS — Real-time Video + Frame Sequence
         // ═══════════════════════════════════════════════════════════════════════════
+
+        if (this.transportPanel) this.transportPanel.remove();
 
         this.transportPanel = document.createElement('div');
         this.transportPanel.style.cssText = `
             position: absolute;
-            bottom: 300px;
+            bottom: 16px;
             left: 50%;
             transform: translateX(-50%);
-            display: ${this.totalFrames > 1 ? 'flex' : 'none'};
-            align-items: center;
-            justify-content: center;
-            gap: 12px;
-            background: rgba(10, 10, 12, 0.9);
+            display: ${this.totalFrames > 1 || this.videoMode ? 'flex' : 'none'};
+            flex-direction: column;
+            align-items: stretch;
+            gap: 0;
+            background: rgba(8, 8, 14, 0.92);
             border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 8px;
-            padding: 6px 16px;
-            backdrop-filter: blur(8px);
+            border-radius: 10px;
+            padding: 0;
+            backdrop-filter: blur(12px);
             z-index: 101;
-            transition: opacity 0.4s, transform 0.4s;
-            opacity: 1;
+            width: min(640px, 90vw);
+            box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+            overflow: hidden;
             pointer-events: auto;
         `;
 
-        // The controlsPanel and transportPanel will be appended to canvasWrapper to float over image
+        // ── Top: Video drop zone / filename strip ──────────────────────────────
+        const fileStrip = document.createElement('div');
+        fileStrip.style.cssText = `
+            display: flex; align-items: center; gap: 8px;
+            padding: 5px 12px;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            font-size: 10px; font-family: monospace;
+            color: rgba(255,255,255,0.35);
+            cursor: pointer;
+        `;
+        const fileIcon = document.createElement('span');
+        fileIcon.innerHTML = `<svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+            <rect x="2" y="1" width="8" height="11" rx="1" stroke="currentColor" stroke-width="1.1"/>
+            <path d="M5 6l3 1.5L5 9V6z" fill="currentColor"/>
+        </svg>`;
+        fileIcon.style.cssText = 'opacity: 0.6; flex-shrink: 0; display: flex; align-items: center;';
+        this._fileNameLabel = document.createElement('span');
+        this._fileNameLabel.textContent = 'Drop video  •  MP4 / WebM / MOV  •  or click to browse';
+        this._fileNameLabel.style.cssText = 'flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;';
 
-        // Loop Toggle
-        const loopBtn = document.createElement('div');
-        loopBtn.innerHTML = '∞'; // Infinite symbol
-        loopBtn.title = 'Toggle Loop';
-        loopBtn.style.cssText = 'color: #888; cursor: pointer; font-size: 16px; width: 20px; text-align: center;';
-        loopBtn.onclick = () => {
-            this.loop = !this.loop;
-            loopBtn.style.color = this.loop ? this.theme.accent : '#888';
+        const unloadBtn = document.createElement('div');
+        unloadBtn.innerHTML = '✕';
+        unloadBtn.title = 'Unload video';
+        unloadBtn.style.cssText = `
+            font-size: 10px; color: rgba(255,255,255,0.25); cursor: pointer; padding: 2px 4px;
+            border-radius: 4px; transition: color 0.15s; display: none;
+        `;
+        unloadBtn.onmouseenter = () => { unloadBtn.style.color = '#ff6b6b'; };
+        unloadBtn.onmouseleave = () => { unloadBtn.style.color = 'rgba(255,255,255,0.25)'; };
+        unloadBtn.onclick = (e) => {
+            e.stopPropagation();
+            this.unloadVideo();
+            this._fileNameLabel.textContent = 'Drop video  •  MP4 / WebM / MOV  •  or click to browse';
+            unloadBtn.style.display = 'none';
+            if (this.totalFrames <= 1) this.transportPanel.style.display = 'none';
         };
-        this.transportPanel.appendChild(loopBtn);
 
-        // Prev Frame
-        const prevBtn = document.createElement('div');
-        prevBtn.textContent = '⏮';
-        prevBtn.style.cssText = 'color: #ccc; cursor: pointer; font-size: 14px;';
-        prevBtn.onclick = () => this.prevFrame();
-        this.transportPanel.appendChild(prevBtn);
+        fileStrip.appendChild(fileIcon);
+        fileStrip.appendChild(this._fileNameLabel);
+        fileStrip.appendChild(unloadBtn);
 
-        // Play/Pause
+        // Hidden file input
+        const fileInput = document.createElement('input');
+        fileInput.type = 'file';
+        fileInput.accept = 'video/mp4,video/webm,video/quicktime,video/x-matroska,video/*';
+        fileInput.style.display = 'none';
+        fileInput.onchange = (e) => {
+            const f = e.target.files[0];
+            if (!f) return;
+            this._fileNameLabel.textContent = f.name;
+            unloadBtn.style.display = '';
+            this.loadVideo(f);
+        };
+        fileStrip.appendChild(fileInput);
+
+        fileStrip.onclick = (e) => {
+            if (e.target === unloadBtn) return;
+            fileInput.click();
+        };
+
+        // Drag-and-drop on canvasWrapper
+        this.canvasWrapper.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            if ([...e.dataTransfer.types].includes('Files')) {
+                e.dataTransfer.dropEffect = 'copy';
+                fileStrip.style.background = 'rgba(0,168,255,0.08)';
+            }
+        });
+        this.canvasWrapper.addEventListener('dragleave', () => {
+            fileStrip.style.background = '';
+        });
+        this.canvasWrapper.addEventListener('drop', (e) => {
+            e.preventDefault();
+            fileStrip.style.background = '';
+            const f = [...e.dataTransfer.files].find(f => f.type.startsWith('video/'));
+            if (f) {
+                this._fileNameLabel.textContent = f.name;
+                unloadBtn.style.display = '';
+                this.transportPanel.style.display = 'flex';
+                this.loadVideo(f);
+            }
+        });
+
+        this.transportPanel.appendChild(fileStrip);
+
+        // ── Scrubber / Progress bar ────────────────────────────────────────────
+        const scrubberWrap = document.createElement('div');
+        scrubberWrap.style.cssText = 'position: relative; padding: 4px 12px 2px; display: flex; align-items: center; gap: 8px;';
+
+        // Timecode start
+        this._videoTimecode = document.createElement('span');
+        this._videoTimecode.textContent = '00:00:00:00';
+        this._videoTimecode.style.cssText = 'font-size: 9.5px; font-family: monospace; color: rgba(255,255,255,0.45); min-width: 62px; user-select: none;';
+
+        const scrubber = document.createElement('input');
+        scrubber.type = 'range';
+        scrubber.min = '0'; scrubber.max = '10000'; scrubber.step = '1'; scrubber.value = '0';
+        scrubber.style.cssText = `
+            flex: 1; height: 3px; cursor: pointer;
+            accent-color: ${this.theme.accent};
+            -webkit-appearance: none; appearance: none;
+            background: linear-gradient(to right, ${this.theme.accent} 0%, rgba(255,255,255,0.15) 0%);
+        `;
+        this._videoScrubber = scrubber;
+        this.frameCounter = scrubber; // alias so updateFrameDisplay() doesn't crash
+
+        let _scrubbing = false;
+        scrubber.addEventListener('mousedown', () => { _scrubbing = true; });
+        scrubber.addEventListener('mouseup', () => { _scrubbing = false; });
+        scrubber.addEventListener('input', () => {
+            const pct = parseInt(scrubber.value) / 10000;
+            // Update scrubber fill
+            scrubber.style.background = `linear-gradient(to right, ${this.theme.accent} ${pct * 100}%, rgba(255,255,255,0.15) ${pct * 100}%)`;
+            if (this.videoMode && this.videoEl) {
+                this.seekVideoTo(pct);
+            } else if (this.totalFrames > 1) {
+                const frameIdx = Math.round(pct * (this.totalFrames - 1));
+                this.setFrame(frameIdx);
+            }
+        });
+
+        // Duration label
+        this._videoDuration = document.createElement('span');
+        this._videoDuration.textContent = '00:00:00:00';
+        this._videoDuration.style.cssText = 'font-size: 9.5px; font-family: monospace; color: rgba(255,255,255,0.28); min-width: 62px; text-align: right; user-select: none;';
+
+        scrubberWrap.appendChild(this._videoTimecode);
+        scrubberWrap.appendChild(scrubber);
+        scrubberWrap.appendChild(this._videoDuration);
+        this.transportPanel.appendChild(scrubberWrap);
+
+        // ── Controls row ──────────────────────────────────────────────────────
+        const ctrlRow = document.createElement('div');
+        ctrlRow.style.cssText = 'display: flex; align-items: center; gap: 8px; padding: 6px 12px 8px; justify-content: space-between;';
+
+        // Left group: loop | step-back | prev | play | next | step-fwd
+        const leftGroup = document.createElement('div');
+        leftGroup.style.cssText = 'display: flex; align-items: center; gap: 6px;';
+
+        const mkBtn = (html, title, onClick, small = false) => {
+            const b = document.createElement('div');
+            b.innerHTML = html;
+            b.title = title;
+            b.style.cssText = `
+                color: ${small ? 'rgba(255,255,255,0.55)' : '#ddd'}; cursor: pointer;
+                font-size: ${small ? '12px' : '15px'}; width: ${small ? '18px' : '22px'};
+                display: flex; align-items: center; justify-content: center;
+                transition: color 0.12s; user-select: none;
+            `;
+            b.onmouseenter = () => { b.style.color = '#fff'; };
+            b.onmouseleave = () => { b.style.color = small ? 'rgba(255,255,255,0.55)' : '#ddd'; };
+            b.onclick = onClick;
+            return b;
+        };
+
+        const loopBtn = mkBtn('∞', 'Toggle Loop', () => {
+            this.loop = !this.loop;
+            if (this.videoEl) this.videoEl.loop = this.loop;
+            loopBtn.style.color = this.loop ? this.theme.accent : 'rgba(255,255,255,0.55)';
+        }, true);
+        loopBtn.style.fontSize = '17px';
+        loopBtn.style.color = this.loop ? this.theme.accent : 'rgba(255,255,255,0.55)';
+
+        const stepBackBtn = mkBtn('⇤', 'Step back 1 frame (Shift+←)', () => {
+            if (this.videoMode && this.videoEl) {
+                const fps = this._videoNativeFps || 25;
+                this.videoEl.currentTime = Math.max(0, this.videoEl.currentTime - 1 / fps);
+            } else this.prevFrame();
+        }, true);
+
+        const prevBtn = mkBtn('⏮', 'Previous frame (←)', () => {
+            if (this.videoMode && this.videoEl) this.videoEl.currentTime = 0;
+            else this.prevFrame();
+        }, false);
+
         const playBtn = document.createElement('div');
         playBtn.textContent = '▶';
-        playBtn.style.cssText = 'color: #fff; cursor: pointer; font-size: 18px; width: 24px; text-align: center;';
+        playBtn.title = 'Play / Pause (Space)';
+        playBtn.style.cssText = `
+            color: #fff; cursor: pointer; font-size: 18px; width: 30px; height: 30px;
+            display: flex; align-items: center; justify-content: center;
+            background: ${this.theme.accent}22; border: 1px solid ${this.theme.accent}55;
+            border-radius: 50%; transition: background 0.15s; user-select: none; flex-shrink: 0;
+        `;
+        playBtn.onmouseenter = () => { playBtn.style.background = this.theme.accent + '44'; };
+        playBtn.onmouseleave = () => { playBtn.style.background = this.theme.accent + '22'; };
         playBtn.onclick = () => this.togglePlayback();
-        this.playBtn = playBtn; // Save ref to update icon
-        this.transportPanel.appendChild(playBtn);
+        this.playBtn = playBtn;
 
-        // Next Frame
-        const nextBtn = document.createElement('div');
-        nextBtn.textContent = '⏭';
-        nextBtn.style.cssText = 'color: #ccc; cursor: pointer; font-size: 14px;';
-        nextBtn.onclick = () => this.nextFrame();
-        this.transportPanel.appendChild(nextBtn);
+        const nextBtn = mkBtn('⏭', 'Next frame (→)', () => {
+            if (this.videoMode && this.videoEl) this.videoEl.currentTime = this.videoEl.duration;
+            else this.nextFrame();
+        }, false);
 
-        // Frame Counter
+        const stepFwdBtn = mkBtn('⇥', 'Step forward 1 frame (Shift+→)', () => {
+            if (this.videoMode && this.videoEl) {
+                const fps = this._videoNativeFps || 25;
+                this.videoEl.currentTime = Math.min(this.videoEl.duration, this.videoEl.currentTime + 1 / fps);
+            } else this.nextFrame();
+        }, true);
+
+        leftGroup.appendChild(loopBtn);
+        leftGroup.appendChild(stepBackBtn);
+        leftGroup.appendChild(prevBtn);
+        leftGroup.appendChild(playBtn);
+        leftGroup.appendChild(nextBtn);
+        leftGroup.appendChild(stepFwdBtn);
+
+        // Center: frame counter
         this.frameCounter = document.createElement('div');
         this.frameCounter.textContent = '1 / 1';
-        this.frameCounter.style.cssText = 'color: #888; font-size: 11px; font-family: monospace; margin-left: 8px; min-width: 50px; text-align: center;';
-        this.transportPanel.appendChild(this.frameCounter);
+        this.frameCounter.style.cssText = 'color: rgba(255,255,255,0.35); font-size: 10px; font-family: monospace; min-width: 70px; text-align: center; user-select: none;';
 
-        // Float these over the canvas
+        // Right group: FPS selector | Speed selector
+        const rightGroup = document.createElement('div');
+        rightGroup.style.cssText = 'display: flex; align-items: center; gap: 8px;';
+
+        const mkSel = (label, options, current, onChange) => {
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'display: flex; align-items: center; gap: 4px;';
+            const lbl = document.createElement('span');
+            lbl.textContent = label;
+            lbl.style.cssText = 'font-size: 9px; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 0.5px;';
+            const sel = document.createElement('select');
+            sel.style.cssText = `
+                background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.7);
+                border: 1px solid rgba(255,255,255,0.1); border-radius: 4px;
+                padding: 2px 4px; font-size: 10px; font-family: monospace; cursor: pointer; outline: none;
+            `;
+            options.forEach(([val, txt]) => {
+                const opt = document.createElement('option');
+                opt.value = String(val); opt.textContent = txt;
+                if (String(val) === String(current)) opt.selected = true;
+                sel.appendChild(opt);
+            });
+            sel.onchange = (e) => onChange(e.target.value);
+            wrap.appendChild(lbl);
+            wrap.appendChild(sel);
+            return { wrap, sel };
+        };
+
+        const { wrap: fpsWrap, sel: fpsSel } = mkSel('FPS',
+            [[12, '12'], [15, '15'], [23.976, '23.97'], [24, '24'], [25, '25'], [29.97, '29.97'], [30, '30'], [48, '48'], [50, '50'], [60, '60']],
+            this.playbackFps || 24,
+            (v) => {
+                this.playbackFps = parseFloat(v);
+                if (this.videoEl) this._videoNativeFps = this.playbackFps;
+            }
+        );
+        this._fpsSel = fpsSel;
+
+        const { wrap: spdWrap, sel: spdSel } = mkSel('×',
+            [[0.25, '¼'], [0.5, '½'], [1, '1'], [1.5, '1.5'], [2, '2'], [4, '4']],
+            this.playbackSpeed || 1,
+            (v) => {
+                this.playbackSpeed = parseFloat(v);
+                if (this.videoEl) this.videoEl.playbackRate = this.playbackSpeed;
+            }
+        );
+
+        rightGroup.appendChild(fpsWrap);
+        rightGroup.appendChild(spdWrap);
+
+        // v3.0 #8.2: GPU Cache Purge Button
+        const purgeBtn = mkBtn('🧹', 'Clear GPU Frame Cache', () => {
+            if (this.renderer) {
+                this.renderer.clearFrameCache();
+                // If sequence mode, clear the frameImages array to force reload from disk/network
+                if (this.totalFrames > 1) {
+                    this.frameImages = [];
+                    this.updateFrameDisplay();
+                }
+                this._termLog('info', '[GPU] Cache purged. Memory released.');
+            }
+        }, true);
+        purgeBtn.style.marginLeft = '4px';
+        rightGroup.appendChild(purgeBtn);
+
+        ctrlRow.appendChild(leftGroup);
+        ctrlRow.appendChild(this.frameCounter);
+        ctrlRow.appendChild(rightGroup);
+        this.transportPanel.appendChild(ctrlRow);
+
+        // ── Space bar shortcut ─────────────────────────────────────────────────
+        // Wire into existing docKeyHandler if possible, otherwise add here
+        const spaceHandler = (e) => {
+            if (e.code === 'Space' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+                e.preventDefault();
+                this.togglePlayback();
+            }
+            if (e.code === 'ArrowLeft' && e.shiftKey) { stepBackBtn.onclick(); }
+            if (e.code === 'ArrowRight' && e.shiftKey) { stepFwdBtn.onclick(); }
+        };
+        if (!this._transportSpaceHandler) {
+            this._transportSpaceHandler = spaceHandler;
+            document.addEventListener('keydown', this._transportSpaceHandler);
+        }
+
+        // Float transport over the canvas
         this.canvasWrapper.appendChild(this.transportPanel);
-        this.canvasWrapper.appendChild(this.controlsPanel);
+
+
+        // ── Embed HUD into the right control panel (not floating on body) ──────
+        this.controlsPanel.classList.add('radiance-panel-embedded');
+        // Remove position/size override styles that only apply to floating mode
+        this.controlsPanel.style.left = '';
+        this.controlsPanel.style.top = '';
+        this.controlsPanel.style.width = '';
+        this.controlsPanel.style.height = '';
+        if (this.controlsPanel.parentNode !== this.rightControlPanel) {
+            if (this.controlsPanel.parentNode) this.controlsPanel.parentNode.removeChild(this.controlsPanel);
+            this.rightControlPanel.appendChild(this.controlsPanel);
+        }
 
         // Relative ordering for info bar
         if (this.bottomInfoBar) {
@@ -3936,7 +6196,7 @@ class RadianceViewer {
 
         const createMini = (lbl, min, max, val, step, cb) => {
             const k = this.createKnob(lbl, min, max, val, step, cb);
-            k.style.transform = 'scale(0.9)';
+            k.style.maxWidth = '80px';
             return k;
         };
 
@@ -3944,12 +6204,12 @@ class RadianceViewer {
         // 1. TOP BAR: Exp | Temp | Tint | Contrast | Pivot | Mid/Detail
         // ═════════════════════════════════════════════════════════════════════
         const topBar = document.createElement('div');
-        topBar.style.cssText = 'display: grid; grid-template-columns: repeat(6, 1fr); gap: 2px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 8px; justify-items: center;';
+        topBar.style.cssText = 'display: flex; flex-wrap: wrap; gap: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 8px; justify-content: space-evenly;';
 
-        // Exposure
+        // Exposure: Slider 0..10, but allow keyboard/manual push to 12.0 (shader limit)
         topBar.appendChild(createMini('EXP', -10.0, 10.0, this.exposure || 0.0, 0.1, v => {
-            this.exposure = v;
-            if (this.renderer) this.renderer.setExposure(v);
+            this.exposure = Math.max(-12.0, Math.min(12.0, v));
+            if (this.renderer) this.renderer.setExposure(this.exposure);
             this.render();
         }));
 
@@ -3965,9 +6225,9 @@ class RadianceViewer {
             this.render();
         }));
 
-        topBar.appendChild(createMini('CONTRAST', 0.5, 2.0, this.contrast || 1.0, 0.02, v => {
-            this.contrast = v;
-            if (this.renderer) this.renderer.setContrast(v);
+        topBar.appendChild(createMini('CONTRAST', 0.2, 3.0, this.contrast || 1.0, 0.02, v => {
+            this.contrast = Math.max(0.0, Math.min(5.0, v));
+            if (this.renderer) this.renderer.setContrast(this.contrast);
             this.render();
         }));
 
@@ -3987,47 +6247,231 @@ class RadianceViewer {
         container.appendChild(topBar);
 
         // ═════════════════════════════════════════════════════════════════════
-        // 2. COLOR WHEELS: Lift | Gamma | Gain | Offset
+        // 1b. EYEDROPPER WHITE BALANCE + SOFT CLIP
         // ═════════════════════════════════════════════════════════════════════
-        const wheelsRow = document.createElement('div');
-        wheelsRow.style.cssText = 'display: flex; justify-content: space-between; gap: 4px; padding: 4px 0;';
+        const wbRow = document.createElement('div');
+        wbRow.style.cssText = 'display: flex; align-items: center; gap: 8px; padding: 4px 0 6px; border-bottom: 1px solid rgba(255,255,255,0.06);';
 
-        // Lift
-        wheelsRow.appendChild(this.createColorWheel('LIFT', -0.2, 0.2, this.lift || [0, 0, 0], 0.005, (r, g, b) => {
-            this.lift = [r, g, b];
-            if (this.renderer) this.renderer.setLift(r, g, b);
+        // Eyedropper button
+        const eyeBtn = document.createElement('div');
+        eyeBtn.title = 'Click a grey/neutral pixel to auto-balance white point';
+        const isWbActive = this._wbPickerActive || false;
+        eyeBtn.innerHTML = `<span style="font-size:13px">🔬</span>`;
+        eyeBtn.style.cssText = `
+            padding: 3px 8px; border-radius: 4px; cursor: pointer; font-size: 9px; font-weight: bold;
+            border: 1px solid ${isWbActive ? '#6af' : 'rgba(255,255,255,0.15)'};
+            background: ${isWbActive ? 'rgba(80,160,255,0.2)' : 'rgba(255,255,255,0.05)'};
+            color: ${isWbActive ? '#6af' : '#aaa'};
+            display: flex; align-items: center; gap: 4px; white-space: nowrap;
+            transition: all 0.15s;
+        `;
+        eyeBtn.appendChild(Object.assign(document.createElement('span'), { textContent: 'WB PICK', style: { fontSize: '9px' } }));
+        eyeBtn.onclick = () => this._toggleWBPicker(eyeBtn);
+        wbRow.appendChild(eyeBtn);
+
+        // Soft Clip knob
+        const scWrap = document.createElement('div');
+        scWrap.style.cssText = 'display: flex; flex-direction: column; align-items: center; gap: 2px; margin-left: auto;';
+        scWrap.appendChild(createMini('S.CLIP', 0.0, 1.0, this.softClip || 0.0, 0.02, v => {
+            this.softClip = v;
+            if (this.renderer) this.renderer.setSoftClip(v);
             this.render();
         }));
+        wbRow.appendChild(scWrap);
 
-        // Gamma
-        wheelsRow.appendChild(this.createColorWheel('GAMMA', -0.5, 0.5, this.gamma ? this.gamma.map(x => x - 1.0) : [0, 0, 0], 0.01, (r, g, b) => {
-            this.gamma = [Math.max(0.1, 1.0 + r), Math.max(0.1, 1.0 + g), Math.max(0.1, 1.0 + b)];
-            if (this.renderer) this.renderer.setGamma(this.gamma[0], this.gamma[1], this.gamma[2]);
+        container.appendChild(wbRow);
+
+        // ═════════════════════════════════════════════════════════════════════
+        // 1c. RGB PRINTER LIGHTS
+        // ═════════════════════════════════════════════════════════════════════
+        const printerRow = document.createElement('div');
+        printerRow.style.cssText = 'display: flex; flex-direction: column; gap: 3px; padding: 4px 0 6px; border-bottom: 1px solid rgba(255,255,255,0.06);';
+
+        const printerLabel = document.createElement('div');
+        printerLabel.textContent = 'PRINTER LIGHTS';
+        printerLabel.style.cssText = 'font-size: 9px; font-weight: bold; color: #666; letter-spacing: 0.08em; padding-left: 2px;';
+        printerRow.appendChild(printerLabel);
+
+        const printerStrips = document.createElement('div');
+        printerStrips.style.cssText = 'display: flex; flex-direction: column; gap: 3px;';
+
+        const makePrinterStrip = (label, color, hexColor, getVal, setVal) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display: flex; align-items: center; gap: 6px;';
+
+            const lbl = document.createElement('span');
+            lbl.textContent = label;
+            lbl.style.cssText = `font-size: 9px; font-weight: bold; color: ${hexColor}; width: 10px; flex-shrink: 0;`;
+            row.appendChild(lbl);
+
+            const track = document.createElement('div');
+            track.style.cssText = `
+                flex: 1; height: 10px; background: linear-gradient(to right, #111 0%, ${hexColor}33 50%, ${hexColor}88 100%);
+                border-radius: 5px; border: 1px solid rgba(255,255,255,0.1); position: relative; cursor: ew-resize;
+            `;
+
+            const thumb = document.createElement('div');
+            const pct = (getVal() + 50) / 100;
+            thumb.style.cssText = `
+                position: absolute; top: 50%; transform: translate(-50%, -50%);
+                left: ${pct * 100}%; width: 10px; height: 10px;
+                border-radius: 50%; background: ${hexColor}; border: 1px solid #fff;
+                box-shadow: 0 0 4px ${hexColor}; pointer-events: none;
+            `;
+            track.appendChild(thumb);
+
+            const valLbl = document.createElement('span');
+            valLbl.textContent = getVal() > 0 ? `+${getVal()}` : `${getVal()}`;
+            valLbl.style.cssText = 'font-size: 9px; color: #888; width: 28px; text-align: right; font-family: monospace;';
+
+            const dblClick = () => {
+                setVal(0);
+                this.render();
+                const newPct = 0.5;
+                thumb.style.left = `${newPct * 100}%`;
+                valLbl.textContent = '0';
+            };
+            track.ondblclick = dblClick;
+
+            let dragging = false;
+            track.onmousedown = (e) => {
+                dragging = true;
+                e.preventDefault();
+            };
+            document.addEventListener('mousemove', (e) => {
+                if (!dragging) return;
+                const rect = track.getBoundingClientRect();
+                const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                const val = Math.round(pct * 100 - 50);
+                setVal(val);
+                thumb.style.left = `${pct * 100}%`;
+                valLbl.textContent = val > 0 ? `+${val}` : `${val}`;
+                this.render();
+            });
+            document.addEventListener('mouseup', () => { dragging = false; });
+
+            row.appendChild(track);
+            row.appendChild(valLbl);
+            return row;
+        };
+
+        printerStrips.appendChild(makePrinterStrip('R', 'red', '#ff4444',
+            () => this.printerR || 0, v => { this.printerR = v; if (this.renderer) this.renderer.setPrinterLights(this.printerR, this.printerG || 0, this.printerB || 0); }));
+        printerStrips.appendChild(makePrinterStrip('G', 'green', '#44ff44',
+            () => this.printerG || 0, v => { this.printerG = v; if (this.renderer) this.renderer.setPrinterLights(this.printerR || 0, this.printerG, this.printerB || 0); }));
+        printerStrips.appendChild(makePrinterStrip('B', 'blue', '#4488ff',
+            () => this.printerB || 0, v => { this.printerB = v; if (this.renderer) this.renderer.setPrinterLights(this.printerR || 0, this.printerG || 0, this.printerB); }));
+
+        printerRow.appendChild(printerStrips);
+        container.appendChild(printerRow);
+
+        // ═════════════════════════════════════════════════════════════════════
+        // 2. COLOR WHEELS TABS: Primary | Log
+        // ═════════════════════════════════════════════════════════════════════
+        const wheelsWrapper = document.createElement('div');
+        wheelsWrapper.style.cssText = 'display: flex; flex-direction: column; gap: 4px; padding: 4px 0;';
+
+        const wheelTabs = document.createElement('div');
+        wheelTabs.style.cssText = 'display: flex; gap: 8px; justify-content: center; margin-bottom: 4px;';
+
+        const renderWheels = () => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display: flex; justify-content: space-between; gap: 4px;';
+
+            if (this.activeWheelTab === 'LOG') {
+                row.appendChild(this.createColorWheel('SHADOW', -0.2, 0.2, this.logShadow || [0, 0, 0], 0.005, (r, g, b) => {
+                    this.logShadow = [r, g, b];
+                    if (this.renderer) this.renderer.setLogShadow(r, g, b);
+                    this.render();
+                }));
+                row.appendChild(this.createColorWheel('MIDTONE', -0.5, 0.5, this.logMidtone || [0, 0, 0], 0.01, (r, g, b) => {
+                    this.logMidtone = [r, g, b];
+                    if (this.renderer) this.renderer.setLogMidtone(r, g, b);
+                    this.render();
+                }));
+                row.appendChild(this.createColorWheel('HILIGHT', -0.5, 1.5, this.logHighlight || [0, 0, 0], 0.01, (r, g, b) => {
+                    this.logHighlight = [r, g, b];
+                    if (this.renderer) this.renderer.setLogHighlight(r, g, b);
+                    this.render();
+                }));
+            } else {
+                // Lift
+                row.appendChild(this.createColorWheel('LIFT', -0.2, 0.2, this.lift || [0, 0, 0], 0.005, (r, g, b) => {
+                    this.lift = [r, g, b];
+                    if (this.renderer) this.renderer.setLift(r, g, b);
+                    this.render();
+                }));
+                // Gamma
+                row.appendChild(this.createColorWheel('GAMMA', -0.5, 0.5, this.gamma ? this.gamma.map(x => x - 1.0) : [0, 0, 0], 0.01, (r, g, b) => {
+                    this.gamma = [Math.max(0.1, 1.0 + r), Math.max(0.1, 1.0 + g), Math.max(0.1, 1.0 + b)];
+                    if (this.renderer) this.renderer.setGamma(this.gamma[0], this.gamma[1], this.gamma[2]);
+                    this.render();
+                }));
+                // Gain
+                row.appendChild(this.createColorWheel('GAIN', -0.5, 1.5, this.gain ? this.gain.map(x => x - 1.0) : [0, 0, 0], 0.01, (r, g, b) => {
+                    this.gain = [Math.max(0, 1.0 + r), Math.max(0, 1.0 + g), Math.max(0, 1.0 + b)];
+                    if (this.renderer) this.renderer.setGain(this.gain[0], this.gain[1], this.gain[2]);
+                    this.render();
+                }));
+            }
+
+            // Offset (Global) is shared
+            row.appendChild(this.createColorWheel('OFFSET', -0.5, 0.5, this.offset || [0, 0, 0], 0.005, (r, g, b) => {
+                this.offset = [r, g, b];
+                if (this.renderer) this.renderer.setOffset(r, g, b);
+                this.render();
+            }));
+
+            return row;
+        };
+
+        if (this.colorScience === undefined) this.colorScience = 0;
+        if (!this.activeWheelTab) this.activeWheelTab = 'PRIMARY';
+        let wheelContainer = renderWheels();
+
+        ['PRIMARY', 'LOG'].forEach(tab => {
+            const btn = document.createElement('div');
+            btn.textContent = tab;
+            btn.style.cssText = `font-size: 10px; font-weight: bold; cursor: pointer; padding: 2px 8px; border-radius: 4px; color: ${this.activeWheelTab === tab ? '#fff' : '#666'}; background: ${this.activeWheelTab === tab ? 'rgba(255,255,255,0.1)' : 'transparent'};`;
+            btn.onclick = () => {
+                this.activeWheelTab = tab;
+                const newWheels = renderWheels();
+                wheelsWrapper.replaceChild(newWheels, wheelContainer);
+                wheelContainer = newWheels;
+                Array.from(wheelTabs.children).forEach(c => {
+                    const isA = c.textContent === tab;
+                    c.style.color = isA ? '#fff' : '#666';
+                    c.style.background = isA ? 'rgba(255,255,255,0.1)' : 'transparent';
+                });
+            };
+            wheelTabs.appendChild(btn);
+        });
+
+        wheelsWrapper.appendChild(wheelTabs);
+
+        const csSelect = document.createElement('select');
+        csSelect.style.cssText = 'background: #222; color: #fff; border: 1px solid #444; border-radius: 4px; padding: 2px 4px; font-size: 10px; outline: none; margin-left: auto; cursor: pointer;';
+        const optLin = document.createElement('option'); optLin.value = 0; optLin.textContent = 'Linear (sRGB)';
+        const optAces = document.createElement('option'); optAces.value = 1; optAces.textContent = 'ACEScct';
+        csSelect.appendChild(optLin);
+        csSelect.appendChild(optAces);
+        csSelect.value = this.colorScience || 0;
+        csSelect.onchange = (e) => {
+            this.colorScience = parseInt(e.target.value);
+            if (this.renderer) this.renderer.setColorScience(this.colorScience);
             this.render();
-        }));
+        };
 
-        // Gain
-        wheelsRow.appendChild(this.createColorWheel('GAIN', -0.5, 1.5, this.gain ? this.gain.map(x => x - 1.0) : [0, 0, 0], 0.01, (r, g, b) => {
-            this.gain = [Math.max(0, 1.0 + r), Math.max(0, 1.0 + g), Math.max(0, 1.0 + b)];
-            if (this.renderer) this.renderer.setGain(this.gain[0], this.gain[1], this.gain[2]);
-            this.render();
-        }));
-
-        // Offset (Global)
-        wheelsRow.appendChild(this.createColorWheel('OFFSET', -0.5, 0.5, this.offset || [0, 0, 0], 0.005, (r, g, b) => {
-            this.offset = [r, g, b];
-            if (this.renderer) this.renderer.setOffset(r, g, b);
-            this.render();
-        }));
-
-        container.appendChild(wheelsRow);
+        wheelTabs.appendChild(csSelect);
+        wheelsWrapper.appendChild(wheelContainer);
+        container.appendChild(wheelsWrapper);
 
 
         // ═════════════════════════════════════════════════════════════════════
         // 3. BOTTOM BAR: Boost | Shadows | Highlights | Sat | Hue | Luma Mix
         // ═════════════════════════════════════════════════════════════════════
         const botBar = document.createElement('div');
-        botBar.style.cssText = 'display: grid; grid-template-columns: repeat(6, 1fr); gap: 2px; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 8px; justify-items: center;';
+        botBar.style.cssText = 'display: flex; flex-wrap: wrap; gap: 2px 0; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 8px; justify-content: space-evenly;';
 
         // Color Boost
         botBar.appendChild(createMini('C.BOOST', 0.0, 2.0, this.colorBoost || 0.0, 0.05, v => {
@@ -4081,7 +6525,7 @@ class RadianceViewer {
 
         // ─── Grain Knobs Row ──────────────────────────────
         const grid = document.createElement('div');
-        grid.style.cssText = 'display: flex; gap: 16px; justify-content: flex-start;';
+        grid.style.cssText = 'display: flex; flex-wrap: wrap; gap: 8px 0; justify-content: space-evenly;';
 
         // Grain Amount
         grid.appendChild(this.createKnob('GRAIN', 0.0, 1.0, this.grain || 0.0, 0.05, v => {
@@ -4112,6 +6556,38 @@ class RadianceViewer {
         }));
 
         container.appendChild(grid);
+
+        // Animate toggle — below grain knobs
+        const animRow = document.createElement('div');
+        animRow.style.cssText = 'display: flex; align-items: center; gap: 10px; margin-top: 2px; margin-bottom: 4px;';
+
+        const animBtn = document.createElement('div');
+        const isAnimOn = !!this.grainAnimate;
+        animBtn.textContent = isAnimOn ? '⏵ GRAIN ANIMATE  ON' : '⏸ GRAIN ANIMATE  OFF';
+        animBtn.style.cssText = `
+            font-size: 9px; font-weight: 600; letter-spacing: 0.08em; cursor: pointer;
+            padding: 3px 10px; border-radius: 3px; user-select: none;
+            border: 1px solid ${isAnimOn ? 'rgba(255,180,60,0.5)' : 'rgba(255,255,255,0.1)'};
+            background: ${isAnimOn ? 'rgba(255,180,60,0.12)' : 'rgba(255,255,255,0.03)'};
+            color: ${isAnimOn ? '#ffa830' : '#555'};
+            transition: all 0.15s;
+        `;
+        const animNote = document.createElement('div');
+        animNote.style.cssText = 'font-size: 8px; color: #444;';
+        animNote.textContent = 'Static for stills · Animated for video';
+
+        animBtn.onclick = () => {
+            this.grainAnimate = !this.grainAnimate;
+            if (this.renderer) this.renderer.setGrainAnimate(this.grainAnimate);
+            animBtn.textContent = this.grainAnimate ? '⏵ GRAIN ANIMATE  ON' : '⏸ GRAIN ANIMATE  OFF';
+            animBtn.style.borderColor = this.grainAnimate ? 'rgba(255,180,60,0.5)' : 'rgba(255,255,255,0.1)';
+            animBtn.style.background = this.grainAnimate ? 'rgba(255,180,60,0.12)' : 'rgba(255,255,255,0.03)';
+            animBtn.style.color = this.grainAnimate ? '#ffa830' : '#555';
+            this.render();
+        };
+        animRow.appendChild(animBtn);
+        animRow.appendChild(animNote);
+        container.appendChild(animRow);
 
         // ─── Film Stock Presets ───────────────────────────
         const presetLabel = document.createElement('div');
@@ -4182,9 +6658,9 @@ class RadianceViewer {
 
         const dofCheck = document.createElement('div');
         dofCheck.innerHTML = `
-            <input type="checkbox" id="dof-enable" ${this.dofEnabled ? 'checked' : ''}>
-            <label for="dof-enable" style="color: #ccc; font-size: 11px; margin-left: 4px;">Enable DoF</label>
-        `;
+        <input type="checkbox" id="dof-enable" ${this.dofEnabled ? 'checked' : ''}>
+        <label for="dof-enable" style="color: #ccc; font-size: 11px; margin-left: 4px;">Enable DoF</label>
+    `;
         dofCheck.querySelector('input').onchange = (e) => {
             this.dofEnabled = e.target.checked;
             if (this.renderer) this.renderer.setDoFEnabled(this.dofEnabled);
@@ -4207,7 +6683,7 @@ class RadianceViewer {
 
         // 2. Main Knobs Row (Focus, Aperture, Distortion)
         const knobsRow = document.createElement('div');
-        knobsRow.style.cssText = 'display: flex; gap: 16px; justify-content: space-around;';
+        knobsRow.style.cssText = 'display: flex; flex-wrap: wrap; gap: 8px 0; justify-content: space-evenly;';
 
         knobsRow.appendChild(this.createKnob('FOCUS', 0.0, 1.0, this.focusDistance || 0.5, 0.01, v => {
             this.focusDistance = v;
@@ -4288,29 +6764,51 @@ class RadianceViewer {
         signaturePresets.forEach(p => {
             const btn = document.createElement('div');
             btn.textContent = p.label;
-            btn.style.cssText = presetBtnStyle;
-            btn.onmouseenter = () => btn.style.background = 'rgba(255,255,255,0.12)';
-            btn.onmouseleave = () => btn.style.background = 'rgba(255,255,255,0.05)';
+            btn.dataset.sigLabel = p.label;
+            const isActiveSig = this.activeLensSignature === p.label;
+            btn.style.cssText = presetBtnStyle + (isActiveSig ? presetBtnActiveStyle : '');
+            btn.onmouseenter = () => { if (this.activeLensSignature !== p.label) btn.style.background = 'rgba(255,255,255,0.12)'; };
+            btn.onmouseleave = () => { if (this.activeLensSignature !== p.label) btn.style.background = 'rgba(255,255,255,0.05)'; };
             btn.onclick = () => {
-                this.apertureBlades = p.blades;
-                this.apertureRotation = p.angle;
-                this.apertureAnamorphic = p.anamorphic || 1.0;
-                this.lensDistortion = p.distort || 0.0;
-                this.lensFringe = p.fringe || 0.0;
-                this.halation = p.halation || 0.0;
-                this.diffusion = p.diffusion || 0.0;
-                this.bokehOpticalVig = p.opticalVig || 0.0;
-                this.bokehHighlightBias = p.highlight || 0.0;
+                const isAlreadyActive = this.activeLensSignature === p.label;
+
+                // Update all sibling buttons to deactivated style
+                sigRow.querySelectorAll('div').forEach(b => {
+                    b.style.cssText = presetBtnStyle;
+                });
+
+                if (isAlreadyActive) {
+                    // Toggle OFF — reset to neutral
+                    this.activeLensSignature = null;
+                    this.apertureBlades = 0; this.apertureRotation = 0;
+                    this.apertureAnamorphic = 1.0;
+                    this.lensDistortion = 0.0; this.lensFringe = 0.0;
+                    this.halation = 0.0; this.diffusion = 0.0;
+                    this.bokehOpticalVig = 0.0; this.bokehHighlightBias = 0.0;
+                } else {
+                    // Apply preset
+                    this.activeLensSignature = p.label;
+                    btn.style.cssText = presetBtnStyle + presetBtnActiveStyle;
+                    this.apertureBlades = p.blades;
+                    this.apertureRotation = p.angle;
+                    this.apertureAnamorphic = p.anamorphic || 1.0;
+                    this.lensDistortion = p.distort || 0.0;
+                    this.lensFringe = p.fringe || 0.0;
+                    this.halation = p.halation || 0.0;
+                    this.diffusion = p.diffusion || 0.0;
+                    this.bokehOpticalVig = p.opticalVig || 0.0;
+                    this.bokehHighlightBias = p.highlight || 0.0;
+                }
 
                 if (this.renderer) {
-                    this.renderer.setApertureShape(p.blades, p.angle, this.apertureAnamorphic);
+                    this.renderer.setApertureShape(this.apertureBlades, this.apertureRotation, this.apertureAnamorphic);
                     this.renderer.setLensDistortion(this.lensDistortion, this.lensFringe);
                     this.renderer.setHalation(this.halation);
                     this.renderer.setDiffusion(this.diffusion);
                     this.renderer.setBokehPhysics(this.bokehHighlightBias, this.bokehSoapBubble || 0.0, this.bokehOpticalVig);
                 }
                 this.render();
-                this.renderLensTab(this.tabContentContainer);
+                // No full renderLensTab() — we update the DOM in-place above
             };
             sigRow.appendChild(btn);
         });
@@ -4318,7 +6816,7 @@ class RadianceViewer {
 
         // ─── Manual Shape Knobs ──────────────────────────
         const shapeGrid = document.createElement('div');
-        shapeGrid.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;';
+        shapeGrid.style.cssText = 'display: flex; flex-wrap: wrap; gap: 8px 0; justify-content: space-evenly;';
 
         shapeGrid.appendChild(this.createKnob('BLADES', 0, 9, this.apertureBlades || 0, 1, v => {
             this.apertureBlades = Math.round(v);
@@ -4347,7 +6845,7 @@ class RadianceViewer {
         filterGroup.innerHTML = '<div style="color: #888; font-size: 10px; margin-bottom: 4px; text-transform: uppercase;">Optical Filters</div>';
 
         const filterGrid = document.createElement('div');
-        filterGrid.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;';
+        filterGrid.style.cssText = 'display: flex; flex-wrap: wrap; gap: 8px 0; justify-content: space-evenly;';
 
         filterGrid.appendChild(this.createKnob('FRINGE', 0.0, 2.0, this.lensFringe || 0.0, 0.05, v => {
             this.lensFringe = v;
@@ -4376,7 +6874,7 @@ class RadianceViewer {
         fxGroup.innerHTML = '<div style="color: #888; font-size: 10px; margin-bottom: 4px; text-transform: uppercase;">Lens Effects</div>';
 
         const fxGrid = document.createElement('div');
-        fxGrid.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;';
+        fxGrid.style.cssText = 'display: flex; flex-wrap: wrap; gap: 8px 0; justify-content: space-evenly;';
 
         const diffPresets = [
             { label: 'Pro-Mist 1/4', bloom: 0.15, halation: 0.1, diffusion: 0.2 },
@@ -4436,7 +6934,7 @@ class RadianceViewer {
         bokehGroup.innerHTML = '<div style="color: #888; font-size: 10px; margin-bottom: 4px; text-transform: uppercase;">Bokeh Physics</div>';
 
         const bokehGrid = document.createElement('div');
-        bokehGrid.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;';
+        bokehGrid.style.cssText = 'display: flex; flex-wrap: wrap; gap: 8px 0; justify-content: space-evenly;';
 
         bokehGrid.appendChild(this.createKnob('HIGHLIGHT', 0.0, 5.0, this.bokehHighlightBias || 0.0, 0.1, v => {
             this.bokehHighlightBias = v;
@@ -4461,23 +6959,35 @@ class RadianceViewer {
     }
 
     renderCurvesTab(container) {
-        container.style.cssText = 'display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 10px; height: 100%; overflow: hidden;';
+        container.style.cssText = 'display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 10px;';
 
-        // 1. Create Editor Container
+        // 1. Create Editor Container — fixed height to prevent infinite resize loop
+        // (parent HUD is height:auto, so 100% or flex:1 would feed back into itself)
         const editorContainer = document.createElement('div');
-        editorContainer.style.cssText = 'position: relative; flex: 1; min-height: 200px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden;';
+        editorContainer.style.cssText = 'position: relative; height: 260px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden;';
         container.appendChild(editorContainer);
 
         // 2. Initialize Curve Editor
         if (!this.curveEditor) {
-            this.curveEditor = new RadianceCurveEditor(280, 280, this.theme, (data) => {
+            this.curveEditor = new RadianceCurveEditor(280, 280, this.theme, (data, secData) => {
                 if (this.renderer) {
                     this.renderer.updateCurveLut(data);
+                    if (secData) {
+                        this.renderer.updateSecondaryCurveLut(secData);
+                        // Only activate secondary curves if they were actually edited
+                        // (identity LUT has all values at exactly 0.5)
+                        const isIdentity = secData.every((v, i) => i % 4 === 3 ? true : Math.abs(v - 0.5) < 0.001);
+                        if (!isIdentity) {
+                            this.renderer.setSecondaryCurveMix(1.0);
+                        }
+                    }
                     this.renderer.setCurveMix(this.curveMix !== undefined ? this.curveMix : 1.0);
                     this.render();
                 }
             });
             if (this.image) this.curveEditor.updateHistogram(this.image);
+            // Immediately upload neutral default LUTs to clear any stale texture state
+            this.curveEditor.notifyChange();
         }
 
         editorContainer.appendChild(this.curveEditor.canvas);
@@ -4497,23 +7007,25 @@ class RadianceViewer {
         const channels = document.createElement('div');
         channels.style.cssText = 'position: absolute; top: 10px; left: 36px; display: flex; gap: 4px; align-items: center;';
 
-        ['RGB', 'R', 'G', 'B'].forEach(ch => {
+        ['RGB', 'R', 'G', 'B', 'HueVsHue', 'HueVsSat', 'HueVsLuma'].forEach(ch => {
             const btn = document.createElement('div');
-            btn.textContent = ch;
+            const label = ch === 'HueVsHue' ? 'HvH' : ch === 'HueVsSat' ? 'HvS' : ch === 'HueVsLuma' ? 'HvL' : ch;
+            btn.textContent = label;
             const isActive = this.curveEditor.activeChannel === ch;
-            const color = ch === 'R' ? '#ff4d4d' : ch === 'G' ? '#4dff4d' : ch === 'B' ? '#4d4dff' : '#ffffff';
+            const color = ch === 'R' ? '#ff4d4d' : ch === 'G' ? '#4dff4d' : ch === 'B' ? '#4d4dff' :
+                ch === 'HueVsHue' ? '#ffaaaa' : ch === 'HueVsSat' ? '#ffff44' : ch === 'HueVsLuma' ? '#44ffaa' : '#ffffff';
 
             btn.style.cssText = `
-                width: 32px; height: 20px;
-                background: ${isActive ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.6)'};
-                color: ${isActive ? '#fff' : color};
-                border: 1px solid ${isActive ? color : 'rgba(255,255,255,0.1)'};
-                border-radius: 3px;
-                display: flex; align-items: center; justify-content: center;
-                font-size: 10px; font-weight: bold; cursor: pointer;
-                transition: all 0.15s;
-                text-shadow: ${isActive ? `0 0 5px ${color}` : 'none'};
-            `;
+            width: 32px; height: 20px;
+            background: ${isActive ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.6)'};
+            color: ${isActive ? '#fff' : color};
+            border: 1px solid ${isActive ? color : 'rgba(255,255,255,0.1)'};
+            border-radius: 3px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 10px; font-weight: bold; cursor: pointer;
+            transition: all 0.15s;
+            text-shadow: ${isActive ? `0 0 5px ${color}` : 'none'};
+        `;
             btn.onmouseenter = () => { if (!isActive) btn.style.background = 'rgba(255,255,255,0.1)'; };
             btn.onmouseleave = () => { if (!isActive) btn.style.background = 'rgba(0,0,0,0.6)'; };
             btn.onclick = () => {
@@ -4691,9 +7203,9 @@ class RadianceViewer {
         // Enable Toggle
         const enableCheck = document.createElement('div');
         enableCheck.innerHTML = `
-            <input type="checkbox" id="qual-enable" ${this.qualifierState.enabled ? 'checked' : ''}>
-            <label for="qual-enable" style="color: #ccc; font-size: 11px; margin-left: 4px;">Active</label>
-        `;
+        <input type="checkbox" id="qual-enable" ${this.qualifierState.enabled ? 'checked' : ''}>
+        <label for="qual-enable" style="color: #ccc; font-size: 11px; margin-left: 4px;">Active</label>
+    `;
         enableCheck.querySelector('input').onchange = (e) => {
             this.qualifierState.enabled = e.target.checked;
             update();
@@ -4703,9 +7215,9 @@ class RadianceViewer {
         // Show Mask
         const maskCheck = document.createElement('div');
         maskCheck.innerHTML = `
-            <input type="checkbox" id="qual-mask" ${this.qualifierState.showMask ? 'checked' : ''}>
-            <label for="qual-mask" style="color: #ccc; font-size: 11px; margin-left: 4px;">Show Mask</label>
-        `;
+        <input type="checkbox" id="qual-mask" ${this.qualifierState.showMask ? 'checked' : ''}>
+        <label for="qual-mask" style="color: #ccc; font-size: 11px; margin-left: 4px;">Show Mask</label>
+    `;
         maskCheck.querySelector('input').onchange = (e) => {
             this.qualifierState.showMask = e.target.checked;
             update();
@@ -4790,9 +7302,9 @@ class RadianceViewer {
         // Invert
         const invertCheck = document.createElement('div');
         invertCheck.innerHTML = `
-            <input type="checkbox" id="mask-invert" ${this.maskState.invert ? 'checked' : ''}>
-            <label for="mask-invert" style="color: #ccc; font-size: 11px; margin-left: 4px;">Invert</label>
-        `;
+        <input type="checkbox" id="mask-invert" ${this.maskState.invert ? 'checked' : ''}>
+        <label for="mask-invert" style="color: #ccc; font-size: 11px; margin-left: 4px;">Invert</label>
+    `;
         invertCheck.querySelector('input').onchange = (e) => {
             this.maskState.invert = e.target.checked;
             update();
@@ -4802,9 +7314,9 @@ class RadianceViewer {
         // Show Overlay
         const overlayCheck = document.createElement('div');
         overlayCheck.innerHTML = `
-            <input type="checkbox" id="mask-overlay" ${this.maskState.showOverlay ? 'checked' : ''}>
-            <label for="mask-overlay" style="color: #ccc; font-size: 11px; margin-left: 4px;">Overlay</label>
-        `;
+        <input type="checkbox" id="mask-overlay" ${this.maskState.showOverlay ? 'checked' : ''}>
+        <label for="mask-overlay" style="color: #ccc; font-size: 11px; margin-left: 4px;">Overlay</label>
+    `;
         overlayCheck.querySelector('input').onchange = (e) => {
             this.maskState.showOverlay = e.target.checked;
             update();
@@ -5072,6 +7584,19 @@ class RadianceViewer {
         grabBtn.onclick = () => this.grabStill();
         refRow.appendChild(grabBtn);
 
+        // Clear Gallery Button
+        const clearBtn = document.createElement('button');
+        clearBtn.textContent = '🗑️ CLEAR';
+        clearBtn.style.cssText = 'background: #3a2020; color: #ff8888; border: 1px solid #552222; padding: 6px 12px; border-radius: 4px; font-size: 10px; cursor: pointer; font-weight: bold;';
+        clearBtn.onclick = () => {
+            if (this.renderer) this.renderer.clearReferenceShelf();
+            if (this.galleryGrid) {
+                this.galleryGrid.innerHTML = '';
+                this.savedStills = 0;
+            }
+        };
+        refRow.appendChild(clearBtn);
+
         const refCheckGroup = document.createElement('div');
         refCheckGroup.style.cssText = 'display: flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.03); padding: 5px 10px; border-radius: 4px;';
 
@@ -5090,10 +7615,15 @@ class RadianceViewer {
         refLbl.htmlFor = 'wipe-ref';
         refLbl.textContent = 'Use Ref';
         refLbl.style.cssText = 'color: #888; font-size: 10px; cursor: pointer;';
-        refCheckGroup.appendChild(refLbl);
         refRow.appendChild(refCheckGroup);
 
         refGroup.appendChild(refRow);
+
+        // Add Gallery Grid container below the buttons
+        this.galleryGrid = document.createElement('div');
+        this.galleryGrid.style.cssText = 'display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; margin-bottom: 8px;';
+        refGroup.appendChild(this.galleryGrid);
+
         container.appendChild(refGroup);
 
         // 3. Overlays / Grids
@@ -5142,10 +7672,35 @@ class RadianceViewer {
         exportRow.appendChild(saveBtn);
 
         const cubeBtn = document.createElement('button');
-        cubeBtn.textContent = '📤 EXPORT .CUBE';
+        cubeBtn.textContent = '📤 .CUBE';
         cubeBtn.style.cssText = 'background: #2a2a30; color: #ffca28; border: 1px solid #ffca2833; padding: 6px; border-radius: 4px; font-size: 10px; cursor: pointer; flex: 1; font-weight: bold;';
         cubeBtn.onclick = () => this.exportToCube();
         exportRow.appendChild(cubeBtn);
+
+        const cdlExportBtn = document.createElement('button');
+        cdlExportBtn.textContent = '📤 .CDL';
+        cdlExportBtn.style.cssText = 'background: #2a302a; color: #88ff88; border: 1px solid #88ff8833; padding: 6px; border-radius: 4px; font-size: 10px; cursor: pointer; flex: 1; font-weight: bold;';
+        cdlExportBtn.onclick = () => this.exportToCDL();
+        exportRow.appendChild(cdlExportBtn);
+
+        const cdlImportBtn = document.createElement('button');
+        cdlImportBtn.textContent = '📥 .CDL';
+        cdlImportBtn.style.cssText = 'background: #2a302a; color: #88ff88; border: 1px solid #88ff8833; padding: 6px; border-radius: 4px; font-size: 10px; cursor: pointer; flex: 1; font-weight: bold;';
+
+        // Setup hidden file input for CDL import
+        const cdlInput = document.createElement('input');
+        cdlInput.type = 'file';
+        cdlInput.accept = '.cdl';
+        cdlInput.style.display = 'none';
+        cdlInput.onchange = (e) => {
+            if (e.target.files && e.target.files.length > 0) {
+                this.importFromCDL(e.target.files[0]);
+            }
+        };
+        exportRow.appendChild(cdlInput);
+
+        cdlImportBtn.onclick = () => cdlInput.click();
+        exportRow.appendChild(cdlImportBtn);
 
         exportGroup.appendChild(exportRow);
 
@@ -5182,23 +7737,116 @@ class RadianceViewer {
         }
 
         container.appendChild(exportGroup);
+
+        // 5. Accessibility settings
+        const accessGroup = document.createElement('div');
+        accessGroup.style.marginTop = '4px';
+        accessGroup.innerHTML = '<div style="color: #888; font-size: 10px; margin-bottom: 8px; text-transform: uppercase; font-weight: bold;">Accessibility</div>';
+
+        const hcRow = document.createElement('div');
+        hcRow.style.cssText = 'display: flex; align-items: center; gap: 10px; background: rgba(255,255,255,0.03); padding: 8px; border-radius: 6px;';
+
+        const hcCheck = document.createElement('input');
+        hcCheck.type = 'checkbox';
+        hcCheck.id = 'hud-high-contrast';
+        hcCheck.checked = this.highContrast || false;
+        hcCheck.onchange = (e) => {
+            this.highContrast = e.target.checked;
+            localStorage.setItem('radiance_high_contrast', this.highContrast ? '1' : '0');
+            if (this.highContrast) {
+                RadianceViewer.singletonHUD?.classList.add('high-contrast');
+            } else {
+                RadianceViewer.singletonHUD?.classList.remove('high-contrast');
+            }
+        };
+        hcRow.appendChild(hcCheck);
+
+        const hcLbl = document.createElement('label');
+        hcLbl.htmlFor = 'hud-high-contrast';
+        hcLbl.textContent = 'High Contrast Mode';
+        hcLbl.style.cssText = 'color: #ccc; font-size: 11px; cursor: pointer; flex: 1;';
+        hcRow.appendChild(hcLbl);
+
+        accessGroup.appendChild(hcRow);
+        container.appendChild(accessGroup);
     }
 
     async grabStill() {
         if (!this.renderer || !this.canvas) return;
 
-        // Capture the current rendered output
-        const still = new Image();
-        still.src = this.canvas.toDataURL('image/png');
+        // 1. Tell WebGL to grab the full-res texture directly into its GPU shelf
+        const slot = this.renderer.grabReferenceStill();
 
-        still.onload = () => {
-            // Upload to renderer as reference texture
-            if (this.renderer) {
-                this.renderer.updateReferenceStill(still);
-                console.log("[Radiance] Reference still captured.");
-                // Flash the screen briefly to indicate capture
-                this.canvas.style.filter = 'brightness(2)';
-                setTimeout(() => { this.canvas.style.filter = ''; }, 100);
+        // 2. Downscale canvas for UI thumbnail to save memory
+        const thumbCanvas = document.createElement('canvas');
+        const aspect = this.canvas.width / this.canvas.height;
+        thumbCanvas.width = 160;
+        thumbCanvas.height = 160 / aspect;
+        const ctx = thumbCanvas.getContext('2d');
+        ctx.drawImage(this.canvas, 0, 0, thumbCanvas.width, thumbCanvas.height);
+
+        const thumb = new Image();
+        thumb.src = thumbCanvas.toDataURL('image/jpeg', 0.8);
+
+        thumb.onload = () => {
+            // Flash screen
+            this.canvas.style.filter = 'brightness(2)';
+            setTimeout(() => { this.canvas.style.filter = ''; }, 100);
+
+            // Create UI Thumbnail
+            if (this.galleryGrid) {
+                const thumbWrapper = document.createElement('div');
+                thumbWrapper.style.cssText = `
+                width: 72px; height: 48px; position: relative; cursor: pointer;
+                border: 2px solid transparent; border-radius: 4px; overflow: hidden;
+                transition: border 0.2s;
+            `;
+
+                thumb.style.cssText = 'width: 100%; height: 100%; object-fit: cover; display: block;';
+                thumbWrapper.appendChild(thumb);
+
+                // Number label
+                const lbl = document.createElement('div');
+                lbl.textContent = (slot + 1).toString();
+                lbl.style.cssText = 'position: absolute; bottom: 2px; right: 4px; font-size: 10px; font-weight: bold; color: white; text-shadow: 0 1px 2px black;';
+                thumbWrapper.appendChild(lbl);
+
+                thumbWrapper.onclick = () => {
+                    this.renderer.swapReferenceShelf(slot);
+                    // Update border
+                    Array.from(this.galleryGrid.children).forEach(c => c.style.borderColor = 'transparent');
+                    thumbWrapper.style.borderColor = '#6a8aff';
+
+                    // Auto-enable wipe
+                    const wipeCheck = document.getElementById('wipe-ref');
+                    if (wipeCheck) {
+                        wipeCheck.checked = true;
+                        this.wipeRefEnabled = true;
+                    }
+                    this.render();
+                };
+
+                // Add MATCH button inside thumbnail
+                const matchBtn = document.createElement('div');
+                matchBtn.textContent = 'MATCH';
+                matchBtn.style.cssText = `
+                position: absolute; top: 2px; right: 2px;
+                background: rgba(40,40,255,0.8); color: white;
+                font-size: 8px; font-weight: bold; padding: 2px 4px;
+                border-radius: 2px; cursor: pointer; display: none;
+            `;
+
+                thumbWrapper.onmouseenter = () => matchBtn.style.display = 'block';
+                thumbWrapper.onmouseleave = () => matchBtn.style.display = 'none';
+
+                matchBtn.onclick = (e) => {
+                    e.stopPropagation(); // prevent wipe trigger
+                    this.matchGrade(slot);
+                };
+                thumbWrapper.appendChild(matchBtn);
+
+                this.galleryGrid.appendChild(thumbWrapper);
+                this.savedStills = (this.savedStills || 0) + 1;
             }
         };
     }
@@ -5223,13 +7871,13 @@ class RadianceViewer {
             btn.textContent = m.label;
             const isActive = this.scopeMode === m.id;
             btn.style.cssText = `
-                flex: 1; text - align: center; padding: 3px 0;
-        background: ${isActive ? 'rgba(106,138,255,0.2)' : 'rgba(255,255,255,0.04)'};
-        color: ${isActive ? '#8aafff' : '#777'};
-        border: 1px solid ${isActive ? 'rgba(106,138,255,0.4)' : 'rgba(255,255,255,0.08)'};
-        border - radius: 3px; font - size: 9px; cursor: pointer;
-        transition: background 0.15s;
-        `;
+            flex: 1; text-align: center; padding: 3px 0;
+    background: ${isActive ? 'rgba(106,138,255,0.2)' : 'rgba(255,255,255,0.04)'};
+    color: ${isActive ? '#8aafff' : '#777'};
+    border: 1px solid ${isActive ? 'rgba(106,138,255,0.4)' : 'rgba(255,255,255,0.08)'};
+    border-radius: 3px; font-size: 9px; cursor: pointer;
+    transition: background 0.15s;
+    `;
             btn.onmouseenter = () => { if (!isActive) btn.style.background = 'rgba(255,255,255,0.08)'; };
             btn.onmouseleave = () => { if (!isActive) btn.style.background = 'rgba(255,255,255,0.04)'; };
             btn.onclick = () => {
@@ -5241,6 +7889,38 @@ class RadianceViewer {
         });
         container.appendChild(modeBar);
 
+        // ─── Options Row: Log/Lin toggle + Source toggle ─────
+        if (!this.scopeLogView) this.scopeLogView = localStorage.getItem('radiance_scope_log') === '1';
+
+        const optRow = document.createElement('div');
+        optRow.style.cssText = 'display: flex; gap: 4px; width: 280px; align-items: center;';
+
+        const makeOptBtn = (label, active, onClick) => {
+            const b = document.createElement('div');
+            b.textContent = label;
+            b.style.cssText = `
+                padding: 2px 8px; border-radius: 3px; font-size: 9px; font-weight: bold; cursor: pointer;
+                background: ${active ? 'rgba(255,200,80,0.18)' : 'rgba(255,255,255,0.04)'};
+                color: ${active ? '#ffc844' : '#555'};
+                border: 1px solid ${active ? 'rgba(255,200,80,0.4)' : 'rgba(255,255,255,0.08)'};
+                transition: all 0.15s;
+            `;
+            b.onclick = onClick;
+            return b;
+        };
+
+        optRow.appendChild(makeOptBtn('LOG VIEW', this.scopeLogView, () => {
+            this.scopeLogView = !this.scopeLogView;
+            localStorage.setItem('radiance_scope_log', this.scopeLogView ? '1' : '0');
+            this._lastRenderContent();
+        }));
+
+        const logNote = document.createElement('div');
+        logNote.textContent = this.scopeLogView ? 'LogC · shadows expanded' : 'Linear · 0–255';
+        logNote.style.cssText = 'font-size: 8px; color: #444; margin-left: auto;';
+        optRow.appendChild(logNote);
+        container.appendChild(optRow);
+
         // ─── Scope Canvas ──────────────────────────────────
         const isSquare = this.scopeMode === 'vectorscope';
         const cW = 280, cH = isSquare ? 240 : 180;
@@ -5248,7 +7928,7 @@ class RadianceViewer {
         const canvas = document.createElement('canvas');
         canvas.width = cW;
         canvas.height = cH;
-        canvas.style.cssText = `background: #050508; border: 1px solid rgba(255, 255, 255, 0.1); border - radius: 4px; width: 280px; height: ${cH} px; `;
+        canvas.style.cssText = `background: #050508; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 4px; width: 280px; height: ${cH}px;`;
         container.appendChild(canvas);
 
         // ─── Extract Pixel Data ─────────────────────────────
@@ -5264,24 +7944,65 @@ class RadianceViewer {
         const tmp = document.createElement('canvas');
         tmp.width = sampleW; tmp.height = sampleH;
         const tctx = tmp.getContext('2d');
-        tctx.drawImage(this.image, 0, 0, sampleW, sampleH);
+
+        // Sample from graded GL canvas if possible, else fall back to raw image
+        const srcCanvas = (this.glCanvas && this.glCanvas.width > 0) ? this.glCanvas : this.image;
+        tctx.drawImage(srcCanvas, 0, 0, sampleW, sampleH);
         const imgData = tctx.getImageData(0, 0, sampleW, sampleH);
-        const pixels = imgData.data;
+
+        // ─── Optional Log Transform ─────────────────────────
+        // Applies a simplified LogC-style curve (log base ~300) to pixels so that
+        // the scope shadows are expanded and highlights compressed — exactly as
+        // broadcast monitors with "log assist" display work.
+        let pixels;
+        if (this.scopeLogView) {
+            pixels = this._scopeApplyLogCurve(imgData.data);
+        } else {
+            pixels = imgData.data;
+        }
 
         const ctx = canvas.getContext('2d');
 
         // ─── Render Based on Mode ───────────────────────────
+        const logFlag = this.scopeLogView;
         switch (this.scopeMode) {
-            case 'parade': this._drawScopeParade(ctx, pixels, sampleW, sampleH, cW, cH); break;
-            case 'waveform': this._drawScopeWaveform(ctx, pixels, sampleW, sampleH, cW, cH); break;
-            case 'histogram': this._drawScopeHistogram(ctx, pixels, cW, cH); break;
+            case 'parade': this._drawScopeParade(ctx, pixels, sampleW, sampleH, cW, cH, logFlag); break;
+            case 'waveform': this._drawScopeWaveform(ctx, pixels, sampleW, sampleH, cW, cH, logFlag); break;
+            case 'histogram': this._drawScopeHistogram(ctx, pixels, cW, cH, logFlag); break;
             case 'vectorscope': this._drawScopeVectorscope(ctx, pixels, cW, cH); break;
             case 'falsecolor': this._drawScopeFalseColor(ctx, pixels, sampleW, sampleH, cW, cH); break;
         }
     }
 
+    // ─── Log Curve Transform for Scopes ──────────────────────────────────────
+    // Converts linear 8-bit scope pixels to a log-like representation.
+    // Based on a LogC-inspired curve: maps 0–255 through log(1 + v*c)/log(1+c)
+    // where c = 299 gives a roughly Arri LogC3-shaped response.
+    // Output is a NEW Uint8ClampedArray (source data is not mutated).
+    _scopeApplyLogCurve(data) {
+        const out = new Uint8ClampedArray(data.length);
+        const C = 299.0;
+        const logC1 = Math.log(1.0 + C);
+
+        // Pre-build LUT for speed
+        const lut = new Uint8Array(256);
+        for (let i = 0; i < 256; i++) {
+            const lin = i / 255.0;
+            const logVal = Math.log(1.0 + lin * C) / logC1;
+            lut[i] = Math.round(logVal * 255);
+        }
+
+        for (let i = 0; i < data.length; i += 4) {
+            out[i] = lut[data[i]];
+            out[i + 1] = lut[data[i + 1]];
+            out[i + 2] = lut[data[i + 2]];
+            out[i + 3] = data[i + 3];
+        }
+        return out;
+    }
+
     // ─── RGB Parade ──────────────────────────────────────────
-    _drawScopeParade(ctx, data, imgW, imgH, w, h) {
+    _drawScopeParade(ctx, data, imgW, imgH, w, h, logView) {
         ctx.fillStyle = '#050508';
         ctx.fillRect(0, 0, w, h);
 
@@ -5327,24 +8048,52 @@ class RadianceViewer {
         ctx.moveTo(secW * 2, 0); ctx.lineTo(secW * 2, h);
         ctx.stroke();
 
-        // 50% line
+        // Guide lines: 0%, 50%, 100% with log labels if needed
+        const guides = logView
+            ? [{ v: 0, lbl: '0' }, { v: 0.5, lbl: '~18%' }, { v: 0.74, lbl: '~90%' }, { v: 1, lbl: '100' }]
+            : [{ v: 0, lbl: '0' }, { v: 0.5, lbl: '50%' }, { v: 1, lbl: '100' }];
         ctx.strokeStyle = '#333'; ctx.setLineDash([3, 3]);
-        ctx.beginPath(); ctx.moveTo(0, h * 0.5); ctx.lineTo(w, h * 0.5); ctx.stroke();
+        ctx.font = '7px monospace'; ctx.fillStyle = '#444';
+        guides.forEach(g => {
+            const y = h - g.v * h;
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+            if (g.lbl) ctx.fillText(g.lbl, 2, y - 2);
+        });
         ctx.setLineDash([]);
+        if (logView) {
+            ctx.fillStyle = '#554400'; ctx.font = '8px monospace';
+            ctx.fillText('LOG', w - 22, h - 3);
+        }
     }
 
     // ─── Luma Waveform ───────────────────────────────────────
-    _drawScopeWaveform(ctx, data, imgW, imgH, w, h) {
+    _drawScopeWaveform(ctx, data, imgW, imgH, w, h, logView) {
         ctx.fillStyle = '#050508';
         ctx.fillRect(0, 0, w, h);
 
-        // IRE guide lines
+        // IRE guide lines — in log view these map to approximate log stops
+        const guides = logView
+            ? [
+                { v: 0, lbl: '0' },
+                { v: 0.18, lbl: '~black' },
+                { v: 0.50, lbl: '~18%' },
+                { v: 0.74, lbl: '~90%' },
+                { v: 1.0, lbl: '100' }
+            ]
+            : [
+                { v: 0, lbl: '0' },
+                { v: 0.25, lbl: '25' },
+                { v: 0.50, lbl: '50' },
+                { v: 0.75, lbl: '75' },
+                { v: 1.0, lbl: '100' }
+            ];
+
         ctx.strokeStyle = '#2a2a2a'; ctx.lineWidth = 1;
         ctx.font = '8px monospace'; ctx.fillStyle = '#444';
-        [0, 25, 50, 75, 100].forEach(ire => {
-            const y = h - (ire / 100) * h;
+        guides.forEach(g => {
+            const y = h - g.v * h;
             ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
-            ctx.fillText(ire + '', 2, y - 2);
+            ctx.fillText(g.lbl, 2, y - 2);
         });
 
         // Plot luma dots
@@ -5365,11 +8114,11 @@ class RadianceViewer {
 
         // Label
         ctx.fillStyle = '#5a5'; ctx.font = '10px monospace';
-        ctx.fillText('LUMA', 4, 12);
+        ctx.fillText(logView ? 'LUMA·LOG' : 'LUMA', 4, 12);
     }
 
     // ─── Histogram ───────────────────────────────────────────
-    _drawScopeHistogram(ctx, data, w, h) {
+    _drawScopeHistogram(ctx, data, w, h, logView) {
         ctx.fillStyle = '#050508';
         ctx.fillRect(0, 0, w, h);
 
@@ -5428,8 +8177,12 @@ class RadianceViewer {
 
         // Labels
         ctx.fillStyle = '#666'; ctx.font = '8px monospace';
-        ctx.fillText('0', 2, h - 3);
-        ctx.fillText('255', w - 20, h - 3);
+        ctx.fillText(logView ? 'LOG·0' : '0', 2, h - 3);
+        ctx.fillText(logView ? 'LOG·255' : '255', w - 38, h - 3);
+        if (logView) {
+            ctx.fillStyle = '#554400';
+            ctx.fillText('LOG', w - 22, 11);
+        }
     }
 
     // ─── Vectorscope ─────────────────────────────────────────
@@ -5592,6 +8345,11 @@ class RadianceViewer {
             lensFringe: this.lensFringe || 0.0,
             vignetteIntensity: this.vignetteIntensity || 0.0,
             vignetteFalloff: this.vignetteFalloff ?? 0.5,
+            // v3.4 additions
+            printerR: this.printerR || 0,
+            printerG: this.printerG || 0,
+            printerB: this.printerB || 0,
+            softClip: this.softClip || 0.0,
         };
     }
 
@@ -5611,6 +8369,11 @@ class RadianceViewer {
         this.lensFringe = snapshot.lensFringe;
         this.vignetteIntensity = snapshot.vignetteIntensity;
         this.vignetteFalloff = snapshot.vignetteFalloff;
+        // v3.4: Printer Lights + Soft Clip
+        this.printerR = snapshot.printerR ?? 0;
+        this.printerG = snapshot.printerG ?? 0;
+        this.printerB = snapshot.printerB ?? 0;
+        this.softClip = snapshot.softClip ?? 0.0;
 
         if (this.renderer) {
             this.renderer.setExposure(this.exposure);
@@ -5626,6 +8389,8 @@ class RadianceViewer {
             this.renderer.setDenoise(this.denoise);
             this.renderer.setLensDistortion(this.lensDistortion, this.lensFringe);
             this.renderer.setVignette(this.vignetteIntensity, this.vignetteFalloff);
+            this.renderer.setPrinterLights(this.printerR, this.printerG, this.printerB);
+            this.renderer.setSoftClip(this.softClip);
         }
         this.render();
     }
@@ -5701,55 +8466,206 @@ class RadianceViewer {
         if (this._lastRenderContent) this._lastRenderContent();
     }
 
+    exportToCDL() {
+        console.log("[Radiance] Generating ASC CDL (.cdl)...");
+
+        // ASC CDL maps directly:
+        // Slope = (gain * exposure_stops)
+        // Offset = lift + global_offset
+        // Power = gamma
+        // Saturation = saturation
+
+        const expMult = Math.pow(2.0, this.exposure || 0);
+
+        const slopeX = ((this.gain[0] || 1) * expMult).toFixed(6);
+        const slopeY = ((this.gain[1] || 1) * expMult).toFixed(6);
+        const slopeZ = ((this.gain[2] || 1) * expMult).toFixed(6);
+
+        const offsetX = ((this.lift[0] || 0) + (this.offset[0] || 0)).toFixed(6);
+        const offsetY = ((this.lift[1] || 0) + (this.offset[1] || 0)).toFixed(6);
+        const offsetZ = ((this.lift[2] || 0) + (this.offset[2] || 0)).toFixed(6);
+
+        const powerX = (this.gamma[0] || 1).toFixed(6);
+        const powerY = (this.gamma[1] || 1).toFixed(6);
+        const powerZ = (this.gamma[2] || 1).toFixed(6);
+
+        const sat = (this.saturation || 1.0).toFixed(6);
+
+        const cdl = `<?xml version="1.0" encoding="UTF-8"?>
+<ColorDecisionList xmlns="urn:ASC:CDL:v1.2">
+  <ColorDecision>
+<!-- Radiance Viewer Grade -->
+<ColorCorrection id="radiance_grade">
+  <SOPNode>
+    <Slope>${slopeX} ${slopeY} ${slopeZ}</Slope>
+    <Offset>${offsetX} ${offsetY} ${offsetZ}</Offset>
+    <Power>${powerX} ${powerY} ${powerZ}</Power>
+  </SOPNode>
+  <SatNode>
+    <Saturation>${sat}</Saturation>
+  </SatNode>
+</ColorCorrection>
+  </ColorDecision>
+</ColorDecisionList>
+`;
+        const blob = new Blob([cdl], { type: 'text/xml' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = "radiance_grade.cdl";
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    importFromCDL(file) {
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const text = e.target.result;
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(text, "text/xml");
+
+            try {
+                this._pushUndo();
+
+                const getVal = (tag) => {
+                    const el = xmlDoc.getElementsByTagName(tag)[0];
+                    if (!el) return null;
+                    return el.textContent.trim().split(/\\s+/).map(Number);
+                };
+
+                const slope = getVal("Slope");
+                const offset = getVal("Offset");
+                const power = getVal("Power");
+                const satData = getVal("Saturation");
+
+                if (slope) {
+                    this.gain = slope;
+                    this.exposure = 0; // Slope fully encodes exposure
+                }
+
+                if (offset) {
+                    this.lift = offset;
+                    this.offset = [0, 0, 0]; // Offset fully encoded in lift (or vice versa)
+                }
+
+                if (power) {
+                    this.gamma = power;
+                }
+
+                if (satData) {
+                    this.saturation = satData[0];
+                }
+
+                // Update renderer
+                if (this.renderer) {
+                    this.renderer.setExposure(this.exposure);
+                    this.renderer.setLift(this.lift[0], this.lift[1], this.lift[2]);
+                    this.renderer.setGain(this.gain[0], this.gain[1], this.gain[2]);
+                    this.renderer.setGamma(this.gamma[0], this.gamma[1], this.gamma[2]);
+                    this.renderer.setOffset(this.offset[0], this.offset[1], this.offset[2]);
+                    this.renderer.setSaturation(this.saturation);
+                }
+
+                this.render();
+                if (this._lastRenderContent) this._lastRenderContent(); // refresh UI panels
+
+                console.log("[Radiance] CDL Imported successfully.");
+
+            } catch (err) {
+                console.error("[Radiance] Failed to parse CDL:", err);
+                alert("Failed to parse CDL file. Ensure it is ASC CDL v1.2 XML format.");
+            }
+        };
+        reader.readAsText(file);
+    }
+
     exportToCube() {
         console.log("[Radiance] Generating 3D LUT (.cube)...");
         const size = 33;
         let cube = `TITLE "Radiance Export"\nLUT_3D_SIZE ${size} \nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 1 1 1\n\n`;
 
-        // Helper to apply math (matching radiance_webgl.js)
+        // Helper to apply math (matching radiance_webgl.js and Python apply_grading)
         const applyMath = (c) => {
             let r = c[0], g = c[1], b = c[2];
 
             // 1. Offset
-            r += this.offset[0]; g += this.offset[1]; b += this.offset[2];
+            r += this.offset[0] || 0; g += this.offset[1] || 0; b += this.offset[2] || 0;
 
-            // 2. Lift (pivoted at white)
+            // 2. Exposure (Stops)
+            const expMult = Math.pow(2.0, this.exposure || 0);
+            r *= expMult; g *= expMult; b *= expMult;
+
+            // 3. White Balance (Temp / Tint usually skipped in LUT for neutral grey, but adding for completeness)
+            // Skipping WB here as Temp is usually done globally before grading, but could be added.
+
+            // 4. Lift (Pivoted at White)
             const luma = r * 0.2126 + g * 0.7152 + b * 0.0722;
-            const pivot = Math.max(0.0, Math.min(1.0, 1.0 - luma));
-            r += (this.lift[0] || 0) * pivot;
-            g += (this.lift[1] || 0) * pivot;
-            b += (this.lift[2] || 0) * pivot;
+            const liftPivot = Math.max(0.0, Math.min(1.0, 1.0 - luma));
+            r += (this.lift[0] || 0) * liftPivot;
+            g += (this.lift[1] || 0) * liftPivot;
+            b += (this.lift[2] || 0) * liftPivot;
 
-            // 3. Gain
+            // 5. Gain
             r *= (this.gain[0] || 1); g *= (this.gain[1] || 1); b *= (this.gain[2] || 1);
 
-            // 4. Gamma
-            r = Math.pow(Math.max(0.0, r), 1.0 / (this.gamma[0] || 1));
-            g = Math.pow(Math.max(0.0, g), 1.0 / (this.gamma[1] || 1));
-            b = Math.pow(Math.max(0.0, b), 1.0 / (this.gamma[2] || 1));
+            // 6. Gamma
+            r = Math.sign(r) * Math.pow(Math.abs(r), 1.0 / (this.gamma[0] || 1));
+            g = Math.sign(g) * Math.pow(Math.abs(g), 1.0 / (this.gamma[1] || 1));
+            b = Math.sign(b) * Math.pow(Math.abs(b), 1.0 / (this.gamma[2] || 1));
 
-            // 5. Contrast & Pivot
+            // 7. Contrast & Pivot
             const con = this.contrast || 1.0;
-            const piv = this.pivot || 0.5;
+            const piv = this.pivot || 0.18;
             r = (r - piv) * con + piv;
             g = (g - piv) * con + piv;
             b = (b - piv) * con + piv;
 
-            // 6. Saturation
+            // 8. Log Wheels (Shadow/Midtone/Highlight)
+            // Precise reimplementation of `applyLogWheels` from glsl
+            const logLuma = r * 0.2126 + g * 0.7152 + b * 0.0722;
+
+            // Shadow curve log_s(x)
+            let logS = 0;
+            if (logLuma <= 0.45) {
+                if (logLuma <= 0.33) logS = 1.0;
+                else logS = 1.0 - (logLuma - 0.33) / (0.45 - 0.33);
+            }
+
+            // Highlight curve log_h(x)
+            let logH = 0;
+            if (logLuma >= 0.55) {
+                if (logLuma >= 0.66) logH = 1.0;
+                else logH = (logLuma - 0.55) / (0.66 - 0.55);
+            }
+
+            // Midtone curve log_m(x)
+            const logM = 1.0 - logS - logH;
+
+            const ls = this.logShadow || [1, 1, 1];
+            const lm = this.logMidtone || [1, 1, 1];
+            const lh = this.logHighlight || [1, 1, 1];
+
+            r = r * (logS * ls[0] + logM * lm[0] + logH * lh[0]);
+            g = g * (logS * ls[1] + logM * lm[1] + logH * lh[1]);
+            b = b * (logS * ls[2] + logM * lm[2] + logH * lh[2]);
+
+            // 9. Saturation
             const luma2 = r * 0.2126 + g * 0.7152 + b * 0.0722;
             const sat = this.saturation || 1.0;
             r = luma2 + (r - luma2) * sat;
             g = luma2 + (g - luma2) * sat;
             b = luma2 + (b - luma2) * sat;
 
-            return [r, g, b];
+            return [Math.max(0, r), Math.max(0, g), Math.max(0, b)];
         };
 
         for (let b = 0; b < size; b++) {
             for (let g = 0; g < size; g++) {
                 for (let r = 0; r < size; r++) {
                     const result = applyMath([r / (size - 1), g / (size - 1), b / (size - 1)]);
-                    cube += `${result[0].toFixed(6)} ${result[1].toFixed(6)} ${result[2].toFixed(6)} \n`;
+                    cube += `${result[0].toFixed(6)} ${result[1].toFixed(6)} ${result[2].toFixed(6)}\n`;
                 }
             }
         }
@@ -5769,12 +8685,12 @@ class RadianceViewer {
 
     createKnob(label, min, max, initial, step, callback) {
         const container = document.createElement('div');
-        container.style.cssText = 'display: flex; flex-direction: column; align-items: center; gap: 6px; width: 64px; position: relative;';
+        container.style.cssText = 'display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 60px; width: 70px; flex: 1; max-width: 90px; position: relative;';
 
         // 1. Label
         const lbl = document.createElement('div');
         lbl.textContent = label;
-        lbl.style.cssText = `color: ${this.theme.textDim}; font-size: 10px; font-weight: 500; font-family: ${this.theme.font}; letter-spacing: 0.5px; text-transform: uppercase;`;
+        lbl.style.cssText = `color: ${this.theme.textDim}; font-size: 9.5px; font-weight: 500; font-family: ${this.theme.font}; letter-spacing: 0.4px; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; text-align: center;`;
 
         // 2. Knob Wrapper (for centering value)
         const knobWrapper = document.createElement('div');
@@ -5818,14 +8734,14 @@ class RadianceViewer {
         const valDisplay = document.createElement('div');
         valDisplay.textContent = initial.toFixed(2);
         valDisplay.style.cssText = `
-            font-family: ${this.theme.mono};
-            font-size: 10px;
-            color: ${this.theme.text};
-            position: absolute;
-            pointer-events: none;
-            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
-            z-index: 10;
-        `;
+        font-family: ${this.theme.mono};
+        font-size: 10px;
+        color: ${this.theme.text};
+        position: absolute;
+        pointer-events: none;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+        z-index: 10;
+    `;
 
         knobWrapper.appendChild(svg);
         knobWrapper.appendChild(valDisplay);
@@ -5841,18 +8757,24 @@ class RadianceViewer {
         const updateVisuals = (val) => {
             // Normalized 0..1
             const t = (val - min) / (max - min);
-            // Arc length (leave gap at bottom? No, full circle for now or 270deg is standard)
-            // Let's do full circle for simplicity, or 270deg industry standard.
-            // Industry standard: -135deg to +135deg (270deg range).
-            // Current SVG implementation is full 360 ring. Let's keep 360 ring for "infinite" feel or 0-100% fill.
-
             const offset = circumference - (t * circumference);
             progress.setAttribute("stroke-dashoffset", offset);
 
-            // Color change if non-default?
-            progress.setAttribute("stroke", val === initial ? "rgba(255,255,255,0.3)" : this.theme.accent);
-            lbl.style.color = val === initial ? this.theme.textDim : this.theme.accent;
+            // v3.1: Clamp/Danger Indicator (P2 UX Fix)
+            // If we are at the extreme edges (within 1% of range), add a glow
+            const isAtLimit = (val <= min + (max - min) * 0.001) || (val >= max - (max - min) * 0.001);
 
+            if (isAtLimit && val !== initial) {
+                progress.setAttribute("stroke", "#ff4a4a"); // Red alert
+                progress.style.filter = "drop-shadow(0 0 3px #ff4a4a)";
+                valDisplay.style.color = "#ff4a4a";
+            } else {
+                progress.setAttribute("stroke", val === initial ? "rgba(255,255,255,0.3)" : this.theme.accent);
+                progress.style.filter = "none";
+                valDisplay.style.color = this.theme.text;
+            }
+
+            lbl.style.color = val === initial ? this.theme.textDim : (isAtLimit ? "#ff4a4a" : this.theme.accent);
             valDisplay.textContent = val.toFixed(2);
         };
 
@@ -5924,12 +8846,12 @@ class RadianceViewer {
             input.className = 'knob-numeric-input';
             input.value = currentValue.toFixed(Math.max(0, -Math.log10(step || 0.01)));
             input.style.cssText = `
-                position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-                width: 48px; text-align: center; font-size: 10px;
-                font-family: ${this.theme.mono}; color: ${this.theme.text};
-                background: rgba(0, 0, 0, 0.9); border: 1px solid ${this.theme.accent};
-                border-radius: 4px; padding: 2px 4px; outline: none; z-index: 100;
-            `;
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 48px; text-align: center; font-size: 10px;
+            font-family: ${this.theme.mono}; color: ${this.theme.text};
+            background: rgba(0, 0, 0, 0.9); border: 1px solid ${this.theme.accent};
+            border-radius: 4px; padding: 2px 4px; outline: none; z-index: 100;
+        `;
             container.appendChild(input);
             input.focus();
             input.select();
@@ -6181,23 +9103,23 @@ class RadianceViewer {
         const lbl = document.createElement('div');
         lbl.textContent = label;
         lbl.style.cssText = `
-        color: ${this.theme.textDim};
-        font - size: 11px;
-        font - family: ${this.theme.font};
-        min - width: 50px;
-        font - weight: 500;
-        `;
+    color: ${this.theme.textDim};
+    font - size: 11px;
+    font - family: ${this.theme.font};
+    min - width: 50px;
+    font - weight: 500;
+    `;
 
         const value = document.createElement('div');
         value.textContent = initial.toFixed(2);
         value.style.cssText = `
-        font - family: ${this.theme.mono};
-        font - size: 11px;
-        color: ${this.theme.accent};
-        min - width: 40px;
-        text - align: right;
-        font - variant - numeric: tabular - nums;
-        `;
+    font - family: ${this.theme.mono};
+    font - size: 11px;
+    color: ${this.theme.accent};
+    min - width: 40px;
+    text - align: right;
+    font - variant - numeric: tabular - nums;
+    `;
 
         metaRow.appendChild(lbl);
         metaRow.appendChild(value);
@@ -6207,16 +9129,16 @@ class RadianceViewer {
 
         const sliderFill = document.createElement('div');
         sliderFill.style.cssText = `
-        position: absolute; left: 0; top: 0; height: 100 %; background: #445;
-        width: 50 %; pointer - events: none; border - radius: 2px;
-        `;
+    position: absolute; left: 0; top: 0; height: 100 %; background: #445;
+    width: 50 %; pointer - events: none; border - radius: 2px;
+    `;
 
         const sliderInput = document.createElement('input');
         sliderInput.type = 'range';
         sliderInput.min = min; sliderInput.max = max; sliderInput.step = step; sliderInput.value = initial;
         sliderInput.style.cssText = `
-        position: absolute; left: 0; top: -6px; width: 100 %; height: 16px; opacity: 0; cursor: ew - resize; margin: 0;
-        `;
+    position: absolute; left: 0; top: -6px; width: 100 %; height: 16px; opacity: 0; cursor: ew - resize; margin: 0;
+    `;
 
         const updateVisuals = (val) => {
             const pct = ((val - min) / (max - min)) * 100;
@@ -6250,7 +9172,10 @@ class RadianceViewer {
 
     toggleControls() {
         this.showControls = !this.showControls;
-        if (this.controlsPanel) {
+        // In panel-embedded mode, toggle the entire rightControlPanel (not just the HUD)
+        if (this.rightControlPanel) {
+            this.rightControlPanel.style.display = this.showControls ? 'flex' : 'none';
+        } else if (this.controlsPanel) {
             this.controlsPanel.style.display = this.showControls ? 'flex' : 'none';
         }
         this.controlsToggle.style.color = this.showControls ? this.theme.accent : this.theme.textDim;
@@ -6264,43 +9189,43 @@ class RadianceViewer {
         const t = this.theme;
         this.progressContainer = document.createElement('div');
         this.progressContainer.style.cssText = `
-        position: absolute;
-        bottom: 0;
-        left: 0;
-        width: 100 %;
-        height: 4px;
-        background: rgba(0, 0, 0, 0.5);
-        z - index: 50;
-        pointer - events: none;
-        opacity: 0;
-        transition: opacity 0.3s ease;
-        `;
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100 %;
+    height: 4px;
+    background: rgba(0, 0, 0, 0.5);
+    z - index: 50;
+    pointer - events: none;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    `;
 
         this.progressBar = document.createElement('div');
         this.progressBar.style.cssText = `
-        width: 0 %;
-        height: 100 %;
-        background: linear - gradient(90deg, ${t.accent}, #4f4);
-        transition: width 0.1s linear;
-        box - shadow: 0 0 10px ${t.accent};
-        `;
+    width: 0 %;
+    height: 100 %;
+    background: linear - gradient(90deg, ${t.accent}, #4f4);
+    transition: width 0.1s linear;
+    box - shadow: 0 0 10px ${t.accent};
+    `;
 
         this.progressText = document.createElement('div');
         this.progressText.style.cssText = `
-        position: absolute;
-        bottom: 6px;
-        right: 10px;
-        font - size: 10px;
-        font - family: monospace;
-        color: rgba(255, 255, 255, 0.8);
-        text - shadow: 0 1px 2px black;
-        pointer - events: none;
-        opacity: 0;
-        transition: opacity 0.3s ease;
-        background: rgba(0, 0, 0, 0.6);
-        padding: 2px 6px;
-        border - radius: 4px;
-        `;
+    position: absolute;
+    bottom: 6px;
+    right: 10px;
+    font - size: 10px;
+    font - family: monospace;
+    color: rgba(255, 255, 255, 0.8);
+    text - shadow: 0 1px 2px black;
+    pointer - events: none;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    background: rgba(0, 0, 0, 0.6);
+    padding: 2px 6px;
+    border - radius: 4px;
+    `;
 
         this.progressContainer.appendChild(this.progressBar);
         this.container.appendChild(this.progressContainer);
@@ -6429,13 +9354,13 @@ class RadianceViewer {
         const channels = view.getUint16(8, true);
         // reserved = view.getUint16(10, true);
 
-        // Decompress zlib payload
+        // Decompress zlib payload — pass expected size from header for smart limit
+        const expectedSize = width * height * channels * 2; // 2 bytes per float16
         const compressed = new Uint8Array(buffer, 12);
-        const decompressed = await this._zlibInflateAsync(compressed);
+        const decompressed = await this._zlibInflateAsync(compressed, expectedSize);
         if (!decompressed) return null;
 
-        // v3.0 FIX: Validate decompressed size (was missing — _loadRHDR had it, this didn't)
-        const expectedSize = width * height * channels * 2; // 2 bytes per float16
+        // v3.0 FIX: Validate decompressed size
         if (decompressed.byteLength !== expectedSize) {
             console.error(`[Radiance] RHDR integrity failure: expected ${expectedSize} bytes, got ${decompressed.byteLength} (${width}×${height}×${channels}ch)`);
             return null;
@@ -6502,51 +9427,93 @@ class RadianceViewer {
         return s ? -val : val;
     }
 
-    // v3.1: Robust zlib inflate with error handling and fallback
-    // Python zlib.compress() outputs zlib-wrapped deflate.
+    // v3.2: Robust zlib inflate with error handling and multi-format fallback.
+    // Python zlib.compress() outputs zlib-wrapped deflate (RFC 1950).
     // DecompressionStream('deflate') handles zlib wrapper in modern browsers.
-    async _zlibInflateAsync(compressed) {
+    // Fallback chain: deflate → deflate-raw → gzip.
+    // expectedBytes: optional hint from RHDR header (width*height*channels*2)
+    async _zlibInflateAsync(compressed, expectedBytes) {
         if (typeof DecompressionStream === 'undefined') {
             console.warn('[Radiance] DecompressionStream API not supported. Cannot load compressed RHDR.');
             return null;
         }
 
-        try {
-            const ds = new DecompressionStream('deflate');
-            const writer = ds.writable.getWriter();
-            const reader = ds.readable.getReader();
+        // Use expectedBytes from RHDR header when available, otherwise 256MB hard cap
+        const MAX_SIZE = expectedBytes ? Math.max(expectedBytes * 2, 64 * 1024 * 1024) : 256 * 1024 * 1024;
 
-            writer.write(compressed);
-            writer.close();
+        // Try with zlib wrapper first ('deflate'), then raw deflate, then gzip as last resort
+        for (const format of ['deflate', 'deflate-raw', 'gzip']) {
+            try {
+                const ds = new DecompressionStream(format);
+                const writer = ds.writable.getWriter();
+                const reader = ds.readable.getReader();
 
-            const chunks = [];
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                chunks.push(value);
-            }
+                writer.write(compressed);
+                writer.close();
 
-            let totalLen = chunks.reduce((s, c) => s + c.byteLength, 0);
-            if (totalLen === 0) {
-                console.error('[Radiance] _zlibInflateAsync: decompressed to 0 bytes');
-                return null;
+                const chunks = [];
+                let totalLen = 0;
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    totalLen += value.byteLength;
+                    if (totalLen > MAX_SIZE) {
+                        // Cancel the reader (writer is already closed)
+                        await reader.cancel();
+                        console.error(`[Radiance] RHDR decompression limit exceeded (${totalLen} > ${MAX_SIZE} bytes).`);
+                        return null;
+                    }
+                    chunks.push(value);
+                }
+
+                if (totalLen === 0) {
+                    console.warn(`[Radiance] _zlibInflateAsync(${format}): decompressed to 0 bytes, trying next format`);
+                    continue;
+                }
+                const result = new Uint8Array(totalLen);
+                let offset = 0;
+                for (const chunk of chunks) {
+                    result.set(new Uint8Array(chunk), offset);
+                    offset += chunk.byteLength;
+                }
+                if (format !== 'deflate') {
+                    console.log(`[Radiance] RHDR decompressed via fallback format: ${format}`);
+                }
+                return result;
+            } catch (e) {
+                if (format === 'gzip') {
+                    // All formats failed
+                    console.error('[Radiance] _zlibInflateAsync failed (all formats):', e?.message || e);
+                    return null;
+                }
+                // Log and try next format
+                console.warn(`[Radiance] _zlibInflateAsync(${format}) failed, trying next:`, e?.message || e);
             }
-            const result = new Uint8Array(totalLen);
-            let offset = 0;
-            for (const chunk of chunks) {
-                result.set(new Uint8Array(chunk), offset);
-                offset += chunk.byteLength;
-            }
-            return result;
-        } catch (e) {
-            console.error('[Radiance] _zlibInflateAsync failed:', e);
-            return null;
         }
+        return null;
     }
 
     // Synchronous zlib inflate — not supported. Use _zlibInflateAsync() instead.
     _zlibInflate(compressed) {
         throw new Error('[Radiance] Synchronous zlib inflate is not supported. Use _zlibInflateAsync() instead.');
+    }
+
+    destroy() {
+        RadianceViewer.allInstances.delete(this);
+        if (RadianceViewer.activeInstance === this) {
+            RadianceViewer.activeInstance = Array.from(RadianceViewer.allInstances)[0] || null;
+            // Refresh HUD for the new active instance if it exists
+            if (RadianceViewer.activeInstance && RadianceViewer.activeInstance._lastRenderContent) {
+                RadianceViewer.activeInstance._lastRenderContent();
+            }
+        }
+        // v2.4: Visibility Fix - Only remove HUD if NO Radiance Viewers remain in workflow
+        if (RadianceViewer.allInstances.size === 0 && RadianceViewer.singletonHUD) {
+            RadianceViewer.singletonHUD.remove();
+            RadianceViewer.singletonHUD = null;
+        }
     }
 }
 
@@ -6572,6 +9539,17 @@ app.registerExtension({
             container.style.height = '100%';
 
             this.radianceViewer = new RadianceViewer(this, container);
+
+            // Lifecycle hooks for singleton HUD management
+            this.onRemoved = () => {
+                if (this.radianceViewer) this.radianceViewer.destroy();
+            };
+            this.onSelected = () => {
+                RadianceViewer.activeInstance = this.radianceViewer;
+                if (this.radianceViewer && this.radianceViewer._lastRenderContent) {
+                    this.radianceViewer._lastRenderContent();
+                }
+            };
         };
         // ═══════════════════════════════════════════════════════════════════════════════
         //                           CURVE EDITOR MOVED TO END
@@ -6600,6 +9578,10 @@ app.registerExtension({
 
             const viewer = this.radianceViewer;
             if (!viewer) return;
+
+            // v3.1: Increment generation ID to invalidate in-flight async loads from previous results
+            viewer.generationID++;
+            const currentGen = viewer.generationID;
 
             // Separate main images from compare and zdepth images
             const mainImages = message.radiance_images.filter(img => !img.is_compare && !img.is_zdepth);
@@ -6635,6 +9617,9 @@ app.registerExtension({
                 img.type = imgData.type;
 
                 img.onload = () => {
+                    // v3.1: Abort if a newer generation has started
+                    if (viewer.generationID !== currentGen) return;
+
                     viewer.frameImages[idx] = img;
                     // Only set as display if no HDR primary, or as placeholder while HDR loads
                     // If HDR load eventually fails, this will remain as the display image
@@ -6658,6 +9643,9 @@ app.registerExtension({
                     fetch(hdrUrl)
                         .then(r => r.arrayBuffer())
                         .then(async (buffer) => {
+                            // v3.1: Abort if a newer generation has started
+                            if (viewer.generationID !== currentGen) return;
+
                             // If parse fails (e.g. no DecompressionStream), it returns null
                             const npy = await viewer._parseHDRBuffer(buffer);
 
@@ -6681,9 +9669,12 @@ app.registerExtension({
 
                                     if (viewer.renderer) {
                                         let tex;
+                                        const frameId = `${imgData.hdr_sidecar}_${idx}`;
                                         try {
                                             if (npy.fp16data) {
-                                                tex = viewer.renderer.loadFloat16Texture(
+                                                // v3.0 #8: Use LRU cache — skip re-upload if already in GPU VRAM
+                                                tex = viewer.renderer.loadFloat16TextureCached(
+                                                    frameId,
                                                     npy.fp16data, npy.width, npy.height, npy.channels
                                                 );
                                             } else {
@@ -6743,6 +9734,7 @@ app.registerExtension({
                 const cmp = new Image();
                 cmp.crossOrigin = 'anonymous';
                 cmp.onload = () => {
+                    if (viewer.generationID !== currentGen) return;
                     viewer.frameCompareImages[idx] = cmp;
                     if (idx === 0) viewer.setCompareImage(cmp);
                 };
@@ -6755,6 +9747,7 @@ app.registerExtension({
                 const zImg = new Image();
                 zImg.crossOrigin = 'anonymous';
                 zImg.onload = () => {
+                    if (viewer.generationID !== currentGen) return;
                     viewer.frameZdepthImages[idx] = zImg;
                     if (idx === viewer.currentFrame) {
                         viewer.zdepthImage = zImg;
@@ -6809,7 +9802,10 @@ class RadianceCurveEditor {
             'RGB': [{ x: 0, y: 0 }, { x: 1, y: 1 }],
             'R': [{ x: 0, y: 0 }, { x: 1, y: 1 }],
             'G': [{ x: 0, y: 0 }, { x: 1, y: 1 }],
-            'B': [{ x: 0, y: 0 }, { x: 1, y: 1 }]
+            'B': [{ x: 0, y: 0 }, { x: 1, y: 1 }],
+            'HueVsHue': [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }],
+            'HueVsSat': [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }],
+            'HueVsLuma': [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }]
         };
 
         this.activeChannel = 'RGB';
@@ -6821,7 +9817,10 @@ class RadianceCurveEditor {
             'RGB': '#ffffff',
             'R': '#ff4d4d',
             'G': '#4dff4d',
-            'B': '#4d88ff'
+            'B': '#4d88ff',
+            'HueVsHue': '#ffaaaa',
+            'HueVsSat': '#fff144',
+            'HueVsLuma': '#44ffaa'
         };
 
         this.levels = { inBlack: 0, inWhite: 255 };
@@ -6909,7 +9908,11 @@ class RadianceCurveEditor {
     }
 
     resetActiveChannel() {
-        this.curves[this.activeChannel] = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
+        if (this.activeChannel.startsWith('Hue')) {
+            this.curves[this.activeChannel] = [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }];
+        } else {
+            this.curves[this.activeChannel] = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
+        }
         this.notifyChange();
         this.draw();
     }
@@ -6917,6 +9920,9 @@ class RadianceCurveEditor {
     resetAll() {
         for (const ch of ['RGB', 'R', 'G', 'B']) {
             this.curves[ch] = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
+        }
+        for (const ch of ['HueVsHue', 'HueVsSat', 'HueVsLuma']) {
+            this.curves[ch] = [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }];
         }
         this.levels = { inBlack: 0, inWhite: 255 };
         this.notifyChange();
@@ -7047,6 +10053,14 @@ class RadianceCurveEditor {
         };
 
         cvs.onmousemove = (e) => {
+            if (this.draggingPoint && e.buttons !== 1) {
+                // If the user released the mouse button globally but ComfyUI stole the event
+                this.draggingPoint = null;
+                cvs.style.cursor = 'crosshair';
+                this.draw();
+                return;
+            }
+
             const rect = cvs.getBoundingClientRect();
             const px = e.clientX - rect.left;
             const py = e.clientY - rect.top;
@@ -7321,14 +10335,36 @@ class RadianceCurveEditor {
         ctx.moveTo(mid.cx, mid.cy - 6); ctx.lineTo(mid.cx, mid.cy + 6);
         ctx.stroke();
 
-        // Identity diagonal
+        // Identity diagonal / line
         ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
         ctx.setLineDash([3, 5]);
         ctx.beginPath();
-        const d0 = this.normToCanvas(0, 0), d1 = this.normToCanvas(1, 1);
-        ctx.moveTo(d0.cx, d0.cy); ctx.lineTo(d1.cx, d1.cy);
+        if (this.activeChannel.startsWith('Hue')) {
+            // Horizontal line for Hue curves
+            const h0 = this.normToCanvas(0, 0.5), h1 = this.normToCanvas(1, 0.5);
+            ctx.moveTo(h0.cx, h0.cy); ctx.lineTo(h1.cx, h1.cy);
+        } else {
+            const d0 = this.normToCanvas(0, 0), d1 = this.normToCanvas(1, 1);
+            ctx.moveTo(d0.cx, d0.cy); ctx.lineTo(d1.cx, d1.cy);
+        }
         ctx.stroke();
         ctx.setLineDash([]);
+
+        // Rainbow background for Hue curves
+        if (this.activeChannel.startsWith('Hue')) {
+            const grad = ctx.createLinearGradient(pX, 0, pX + pW, 0);
+            grad.addColorStop(0, '#ff0000');
+            grad.addColorStop(1 / 6, '#ffff00');
+            grad.addColorStop(2 / 6, '#00ff00');
+            grad.addColorStop(3 / 6, '#00ffff');
+            grad.addColorStop(4 / 6, '#0000ff');
+            grad.addColorStop(5 / 6, '#ff00ff');
+            grad.addColorStop(1, '#ff0000');
+            ctx.globalAlpha = 0.1;
+            ctx.fillStyle = grad;
+            ctx.fillRect(pX, pY, pW, pH);
+            ctx.globalAlpha = 1.0;
+        }
 
         // 3. Histogram (soft fill, Resolve aesthetic)
         if (this.histograms.L) {
@@ -7364,7 +10400,13 @@ class RadianceCurveEditor {
         }
 
         // 4. Ghost curves (inactive channels at low opacity)
-        const ghostChannels = this.activeChannel === 'RGB' ? ['R', 'G', 'B'] : ['RGB'];
+        let ghostChannels = [];
+        if (this.activeChannel === 'RGB') ghostChannels = ['R', 'G', 'B'];
+        else if (this.activeChannel === 'R' || this.activeChannel === 'G' || this.activeChannel === 'B') ghostChannels = ['RGB'];
+        else if (this.activeChannel === 'HueVsHue') ghostChannels = ['HueVsSat', 'HueVsLuma'];
+        else if (this.activeChannel === 'HueVsSat') ghostChannels = ['HueVsHue', 'HueVsLuma'];
+        else if (this.activeChannel === 'HueVsLuma') ghostChannels = ['HueVsHue', 'HueVsSat'];
+
         ghostChannels.forEach(ch => {
             const pts = this.curves[ch];
             if (pts.length < 2) return;
@@ -7525,23 +10567,23 @@ class RadianceCurveEditor {
         });
     }
 
-    // ─── LUT Generation → GPU ──────────────────────────────────
     notifyChange() {
         if (!this.onChange) return;
 
-        // Evaluate all four curves
+        // Evaluate all curves
         const master = this.evaluateCurve(this.curves['RGB']);
         const rCurve = this.evaluateCurve(this.curves['R']);
         const gCurve = this.evaluateCurve(this.curves['G']);
         const bCurve = this.evaluateCurve(this.curves['B']);
 
+        const hvhCurve = this.evaluateCurve(this.curves['HueVsHue']);
+        const hvsCurve = this.evaluateCurve(this.curves['HueVsSat']);
+        const hvlCurve = this.evaluateCurve(this.curves['HueVsLuma']);
+
         // Levels remapping
         const inBlack = this.levels.inBlack / 255;
         const inWhite = this.levels.inWhite / 255;
         const inRange = Math.max(0.001, inWhite - inBlack);
-
-        // Float32 LUT: 256 × RGBA = 1024 floats
-        const lut = new Float32Array(256 * 4);
 
         // Sub-sample lookup with linear interpolation for precision
         const lookup = (curve, u) => {
@@ -7552,6 +10594,10 @@ class RadianceCurveEditor {
             if (k < 0) return curve[0];
             return curve[k] * (1 - frac) + curve[k + 1] * frac;
         };
+
+        // Float32 LUT: 256 × RGBA = 1024 floats
+        const lut = new Float32Array(256 * 4);
+        const secLut = new Float32Array(256 * 4);
 
         for (let i = 0; i < 256; i++) {
             // Apply input levels
@@ -7569,9 +10615,15 @@ class RadianceCurveEditor {
             lut[i * 4 + 1] = Math.max(0, Math.min(1, g));
             lut[i * 4 + 2] = Math.max(0, Math.min(1, b));
             lut[i * 4 + 3] = 1.0;
+
+            // Secondary LUT
+            secLut[i * 4 + 0] = Math.max(0, Math.min(1, hvhCurve[i])); // HueVsHue (0..1)
+            secLut[i * 4 + 1] = Math.max(0, Math.min(1, hvsCurve[i])); // HueVsSat (0..1)
+            secLut[i * 4 + 2] = Math.max(0, Math.min(1, hvlCurve[i])); // HueVsLuma (0..1)
+            secLut[i * 4 + 3] = 1.0;
         }
 
-        this.onChange(lut);
+        this.onChange(lut, secLut);
     }
 
     setLevels(inBlack, inWhite) {

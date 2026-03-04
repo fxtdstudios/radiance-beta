@@ -60,6 +60,7 @@ v3.0 — 23 bugs fixed from v1.0:
 import torch
 import numpy as np
 import os
+import re
 import time
 import logging
 import hashlib
@@ -76,10 +77,54 @@ from .hdr.io import (
     SimpleEXRWriter,
 )
 
-# ── Nuke TCP connector ──
-from .tools.nuke_connector import NukeConnector
+# ── Nuke TCP connector (with sanitization) ──
+from .tools.nuke_connector import NukeConnector, validate_nuke_identifier
+
+# ── Path security ──
+try:
+    from .path_utils import safe_join, get_safe_output_dir
+except ImportError:
+    from path_utils import safe_join, get_safe_output_dir
 
 logger = logging.getLogger("radiance.nuke.bridge")
+
+# ── Security: Host allowlist for Nuke Bridge connections ──
+_DEFAULT_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _get_allowed_hosts() -> set:
+    """
+    Get the set of allowed hosts for Nuke Bridge TCP connections.
+    Defaults to localhost only. Studios can add IPs via the
+    RADIANCE_NUKE_ALLOWED_HOSTS environment variable (comma-separated).
+    """
+    allowed = set(_DEFAULT_ALLOWED_HOSTS)
+    env_hosts = os.environ.get("RADIANCE_NUKE_ALLOWED_HOSTS", "")
+    if env_hosts:
+        for h in env_hosts.split(","):
+            h = h.strip()
+            if h:
+                allowed.add(h)
+    return allowed
+
+
+# ── Security: Stream name validation ──
+_SAFE_STREAM_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
+
+
+def _validate_stream_name(name: str) -> str:
+    """Validate stream_name to prevent command injection via filenames/TCP commands."""
+    name = name.strip()
+    if not name:
+        raise ValueError("stream_name cannot be empty")
+    if not _SAFE_STREAM_RE.match(name):
+        raise ValueError(
+            f"Invalid stream_name: '{name}'. "
+            f"Only letters, digits, underscore, and hyphen are allowed."
+        )
+    if len(name) > 128:
+        raise ValueError(f"stream_name too long (max 128 chars)")
+    return name
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -203,6 +248,40 @@ def _write_exr_all_channels(
     return False
 
 
+def _write_exr_atomic(
+    filepath: str,
+    rgb: np.ndarray,
+    alpha: Optional[np.ndarray],
+    depth: Optional[np.ndarray],
+    bit_depth: str,
+    compression: str,
+    metadata: Optional[Dict[str, Any]],
+) -> bool:
+    """
+    Atomic EXR write: writes to a temp file first, then renames on success.
+    Prevents corrupt partial files if the process is interrupted mid-write.
+    """
+    tmp_path = filepath + ".tmp"
+    try:
+        ok = _write_exr_all_channels(tmp_path, rgb, alpha, depth, bit_depth, compression, metadata)
+        if ok:
+            # Atomic rename (on same filesystem, this is atomic on most OSes)
+            if os.path.exists(filepath):
+                os.remove(filepath)
+            os.rename(tmp_path, filepath)
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Atomic EXR write failed for {filepath}: {e}")
+        # Clean up temp file on failure
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        return False
+
+
 def _perceptual_hash(img_np: np.ndarray) -> str:
     """
     Quick perceptual hash for change detection.
@@ -215,7 +294,7 @@ def _perceptual_hash(img_np: np.ndarray) -> str:
     step_h = max(1, h // 32)
     step_w = max(1, w // 32)
     sample = img_np[::step_h, ::step_w, :3].astype(np.float16)
-    return hashlib.md5(sample.tobytes()).hexdigest()  # nosec B324
+    return hashlib.blake2s(sample.tobytes()).hexdigest()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -398,6 +477,22 @@ class RadianceNukeBridge:
         unique_id: str = "",
     ) -> Tuple[torch.Tensor, str]:
 
+        # ── Security: Validate stream_name ──
+        try:
+            stream_name = _validate_stream_name(stream_name)
+        except ValueError as e:
+            return (images, f"ERROR: {e}")
+
+        # ── Security: Validate host against allowlist ──
+        allowed_hosts = _get_allowed_hosts()
+        if host not in allowed_hosts:
+            return (
+                images,
+                f"ERROR: Host '{host}' not in allowed list. "
+                f"Allowed: {', '.join(sorted(allowed_hosts))}. "
+                f"Set RADIANCE_NUKE_ALLOWED_HOSTS env var to add studio IPs.",
+            )
+
         # ── Validate input ──
         if not isinstance(images, torch.Tensor):
             return (images, "ERROR: images must be a torch.Tensor")
@@ -412,10 +507,15 @@ class RadianceNukeBridge:
             f"ch={c}, space={color_space}, mode={send_mode}"
         )
 
-        # ── Output directory ──
+        # ── Output directory (secured) ──
         if output_path and output_path.strip():
-            bridge_dir = output_path.strip().strip('"').strip("'")
-            os.makedirs(bridge_dir, exist_ok=True)
+            clean_path = output_path.strip().strip('"').strip("'")
+            try:
+                # Route through safe_join for security
+                base_output = folder_paths.get_output_directory()
+                bridge_dir = get_safe_output_dir(base_output, clean_path)
+            except ValueError as e:
+                return (images, f"ERROR: Invalid output_path: {e}")
         else:
             bridge_dir = _get_bridge_temp_dir()
 
@@ -485,8 +585,8 @@ class RadianceNukeBridge:
                 "radianceBitDepth": bit_depth,
             }
 
-            # Write using full Radiance IO writer chain
-            ok = _write_exr_all_channels(
+            # Write using full Radiance IO writer chain (atomic)
+            ok = _write_exr_atomic(
                 filepath,
                 rgb,
                 alpha,

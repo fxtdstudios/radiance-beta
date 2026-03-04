@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-    Radiance Nuke Connector v3.0 — TCP Client for Nuke Command Server
+    Radiance Nuke Connector v2.1 — TCP Client for Nuke Command Server
                         Radiance © 2024-2026 FXTD STUDIOS
 
 This is the NukeConnector class that nodes_nuke.py imports via:
@@ -34,6 +34,7 @@ v3.0 fixes:
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
+import re
 import socket
 import struct
 import json
@@ -52,6 +53,60 @@ READ_TIMEOUT = 15.0
 HEADER_MAGIC = b"RCMD"  # 4-byte magic identifier
 HEADER_VERSION = 1  # Protocol version
 END_MARKER = b"\n__RADIANCE_END__\n"  # Response terminator
+
+# Security: regex pattern for safe Nuke identifiers (node names, stream names)
+_SAFE_IDENTIFIER_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
+# Security: characters allowed in Nuke strings (paths, color space names)
+_SAFE_STRING_RE = re.compile(r"^[a-zA-Z0-9_\-./: ()#+]+$")
+
+
+def _sanitize_nuke_string(value: str, context: str = "value") -> str:
+    """
+    Sanitize a string before embedding it in a Nuke Python command.
+
+    Removes/escapes characters that could break out of a Python string literal
+    and inject arbitrary code. This is a defense-in-depth measure.
+
+    Args:
+        value: The string to sanitize
+        context: Description for error messages (e.g., 'node_name', 'filepath')
+
+    Returns:
+        Sanitized string safe for embedding in single-quoted Python literals
+    """
+    # Remove null bytes
+    value = value.replace("\x00", "")
+    # Escape backslashes first, then single quotes
+    value = value.replace("\\", "/")
+    value = value.replace("'", "")
+    value = value.replace('"', "")
+    # Remove newlines and other control characters that could break commands
+    value = re.sub(r"[\n\r\t]", "", value)
+    # Strip leading/trailing whitespace
+    value = value.strip()
+    return value
+
+
+def validate_nuke_identifier(name: str, context: str = "identifier") -> str:
+    """
+    Validate that a string is a safe Nuke identifier (node name, stream name).
+
+    Only allows: a-z, A-Z, 0-9, underscore, hyphen.
+
+    Raises:
+        ValueError: If the name contains invalid characters
+    """
+    name = name.strip()
+    if not name:
+        raise ValueError(f"Empty {context} is not allowed")
+    if not _SAFE_IDENTIFIER_RE.match(name):
+        raise ValueError(
+            f"Invalid {context}: '{name}'. "
+            f"Only letters, digits, underscore, and hyphen are allowed."
+        )
+    if len(name) > 128:
+        raise ValueError(f"{context} too long (max 128 chars): '{name[:32]}...'")
+    return name
 
 
 class NukeConnector:
@@ -192,7 +247,15 @@ class NukeConnector:
             connect_viewer: If True, wire Read → Viewer1 input 0
             raw:            If True, bypass Nuke's internal color management
         """
-        safe_path = filepath.replace("\\", "/")
+        # ── Security: sanitize all user-supplied strings ──
+        safe_path = _sanitize_nuke_string(filepath, "filepath")
+        safe_node_name = validate_nuke_identifier(node_name, "node_name")
+        safe_color_space = _sanitize_nuke_string(color_space, "color_space")
+
+        # Validate numeric parameters
+        first_frame = int(first_frame)
+        last_frame = int(last_frame)
+        current_frame = int(current_frame)
 
         # Build the Nuke Python script
         cmd_lines = [
@@ -201,13 +264,13 @@ class NukeConnector:
             "# Find existing Read or create new",
             "node = None",
             "for n in nuke.allNodes('Read'):",
-            f"    if n.name() == '{node_name}':",
+            f"    if n.name() == '{safe_node_name}':",
             "        node = n",
             "        break",
             "",
             "if node is None:",
             "    node = nuke.createNode('Read', inpanel=False)",
-            f"    node.setName('{node_name}')",
+            f"    node.setName('{safe_node_name}')",
             "",
             "# Set file path and frame range",
             f"node['file'].setValue('{safe_path}')",
@@ -219,7 +282,7 @@ class NukeConnector:
         ]
 
         if not raw:
-            cmd_lines.append(f"node['colorspace'].setValue('{color_space}')")
+            cmd_lines.append(f"node['colorspace'].setValue('{safe_color_space}')")
 
         cmd_lines += [
             "",
@@ -243,13 +306,14 @@ class NukeConnector:
             ]
 
         cmd_lines.append(
-            f"\n'{node_name}: loaded {safe_path} [{first_frame}-{last_frame}]'"
+            f"\n'{safe_node_name}: loaded {safe_path} [{first_frame}-{last_frame}]'"
         )
 
         return self.send_command("\n".join(cmd_lines))
 
     def set_frame(self, frame: int) -> Tuple[bool, str]:
         """Set Nuke's current frame."""
+        frame = int(frame)  # Ensure integer — no injection
         return self.send_command(f"import nuke; nuke.frame({frame}); 'frame={frame}'")
 
     def get_info(self) -> Tuple[bool, Dict[str, Any]]:

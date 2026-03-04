@@ -4,349 +4,568 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Node Reference - FXTD Studio Radiance</title>
-    <link rel="icon" type="image/png" href="icon.png">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link
-        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
-        rel="stylesheet">
-    <style>
-        :root {
-            --bg-primary: #1a1a1a;
-            --bg-secondary: #252525;
-            --bg-card: rgba(35, 35, 35, 0.95);
-            --accent-gold: #FFD700;
-            --text-primary: #e0e0e0;
-            --text-secondary: #888;
-            --text-muted: #666;
-            --border-default: rgba(255, 255, 255, 0.1);
-        }
-
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        body {
-            font-family: 'Inter', sans-serif;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            line-height: 1.6;
-        }
-
-        /* Navigation */
-        nav {
-            background: var(--bg-secondary);
-            border-bottom: 1px solid #333;
-            padding: 0.75rem 2rem;
-            position: sticky;
-            top: 0;
-            z-index: 100;
-        }
-
-        .nav-content {
-            max-width: 1440px;
-            margin: 0 auto;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-
-        .nav-links a {
-            color: #999;
-            text-decoration: none;
-            padding: 0.35rem 0.75rem;
-            border-radius: 4px;
-            font-size: 0.9rem;
-        }
-
-        .nav-links a:hover,
-        .nav-links a.active {
-            color: #fff;
-            background: #444;
-        }
-
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 2rem;
-        }
-
-        /* Header */
-        header {
-            text-align: center;
-            margin-bottom: 3rem;
-        }
-
-        header h1 {
-            font-size: 2.5rem;
-            margin-bottom: 0.5rem;
-        }
-
-        /* TOC */
-        .toc {
-            background: var(--bg-card);
-            padding: 1.5rem;
-            border-radius: 12px;
-            border: 1px solid var(--border-default);
-            margin-bottom: 3rem;
-        }
-
-        .toc h3 {
-            font-size: 0.9rem;
-            text-transform: uppercase;
-            color: var(--text-muted);
-            margin-bottom: 1rem;
-        }
-
-        .toc ul {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 1rem;
-            list-style: none;
-        }
-
-        .toc a {
-            color: var(--text-secondary);
-            text-decoration: none;
-            font-size: 0.95rem;
-        }
-
-        .toc a:hover {
-            color: var(--accent-gold);
-        }
-
-        /* Sections */
-        .category {
-            margin-bottom: 4rem;
-            scroll-margin-top: 80px;
-        }
-
-        .category-header {
-            display: flex;
-            align-items: baseline;
-            gap: 1rem;
-            margin-bottom: 1.5rem;
-            padding-bottom: 0.5rem;
-            border-bottom: 1px solid var(--border-default);
-        }
-
-        .category-header h2 {
-            font-size: 1.8rem;
-            color: #fff;
-        }
-
-        /* Node Cards */
-        .node-card {
-            background: var(--bg-card);
-            border: 1px solid var(--border-default);
-            border-radius: 12px;
-            padding: 1.5rem;
-            margin-bottom: 1.5rem;
-        }
-
-        .node-title {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            margin-bottom: 0.5rem;
-        }
-
-        .node-icon {
-            font-size: 1.5rem;
-        }
-
-        .node-name {
-            font-size: 1.25rem;
-            font-weight: 700;
-            color: #fff;
-        }
-
-        .node-class {
-            display: inline-block;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.8rem;
-            color: var(--accent-gold);
-            background: rgba(255, 215, 0, 0.1);
-            padding: 0.2rem 0.5rem;
-            border-radius: 4px;
-            margin-bottom: 1rem;
-        }
-
-        .node-description {
-            color: var(--text-secondary);
-            margin-bottom: 1.5rem;
-        }
-
-        /* Tables */
-        .io-section {
-            margin-bottom: 1rem;
-        }
-
-        .io-section h4 {
-            font-size: 0.85rem;
-            text-transform: uppercase;
-            color: var(--text-muted);
-            margin-bottom: 0.5rem;
-        }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 0.9rem;
-        }
-
-        th {
-            text-align: left;
-            color: var(--text-muted);
-            padding: 0.5rem;
-            border-bottom: 1px solid var(--border-default);
-            font-weight: 500;
-        }
-
-        td {
-            padding: 0.5rem;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
-            color: var(--text-primary);
-        }
-
-        td code {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.8rem;
-            background: #333;
-            padding: 0.1rem 0.3rem;
-            border-radius: 3px;
-        }
-
-        /* Footer */
-        footer {
-            margin-top: 4rem;
-            text-align: center;
-            color: var(--text-muted);
-            border-top: 1px solid var(--border-default);
-            padding-top: 2rem;
-        }
-
-        /* Interactivity */
-        .node-card {
-            cursor: pointer;
-            transition: all 0.2s ease;
-            position: relative;
-        }
-
-        .node-card:hover {
-            border-color: var(--accent-gold);
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-        }
-
-        .node-card.collapsed .node-description,
-        .node-card.collapsed .io-section {
-            display: none;
-        }
-
-        .node-card.collapsed .node-class {
-            margin-bottom: 0;
-            opacity: 0.7;
-        }
-
-        /* Add a clear indicator of expandability */
-        .node-card::after {
-            content: '▼';
-            position: absolute;
-            top: 2rem;
-            right: 1.5rem;
-            color: var(--text-muted);
-            transition: transform 0.3s ease;
-            font-size: 0.8rem;
-        }
-
-        .node-card.collapsed::after {
-            transform: rotate(-90deg);
-        }
-
-        /* SVG Icon Styles */
-        svg.feature-icon {
-            width: 1.5em;
-            height: 1.5em;
-            vertical-align: middle;
-            margin-right: 0.5rem;
-            display: inline-block;
-        }
-    </style>
+    <title>Node Reference — Radiance</title>
+    <meta name="description" content="Comprehensive guide to all 76 nodes in Radiance v2.1.0.">
+    <link rel="stylesheet" href="wiki.css">
 </head>
 
 <body>
-    <nav>
-        <div class="nav-content">
-            <a href="index.html" style="color:#e0e0e0; font-weight:600;">Radiance</a>
-            <div class="nav-links">
-                <a href="index.html">Overview</a>
-                <a href="installation.html">Installation</a>
-                <a href="node_reference.html" class="active">Nodes</a>
-                <a href="radiance_viewer.html">Viewer</a>
-                <a href="tutorials.html">Tutorials</a>
-                <a href="faq.html">FAQ</a>
-                <a href="changelog.html" style="background:#444;color:#fff;">Changelog</a>
-            </div>
+    <div class="nebula-bg"></div>
+
+    <!-- TOP NAV -->
+    <nav class="wiki-nav">
+        <span class="brand">◎ <span>Radiance</span></span>
+        <div class="nav-links">
+            <a href="index.html">Home</a>
+            <a href="installation.html">Install</a>
+            <a href="node_reference.html" class="active">Nodes</a>
+            <a href="radiance_viewer.html">Viewer</a>
+            <a href="tutorials.html">Tutorials</a>
+            <a href="faq.html">FAQ</a>
+            <a href="changelog.html">Changelog</a>
+            <a href="architecture.html">Architecture</a>
         </div>
+        <div class="nav-spacer"></div>
+        <button id="themeToggle">◎ Light</button>
     </nav>
 
-    <div class="container">
-        <header>
-            <h1>Node Reference</h1>
-            <p style="color:var(--text-secondary);">Comprehensive guide to all 58 nodes in Radiance v2.1.0</p>
+    <aside class="wiki-sidebar">
+        <div class="sidebar-header">
+            <div class="sidebar-search-container">
+                <span class="sidebar-search-icon">🔍</span>
+                <input type="text" class="sidebar-search" id="nodeSearch" placeholder="Search 76 nodes...">
+            </div>
+        </div>
+        <nav class="sidebar-nav">
+            <div class="sidebar-group">
+                <div class="sidebar-label">Categories</div>
+                <a href="#hdr" class="sidebar-link">◎ HDR & Color</a>
+                <a href="#film" class="sidebar-link">◎ Film & Camera</a>
+                <a href="#upscale" class="sidebar-link">◎ Upscale</a>
+                <a href="#viewer" class="sidebar-link">◎ Viewer</a>
+                <a href="#utils" class="sidebar-link">◎ IO & Utils</a>
+            </div>
+            <div class="sidebar-group">
+                <div class="sidebar-label">Recent Releases</div>
+                <a href="#RadianceGradeMatch" class="sidebar-link">
+                    Grade Match <span class="badge-new">NEW</span>
+                </a>
+            </div>
+        </nav>
+    </aside>
+
+    <main class="wiki-content">
+
+        <nav>
+            <ul class="breadcrumb">
+                <li><a href="index.html">Home</a></li>
+                <li class="current">Node Reference</li>
+            </ul>
+        </nav>
+
+        <header style="margin-bottom: 3rem;" class="animate-in">
+            <h1 class="text-gradient">Node Reference</h1>
+            <p class="page-subtitle">Comprehensive guide to all <strong>76 nodes</strong> in Radiance
+                <span class="badge badge-gold">v2.1.0</span>
+            </p>
         </header>
 
-        <nav class="toc">
-            <h3>Jump to Section</h3>
-            <ul>
-                <li><a href="#hdr"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
-                            fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                            stroke-linejoin="round" class="feature-icon">
-                            <circle cx="12" cy="12" r="5" />
-                            <line x1="12" y1="1" x2="12" y2="3" />
-                            <line x1="12" y1="21" x2="12" y2="23" />
-                            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
-                            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-                            <line x1="1" y1="12" x2="3" y2="12" />
-                            <line x1="21" y1="12" x2="23" y2="12" />
-                            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
-                            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-                        </svg> HDR & Color Science (24)</a></li>
-                <li><a href="#film"> Film & Camera (14)</a></li>
-                <li><a href="#upscale">⬆️ Upscaling & Restoration (6)</a></li>
-                <li><a href="#viewer"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
-                            fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                            stroke-linejoin="round" class="feature-icon">
-                            <line x1="18" y1="20" x2="18" y2="10" />
-                            <line x1="12" y1="20" x2="12" y2="4" />
-                            <line x1="6" y1="20" x2="6" y2="14" />
-                        </svg> Viewer & Analysis (3)</a></li>
-                <li><a href="#utils"> IO & Utilities (11)</a></li>
+        <nav>
+            <ul class="breadcrumb">
+                <li><a href="index.html">Home</a></li>
+                <li class="current">Node Reference</li>
             </ul>
         </nav>
 
         <section class="category" id="hdr">
-            <div class="category-header">
-                <h2><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
-                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-                        class="feature-icon">
-                        <circle cx="12" cy="12" r="5" />
-                        <line x1="12" y1="1" x2="12" y2="3" />
-                        <line x1="12" y1="21" x2="12" y2="23" />
-                        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
-                        <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-                        <line x1="1" y1="12" x2="3" y2="12" />
-                        <line x1="21" y1="12" x2="23" y2="12" />
-                        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
-                        <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-                    </svg> HDR & Color Science</h2>
+            <div class="category-header" id="hdr-color">
+                <h2>◎ HDR & Color Science</h2>
                 <span style="color:var(--text-muted);">30 nodes</span>
             </div>
+            <!-- ▼ NEW IN v2.1 ▼ -->
             <div class="nodes-list">
+
+                <!-- Radiance Grade Match -->
+                <div class="node-card new-in-21" id="RadianceGradeMatch">
+                    <div class="node-title">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance Grade Match</span>
+                        <span class="badge badge-gold">New v2.1</span>
+                    </div>
+                    <code class="node-class-badge">RadianceGradeMatch</code>
+                    <p class="node-desc">Shot-to-shot color matching using CIE L*a*b* mean and standard deviation
+                        transfer. Connect a source image and a reference image — the node matches the source's color
+                        statistics to the reference and outputs a matched image plus a <code>grade_info</code> JSON
+                        that
+                        can be replayed on other shots.</p>
+                    <div class="node-io">
+                        <h4>Inputs</h4>
+                        <table class="wiki-table">
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                                <th>Default</th>
+                            </tr>
+                            <tr>
+                                <td>source</td>
+                                <td><code>IMAGE</code></td>
+                                <td>—</td>
+                            </tr>
+                            <tr>
+                                <td>reference</td>
+                                <td><code>IMAGE</code></td>
+                                <td>—</td>
+                            </tr>
+                            <tr>
+                                <td>match_strength</td>
+                                <td><code>FLOAT</code></td>
+                                <td>1.0</td>
+                            </tr>
+                        </table>
+                        <h4>Outputs</h4>
+                        <table class="wiki-table">
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                            </tr>
+                            <tr>
+                                <td>IMAGE</td>
+                                <td><code>IMAGE</code></td>
+                            </tr>
+                            <tr>
+                                <td>grade_info</td>
+                                <td><code>STRING</code> (JSON)</td>
+                            </tr>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Apply Grade Info -->
+                <div class="node-card new-in-21" id="RadianceApplyGradeInfo">
+                    <div class="node-title">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Apply Grade Info</span>
+                        <span class="badge badge-gold">New v2.1</span>
+                    </div>
+                    <code class="node-class-badge">RadianceApplyGradeInfo</code>
+                    <p class="node-desc">Replay a <code>grade_info</code> JSON string (output of Radiance Grade or
+                        Grade
+                        Match) onto any image. Use this to apply a graded look to new shots without manually
+                        duplicating
+                        all grade parameters. The <code>strength</code> slider blends between original and graded.
+                    </p>
+                    <div class="node-io">
+                        <h4>Inputs</h4>
+                        <table class="wiki-table">
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                                <th>Default</th>
+                            </tr>
+                            <tr>
+                                <td>image</td>
+                                <td><code>IMAGE</code></td>
+                                <td>—</td>
+                            </tr>
+                            <tr>
+                                <td>grade_info</td>
+                                <td><code>STRING</code></td>
+                                <td>—</td>
+                            </tr>
+                            <tr>
+                                <td>strength</td>
+                                <td><code>FLOAT</code></td>
+                                <td>1.0</td>
+                            </tr>
+                        </table>
+                        <h4>Outputs</h4>
+                        <table class="wiki-table">
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                            </tr>
+                            <tr>
+                                <td>IMAGE</td>
+                                <td><code>IMAGE</code></td>
+                            </tr>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- LUT Bake -->
+                <div class="node-card new-in-21" id="RadianceLUTBake">
+                    <div class="node-title">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance LUT Bake</span>
+                        <span class="badge badge-gold">New v2.1</span>
+                    </div>
+                    <code class="node-class-badge">RadianceLUTBake</code>
+                    <p class="node-desc">Bake any Radiance Grade parameter set into a 33³ <code>.cube</code> LUT
+                        file.
+                        The output file is compatible with DaVinci Resolve, Nuke, Adobe Premiere Pro, and any OCIO
+                        pipeline. Also outputs a preview image showing the LUT applied to the input.</p>
+                    <div class="node-io">
+                        <h4>Inputs</h4>
+                        <table class="wiki-table">
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                                <th>Default</th>
+                            </tr>
+                            <tr>
+                                <td>image</td>
+                                <td><code>IMAGE</code></td>
+                                <td>—</td>
+                            </tr>
+                            <tr>
+                                <td>output_path</td>
+                                <td><code>STRING</code></td>
+                                <td>output/grade.cube</td>
+                            </tr>
+                            <tr>
+                                <td>lut_title</td>
+                                <td><code>STRING</code></td>
+                                <td>Radiance Grade</td>
+                            </tr>
+                            <tr>
+                                <td>lut_size</td>
+                                <td><code>INT</code></td>
+                                <td>33</td>
+                            </tr>
+                            <tr>
+                                <td>lift_r/g/b</td>
+                                <td><code>FLOAT</code></td>
+                                <td>0.0</td>
+                            </tr>
+                            <tr>
+                                <td>gamma_r/g/b</td>
+                                <td><code>FLOAT</code></td>
+                                <td>1.0</td>
+                            </tr>
+                            <tr>
+                                <td>gain_r/g/b</td>
+                                <td><code>FLOAT</code></td>
+                                <td>1.0</td>
+                            </tr>
+                            <tr>
+                                <td>offset_r/g/b</td>
+                                <td><code>FLOAT</code></td>
+                                <td>0.0</td>
+                            </tr>
+                            <tr>
+                                <td>contrast</td>
+                                <td><code>FLOAT</code></td>
+                                <td>1.0</td>
+                            </tr>
+                            <tr>
+                                <td>saturation</td>
+                                <td><code>FLOAT</code></td>
+                                <td>1.0</td>
+                            </tr>
+                        </table>
+                        <h4>Outputs</h4>
+                        <table class="wiki-table">
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                            </tr>
+                            <tr>
+                                <td>preview</td>
+                                <td><code>IMAGE</code></td>
+                            </tr>
+                            <tr>
+                                <td>cube_path</td>
+                                <td><code>STRING</code></td>
+                            </tr>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- LUT Apply -->
+                <div class="node-card new-in-21" id="RadianceLUTApplyNew">
+                    <div class="node-title">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance LUT Apply</span>
+                        <span class="badge badge-teal">Enhanced v2.1</span>
+                    </div>
+                    <code class="node-class-badge">RadianceLUTApply</code>
+                    <p class="node-desc">Load and apply any <code>.cube</code> LUT file to an image using GPU-safe
+                        trilinear interpolation. The <code>strength</code> parameter blends between the original and
+                        LUT-applied image (0 = bypass, 1 = full LUT). HDR-safe — values outside [0,1] are not
+                        clamped.
+                    </p>
+                    <div class="node-io">
+                        <h4>Inputs</h4>
+                        <table class="wiki-table">
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                                <th>Default</th>
+                            </tr>
+                            <tr>
+                                <td>image</td>
+                                <td><code>IMAGE</code></td>
+                                <td>—</td>
+                            </tr>
+                            <tr>
+                                <td>lut_file</td>
+                                <td><code>STRING</code></td>
+                                <td>path/to/lut.cube</td>
+                            </tr>
+                            <tr>
+                                <td>strength</td>
+                                <td><code>FLOAT</code></td>
+                                <td>1.0</td>
+                            </tr>
+                        </table>
+                        <h4>Outputs</h4>
+                        <table class="wiki-table">
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                            </tr>
+                            <tr>
+                                <td>IMAGE</td>
+                                <td><code>IMAGE</code></td>
+                            </tr>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Temporal Smooth -->
+                <div class="node-card new-in-21" id="RadianceTemporalSmooth">
+                    <div class="node-title">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance Temporal Smooth</span>
+                        <span class="badge badge-gold">New v2.1</span>
+                    </div>
+                    <code class="node-class-badge">RadianceTemporalSmooth</code>
+                    <p class="node-desc">Reduces inter-frame flicker and AI grain in video batches using per-pixel
+                        Exponential Moving Average (EMA). The <strong>motion-aware</strong> mode boosts alpha to 1.0
+                        on
+                        pixels with large frame-to-frame changes, preserving sharp motion while smoothing static
+                        background noise. Use before export or final evaluation.</p>
+                    <div class="node-io">
+                        <h4>Inputs</h4>
+                        <table class="wiki-table">
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                                <th>Default</th>
+                            </tr>
+                            <tr>
+                                <td>images</td>
+                                <td><code>IMAGE</code> (batch)</td>
+                                <td>—</td>
+                            </tr>
+                            <tr>
+                                <td>alpha</td>
+                                <td><code>FLOAT</code></td>
+                                <td>0.5</td>
+                            </tr>
+                            <tr>
+                                <td>motion_aware</td>
+                                <td><code>BOOLEAN</code></td>
+                                <td>True</td>
+                            </tr>
+                            <tr>
+                                <td>motion_threshold</td>
+                                <td><code>FLOAT</code></td>
+                                <td>0.05</td>
+                            </tr>
+                            <tr>
+                                <td>warmup_frames</td>
+                                <td><code>INT</code></td>
+                                <td>0</td>
+                            </tr>
+                        </table>
+                        <h4>Outputs</h4>
+                        <table class="wiki-table">
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                            </tr>
+                            <tr>
+                                <td>images</td>
+                                <td><code>IMAGE</code> (batch)</td>
+                            </tr>
+                            <tr>
+                                <td>stats</td>
+                                <td><code>STRING</code> (JSON)</td>
+                            </tr>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Flicker Analyze -->
+                <div class="node-card new-in-21" id="RadianceFlickerAnalyze">
+                    <div class="node-title">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance Flicker Analyze</span>
+                        <span class="badge badge-gold">New v2.1</span>
+                    </div>
+                    <code class="node-class-badge">RadianceFlickerAnalyze</code>
+                    <p class="node-desc">Measures frame-to-frame luma consistency across a video batch and outputs a
+                        JSON quality report. Use this before and after Temporal Smooth to benchmark flicker
+                        reduction.
+                        The <strong>flicker index</strong> is the coefficient of variation of per-frame luma means
+                        (std/mean). Values below 0.01 are imperceptible.</p>
+                    <div class="node-io">
+                        <h4>Inputs</h4>
+                        <table class="wiki-table">
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                                <th>Default</th>
+                            </tr>
+                            <tr>
+                                <td>images</td>
+                                <td><code>IMAGE</code> (batch)</td>
+                                <td>—</td>
+                            </tr>
+                        </table>
+                        <h4>Outputs</h4>
+                        <table class="wiki-table">
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                            </tr>
+                            <tr>
+                                <td>images</td>
+                                <td><code>IMAGE</code> (passthrough)</td>
+                            </tr>
+                            <tr>
+                                <td>report</td>
+                                <td><code>STRING</code> (JSON)</td>
+                            </tr>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- False Color -->
+                <div class="node-card new-in-21" id="RadianceFalseColor">
+                    <div class="node-title">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance False Color</span>
+                        <span class="badge badge-gold">New v2.1</span>
+                    </div>
+                    <code class="node-class-badge">RadianceFalseColor</code>
+                    <p class="node-desc">Bakes a 7-zone calibrated false-color exposure visualization as an IMAGE
+                        output
+                        — usable in headless batch pipelines without opening the viewer. Zones:
+                        <strong>Crushed</strong>
+                        (purple), <strong>Under</strong> (blue), <strong>Dim</strong> (light blue),
+                        <strong>Correct</strong> (green ~18% grey), <strong>Over</strong> (yellow),
+                        <strong>Hot</strong>
+                        (orange-red), <strong>Clipped</strong> (white). Configurable exposure offset and sRGB/linear
+                        blend.
+                    </p>
+                    <div class="node-io">
+                        <h4>Inputs</h4>
+                        <table class="wiki-table">
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                                <th>Default</th>
+                            </tr>
+                            <tr>
+                                <td>image</td>
+                                <td><code>IMAGE</code></td>
+                                <td>—</td>
+                            </tr>
+                            <tr>
+                                <td>is_linear</td>
+                                <td><code>BOOLEAN</code></td>
+                                <td>True</td>
+                            </tr>
+                            <tr>
+                                <td>blend</td>
+                                <td><code>FLOAT</code></td>
+                                <td>1.0</td>
+                            </tr>
+                            <tr>
+                                <td>exposure_offset</td>
+                                <td><code>FLOAT</code></td>
+                                <td>0.0</td>
+                            </tr>
+                        </table>
+                        <h4>Outputs</h4>
+                        <table class="wiki-table">
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                            </tr>
+                            <tr>
+                                <td>IMAGE</td>
+                                <td><code>IMAGE</code></td>
+                            </tr>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Blend Composite -->
+                <div class="node-card new-in-21" id="RadianceBlendComposite">
+                    <div class="node-title">
+                        <span class="node-icon">◎</span>
+                        <span class="node-name">Radiance Blend Composite</span>
+                        <span class="badge badge-gold">New v2.1</span>
+                    </div>
+                    <code class="node-class-badge">RadianceBlendComposite</code>
+                    <p class="node-desc">Composites two images using 8 industry-standard blend modes with optional
+                        per-pixel MASK control and opacity. HDR-safe — no mid-pipeline clamping. Useful for
+                        glow/bloom
+                        layers, light wraps, logo overlays, and VFX compositing. Blend modes: Normal, Add, Screen,
+                        Multiply, Overlay, Soft Light, Difference, Divide.</p>
+                    <div class="node-io">
+                        <h4>Inputs</h4>
+                        <table class="wiki-table">
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                                <th>Default</th>
+                            </tr>
+                            <tr>
+                                <td>base</td>
+                                <td><code>IMAGE</code></td>
+                                <td>—</td>
+                            </tr>
+                            <tr>
+                                <td>blend</td>
+                                <td><code>IMAGE</code></td>
+                                <td>—</td>
+                            </tr>
+                            <tr>
+                                <td>mode</td>
+                                <td><code>COMBO</code></td>
+                                <td>Normal</td>
+                            </tr>
+                            <tr>
+                                <td>opacity</td>
+                                <td><code>FLOAT</code></td>
+                                <td>1.0</td>
+                            </tr>
+                            <tr>
+                                <td>mask (opt)</td>
+                                <td><code>MASK</code></td>
+                                <td>—</td>
+                            </tr>
+                        </table>
+                        <h4>Outputs</h4>
+                        <table class="wiki-table">
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                            </tr>
+                            <tr>
+                                <td>IMAGE</td>
+                                <td><code>IMAGE</code></td>
+                            </tr>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- ▲ END NEW IN v2.1 ▲ -->
+
                 <div class="node-card" id="RadianceLUTApply">
                     <div class="node-title">
                         <span class="node-icon">◎</span>
@@ -1151,7 +1370,8 @@
                         <span class="node-name">ImageToFloat32</span>
                     </div>
                     <code class="node-class">ImageToFloat32</code>
-                    <p class="node-description">Convert images to 32-bit float precision for HDR processing. Preserves
+                    <p class="node-description">Convert images to 32-bit float precision for HDR processing.
+                        Preserves
                         full dynamic range without clamping.</p>
 
                     <div class="io-section">
@@ -1454,7 +1674,8 @@
                         <span class="node-name">ColorSpaceConvert</span>
                     </div>
                     <code class="node-class">ColorSpaceConvert</code>
-                    <p class="node-description">GPU-accelerated color space conversion (sRGB, ACEScg, ACEScct, Rec.2020,
+                    <p class="node-description">GPU-accelerated color space conversion (sRGB, ACEScg, ACEScct,
+                        Rec.2020,
                         DCI-P3). Uses industry-standard matrices.</p>
 
                     <div class="io-section">
@@ -1522,7 +1743,8 @@
                         <span class="node-name">LoadImageEXR</span>
                     </div>
                     <code class="node-class">LoadImageEXR</code>
-                    <p class="node-description">Load EXR/HDR files with full HDR dynamic range. Enter file path directly
+                    <p class="node-description">Load EXR/HDR files with full HDR dynamic range. Enter file path
+                        directly
                         or select from input folder.</p>
 
                     <div class="io-section">
@@ -1574,7 +1796,8 @@
                         <span class="node-name">LoadImageEXRSequence</span>
                     </div>
                     <code class="node-class">LoadImageEXRSequence</code>
-                    <p class="node-description">Load EXR/HDR image sequence from a folder. Returns a batch of images.
+                    <p class="node-description">Load EXR/HDR image sequence from a folder. Returns a batch of
+                        images.
                     </p>
 
                     <div class="io-section">
@@ -1650,7 +1873,8 @@
                         <span class="node-name">SaveImage16bit</span>
                     </div>
                     <code class="node-class">SaveImage16bit</code>
-                    <p class="node-description">Save images as 16-bit PNG or TIFF for wider software compatibility while
+                    <p class="node-description">Save images as 16-bit PNG or TIFF for wider software compatibility
+                        while
                         preserving extended range.</p>
 
                     <div class="io-section">
@@ -1751,7 +1975,8 @@
                         <span class="node-name">HDRExposureBlend</span>
                     </div>
                     <code class="node-class">HDRExposureBlend</code>
-                    <p class="node-description">Blend multiple exposures (bracketing) for extended dynamic range. Takes
+                    <p class="node-description">Blend multiple exposures (bracketing) for extended dynamic range.
+                        Takes
                         highlights from low exposure and shadows from high exposure for optimal color grading.</p>
 
                     <div class="io-section">
@@ -1842,7 +2067,8 @@
                         <span class="node-name">HDRShadowHighlightRecovery</span>
                     </div>
                     <code class="node-class">HDRShadowHighlightRecovery</code>
-                    <p class="node-description">Recover shadow and highlight detail from a single HDR image for better
+                    <p class="node-description">Recover shadow and highlight detail from a single HDR image for
+                        better
                         color grading flexibility.</p>
 
                     <div class="io-section">
@@ -1952,7 +2178,8 @@
                         <span class="node-name">GPUTensorOps</span>
                     </div>
                     <code class="node-class">GPUTensorOps</code>
-                    <p class="node-description">GPU-accelerated HDR operations. Fast exposure, gamma, and normalization.
+                    <p class="node-description">GPU-accelerated HDR operations. Fast exposure, gamma, and
+                        normalization.
                     </p>
 
                     <div class="io-section">
@@ -2009,7 +2236,8 @@
                         <span class="node-name">HDR360Generate</span>
                     </div>
                     <code class="node-class">HDR360Generate</code>
-                    <p class="node-description">Generate 360° equirectangular panoramas for HDRI environment mapping in
+                    <p class="node-description">Generate 360° equirectangular panoramas for HDRI environment mapping
+                        in
                         3D applications.</p>
 
                     <div class="io-section">
@@ -2106,7 +2334,8 @@
                         <span class="node-name">ACES2OutputTransform</span>
                     </div>
                     <code class="node-class">ACES2OutputTransform</code>
-                    <p class="node-description">Apply ACES 2.0 Output Transform with proper gamut mapping for SDR, HDR,
+                    <p class="node-description">Apply ACES 2.0 Output Transform with proper gamut mapping for SDR,
+                        HDR,
                         or Cinema output.</p>
 
                     <div class="io-section">
@@ -2183,7 +2412,8 @@
                         <span class="node-name">ACESConfigManager</span>
                     </div>
                     <code class="node-class">ACESConfigManager</code>
-                    <p class="node-description">Detect, download, and manage ACES OCIO configurations for professional
+                    <p class="node-description">Detect, download, and manage ACES OCIO configurations for
+                        professional
                         color workflows.</p>
 
                     <div class="io-section">
@@ -2392,8 +2622,8 @@
             </div>
         </section>
         <section class="category" id="film">
-            <div class="category-header">
-                <h2> Film & Camera</h2>
+            <div class="category-header" id="film">
+                <h2>◎ Film & Camera</h2>
                 <span style="color:var(--text-muted);">15 nodes</span>
             </div>
             <div class="nodes-list">
@@ -2470,7 +2700,8 @@
                         <span class="node-name">RadianceDepthOfField</span>
                     </div>
                     <code class="node-class">RadianceDepthOfField</code>
-                    <p class="node-description">Apply cinematic depth of field blur with optional depth map input.</p>
+                    <p class="node-description">Apply cinematic depth of field blur with optional depth map input.
+                    </p>
 
                     <div class="io-section">
                         <h4>Inputs</h4>
@@ -2620,7 +2851,8 @@
                         <span class="node-name">RadianceRollingShutter</span>
                     </div>
                     <code class="node-class">RadianceRollingShutter</code>
-                    <p class="node-description">Simulate rolling shutter artifacts (skew, wobble, flash banding).</p>
+                    <p class="node-description">Simulate rolling shutter artifacts (skew, wobble, flash banding).
+                    </p>
 
                     <div class="io-section">
                         <h4>Inputs</h4>
@@ -3550,7 +3782,8 @@
                         <span class="node-name">RadianceRealisticGrain</span>
                     </div>
                     <code class="node-class">RadianceRealisticGrain</code>
-                    <p class="node-description">Realistic camera grain based on real sensor noise. Just pick your camera
+                    <p class="node-description">Realistic camera grain based on real sensor noise. Just pick your
+                        camera
                         and adjust strength.</p>
 
                     <div class="io-section">
@@ -3926,7 +4159,7 @@
         </section>
         <section class="category" id="upscale">
             <div class="category-header">
-                <h2>⬆️ Upscaling & Restoration</h2>
+                <h2>⬆ Upscaling & Restoration</h2>
                 <span style="color:var(--text-muted);">7 nodes</span>
             </div>
             <div class="nodes-list">
@@ -4012,7 +4245,8 @@
                         <span class="node-name">RadianceProUpscale</span>
                     </div>
                     <code class="node-class">RadianceProUpscale</code>
-                    <p class="node-description">Professional 32-bit upscaler optimized for Flux with HDR support.</p>
+                    <p class="node-description">Professional 32-bit upscaler optimized for Flux with HDR support.
+                    </p>
 
                     <div class="io-section">
                         <h4>Inputs</h4>
@@ -4206,7 +4440,8 @@
                         <span class="node-name">RadianceUpscaleTiled</span>
                     </div>
                     <code class="node-class">RadianceUpscaleTiled</code>
-                    <p class="node-description">Tile-based upscaler for processing very large images efficiently.</p>
+                    <p class="node-description">Tile-based upscaler for processing very large images efficiently.
+                    </p>
 
                     <div class="io-section">
                         <h4>Inputs</h4>
@@ -4551,7 +4786,8 @@
                         <span class="node-name">RadianceWaveform</span>
                     </div>
                     <code class="node-class">RadianceWaveform</code>
-                    <p class="node-description">Visualize image exposure and channel balance using a Waveform monitor.
+                    <p class="node-description">Visualize image exposure and channel balance using a Waveform
+                        monitor.
                     </p>
 
                     <div class="io-section">
@@ -4802,7 +5038,8 @@
                         <span class="node-name">RadianceDNAReader</span>
                     </div>
                     <code class="node-class">RadianceDNAReader</code>
-                    <p class="node-description">Verifies if an image contains a valid FXTD Digital DNA signature.</p>
+                    <p class="node-description">Verifies if an image contains a valid FXTD Digital DNA signature.
+                    </p>
 
                     <div class="io-section">
                         <h4>Inputs</h4>
@@ -5086,7 +5323,8 @@
                         <span class="node-name">RadianceHelp</span>
                     </div>
                     <code class="node-class">RadianceHelp</code>
-                    <p class="node-description">Open FXTD Studio Radiance documentation or website in your browser.</p>
+                    <p class="node-description">Open FXTD Studio Radiance documentation or website in your browser.
+                    </p>
 
                     <div class="io-section">
                         <h4>Inputs</h4>
@@ -5129,7 +5367,8 @@
                         <span class="node-name">RadianceUnifiedLoader</span>
                     </div>
                     <code class="node-class">RadianceUnifiedLoader</code>
-                    <p class="node-description">Unified Professional Loader for Flux and modern Diffusion models (UNET +
+                    <p class="node-description">Unified Professional Loader for Flux and modern Diffusion models
+                        (UNET +
                         Dual CLIP + VAE).</p>
 
                     <div class="io-section">
@@ -5548,27 +5787,72 @@
                 </div>
             </div>
         </section>
-        <footer>
-            <p>FXTD Studios © 2024-2026</p>
-        </footer>
+    </main>
     </div>
 
-    <script>
-        document.addEventListener('DOMContentLoaded', () => {
-            const cards = document.querySelectorAll('.node-card');
-            cards.forEach(card => {
-                // Start collapsed
-                card.classList.add('collapsed');
+    <footer class="wiki-footer">
+        <div style="display:flex; gap:1.5rem; justify-content:center; flex-wrap:wrap; margin-bottom:1rem; opacity:0.8;">
+            <a href="https://fxtd.org/" target="_blank">Website</a>
+            <a href="https://github.com/fxtdstudios/radiance" target="_blank">GitHub</a>
+            <a href="https://linkedin.com/company/fxtdstudios" target="_blank">LinkedIn</a>
+            <a href="https://instagram.com/fxtdstudios" target="_blank">Instagram</a>
+            <a href="https://vimeo.com/fxtdstudios" target="_blank">Vimeo</a>
+            <a href="https://discord.gg/fxtdstudios" target="_blank">Discord</a>
+            <a href="https://facebook.com/fxtdstudios" target="_blank">Facebook</a>
+        </div>
+        <p><strong>Radiance v2.1.0</strong> · © FXTD Studios</p>
+    </footer>
 
-                // Toggle on click
-                card.addEventListener('click', (e) => {
-                    // Toggle collapsed state
-                    card.classList.toggle('collapsed');
-                });
+    <script>
+        // Real-time Search Logic
+        const searchInput = document.getElementById('nodeSearch');
+        const cards = document.querySelectorAll('.node-card');
+        const categories = document.querySelectorAll('.category');
+
+        searchInput.addEventListener('input', (e) => {
+            const query = e.target.value.toLowerCase().trim();
+
+            cards.forEach(card => {
+                const name = card.querySelector('.node-name').textContent.toLowerCase();
+                const className = card.querySelector('.node-class-badge')?.textContent.toLowerCase() || "";
+                const desc = card.querySelector('.node-desc').textContent.toLowerCase();
+
+                const isMatch = name.includes(query) || className.includes(query) || desc.includes(query);
+                card.style.display = isMatch ? 'block' : 'none';
+            });
+
+            // Hide empty categories
+            categories.forEach(cat => {
+                const visibleCards = cat.querySelectorAll('.node-card[style="display: block;"]').length ||
+                    cat.querySelectorAll('.node-card:not([style*="display: none"])').length;
+                cat.style.display = visibleCards > 0 ? 'block' : 'none';
+            });
+        });
+
+        // Theme toggle
+        const btn = document.getElementById('themeToggle');
+        const saved = localStorage.getItem('radiance-theme');
+        if (saved === 'light') { document.body.classList.add('light'); btn.textContent = '◎ Dark'; }
+        btn.addEventListener('click', () => {
+            document.body.classList.toggle('light');
+            const isLight = document.body.classList.contains('light');
+            btn.textContent = isLight ? '◎ Dark' : '◎ Light';
+            localStorage.setItem('radiance-theme', isLight ? 'light' : 'dark');
+        });
+
+        // Copy Class Name on Click
+        cards.forEach(card => {
+            card.addEventListener('click', (e) => {
+                const badge = card.querySelector('.node-class-badge');
+                if (badge && (e.target === badge || badge.contains(e.target))) {
+                    navigator.clipboard.writeText(badge.textContent);
+                    const originalText = badge.textContent;
+                    badge.textContent = 'Copied!';
+                    setTimeout(() => badge.textContent = originalText, 1000);
+                }
             });
         });
     </script>
-
 </body>
 
 </html>

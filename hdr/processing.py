@@ -590,8 +590,12 @@ class GPUTensorOps:
         if operation == "Exposure":
             result = img * (2.0**value)
         elif operation == "Gamma":
+            # FIX (VFX Audit): Previous code used torch.clamp(img, 0.001, None) which:
+            #  1. Destroyed negative wide-gamut values (clipped to 0.001).
+            #  2. Added a 0.001 pedestal to pure black (visible on 10-bit+ displays).
+            # Fix: use sign-preserving power, consistent with Float32ColorCorrect.
             gamma = max(0.1, value) if value != 0 else 2.2
-            result = torch.pow(torch.clamp(img, 0.001, None), 1.0 / gamma)
+            result = torch.sign(img) * torch.pow(torch.clamp(torch.abs(img), min=1e-12), 1.0 / gamma)
         elif operation == "Lift/Gain":
             result = img + value  # Simple lift
         elif operation == "Normalize":
