@@ -5,14 +5,12 @@
 ![Version](https://img.shields.io/badge/version-2.1.0-blue)
 ![License](https://img.shields.io/badge/license-GPL--3.0-green)
 ![ComfyUI](https://img.shields.io/badge/ComfyUI-Compatible-purple)
-![GPU](https://img.shields.io/badge/GPU-CUDA%20%7C%20Apple%20MPS-orange)
-![Nodes](https://img.shields.io/badge/nodes-79-brightgreen)
+![Nodes](https://img.shields.io/badge/Nodes-79-blue?style=for-the-badge&logo=comfyui)
+![Version](https://img.shields.io/badge/Version-2.1.0-orange?style=for-the-badge)
 
 </div>
 
-# Radiance — Professional HDR Suite for ComfyUI
-
-*Industry-grade color grading, film effects, HDR processing, and interactive viewing — built for VFX pipelines.*
+**Radiance** is a professional, VFX-grade 32-bit float color science suite for ComfyUI. Built for film editors, colorists, and VFX artists who require absolute precision in their AI-assisted workflows.
 
 [Installation](#installation) · [Node Reference](#node-reference) · [Quick Start](#quick-start) · [Viewer Shortcuts](#viewer-shortcuts) · [Documentation](https://fxtd.org/radiance_docs/) · [What's New](#whats-new-v210)
 
@@ -21,20 +19,13 @@
 ## What's New — v2.1.0
 
 ### ◎ Radiance v2.1.0 (The Professional Suite)
+- **Video-Native Workflow** — Radiance Viewer now accepts `VIDEO` and `IMAGE` inputs interchangeably with real-time frame extraction.
+- **Cinematic Prompt Enhancer** — Built-in AI refinement widget in `Cinematic Prompt Machine` for physically-accurate camera/lighting prompts.
+- **Terminal HUD & Live REPL** — Nuke-style Python interaction directly inside the viewer. Inspect tensors or run math in real-time.
+- **Interactive Mask Editor** — `◎ Radiance Load Image` now includes a non-destructive soft-brush mask editor for immediate compositing.
 - **◎ Radiance 32-bit Denoise** — new edge-preserving bilateral filter for 32-bit float images.
 - **◎ Radiance Reroute / Reroute+** — compact visual reroute nodes with auto-type detection.
-- **◎ Radiance Load Image** — enhanced image loader with integrated soft-brush mask editor.
 - **◎ Show Text (Radiance)** — display string, JSON, or any data type output directly on the node UI.
-- **Prompt Enhancer Integration** — Cinematic Prompt Machine now includes a "Prompt Enhancer" widget.
-
-### ◎ Radiance Viewer Overhaul
-- **CDL Export / Import** — save/load grade as ASC CDL v1.2 XML (Nuke, Resolve, OCIO compatible) via ◎ menu
-- **GPU Histogram** — press `H` for a GPU-rendered 256-bin histogram with HDR log scale and SDR ceiling marker
-- **fp32 Pick Buffer** — color picker now reads true scene-linear HDR values from a zlib-compressed `.rpick` sidecar (accurate EV readout at cursor)
-- **LRU Frame Cache** — up to 8 GPU textures cached; zero re-uploads when scrubbing through frames
-- **OES_texture_half_float** — explicit WebGL half-float upload path; HDR textures are now uploaded in fp16 instead of fp32
-- **Linear False Color / Zebra** — `E` and `Z` now evaluate in scene-linear space (pre-OETF) for stop-accurate thresholds
-- **Display-P3 / HDR Detection** — viewer detects P3 and Rec.2020 monitors and configures canvas color space automatically
 
 ### ◎ New Color Nodes (4)
 | Node | File | What it does |
@@ -44,22 +35,74 @@
 | **◎ Radiance LUT Bake** | `nodes_lut.py` | Bake grade params into a 33³ `.cube` LUT (Resolve / Nuke / Premiere ready) |
 | **◎ Radiance LUT Apply** | `nodes_lut.py` | Load any `.cube` LUT and apply via trilinear interpolation |
 
-### ◎ New Video Nodes (2)
-| Node | File | What it does |
-|---|---|---|
-| **◎ Radiance Temporal Smooth** | `nodes_temporal.py` | Per-pixel EMA across batch frames — removes flicker and AI grain; motion-aware mask preserves edges |
-| **◎ Radiance Flicker Analyze** | `nodes_temporal.py` | Measures frame-to-frame flicker index; outputs JSON report for QC benchmarking |
+## Node Reference (79 Total)
 
-### ◎ New Analysis + Compositing Nodes (3)
-| Node | File | What it does |
-|---|---|---|
-| **◎ Radiance False Color** | `nodes_scopes.py` | 7-zone false-color overlay baked as IMAGE — pipeline-usable without opening the viewer |
-| **◎ Radiance Blend Composite** | `nodes_overlay.py` | 8 blend modes (Normal, Add, Screen, Multiply, Overlay, Soft Light, Difference, Divide) with optional MASK |
+### ◎ Core & Viewers
+| Node | File | Description |
+| :--- | :--- | :--- |
+| **◎ Radiance Viewer** | `nodes_radiance_viewer.py` | Professional v3.2 HUD with GPU scopes, LRU caching, and Terminal REPL |
+| **◎ Radiance Grade Apply** | `nodes_radiance_viewer.py` | Bakes Viewer grading parameters into a 32-bit tensor |
+| **◎ Radiance Manager** | `nodes_studio.py` | Centralized project and version management following VFX standards |
+| **◎ Radiance .rad Workspace** | `nodes_workspace.py` | Save/Load state and custom node templates |
+| **◎ Show Text (Radiance)** | `nodes_text.py` | Visual debugger for strings, JSON, and complex dictionaries |
 
-### ◎ Improvements
-- **Radiance Grade** — added `reference_image` match grading, external JSON preset file, and full JSON `grade_info` output
-- **Sampler Pro v3.6** — fixed 6 critical bugs including sigma schedule off-by-one (BUG-28), guidance deep-copy overhead, and double noise injection
-- **Requirements** — added `Pillow` and `scipy` (both used in core processing nodes)
+### ◎ Color & HDR Pipeline
+| Node | File | Description |
+| :--- | :--- | :--- |
+| **◎ Radiance Grade** | `nodes_grade.py` | Primary 32-bit Lift/Gamma/Gain/Offset grading engine |
+| **◎ Radiance Grade Match** | `nodes_grade.py` | **New:** Shot-to-shot color transfer using CIE L\*a\*b\* statistics |
+| **◎ Radiance LUT Apply** | `nodes_color.py` | High-precision trilinear LUT applicator (.cube / .3dl) |
+| **◎ Radiance Workflow Presets**| `nodes_color.py` | Scene-linear setups for ACES, Log, and Display transforms |
+| **◎ Radiance Log Curve Decode**| `nodes_color.py` | Precise decoding for LogC3, LogC4, S-Log3, REDLog, etc. |
+| **◎ Radiance VAE Encode Pro** | `nodes_hdr.py` | 32-bit floating point VAE encoding with tiling support |
+| **◎ Radiance VAE Decode Pro** | `nodes_hdr.py` | 32-bit floating point VAE decoding with tiling support |
+| **◎ Radiance OCIO Transform** | `nodes_color.py` | Full OpenColorIO v2.x integration |
+| **◎ Radiance Color Matrix** | `nodes_color.py` | GPU-accelerated 3x3 and 4x4 matrix operations |
+
+### ◎ Camera & Film FX
+| Node | File | Description |
+| :--- | :--- | :--- |
+| **◎ Radiance White Balance** | `nodes_camera.py` | Accurate Kelvin temperature and tint correction |
+| **◎ Radiance Depth of Field** | `nodes_camera.py` | Physically-accurate bokeh synthesis with custom shapes |
+| **◎ Radiance Motion Blur** | `nodes_camera.py` | Directional and radial 32-bit vector blur |
+| **◎ Radiance Film Grain** | `nodes_filmgrain.py` | Scanned film grain synthesis with motion coherence |
+| **◎ Radiance 32-bit Denoise** | `nodes_denoise.py` | Edge-preserving selective bilateral filtering |
+| **◎ Radiance Rolling Shutter**| `nodes_camera.py` | Simulation of CMOS rolling shutter artifacts |
+
+### ◎ Video & Temporal
+| Node | File | Description |
+| :--- | :--- | :--- |
+| **◎ Radiance Read (Video)** | `nodes_io.py` | Professional high-bitrate video decoding (ProRes, DNx) |
+| **◎ Radiance Read (Sequence)**| `nodes_io.py` | EXR/DPX/PNG frame sequence loader |
+| **◎ Radiance Temporal Smooth**| `nodes_temporal.py` | Motion-aware flicker reduction for AI video |
+| **◎ Radiance Flicker Analyze**| `nodes_temporal.py` | Measurement tool for frame-to-frame intensity variance |
+
+### ◎ Analysis & QC
+| Node | File | Description |
+| :--- | :--- | :--- |
+| **◎ Radiance QC Pro** | `nodes_qc.py` | Automated gamut, clipping, and noise violation detection |
+| **◎ Radiance Waveform** | `nodes_scopes.py` | High-speed GPU-rendered RGB/Luma Parade |
+| **◎ Radiance Vectorscope** | `nodes_scopes.py` | Professional hue/saturation phase monitoring |
+| **◎ Radiance False Color** | `nodes_scopes.py` | Stop-accurate exposure visualization (Zebra/IRE) |
+| **◎ Radiance Depth Map** | `nodes_depth.py` | Advanced Z-Depth generation for post-compositing |
+
+### ◎ Pipeline & I/O
+| Node | File | Description |
+| :--- | :--- | :--- |
+| **◎ Radiance Write** | `nodes_io.py` | Production-standard file writing (v01, v02, etc.) |
+| **◎ Radiance Save EXR/HDR** | `nodes_exr.py` | Multi-channel 32-bit scanline/PIZ OpenEXR export |
+| **◎ Radiance Nuke Bridge** | `nodes_nuke.py` | **Featured:** Live 2-way image transfer with The Foundry Nuke |
+| **◎ Radiance Reroute+** | `nodes_layout.py` | Smart compact routing with auto-labeling |
+| **◎ Radiance Metadata Overlay**| `nodes_overlay.py` | Custom bake-in for burn-ins and slates |
+| **◎ Radiance DNA Reader** | `nodes_dna.py` | Read custom project/shot metadata from .dna files |
+
+### ◎ Logic & AI
+| Node | File | Description |
+| :--- | :--- | :--- |
+| **◎ Radiance Sampler Pro** | `nodes_sampler.py` | Flux-optimized sampling with phase-shift logic |
+| **◎ Cinematic Encoder** | `nodes_prompt.py` | **Featured:** Turn simple prompts into professional lensing |
+| **◎ Radiance AI Upscale** | `nodes_upscale.py` | 32-bit latent-preserving super-resolution |
+| **◎ Radiance Highlight Synth**| `nodes_hdr.py` | AI-driven reconstruction of clipped HDR textures |
 
 ---
 

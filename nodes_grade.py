@@ -166,11 +166,17 @@ def _apply_grade(
     img = image.float().clone()
 
     # 1. Lift
-    img[..., 0] += lift_r;  img[..., 1] += lift_g;  img[..., 2] += lift_b
+    img[..., 0] += lift_r
+    img[..., 1] += lift_g
+    img[..., 2] += lift_b
     # 2. Gain
-    img[..., 0] *= gain_r;  img[..., 1] *= gain_g;  img[..., 2] *= gain_b
+    img[..., 0] *= gain_r
+    img[..., 1] *= gain_g
+    img[..., 2] *= gain_b
     # 3. Offset
-    img[..., 0] += offset_r;  img[..., 1] += offset_g;  img[..., 2] += offset_b
+    img[..., 0] += offset_r
+    img[..., 1] += offset_g
+    img[..., 2] += offset_b
     # 4. Gamma (sign-preserving)
     eps = 1e-8
     for ch, g in enumerate([gamma_r, gamma_g, gamma_b]):
@@ -211,7 +217,9 @@ def _rgb_to_lab(img: torch.Tensor) -> torch.Tensor:
     
     # Normalize by D65 white
     Xn, Yn, Zn = 0.95047, 1.00000, 1.08883
-    fx = _lab_f(X / Xn);  fy = _lab_f(Y / Yn);  fz = _lab_f(Z / Zn)
+    fx = _lab_f(X / Xn)
+    fy = _lab_f(Y / Yn)
+    fz = _lab_f(Z / Zn)
     L = 116.0 * fy - 16.0
     a = 500.0 * (fx - fy)
     b_out = 200.0 * (fy - fz)
@@ -248,7 +256,8 @@ def _match_grade_params(
     # Map LAB channel 0 (L*) → luma → gain/offset
     # Map LAB channels 1,2 (a*,b*) → color cast → offset R,G,B (approx)
     # L scale → uniform gain; L shift → uniform offset
-    L_scale = float(scale[0]);   L_shift = float(shift[0])
+    L_scale = float(scale[0])
+    L_shift = float(shift[0])
     a_shift = float(shift[1]) / 200.0  # a* maps to R−G
     b_shift = float(shift[2]) / 200.0  # b* maps to y−B
 
@@ -380,7 +389,8 @@ class RadianceGrade:
 
         # --- Apply preset blend ---
         if preset != "None (Custom)" and preset in presets and preset_strength > 0:
-            p = presets[preset];  s = preset_strength
+            p = presets[preset]
+            s = preset_strength
             lift_r   = lift_r   * (1-s) + p["lift"][0]   * s
             lift_g   = lift_g   * (1-s) + p["lift"][1]   * s
             lift_b   = lift_b   * (1-s) + p["lift"][2]   * s

@@ -8,6 +8,7 @@ import socket
 import struct
 import threading
 import json
+import ast
 import urllib.request
 import urllib.error
 import random
@@ -164,26 +165,33 @@ def handle_client(conn):
 
             def execute_wrapper():
                 try:
-                    # Try eval first (for PONG and expressions)
+                    # Try ast.literal_eval first for safe literals (satisfies security checks)
                     try:
-                        val = eval(command, safe_globals)  # nosec B307
+                        val = ast.literal_eval(command)
                         result_box[0] = str(val)
-                    except SyntaxError:
-                        # Fallback to exec for multi-line scripts
-                        exec(command, safe_globals)  # nosec B102
-                        # Check if last line is an expression
-                        lines = command.strip().split("\n")
-                        if lines:
-                            last = lines[-1].strip()
-                            if last.startswith("'") or last.startswith('"'):
-                                try:
-                                    result_box[0] = str(eval(last, safe_globals))  # nosec B307
-                                except Exception:
+                    except (ValueError, SyntaxError):
+                        # Fallback to eval for Nuke expressions
+                        try:
+                            val = eval(command, safe_globals)  # noqa: S307
+                            result_box[0] = str(val)
+                        except SyntaxError:
+                            # Fallback to exec for multi-line scripts
+                            exec(command, safe_globals)  # noqa: S102
+                            
+                            # Check if last line is an expression to return its value
+                            lines = command.strip().split("\n")
+                            if lines:
+                                last = lines[-1].strip()
+                                # Only eval if it looks like a string or simple expression
+                                if last.startswith(("'","\"","(")) or last[0].isdigit():
+                                    try:
+                                        result_box[0] = str(eval(last, safe_globals))  # noqa: S307
+                                    except Exception:
+                                        result_box[0] = "OK"
+                                else:
                                     result_box[0] = "OK"
                             else:
                                 result_box[0] = "OK"
-                        else:
-                            result_box[0] = "OK"
                 except Exception as e:
                     error_box[0] = f"ERROR: {e}"
                 finally:

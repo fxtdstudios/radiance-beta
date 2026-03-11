@@ -46,13 +46,19 @@ def _apply_grade_to_tensor(
     out = img.clone().float()
 
     # 1. Lift
-    out[..., 0] += lift_r;  out[..., 1] += lift_g;  out[..., 2] += lift_b
+    out[..., 0] += lift_r
+    out[..., 1] += lift_g
+    out[..., 2] += lift_b
 
     # 2. Gain
-    out[..., 0] *= gain_r;  out[..., 1] *= gain_g;  out[..., 2] *= gain_b
+    out[..., 0] *= gain_r
+    out[..., 1] *= gain_g
+    out[..., 2] *= gain_b
 
     # 3. Offset
-    out[..., 0] += offset_r;  out[..., 1] += offset_g;  out[..., 2] += offset_b
+    out[..., 0] += offset_r
+    out[..., 1] += offset_g
+    out[..., 2] += offset_b
 
     # 4. Gamma (sign-preserving)
     eps = 1e-8
@@ -167,9 +173,12 @@ def _apply_cube_lut_to_image(img: torch.Tensor, lut: torch.Tensor, lut_size: int
     gc = flat[:, 1] * (n - 1)
     bc = flat[:, 2] * (n - 1)
 
-    r0 = rc.long().clamp(0, n - 2);  r1 = r0 + 1
-    g0 = gc.long().clamp(0, n - 2);  g1 = g0 + 1
-    b0 = bc.long().clamp(0, n - 2);  b1 = b0 + 1
+    r0 = rc.long().clamp(0, n - 2)
+    r1 = r0 + 1
+    g0 = gc.long().clamp(0, n - 2)
+    g1 = g0 + 1
+    b0 = bc.long().clamp(0, n - 2)
+    b1 = b0 + 1
 
     rf = rc - r0.float()
     gf = gc - g0.float()
@@ -188,7 +197,9 @@ def _apply_cube_lut_to_image(img: torch.Tensor, lut: torch.Tensor, lut_size: int
     c011 = lut[idx(r0, g1, b1)]
     c111 = lut[idx(r1, g1, b1)]
 
-    rf = rf.unsqueeze(1);  gf = gf.unsqueeze(1);  bf = bf.unsqueeze(1)
+    rf = rf.unsqueeze(1)
+    gf = gf.unsqueeze(1)
+    bf = bf.unsqueeze(1)
 
     out = (
         c000 * (1 - rf) * (1 - gf) * (1 - bf) +
