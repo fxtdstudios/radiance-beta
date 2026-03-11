@@ -820,7 +820,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "OCIOColorTransform": "OCIO Color Transform",
-    "ACESConfigManager": "ACES Config Manager",
-    "OCIOListColorspaces": "List OCIO Colorspaces",
+    "OCIOColorTransform": "◎ OCIO Color Transform",
+    "ACESConfigManager": "◎ ACES Config Manager",
+    "OCIOListColorspaces": "◎ List OCIO Colorspaces",
 }

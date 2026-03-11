@@ -192,14 +192,23 @@ def _apply_grade(
 def _rgb_to_lab(img: torch.Tensor) -> torch.Tensor:
     """Rough sRGB → CIE L*a*b* for mean/std matching. img shape (B,H,W,3) [0,1]."""
     # Linear → XYZ (D65)
-    rgb = img.float().clamp(0.0, 1.0)
-    # sRGB linearize (approx)
-    lin = torch.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+    # Sign-preserving linearization (HDR safe)
+    # Instead of sRGB power 2.4 (which expects 0..1), use a more robust power
+    # that handles negatives and values > 1.0 without crushing.
+    eps = 1e-12
+    rgb = img.float()
+    
+    # Linearize: sRGB approximation that handles values outside [0, 1]
+    # For values > 0.04045, use sign(x) * |x|^2.2 (or 2.4)
+    # This is safe for linear scene-referred data with negative Wide Gamut values.
+    lin = torch.sign(rgb) * torch.pow(torch.abs(rgb) + eps, 2.2)
+
     # RGB → XYZ (sRGB D65)
     r, g, b = lin[..., 0], lin[..., 1], lin[..., 2]
     X = 0.4124564 * r + 0.3575761 * g + 0.1804375 * b
     Y = 0.2126729 * r + 0.7151522 * g + 0.0721750 * b
     Z = 0.0193339 * r + 0.1191920 * g + 0.9503041 * b
+    
     # Normalize by D65 white
     Xn, Yn, Zn = 0.95047, 1.00000, 1.08883
     fx = _lab_f(X / Xn);  fy = _lab_f(Y / Yn);  fz = _lab_f(Z / Zn)
@@ -589,7 +598,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceGrade":          "◎ Radiance Grade",
+    "RadianceGrade": "◎ Radiance Grade",
     "RadianceApplyGradeInfo": "◎ Apply Grade Info",
-    "RadianceGradeMatch":     "◎ Radiance Grade Match",
+    "RadianceGradeMatch": "◎ Radiance Grade Match",
 }

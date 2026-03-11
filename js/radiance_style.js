@@ -17,10 +17,63 @@ const COLORS = {
     ACCENT: "#00a8ff"        // Radiance Blue
 };
 
+// ── Fix: NODE_DEFAULT_SHAPE property shim ────────────────────────────────────
+// colorPaletteService (ComfyUI core) calls `loadLiteGraphColorPalette` which
+// reads and re-sets LiteGraph.NODE_DEFAULT_SHAPE.  LiteGraph itself only
+// accepts the magic numbers 1 / 2 / 4 (BOX / ROUND / CARD).  Some installed
+// extensions — or color palettes — write strings like "box" instead, causing a
+// console warning every load.  This property shim runs SYNCHRONOUSLY at module
+// load time (before colorPaletteService fires) and transparently coerces any
+// string or out-of-range value to the correct integer so the warning never fires.
+(function patchLiteGraphShape() {
+    if (!window.LiteGraph) return; // LiteGraph not yet loaded; skip
+    if (Object.getOwnPropertyDescriptor(LiteGraph, '_shape')) return; // already patched
+
+    const _mapShape = (v) => {
+        if (typeof v === 'number' && [1, 2, 4].includes(v)) return v;
+        const s = String(v).toLowerCase();
+        if (s === 'box')    return 1; // LiteGraph.BOX_SHAPE
+        if (s === 'round')  return 2; // LiteGraph.ROUND_SHAPE
+        if (s === 'circle') return 2;
+        if (s === 'card')   return 4; // LiteGraph.CARD_SHAPE
+        return typeof v === 'number' ? Math.max(1, v) : 2; // fallback: ROUND
+    };
+
+    let _current = _mapShape(LiteGraph.NODE_DEFAULT_SHAPE);
+    Object.defineProperty(LiteGraph, 'NODE_DEFAULT_SHAPE', {
+        get() { return _current; },
+        set(v) { _current = _mapShape(v); },
+        configurable: true,
+        enumerable: true,
+    });
+})();
+
 app.registerExtension({
     name: "FXTD.Radiance.Style",
 
+    async init() {
+        // Shape shim now applied at module load time (top-level IIFE above).
+    },
+
     async setup() {
+
+
+        // Fix #2: VHS Nodes crash on load when force_size is null
+        if (window.LiteGraph && window.LGraphNode) {
+            const origConfigure = window.LGraphNode.prototype.configure;
+            window.LGraphNode.prototype.configure = function (info) {
+                if (this.type && this.type.includes("VHS_") && info && info.widgets_values) {
+                    if (typeof info.widgets_values === 'object' && !Array.isArray(info.widgets_values)) {
+                        if (info.widgets_values.force_size === null) {
+                            info.widgets_values.force_size = "Disabled";
+                        }
+                    }
+                }
+                return origConfigure.apply(this, arguments);
+            };
+        }
+        // ---------------------------------------------
+
         // v3.0 #15: High Contrast Mode & Premium Glass Styles
         const style = document.createElement("style");
         style.innerHTML = `

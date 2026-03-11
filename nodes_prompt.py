@@ -24,6 +24,7 @@ Example Usage (Cinematic Encoder):
 """
 
 import logging
+import torch
 
 logger = logging.getLogger("radiance.prompt")
 
@@ -628,6 +629,53 @@ class CinematicDatasets:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#                         NEURAL GRAMMAR ENGINE (v3.5)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class NeuralGrammar:
+    """
+    Advanced logic to "Neuralize" prompts, making them more precise,
+    scientific, and architecturally aware for T5/Diffusion models.
+    """
+
+    SCIENTIFIC_REPLACEMENTS = {
+        "visualize": "volumetric rendering of latent dynamics",
+        "accurate": "high-fidelity mathematical precision",
+        "precise": "sub-pixel accurate spatial distribution",
+        "design": "topological architectural structure",
+        "process": "sequential tensor transformation flow",
+        "generation": "stochastic manifold reconstruction",
+    }
+
+    @staticmethod
+    def scientificize(text: str) -> str:
+        """Replace common words with high-precision scientific cinematic terms."""
+        words = text.lower().split()
+        new_words = []
+        for word in words:
+            clean_word = word.strip(".,!?;:")
+            if clean_word in NeuralGrammar.SCIENTIFIC_REPLACEMENTS:
+                replacement = NeuralGrammar.SCIENTIFIC_REPLACEMENTS[clean_word]
+                # Preserve punctuation
+                new_words.append(word.replace(clean_word, replacement))
+            else:
+                new_words.append(word)
+        return " ".join(new_words)
+
+    @staticmethod
+    def enhance_syntax(prompt_parts: list) -> list:
+        """Improve grammar and technical structure of prompt parts."""
+        # Ensure 'Shot on' has proper articles, etc.
+        enhanced = []
+        for part in prompt_parts:
+            if part.startswith("Shot on"):
+                # "Shot on ARRI Alexa" -> "Captured with high-precision ARRI Alexa"
+                part = part.replace("Shot on ", "Captured with high-precision ARRI ")
+            enhanced.append(part)
+        return enhanced
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #                   PRESET VALIDATION (v2.1 — runs at import time)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -715,20 +763,30 @@ _MOOD_VOCAB = {
 }
 
 
-def _real_token_count(clip, text: str) -> int:
+def _real_token_count(clip, text: str, tokens: dict = None) -> int:
     """
     Get actual token count using the connected CLIP tokenizer.
     Falls back to estimate_tokens() if tokenizer API is unavailable.
     """
+    if tokens is None:
+        try:
+            tokens = clip.tokenize(text)
+        except Exception:
+            return estimate_tokens(text)
+
     try:
-        tokens = clip.tokenize(text)
         # Try each known encoder key in order of preference
         for key in ("t5xxl", "l", "g", "llm"):
             if key in tokens and tokens[key]:
-                return int(tokens[key][0].shape[-1])
+                if hasattr(tokens[key][0], "shape"):
+                    return int(tokens[key][0].shape[-1])
+                elif hasattr(tokens[key][0], "__len__"):
+                    return len(tokens[key][0])
         # Fallback: count all token entries if shape not accessible
         for val in tokens.values():
-            if val and hasattr(val[0], "__len__"):
+            if val and hasattr(val[0], "shape"):
+                return int(val[0].shape[-1])
+            elif val and hasattr(val[0], "__len__"):
                 return len(val[0])
     except Exception:
         pass
@@ -769,6 +827,10 @@ def _build_prose_prompt(
         parts.append(f"{framing} of {subject}.")
     else:
         parts.append(f"{subject}.")
+
+    # Neural Grammar Injection: If the user asks for accuracy/precision, expand it
+    if "accurate" in subject or "precise" in subject or "visualize" in subject:
+        parts[0] = NeuralGrammar.scientificize(parts[0])
 
     # 2. Art direction (positioned here — right after subject)
     if art_direction and art_direction.strip():
@@ -879,6 +941,31 @@ def insert_break_points(prompt: str, max_tokens: int = 70) -> str:
         result.append(" ".join(current_chunk))
 
     return f" {BREAK_TOKEN} ".join(result)
+
+
+def enhance_prompt_grammar(prompt: str, level: str) -> str:
+    """Fix common grammar/formatting issues and optionally inject creative tags."""
+    if level == "Off" or not prompt:
+        return prompt
+
+    import re
+    p = prompt
+    # Remove redundant spaces
+    p = re.sub(r' {2,}', ' ', p)
+    # Fix stray/duplicate commas
+    p = re.sub(r'\s+,', ',', p)
+    p = re.sub(r',+', ',', p)
+    p = re.sub(r',\s*,', ',', p)
+
+    if level == "Creative Enhancement":
+        # Inject universally high-quality aesthetic modifiers
+        creative_tags = "masterpiece, best quality, highly detailed, stunning, ultra-high resolution"
+        if p.endswith('.'):
+            p = p[:-1] + ", " + creative_tags + "."
+        else:
+            p += ", " + creative_tags
+
+    return p.strip()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1252,14 +1339,24 @@ class RadianceCinematicPromptEncoder:
                     {"default": "Off",
                      "tooltip": "Auto-insert BREAK tokens at chunk boundaries for long prompts."},
                 ),
+                "prompt_enhancer": (
+                    ["Off", "Grammar & Formatting", "Creative Enhancement"],
+                    {"default": "Off",
+                     "tooltip": "Auto-fix prompt grammar or inject high-quality aesthetic tags."},
+                ),
+                "image_ref": (
+                    "IMAGE",
+                    {"tooltip": "Optional reference image. Passed through to output for routing convenience."},
+                ),
             },
         }
 
-    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "STRING", "STRING", "INT")
-    RETURN_NAMES = ("positive", "negative", "positive_text", "negative_text", "token_count")
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "IMAGE", "STRING", "STRING", "INT")
+    RETURN_NAMES = ("positive", "negative", "image_ref", "positive_text", "negative_text", "token_count")
     OUTPUT_TOOLTIPS = (
         "Positive conditioning for the sampler.",
         "Negative conditioning for the sampler.",
+        "Optional reference image passed through.",
         "Final positive prompt string — wire to a text preview node.",
         "Final negative prompt string.",
         "Actual token count from the CLIP tokenizer.",
@@ -1303,6 +1400,8 @@ class RadianceCinematicPromptEncoder:
         clip_skip=0,
         lora_keywords="",
         use_break="Off",
+        image_ref=None,
+        prompt_enhancer="Off",
     ):
         # ── Validation ──────────────────────────────────────────────────────
         if clip is None:
@@ -1359,17 +1458,29 @@ class RadianceCinematicPromptEncoder:
             prompt_weight_mode=prompt_weight_mode,
         )
 
+        # ── Enhance Prompt Grammar ──────────────────────────────────────────
+        if prompt_enhancer != "Off":
+            final_prompt = enhance_prompt_grammar(final_prompt, prompt_enhancer)
+
         # ── BREAK tokens ────────────────────────────────────────────────────
         if use_break == "On":
             final_prompt = insert_break_points(final_prompt, max_tokens=token_limit - 7)
 
-        # ── Real token count ────────────────────────────────────────────────
-        real_count = _real_token_count(clip, final_prompt)
+        # ── Tokenize & Real token count ─────────────────────────────────────
+        pos_tokens = clip.tokenize(final_prompt)
+        real_count = _real_token_count(clip, final_prompt, tokens=pos_tokens)
+        
         if real_count > token_limit and use_break == "Off":
             logger.warning(
                 f"[Encoder] Prompt has {real_count} tokens (limit {token_limit}). "
-                "Enable 'use_break' or increase context_window."
+                "Enable 'use_break' or increase context_window. Truncating to prevent OOM."
             )
+            # Safe truncation of token lists to prevent VRAM overflow and node crashes
+            for key in pos_tokens:
+                if isinstance(pos_tokens[key], list):
+                    for i in range(len(pos_tokens[key])):
+                        if hasattr(pos_tokens[key][i], "__len__") and len(pos_tokens[key][i]) > token_limit:
+                            pos_tokens[key][i] = pos_tokens[key][i][:token_limit]
 
         # ── CLIP skip ───────────────────────────────────────────────────────
         if clip_skip > 0:
@@ -1377,13 +1488,21 @@ class RadianceCinematicPromptEncoder:
             clip.clip_layer(-clip_skip)
 
         # ── Encode ──────────────────────────────────────────────────────────
-        pos_tokens = clip.tokenize(final_prompt)
         positive_cond = clip.encode_from_tokens_scheduled(pos_tokens)
 
-        neg_tokens = clip.tokenize(negative_prompt or "")
+        # Ensure negative prompt is at least a space to prevent empty tensor crashes on strict arches
+        safe_negative = negative_prompt if negative_prompt and negative_prompt.strip() else " "
+        neg_tokens = clip.tokenize(safe_negative)
         negative_cond = clip.encode_from_tokens_scheduled(neg_tokens)
 
-        return (positive_cond, negative_cond, final_prompt, negative_prompt, real_count)
+        # ── image_ref passthrough ────────────────────────────────────────
+        # image_ref is optional, but the output slot is typed IMAGE.
+        # Downstream nodes crash on None, so provide a 1×1 black pixel fallback.
+        if image_ref is None:
+            image_ref = torch.zeros(1, 1, 1, 3)  # BHWC
+            logger.debug("[Encoder] No image_ref connected — using 1×1 black fallback.")
+
+        return (positive_cond, negative_cond, image_ref, final_prompt, negative_prompt, real_count)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                         NODE MAPPINGS

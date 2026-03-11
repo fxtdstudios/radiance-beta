@@ -1436,18 +1436,17 @@ class RadianceWebGLRenderer {
             vec3 applyCurves(vec3 color) {
                 if (u_curveMix <= 0.0) return color;
                 
-                // Texture lookup (0..1 range)
-                // We use the color value itself as the U coordinate. V is 0.5.
-                // Clamp input to 0-1 to avoid texture wrap artifacts
+                // Sample only the 0..1 range from the LUT
                 vec3 c = clamp(color, 0.0, 1.0);
                 
                 float r = texture(u_curveLut, vec2(c.r, 0.5)).r;
                 float g = texture(u_curveLut, vec2(c.g, 0.5)).g;
                 float b = texture(u_curveLut, vec2(c.b, 0.5)).b;
                 
-                vec3 curved = vec3(r, g, b);
+                // Preserve HDR highlights: additive extrapolation for values > 1.0
+                // This ensures Specular Highlights aren't crushed if the curve is at identity.
+                vec3 curved = vec3(r, g, b) + max(vec3(0.0), color - 1.0);
                 
-                // Mix based on strength
                 return mix(color, curved, u_curveMix);
             }
 

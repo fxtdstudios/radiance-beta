@@ -249,6 +249,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceTemporalSmooth":  "◎ Radiance Temporal Smooth",
-    "RadianceFlickerAnalyze":  "◎ Radiance Flicker Analyze",
+    "RadianceTemporalSmooth": "◎ Radiance Temporal Smooth",
+    "RadianceFlickerAnalyze": "◎ Radiance Flicker Analyze",
 }

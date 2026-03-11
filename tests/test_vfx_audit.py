@@ -301,23 +301,18 @@ class TestGPUTensorOps(unittest.TestCase):
         result, _ = self._run(t, "Exposure", value=0.0)  # no change
         self.assertAlmostEqual(float(result.max()), 3.0, delta=0.01)
 
-    # CRITICAL BUG AUDIT: Gamma uses clamp(0.001, None) — clamps negatives
-    def test_gamma_clamps_negatives_KNOWN_BUG(self):
+    # FIXED (v3.0): Gamma now uses sign-preserving power
+    def test_gamma_preserves_negatives(self):
         """
-        KNOWN BUG (v3.0): GPUTensorOps Gamma op uses torch.clamp(img, 0.001, None)
-        before the power, which:
-          1. Destroys negative wide-gamut values (clips to 0.001)
-          2. Introduces a 0.001 pedestal on pure black
-        This test DOCUMENTS the bug. It will FAIL when the bug is fixed.
+        FIXED (v3.0): GPUTensorOps Gamma op now uses sign-preserving power.
+        Negatives must survive and not be clamped to a pedestal.
         """
-        t = torch.full((1, 4, 4, 3), -0.1, dtype=torch.float32)
+        t = torch.tensor([[[[-0.1, -0.5, 0]]]], dtype=torch.float32)
         result, _ = self._run(t, "Gamma", value=2.2)
-        # Bug present: clamp lifts -0.1 → 0.001
-        has_pedestal = float(result.min()) >= 0.001 - 1e-6
-        # We document but do not fail CI on this; mark as expected bug
-        if has_pedestal:
-            print("\n  [AUDIT] GPUTensorOps Gamma: negative clamp BUG confirmed — "
-                  "negatives become 0.001 pedestal. Fix: use sign-preserving power.")
+        # Fix present: negatives stay negative
+        self.assertLess(float(result[..., 0]), 0.0, "Gamma must preserve negative values")
+        self.assertLess(float(result[..., 1]), 0.0, "Gamma must preserve negative values")
+        self.assertAlmostEqual(float(result[..., 2]), 0.0, places=6, msg="Pure black must stay black")
 
     def test_normalize_per_frame(self):
         """v2.1 fix: GPUTensorOps Normalize scales each frame independently.

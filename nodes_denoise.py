@@ -85,4 +85,4 @@ class RadianceDenoise:
 
 NODE_CLASS_MAPPINGS = {"RadianceDenoise": RadianceDenoise}
 
-NODE_DISPLAY_NAME_MAPPINGS = {"RadianceDenoise": "Radiance 32-bit Denoise"}
+NODE_DISPLAY_NAME_MAPPINGS = {"RadianceDenoise": "◎ Radiance 32-bit Denoise"}

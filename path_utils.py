@@ -95,11 +95,11 @@ def get_safe_output_dir(base_dir: str, subfolder: str = "") -> str:
         ValueError: If subfolder would escape base_dir
     """
     if subfolder and os.path.isabs(subfolder):
-        raise ValueError(f"Absolute subfolder paths not allowed: '{subfolder}'")
-
-    output_dir = (
-        safe_join(base_dir, subfolder) if subfolder else os.path.abspath(base_dir)
-    )
+        output_dir = os.path.normpath(subfolder)
+    else:
+        output_dir = (
+            safe_join(base_dir, subfolder) if subfolder else os.path.abspath(base_dir)
+        )
 
     # Create directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -112,7 +112,7 @@ def get_safe_input_path(base_dir: str, filename: str) -> str:
 
     Args:
         base_dir: The base input directory (from ComfyUI)
-        filename: The filename or subpath to read
+        filename: The filename or subpath to read (allows explicit absolute paths)
 
     Returns:
         Safe absolute path for the input file
@@ -120,6 +120,10 @@ def get_safe_input_path(base_dir: str, filename: str) -> str:
     Raises:
         ValueError: If the path would escape the base directory
     """
+    # Allow absolute paths for VFX workflows, preventing relative traversal
+    if os.path.isabs(filename):
+        return os.path.normpath(filename)
+        
     # Ensure base_dir is absolute
     base_dir = os.path.normpath(os.path.abspath(base_dir))
     

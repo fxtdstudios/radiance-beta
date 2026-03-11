@@ -2,7 +2,44 @@
 
 All notable changes to FXTD Radiance will be documented in this file.
 
-## [2.1.0] - 2026-02-26
+## [2.1.0] - 2026-03-10
+
+### Added — Radiance Viewer v2.2 (Terminal & UX Overhaul)
+- **TERMINAL HUD Tab** (`radiance_viewer.js`): Live Python REPL embedded directly in the viewer.
+  - Persistent namespace (`_TERMINAL_NS`) — variables survive between executions.
+  - 30-second timeout guard via `threading.Thread` to prevent ComfyUI event-loop freeze.
+  - Pre-injected context: `math`, `os`, `torch`, `np`, `json`, `time`, `folder_paths`.
+  - `Reset Namespace` button wipes state on demand.
+  - Snippet dropdown with common helper presets.
+- **Documentation Links** in Radiance Workspace node (two new buttons: `📖 Docs — radiance.fxtd.org` and `🌐 FXTD Studios — www.fxtd.org`) and in the Terminal tab status bar.
+
+### Changed — Radiance Viewer UX (5 Design Improvements)
+- **Toolbar Group Labels**: 9 labeled clusters (`FILE · GRADE · VIEW · CH · NAV · ANALYSIS · COMPARE · SCOPES · ANNOTATE · MEASURE`) with hairline separator rules.
+- **Panel Label Typography**: All HUD sub-labels bumped to `11px` + `letter-spacing: 0.06em` for improved legibility.
+- **Bottom Dock Colors**: `TERMINAL` tab now renders in `#00a8ff` (brand blue); `SCRIPT EDITOR` in `#7a92b0` (muted slate). `RUN AUTOMATION` button color unified to match.
+- **Film Stock Preset Active State**: Clicking a film stock pill now shows a blue-glow border indicator (`rgba(0,168,255,0.45)`) — selected state is always visible.
+- **Right Panel Height**: `tabContentContainer` uses `flex:1 + overflow-y:auto` — grading controls fill the full panel height instead of leaving a generic black void below.
+
+### Changed — Nodes
+- **◎ Radiance Depth Map** (renamed from `◎ Depth Map Generator`): Display name updated in `nodes_depth.py` — existing workflows unaffected as the internal class name `RadianceDepthMapGenerator` is unchanged.
+- **Output Path Consistency**: Widget parameter name unified to `output_path` across:
+  - `RadianceWrite` node (`nodes_io.py`) — was `subfolder`.
+  - `RadianceSaveEXR` node (`hdr/io.py`) — was `custom_path`.
+
+### Fixed
+- Added missing `import json` to `nodes_radiance_viewer.py`.
+- Restored accidentally dropped `exportToCDL()` function declaration after Terminal injection.
+
+### Added — Radiance v2.1.0 (The Professional Suite)
+- **◎ Radiance 32-bit Denoise** (`nodes_denoise.py`): Edge-preserving bilateral filter for 32-bit float images.
+- **◎ Radiance Reroute / Reroute+** (`nodes_layout.py`): Compact visual reroute nodes with auto-type detection and custom labels.
+- **◎ Radiance Load Image** (`nodes_radiance_mask.py`): Enhanced image loader with integrated soft-brush mask editor and non-destructive companion mask storage.
+- **◎ Show Text (Radiance)** (`nodes_text.py`): Utility node for displaying any data type (string, JSON, etc.) directly on the node UI.
+- **Prompt Enhancer Integration**: `Cinematic Prompt Machine` now supports grammar-aware prompt enhancement (Natural, Descriptive, Cinematic styles).
+
+### Improved
+- **Metadata Management**: Improved EXR/PNG metadata handling across I/O nodes.
+- **Dependency Validation**: enhanced `check_dependencies` in `__init__.py` for clearer installation guidance.
 
 ### Added — Radiance Viewer v2.1 (Viewer Overhaul)
 - **fp32 Pick Buffer Sidecar** (`#5`): Each frame now saves a zlib-compressed fp32 `.rpick` sidecar (max 256px) for accurate scene-linear HDR color picking — true EV readout at cursor

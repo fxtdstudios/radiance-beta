@@ -1071,7 +1071,7 @@ def write_exr_cv2(
 
 def check_openexr_available() -> bool:
     try:
-        pass
+        import OpenEXR  # noqa: F401
 
         return True
     except ImportError:
@@ -1383,7 +1383,9 @@ class RadianceSaveEXR:
     """
 
     def __init__(self):
-        self.output_dir = "output"
+        # Default to ComfyUI standard output directory
+        import folder_paths
+        self.output_dir = folder_paths.get_output_directory()
         self.type = "output"
 
     @classmethod
@@ -1426,7 +1428,8 @@ class RadianceSaveEXR:
                 ),
                 "alpha_mode": (["None", "From Image", "Solid White", "Solid Black"],),
                 "premultiply_alpha": ("BOOLEAN", {"default": False}),
-                "subfolder": ("STRING", {"default": ""}),
+                "output_path": ("STRING", {"default": "", "tooltip": "Absolute or relative output path. Example: D:\\saved or my_subfolder"}),
+
                 "start_frame": ("INT", {"default": 1, "min": 0, "max": 999999}),
                 "frame_padding": ("INT", {"default": 4, "min": 1, "max": 8}),
                 "add_metadata": ("BOOLEAN", {"default": True}),
@@ -1454,7 +1457,7 @@ class RadianceSaveEXR:
         output_color_space: str = "Linear",
         alpha_mode: str = "None",
         premultiply_alpha: bool = False,
-        subfolder: str = "",
+        output_path: str = "",
         start_frame: int = 1,
         frame_padding: int = 4,
         add_metadata: bool = True,
@@ -1465,11 +1468,17 @@ class RadianceSaveEXR:
     ) -> Dict[str, Any]:
 
         try:
-            if subfolder and os.path.isabs(subfolder):
-                output_dir = subfolder
+            if output_path and os.path.isabs(output_path):
+                output_dir = output_path
                 os.makedirs(output_dir, exist_ok=True)
             else:
-                output_dir = get_safe_output_dir(self.output_dir, subfolder)
+                # Sanitize: Remove 'output/' prefix if it was added by automation scripts
+                clean_path = output_path
+                if clean_path:
+                    clean_path = clean_path.replace("\\", "/")
+                    if clean_path.startswith("output/"):
+                        clean_path = clean_path[7:]
+                output_dir = get_safe_output_dir(self.output_dir, clean_path)
         except ValueError as e:
             logger.error(f"Invalid output path: {e}")
             raise ValueError(f"Security error: {e}")
@@ -1502,6 +1511,8 @@ class RadianceSaveEXR:
             logger.warning(f"Batch size {batch_size} exceeds limit {MAX_BATCH_SIZE}")
             batch_size = MAX_BATCH_SIZE
 
+        logger.info(f"Radiance: Saving {batch_size} image(s) to: {output_dir}")
+
         saved_paths: List[str] = []
         use_openexr = check_openexr_available()
         writer = SimpleEXRWriter()
@@ -1530,7 +1541,16 @@ class RadianceSaveEXR:
                 frame_str = str(frame_num).zfill(frame_padding)
                 ext = ".hdr" if format == "HDR" else ".exr"
                 filename = f"{filename_prefix}_{frame_str}{ext}"
-                filepath = safe_join(output_dir, filename)
+                
+                # Support absolute paths in prefix for VFX pipelines
+                if os.path.isabs(filename):
+                    filepath = os.path.normpath(filename)
+                    # Ensure directory exists for direct absolute paths
+                    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+                else:
+                    filepath = safe_join(output_dir, filename)
+
+                logger.info(f"Radiance: Writing EXR [{i+1}/{batch_size}] -> {filepath}")
 
                 if format == "HDR":
                     if write_hdr_rgbe(filepath, img_out):
@@ -1556,14 +1576,29 @@ class RadianceSaveEXR:
                 if success:
                     saved_paths.append(filepath)
                 else:
-                    logger.error(f"All EXR writers failed for {filepath}")
+                    logger.error(f"Radiance Error: All EXR writers failed for {filepath}")
 
             except Exception as e:
-                logger.error(f"Error processing frame {i}: {e}")
+                logger.error(f"Radiance Error: Processing frame {i}: {e}")
                 continue
 
-        paths_str = "\n".join(saved_paths)
-        return {"ui": {}, "result": (paths_str, output_dir, len(saved_paths))}
+        # Prepare UI response (filenames for preview)
+        # Browsers cannot display EXR/HDR files, so we skip the 'file_paths' list
+        # if the format is not compatible OR if it's an absolute path (which breaks local server URL mapping).
+        ui_files = []
+        is_preview_compatible = format in ["PNG", "JPG", "JPEG"]
+        
+        # In ComfyUI, returned 'ui'['images'] or 'ui'['file_paths'] triggers preview.
+        # For RadianceSaveEXR, we strictly avoid this for non-visual formats to prevent the "empty box" error.
+        
+        # Emergency Fix: Ensure name 'paths_str' exists just in case of weird scoping/caching
+        paths_str = ",".join(saved_paths)
+        logger.info(f"!!! RADIANCE DEBUG: save_exr executing line 1596 - saved_paths count: {len(saved_paths)} !!!")
+
+        return {
+            "ui": {"file_paths": []}, 
+            "result": (paths_str, str(output_dir), len(saved_paths)),
+        }
 
     def _convert_color_space(
         self, img: np.ndarray, input_cs: str, output_cs: str

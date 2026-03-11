@@ -186,7 +186,7 @@ class NukeConnector:
             msg = (
                 f"Nuke not reachable at {self.host}:{self.port}. "
                 "Ensure the Radiance listener is running in Nuke:\n"
-                "  Script Editor → exec(open('radiance_nuke_listener.py').read())"
+                "  Script Editor → run scripts/start_nuke_server.py"
             )
             self._last_error = msg
             logger.warning(msg)
@@ -262,13 +262,8 @@ class NukeConnector:
             "import nuke",
             "",
             "# Find existing Read or create new",
-            "node = None",
-            "for n in nuke.allNodes('Read'):",
-            f"    if n.name() == '{safe_node_name}':",
-            "        node = n",
-            "        break",
-            "",
-            "if node is None:",
+            f"node = nuke.toNode('{safe_node_name}')",
+            "if node is None or node.Class() != 'Read':",
             "    node = nuke.createNode('Read', inpanel=False)",
             f"    node.setName('{safe_node_name}')",
             "",
@@ -294,10 +289,7 @@ class NukeConnector:
             cmd_lines += [
                 "",
                 "# Connect to Viewer",
-                "viewer = None",
-                "for n in nuke.allNodes('Viewer'):",
-                "    viewer = n",
-                "    break",
+                "viewer = nuke.toNode('Viewer1')",
                 "if viewer is None:",
                 "    viewer = nuke.createNode('Viewer', inpanel=False)",
                 "",

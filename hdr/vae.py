@@ -895,7 +895,13 @@ class RadianceVAE4KEncode:
 
         # v2.0 Feature 3: Handle 5D video latents (B, F, H, W, C)
         is_video = pixels.ndim == 5
-        if is_video:
+        
+        # Check if the VAE natively supports 3D latents (e.g., Wan Video, Cosmos)
+        is_3d_vae = False
+        if hasattr(vae, "latent_dim") and getattr(vae, "latent_dim") == 3:
+            is_3d_vae = True
+            
+        if is_video and not is_3d_vae:
             B, F, H, W, C = pixels.shape
             logger.info(
                 f"[Radiance 4K Encode v2.0] Video: {B}×{F}×{W}×{H}, space={source_space}"
@@ -1168,18 +1174,27 @@ class RadianceVAE4KDecode:
         """
         Decode full latent in overlapping tiles with cosine blend.
 
+        Called only after decode() has already handled the frame-loop path for
+        non-3D-native VAEs. By the time we arrive here, samples["samples"] is
+        always 4D (B, C, H, W) — a single image, a single extracted frame, or a
+        3D-native VAE latent whose 5D output is reshaped inside the tile loop.
+
         Args:
-            samples: {"samples": (B, C, H, W)} latent
-            vae: ComfyUI VAE model
-            tile_size_px: Tile size in PIXEL space (will be /8 for latent)
-            overlap_px: Overlap in PIXEL space
-            pbar: Optional progress bar
+            samples:      {"samples": (B, C, H, W)} latent dict
+            vae:          ComfyUI VAE model
+            tile_size_px: Tile size in pixel space (divided by 8 for latent space)
+            overlap_px:   Overlap in pixel space
+            pbar:         Optional ComfyUI ProgressBar
 
         Returns:
-            (B, pixH, pixW, 3) decoded image
+            Tuple of:
+              - (B, pixH, pixW, C) decoded image tensor
+              - int | None  — frame count if a 3D-native VAE produced 5D output, else None
         """
         latent = samples["samples"]
-        b, c, lat_h, lat_w = latent.shape
+
+        b, c = latent.shape[0], latent.shape[1]
+        lat_h, lat_w = latent.shape[-2], latent.shape[-1]
         device = latent.device
         scale = 8
 
@@ -1208,13 +1223,26 @@ class RadianceVAE4KDecode:
         out_c = None  # Will be set from first tile
 
         tile_idx = 0
+        _tile_video_frames = None  # Populated on first tile if 3D VAE detected
         for yi, (ly1, ly2) in enumerate(tiles_y):
             for xi, (lx1, lx2) in enumerate(tiles_x):
                 # Extract latent tile
-                tile_lat = latent[:, :, ly1:ly2, lx1:lx2].contiguous()
+                # Use ellipsis to gracefully handle both 4D (H, W) and 5D (F, H, W) slicing
+                tile_lat = latent[..., ly1:ly2, lx1:lx2].contiguous()
 
                 # Decode on GPU
                 tile_decoded = vae.decode(tile_lat).float().cpu()
+
+                # FIX-4: 3D (temporal) VAEs return (B, F, H, W, C) — a 5D tensor.
+                # Reshape to (B*F, H, W, C) so all downstream accumulation logic
+                # treats frames as batch elements (standard ComfyUI IMAGE format).
+                if tile_decoded.ndim == 5:
+                    _B5, _F5, _H5, _W5, _C5 = tile_decoded.shape
+                    if _tile_video_frames is None:
+                        _tile_video_frames = _F5
+                    tile_decoded = tile_decoded.reshape(_B5 * _F5, _H5, _W5, _C5)
+                    # Also update b so the accumulator is sized for all frames
+                    b = tile_decoded.shape[0]
 
                 # Pixel coordinates
                 px1 = lx1 * scale
@@ -1260,7 +1288,7 @@ class RadianceVAE4KDecode:
         # Normalize by accumulated weight (guard against near-zero at tile edges)
         weight_acc = torch.clamp(weight_acc, min=1e-3)
         output = output / weight_acc
-        return output.to(device)
+        return output.to(device), _tile_video_frames
 
     def _vae_output_to_target(
         self,
@@ -1460,7 +1488,66 @@ class RadianceVAE4KDecode:
             vae_factor = radiance_meta.get("vae_factor", vae_factor)
 
         latent = samples["samples"]
-        b, c, lat_h, lat_w = latent.shape
+        
+        # v2.1 Video Support: Check for 5D video latent (B, C, F, H, W)
+        is_video = latent.ndim == 5
+        
+        # Check if the VAE natively supports 3D latents (e.g., Wan Video, Cosmos)
+        is_3d_vae = False
+        if hasattr(vae, "latent_dim") and getattr(vae, "latent_dim") == 3:
+            is_3d_vae = True
+            
+        if is_video and not is_3d_vae:
+            B, C, F, H, W = latent.shape
+            logger.info(
+                f"[Radiance 4K Decode v2.1] Video Latent: {W}×{H} ({B} batches, {F} frames), format={latent_fmt}"
+            )
+            decoded_frames = []
+            frame_alphas = None
+            if alpha is not None:
+                if alpha.shape[0] == B * F:
+                    frame_alphas = alpha.chunk(F, dim=0)
+                else:
+                    frame_alphas = [alpha] * F
+
+            for fi in range(F):
+                frame_latent = latent[:, :, fi, ...]
+                frame_samples = dict(samples)
+                frame_samples["samples"] = frame_latent
+                
+                frame_alpha = frame_alphas[fi] if frame_alphas else None
+
+                decoded_frame, meta_str, fmt = self.decode(
+                    samples=frame_samples,
+                    vae=vae,
+                    target_space=target_space,
+                    tile_size=tile_size,
+                    overlap=overlap,
+                    exposure_adjust=exposure_adjust,
+                    alpha=frame_alpha,
+                    hdr_mode=hdr_mode,
+                    inverse_tonemap=inverse_tonemap,
+                    target_stops=target_stops,
+                    crop_padding=crop_padding,
+                    export_rhdr=False, 
+                    source_space=source_space,
+                    processing_mode=processing_mode
+                )
+                decoded_frames.append(decoded_frame)
+
+            all_frames = torch.cat(decoded_frames, dim=0)
+
+            try:
+                meta_json = json.loads(meta_str)
+            except:
+                meta_json = {}
+            meta_json["video"] = True
+            meta_json["frames"] = F
+
+            return (all_frames, json.dumps(meta_json, indent=2), latent_fmt)
+
+        b, c = latent.shape[0], latent.shape[1]
+        lat_h, lat_w = latent.shape[-2], latent.shape[-1]
         pix_h, pix_w = lat_h * vae_factor, lat_w * vae_factor
 
         logger.info(
@@ -1489,12 +1576,21 @@ class RadianceVAE4KDecode:
 
         pbar = comfy.utils.ProgressBar(100)
 
+        decoded_video_frames = None  # Set when 3D VAE returns 5D output
         with torch.no_grad():
             if pix_h <= ts_px and pix_w <= ts_px:
                 img = vae.decode(latent).float()
+                # FIX-4: 3D (temporal) VAEs return (B, F, H, W, C) — reshape to
+                # (B*F, H, W, C) so downstream code handles it as a frame batch.
+                if img.ndim == 5:
+                    _B5, _F5, _H5, _W5, _C5 = img.shape
+                    decoded_video_frames = _F5
+                    img = img.reshape(_B5 * _F5, _H5, _W5, _C5)
                 pbar.update_absolute(100, 100)
             else:
-                img = self._tiled_decode(samples, vae, ts_px, overlap, pbar)
+                img, _tiled_video_frames = self._tiled_decode(samples, vae, ts_px, overlap, pbar)
+                if _tiled_video_frames is not None:
+                    decoded_video_frames = _tiled_video_frames
 
         img = img.float()
 
@@ -1543,12 +1639,20 @@ class RadianceVAE4KDecode:
                 alpha_ch = alpha_ch.expand(img.shape[0], -1, -1, -1)
             img = torch.cat([img, alpha_ch], dim=-1)
 
-        # Export .rhdr if requested
-        rhdr_filename = None
+        # Export .rhdr if requested — one sidecar per frame for video, single file for stills
+        rhdr_filenames = []
         if export_rhdr:
             output_dir = folder_paths.get_temp_directory()
-            frame_np = img[0, ..., :3].cpu().numpy()
-            rhdr_filename = self._save_rhdr(frame_np, output_dir)
+            num_frames = img.shape[0]
+            for fi in range(num_frames):
+                frame_np = img[fi, ..., :3].cpu().numpy()
+                # FIX-4: Guard against any residual extra dims
+                while frame_np.ndim > 3:
+                    frame_np = frame_np[0]
+                prefix = f"radiance_4k_f{fi:04d}" if num_frames > 1 else "radiance_4k"
+                fname = self._save_rhdr(frame_np, output_dir, prefix=prefix)
+                if fname:
+                    rhdr_filenames.append(fname)
 
         final_h, final_w = img.shape[1], img.shape[2]
         metadata = {
@@ -1564,8 +1668,16 @@ class RadianceVAE4KDecode:
             "vae_factor": vae_factor, "latent_format": latent_fmt,
             "processing_mode": processing_mode,
         }
-        if rhdr_filename:
-            metadata["rhdr_export"] = rhdr_filename
+        # Video metadata: populated for both 3D-native VAE path and frame-loop path
+        if decoded_video_frames is not None:
+            metadata["video"] = True
+            metadata["frames"] = decoded_video_frames
+        elif img.shape[0] > 1:
+            # Batch of images (e.g. from frame-loop path arriving here as concatenated frames)
+            metadata["video"] = True
+            metadata["frames"] = img.shape[0]
+        if rhdr_filenames:
+            metadata["rhdr_export"] = rhdr_filenames[0] if len(rhdr_filenames) == 1 else rhdr_filenames
 
         return (img, json.dumps(metadata, indent=2), latent_fmt)
 
@@ -1690,7 +1802,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceVAE4KEncode": "Radiance VAE 4K Encode",
-    "RadianceVAE4KDecode": "Radiance VAE 4K Decode",
-    "RadianceVAE4KRoundtrip": "Radiance VAE 4K Roundtrip",
+    "RadianceVAE4KEncode": "◎ Radiance VAE 4K Encode",
+    "RadianceVAE4KDecode": "◎ Radiance VAE 4K Decode",
+    "RadianceVAE4KRoundtrip": "◎ Radiance VAE 4K Roundtrip",
 }

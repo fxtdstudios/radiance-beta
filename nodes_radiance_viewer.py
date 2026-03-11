@@ -53,6 +53,12 @@ import os
 import uuid
 import logging
 import math
+import sys
+import io
+import json
+import traceback
+from aiohttp import web
+from server import PromptServer
 
 # v3.1: Enable OpenEXR support in OpenCV
 # Essential for 32-bit float export
@@ -1124,6 +1130,18 @@ def save_16bit_png(filepath: str, img_uint16: np.ndarray) -> bool:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+class RadianceType(str):
+    """
+    A specific multi-type class that leverages LiteGraph's native comma-separated type parsing 
+    on the frontend ("IMAGE,VIDEO") while bypassing Python backend validation.
+    """
+    def __ne__(self, __value: object) -> bool:
+        return False
+
+# Expose as a multi-type that specifically accepts IMAGE and VIDEO in the UI
+image_video_type = RadianceType("IMAGE,VIDEO")
+
+
 class RadianceViewer:
     """
     VFX Industry-Standard Viewer with IMAGE passthrough:
@@ -1142,7 +1160,7 @@ class RadianceViewer:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": (image_video_type,),
             },
             "optional": {
                 "bit_depth": (
@@ -1157,9 +1175,9 @@ class RadianceViewer:
                     },
                 ),
                 # ── Compare / Depth ──
-                "compare_image": ("IMAGE",),
+                "compare_image": (image_video_type,),
                 "zdepth": (
-                    "IMAGE",
+                    image_video_type,
                     {"tooltip": "Z-Depth map to display when pressing Z button"},
                 ),
             },
@@ -1170,8 +1188,7 @@ class RadianceViewer:
         }
 
     # v2.1: IMAGE passthrough + metadata outputs
-    RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("image", "metadata")
+    RETURN_TYPES = ()
     FUNCTION = "view"
     CATEGORY = "FXTD Studios/Radiance/Views"
     OUTPUT_NODE = True
@@ -1187,16 +1204,37 @@ class RadianceViewer:
 
     def view(
         self,
-        image: torch.Tensor,
+        image: Any,
         bit_depth: str = "16-bit (Quality)",
         # Compare / Depth
-        compare_image: Optional[torch.Tensor] = None,
-        zdepth: Optional[torch.Tensor] = None,
+        compare_image: Optional[Any] = None,
+        zdepth: Optional[Any] = None,
         # Hidden
         prompt: Optional[Any] = None,
         extra_pnginfo: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Process and display the image in the Radiance Viewer."""
+
+        # ── Handle Custom VIDEO dicts / Extractor ──
+        def _extract_tensor(x: Any) -> Any:
+            if hasattr(x, "get_components"):
+                try:
+                    comps = x.get_components()
+                    if hasattr(comps, "images"):
+                        return comps.images
+                except Exception:
+                    pass
+            if isinstance(x, dict) and "samples" in x:
+                return x["samples"]
+            if isinstance(x, (list, tuple)) and len(x) > 0 and isinstance(x[0], torch.Tensor):
+                return x[0]
+            return x
+
+        image = _extract_tensor(image)
+        if compare_image is not None:
+            compare_image = _extract_tensor(compare_image)
+        if zdepth is not None:
+            zdepth = _extract_tensor(zdepth)
 
         # ── Parse bit depth ──
         use_16bit = "16-bit" in bit_depth and HAS_CV2
@@ -1277,20 +1315,26 @@ class RadianceViewer:
             }
             metadata_str = json.dumps(meta_dict, indent=2)
 
+            # ── v3.1: Inject into Terminal Namespace ──
+            # Allows experts to inspect live data via the REPL tab
+            _TERMINAL_NS["image"] = image
+            _TERMINAL_NS["prompt"] = prompt
+            _TERMINAL_NS["metadata"] = extra_pnginfo
+
             return {
                 "ui": {
                     "radiance_images": images_list,
                     "batch_size": [batch_size],
                     "bit_depth": ["16-bit" if use_16bit else "8-bit"],
                 },
-                "result": (output_image, metadata_str),
+                "result": (),
             }
 
         except (RuntimeError, ValueError, TypeError) as e:
             logger.error(f"Error in viewer: {e}")
             return {
                 "ui": {"radiance_images": [], "error": [str(e)]},
-                "result": (image, str(e)),
+                "result": (),
             }
 
     # ─────────────────────────────────────────────────────────────────────
@@ -1831,6 +1875,87 @@ class RadianceGradeApply:
             out_batch.append(graded_tensor)
             
         return (torch.stack(out_batch),)
+
+
+# ── Persistent namespace for the terminal REPL ──────────────────────────────
+_TERMINAL_NS: dict = {
+    "math": math,
+    "os": os,
+    "torch": torch,
+    "np": np,
+    "json": json,
+    "time": __import__("time"),
+    "cv2": cv2 if HAS_CV2 else None,
+}
+# Pre-seed it once with folder_paths and PIL if available
+try:
+    from PIL import Image as PILImage
+    _TERMINAL_NS["PIL"] = PILImage
+except ImportError:
+    pass
+# Pre-seed it once with folder_paths if available
+try:
+    import folder_paths as _fp
+    _TERMINAL_NS["folder_paths"] = _fp
+except ImportError:
+    pass
+
+
+@PromptServer.instance.routes.post('/radiance/terminal')
+async def radiance_terminal_endpoint(request):
+    import threading
+
+    try:
+        data = await request.json()
+        code = data.get('code', '')
+        reset = data.get('_reset', False)
+
+        # ── Reset namespace ──────────────────────────────────────────────
+        if reset or code.strip() == '__radiance_reset__ = True':
+            global _TERMINAL_NS
+            _TERMINAL_NS = {
+                "math": math, "os": os, "torch": torch, "np": np,
+                "json": json, "time": __import__("time"),
+            }
+            try:
+                import folder_paths as _fp
+                _TERMINAL_NS["folder_paths"] = _fp
+            except ImportError:
+                pass
+            return web.json_response({"output": "", "status": "success"})
+
+        # ── Run with 30-second timeout guard ────────────────────────────
+        result_box = {"output": "", "status": "success"}
+
+        def _run():
+            old_stdout, old_stderr = sys.stdout, sys.stderr
+            buf = io.StringIO()
+            sys.stdout = buf
+            sys.stderr = buf
+            try:
+                exec(code, _TERMINAL_NS)  # noqa: S102
+                result_box["output"] = buf.getvalue()
+                result_box["status"] = "success"
+            except Exception:
+                result_box["output"] = buf.getvalue() + "\n" + traceback.format_exc()
+                result_box["status"] = "error"
+            finally:
+                sys.stdout = old_stdout
+                sys.stderr = old_stderr
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout=30)
+
+        if t.is_alive():
+            result_box["output"] = "⏱ Execution timed out after 30 seconds."
+            result_box["status"] = "error"
+
+        return web.json_response(result_box)
+
+    except Exception as e:
+        return web.json_response({"output": str(e), "status": "error"})
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

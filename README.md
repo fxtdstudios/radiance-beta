@@ -6,7 +6,7 @@
 ![License](https://img.shields.io/badge/license-GPL--3.0-green)
 ![ComfyUI](https://img.shields.io/badge/ComfyUI-Compatible-purple)
 ![GPU](https://img.shields.io/badge/GPU-CUDA%20%7C%20Apple%20MPS-orange)
-![Nodes](https://img.shields.io/badge/nodes-76-brightgreen)
+![Nodes](https://img.shields.io/badge/nodes-79-brightgreen)
 
 </div>
 
@@ -19,6 +19,13 @@
 ---
 
 ## What's New — v2.1.0
+
+### ◎ Radiance v2.1.0 (The Professional Suite)
+- **◎ Radiance 32-bit Denoise** — new edge-preserving bilateral filter for 32-bit float images.
+- **◎ Radiance Reroute / Reroute+** — compact visual reroute nodes with auto-type detection.
+- **◎ Radiance Load Image** — enhanced image loader with integrated soft-brush mask editor.
+- **◎ Show Text (Radiance)** — display string, JSON, or any data type output directly on the node UI.
+- **Prompt Enhancer Integration** — Cinematic Prompt Machine now includes a "Prompt Enhancer" widget.
 
 ### ◎ Radiance Viewer Overhaul
 - **CDL Export / Import** — save/load grade as ASC CDL v1.2 XML (Nuke, Resolve, OCIO compatible) via ◎ menu
@@ -52,7 +59,7 @@
 ### ◎ Improvements
 - **Radiance Grade** — added `reference_image` match grading, external JSON preset file, and full JSON `grade_info` output
 - **Sampler Pro v3.6** — fixed 6 critical bugs including sigma schedule off-by-one (BUG-28), guidance deep-copy overhead, and double noise injection
-- **Requirements** — added `Pillow` (was used but undeclared), removed `scipy` (was declared but unused)
+- **Requirements** — added `Pillow` and `scipy` (both used in core processing nodes)
 
 ---
 
@@ -86,7 +93,7 @@ Then install dependencies for your OS:
 ### Dependencies
 ```
 opencv-python   Pillow   imageio   OpenEXR   Imath
-opencolorio   colour-science   transformers
+opencolorio   colour-science   transformers   scipy
 ```
 `torch`, `numpy`, `safetensors` are bundled with ComfyUI — no separate install needed.
 
@@ -141,7 +148,7 @@ generated_video → RadianceTemporalSmooth(alpha=0.6) → clean_video
 
 ## Node Reference
 
-**Total: 76 nodes** across 12 categories
+**Total: 79 nodes** across 15 categories
 
 ### ◎ Color Grading
 
@@ -258,6 +265,33 @@ generated_video → RadianceTemporalSmooth(alpha=0.6) → clean_video
 | Radiance Save EXR (Project) | Auto-path EXR output from project settings |
 | Radiance Studio | Nuke-style backdrops and node organization |
 | Nuke Link | Send/receive images to/from Nuke |
+
+### ◎ Filter & Denoise
+
+| Node | Description |
+|---|---|
+| **◎ Radiance Denoise** | Edge-preserving bilateral filter for 32-bit float images |
+| FXTD Gaussian Blur | High-precision Gaussian blur with HDR support |
+
+### ◎ Layout
+
+| Node | Description |
+|---|---|
+| **◎ Radiance Reroute** | Industry-standard reroute node |
+| **◎ Radiance Reroute+** | Advanced reroute with labels and auto-type color detection |
+
+### ◎ Masking
+
+| Node | Description |
+|---|---|
+| **◎ Radiance Load Image** | Enhanced image loader with integrated soft-brush mask editor |
+
+### ◎ Utilities
+
+| Node | Description |
+|---|---|
+| **◎ Show Text (Radiance)** | Displays any input data (STRING, INT, DICT) as text on the node UI |
+| Radiance Workspace | Define workspace-wide variables and settings |
 
 ---
 

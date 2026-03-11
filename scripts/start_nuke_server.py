@@ -738,4 +738,5 @@ def add_radiance_menu():
 
 if nuke.GUI:
     add_radiance_menu()
-    print("Radiance Bridge Menu installed.")
+    start_bridge()
+    print("Radiance Bridge started and menu installed.")

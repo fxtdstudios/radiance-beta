@@ -1819,7 +1819,26 @@ class RadianceAIUpscale:
 
     def _fallback_upscale(self, image, model_name):
         """Fallback to algorithmic upscale when AI model unavailable."""
-        logger.warning(f"Falling back to Lanczos upscale (AI model not loaded)")
+        logger.warning("Falling back to Lanczos upscale (AI model not loaded)")
+
+        # ── Validate input shape (must be BHWC) ──────────────────────────────
+        if not isinstance(image, torch.Tensor) or image.dim() != 4:
+            raise RuntimeError(
+                f"[RadianceAIUpscale] Expected 4D BHWC tensor, got "
+                f"{type(image).__name__} with shape {getattr(image, 'shape', '?')}"
+            )
+
+        b, h, w, c = image.shape
+
+        # Detect BCHW-format tensors passed by mistake (channels in dim-1)
+        # Typical: B=1, C=3 or 4, H=large, W=large.
+        # Heuristic: if c > 32 it is almost certainly H, not channels.
+        if c > 32:
+            raise RuntimeError(
+                f"[RadianceAIUpscale] Input tensor looks like BCHW (last dim={c}), "
+                f"expected BHWC. Shape: {tuple(image.shape)}. "
+                "Permute the tensor to BHWC before passing to this node."
+            )
 
         scale = 4
         if "x2" in model_name.lower():
@@ -1827,15 +1846,37 @@ class RadianceAIUpscale:
         elif "x8" in model_name.lower():
             scale = 8
 
-        b, h, w, c = image.shape
         new_h, new_w = h * scale, w * scale
 
-        img_bchw = image.permute(0, 3, 1, 2)
+        # ── Memory safety cap: 64 MP = 16K×4K ──────────────────────────────
+        MAX_OUTPUT_PIXELS = 64_000_000  # 64 megapixels (~16K×4K)
+        output_pixels = new_h * new_w
+        if output_pixels > MAX_OUTPUT_PIXELS:
+            # Scale down to fit within the cap
+            cap_factor = (MAX_OUTPUT_PIXELS / (h * w)) ** 0.5
+            safe_scale = max(1, int(cap_factor))
+            new_h, new_w = h * safe_scale, w * safe_scale
+            logger.warning(
+                f"[RadianceAIUpscale] Fallback x{scale} would produce {output_pixels:,} pixels "
+                f"({new_h // safe_scale * scale}×{new_w // safe_scale * scale}), "
+                f"which would require ~{output_pixels * 4 * c // 1024**3:.1f} GB RAM. "
+                f"Capping to x{safe_scale} ({new_h}×{new_w}) to avoid OOM."
+            )
+            scale = safe_scale
+
+        # ── Estimate memory before allocating ────────────────────────────────
+        approx_bytes = b * new_h * new_w * c * 4  # float32
+        if approx_bytes > 4 * 1024 ** 3:  # warn if > 4 GB
+            logger.warning(
+                f"[RadianceAIUpscale] Fallback upscale output will be "
+                f"~{approx_bytes / 1024**3:.1f} GB. Consider using a smaller image."
+            )
+
+        img_bchw = image.float().cpu().permute(0, 3, 1, 2)
         upscaled = F.interpolate(
             img_bchw, size=(new_h, new_w), mode="bicubic", align_corners=False
         )
         result = upscaled.permute(0, 2, 3, 1)
-        # No clamp here either for HDR safety
 
         return (result, f"Bicubic {scale}x (AI model not available)")
 

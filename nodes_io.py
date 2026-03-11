@@ -590,7 +590,7 @@ class RadianceWrite:
                     INPUT_COLORSPACES,
                     {"default": "sRGB (Standard)"},
                 ),
-                "subfolder": ("STRING", {"default": ""}),
+                "output_path": ("STRING", {"default": "", "tooltip": "Absolute or relative output path. Leave empty for ComfyUI default output folder."}),
             },
             "optional": {
                 "audio": ("AUDIO",),
@@ -621,14 +621,14 @@ class RadianceWrite:
         fps,
         quality,
         output_color_space,
-        subfolder="",
+        output_path="",
         audio=None,
         prompt=None,
         extra_pnginfo=None,
     ):
         from folder_paths import get_output_directory
 
-        full_output_dir = get_safe_output_dir(get_output_directory(), subfolder)
+        full_output_dir = get_safe_output_dir(get_output_directory(), output_path)
 
         timestamp = int(time.time())
 

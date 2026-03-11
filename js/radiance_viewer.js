@@ -9,17 +9,16 @@
  * - Pixel probe with float values + copy to clipboard
  * - A/B comparison (wipe, side-by-side, difference)
  * - Professional scopes (Histogram, Waveform, Vectorscope) + overlay mode
- * - Annotations (circle, arrow, rectangle)
  * - Grid overlay (rule of thirds, center)
  * - Export snapshot, reset controls
  * ═══════════════════════════════════════════════════════════════════════════════
  */
 
-console.log("[Radiance] Viewer Script Loading...");
-
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { RadianceWebGLRenderer } from "./radiance_webgl.js?v=2.1.0";
+import { RadianceNeuralMonitor } from "./radiance_neural.js";
+
 
 
 class RadianceViewer {
@@ -47,6 +46,11 @@ class RadianceViewer {
         this.container = container;
         RadianceViewer.allInstances.add(this);
         RadianceViewer.activeInstance = this;
+        this._lastProgress = 0;
+
+        // Neural Monitor integration
+        this.neuralMonitor = null;
+        this._setupComfyListeners();
 
         // v2.1: Cinema Scope Fonts
         if (!document.getElementById('radiance-fonts')) {
@@ -99,7 +103,6 @@ class RadianceViewer {
                     position: relative;
                     min-width: 320px;
                     max-width: 900px;
-                    transition: flex-basis 0.15s;
                 }
                 .radiance-right-control-panel .rcp-resize-handle {
                     position: absolute;
@@ -259,23 +262,13 @@ class RadianceViewer {
         this.scopeMode = localStorage.getItem('radiance_scope_mode') || 'parade'; // parade|waveform|histogram|vectorscope|falsecolor
         this.generationID = 0; // v3.1: Unique ID per execution to cancel stale async loads
 
-        // Annotations
-        this.annotations = [];
-        this.isAnnotating = false;
-        this.annotationTool = 'pen'; // pen, circle, arrow, rect, text
-        this.annotationStart = null;
-        this.annotationColor = '#ff4444';
-        this.annotationLineWidth = 3;
-        this.currentPath = null; // For pen drawing
+        // Grid & Safe Areas
 
         // Grid & Safe Areas
         this.showGrid = false;
         this.gridMode = 0; // 0=off, 1=thirds, 2=safe areas, 3=center
 
-        // Measurement Tools
-        this.measurementMode = 'none'; // none, distance, angle
-        this.measurements = [];
-        this.currentMeasurement = null;
+        // Fullscreen
 
         // Fullscreen
         this.isFullscreen = false;
@@ -402,6 +395,11 @@ class RadianceViewer {
             showOverlay: false
         };
 
+        // v3.5: Rendering Throttle & Debounce State
+        this._renderRequested = false;
+        this._scopeUpdateRequested = false;
+        this._scopeUpdateTimer = null;
+
         this.init();
     }
 
@@ -456,22 +454,48 @@ class RadianceViewer {
             btn.style.background = this._wbPickerActive ? 'rgba(80,160,255,0.2)' : 'rgba(255,255,255,0.05)';
             btn.style.color = this._wbPickerActive ? '#6af' : '#aaa';
         }
+
+        // v3.5: OSD Feedback
         if (this._wbPickerActive) {
             this.canvas.style.cursor = 'crosshair';
+            if (this._analysisLabel) {
+                this._analysisLabel.textContent = 'PICK NEUTRAL POINT...';
+                this._analysisLabel.style.display = 'block';
+                this._analysisLabel.style.background = '#00a8ff';
+                this._analysisLabel.style.color = '#fff';
+            }
+
             this._wbPickHandler = (e) => {
                 const rect = this.canvas.getBoundingClientRect();
-                const cx = (e.clientX - rect.left) / rect.width;
-                const cy = (e.clientY - rect.top) / rect.height;
+                // v3.5: Correct for pan/zoom to find the exact image pixel
+                const mouseX = e.clientX - rect.left;
+                const mouseY = e.clientY - rect.top;
 
-                // Sample from raw HDR picker if available, else fall back to 2D canvas
+                // Convert canvas pos -> image UV
+                // (mouseX - panX) / zoom = imageX
+                const imgU = (mouseX - this.panX) / (this.imageWidth * this.zoom);
+                const imgV = (mouseY - this.panY) / (this.imageHeight * this.zoom);
+
+                if (imgU < 0 || imgU > 1 || imgV < 0 || imgV > 1) {
+                    console.warn('[WB] Picked outside image boundaries');
+                    return;
+                }
+
+                // Sample from raw HDR data if available (32-bit float accuracy)
                 let r, g, b;
-                if (this.hdrPicker && this.hdrPicker.loaded) {
-                    const px = this.hdrPicker.sample(cx, cy);
-                    if (!px) return;
-                    r = px.r; g = px.g; b = px.b;
+                const hdr = this.hdrData || (this.frameHDRData && this.frameHDRData[this.currentFrame]);
+
+                if (hdr && hdr.data) {
+                    const ix = Math.floor(imgU * (hdr.width - 1));
+                    const iy = Math.floor(imgV * (hdr.height - 1));
+                    const idx = (iy * hdr.width + ix) * (hdr.channels || 3);
+                    r = hdr.data[idx];
+                    g = hdr.data[idx + 1];
+                    b = hdr.data[idx + 2];
                 } else {
-                    const imgX = Math.round(cx * this.imageWidth);
-                    const imgY = Math.round(cy * this.imageHeight);
+                    // Fallback to display image (8-bit SDR)
+                    const imgX = Math.round(imgU * (this.imageWidth - 1));
+                    const imgY = Math.round(imgV * (this.imageHeight - 1));
                     const tmp = document.createElement('canvas');
                     tmp.width = 1; tmp.height = 1;
                     const tctx = tmp.getContext('2d');
@@ -482,31 +506,34 @@ class RadianceViewer {
 
                 // Avoid picking near black or pure white (unreliable neutral)
                 const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-                if (luma < 0.05 || luma > 0.95) {
-                    console.warn('[WB] Picked pixel is too dark/bright — choose a neutral grey');
+                if (luma < 0.01 || luma > 10.0) { // Wider range for HDR
+                    console.warn('[WB] Picked pixel is invalid — choose a neutral grey');
                     return;
                 }
 
-                // Normalize to equal energy: compute how far each channel deviates from grey
+                // Normalize to equal energy
                 const avg = (r + g + b) / 3.0;
-                const devR = r / avg - 1.0;  // +ve = too warm (too much R)
-                const devG = g / avg - 1.0;
+                if (avg < 1e-6) return;
+
+                const devR = r / avg - 1.0;
                 const devB = b / avg - 1.0;
+                const devG = g / avg - 1.0;
 
-                // Map RGB deviation → temperature/tint:
-                // Temperature opposes R-B axis (warm↔cool)
-                // Tint opposes R+B-G axis (magenta↔green)
-                const newTemp = -(devR - devB) * 0.5;
-                const newTint = -(devR + devB - 2 * devG) * 0.25;
+                // Map RGB deviation -> temperature/tint correction
+                const newTemp = -(devR - devB) * 0.8; // Increased gain for better correction
+                const newTint = -(devR + devB - 2 * devG) * 0.4;
 
-                this.temperature = Math.max(-2, Math.min(2, newTemp));
-                this.tint = Math.max(-2, Math.min(2, newTint));
+                this.temperature = Math.max(-2, Math.min(2, this.temperature + newTemp));
+                this.tint = Math.max(-2, Math.min(2, this.tint + newTint));
+
                 if (this.renderer) {
                     this.renderer.setTemperature(this.temperature);
                     this.renderer.setTint(this.tint);
                 }
-                this.render();
-                console.log(`[WB] Set temp=${this.temperature.toFixed(3)} tint=${this.tint.toFixed(3)} from luma=${luma.toFixed(3)}`);
+                this.requestRender();
+                this.requestScopeUpdate();
+
+                console.log(`[WB] Corrected temp=${this.temperature.toFixed(3)} tint=${this.tint.toFixed(3)} from luma=${luma.toFixed(3)}`);
 
                 // Auto-deactivate after pick
                 this._wbPickerActive = false;
@@ -515,14 +542,17 @@ class RadianceViewer {
                     btn.style.background = 'rgba(255,255,255,0.05)';
                     btn.style.color = '#aaa';
                 }
-                this.canvas.removeEventListener('click', this._wbPickHandler);
+                if (this._analysisLabel) this._analysisLabel.style.display = 'none';
+
+                this.canvas.removeEventListener('mousedown', this._wbPickHandler);
                 this.canvas.style.cursor = 'crosshair';
-                // Rebuild primaries tab to refresh knob values
                 if (this._lastRenderContent) this._lastRenderContent();
             };
-            this.canvas.addEventListener('click', this._wbPickHandler, { once: true });
+            // v3.5: Use mousedown for better reliability in ComfyUI
+            this.canvas.addEventListener('mousedown', this._wbPickHandler, { once: true });
         } else {
-            if (this._wbPickHandler) this.canvas.removeEventListener('click', this._wbPickHandler);
+            if (this._wbPickHandler) this.canvas.removeEventListener('mousedown', this._wbPickHandler);
+            if (this._analysisLabel) this._analysisLabel.style.display = 'none';
             this.canvas.style.cursor = 'crosshair';
         }
     }
@@ -648,20 +678,11 @@ class RadianceViewer {
             flex-direction: column;
         `;
 
-        // Toolbar
+        // Toolbar - v3.5: Moved to Left HUD (analysisHUD)
         this.toolbar = document.createElement('div');
-        this.toolbar.style.cssText = `
-            flex: 0 0 32px;
-            display: flex;
-            align-items: center;
-            gap: 2px;
-            padding: 0 6px;
-            background: ${t.panel};
-            border-bottom: 1px solid ${t.panelBorder};
-            overflow-x: auto;
-        `;
+        this.toolbar.style.display = 'none'; // Hide horizontal top bar
         this.container.appendChild(this.toolbar);
-        this.createToolbar();
+        // this.createToolbar(); // Will be called inside createMainLeftHUD
 
         // Main area
         this.mainArea = document.createElement('div');
@@ -705,8 +726,9 @@ class RadianceViewer {
         });
         this.mainArea.appendChild(this.rightControlPanel);
 
-        // Create HUD (floating controls)
+        // Create HUDs
         this.createHUD();
+        this.createMainLeftHUD();
 
         // Main canvas (2D fallback)
         this.canvas = document.createElement('canvas');
@@ -970,12 +992,26 @@ class RadianceViewer {
             flex: 0 0 ${savedH}px;
             display: flex;
             flex-direction: column;
-            background: #080b0f;
-            border-top: 1px solid ${t.panelBorder};
+            background: rgba(10, 15, 20, 0.95);
+            backdrop-filter: blur(20px) saturate(160%);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
             overflow: hidden;
             font-family: ${t.mono};
             font-size: 11px;
+            position: relative;
         `;
+
+        // Scanline/Glow Effect
+        const scanline = document.createElement('div');
+        scanline.style.cssText = `
+            position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.15) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.03), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.03));
+            background-size: 100% 2.5px, 2px 100%;
+            pointer-events: none;
+            z-index: 10;
+            opacity: 0.1;
+        `;
+        termContainer.appendChild(scanline);
 
         // ── Header bar ───────────────────────────────────────────────────────
         const header = document.createElement('div');
@@ -991,15 +1027,33 @@ class RadianceViewer {
             user-select: none;
         `;
 
-        const termTitle = document.createElement('span');
-        termTitle.style.cssText = `font-size: 9px; font-weight: 600; letter-spacing: 0.08em; color: #3d8; text-transform: uppercase;`;
-        termTitle.textContent = '● RADIANCE TERMINAL';
-        header.appendChild(termTitle);
+        const tabsContainer = document.createElement('div');
+        tabsContainer.style.cssText = `display: flex; gap: 8px; margin-right: auto;`;
+
+        const createTab = (name, active) => {
+            const btn = document.createElement('div');
+            btn.textContent = name;
+            btn.style.cssText = `
+                font-size: 9px; font-weight: 600; letter-spacing: 0.08em;
+                color: ${active ? '#00a8ff' : '#555'}; text-transform: uppercase;
+                cursor: pointer; padding: 4px 8px;
+                border-bottom: 2px solid ${active ? '#00a8ff' : 'transparent'};
+                transition: 0.2s;
+            `;
+            return btn;
+        };
+
+        const tabTerm = createTab('⌨ TERMINAL', true);
+        const tabScript = createTab('✎ SCRIPT EDITOR', false);
+
+        tabsContainer.appendChild(tabTerm);
+        tabsContainer.appendChild(tabScript);
+        header.appendChild(tabsContainer);
 
         // Session counter badge
         const badge = document.createElement('span');
-        badge.style.cssText = `font-size: 8px; color: #555; margin-left: auto;`;
-        badge.textContent = 'v3.4 · fxtd';
+        badge.style.cssText = `font-size: 8px; color: #555;`;
+        badge.textContent = 'v2.1 · FXTD STUDIOS';
         header.appendChild(badge);
 
         // Clear button
@@ -1012,19 +1066,18 @@ class RadianceViewer {
         header.appendChild(clearBtn);
 
         // Collapse toggle
-        let collapsed = false;
+        this._termCollapsed = false;
         const collapseBtn = document.createElement('span');
         collapseBtn.textContent = '▾';
         collapseBtn.style.cssText = `font-size: 11px; color: #555; cursor: pointer; line-height: 1; transition: color 0.15s;`;
         collapseBtn.onmouseenter = () => collapseBtn.style.color = '#aaa';
         collapseBtn.onmouseleave = () => collapseBtn.style.color = '#555';
-        collapseBtn.onclick = () => {
-            collapsed = !collapsed;
-            outputEl.style.display = collapsed ? 'none' : 'block';
-            inputRow.style.display = collapsed ? 'none' : 'flex';
-            collapseBtn.textContent = collapsed ? '▸' : '▾';
-            termContainer.style.flex = collapsed ? '0 0 22px' : `0 0 ${savedH}px`;
-        };
+        collapseBtn.onclick = () => this.toggleTerminal();
+
+        this._termCollapseBtn = collapseBtn;
+        this._termContainer = termContainer;
+        this._termSavedH = savedH;
+
         header.appendChild(collapseBtn);
         termContainer.appendChild(header);
 
@@ -1044,6 +1097,263 @@ class RadianceViewer {
         outputEl.style.scrollbarColor = '#222 transparent';
         termContainer.appendChild(outputEl);
         this._termOutput = outputEl;
+        this._termOutputEl = outputEl;
+
+        // ── Script Editor Area (Hidden by default) ───────────────────────────
+        const scContainer = document.createElement('div');
+        scContainer.style.cssText = `flex: 1; display: none; flex-direction: column; background: #080b0f;`;
+
+        const scToolbar = document.createElement('div');
+        scToolbar.style.cssText = `flex: 0 0 26px; display: flex; align-items: center; padding: 0 8px; gap: 8px; border-bottom: 1px solid #111; background: #0a0d12;`;
+
+        const scModeSelect = document.createElement('select');
+        scModeSelect.style.cssText = `background: #111; color: #aaa; border: 1px solid #222; font-size: 10px; padding: 2px; border-radius: 3px; outline: none;`;
+        ['Batch Prompts', 'JavaScript'].forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m; opt.textContent = m;
+            scModeSelect.appendChild(opt);
+        });
+
+        const scTextarea = document.createElement('textarea');
+        scTextarea.placeholder = "// Enter prompts (one per line) or JS code here...";
+        scTextarea.style.cssText = `
+            flex: 1; background: transparent; border: none; outline: none;
+            color: #d8dee8; font-family: ${t.mono}; font-size: 11px;
+            padding: 10px; resize: none; line-height: 1.4;
+            scrollbar-width: thin; scrollbar-color: #333 transparent;
+        `;
+
+        const scSaveBtn = document.createElement('button');
+        scSaveBtn.textContent = '💾 SAVE';
+        scSaveBtn.style.cssText = `background: rgba(100, 100, 100, 0.15); color: #aaa; border: 1px solid rgba(100, 100, 100, 0.4); font-size: 9px; font-weight: bold; border-radius: 3px; padding: 3px 10px; cursor: pointer; margin-left: auto;`;
+        scSaveBtn.onclick = () => {
+            const data = scTextarea.value || "";
+            if (!data) return;
+            const blob = new Blob([data], { type: "text/plain" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `radiance_script_${Date.now()}.rds`;
+            a.click();
+            URL.revokeObjectURL(url);
+        };
+
+        const scLoadBtn = document.createElement('button');
+        scLoadBtn.textContent = '📂 LOAD';
+        scLoadBtn.style.cssText = `background: rgba(100, 100, 100, 0.15); color: #aaa; border: 1px solid rgba(100, 100, 100, 0.4); font-size: 9px; font-weight: bold; border-radius: 3px; padding: 3px 10px; cursor: pointer;`;
+        scLoadBtn.onclick = () => {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.rds,.txt,.js,.json';
+            input.onchange = e => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = e => scTextarea.value = e.target.result;
+                reader.readAsText(file);
+            };
+            input.click();
+        };
+
+        const scPathLabel = document.createElement('span');
+        scPathLabel.textContent = 'SAVE PATH:';
+        scPathLabel.style.cssText = `color: #e2a; font-size: 9px; font-weight: bold; margin-right: 5px; letter-spacing: 0.05em; display: none;`;
+
+        const scPathInput = document.createElement('input');
+        scPathInput.type = 'text';
+        scPathInput.placeholder = 'Batch Save Path (e.g. D:/Exports/)';
+        scPathInput.value = localStorage.getItem('radiance_batch_path') || '';
+        scPathInput.style.cssText = `flex: 1; background: #1a1e24; color: #aaa; border: 1px solid #333; padding: 2px 5px; font-size: 10px; border-radius: 2px; margin-right: 5px; display: none;`;
+        scPathInput.oninput = () => localStorage.setItem('radiance_batch_path', scPathInput.value);
+
+        // Show/Hide path UI based on mode
+        scModeSelect.onchange = () => {
+            const isBatch = scModeSelect.value === 'Batch Prompts';
+            scPathInput.style.display = isBatch ? 'block' : 'none';
+            scPathLabel.style.display = isBatch ? 'block' : 'none';
+        };
+        const isInitialBatch = scModeSelect.value === 'Batch Prompts';
+        scPathInput.style.display = isInitialBatch ? 'block' : 'none';
+        scPathLabel.style.display = isInitialBatch ? 'block' : 'none';
+
+        const scRunBtn = document.createElement('button');
+        scRunBtn.textContent = '▶ RUN AUTOMATION';
+        scRunBtn.style.cssText = `background: rgba(0, 168, 255, 0.1); color: #00a8ff; border: 1px solid rgba(0, 168, 255, 0.35); font-size: 9px; font-weight: bold; border-radius: 3px; padding: 3px 10px; cursor: pointer; white-space: nowrap;`;
+
+        scToolbar.appendChild(scModeSelect);
+        scToolbar.appendChild(scSaveBtn);
+        scToolbar.appendChild(scLoadBtn);
+        scToolbar.appendChild(scPathLabel);
+        scToolbar.appendChild(scPathInput);
+        scToolbar.appendChild(scRunBtn);
+
+        scContainer.appendChild(scToolbar);
+        scContainer.appendChild(scTextarea);
+        termContainer.appendChild(scContainer);
+
+        // Tab Switching Logic
+        let activeTab = 'term';
+        tabTerm.onclick = () => {
+            activeTab = 'term';
+            tabTerm.style.color = '#00a8ff'; tabTerm.style.borderColor = '#00a8ff';
+            tabScript.style.color = '#555'; tabScript.style.borderColor = 'transparent';
+            outputEl.style.display = 'block';
+            this._termInputRow.style.display = 'flex';
+            scContainer.style.display = 'none';
+            this._termInput.focus();
+        };
+        tabScript.onclick = () => {
+            activeTab = 'script';
+            tabScript.style.color = '#7a92b0'; tabScript.style.borderColor = '#7a92b0';
+            tabTerm.style.color = '#555'; tabTerm.style.borderColor = 'transparent';
+            outputEl.style.display = 'none';
+            this._termInputRow.style.display = 'none';
+            scContainer.style.display = 'flex';
+            setTimeout(() => scTextarea.focus(), 50);
+        };
+
+        // Script Runner Logic
+        scRunBtn.onclick = async () => {
+            const mode = scModeSelect.value;
+            const code = scTextarea.value.trim();
+            if (!code) return;
+
+            // Switch to terminal view to show logs
+            tabTerm.onclick();
+            this._termLog('event', `[Script] Starting ${mode} automation...`);
+
+            if (mode === 'JavaScript') {
+                try {
+                    // Provide app and api in scope
+                    const ctxFunc = new Function('app', 'api', 'logger', `
+                        try {
+                            ${code}
+                        } catch(e) {
+                            logger('error', '[JS Eval Error] ' + e.message);
+                        }
+                    `);
+                    ctxFunc(app, api, (type, msg) => this._termLog(type, msg));
+                } catch (e) {
+                    this._termLog('error', `[Eval Error] ${e.message}`);
+                }
+            } else if (mode === 'Batch Prompts') {
+                // Split by period or newline to allow paragraph-style or list-style entries, filter out empties
+                const lines = code.split(/[\n\.]/).map(l => l.trim()).filter(l => l && l.length > 2);
+
+                // Find CLIPTextEncode or Radiance Prompt node
+                const nodes = app.graph._nodes;
+                const clipNode = nodes.find(n =>
+                    (n.type === 'CLIPTextEncode' && n.title !== 'Negative Prompt') ||
+                    n.type === 'RadianceCinematicPromptEncoder' ||
+                    n.type === 'FXTDCinematicPromptEncoder'
+                );
+
+                if (!clipNode) {
+                    this._termLog('error', '[Batch] Could not find a primary CLIPTextEncode or Radiance Prompt node in graph!');
+                    return;
+                }
+                const textWidget = clipNode.widgets.find(w => w.name === 'text' || w.name === 'base_prompt');
+                if (!textWidget) {
+                    this._termLog('error', '[Batch] Prompt node has no text or base_prompt widget.');
+                    return;
+                }
+
+                scRunBtn.textContent = '⏳ RUNNING...';
+                scRunBtn.style.opacity = '0.5';
+                scRunBtn.disabled = true;
+
+                // Find all potential Save nodes to hijack
+                const saveNodes = nodes.filter(n =>
+                    n.type.includes('SaveImage') ||
+                    n.type.includes('RadianceSave') ||
+                    n.type.includes('RadianceWrite') ||
+                    n.type.includes('ImageSave')
+                );
+
+                if (saveNodes.length === 0) {
+                    this._termLog('warn', '[Batch] No compatible Save nodes (Radiance/Standard) found in graph.');
+                }
+
+                let customPath = scPathInput.value.trim();
+                let isAbsolute = customPath.match(/^[a-zA-Z]:[\\\/]/) || customPath.startsWith('/');
+                let finalSubfolder = '';
+
+                if (isAbsolute) {
+                    finalSubfolder = customPath;
+                } else {
+                    finalSubfolder = customPath || 'radiance_automation/';
+                    if (finalSubfolder.toLowerCase().startsWith('output/')) finalSubfolder = finalSubfolder.substring(7);
+                    if (finalSubfolder.toLowerCase().startsWith('output\\')) finalSubfolder = finalSubfolder.substring(7);
+                }
+
+                saveNodes.forEach(node => {
+                    this._termLog('info', `[Batch] Hijacking node: ${node.title || node.type} (${node.id})`);
+
+                    const widgets = node.widgets || [];
+                    const extWidget = widgets.find(w => w.name.toLowerCase().includes('extension') || w.name.toLowerCase().includes('format'));
+                    const pfxWidget = widgets.find(w => w.name === 'filename_prefix' || w.name === 'filename');
+                    const subWidget = widgets.find(w => w.name === 'subfolder' || w.name === 'output_path');
+                    const depthWidget = widgets.find(w => w.name === 'bit_depth');
+
+                    // 1. Force EXR Format
+                    if (extWidget) {
+                        if (node.type === 'RadianceSaveEXR') {
+                            extWidget.value = 'EXR';
+                            if (depthWidget) depthWidget.value = '32-bit Float';
+                        } else if (node.type.includes('Radiance')) {
+                            extWidget.value = 'exr';
+                        } else {
+                            extWidget.value = 'exr (32-bit)';
+                            if (extWidget.options?.values?.includes('exr')) extWidget.value = 'exr';
+                        }
+                    }
+
+                    // 2. Set Path
+                    if (subWidget) {
+                        subWidget.value = finalSubfolder;
+                    } else if (isAbsolute && pfxWidget) {
+                        // For vanilla SaveImage with absolute path: we have to put it in the prefix
+                        let fullPfx = finalSubfolder;
+                        if (!fullPfx.endsWith('/') && !fullPfx.endsWith('\\')) fullPfx += '/';
+                        // Note: basePfx will be updated per-loop below
+                    }
+                });
+
+                this._termLog('info', `[Batch] Target Path: ${isAbsolute ? '' : 'output/'}${finalSubfolder}`);
+
+                this._termLog('system', `[Batch] Queuing ${lines.length} prompts (split by newline/period)`);
+                for (let i = 0; i < lines.length; i++) {
+                    const prompt = lines[i];
+                    textWidget.value = `[${i + 1}/${lines.length}] ${prompt}`;
+
+                    // Update prefixes for all save nodes
+                    saveNodes.forEach(node => {
+                        const widgets = node.widgets || [];
+                        const pfxWidget = widgets.find(w => w.name === 'filename_prefix' || w.name === 'filename');
+                        const subWidget = widgets.find(w => w.name === 'subfolder' || w.name === 'output_path');
+
+                        let basePfx = 'batch_';
+                        if (isAbsolute && !subWidget) {
+                            basePfx = finalSubfolder;
+                            if (!basePfx.endsWith('/') && !basePfx.endsWith('\\')) basePfx += '/';
+                        }
+
+                        if (pfxWidget) {
+                            pfxWidget.value = `${basePfx}${String(i + 1).padStart(3, '0')}_`;
+                        }
+                    });
+
+                    this._termLog('cmd', `[Batch Queue ${i + 1}/${lines.length}] > ${prompt.substring(0, 40)}...`);
+                    await app.queuePrompt(0);
+                    await new Promise(r => setTimeout(r, 100));
+                }
+
+                this._termLog('success', `[Batch] Successfully queued ${lines.length} images.`);
+                scRunBtn.textContent = '▶ RUN AUTOMATION';
+                scRunBtn.style.opacity = '1';
+                scRunBtn.disabled = false;
+            }
+        };
 
         // ── Input row ────────────────────────────────────────────────────────
         const inputRow = document.createElement('div');
@@ -1056,13 +1366,13 @@ class RadianceViewer {
         `;
 
         const promptLabel = document.createElement('span');
-        promptLabel.textContent = 'FXTD ❯';
+        promptLabel.textContent = 'FXTD STUDIOS ❯';
         promptLabel.style.cssText = `color: #3d8; font-size: 10px; padding: 0 8px; flex-shrink: 0; letter-spacing: 0.05em;`;
         inputRow.appendChild(promptLabel);
 
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.placeholder = 'enter command  (try: help, status, lut list, grade reset)';
+        const input = document.createElement('textarea');
+        input.placeholder = 'enter command (try: help, status, lut list, grade reset)';
+        input.rows = 1;
         input.style.cssText = `
             flex: 1;
             background: transparent;
@@ -1072,11 +1382,23 @@ class RadianceViewer {
             font-family: ${t.mono};
             font-size: 10.5px;
             caret-color: #3d8;
-            padding: 0 6px 0 0;
+            padding: 6px 6px 6px 0;
+            resize: none;
+            overflow-y: hidden;
+            min-height: 26px;
+            max-height: 200px;
         `;
+
+        // Auto-resize textarea
+        input.addEventListener('input', function () {
+            this.style.height = 'auto';
+            this.style.height = (this.scrollHeight) + 'px';
+        });
+
         inputRow.appendChild(input);
         termContainer.appendChild(inputRow);
         this._termInput = input;
+        this._termInputRow = inputRow;
 
         // ── Append to container ──────────────────────────────────────────────
         this.container.appendChild(resizeHandle);
@@ -1104,100 +1426,175 @@ class RadianceViewer {
             document.removeEventListener('mouseup', endDrag);
         };
         resizeHandle.addEventListener('mousedown', startDrag);
-        header.addEventListener('mousedown', (e) => { if (e.target === header || e.target === termTitle) startDrag(e); });
+        header.addEventListener('mousedown', (e) => { 
+            // Allow dragging from header background or tabs container (excluding buttons if any)
+            if (e.target === header || tabsContainer.contains(e.target) || badge.contains(e.target)) {
+                startDrag(e); 
+            }
+        });
 
-        // ── Command history ──────────────────────────────────────────────────
+        // ── Command history & Tab Autocomplete ───────────────────────────────
         this._termHistory = [];
         this._termHistoryIdx = -1;
+        this._tabCompleteMatches = [];
+        this._tabCompleteIdx = -1;
+        this._tabCompletePrefix = '';
+        this._termIsRecording = false;
+        this._termMacroBuffer = [];
+
         // IMPORTANT: Use capture phase + stopImmediatePropagation to prevent
         // ComfyUI's global keyboard handlers from intercepting Enter/arrows/etc.
         input.addEventListener('keydown', (e) => {
             e.stopPropagation();
             e.stopImmediatePropagation();
 
-            if (e.key === 'ArrowUp') {
+            if (e.key === 'Tab') {
+                e.preventDefault(); // keep focus in input
+                if (!input.value) return;
+
+                // If continuing a tab session
+                if (this._tabCompleteMatches.length > 0 && input.value.startsWith(this._tabCompletePrefix)) {
+                    this._tabCompleteIdx = (this._tabCompleteIdx + 1) % this._tabCompleteMatches.length;
+                    input.value = this._tabCompleteMatches[this._tabCompleteIdx] + ' ';
+                    return;
+                }
+
+                // Start new tab session
+                const prefix = input.value.split(/\s+/)[0].toLowerCase();
+                this._tabCompletePrefix = prefix;
+
+                const builtins = [
+                    'help', 'status', 'export', 'frame', 'compare', 'ab', 'metadata',
+                    'alias', 'grade', 'lut', 'exposure', 'sat', 'gamma', 'zoom',
+                    'channel', 'scope', 'printer', 'softclip', 'wb', 'info',
+                    'run', 'queue', 'clear', 'eval', 'bypass', 'tracker', 'shotgrid', 'ftrack'
+                ];
+
+                let aliases = [];
+                try { aliases = Object.keys(JSON.parse(localStorage.getItem('radiance_term_aliases') || '{}')); } catch { }
+
+                const allCmds = [...new Set([...builtins, ...aliases])].sort();
+                this._tabCompleteMatches = allCmds.filter(c => c.startsWith(prefix));
+
+                if (this._tabCompleteMatches.length === 1) {
+                    input.value = this._tabCompleteMatches[0] + ' ';
+                    this._tabCompleteMatches = [];
+                } else if (this._tabCompleteMatches.length > 1) {
+                    this._tabCompleteIdx = 0;
+                    input.value = this._tabCompleteMatches[0] + ' ';
+                    // Show options if more than one
+                    this._termLog('info', `  ${this._tabCompleteMatches.join('  ')}`);
+                }
+            } else if (e.key === 'ArrowUp') {
+                this._tabCompleteMatches = []; // reset autocomplete
                 this._termHistoryIdx = Math.min(this._termHistoryIdx + 1, this._termHistory.length - 1);
                 input.value = this._termHistory[this._termHistoryIdx] || '';
                 e.preventDefault();
             } else if (e.key === 'ArrowDown') {
+                this._tabCompleteMatches = [];
                 this._termHistoryIdx = Math.max(this._termHistoryIdx - 1, -1);
                 input.value = this._termHistoryIdx >= 0 ? this._termHistory[this._termHistoryIdx] : '';
                 e.preventDefault();
             } else if (e.key === 'Enter') {
+                if (e.shiftKey) {
+                    // Let default shift+enter behavior happen (newline)
+                    // The auto-resize input listener will handle the height jump
+                    return;
+                }
+
                 e.preventDefault();
+                this._tabCompleteMatches = [];
                 const cmd = input.value.trim();
                 if (!cmd) return;
-                this._termHistory.unshift(cmd);
+
+                // For history, replace literal newlines with \n strings to keep it one line in history
+                const histCmd = cmd.replace(/\n/g, '\\n');
+                this._termHistory.unshift(histCmd);
                 this._termHistoryIdx = -1;
+
                 input.value = '';
-                this._termLog('cmd', `❯ ${cmd}`);
+                input.style.height = 'auto'; // reset height
+
+                // Log multi-line commands cleanly
+                const displayCmd = cmd.split('\n').map((line, i) => i === 0 ? `❯ ${line}` : `  ${line}`).join('\n');
+                this._termLog('cmd', displayCmd);
+
                 this._termExec(cmd);
             } else if (e.key === 'Escape') {
+                this._tabCompleteMatches = [];
                 input.value = '';
                 input.blur();
+            } else {
+                // Any other typing resets autocomplete
+                this._tabCompleteMatches = [];
             }
         }, true);
 
-        // ── Console intercept ────────────────────────────────────────────────
-        const origLog = console.log.bind(console);
-        const origWarn = console.warn.bind(console);
-        const origError = console.error.bind(console);
-
-        const fmtArgs = (args) => args.map(a => {
-            if (typeof a === 'object') { try { return JSON.stringify(a, null, 0); } catch { return String(a); } }
-            return String(a);
-        }).join(' ');
-
-        console.log = (...args) => {
-            origLog(...args);
-            const msg = fmtArgs(args);
-            if (msg.includes('[Radiance') || msg.includes('[WB') || msg.includes('[FXTD')) {
-                this._termLog('info', msg);
-            }
-        };
-        console.warn = (...args) => {
-            origWarn(...args);
-            this._termLog('warn', fmtArgs(args));
-        };
-        console.error = (...args) => {
-            origError(...args);
-            this._termLog('error', fmtArgs(args));
-        };
 
         // ── Boot message ─────────────────────────────────────────────────────
-        this._termLog('system', '╔══════════════════════════════════════════════╗');
-        this._termLog('system', '║    FXTD RADIANCE TERMINAL  ·  v2.1           ║');
-        this._termLog('system', '║    Type  help  for available commands        ║');
-        this._termLog('system', '╚══════════════════════════════════════════════╝');
+        this._termLog('system', '=============================================');
+        this._termLog('system', '  FXTD STUDIOS RADIANCE TERMINAL · v2.1');
+        this._termLog('system', '  Type "help" for available commands');
+        this._termLog('system', '=============================================');
+
+        // ── Run Startup Script ────────────────────────────────────────────────
+        setTimeout(() => {
+            try {
+                const aliases = JSON.parse(localStorage.getItem('radiance_term_aliases') || '{}');
+                if (aliases['startup']) {
+                    this._termLog('system', 'Executing startup macro...');
+                    this._termExec('startup');
+                }
+            } catch (e) { }
+        }, 500);
     }
 
     // ── Log a line to the terminal ───────────────────────────────────────────
     _termLog(type, msg) {
         if (!this._termOutput) return;
         const line = document.createElement('div');
-        line.style.cssText = 'padding: 0.5px 0; white-space: pre-wrap;';
-
-        const ts = new Date().toTimeString().slice(0, 8);
-        const tsSpan = `<span style="color:#2a3540;user-select:none">[${ts}]</span> `;
-
+        
         const colors = {
             system: '#3d6060',
-            info: '#6af',
-            warn: '#fa0',
-            error: '#f44',
-            cmd: '#3d8',
-            success: '#4d8',
-            grade: '#bf7',
-            event: '#a78',
-            result: '#8cf',
+            info: '#00a8ff',
+            warn: '#ff9f43',
+            error: '#ff4757',
+            cmd: '#2ed573',
+            success: '#7bed9f',
+            grade: '#a29bfe',
+            event: '#eccc68',
+            result: '#70a1ff',
         };
         const c = colors[type] || '#c8d3e0';
+
+        line.style.cssText = `
+            padding: 2px 8px;
+            margin: 1px 0;
+            white-space: pre-wrap;
+            border-left: 2px solid ${type === 'cmd' ? c : 'transparent'};
+            background: ${type === 'cmd' ? 'rgba(46, 213, 115, 0.05)' : 'transparent'};
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            font-size: 10.5px;
+            transition: background 0.2s;
+        `;
+
+        const ts = new Date().toTimeString().slice(0, 8);
+        const tsSpan = `<span style="color:rgba(255,255,255,0.15);user-select:none;font-size:9px;min-width:45px;">${ts}</span>`;
 
         // Sanitize backend-supplied messages against XSS
         const escaped = RadianceViewer.escapeHtml(msg);
         const highlighted = escaped.replace(/(\[[\w\s·\.]+\])/g, `<span style="color:${c};font-weight:600">$1</span>`);
 
-        line.innerHTML = tsSpan + `<span style="color:${c}">${highlighted}</span>`;
+        line.innerHTML = tsSpan + `<span style="color:${c};flex:1">${highlighted}</span>`;
+        
+        // Add indicator for errors/warnings
+        if (type === 'error' || type === 'warn') {
+            line.style.borderLeftColor = c;
+            line.style.background = `linear-gradient(90deg, ${c}11 0%, transparent 100%)`;
+        }
+
         this._termOutput.appendChild(line);
 
         // Keep max 500 lines
@@ -1209,15 +1606,43 @@ class RadianceViewer {
 
     // ── Command executor ─────────────────────────────────────────────────────
     _termExec(cmd) {
+        // Alias expansion
+        if (!this._termAliases) {
+            try { this._termAliases = JSON.parse(localStorage.getItem('radiance_term_aliases') || '{}'); }
+            catch { this._termAliases = {}; }
+        }
+
+        const rawParts = cmd.trim().split(/\s+/);
+        let firstWord = rawParts[0].toLowerCase();
+
+        // Expand alias if it exists and we're not defining/deleting one
+        if (firstWord !== 'alias' && this._termAliases[firstWord]) {
+            const expanded = this._termAliases[firstWord] + ' ' + rawParts.slice(1).join(' ');
+            cmd = expanded.trim();
+        }
+
         const parts = cmd.trim().split(/\s+/);
         const verb = parts[0].toLowerCase();
         const args = parts.slice(1);
+
+        // Macro Recorder Intercept
+        if (this._termIsRecording && verb !== 'record') {
+            this._termMacroBuffer.push(cmd);
+        }
 
         switch (verb) {
             case 'help': {
                 const cmds = [
                     ['help', 'Show this help'],
+                    ['<python>', 'Arbitrary python commands sent to backend!'],
                     ['status', 'Show viewer + renderer state'],
+                    ['export [name]', 'Export current frame as PNG'],
+                    ['frame <next|prev|#>', 'Navigate image sequence'],
+                    ['compare <save|toggle>', 'A/B split between grades (or: ab)'],
+                    ['metadata', 'Show parsed EXR/image metadata'],
+                    ['bypass <id|title>', 'Toggle node bypass state'],
+                    ['tracker <sync|status>', 'Push to ShotGrid/ftrack (stub)'],
+                    ['alias <nm> "<cmd>"', 'Create shortcut (e.g. alias sq "frame next")'],
                     ['grade', 'Show current grade values'],
                     ['grade reset', 'Reset all grading to defaults'],
                     ['grade save <name>', 'Save current grade to slot'],
@@ -1240,8 +1665,153 @@ class RadianceViewer {
                     ['queue', 'Show ComfyUI queue status'],
                     ['clear', 'Clear terminal'],
                     ['eval <js>', 'Evaluate JS (advanced)'],
+                    ['record <start|stop name>', 'Record a series of commands to an alias'],
+                    ['ls <nodes|selected>', 'List graph nodes (e.g. ls nodes)'],
+                    ['find <type|title>', 'Find and highlight a node'],
+                    ['doc <python_module>', 'Fetch python documentation'],
                 ];
                 cmds.forEach(([c, d]) => this._termLog('result', `  ${c.padEnd(26)} ${d}`));
+                break;
+            }
+
+            case 'record': {
+                if (args[0] === 'start') {
+                    if (this._termIsRecording) {
+                        this._termLog('warn', '[Record] Already recording! Type `record stop [name]` to save.');
+                        break;
+                    }
+                    this._termIsRecording = true;
+                    this._termMacroBuffer = [];
+                    this._termLog('event', '[Record] 🔴 Recording started. Type commands, then `record stop <name>`');
+                } else if (args[0] === 'stop') {
+                    if (!this._termIsRecording) {
+                        this._termLog('warn', '[Record] Not currently recording.');
+                        break;
+                    }
+                    this._termIsRecording = false;
+                    const name = args[1];
+                    if (!name) {
+                        this._termLog('warn', '[Record] Stopped. Discarded macro (no name provided).');
+                        this._termMacroBuffer = [];
+                        break;
+                    }
+                    if (this._termMacroBuffer.length === 0) {
+                        this._termLog('warn', `[Record] Stopped. Discarded macro (empty).`);
+                        break;
+                    }
+                    // Compile commands with semicolons
+                    const compiled = this._termMacroBuffer.join('; ');
+                    this._termAliases[name] = compiled;
+                    localStorage.setItem('radiance_term_aliases', JSON.stringify(this._termAliases));
+                    this._termLog('success', `[Record] ⏹ Stopped. Macro saved as alias: ${name}`);
+                    this._termMacroBuffer = [];
+                } else {
+                    this._termLog('warn', 'usage: record start | record stop <name>');
+                }
+                break;
+            }
+
+            case 'ls': {
+                if (!app.graph || !app.graph._nodes) {
+                    this._termLog('error', '[LS] Graph not available.');
+                    break;
+                }
+                if (args[0] === 'nodes') {
+                    const count = app.graph._nodes.length;
+                    this._termLog('info', `[LS] Graph contains ${count} nodes:`);
+                    app.graph._nodes.forEach(n => {
+                        this._termLog('result', `  [${n.id}] ${n.type} ${n.title ? `"${n.title}"` : ''}`);
+                    });
+                } else if (args[0] === 'selected') {
+                    const sel = Object.values(app.canvas.selected_nodes || {});
+                    if (!sel.length) {
+                        this._termLog('result', '[LS] No nodes selected.');
+                        break;
+                    }
+                    this._termLog('info', `[LS] ${sel.length} nodes selected:`);
+                    sel.forEach(n => {
+                        this._termLog('result', `  [${n.id}] ${n.type} ${n.title ? `"${n.title}"` : ''}`);
+                    });
+                } else {
+                    this._termLog('warn', 'usage: ls nodes | ls selected');
+                }
+                break;
+            }
+
+            case 'find': {
+                if (!args[0]) {
+                    this._termLog('warn', 'usage: find <type or title string>');
+                    break;
+                }
+                const query = args.join(' ').toLowerCase();
+                const nodes = app.graph._nodes || [];
+                const matches = nodes.filter(n =>
+                    String(n.id) === query ||
+                    (n.title && n.title.toLowerCase().includes(query)) ||
+                    (n.type && n.type.toLowerCase().includes(query))
+                );
+
+                if (!matches.length) {
+                    this._termLog('warn', `[Find] No nodes found matching "${query}"`);
+                    break;
+                }
+
+                app.canvas.deselectAllNodes();
+                matches.forEach(m => app.canvas.selectNode(m, true));
+                app.canvas.centerOnNode(matches[0]);
+                app.canvas.setDirty(true, true);
+
+                this._termLog('success', `[Find] Found and selected ${matches.length} node(s).`);
+                break;
+            }
+
+            case 'doc': {
+                if (!args[0]) {
+                    this._termLog('warn', 'usage: doc <python_module_or_object>');
+                    break;
+                }
+                const target = args[0];
+                const pyCmd = `import inspect; print(f"\\n--- Docstring for {target} ---\\n{inspect.getdoc(${target}) or 'No docstring available.'}\\n----------------------------")`;
+                this._termLog('event', `[Doc] Fetching Python docstring for ${target}...`);
+                this._termExec(pyCmd);
+                break;
+            }
+
+            case 'gpu': {
+                this._termLog('event', '[GPU] Querying hardware telemetry...');
+                const pyCmd = `
+import torch
+from radiance.gpu_memory import get_gpu_memory_info
+info = get_gpu_memory_info()
+if info.get('available'):
+    print(f"--- GPU DIAGNOSTICS ---\\nDevice   : {torch.cuda.get_device_name(0)}\\nAllocated: {info['allocated_mb']:.1f} MB\\nReserved : {info['reserved_mb']:.1f} MB\\nPeak     : {info['max_allocated_mb']:.1f} MB\\n----------------------")
+else:
+    print("GPU NOT AVAILABLE (CPU MODE)")
+                `;
+                this._termExec(pyCmd);
+                break;
+            }
+
+            case 'inspect': {
+                const target = args[0] || 'view';
+                if (target === 'view') {
+                    const stats = [
+                        ['RESOLUTION', `${this.imageWidth} × ${this.imageHeight}`],
+                        ['CHANNELS', this.channel === 'rgb' ? '3 (RGB)' : '4 (RGBA)'],
+                        ['PIXEL DATA', this.imageData ? 'ALLOCATED' : 'NULL'],
+                        ['GPU TEXTURE', this.useWebGL ? 'ACTIVE' : 'FALLBACK'],
+                        ['MEMORY', `${((this.imageWidth * this.imageHeight * 4 * 4) / 1024 / 1024).toFixed(2)} MB (Est. 32-bit)`]
+                    ];
+                    
+                    this._termLog('system', '--- TENSOR INSPECTION [IMAGE] ---');
+                    stats.forEach(([k, v]) => {
+                        this._termLog('result', `${k.padEnd(12)} : ${v}`);
+                    });
+                    this._termLog('system', '-------------------------------');
+                } else {
+                    this._termLog('event', `[Inspect] Relaying to Python backend for ${target}...`);
+                    this._termExec(`import torch; print(f"--- Tensor Info: {${target}} ---\\nType: {type(${target})}\\nShape: {${target}.shape if hasattr(${target}, 'shape') else 'N/A'}\\nDevice: {${target}.device if hasattr(${target}, 'device') else 'N/A'}\\nDtype: {${target}.dtype if hasattr(${target}, 'dtype') else 'N/A'}\\n-------------------")`);
+                }
                 break;
             }
 
@@ -1454,6 +2024,57 @@ class RadianceViewer {
                 break;
             }
 
+            case 'bypass': {
+                if (!args[0]) { this._termLog('warn', 'usage: bypass <node_id | node_title>'); break; }
+                const query = args.join(' ').toLowerCase();
+                const nodes = app.graph._nodes || [];
+                const target = nodes.find(n => String(n.id) === query || (n.title && n.title.toLowerCase() === query) || (n.type && n.type.toLowerCase() === query));
+                if (!target) {
+                    this._termLog('warn', `[Bypass] Node not found: "${query}"`);
+                    break;
+                }
+                const NEVER = 2; // LiteGraph.NEVER
+                const ALWAYS = 0; // LiteGraph.ALWAYS
+
+                if (target.mode === NEVER) {
+                    target.mode = ALWAYS;
+                    this._termLog('success', `[Bypass] Unmuted node: ${target.title || target.type} (id:${target.id})`);
+                } else {
+                    target.mode = NEVER;
+                    this._termLog('success', `[Bypass] Muted node: ${target.title || target.type} (id:${target.id})`);
+                }
+                app.graph.setDirtyCanvas(true, true);
+                break;
+            }
+
+            case 'shotgrid':
+            case 'ftrack':
+            case 'tracker': {
+                if (args[0] === 'sync') {
+                    if (!this.image) { this._termLog('warn', '[Tracker] No image to sync.'); break; }
+                    this._termLog('info', `[Tracker] Assembling payload...`);
+                    const meta = this.hdrData?.metadata || {};
+                    const shot = meta['shot'] || meta['Shot'] || 'sc01_sh010';
+                    const task = meta['task'] || 'comp_v01';
+
+                    this._termLog('info', `[Tracker] Target Shot : ${shot}`);
+                    this._termLog('info', `[Tracker] Task Name   : ${task}`);
+                    this._termLog('event', `[Tracker] Uploading artifact preview... [STUB]`);
+
+                    // Stub timeout for fake network delay
+                    setTimeout(() => {
+                        this._termLog('success', `[Tracker] ✅ Sync complete. Version published to pipeline.`);
+                    }, 600);
+                } else if (args[0] === 'status') {
+                    this._termLog('result', '[Tracker] Status: connected (Stub Mode)');
+                    this._termLog('result', '[Tracker] User  : fxtd_radiance');
+                    this._termLog('result', '[Tracker] URL   : https://studio.shotgrid.local');
+                } else {
+                    this._termLog('warn', `usage: tracker <sync|status>`);
+                }
+                break;
+            }
+
             case 'run': {
                 this._termLog('event', '[Workflow] Queuing prompt…');
                 this.runWorkflow();
@@ -1492,10 +2113,139 @@ class RadianceViewer {
                 break;
             }
 
-            default: {
-                this._termLog('warn', `Unknown command: "${verb}". Type  help  for available commands.`);
+            case 'alias': {
+                if (!args[0]) {
+                    const keys = Object.keys(this._termAliases || {});
+                    if (!keys.length) { this._termLog('result', '  No aliases defined.'); break; }
+                    keys.forEach(k => this._termLog('result', `  alias ${k} = "${this._termAliases[k]}"`));
+                } else if (args[0] === 'delete' || args[0] === 'remove') {
+                    if (args[1]) {
+                        delete this._termAliases[args[1]];
+                        localStorage.setItem('radiance_term_aliases', JSON.stringify(this._termAliases));
+                        this._termLog('success', `[Alias] Removed ${args[1]}`);
+                    }
+                } else {
+                    const name = args[0];
+                    // Re-join args intelligently to handle quotes
+                    const cmdStr = cmd.substring(cmd.indexOf(name) + name.length).trim().replace(/^['"]|['"]$/g, '');
+                    if (!cmdStr) { this._termLog('warn', `usage: alias <name> "<command>"`); break; }
+                    this._termAliases[name] = cmdStr;
+                    localStorage.setItem('radiance_term_aliases', JSON.stringify(this._termAliases));
+                    this._termLog('success', `[Alias] ${name} → ${cmdStr}`);
+
+                    if (name === 'startup') {
+                        this._termLog('info', '[Alias] ' + name + ' command will now execute automatically on boot.');
+                    }
+                }
                 break;
             }
+
+            case 'export': {
+                if (!this.image) { this._termLog('warn', '[Export] No image loaded.'); break; }
+                const canvas = this.useWebGL && this.renderer ? this.renderer.canvas : this.canvas2d;
+                if (!canvas) { this._termLog('warn', '[Export] Canvas not available.'); break; }
+
+                const fn = args[0] || `radiance_export_${Date.now()}`;
+                const dataURL = canvas.toDataURL('image/png');
+                const link = document.createElement('a');
+                link.download = fn.endsWith('.png') ? fn : `${fn}.png`;
+                link.href = dataURL;
+                link.click();
+                this._termLog('success', `[Export] Saved locally as ${link.download}`);
+                break;
+            }
+
+            case 'frame': {
+                if (!this.frameImages || this.frameImages.length < 2) {
+                    this._termLog('warn', '[Frame] No image sequence loaded.');
+                    break;
+                }
+                const max = this.frameImages.length - 1;
+                let target = this.currentFrame;
+                if (args[0] === 'next') target++;
+                else if (args[0] === 'prev') target--;
+                else target = parseInt(args[0]);
+
+                if (isNaN(target)) { this._termLog('warn', `usage: frame <next|prev|#number>`); break; }
+
+                target = Math.max(0, Math.min(max, target));
+                if (target !== this.currentFrame) {
+                    this.currentFrame = target;
+                    this.render(true);
+                    this._termLog('success', `[Frame] → ${target + 1} / ${max + 1}`);
+                } else {
+                    this._termLog('result', `[Frame] Already at ${target + 1}`);
+                }
+                break;
+            }
+
+            case 'metadata': {
+                if (!this.image) { this._termLog('warn', '[Metadata] No image loaded.'); break; }
+                const meta = this.hdrData?.metadata;
+                if (!meta || Object.keys(meta).length === 0) {
+                    this._termLog('result', '  No EXR metadata found.');
+                    break;
+                }
+                this._termLog('result', '  EXR Metadata:');
+                for (const [k, v] of Object.entries(meta)) {
+                    this._termLog('result', `    ${k.padEnd(20)} : ${v}`);
+                }
+                break;
+            }
+
+            case 'compare':
+            case 'ab': {
+                if (args[0] === 'save') {
+                    this._compareState = this._captureGradingState();
+                    this._termLog('success', '[Compare] Grade state saved to memory.');
+                } else {
+                    // Default behavior is toggle if nothing specified
+                    if (!this._compareState) {
+                        this._termLog('warn', '[Compare] No state saved. Auto-saving original state first.');
+                        this._compareState = this._captureGradingState();
+                        break;
+                    }
+                    const current = this._captureGradingState();
+                    this._restoreGradingState(this._compareState);
+                    this._compareState = current; // Swap them
+                    if (this._lastRenderContent) this._lastRenderContent();
+                    this._termLog('success', '[Compare] Toggled grade state.');
+                }
+                break;
+            }
+
+            default: {
+                this._termLog('event', '[Terminal] Executing Python on backend...');
+                api.fetchApi('/radiance/terminal', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code: cmd })
+                }).then(r => r.json()).then(data => {
+                    if (data.status === 'success') {
+                        if (data.output && data.output.trim() !== "") {
+                            this._termLog('result', data.output.trim());
+                        }
+                    } else {
+                        if (data.output) this._termLog('error', data.output.trim());
+                        else this._termLog('error', 'Execution failed.');
+                    }
+                }).catch(e => {
+                    this._termLog('error', `[Terminal API] Network error: ${e.message}`);
+                });
+                break;
+            }
+        }
+    }
+
+    toggleTerminal() {
+        this._termCollapsed = !this._termCollapsed;
+        if (this._termOutputEl) this._termOutputEl.style.display = this._termCollapsed ? 'none' : 'block';
+        if (this._termInputRow) this._termInputRow.style.display = this._termCollapsed ? 'none' : 'flex';
+        if (this._termCollapseBtn) this._termCollapseBtn.textContent = this._termCollapsed ? '▸' : '▾';
+        if (this._termContainer) this._termContainer.style.flex = this._termCollapsed ? '0 0 22px' : `0 0 ${this._termSavedH}px`;
+
+        if (!this._termCollapsed && this._termInput) {
+            setTimeout(() => this._termInput.focus(), 50);
         }
     }
 
@@ -1710,26 +2460,7 @@ class RadianceViewer {
             }
         });
 
-        // ── execution_error ───────────────────────────────────────────────
-        api.addEventListener('execution_error', ({ detail }) => {
-            const node_id = detail?.node_id || detail?.node;
-            const title = node_id ? nodeTitle(node_id) : 'unknown';
-            const msg = detail?.exception_message || detail?.message || JSON.stringify(detail);
-            const type = detail?.exception_type || '';
-
-            this._termLog('system', '─'.repeat(52));
-            this._termLog('error', `✗  EXECUTION ERROR`);
-            this._termLog('error', `   node    : ${title} (id:${node_id})`);
-            if (type) this._termLog('error', `   type    : ${type}`);
-            this._termLog('error', `   message : ${msg}`);
-
-            // Traceback lines (keep last 6)
-            if (detail?.traceback) {
-                const lines = detail.traceback.slice(-6);
-                lines.forEach(l => this._termLog('error', `   ${l.trim()}`));
-            }
-            this._termLog('system', '─'.repeat(52));
-        });
+        // (Duplicate execution_error listener removed — see line 1644)
 
         // ── status (queue updates) ────────────────────────────────────────
         api.addEventListener('status', ({ detail }) => {
@@ -1900,6 +2631,7 @@ class RadianceViewer {
         label.style.cssText = `
             color: ${this.theme.textDim};
             font-size: 11px;
+            letter-spacing: 0.06em;
             font-family: ${this.theme.font};
             min-width: 50px;
             font-weight: 500;
@@ -1908,207 +2640,259 @@ class RadianceViewer {
         return label;
     }
 
-    createToolbar() {
-        // Fullscreen & Export
-        this.addButton('⛶', () => this.toggleFullscreen(), 'Fullscreen');
-        this.addButton('💾', (e) => this.showExportMenu(e), 'Export');
-        this.addButton('↺', () => this.resetControls(), 'Reset');
-        this.addButton('?', () => this.toggleHelp(), 'Keyboard Shortcuts (?)');
-        this.addSep();
+    // createToolbar moved to createMainLeftHUD logic
 
-        // Run & Editor
-        // this.runButton = this.addButton('▶', () => this.runWorkflow(), 'Run (Shift+Enter)');
-        // this.runButton.style.color = '#4f4'; // Green hue
+    createMainLeftHUD() {
+        const t = this.theme;
+        this.analysisHUD = document.createElement('div');
+        this.analysisHUD.style.cssText = `
+            position: absolute;
+            left: 14px;
+            top: 50%;
+            transform: translateY(-50%);
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            width: 58px;
+            z-index: 100;
+            padding: 16px 8px;
+            box-sizing: border-box;
+            background: rgba(13, 13, 18, 0.85);
+            backdrop-filter: blur(24px) saturate(180%);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            box-shadow: 0 12px 48px rgba(0, 0, 0, 0.6), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+            pointer-events: auto;
+            max-height: 90vh;
+            align-items: center;
+            overflow-y: auto;
+            scrollbar-width: none;
+        `;
+        this.analysisHUD.style.msOverflowStyle = 'none';
 
-        // Removed separate Prompt button (v2.4: Integration into HUD complete)
-        // this.promptButton = this.addButton('P', () => this.togglePromptPanel(), 'Prompt Editor (P)');
-        this.addSep();
+        const hud = this.analysisHUD;
 
-        // Controls Toggle
-        this.controlsToggle = this.addButton('🎛️', () => this.toggleControls(), 'Toggle Grading Controls');
-        this.controlsToggle.style.color = this.theme.accent; // Active by default
-        this.addSep();
+        // ── GROUP: File & System ──────────────────────────────────────────────
+        this.addGrpLabel('FILE', hud);
+        this.addButton('⛶', () => this.toggleFullscreen(), 'Fullscreen (F11)', hud);
+        this.addButton('💾', (e) => this.showExportMenu(e), 'Export Frame', hud);
+        this.addButton('↺', () => this.resetControls(), 'Reset All Grades', hud);
+        this.addButton('?', () => this.toggleHelp(), 'Keyboard Shortcuts (?)', hud);
+        this.addSep(hud);
 
-        // Removed EV/Gamma sliders from toolbar
-        // They are now in HUD
+        // ── GROUP: Grading ───────────────────────────────────────────────────
+        this.addGrpLabel('GRADE', hud);
+        this.controlsToggle = this.addButton('🎛️', () => this.toggleControls(), 'Toggle Grading Controls (H)', hud);
+        this.controlsToggle.style.color = this.theme.accent;
+        this.addSep(hud);
 
-        // Removed separate Lens controls from toolbar
-        // They are now in HUD
+        // ── GROUP: View & LUT ────────────────────────────────────────────────
+        this.addGrpLabel('VIEW', hud);
+        this.addButton('Fit', () => this.fitToView(), 'Fit to view (F)', hud);
+        this.addButton('1:1', () => this.setZoom(1.0), 'Actual pixels (1)', hud);
+        
+        // LUT Select (Vertical adapted)
+        const lutWrap = document.createElement('div');
+        lutWrap.style.cssText = 'display:flex; flex-direction:column; gap:2px; align-items:center;';
+        const lutLbl = document.createElement('span');
+        lutLbl.textContent = 'LUT';
+        lutLbl.style.cssText = 'font-size:7px; color:rgba(255,255,255,0.2); font-weight:bold;';
+        lutWrap.appendChild(lutLbl);
 
-        // Zoom
-        this.addButton('Fit', () => this.fitToView(), 'F');
-        this.addButton('1:1', () => this.setZoom(1.0), '1');
-        this.addSep();
-
-        // LUT Dropdown
-        this.addLbl('LUT');
         const lutSel = document.createElement('select');
         lutSel.style.cssText = `
-            background: #181820;
-            color: ${this.theme.text};
-            border: 1px solid ${this.theme.panelBorder};
+            background: #121218;
+            color: ${this.theme.accent};
+            border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 4px;
-            padding: 2px 4px;
-            font-size: 11px;
+            padding: 2px;
+            font-size: 8px;
+            font-weight: bold;
             outline: none;
             cursor: pointer;
+            width: 44px;
+            text-align: center;
         `;
         this.lutOptions.forEach(opt => {
             const el = document.createElement('option');
-            el.value = opt;
-            el.textContent = opt;
+            el.value = opt; el.textContent = opt;
             lutSel.appendChild(el);
         });
         lutSel.value = this.displayLut;
         lutSel.onchange = (e) => { this.displayLut = e.target.value; this.render(); };
-        this.toolbar.appendChild(lutSel);
+        lutWrap.appendChild(lutSel);
+        hud.appendChild(lutWrap);
+        this.addSep(hud);
 
-        this.addSep();
-
-        // Channels (added Alpha)
+        // ── GROUP: Channels ──────────────────────────────────────────────────
+        this.addGrpLabel('CH', hud);
+        const chGrid = document.createElement('div');
+        chGrid.style.cssText = 'display:grid; grid-template-columns: 1fr 1fr; gap:3px; width: 100%;';
         ['RGB', 'R', 'G', 'B', 'A', 'L'].forEach(ch => {
             this.addButton(ch, () => {
                 this.channel = ch.toLowerCase() === 'l' ? 'luma' : ch.toLowerCase();
-                this.showZdepth = false; // channel switch always exits depth view
+                this.showZdepth = false;
                 this.render();
-            }, ch === 'A' ? 'Alpha Channel' : '');
+            }, ch === 'A' ? 'Alpha Channel' : '', chGrid);
         });
-        this.addSep();
+        hud.appendChild(chGrid);
+        this.addSep(hud);
 
-        // Batch Navigation
-        this.prevFrameBtn = this.addButton('◀', () => this.prevFrame(), 'Previous Frame (←)');
+        // ── GROUP: Navigation ────────────────────────────────────────────────
+        this.addGrpLabel('NAV', hud);
+        this.prevFrameBtn = this.addButton('◀', () => this.prevFrame(), 'Previous Frame (←)', hud);
         this.frameDisplay = document.createElement('span');
         this.frameDisplay.textContent = '1/1';
-        this.frameDisplay.style.cssText = `color: ${this.theme.text}; font-size: 9px; min-width: 32px; text-align: center;`;
-        this.toolbar.appendChild(this.frameDisplay);
-        this.nextFrameBtn = this.addButton('▶', () => this.nextFrame(), 'Next Frame (→)');
-        this.addSep();
+        this.frameDisplay.style.cssText = `color: ${this.theme.text}; font-size: 8px; text-align: center; font-weight: bold;`;
+        hud.appendChild(this.frameDisplay);
+        this.nextFrameBtn = this.addButton('▶', () => this.nextFrame(), 'Next Frame (→)', hud);
+        
+        this.playBtn = this.addButton('▶️', () => this.togglePlayback(), 'Play/Pause Sequence (Space)', hud);
+        this.addSep(hud);
 
-        // ── Video load button ──────────────────────────────────────────────────
-        const vidFileInput = document.createElement('input');
-        vidFileInput.type = 'file';
-        vidFileInput.accept = 'video/mp4,video/webm,video/quicktime,video/x-matroska,video/*';
-        vidFileInput.style.display = 'none';
-        vidFileInput.onchange = (e) => {
-            const f = e.target.files[0];
-            if (!f) return;
-            if (this._fileNameLabel) this._fileNameLabel.textContent = f.name;
-            if (this.transportPanel) this.transportPanel.style.display = 'flex';
-            this.loadVideo(f);
-        };
-        this.toolbar.appendChild(vidFileInput);
-        this.addButton('🎬', () => vidFileInput.click(), 'Load Video File (MP4 / WebM / MOV)');
-        this.addSep();
+        // ── GROUP: Compare ──────────────────────────────────────────────────
+        this.addGrpLabel('COMP', hud);
+        this.addButton('A|B', () => this.cycleCompareMode(), 'Compare (A)', hud);
+        this.addSep(hud);
 
-        // View
-        this.addButton('FC', () => { this.falseColor = !this.falseColor; this.zebra = false; this.focusPeaking = false; this.showZdepth = false; this.gamutWarning = false; this.clippingMonitor = false; this.render(); }, 'False Color (E)');
-        this.addButton('GW', () => { this.gamutWarning = !this.gamutWarning; this.clippingMonitor = false; this.falseColor = false; this.render(); }, 'Gamut Warning');
-        this.addButton('CLP', () => { this.clippingMonitor = !this.clippingMonitor; this.gamutWarning = false; this.falseColor = false; this.render(); }, 'Clipping Monitor');
-        this.addButton('Z', () => this.toggleZdepth(), 'Z-Depth / Zebra (Z)');
-        this.focusPeakingBtn = this.addButton('FP', () => { this.focusPeaking = !this.focusPeaking; this.falseColor = false; this.zebra = false; this.showZdepth = false; this.render(); }, 'Focus Peaking (K)');
-        this.gridBtn = this.addButton('▦', () => this.cycleGridMode(), 'Grid / Safe Areas (G)');
-        this.addButton('📺', () => this.cycleSafeAreas(), 'Safe Areas (S)');
+        // ── GROUP: Analysis ──────────────────────────────────────────────────
+        this.addGrpLabel('ANLYS', hud);
+        const fcBtn = this.addButton('FC', () => { 
+            this.falseColor = !this.falseColor; 
+            if (this.falseColor) { 
+                this.zebra = this.focusPeaking = this.showZdepth = this.gamutWarning = this.clippingMonitor = false; 
+            }
+            syncAll(); this.render(); 
+        }, 'False Color (E)', hud);
+
+        const gwBtn = this.addButton('GW', () => { 
+            this.gamutWarning = !this.gamutWarning; 
+            if (this.gamutWarning) { this.clippingMonitor = this.falseColor = false; }
+            syncAll(); this.render(); 
+        }, 'Gamut Warning', hud);
+
+        const clpBtn = this.addButton('CLP', () => { 
+            this.clippingMonitor = !this.clippingMonitor; 
+            if (this.clippingMonitor) { this.gamutWarning = this.falseColor = false; }
+            syncAll(); this.render(); 
+        }, 'Clipping Monitor', hud);
+
+        const zBtn = this.addButton('Z', () => { 
+            this.toggleZdepth(); 
+            syncAll(); 
+        }, 'Z-Depth / Zebra (Z)', hud);
+        
+        this.focusPeakingBtn = this.addButton('FP', () => { 
+            this.focusPeaking = !this.focusPeaking; 
+            if (this.focusPeaking) { this.falseColor = this.zebra = this.showZdepth = false; }
+            syncAll(); this.render(); 
+        }, 'Focus Peaking (K)', hud);
+
+        this.gridBtn = this.addButton('▦', () => { 
+            this.cycleGridMode(); 
+            syncAll(); 
+        }, 'Grid / Safe Areas (G)', hud);
+
+        const saBtn = this.addButton('📺', () => { 
+            this.cycleSafeAreas(); 
+            syncAll(); 
+        }, 'Safe Areas (S)', hud);
+        
         this.loupeBtn = this.addButton('🔍', () => {
             this.showLoupe = !this.showLoupe;
-            this.loupeBtn.classList.toggle('active', this.showLoupe);
-            this.loupeBtn.style.color = this.showLoupe ? this.theme.accent : this.theme.textDim;
+            syncAll();
             this.renderOverlay();
-        }, 'Pixel Loupe (Q)');
-        if (this.showLoupe) {
-            this.loupeBtn.classList.add('active');
-            this.loupeBtn.style.color = this.theme.accent;
-        }
-        this.addSep();
+        }, 'Pixel Loupe (Q)', hud);
 
-        // Compare
-        this.addButton('A|B', () => this.cycleCompareMode(), 'Compare (A)');
-        this.addSep();
+        const updateBtn = (btn, active) => {
+            if (!btn) return;
+            btn.classList.toggle('active', active);
+            btn.style.color = active ? this.theme.accent : this.theme.textDim;
+            btn.style.background = active ? 'rgba(0, 168, 255, 0.15)' : 'rgba(255, 255, 255, 0.03)';
+            btn.style.borderColor = active ? 'rgba(0, 168, 255, 0.4)' : 'rgba(255, 255, 255, 0.08)';
+            btn.style.boxShadow = active ? '0 0 10px rgba(0, 168, 255, 0.2)' : 'none';
+        };
 
-        // Scopes
-        this.addButton('H', () => this.toggleScope('histogram'), 'Histogram');
-        this.addButton('W', () => this.toggleScope('waveform'), 'Waveform');
-        this.addButton('V', () => this.toggleScope('vectorscope'), 'Vectorscope');
-        this.addButton('ℹ️', () => this.toggleMetadata(), 'Image Info');
-        this.addSep();
-        this.addButton('◫', () => { this.scopeOverlay = !this.scopeOverlay; this.renderOverlay(); }, 'Overlay');
-        this.addSep();
+        const syncAll = () => {
+            updateBtn(fcBtn, this.falseColor);
+            updateBtn(gwBtn, this.gamutWarning);
+            updateBtn(clpBtn, this.clippingMonitor);
+            updateBtn(zBtn, this.showZdepth);
+            updateBtn(this.focusPeakingBtn, this.focusPeaking);
+            updateBtn(this.gridBtn, this.showGrid);
+            updateBtn(saBtn, this.safeAreaMode !== 'none');
+            updateBtn(this.loupeBtn, this.showLoupe);
+        };
 
-        // Annotations
-        this.annotBtns = {};
+        // Initial sync
+        setTimeout(() => syncAll(), 50);
 
-        // Color Picker
-        const colorInput = document.createElement('input');
-        colorInput.type = 'color';
-        colorInput.value = this.annotationColor;
-        colorInput.style.cssText = `width: 20px; height: 18px; border: none; padding: 0; background: none; cursor: pointer;`;
-        colorInput.oninput = (e) => this.annotationColor = e.target.value;
-        this.toolbar.appendChild(colorInput);
-
-        // Size Selector
-        const sizeSel = document.createElement('select');
-        [1, 2, 3, 5, 8, 12].forEach(s => {
-            const opt = document.createElement('option');
-            opt.value = s; opt.text = s + 'px';
-            if (s === this.annotationLineWidth) opt.selected = true;
-            sizeSel.appendChild(opt);
-        });
-        sizeSel.style.cssText = `
-            background: #1a1a28; color: ${this.theme.textDim}; border: 1px solid ${this.theme.panelBorder};
-            border-radius: 3px; font-size: 9px; margin-right: 2px; height: 18px;
-        `;
-        sizeSel.onchange = (e) => this.annotationLineWidth = parseInt(e.target.value);
-        this.toolbar.appendChild(sizeSel);
-
-        this.annotBtns.pen = this.addButton('✎', () => this.setAnnotationTool('pen'), 'Pen');
-        this.annotBtns.arrow = this.addButton('→', () => this.setAnnotationTool('arrow'), 'Arrow');
-        this.annotBtns.rect = this.addButton('□', () => this.setAnnotationTool('rect'), 'Rectangle');
-        this.annotBtns.circle = this.addButton('○', () => this.setAnnotationTool('circle'), 'Circle');
-        this.annotBtns.text = this.addButton('T', () => this.setAnnotationTool('text'), 'Text');
-
-        this.addButton('↩', () => this.undoAnnotation(), 'Undo');
-        this.addButton('⟲', () => this.clearAnnotations(), 'Clear All');
-        this.addSep();
-
-        // Measurement Tools
-        this.measureBtns = {};
-        this.measureBtns.distance = this.addButton('📏', () => this.setMeasurementTool('distance'), 'Distance (D)');
-        this.measureBtns.angle = this.addButton('∠', () => this.setMeasurementTool('angle'), 'Angle (Ø)');
-        this.addButton('⌫', () => this.clearMeasurements(), 'Clear Measurements');
+        this.canvasWrapper.appendChild(this.analysisHUD);
     }
 
-    addLbl(text) {
+    addLbl(text, container = this.toolbar) {
         const lbl = document.createElement('span');
         lbl.textContent = text;
         lbl.style.cssText = `color: ${this.theme.textDim}; font-size: 9px;`;
-        this.toolbar.appendChild(lbl);
+        container.appendChild(lbl);
     }
 
-    addButton(text, onClick, title = '') {
+    addGrpLabel(text, container = this.toolbar) {
+        const grp = document.createElement('div');
+        grp.style.cssText = `display:flex;flex-direction:column;align-items:center;padding:0 4px;gap:1px;flex-shrink:0;`;
+        const lbl = document.createElement('span');
+        lbl.textContent = text;
+        lbl.style.cssText = `color:rgba(255,255,255,0.18);font-size:7.5px;letter-spacing:0.12em;font-weight:700;white-space:nowrap;`;
+        const line = document.createElement('div');
+        line.style.cssText = `width:100%;height:1px;background:rgba(255,255,255,0.06);`;
+        grp.appendChild(lbl);
+        grp.appendChild(line);
+        container.appendChild(grp);
+    }
+
+    addButton(text, onClick, title = '', container = this.toolbar) {
         const btn = document.createElement('button');
-        btn.textContent = text;
+        btn.innerHTML = text;
         btn.title = title;
         btn.style.cssText = `
-            padding: 2px 5px;
-            background: linear-gradient(180deg, #1a1a28 0%, #12121a 100%);
-            border: 1px solid ${this.theme.panelBorder};
-            border-radius: 3px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 24px;
+            min-width: 24px;
+            width: ${container === this.analysisHUD ? '100%' : 'auto'};
+            padding: 0 6px;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 6px;
             color: ${this.theme.textDim};
             cursor: pointer;
-            font-size: 9px;
+            font-size: 11px;
+            font-weight: 500;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            line-height: 1;
+            box-sizing: border-box;
         `;
-        btn.onmouseenter = () => btn.style.color = this.theme.text;
-        btn.onmouseleave = () => { if (!btn.classList.contains('active')) btn.style.color = this.theme.textDim; };
+        btn.onmouseenter = () => { if (!btn.classList.contains('active')) { btn.style.color = '#fff'; btn.style.background = 'rgba(255,255,255,0.1)'; } };
+        btn.onmouseleave = () => { if (!btn.classList.contains('active')) { btn.style.color = this.theme.textDim; btn.style.background = 'rgba(255,255,255,0.03)'; } };
         btn.onclick = onClick;
-        this.toolbar.appendChild(btn);
+        container.appendChild(btn);
         return btn;
     }
 
+
     // v2.2: Removed dead createCustomSlider() — replaced by createControlRow() HUD sliders
 
-    addSep() {
+    addSep(container = this.toolbar) {
         const s = document.createElement('div');
-        s.style.cssText = `width: 1px; height: 12px; background: ${this.theme.panelBorder}; margin: 0 2px;`;
-        this.toolbar.appendChild(s);
+        // v3.5: Support vertical separation
+        const isVertical = container !== this.toolbar;
+        if (isVertical) {
+            s.style.cssText = `width: 100%; height: 1px; background: rgba(255,255,255,0.05); margin: 4px 0;`;
+        } else {
+            s.style.cssText = `width: 1px; height: 12px; background: ${this.theme.panelBorder}; margin: 0 2px;`;
+        }
+        container.appendChild(s);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -2168,183 +2952,9 @@ class RadianceViewer {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    //                          ANNOTATIONS
     // ═══════════════════════════════════════════════════════════════════════════
 
 
-    setAnnotationTool(tool) {
-        this.annotationTool = tool;
-        this.isAnnotating = true;
-        this.measurementMode = 'none'; // Disable measurement
-        this.canvas.style.cursor = 'crosshair';
-
-        // Clear measurement tool selection
-        if (this.measureBtns) {
-            Object.keys(this.measureBtns).forEach(k => {
-                const btn = this.measureBtns[k];
-                btn.style.background = '';
-                btn.style.color = this.theme.textDim;
-                btn.classList.remove('active');
-            });
-        }
-
-
-        // Highlight active
-        Object.keys(this.annotBtns).forEach(k => {
-            const btn = this.annotBtns[k];
-            if (k === tool) {
-                btn.style.background = this.theme.accent;
-                btn.style.color = '#fff';
-                btn.classList.add('active');
-            } else {
-                btn.style.background = '';
-                btn.style.color = this.theme.textDim;
-                btn.classList.remove('active');
-            }
-        });
-    }
-
-    undoAnnotation() {
-        if (this.annotations.length > 0) {
-            this.annotations.pop();
-            this.renderOverlay();
-        }
-    }
-
-    addAnnotation(type, x1, y1, x2, y2, extra = {}) {
-        this.annotations.push({
-            type, x1, y1, x2, y2,
-            color: this.annotationColor,
-            width: this.annotationLineWidth,
-            ...extra
-        });
-        this.renderOverlay();
-    }
-
-    clearAnnotations() {
-        this.annotations = [];
-        this.renderOverlay();
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    //                          MEASUREMENTS
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    setMeasurementTool(mode) {
-        this.measurementMode = mode;
-        this.isAnnotating = false; // Disable annotation
-        this.annotationTool = null;
-        this.canvas.style.cursor = mode === 'none' ? 'default' : 'crosshair';
-
-        // Highlight active measurement button
-        if (this.measureBtns) {
-            Object.keys(this.measureBtns).forEach(k => {
-                const btn = this.measureBtns[k];
-                if (k === mode) {
-                    btn.style.background = this.theme.accent;
-                    btn.style.color = '#fff';
-                    btn.classList.add('active');
-                } else {
-                    btn.style.background = '';
-                    btn.style.color = this.theme.textDim;
-                    btn.classList.remove('active');
-                }
-            });
-        }
-
-        // Clear annotation tool selection
-        if (this.annotBtns && mode !== 'none') {
-            Object.keys(this.annotBtns).forEach(k => {
-                const btn = this.annotBtns[k];
-                btn.style.background = '';
-                btn.style.color = this.theme.textDim;
-                btn.classList.remove('active');
-            });
-        }
-    }
-
-    clearMeasurements() {
-        this.measurements = [];
-        this.currentMeasurement = null;
-        this.renderOverlay();
-    }
-
-    drawMeasurement(ctx, m, scale) {
-        const color = '#ffff00'; // Yellow
-        ctx.strokeStyle = color;
-        ctx.fillStyle = color;
-        ctx.lineWidth = 2 * scale;
-        ctx.beginPath();
-
-        if (m.type === 'distance') {
-            ctx.moveTo(m.x1, m.y1);
-            ctx.lineTo(m.x2, m.y2);
-            ctx.stroke();
-
-            // Draw T-ends
-            const ang = Math.atan2(m.y2 - m.y1, m.x2 - m.x1);
-            const perp = ang + Math.PI / 2;
-            const len = 5 * scale;
-
-            ctx.beginPath();
-            ctx.moveTo(m.x1 + Math.cos(perp) * len, m.y1 + Math.sin(perp) * len);
-            ctx.lineTo(m.x1 - Math.cos(perp) * len, m.y1 - Math.sin(perp) * len);
-            ctx.moveTo(m.x2 + Math.cos(perp) * len, m.y2 + Math.sin(perp) * len);
-            ctx.lineTo(m.x2 - Math.cos(perp) * len, m.y2 - Math.sin(perp) * len);
-            ctx.stroke();
-
-            // Text
-            const dist = Math.sqrt(Math.pow(m.x2 - m.x1, 2) + Math.pow(m.y2 - m.y1, 2));
-            const cx = (m.x1 + m.x2) / 2;
-            const cy = (m.y1 + m.y2) / 2;
-
-            ctx.font = `bold ${Math.max(10, 12 * scale)}px sans-serif`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'bottom';
-            // Draw background for text
-            const text = `${dist.toFixed(1)} px`;
-            const tm = ctx.measureText(text);
-            ctx.globalAlpha = 0.7;
-            ctx.fillStyle = '#000';
-            ctx.fillRect(cx - tm.width / 2 - 2, cy - 14 * scale, tm.width + 4, 16 * scale);
-            ctx.globalAlpha = 1.0;
-            ctx.fillStyle = color;
-            ctx.fillText(text, cx, cy - 2 * scale);
-
-        } else if (m.type === 'angle') {
-            ctx.moveTo(m.x1, m.y1);
-            ctx.lineTo(m.x2, m.y2);
-            ctx.stroke();
-
-            const dx = m.x2 - m.x1;
-            const dy = m.y2 - m.y1;
-            let ang = Math.atan2(dy, dx) * 180 / Math.PI;
-
-            // Normalize angle for display (e.g., relative to horizontal)
-            // Or just show positive angle
-            if (ang < 0) ang += 360;
-
-            // Draw arc
-            ctx.beginPath();
-            ctx.arc(m.x1, m.y1, 20 * scale, 0, Math.atan2(dy, dx), dy < 0);
-            ctx.stroke();
-
-            ctx.font = `bold ${Math.max(10, 12 * scale)}px sans-serif`;
-            ctx.textAlign = 'left';
-            const text = `${ang.toFixed(1)}°`;
-
-            // Background
-            const mx = m.x1 + 25 * scale;
-            const my = m.y1;
-            const tm = ctx.measureText(text);
-            ctx.globalAlpha = 0.7;
-            ctx.fillStyle = '#000';
-            ctx.fillRect(mx - 2, my - 10 * scale, tm.width + 4, 14 * scale);
-            ctx.globalAlpha = 1.0;
-            ctx.fillStyle = color;
-            ctx.fillText(text, mx, my);
-        }
-    }
 
     // ═══════════════════════════════════════════════════════════════════════════
     //                          BATCH NAVIGATION
@@ -2360,6 +2970,38 @@ class RadianceViewer {
         if (this.totalFrames <= 1) return;
         this.currentFrame = (this.currentFrame + 1) % this.totalFrames;
         this.loadCurrentFrame();
+    }
+
+    togglePlayback() {
+        if (this.totalFrames <= 1) return;
+        
+        this.isPlaying = !this.isPlaying;
+        
+        if (this.isPlaying) {
+            this.playBtn.textContent = '⏸';
+            this.playBtn.classList.add('active');
+            this.playBtn.style.color = '#fff';
+            this.playBtn.style.background = 'rgba(0, 168, 255, 0.15)';
+            this.playBtn.style.borderColor = 'rgba(0, 168, 255, 0.5)';
+            this.playBtn.style.boxShadow = '0 0 10px rgba(0, 168, 255, 0.2)';
+            
+            // Loop at ~24fps (41ms)
+            this.playbackInterval = setInterval(() => {
+                this.nextFrame();
+            }, 41);
+        } else {
+            this.playBtn.textContent = '▶️';
+            this.playBtn.classList.remove('active');
+            this.playBtn.style.color = this.theme.textDim;
+            this.playBtn.style.background = 'rgba(255,255,255,0.03)';
+            this.playBtn.style.borderColor = 'rgba(255,255,255,0.08)';
+            this.playBtn.style.boxShadow = 'none';
+            
+            if (this.playbackInterval) {
+                clearInterval(this.playbackInterval);
+                this.playbackInterval = null;
+            }
+        }
     }
 
     loadCurrentFrame() {
@@ -2644,6 +3286,10 @@ class RadianceViewer {
             case 's': if (!e.ctrlKey) this.cycleSafeAreas(); break;
             case 'arrowleft': this.prevFrame(); break;
             case 'arrowright': this.nextFrame(); break;
+            case ' ':
+                e.preventDefault(); // Stop default scroll
+                this.togglePlayback();
+                break;
             case 'escape':
                 if (this.showHelp) { this.toggleHelp(); }
                 else if (this.isFullscreen) { this.exitFullscreen(); }
@@ -2653,10 +3299,8 @@ class RadianceViewer {
             case '-': this.adjustEV(-0.5); break;
             case '0': this.resetControls(); break;
             case 'p': if (!e.ctrlKey) this.togglePromptPanel(); break;
+            case '`': case '~': this.toggleTerminal(); e.preventDefault(); break;
             case 'enter': if (e.shiftKey) this.runWorkflow(); break;
-            case 'd': if (!e.ctrlKey) this.setMeasurementTool('distance'); break;
-            case 'ø': this.setMeasurementTool('angle'); break;
-            case 'delete': case 'backspace': if (!e.target.tagName || e.target.tagName !== 'INPUT') this.clearMeasurements(); break;
         }
     }
 
@@ -2925,7 +3569,6 @@ class RadianceViewer {
         } else {
             this.renderImage(ctx, this.image);
         }
-        this.annotations.forEach(a => this.drawAnnotation(ctx, a, 1));
 
         const link = document.createElement('a');
         link.download = `radiance_${Date.now()}.png`;
@@ -3002,8 +3645,6 @@ class RadianceViewer {
                     ['G', 'Green channel'],
                     ['S', 'Safe areas'],
                     ['A', 'A/B compare'],
-                    ['D', 'Distance measure'],
-                    ['Del', 'Clear measurements']
                 ]
             },
             {
@@ -3335,43 +3976,6 @@ class RadianceViewer {
         // Grid
         if (this.showGrid) this.drawGrid(ctx, w, h);
 
-        // Annotations
-        ctx.save();
-        ctx.translate(this.panX, this.panY);
-        ctx.scale(this.zoom, this.zoom);
-        this.annotations.forEach(a => this.drawAnnotation(ctx, a, 1 / this.zoom));
-
-        // Draw current stroke if active
-        if (this.isAnnotating && this.currentPath && this.annotationTool === 'pen') {
-            this.drawAnnotation(ctx, {
-                type: 'pen',
-                points: this.currentPath,
-                color: this.annotationColor,
-                width: this.annotationLineWidth
-            }, 1 / this.zoom);
-        } else if (this.isAnnotating && this.annotationStart && this.annotationTool !== 'text') {
-            // Preview shapes (simplified logic: we don't have mouse pos here easily without storing it,
-            // but `renderOverlay` is called usually when done or panning.
-            // For drag interaction, we need mouse move to trigger render.
-        }
-
-        ctx.restore();
-
-        // Measurements
-        if (this.measurements || this.currentMeasurement) {
-            ctx.save();
-            ctx.translate(this.panX, this.panY);
-            ctx.scale(this.zoom, this.zoom);
-            const scale = 1 / this.zoom;
-
-            if (this.measurements) {
-                this.measurements.forEach(m => this.drawMeasurement(ctx, m, scale));
-            }
-            if (this.currentMeasurement) {
-                this.drawMeasurement(ctx, this.currentMeasurement, scale);
-            }
-            ctx.restore();
-        }
 
         // Scope overlay
         if (this.scopeOverlay && this.histogramData) this.drawHistogramOverlay(ctx, w, h);
@@ -3380,6 +3984,119 @@ class RadianceViewer {
         if (this.maskState && this.maskState.type > 0 && this.maskState.showOverlay && !this.wipeEnabled) {
             this.drawMaskInteractiveOverlay(ctx);
         }
+    }
+
+    getMaskHandleAt(x, y) {
+        if (!this.maskState || this.maskState.type === 0) return null;
+
+        const m = this.maskState;
+        const cx = m.center[0] * this.imageWidth;
+        const cy = m.center[1] * this.imageHeight;
+        const sw = m.scale[0] * this.imageWidth;
+        const sh = m.scale[1] * this.imageHeight;
+        const rot = m.rotation;
+
+        // Hit distance in image space, adjusted for zoom
+        const hitRadius = 12 / this.zoom;
+
+        // 1. Center
+        if (Math.hypot(x - cx, y - cy) < hitRadius) return 'center';
+
+        // 2. Rotation Handle (above top edge)
+        const rotHandleDist = (sh / 2) + (25 / this.zoom);
+        const rx = cx + rotHandleDist * Math.sin(rot);
+        const ry = cy - rotHandleDist * Math.cos(rot);
+        if (Math.hypot(x - rx, y - ry) < hitRadius) return 'rotation';
+
+        // 3. Scale Handles
+        const cosR = Math.cos(rot), sinR = Math.sin(rot);
+
+        // Scale X handles (right/left)
+        const ptsX = [
+            { x: cx + (sw / 2) * cosR, y: cy + (sw / 2) * sinR },
+            { x: cx - (sw / 2) * cosR, y: cy - (sw / 2) * sinR }
+        ];
+        for (const p of ptsX) if (Math.hypot(x - p.x, y - p.y) < hitRadius) return 'scale_x';
+
+        // Scale Y handles (top/bottom)
+        const ptsY = [
+            { x: cx - (sh / 2) * sinR, y: cy + (sh / 2) * cosR },
+            { x: cx + (sh / 2) * sinR, y: cy - (sh / 2) * cosR }
+        ];
+        for (const p of ptsY) if (Math.hypot(x - p.x, y - p.y) < hitRadius) return 'scale_y';
+
+        return null;
+    }
+
+    drawMaskInteractiveOverlay(ctx) {
+        if (!this.maskState) return;
+        const m = this.maskState;
+        const cx = m.center[0] * this.imageWidth;
+        const cy = m.center[1] * this.imageHeight;
+        const sw = m.scale[0] * this.imageWidth;
+        const sh = m.scale[1] * this.imageHeight;
+        const rot = m.rotation;
+
+        ctx.save();
+        ctx.translate(this.panX, this.panY);
+        ctx.scale(this.zoom, this.zoom);
+
+        const accent = this.theme.accent;
+        const handleSize = 5 / this.zoom;
+
+        // 1. Draw Shape Outline
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 1.5 / this.zoom;
+        ctx.setLineDash([4 / this.zoom, 4 / this.zoom]);
+
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(rot);
+
+        ctx.beginPath();
+        if (m.type === 1) { // Circle
+            ctx.ellipse(0, 0, sw / 2, sh / 2, 0, 0, Math.PI * 2);
+        } else if (m.type === 2) { // Box
+            ctx.rect(-sw / 2, -sh / 2, sw, sh);
+        }
+        ctx.stroke();
+        ctx.restore();
+        ctx.setLineDash([]);
+
+        // 2. Draw Handles
+        const drawHandle = (hx, hy, isDot = false) => {
+            ctx.fillStyle = accent;
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 1 / this.zoom;
+            ctx.beginPath();
+            if (isDot) ctx.arc(hx, hy, handleSize * 1.2, 0, Math.PI * 2);
+            else ctx.rect(hx - handleSize, hy - handleSize, handleSize * 2, handleSize * 2);
+            ctx.fill();
+            ctx.stroke();
+        };
+
+        // Center
+        drawHandle(cx, cy, true);
+
+        // Rotation line and handle
+        const rotHandleDist = (sh / 2) + (25 / this.zoom);
+        const rx = cx + rotHandleDist * Math.sin(rot);
+        const ry = cy - rotHandleDist * Math.cos(rot);
+
+        ctx.beginPath();
+        ctx.moveTo(cx + (sh / 2) * Math.sin(rot), cy - (sh / 2) * Math.cos(rot));
+        ctx.lineTo(rx, ry);
+        ctx.stroke();
+        drawHandle(rx, ry, true);
+
+        // Scale Handles
+        const cosR = Math.cos(rot), sinR = Math.sin(rot);
+        drawHandle(cx + (sw / 2) * cosR, cy + (sw / 2) * sinR);
+        drawHandle(cx - (sw / 2) * cosR, cy - (sw / 2) * sinR);
+        drawHandle(cx - (sh / 2) * sinR, cy + (sh / 2) * cosR);
+        drawHandle(cx + (sh / 2) * sinR, cy - (sh / 2) * cosR);
+
+        ctx.restore();
     }
 
     drawGrid(ctx, w, h) {
@@ -3458,57 +4175,6 @@ class RadianceViewer {
         }
     }
 
-    drawAnnotation(ctx, a, lineScale) {
-        ctx.strokeStyle = a.color;
-        ctx.fillStyle = a.color;
-        ctx.lineWidth = (a.width || 3) * lineScale;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.beginPath();
-
-        if (a.type === 'pen') {
-            if (a.points && a.points.length > 0) {
-                ctx.moveTo(a.points[0].x, a.points[0].y);
-                for (let i = 1; i < a.points.length; i++) {
-                    ctx.lineTo(a.points[i].x, a.points[i].y);
-                }
-            }
-            ctx.stroke();
-            return;
-        }
-
-        if (a.type === 'text') {
-            ctx.font = `bold ${Math.max(10, (a.width || 3) * 5)}px sans-serif`;
-            // Draw background for readability
-            ctx.save();
-            ctx.scale(1 / this.zoom, 1 / this.zoom); // Keep text constant size or scale? Let's scale with image so it stays fixed in place
-            ctx.restore();
-            // Actually, keep it simple: text scales with image
-
-            ctx.shadowColor = 'black';
-            ctx.shadowBlur = 4 * lineScale;
-            ctx.lineWidth = 1 * lineScale; // reset for text stroke
-
-            ctx.fillText(a.text, a.x1, a.y1);
-            ctx.shadowBlur = 0; // v2.2: Reset shadow to prevent leak to subsequent draws
-            return;
-        }
-
-        if (a.type === 'circle') {
-            const rx = Math.abs(a.x2 - a.x1) / 2, ry = Math.abs(a.y2 - a.y1) / 2;
-            ctx.ellipse((a.x1 + a.x2) / 2, (a.y1 + a.y2) / 2, rx, ry, 0, 0, Math.PI * 2);
-        } else if (a.type === 'arrow') {
-            ctx.moveTo(a.x1, a.y1); ctx.lineTo(a.x2, a.y2);
-            const ang = Math.atan2(a.y2 - a.y1, a.x2 - a.x1);
-            const hl = (12 + (a.width || 3)) * lineScale;
-            ctx.lineTo(a.x2 - hl * Math.cos(ang - 0.4), a.y2 - hl * Math.sin(ang - 0.4));
-            ctx.moveTo(a.x2, a.y2);
-            ctx.lineTo(a.x2 - hl * Math.cos(ang + 0.4), a.y2 - hl * Math.sin(ang + 0.4));
-        } else if (a.type === 'rect') {
-            ctx.rect(a.x1, a.y1, a.x2 - a.x1, a.y2 - a.y1);
-        }
-        ctx.stroke();
-    }
 
     drawHistogramOverlay(ctx, w, h) {
         const { hR, hG, hB, max } = this.histogramData;
@@ -3538,7 +4204,11 @@ class RadianceViewer {
         this.canvas.addEventListener('wheel', (e) => {
             e.preventDefault();
             const rect = this.canvas.getBoundingClientRect();
-            const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+            this._lastCanvasRect = rect;
+            this._canvasScaleX = this.canvas.width / rect.width;
+            this._canvasScaleY = this.canvas.height / rect.height;
+            const mx = (e.clientX - rect.left) * this._canvasScaleX;
+            const my = (e.clientY - rect.top) * this._canvasScaleY;
 
             // v2.5: Exponential zoom for smoother response at all scales (Nuke/Resolve style)
             const sensitivity = 0.001;
@@ -3554,11 +4224,16 @@ class RadianceViewer {
 
         this.canvas.addEventListener('mousedown', (e) => {
             const rect = this.canvas.getBoundingClientRect();
-            const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+            this._lastCanvasRect = rect; // Cache for performance during mousemove
+            this._canvasScaleX = this.canvas.width / rect.width;
+            this._canvasScaleY = this.canvas.height / rect.height;
+
+            const mx = (e.clientX - rect.left) * this._canvasScaleX;
+            const my = (e.clientY - rect.top) * this._canvasScaleY;
             const x = (mx - this.panX) / this.zoom;
             const y = (my - this.panY) / this.zoom;
 
-            if (this.compareMode === 'wipe' && Math.abs(mx - rect.width * this.wipePosition) < 10) {
+            if (this.compareMode === 'wipe' && Math.abs(mx - this.canvas.width * this.wipePosition) < 10) {
                 this.isDraggingWipe = true; return;
             }
 
@@ -3572,52 +4247,7 @@ class RadianceViewer {
                 return;
             }
 
-            if (this.isAnnotating && e.button === 0) {
-                if (this.annotationTool === 'text') {
-                    // v2.2: Inline text input instead of blocking prompt()
-                    const input = document.createElement('input');
-                    input.type = 'text';
-                    input.placeholder = 'Type annotation...';
-                    input.style.cssText = `
-                        position: absolute; z-index: 1000;
-                        left: ${e.clientX - this.canvas.getBoundingClientRect().left}px;
-                        top: ${e.clientY - this.canvas.getBoundingClientRect().top}px;
-                        background: rgba(0,0,0,0.9); color: #fff;
-                        border: 1px solid ${this.theme.accent};
-                        padding: 4px 8px; font-size: 12px; outline: none;
-                        border-radius: 3px; min-width: 120px;
-                    `;
-                    const finalize = () => {
-                        const text = input.value.trim();
-                        if (text) this.addAnnotation('text', x, y, x, y, { text });
-                        input.remove();
-                    };
-                    input.onkeydown = (ke) => { if (ke.key === 'Enter') finalize(); if (ke.key === 'Escape') input.remove(); };
-                    input.onblur = finalize;
-                    this.canvasWrapper.appendChild(input);
-                    input.focus();
-                    return;
-                }
 
-                if (this.annotationTool === 'pen') {
-                    this.currentPath = [{ x, y }];
-                }
-
-                this.annotationStart = { x, y };
-                return;
-            }
-
-            if (this.measurementMode !== 'none' && e.button === 0) {
-                const x = (mx - this.panX) / this.zoom;
-                const y = (my - this.panY) / this.zoom;
-                this.measurementStart = { x, y };
-                this.currentMeasurement = {
-                    type: this.measurementMode,
-                    x1: x, y1: y,
-                    x2: x, y2: y
-                };
-                return;
-            }
 
             if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
                 e.preventDefault(); // Prevent middle-click auto-scroll which swallows mouseup
@@ -3629,11 +4259,13 @@ class RadianceViewer {
         });
 
         this.canvas.addEventListener('mousemove', (e) => {
-            const rect = this.canvas.getBoundingClientRect();
-            const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+            if (!this._lastCanvasRect) this._lastCanvasRect = this.canvas.getBoundingClientRect();
+            const rect = this._lastCanvasRect;
+            const mx = (e.clientX - rect.left) * (this._canvasScaleX || 1);
+            const my = (e.clientY - rect.top) * (this._canvasScaleY || 1);
 
             if (this.isDraggingWipe) {
-                this.wipePosition = Math.max(0.02, Math.min(0.98, mx / rect.width));
+                this.wipePosition = Math.max(0.02, Math.min(0.98, mx / this.canvas.width));
                 this.render(); return;
             }
 
@@ -3668,8 +4300,6 @@ class RadianceViewer {
                 if (this.activeTab === 'masks' && this.tabContentContainer) {
                     // Update the visible GUI sliders without fully rebuilding the DOM to avoid losing focus
                     const centerInputs = this.tabContentContainer.querySelectorAll('.knob-value');
-                    // We'll just force a full re-render of the tab for now if it's easiest, but it might flicker
-                    // Need to find a cleaner way. Let's just update the WebGL for now.
                 }
 
                 if (this.renderer) this.renderer.setMask(m);
@@ -3678,6 +4308,7 @@ class RadianceViewer {
             }
 
             if (this.isPanning) {
+                // Panning strictly relies on clientX delta, scaling isn't necessary for delta-drag
                 this.panX += e.clientX - this.lastMouseX;
                 this.panY += e.clientY - this.lastMouseY;
                 this.lastMouseX = e.clientX;
@@ -3685,51 +4316,6 @@ class RadianceViewer {
                 this.render();
             }
 
-            // Handle Drawing Preview
-            if (this.isAnnotating && this.annotationStart) {
-                const x = (mx - this.panX) / this.zoom;
-                const y = (my - this.panY) / this.zoom;
-
-                if (this.annotationTool === 'pen' && this.currentPath) {
-                    this.currentPath.push({ x, y });
-                    this.renderOverlay();
-                } else if (['circle', 'arrow', 'rect'].includes(this.annotationTool)) {
-                    // We need to render a preview.
-                    // The most efficient way is to just redraw overlay with a temporary shape.
-                    this.renderOverlay();
-
-                    // Draw preview directly here to avoid state complexity?
-                    // Or better, add a "preview" param to renderOverlay or just use a temp field.
-                    // Let's use direct drawing on overlay context for performance?
-                    // Actually `renderOverlay` clears everything. So we must redraw all annotations + preview.
-
-                    // Let's do a manual preview draw after `renderOverlay` call?
-                    // No, `renderOverlay` is called above. Let's make `renderOverlay` aware of drag.
-                    const ctx = this.overlayCtx;
-                    ctx.save();
-                    ctx.translate(this.panX, this.panY);
-                    ctx.scale(this.zoom, this.zoom);
-                    this.drawAnnotation(ctx, {
-                        type: this.annotationTool,
-                        x1: this.annotationStart.x,
-                        y1: this.annotationStart.y,
-                        x2: x,
-                        y2: y,
-                        color: this.annotationColor,
-                        width: this.annotationLineWidth
-                    }, 1 / this.zoom);
-                    ctx.restore();
-                }
-            }
-
-            // Handle Measurement Preview
-            if (this.measurementStart && this.currentMeasurement) {
-                const x = (mx - this.panX) / this.zoom;
-                const y = (my - this.panY) / this.zoom;
-                this.currentMeasurement.x2 = x;
-                this.currentMeasurement.y2 = y;
-                this.renderOverlay();
-            }
 
             this.updateCursor(e);
             this.updateProbe(e);
@@ -3738,52 +4324,6 @@ class RadianceViewer {
         // Click-to-Focus for DoF
 
         window.addEventListener('mouseup', (e) => {
-            // Finalize annotation shapes on mouseup
-            if (this.isAnnotating && this.annotationStart) {
-                const rect = this.canvas.getBoundingClientRect();
-                const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-                const x = (mx - this.panX) / this.zoom;
-                const y = (my - this.panY) / this.zoom;
-
-                if (this.annotationTool === 'pen' && this.currentPath && this.currentPath.length > 1) {
-                    this.annotations.push({
-                        type: 'pen',
-                        points: this.currentPath,
-                        color: this.annotationColor,
-                        width: this.annotationLineWidth
-                    });
-                } else if (['circle', 'arrow', 'rect'].includes(this.annotationTool)) {
-                    const dx = x - this.annotationStart.x;
-                    const dy = y - this.annotationStart.y;
-                    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
-                        this.addAnnotation(
-                            this.annotationTool,
-                            this.annotationStart.x,
-                            this.annotationStart.y,
-                            x, y
-                        );
-                    }
-                }
-
-                this.annotationStart = null;
-                this.currentPath = null;
-                this.renderOverlay();
-            }
-
-            // Finalize measurement on mouseup
-            if (this.measurementStart) {
-                if (this.currentMeasurement) {
-                    // Only add if non-zero length
-                    const dx = this.currentMeasurement.x2 - this.currentMeasurement.x1;
-                    const dy = this.currentMeasurement.y2 - this.currentMeasurement.y1;
-                    if (Math.abs(dx) > 0.1 || Math.abs(dy) > 0.1) {
-                        this.measurements.push(this.currentMeasurement);
-                    }
-                }
-                this.measurementStart = null;
-                this.currentMeasurement = null;
-                this.renderOverlay();
-            }
 
             this.isPanning = false;
             this.isDraggingWipe = false;
@@ -3802,7 +4342,10 @@ class RadianceViewer {
         this.canvas.addEventListener('click', (e) => {
             if (this.dofEnabled && !this.isAnnotating && !this.isPanning && !this.isDraggingWipe) {
                 const rect = this.canvas.getBoundingClientRect();
-                const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+                const scaleX = this.canvas.width / rect.width;
+                const scaleY = this.canvas.height / rect.height;
+                const mx = (e.clientX - rect.left) * scaleX;
+                const my = (e.clientY - rect.top) * scaleY;
                 const imgX = Math.floor((mx - this.panX) / this.zoom);
                 const imgY = Math.floor((my - this.panY) / this.zoom);
 
@@ -3841,6 +4384,7 @@ class RadianceViewer {
     }
 
     resize() {
+        this._lastCanvasRect = null; // Invalidate cache
         const rect = this.canvasWrapper.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) return;
         this.canvas.width = Math.floor(rect.width);
@@ -3852,8 +4396,9 @@ class RadianceViewer {
 
     updateCursor(e) {
         if (!this.image) return;
-        const rect = this.canvas.getBoundingClientRect();
-        const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        const rect = this._lastCanvasRect || this.canvas.getBoundingClientRect();
+        const mx = (e.clientX - rect.left) * (this._canvasScaleX || 1);
+        const my = (e.clientY - rect.top) * (this._canvasScaleY || 1);
         const imgX = Math.floor((mx - this.panX) / this.zoom);
         const imgY = Math.floor((my - this.panY) / this.zoom);
         if (imgX >= 0 && imgX < this.imageWidth && imgY >= 0 && imgY < this.imageHeight) {
@@ -3865,8 +4410,9 @@ class RadianceViewer {
 
     updateProbe(e) {
         if (!this.image || !this.imageData) { this.infoLeft.innerHTML = ''; return; }
-        const rect = this.canvas.getBoundingClientRect();
-        const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        const rect = this._lastCanvasRect || this.canvas.getBoundingClientRect();
+        const mx = (e.clientX - rect.left) * (this._canvasScaleX || 1);
+        const my = (e.clientY - rect.top) * (this._canvasScaleY || 1);
         const imgX = Math.floor((mx - this.panX) / this.zoom);
         const imgY = Math.floor((my - this.panY) / this.zoom);
 
@@ -3934,7 +4480,7 @@ class RadianceViewer {
 
             // Draw pixel loupe on overlay
             if (this.showLoupe) {
-                this.renderOverlay(); // Clear and redraw annotations/grid first
+                this.renderOverlay(); // Clear and redraw first
                 this.drawLoupe(mx, my, imgX, imgY);
             }
         } else {
@@ -4622,6 +5168,25 @@ class RadianceViewer {
     //                          RENDERING
     // ═══════════════════════════════════════════════════════════════════════════
 
+    // v3.5: Throttled rendering entry point
+    requestRender() {
+        if (this._renderRequested) return;
+        this._renderRequested = true;
+        requestAnimationFrame(() => {
+            this._renderRequested = false;
+            this.render();
+        });
+    }
+
+    // v3.5: Debounced scope update
+    requestScopeUpdate() {
+        if (this._scopeUpdateTimer) clearTimeout(this._scopeUpdateTimer);
+        this._scopeUpdateTimer = setTimeout(() => {
+            this.updateScopes();
+            this._scopeUpdateTimer = null;
+        }, this.scopeDebounceMs || 150);
+    }
+
     render() {
         if (this.canvas.width === 0 || this.canvas.height === 0) return;
 
@@ -5256,7 +5821,7 @@ class RadianceViewer {
     }
 
     renderPromptTab(container) {
-        container.style.cssText = 'display: flex; flex-direction: column; gap: 10px; padding: 10px; max-height: 380px; overflow-y: auto; color: #fff;';
+        container.style.cssText = 'display: flex; flex-direction: column; flex: 1; gap: 16px; padding: 12px; min-height: 0; overflow-y: auto; color: #fff;';
         const t = this.theme;
 
         // v2.4: Move Run Button to top of prompt tab
@@ -5266,26 +5831,32 @@ class RadianceViewer {
         const runBtn = document.createElement('button');
         runBtn.innerHTML = '▶ RUN WORKFLOW';
         runBtn.style.cssText = `
-        background: #1a4a1a;
-        color: #4f4;
-        border: 1px solid #2a6a2a;
+        background: linear-gradient(135deg, #134e13 0%, #0a2e0a 100%);
+        color: #6eff6e;
+        border: 1px solid rgba(110, 255, 110, 0.3);
         border-radius: 8px;
-        padding: 10px 20px;
-        font-size: 12px;
-        font-weight: 800;
+        padding: 12px 24px;
+        font-size: 13px;
+        font-weight: 900;
         cursor: pointer;
-        letter-spacing: 1px;
-        transition: all 0.2s;
+        letter-spacing: 1.5px;
+        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
         width: 100%;
         font-family: ${t.font};
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3), inset 0 1px 1px rgba(255,255,255,0.05);
+        text-shadow: 0 0 10px rgba(110, 255, 110, 0.3);
     `;
         runBtn.onmouseover = () => {
-            runBtn.style.background = '#226222';
-            runBtn.style.boxShadow = '0 0 15px rgba(79, 255, 79, 0.2)';
+            runBtn.style.background = 'linear-gradient(135deg, #1a631a 0%, #0d3b0d 100%)';
+            runBtn.style.border = '1px solid rgba(110, 255, 110, 0.5)';
+            runBtn.style.boxShadow = '0 0 20px rgba(79, 255, 79, 0.15), 0 6px 8px rgba(0,0,0,0.4)';
+            runBtn.style.transform = 'translateY(-1px)';
         };
         runBtn.onmouseout = () => {
-            runBtn.style.background = '#1a4a1a';
-            runBtn.style.boxShadow = 'none';
+            runBtn.style.background = 'linear-gradient(135deg, #134e13 0%, #0a2e0a 100%)';
+            runBtn.style.border = '1px solid rgba(110, 255, 110, 0.3)';
+            runBtn.style.boxShadow = '0 4px 6px rgba(0,0,0,0.3), inset 0 1px 1px rgba(255,255,255,0.05)';
+            runBtn.style.transform = 'none';
         };
         this.runButton = runBtn;
         runBtn.onclick = () => this.runWorkflow();
@@ -5304,8 +5875,6 @@ class RadianceViewer {
 
             return isEncoder || isUnet || isLatent;
         });
-
-        console.log("[Radiance] Found", nodes.length, "Generation settings nodes.");
 
         // Sort nodes to ensure CinematicPromptEncoder is rendered first, and RadianceUnifiedLoader is rendered last
         nodes.sort((a, b) => {
@@ -5337,11 +5906,11 @@ class RadianceViewer {
 
         nodes.forEach(node => {
             const wrapper = document.createElement('div');
-            wrapper.style.cssText = `display: flex; flex-direction: column; gap: 8px; padding: 10px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px;`;
+            wrapper.style.cssText = `display: flex; flex-direction: column; gap: 12px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.07); border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.2);`;
 
             const label = document.createElement('div');
             label.textContent = (node.title || node.type).toUpperCase();
-            label.style.cssText = `color: ${t.accent}; font-size: 10px; font-weight: 800; cursor: pointer; letter-spacing: 0.5px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 6px; margin-bottom: 4px;`;
+            label.style.cssText = `color: ${t.accent}; font-size: 11px; font-weight: 900; cursor: pointer; letter-spacing: 1px; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 8px; margin-bottom: 6px;`;
             label.onclick = () => { app.canvas.centerOnNode(node); app.canvas.selectNode(node); };
             wrapper.appendChild(label);
 
@@ -5368,7 +5937,7 @@ class RadianceViewer {
 
                 // Flex container for horizontal layout
                 const grid = document.createElement('div');
-                grid.style.cssText = 'display: flex; flex-direction: row; gap: 10px; align-items: flex-end; flex-wrap: wrap;';
+                grid.style.cssText = 'display: flex; flex-direction: row; gap: 14px; align-items: flex-end; flex-wrap: wrap;';
 
                 node.widgets.forEach(w => {
                     if (w.name === 'base_prompt' || w.name === 'prompt_preview' || w.type === 'converted-widget' || w.name === '_temp') return;
@@ -5378,7 +5947,7 @@ class RadianceViewer {
 
                     const wl = document.createElement('div');
                     wl.textContent = w.name.replace(/_/g, ' ').toUpperCase();
-                    wl.style.cssText = `color: ${t.textDim}; font-size: 9px; font-weight: 600; opacity: 0.8;`;
+                    wl.style.cssText = `color: ${t.textDim}; font-size: 9px; font-weight: 700; opacity: 1.0; letter-spacing: 0.2px;`;
                     wWrap.appendChild(wl);
 
                     let input;
@@ -5482,7 +6051,7 @@ class RadianceViewer {
 
         const t = this.theme;
         this.controlsPanel = document.createElement('div');
-        this.controlsPanel.className = 'radiance-glass-dock';
+        this.controlsPanel.className = 'radiance-glass-dock radiance-panel-embedded';
         this.controlsPanel.id = 'radiance-singleton-hud';
         RadianceViewer.singletonHUD = this.controlsPanel;
 
@@ -5590,11 +6159,11 @@ class RadianceViewer {
 
         // Tabs row
         const tabsRow = document.createElement('div');
-        tabsRow.style.cssText = `display: flex; gap: 4px; padding: 4px 6px 10px 6px;`;
+        tabsRow.style.cssText = `display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 6px 10px 6px;`;
 
         const activeTabStyle = `background: rgba(255,255,255,0.1); color: ${t.text}; border-bottom: 2px solid ${t.accent}`;
         const inactiveTabStyle = `background: transparent; color: ${t.textDim}; border-bottom: 2px solid transparent`;
-        const baseTabStyle = `flex: 1; text-align: center; padding: 6px 0; font-size: 11px; font-weight: 600; letter-spacing: 0.5px; cursor: pointer; border-radius: 4px; transition: all 0.2s;`;
+        const baseTabStyle = `flex: 1 1 auto; min-width: 72px; text-align: center; padding: 6px 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.5px; cursor: pointer; border-radius: 4px; transition: all 0.2s;`;
 
         let activeTab = 'primaries';
         this.activeTab = 'primaries';
@@ -5607,8 +6176,8 @@ class RadianceViewer {
             { id: 'curves', label: 'CURVES' },
             { id: 'effects', label: 'EFFECTS' },
             { id: 'masks', label: 'MASKS' },
-            { id: 'scopes', label: 'SCOPES' },
-            { id: 'view', label: 'VIEW' }
+            { id: 'view', label: 'VIEW' },
+            { id: 'terminal', label: '> _TERM' }
         ];
         this._hudTabs = [];
 
@@ -5644,7 +6213,7 @@ class RadianceViewer {
         const renderContent = () => {
             const active = RadianceViewer.activeInstance || this;
             tabContentContainer.innerHTML = '';
-            tabContentContainer.style.cssText = 'display: flex; flex-direction: column;';
+            tabContentContainer.style.cssText = 'display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto;';
 
             if (activeTab === 'prompt') {
                 active.renderPromptTab(tabContentContainer);
@@ -5658,10 +6227,10 @@ class RadianceViewer {
             } else if (activeTab === 'masks') {
                 active.renderQualifiersTab(tabContentContainer);
                 active.renderMasksTab(tabContentContainer);
-            } else if (activeTab === 'scopes') {
-                active.renderScopesTab(tabContentContainer);
             } else if (activeTab === 'view') {
                 active.renderViewTab(tabContentContainer);
+            } else if (activeTab === 'terminal') {
+                active.renderTerminalTab(tabContentContainer);
             }
         };
 
@@ -6210,76 +6779,63 @@ class RadianceViewer {
         topBar.appendChild(createMini('EXP', -10.0, 10.0, this.exposure || 0.0, 0.1, v => {
             this.exposure = Math.max(-12.0, Math.min(12.0, v));
             if (this.renderer) this.renderer.setExposure(this.exposure);
-            this.render();
+            this.requestRender();
+            this.requestScopeUpdate();
         }));
 
         topBar.appendChild(createMini('TEMP', -2.0, 2.0, this.temperature || 0.0, 0.05, v => {
             this.temperature = v;
             if (this.renderer) this.renderer.setTemperature(v);
-            this.render();
+            this.requestRender();
+            this.requestScopeUpdate();
         }));
 
         topBar.appendChild(createMini('TINT', -2.0, 2.0, this.tint || 0.0, 0.05, v => {
             this.tint = v;
             if (this.renderer) this.renderer.setTint(v);
-            this.render();
+            this.requestRender();
+            this.requestScopeUpdate();
         }));
 
         topBar.appendChild(createMini('CONTRAST', 0.2, 3.0, this.contrast || 1.0, 0.02, v => {
             this.contrast = Math.max(0.0, Math.min(5.0, v));
             if (this.renderer) this.renderer.setContrast(this.contrast);
-            this.render();
+            this.requestRender();
+            this.requestScopeUpdate();
         }));
 
         topBar.appendChild(createMini('PIVOT', 0.0, 1.0, this.pivot || 0.5, 0.05, v => {
             this.pivot = v;
             if (this.renderer) this.renderer.setPivot(v);
-            this.render();
+            this.requestRender();
+            this.requestScopeUpdate();
         }));
 
         // Midtone Detail
         topBar.appendChild(createMini('M.DETAIL', -1.0, 1.0, this.midDetail || 0.0, 0.05, v => {
             this.midDetail = v;
             if (this.renderer) this.renderer.setMidDetail(v);
-            this.render();
+            this.requestRender();
+            this.requestScopeUpdate();
         }));
 
         container.appendChild(topBar);
 
         // ═════════════════════════════════════════════════════════════════════
-        // 1b. EYEDROPPER WHITE BALANCE + SOFT CLIP
+        // 1b. INTEGRATED SCOPES
         // ═════════════════════════════════════════════════════════════════════
-        const wbRow = document.createElement('div');
-        wbRow.style.cssText = 'display: flex; align-items: center; gap: 8px; padding: 4px 0 6px; border-bottom: 1px solid rgba(255,255,255,0.06);';
-
-        // Eyedropper button
-        const eyeBtn = document.createElement('div');
-        eyeBtn.title = 'Click a grey/neutral pixel to auto-balance white point';
-        const isWbActive = this._wbPickerActive || false;
-        eyeBtn.innerHTML = `<span style="font-size:13px">🔬</span>`;
-        eyeBtn.style.cssText = `
-            padding: 3px 8px; border-radius: 4px; cursor: pointer; font-size: 9px; font-weight: bold;
-            border: 1px solid ${isWbActive ? '#6af' : 'rgba(255,255,255,0.15)'};
-            background: ${isWbActive ? 'rgba(80,160,255,0.2)' : 'rgba(255,255,255,0.05)'};
-            color: ${isWbActive ? '#6af' : '#aaa'};
-            display: flex; align-items: center; gap: 4px; white-space: nowrap;
-            transition: all 0.15s;
-        `;
-        eyeBtn.appendChild(Object.assign(document.createElement('span'), { textContent: 'WB PICK', style: { fontSize: '9px' } }));
-        eyeBtn.onclick = () => this._toggleWBPicker(eyeBtn);
-        wbRow.appendChild(eyeBtn);
-
-        // Soft Clip knob
-        const scWrap = document.createElement('div');
-        scWrap.style.cssText = 'display: flex; flex-direction: column; align-items: center; gap: 2px; margin-left: auto;';
-        scWrap.appendChild(createMini('S.CLIP', 0.0, 1.0, this.softClip || 0.0, 0.02, v => {
-            this.softClip = v;
-            if (this.renderer) this.renderer.setSoftClip(v);
-            this.render();
-        }));
-        wbRow.appendChild(scWrap);
-
-        container.appendChild(wbRow);
+        const scopesWrapper = document.createElement('div');
+        scopesWrapper.style.cssText = 'border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 4px; margin-bottom: 8px;';
+        
+        // Pass a sub-container to renderScopesTab so it doesn't affect the main layout
+        const scopesInner = document.createElement('div');
+        this.renderScopesTab(scopesInner);
+        // Overwrite some container styles for integration
+        scopesInner.style.padding = '0';
+        scopesInner.style.gap = '4px';
+        
+        scopesWrapper.appendChild(scopesInner);
+        container.appendChild(scopesWrapper);
 
         // ═════════════════════════════════════════════════════════════════════
         // 1c. RGB PRINTER LIGHTS
@@ -6326,7 +6882,8 @@ class RadianceViewer {
 
             const dblClick = () => {
                 setVal(0);
-                this.render();
+                this.requestRender();
+                this.requestScopeUpdate();
                 const newPct = 0.5;
                 thumb.style.left = `${newPct * 100}%`;
                 valLbl.textContent = '0';
@@ -6346,7 +6903,8 @@ class RadianceViewer {
                 setVal(val);
                 thumb.style.left = `${pct * 100}%`;
                 valLbl.textContent = val > 0 ? `+${val}` : `${val}`;
-                this.render();
+                this.requestRender();
+                this.requestScopeUpdate();
             });
             document.addEventListener('mouseup', () => { dragging = false; });
 
@@ -6382,36 +6940,42 @@ class RadianceViewer {
                 row.appendChild(this.createColorWheel('SHADOW', -0.2, 0.2, this.logShadow || [0, 0, 0], 0.005, (r, g, b) => {
                     this.logShadow = [r, g, b];
                     if (this.renderer) this.renderer.setLogShadow(r, g, b);
-                    this.render();
+                    this.requestRender();
+                    this.requestScopeUpdate();
                 }));
                 row.appendChild(this.createColorWheel('MIDTONE', -0.5, 0.5, this.logMidtone || [0, 0, 0], 0.01, (r, g, b) => {
                     this.logMidtone = [r, g, b];
                     if (this.renderer) this.renderer.setLogMidtone(r, g, b);
-                    this.render();
+                    this.requestRender();
+                    this.requestScopeUpdate();
                 }));
                 row.appendChild(this.createColorWheel('HILIGHT', -0.5, 1.5, this.logHighlight || [0, 0, 0], 0.01, (r, g, b) => {
                     this.logHighlight = [r, g, b];
                     if (this.renderer) this.renderer.setLogHighlight(r, g, b);
-                    this.render();
+                    this.requestRender();
+                    this.requestScopeUpdate();
                 }));
             } else {
                 // Lift
                 row.appendChild(this.createColorWheel('LIFT', -0.2, 0.2, this.lift || [0, 0, 0], 0.005, (r, g, b) => {
                     this.lift = [r, g, b];
                     if (this.renderer) this.renderer.setLift(r, g, b);
-                    this.render();
+                    this.requestRender();
+                    this.requestScopeUpdate();
                 }));
                 // Gamma
                 row.appendChild(this.createColorWheel('GAMMA', -0.5, 0.5, this.gamma ? this.gamma.map(x => x - 1.0) : [0, 0, 0], 0.01, (r, g, b) => {
                     this.gamma = [Math.max(0.1, 1.0 + r), Math.max(0.1, 1.0 + g), Math.max(0.1, 1.0 + b)];
                     if (this.renderer) this.renderer.setGamma(this.gamma[0], this.gamma[1], this.gamma[2]);
-                    this.render();
+                    this.requestRender();
+                    this.requestScopeUpdate();
                 }));
                 // Gain
                 row.appendChild(this.createColorWheel('GAIN', -0.5, 1.5, this.gain ? this.gain.map(x => x - 1.0) : [0, 0, 0], 0.01, (r, g, b) => {
                     this.gain = [Math.max(0, 1.0 + r), Math.max(0, 1.0 + g), Math.max(0, 1.0 + b)];
                     if (this.renderer) this.renderer.setGain(this.gain[0], this.gain[1], this.gain[2]);
-                    this.render();
+                    this.requestRender();
+                    this.requestScopeUpdate();
                 }));
             }
 
@@ -6419,7 +6983,8 @@ class RadianceViewer {
             row.appendChild(this.createColorWheel('OFFSET', -0.5, 0.5, this.offset || [0, 0, 0], 0.005, (r, g, b) => {
                 this.offset = [r, g, b];
                 if (this.renderer) this.renderer.setOffset(r, g, b);
-                this.render();
+                this.requestRender();
+                this.requestScopeUpdate();
             }));
 
             return row;
@@ -6498,21 +7063,24 @@ class RadianceViewer {
         botBar.appendChild(createMini('SAT', 0.0, 3.0, this.saturation || 1.0, 0.05, v => {
             this.saturation = v;
             if (this.renderer) this.renderer.setSaturation(v);
-            this.render();
+            this.requestRender();
+            this.requestScopeUpdate();
         }));
 
         // Hue
         botBar.appendChild(createMini('HUE', 0.0, 360.0, this.hueShift || 0.0, 1.0, v => {
             this.hueShift = v;
             if (this.renderer) this.renderer.setHueShift(v);
-            this.render();
+            this.requestRender();
+            this.requestScopeUpdate();
         }));
 
         // Luma Mix
         botBar.appendChild(createMini('LUMA MIX', 0.0, 1.0, this.lumaMix !== undefined ? this.lumaMix : 1.0, 0.05, v => {
             this.lumaMix = v;
             if (this.renderer) this.renderer.setLumaMix(v);
-            this.render();
+            this.requestRender();
+            this.requestScopeUpdate();
         }));
 
 
@@ -6521,7 +7089,7 @@ class RadianceViewer {
 
 
     renderEffectsTab(container) {
-        container.style.cssText = 'display: flex; flex-direction: column; gap: 10px; padding: 10px; max-height: 280px; overflow-y: auto;';
+        container.style.cssText = 'display: flex; flex-direction: column; flex: 1; gap: 10px; padding: 10px; min-height: 0; overflow-y: auto;';
 
         // ─── Grain Knobs Row ──────────────────────────────
         const grid = document.createElement('div');
@@ -6531,28 +7099,28 @@ class RadianceViewer {
         grid.appendChild(this.createKnob('GRAIN', 0.0, 1.0, this.grain || 0.0, 0.05, v => {
             this.grain = v;
             if (this.renderer) this.renderer.setGrain(v);
-            this.render();
+            this.requestRender();
         }));
 
         // Grain Size
         grid.appendChild(this.createKnob('SIZE', 1.0, 4.0, this.grainSize || 1.0, 0.1, v => {
             this.grainSize = v;
             if (this.renderer) this.renderer.setGrainSize(v);
-            this.render();
+            this.requestRender();
         }));
 
         // Color Grain
         grid.appendChild(this.createKnob('COLOR', 0.0, 1.0, this.grainColor || 0.0, 0.05, v => {
             this.grainColor = v;
             if (this.renderer) this.renderer.setGrainColor(v);
-            this.render();
+            this.requestRender();
         }));
 
         // Denoise
         grid.appendChild(this.createKnob('DENOISE', 0.0, 1.0, this.denoise || 0.0, 0.05, v => {
             this.denoise = v;
             if (this.renderer) this.renderer.setDenoise(v);
-            this.render();
+            this.requestRender();
         }));
 
         container.appendChild(grid);
@@ -6598,15 +7166,25 @@ class RadianceViewer {
         const presets = document.createElement('div');
         presets.style.cssText = 'display: flex; flex-wrap: wrap; gap: 6px;';
 
-        const btnStyle = `background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: #aaa; padding: 4px 8px; border - radius: 4px; font - size: 10px; cursor: pointer; transition: background 0.15s; `;
+        const INACTIVE_PRESET = `background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);color:#888;padding:4px 8px;border-radius:4px;font-size:10px;cursor:pointer;transition:all 0.15s;`;
+        const ACTIVE_PRESET   = `background:rgba(0,168,255,0.12);border:1px solid rgba(0,168,255,0.45);color:#00a8ff;padding:4px 8px;border-radius:4px;font-size:10px;cursor:pointer;transition:all 0.15s;`;
 
+        // Track which grain preset is active via a module-level label key
+        if (!this._activeFilmPreset) this._activeFilmPreset = 'No Grain';
+
+        const allPresetBtns = [];
         const addPreset = (lbl, gVal, sVal, cVal) => {
             const b = document.createElement('div');
             b.textContent = lbl;
-            b.style.cssText = btnStyle;
-            b.onmouseenter = () => b.style.background = 'rgba(255,255,255,0.12)';
-            b.onmouseleave = () => b.style.background = 'rgba(255,255,255,0.05)';
+            const isActive = this._activeFilmPreset === lbl;
+            b.style.cssText = isActive ? ACTIVE_PRESET : INACTIVE_PRESET;
+            allPresetBtns.push({ btn: b, lbl });
+            b.onmouseenter = () => { if (this._activeFilmPreset !== lbl) b.style.background = 'rgba(255,255,255,0.1)'; };
+            b.onmouseleave = () => { if (this._activeFilmPreset !== lbl) b.style.background = 'rgba(255,255,255,0.04)'; };
             b.onclick = () => {
+                this._activeFilmPreset = lbl;
+                // Update all pills
+                allPresetBtns.forEach(({ btn, lbl: l }) => { btn.style.cssText = l === lbl ? ACTIVE_PRESET : INACTIVE_PRESET; });
                 this.grain = gVal;
                 this.grainSize = sVal;
                 this.grainColor = cVal;
@@ -6616,7 +7194,6 @@ class RadianceViewer {
                     this.renderer.setGrainColor(cVal);
                 }
                 this.render();
-                this._lastRenderContent();
             };
             presets.appendChild(b);
         };
@@ -6647,7 +7224,7 @@ class RadianceViewer {
     }
 
     renderLensTab(container) {
-        container.style.cssText = 'display: flex; flex-direction: column; gap: 10px; padding: 10px; max-height: 340px; overflow-y: auto;';
+        container.style.cssText = 'display: flex; flex-direction: column; flex: 1; gap: 10px; padding: 10px; min-height: 0; overflow-y: auto;';
 
         // 1. Focus & DoF Top Row
         const topRow = document.createElement('div');
@@ -6664,7 +7241,7 @@ class RadianceViewer {
         dofCheck.querySelector('input').onchange = (e) => {
             this.dofEnabled = e.target.checked;
             if (this.renderer) this.renderer.setDoFEnabled(this.dofEnabled);
-            this.render();
+            this.requestRender();
         };
         dofLeft.appendChild(dofCheck);
 
@@ -6688,19 +7265,19 @@ class RadianceViewer {
         knobsRow.appendChild(this.createKnob('FOCUS', 0.0, 1.0, this.focusDistance || 0.5, 0.01, v => {
             this.focusDistance = v;
             if (this.renderer) this.renderer.setFocusDistance(v);
-            this.render();
+            this.requestRender();
         }));
 
         knobsRow.appendChild(this.createKnob('SIZE', 0.0, 1.0, this.aperture || 0.0, 0.01, v => {
             this.aperture = v;
             if (this.renderer) this.renderer.setAperture(v);
-            this.render();
+            this.requestRender();
         }));
 
         knobsRow.appendChild(this.createKnob('DISTORT', -0.5, 0.5, this.lensDistortion || 0.0, 0.01, v => {
             this.lensDistortion = v;
             if (this.renderer) this.renderer.setLensDistortion(v, this.lensFringe || 0.0);
-            this.render();
+            this.requestRender();
         }));
 
         container.appendChild(knobsRow);
@@ -6964,7 +7541,7 @@ class RadianceViewer {
         // 1. Create Editor Container — fixed height to prevent infinite resize loop
         // (parent HUD is height:auto, so 100% or flex:1 would feed back into itself)
         const editorContainer = document.createElement('div');
-        editorContainer.style.cssText = 'position: relative; height: 260px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden;';
+        editorContainer.style.cssText = 'position: relative; height: 300px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden;';
         container.appendChild(editorContainer);
 
         // 2. Initialize Curve Editor
@@ -7053,6 +7630,23 @@ class RadianceViewer {
         // 4. Reset & Presets Group (top-right overlay)
         const topButtons = document.createElement('div');
         topButtons.style.cssText = 'position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; align-items: center;';
+
+        // HDR Range Dropdown (v2.1)
+        const rangeSelect = document.createElement('select');
+        rangeSelect.title = 'HDR Range Visualization';
+        rangeSelect.style.cssText = 'background: rgba(0,0,0,0.85); color: #e2a; border: 1px solid rgba(221,34,170,0.3); border-radius: 3px; font-size: 10px; padding: 2px 4px; outline: none; cursor: pointer; height: 20px; font-weight: bold;';
+
+        ['1x', '2x', '4x'].forEach(r => {
+            const opt = document.createElement('option');
+            opt.value = parseFloat(r);
+            opt.textContent = r;
+            rangeSelect.appendChild(opt);
+        });
+        rangeSelect.onchange = (e) => {
+            this.curveEditor.rangeY = parseFloat(e.target.value);
+            this.curveEditor.draw();
+        };
+        topButtons.appendChild(rangeSelect);
 
         // Presets Dropdown
         const presetsSelect = document.createElement('select');
@@ -7176,7 +7770,7 @@ class RadianceViewer {
     }
 
     renderQualifiersTab(container) {
-        container.style.cssText = 'display: flex; flex-direction: column; gap: 10px; padding: 10px; max-height: 280px; overflow-y: auto;';
+        container.style.cssText = 'display: flex; flex-direction: column; flex: 1; gap: 10px; padding: 10px; min-height: 0; overflow-y: auto;';
 
         // Initialize state if missing
         if (!this.qualifierState) {
@@ -7192,7 +7786,7 @@ class RadianceViewer {
         const update = () => {
             if (this.renderer) {
                 this.renderer.setQualifier(this.qualifierState);
-                this.render();
+                this.requestRender();
             }
         };
 
@@ -7201,62 +7795,97 @@ class RadianceViewer {
         topRow.style.cssText = 'display: flex; gap: 10px; align-items: center; justify-content: space-between; margin-bottom: 5px;';
 
         // Enable Toggle
-        const enableCheck = document.createElement('div');
-        enableCheck.innerHTML = `
-        <input type="checkbox" id="qual-enable" ${this.qualifierState.enabled ? 'checked' : ''}>
-        <label for="qual-enable" style="color: #ccc; font-size: 11px; margin-left: 4px;">Active</label>
-    `;
-        enableCheck.querySelector('input').onchange = (e) => {
+        // Helper for consistent checkbox style
+        const createToggle = (id, labelText, isChecked, onChange) => {
+            const wrapper = document.createElement('div');
+            wrapper.style.cssText = 'display: flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.03); padding: 4px 8px; border-radius: 4px;';
+            const check = document.createElement('input');
+            check.type = 'checkbox';
+            check.id = id;
+            check.checked = isChecked;
+            check.style.cssText = 'accent-color: #00ffcc; cursor: pointer;';
+            check.onchange = onChange;
+            const lbl = document.createElement('label');
+            lbl.htmlFor = id;
+            lbl.textContent = labelText;
+            lbl.style.cssText = 'color: #ccc; font-size: 11px; cursor: pointer;';
+            wrapper.appendChild(check);
+            wrapper.appendChild(lbl);
+            return wrapper;
+        };
+
+        // Active Toggle
+        topRow.appendChild(createToggle('qual-enable', 'Active', this.qualifierState.enabled, (e) => {
             this.qualifierState.enabled = e.target.checked;
             update();
-        };
-        topRow.appendChild(enableCheck);
+        }));
 
-        // Show Mask
-        const maskCheck = document.createElement('div');
-        maskCheck.innerHTML = `
-        <input type="checkbox" id="qual-mask" ${this.qualifierState.showMask ? 'checked' : ''}>
-        <label for="qual-mask" style="color: #ccc; font-size: 11px; margin-left: 4px;">Show Mask</label>
-    `;
-        maskCheck.querySelector('input').onchange = (e) => {
+        // Show Mask Toggle
+        topRow.appendChild(createToggle('qual-mask', 'Show Mask', this.qualifierState.showMask, (e) => {
             this.qualifierState.showMask = e.target.checked;
             update();
-        };
-        topRow.appendChild(maskCheck);
+        }));
 
         // Eyedropper
         const pickerBtn = document.createElement('button');
-        pickerBtn.textContent = '🖌 Pick';
-        pickerBtn.style.cssText = 'background: #333; color: #ccc; border: 1px solid #555; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px;';
-        pickerBtn.onclick = () => this.activateEyedropper(update);
+        pickerBtn.textContent = '⚲ PICK COLOR';
+        pickerBtn.style.cssText = 'background: #2a2a30; color: #fff; border: 1px solid #444; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 10px; font-weight: bold; transition: all 0.2s;';
+        pickerBtn.onmouseover = () => { pickerBtn.style.borderColor = '#00ffcc'; pickerBtn.style.boxShadow = '0 0 8px rgba(0, 255, 204, 0.3)'; };
+        pickerBtn.onmouseout = () => { pickerBtn.style.borderColor = '#444'; pickerBtn.style.boxShadow = 'none'; };
+        if (this.isPicking) {
+            pickerBtn.style.borderColor = '#00ffcc';
+            pickerBtn.style.boxShadow = '0 0 8px rgba(0, 255, 204, 0.3)';
+            pickerBtn.style.color = '#00ffcc';
+        }
+        pickerBtn.onclick = () => {
+             this.activateEyedropper(update);
+             // Re-render to update pick button state
+             container.innerHTML = '';
+             this.renderMasksTab(container);
+        };
         topRow.appendChild(pickerBtn);
 
         container.appendChild(topRow);
 
-        // Helper to create knob row
+        // Compact HSL Grid Layout
+        const gridContainer = document.createElement('div');
+        gridContainer.style.cssText = 'display: flex; flex-direction: column; gap: 4px; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 4px; margin-bottom: 12px;';
+
+        // Headers
+        const headerRow = document.createElement('div');
+        headerRow.style.cssText = 'display: flex; gap: 8px; margin-bottom: 2px; padding-left: 40px;';
+        ['CENTER', 'WIDTH', 'SOFT'].forEach(text => {
+            const h = document.createElement('div');
+            h.textContent = text;
+            h.style.cssText = 'color: #888; font-size: 9px; font-weight: bold; width: 44px; text-align: center; letter-spacing: 0.5px;';
+            headerRow.appendChild(h);
+        });
+        gridContainer.appendChild(headerRow);
+
+        // Helper to create knob row WITHOUT individual labels
         const createRow = (label, param, labelColor) => {
             const row = document.createElement('div');
-            row.style.cssText = 'display: flex; gap: 8px; align-items: center; background: rgba(0,0,0,0.2); padding: 4px; border-radius: 4px;';
+            row.style.cssText = 'display: flex; gap: 8px; align-items: center;';
 
             const title = document.createElement('div');
             title.textContent = label;
-            title.style.cssText = `color: ${labelColor}; font - size: 10px; width: 30px; font - weight: bold; `;
+            title.style.cssText = `color: ${labelColor}; font-size: 10px; width: 32px; font-weight: bold; text-align: right; margin-right: 4px;`;
             row.appendChild(title);
 
             // Center
-            row.appendChild(this.createKnob('Center', 0, 1, this.qualifierState[param], 0.01, (v) => {
+            row.appendChild(this.createKnob('', 0, 1, this.qualifierState[param], 0.01, (v) => {
                 this.qualifierState[param] = v;
                 update();
             }));
 
             // Width
-            row.appendChild(this.createKnob('Width', 0, 1, this.qualifierState[param + 'W'], 0.01, (v) => {
+            row.appendChild(this.createKnob('', 0, 1, this.qualifierState[param + 'W'], 0.01, (v) => {
                 this.qualifierState[param + 'W'] = v;
                 update();
             }));
 
             // Soft
-            row.appendChild(this.createKnob('Soft', 0, 0.5, this.qualifierState[param + 'S'], 0.01, (v) => {
+            row.appendChild(this.createKnob('', 0, 0.5, this.qualifierState[param + 'S'], 0.01, (v) => {
                 this.qualifierState[param + 'S'] = v;
                 update();
             }));
@@ -7264,28 +7893,30 @@ class RadianceViewer {
             return row;
         };
 
-        container.appendChild(createRow('HUE', 'h', '#f55'));
-        container.appendChild(createRow('SAT', 's', '#5f5'));
-        container.appendChild(createRow('LUM', 'l', '#aaa'));
+        gridContainer.appendChild(createRow('HUE', 'h', '#ff6b6b'));
+        gridContainer.appendChild(createRow('SAT', 's', '#4cd137'));
+        gridContainer.appendChild(createRow('LUM', 'l', '#dcdde1'));
+        
+        container.appendChild(gridContainer);
     }
 
     renderMasksTab(container) {
-        container.style.cssText = 'display: flex; flex-direction: column; gap: 10px; padding: 10px; max-height: 280px; overflow-y: auto;';
+        container.style.cssText = 'display: flex; flex-direction: column; flex: 1; gap: 10px; padding: 10px; min-height: 0; overflow-y: auto;';
 
         const update = () => {
             if (this.renderer) {
                 this.renderer.setMask(this.maskState);
-                this.render();
+                this.requestRender();
             }
         };
 
         // 1. Top Controls (Type, Invert, Show Overlay)
         const topRow = document.createElement('div');
-        topRow.style.cssText = 'display: flex; gap: 10px; align-items: center; justify-content: space-between; margin-bottom: 5px;';
+        topRow.style.cssText = 'display: flex; gap: 10px; align-items: center; justify-content: space-between; margin-bottom: 8px;';
 
         // Mask Type
         const typeSelect = document.createElement('select');
-        typeSelect.style.cssText = 'background: #333; color: #ccc; border: 1px solid #555; font-size: 11px; padding: 2px; border-radius: 4px;';
+        typeSelect.style.cssText = 'background: #333; color: #ccc; border: 1px solid #555; font-size: 11px; padding: 4px; border-radius: 4px; cursor: pointer;';
         ['None', 'Circle', 'Box'].forEach((label, i) => {
             const opt = document.createElement('option');
             opt.value = i;
@@ -7299,76 +7930,82 @@ class RadianceViewer {
         };
         topRow.appendChild(typeSelect);
 
+        const checkGroup = document.createElement('div');
+        checkGroup.style.cssText = 'display: flex; gap: 8px;';
+
+        // Helper for consistent checkbox style (reused from qualifier)
+        const createToggle = (id, labelText, isChecked, onChange) => {
+            const wrapper = document.createElement('div');
+            wrapper.style.cssText = 'display: flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.03); padding: 4px 8px; border-radius: 4px;';
+            const check = document.createElement('input');
+            check.type = 'checkbox';
+            check.id = id;
+            check.checked = isChecked;
+            check.style.cssText = 'accent-color: #00ffcc; cursor: pointer;';
+            check.onchange = onChange;
+            const lbl = document.createElement('label');
+            lbl.htmlFor = id;
+            lbl.textContent = labelText;
+            lbl.style.cssText = 'color: #ccc; font-size: 11px; cursor: pointer;';
+            wrapper.appendChild(check);
+            wrapper.appendChild(lbl);
+            return wrapper;
+        };
+
         // Invert
-        const invertCheck = document.createElement('div');
-        invertCheck.innerHTML = `
-        <input type="checkbox" id="mask-invert" ${this.maskState.invert ? 'checked' : ''}>
-        <label for="mask-invert" style="color: #ccc; font-size: 11px; margin-left: 4px;">Invert</label>
-    `;
-        invertCheck.querySelector('input').onchange = (e) => {
+        checkGroup.appendChild(createToggle('mask-invert', 'Invert', this.maskState.invert, (e) => {
             this.maskState.invert = e.target.checked;
             update();
-        };
-        topRow.appendChild(invertCheck);
+        }));
 
         // Show Overlay
-        const overlayCheck = document.createElement('div');
-        overlayCheck.innerHTML = `
-        <input type="checkbox" id="mask-overlay" ${this.maskState.showOverlay ? 'checked' : ''}>
-        <label for="mask-overlay" style="color: #ccc; font-size: 11px; margin-left: 4px;">Overlay</label>
-    `;
-        overlayCheck.querySelector('input').onchange = (e) => {
+        checkGroup.appendChild(createToggle('mask-overlay', 'Overlay', this.maskState.showOverlay, (e) => {
             this.maskState.showOverlay = e.target.checked;
             update();
-        };
-        topRow.appendChild(overlayCheck);
+        }));
 
+        topRow.appendChild(checkGroup);
         container.appendChild(topRow);
 
-        // 2. Transform Controls
-        const createRow = (label, controls) => {
-            const row = document.createElement('div');
-            row.style.cssText = 'display: flex; flex-direction: column; gap: 4px; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 4px;';
+        // 2. Transform Controls (2x2 Grid)
+        const gridGroup = document.createElement('div');
+        gridGroup.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr; gap: 8px; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 4px;';
+
+        const createCell = (label, controls) => {
+            const cell = document.createElement('div');
+            cell.style.cssText = 'display: flex; flex-direction: column; gap: 4px;';
             const title = document.createElement('div');
             title.textContent = label;
             title.style.cssText = 'color: #888; font-size: 9px; font-weight: bold; letter-spacing: 0.5px;';
-            row.appendChild(title);
+            cell.appendChild(title);
             const ctrlGroup = document.createElement('div');
             ctrlGroup.style.cssText = 'display: flex; gap: 10px; align-items: center;';
             controls.forEach(c => ctrlGroup.appendChild(c));
-            row.appendChild(ctrlGroup);
-            return row;
+            cell.appendChild(ctrlGroup);
+            return cell;
         };
 
-        // Center
-        container.appendChild(createRow('CENTER', [
+        // Row 1: Center & Scale
+        gridGroup.appendChild(createCell('CENTER', [
             this.createKnob('X', 0, 1, this.maskState.center[0], 0.01, (v) => { this.maskState.center[0] = v; update(); }),
             this.createKnob('Y', 0, 1, this.maskState.center[1], 0.01, (v) => { this.maskState.center[1] = v; update(); })
         ]));
 
-        // Scale
-        container.appendChild(createRow('SCALE', [
+        gridGroup.appendChild(createCell('SCALE', [
             this.createKnob('X', 0.01, 2, this.maskState.scale[0], 0.01, (v) => { this.maskState.scale[0] = v; update(); }),
             this.createKnob('Y', 0.01, 2, this.maskState.scale[1], 0.01, (v) => { this.maskState.scale[1] = v; update(); })
         ]));
 
-        // Rotation & Feather
-        const rotFeatherGroup = document.createElement('div');
-        rotFeatherGroup.style.cssText = 'display: flex; gap: 10px; width: 100%;';
-
-        const rotRow = createRow('ROTATION', [
+        // Row 2: Rotation & Feather
+        gridGroup.appendChild(createCell('ROTATION', [
             this.createKnob('Rad', -Math.PI, Math.PI, this.maskState.rotation, 0.01, (v) => { this.maskState.rotation = v; update(); })
-        ]);
-        rotRow.style.flex = '1';
-        rotFeatherGroup.appendChild(rotRow);
+        ]));
 
-        const featherRow = createRow('FEATHER', [
+        gridGroup.appendChild(createCell('FEATHER', [
             this.createKnob('Soft', 0, 1, this.maskState.feather, 0.01, (v) => { this.maskState.feather = v; update(); })
-        ]);
-        featherRow.style.flex = '1';
-        rotFeatherGroup.appendChild(featherRow);
+        ]));
 
-        container.appendChild(rotFeatherGroup);
+        container.appendChild(gridGroup);
     }
 
     activateEyedropper(callback) {
@@ -7530,7 +8167,58 @@ class RadianceViewer {
     }
 
     renderViewTab(container) {
-        container.style.cssText = 'display: flex; flex-direction: column; gap: 12px; padding: 12px; max-height: 300px; overflow-y: auto;';
+        container.style.cssText = 'display: flex; flex-direction: column; flex: 1; gap: 12px; padding: 12px; min-height: 0; overflow-y: auto;';
+
+        // 0. Neural Network Monitor (Real-time 3D)
+        const neuralGroup = document.createElement('div');
+        neuralGroup.style.marginBottom = '12px';
+        neuralGroup.innerHTML = `
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; padding: 0 4px;">
+                <div style="display: flex; align-items: center; gap: 6px;">
+                    <div style="width: 6px; height: 6px; background: #00ffcc; border-radius: 50%; box-shadow: 0 0 8px #00ffcc; animation: pulse 2s infinite;"></div>
+                    <div style="color: #00ffcc; font-size: 10px; text-transform: uppercase; font-weight: 800; letter-spacing: 1.5px; font-family: 'Inter', sans-serif;">Neural Topology</div>
+                </div>
+                <div style="font-size: 8px; color: rgba(0, 255, 204, 0.4); font-family: monospace; letter-spacing: 1px;">CORE_DEEP_LINK_v2.0</div>
+            </div>
+        `;
+        
+        const monitorContainer = document.createElement('div');
+        monitorContainer.style.cssText = `
+            background: #010409;
+            border: 1px solid rgba(0, 255, 204, 0.15);
+            border-radius: 8px;
+            position: relative;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5), inset 0 0 20px rgba(0,255,180,0.02);
+            overflow: hidden;
+            height: 250px;
+        `;
+        
+        // Add a scanline overlay in CSS if not present
+        if (!document.getElementById('radiance-monitor-styles')) {
+            const style = document.createElement('style');
+            style.id = 'radiance-monitor-styles';
+            style.innerHTML = `
+                @keyframes pulse {
+                    0% { opacity: 0.4; transform: scale(0.9); }
+                    50% { opacity: 1; transform: scale(1.1); }
+                    100% { opacity: 0.4; transform: scale(0.9); }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+        
+        neuralGroup.appendChild(monitorContainer);
+        container.appendChild(neuralGroup);
+
+        // Initialize or re-attach the monitor
+        if (this.neuralMonitor) {
+            this.neuralMonitor.dispose();
+        }
+        this.neuralMonitor = new RadianceNeuralMonitor(monitorContainer);
+        // Ensure current progress is reflected if already generating
+        if (this._lastProgress !== undefined) {
+            this.neuralMonitor.setProgress(this._lastProgress);
+        }
 
         // 1. Comparison Wipe
         const wipeGroup = document.createElement('div');
@@ -7559,7 +8247,7 @@ class RadianceViewer {
         const wipeSlider = document.createElement('input');
         wipeSlider.type = 'range'; wipeSlider.min = '0'; wipeSlider.max = '100'; wipeSlider.step = '1';
         wipeSlider.value = String(Math.round((this.wipe || 0.5) * 100));
-        wipeSlider.style.cssText = 'width: 100px; accent-color: #6a8aff; height: 4px; cursor: pointer;';
+        wipeSlider.style.cssText = 'width: 100px; accent-color: #00ffcc; height: 4px; cursor: pointer;';
         wipeSlider.oninput = (e) => {
             this.wipe = parseInt(e.target.value) / 100;
             if (this.renderer) this.renderer.setWipe(this.wipe, this.wipeEnabled);
@@ -7579,14 +8267,14 @@ class RadianceViewer {
         refRow.style.cssText = 'display: flex; gap: 8px; align-items: center;';
 
         const grabBtn = document.createElement('button');
-        grabBtn.textContent = '📸 GRAB STILL';
+        grabBtn.textContent = '⛶ GRAB STILL';
         grabBtn.style.cssText = 'background: #2a2a30; color: #fff; border: 1px solid #444; padding: 6px 12px; border-radius: 4px; font-size: 10px; cursor: pointer; font-weight: bold; flex: 1;';
         grabBtn.onclick = () => this.grabStill();
         refRow.appendChild(grabBtn);
 
         // Clear Gallery Button
         const clearBtn = document.createElement('button');
-        clearBtn.textContent = '🗑️ CLEAR';
+        clearBtn.textContent = '🗑 CLEAR';
         clearBtn.style.cssText = 'background: #3a2020; color: #ff8888; border: 1px solid #552222; padding: 6px 12px; border-radius: 4px; font-size: 10px; cursor: pointer; font-weight: bold;';
         clearBtn.onclick = () => {
             if (this.renderer) this.renderer.clearReferenceShelf();
@@ -7666,26 +8354,26 @@ class RadianceViewer {
         exportRow.style.cssText = 'display: flex; gap: 8px;';
 
         const saveBtn = document.createElement('button');
-        saveBtn.textContent = '💾 SAVE PRESET';
+        saveBtn.textContent = '⤓ SAVE PRESET';
         saveBtn.style.cssText = 'background: #1a1a20; color: #fff; border: 1px solid #333; padding: 6px; border-radius: 4px; font-size: 10px; cursor: pointer; flex: 1;';
         saveBtn.onclick = () => this.saveGrade();
         exportRow.appendChild(saveBtn);
 
         const cubeBtn = document.createElement('button');
-        cubeBtn.textContent = '📤 .CUBE';
-        cubeBtn.style.cssText = 'background: #2a2a30; color: #ffca28; border: 1px solid #ffca2833; padding: 6px; border-radius: 4px; font-size: 10px; cursor: pointer; flex: 1; font-weight: bold;';
+        cubeBtn.textContent = '⤒ EXPORT .CUBE';
+        cubeBtn.style.cssText = 'background: #1a1a20; color: #ffca28; border: 1px solid #ffca2855; padding: 6px; border-radius: 4px; font-size: 10px; cursor: pointer; flex: 1; font-weight: bold;';
         cubeBtn.onclick = () => this.exportToCube();
         exportRow.appendChild(cubeBtn);
 
         const cdlExportBtn = document.createElement('button');
-        cdlExportBtn.textContent = '📤 .CDL';
-        cdlExportBtn.style.cssText = 'background: #2a302a; color: #88ff88; border: 1px solid #88ff8833; padding: 6px; border-radius: 4px; font-size: 10px; cursor: pointer; flex: 1; font-weight: bold;';
+        cdlExportBtn.textContent = '⤒ EXPORT .CDL';
+        cdlExportBtn.style.cssText = 'background: #1a1a20; color: #88ff88; border: 1px solid #88ff8855; padding: 6px; border-radius: 4px; font-size: 10px; cursor: pointer; flex: 1; font-weight: bold;';
         cdlExportBtn.onclick = () => this.exportToCDL();
         exportRow.appendChild(cdlExportBtn);
 
         const cdlImportBtn = document.createElement('button');
-        cdlImportBtn.textContent = '📥 .CDL';
-        cdlImportBtn.style.cssText = 'background: #2a302a; color: #88ff88; border: 1px solid #88ff8833; padding: 6px; border-radius: 4px; font-size: 10px; cursor: pointer; flex: 1; font-weight: bold;';
+        cdlImportBtn.textContent = '⤓ IMPORT .CDL';
+        cdlImportBtn.style.cssText = 'background: #1a1a20; color: #88ff88; border: 1px solid #88ff8855; padding: 6px; border-radius: 4px; font-size: 10px; cursor: pointer; flex: 1; font-weight: bold;';
 
         // Setup hidden file input for CDL import
         const cdlInput = document.createElement('input');
@@ -7852,11 +8540,11 @@ class RadianceViewer {
     }
 
     renderScopesTab(container) {
-        container.style.cssText = 'display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px;';
+        container.style.cssText = 'display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 8px;';
 
         // ─── Mode Selector Bar ─────────────────────────────
         const modeBar = document.createElement('div');
-        modeBar.style.cssText = 'display: flex; gap: 3px; width: 280px;';
+        modeBar.style.cssText = 'display: flex; gap: 4px; width: 100%; margin-bottom: 4px;';
 
         const modes = [
             { id: 'parade', label: 'Parade' },
@@ -7871,15 +8559,15 @@ class RadianceViewer {
             btn.textContent = m.label;
             const isActive = this.scopeMode === m.id;
             btn.style.cssText = `
-            flex: 1; text-align: center; padding: 3px 0;
-    background: ${isActive ? 'rgba(106,138,255,0.2)' : 'rgba(255,255,255,0.04)'};
-    color: ${isActive ? '#8aafff' : '#777'};
-    border: 1px solid ${isActive ? 'rgba(106,138,255,0.4)' : 'rgba(255,255,255,0.08)'};
-    border-radius: 3px; font-size: 9px; cursor: pointer;
-    transition: background 0.15s;
-    `;
-            btn.onmouseenter = () => { if (!isActive) btn.style.background = 'rgba(255,255,255,0.08)'; };
-            btn.onmouseleave = () => { if (!isActive) btn.style.background = 'rgba(255,255,255,0.04)'; };
+                flex: 1; text-align: center; padding: 8px 0;
+                background: ${isActive ? 'rgba(106,138,255,0.25)' : 'rgba(255,255,255,0.04)'};
+                color: ${isActive ? '#8aafff' : '#888'};
+                border: 1px solid ${isActive ? 'rgba(106,138,255,0.5)' : 'rgba(255,255,255,0.12)'};
+                border-radius: 4px; font-size: 11px; font-weight: 700; cursor: pointer;
+                transition: all 0.15s;
+            `;
+            btn.onmouseenter = () => { if (!isActive) { btn.style.background = 'rgba(255,255,255,0.12)'; btn.style.color = '#fff'; } };
+            btn.onmouseleave = () => { if (!isActive) { btn.style.background = 'rgba(255,255,255,0.04)'; btn.style.color = '#888'; } };
             btn.onclick = () => {
                 this.scopeMode = m.id;
                 localStorage.setItem('radiance_scope_mode', m.id);
@@ -7893,16 +8581,16 @@ class RadianceViewer {
         if (!this.scopeLogView) this.scopeLogView = localStorage.getItem('radiance_scope_log') === '1';
 
         const optRow = document.createElement('div');
-        optRow.style.cssText = 'display: flex; gap: 4px; width: 280px; align-items: center;';
+        optRow.style.cssText = 'display: flex; gap: 10px; width: 100%; align-items: center; margin-bottom: 4px;';
 
         const makeOptBtn = (label, active, onClick) => {
             const b = document.createElement('div');
             b.textContent = label;
             b.style.cssText = `
-                padding: 2px 8px; border-radius: 3px; font-size: 9px; font-weight: bold; cursor: pointer;
-                background: ${active ? 'rgba(255,200,80,0.18)' : 'rgba(255,255,255,0.04)'};
-                color: ${active ? '#ffc844' : '#555'};
-                border: 1px solid ${active ? 'rgba(255,200,80,0.4)' : 'rgba(255,255,255,0.08)'};
+                padding: 5px 12px; border-radius: 4px; font-size: 11px; font-weight: bold; cursor: pointer;
+                background: ${active ? 'rgba(255,200,80,0.22)' : 'rgba(255,255,255,0.06)'};
+                color: ${active ? '#ffc844' : '#777'};
+                border: 1px solid ${active ? 'rgba(255,200,80,0.6)' : 'rgba(255,255,255,0.12)'};
                 transition: all 0.15s;
             `;
             b.onclick = onClick;
@@ -7917,29 +8605,30 @@ class RadianceViewer {
 
         const logNote = document.createElement('div');
         logNote.textContent = this.scopeLogView ? 'LogC · shadows expanded' : 'Linear · 0–255';
-        logNote.style.cssText = 'font-size: 8px; color: #444; margin-left: auto;';
+        logNote.style.cssText = 'font-size: 10px; color: #666; margin-left: auto; font-weight: 600;';
         optRow.appendChild(logNote);
         container.appendChild(optRow);
 
         // ─── Scope Canvas ──────────────────────────────────
         const isSquare = this.scopeMode === 'vectorscope';
-        const cW = 280, cH = isSquare ? 240 : 180;
+        // v3.3: Max resolution scopes (1000px width) with ultra-tall canvases to fill the panel
+        const cW = 1000, cH = isSquare ? 1000 : 750;
 
         const canvas = document.createElement('canvas');
         canvas.width = cW;
         canvas.height = cH;
-        canvas.style.cssText = `background: #050508; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 4px; width: 280px; height: ${cH}px;`;
+        canvas.style.cssText = `background: #010102; border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 8px; width: 100%; height: auto; aspect-ratio: ${cW}/${cH}; box-shadow: inset 0 0 30px rgba(0,0,0,0.9);`;
         container.appendChild(canvas);
 
         // ─── Extract Pixel Data ─────────────────────────────
         if (!this.image) {
             const ctx = canvas.getContext('2d');
-            ctx.fillStyle = '#444'; ctx.font = '10px monospace';
-            ctx.fillText('No Image', cW / 2 - 25, cH / 2);
+            ctx.fillStyle = '#444'; ctx.font = '12px monospace';
+            ctx.fillText('No Image', cW / 2 - 30, cH / 2);
             return;
         }
 
-        const sampleW = 280;
+        const sampleW = 1000;
         const sampleH = Math.round(this.image.height * (sampleW / this.image.width));
         const tmp = document.createElement('canvas');
         tmp.width = sampleW; tmp.height = sampleH;
@@ -8037,12 +8726,12 @@ class RadianceViewer {
             // Label
             ctx.globalAlpha = 1.0;
             ctx.fillStyle = ch.color + '0.8)';
-            ctx.font = '10px monospace';
-            ctx.fillText(ch.label, ch.x + 4, 12);
+            ctx.font = '18px monospace';
+            ctx.fillText(ch.label, ch.x + 8, 22);
         });
 
         // Separators
-        ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
+        ctx.strokeStyle = '#333'; ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.moveTo(secW, 0); ctx.lineTo(secW, h);
         ctx.moveTo(secW * 2, 0); ctx.lineTo(secW * 2, h);
@@ -8052,17 +8741,17 @@ class RadianceViewer {
         const guides = logView
             ? [{ v: 0, lbl: '0' }, { v: 0.5, lbl: '~18%' }, { v: 0.74, lbl: '~90%' }, { v: 1, lbl: '100' }]
             : [{ v: 0, lbl: '0' }, { v: 0.5, lbl: '50%' }, { v: 1, lbl: '100' }];
-        ctx.strokeStyle = '#333'; ctx.setLineDash([3, 3]);
-        ctx.font = '7px monospace'; ctx.fillStyle = '#444';
+        ctx.strokeStyle = '#333'; ctx.setLineDash([6, 6]);
+        ctx.font = '14px monospace'; ctx.fillStyle = '#444';
         guides.forEach(g => {
             const y = h - g.v * h;
             ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
-            if (g.lbl) ctx.fillText(g.lbl, 2, y - 2);
+            if (g.lbl) ctx.fillText(g.lbl, 4, y - 4);
         });
         ctx.setLineDash([]);
         if (logView) {
-            ctx.fillStyle = '#554400'; ctx.font = '8px monospace';
-            ctx.fillText('LOG', w - 22, h - 3);
+            ctx.fillStyle = '#554400'; ctx.font = '16px monospace';
+            ctx.fillText('LOG', w - 40, h - 6);
         }
     }
 
@@ -8088,12 +8777,12 @@ class RadianceViewer {
                 { v: 1.0, lbl: '100' }
             ];
 
-        ctx.strokeStyle = '#2a2a2a'; ctx.lineWidth = 1;
-        ctx.font = '8px monospace'; ctx.fillStyle = '#444';
+        ctx.strokeStyle = '#2a2a2a'; ctx.lineWidth = 2;
+        ctx.font = '16px monospace'; ctx.fillStyle = '#444';
         guides.forEach(g => {
             const y = h - g.v * h;
             ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
-            ctx.fillText(g.lbl, 2, y - 2);
+            ctx.fillText(g.lbl, 4, y - 4);
         });
 
         // Plot luma dots
@@ -8113,8 +8802,8 @@ class RadianceViewer {
         ctx.globalAlpha = 1.0;
 
         // Label
-        ctx.fillStyle = '#5a5'; ctx.font = '10px monospace';
-        ctx.fillText(logView ? 'LUMA·LOG' : 'LUMA', 4, 12);
+        ctx.fillStyle = '#5a5'; ctx.font = '18px monospace';
+        ctx.fillText(logView ? 'LUMA·LOG' : 'LUMA', 8, 22);
     }
 
     // ─── Histogram ───────────────────────────────────────────
@@ -8133,7 +8822,7 @@ class RadianceViewer {
         for (let i = 0; i < 256; i++) max = Math.max(max, hR[i], hG[i], hB[i]);
 
         // Grid
-        ctx.strokeStyle = '#222'; ctx.lineWidth = 1;
+        ctx.strokeStyle = '#222'; ctx.lineWidth = 2;
         for (let i = 1; i < 4; i++) {
             const x = (i / 4) * w;
             ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
@@ -8141,7 +8830,7 @@ class RadianceViewer {
 
         const drawCurve = (hist, color) => {
             ctx.strokeStyle = color;
-            ctx.lineWidth = 1.5;
+            ctx.lineWidth = 3;
             ctx.beginPath();
             for (let i = 0; i < 256; i++) {
                 const x = (i / 255) * w;
@@ -8176,12 +8865,12 @@ class RadianceViewer {
         ctx.globalAlpha = 1.0;
 
         // Labels
-        ctx.fillStyle = '#666'; ctx.font = '8px monospace';
-        ctx.fillText(logView ? 'LOG·0' : '0', 2, h - 3);
-        ctx.fillText(logView ? 'LOG·255' : '255', w - 38, h - 3);
+        ctx.fillStyle = '#666'; ctx.font = '16px monospace';
+        ctx.fillText(logView ? 'LOG·0' : '0', 4, h - 6);
+        ctx.fillText(logView ? 'LOG·255' : '255', w - 75, h - 6);
         if (logView) {
             ctx.fillStyle = '#554400';
-            ctx.fillText('LOG', w - 22, 11);
+            ctx.fillText('LOG', w - 40, 20);
         }
     }
 
@@ -8194,7 +8883,7 @@ class RadianceViewer {
         const rad = Math.min(cx, cy) - 10;
 
         // Graticule rings
-        ctx.strokeStyle = '#1a1a1a'; ctx.lineWidth = 1;
+        ctx.strokeStyle = '#1a1a1a'; ctx.lineWidth = 2;
         [0.25, 0.5, 0.75, 1.0].forEach(r => {
             ctx.beginPath(); ctx.arc(cx, cy, rad * r, 0, Math.PI * 2); ctx.stroke();
         });
@@ -8218,15 +8907,15 @@ class RadianceViewer {
             const tx = cx + Math.cos(ang) * rad * 0.75;
             const ty = cy + Math.sin(ang) * rad * 0.75;
             ctx.fillStyle = t.c;
-            ctx.beginPath(); ctx.arc(tx, ty, 3, 0, Math.PI * 2); ctx.fill();
-            ctx.fillStyle = '#555'; ctx.font = '8px monospace';
-            ctx.fillText(t.l, tx + 5, ty + 3);
+            ctx.beginPath(); ctx.arc(tx, ty, 6, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#555'; ctx.font = '16px monospace';
+            ctx.fillText(t.l, tx + 10, ty + 6);
         });
 
         // Skin Tone Indicator (I-Line)
         ctx.strokeStyle = 'rgba(255, 140, 100, 0.4)';
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([3, 3]);
+        ctx.lineWidth = 3;
+        ctx.setLineDash([6, 6]);
         const iLineAng = (123 - 90) * Math.PI / 180;
         ctx.beginPath();
         ctx.moveTo(cx, cy);
@@ -8306,9 +8995,9 @@ class RadianceViewer {
 
         // Legend
         ctx.fillStyle = 'rgba(0,0,0,0.6)';
-        ctx.fillRect(w - 72, 2, 70, 12);
-        ctx.fillStyle = '#aaa'; ctx.font = '9px monospace';
-        ctx.fillText('FALSE COLOR', w - 70, 11);
+        ctx.fillRect(w - 144, 4, 140, 24);
+        ctx.fillStyle = '#aaa'; ctx.font = '18px monospace';
+        ctx.fillText('FALSE COLOR', w - 138, 22);
 
         // IRE scale bar
         const barX = w - 14, barH = h - 20, barY = 18;
@@ -8465,6 +9154,346 @@ class RadianceViewer {
         localStorage.setItem('radiance_presets', JSON.stringify(presets));
         if (this._lastRenderContent) this._lastRenderContent();
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //                         TERMINAL / SCRIPT EDITOR
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    renderTerminalTab(container) {
+        const t = this.theme;
+        const STORAGE_SCRIPT = 'radiance_term_script';
+        const STORAGE_HIST   = 'radiance_term_history';
+        const MAX_HIST = 50;
+
+        // ── History ────────────────────────────────────────────────────────
+        let history = JSON.parse(localStorage.getItem(STORAGE_HIST) || '[]');
+        let histIdx = history.length; // Points past the last entry (fresh line)
+
+        // ── Root layout ────────────────────────────────────────────────────
+        const root = document.createElement('div');
+        root.style.cssText = `display:flex;flex-direction:column;gap:0;height:100%;font-family:'JetBrains Mono',monospace;`;
+
+        // ── Toolbar ────────────────────────────────────────────────────────
+        const toolbar = document.createElement('div');
+        toolbar.style.cssText = `display:flex;gap:6px;align-items:center;padding:8px 6px;border-bottom:1px solid rgba(255,255,255,0.07);flex-shrink:0;background:rgba(255,255,255,0.02);`;
+
+        const mkBtn = (label, title, color) => {
+            const b = document.createElement('div');
+            b.textContent = label;
+            b.title = title;
+            b.style.cssText = `font-size:10px;font-weight:700;letter-spacing:0.5px;padding:4px 12px;border-radius:4px;cursor:pointer;border:1px solid rgba(255,255,255,0.1);color:${color||'#ccc'};background:rgba(255,255,255,0.04);transition:all 0.2s;user-select:none;`;
+            b.onmouseenter = () => {
+                b.style.background = 'rgba(255,255,255,0.1)';
+                b.style.borderColor = color ? color + '88' : 'rgba(255,255,255,0.3)';
+            };
+            b.onmouseleave = () => {
+                b.style.background = 'rgba(255,255,255,0.04)';
+                b.style.borderColor = 'rgba(255,255,255,0.1)';
+            };
+            return b;
+        };
+
+        const runBtn   = mkBtn('▶ RUN', 'Run script  (Ctrl+Enter)', t.accent);
+        const clearBtn = mkBtn('⌫ CLEAR', 'Clear output  (Ctrl+L)', '#888');
+        const resetBtn = mkBtn('↺ RESET', 'Reset Python namespace', '#e87');
+
+        runBtn.style.borderColor = t.accent + '33';
+        runBtn.style.color = t.accent;
+
+        // Snippet presets
+        const snippets = [
+            ['[AUDIT] Find Model', 'if "prompt" in globals():\n    [print(f"Node {k}: {v[\'inputs\'][\"ckpt_name\"]}") for k,v in prompt.items() if "inputs" in v and "ckpt_name" in v["inputs"]]'],
+            ['[AUDIT] Dependencies', 'import importlib.util\npackages = ["cv2", "numpy", "torch", "imageio", "PIL"]\nfor p in packages:\n    spec = importlib.util.find_spec(p)\n    print(f"{p:10}: {\"INSTALLED\" if spec else \"MISSING\"}")'],
+            ['[IMG] Gamut Check', 'if "image" in globals():\n    # Simple check for values that would be out of sRGB gamut\n    out_of_gamut = torch.any(image > 1.0) or torch.any(image < 0.0)\n    print(f"Wide Gamut / HDR Detected: {out_of_gamut}")\n    if out_of_gamut:\n        print(f"Max Component Value: {image.max():.3f}")'],
+            ['[IMG] Center RGB', 'if "image" in globals():\n    h, w = image.shape[1:3]\n    pixel = image[0, h//2, w//2, :3].tolist()\n    print(f"Center Pixel [R,G,B]: {[round(c, 4) for c in pixel]}")'],
+            ['[DATA] Hist Plot', 'if "image" in globals():\n    h = torch.histc(image, bins=10, min=0, max=1)\n    [print(f"[{i*10}%-{(i+1)*10}%]: {\'#\' * int(v/image.numel()*100)}") for i,v in enumerate(h)]'],
+            ['[UTIL] CDL Export', 'print(\"ASC CDL XML (Identity):\")\nprint(\"\"\"<ColorCorrection id=\\\"radiance\\\">\n  <SOPNode>\n    <Slope>1.0 1.0 1.0</Slope>\n    <Offset>0.0 0.0 0.0</Offset>\n    <Power>1.0 1.0 1.0</Power>\n  </SOPNode>\n  <SatNode>\n    <Saturation>1.000000</Saturation>\n  </SatNode>\n</ColorCorrection>\"\"\")'],
+            ['[SYS] VRAM Stats', 'if torch.cuda.is_available():\n    m = torch.cuda.mem_get_info()\n    print(f"VRAM Free: {m[0]/1e9:.2f} GB / {m[1]/1e9:.2f} GB")'],
+            ['[SYS] Memory Nuke', 'import gc; gc.collect(); torch.cuda.empty_cache() if torch.cuda.is_available() else None; print("Pipeline Memory Flushed.")'],
+        ];
+
+        const snipSelect = document.createElement('select');
+        snipSelect.title = 'Insert Radiance Snippet';
+        snipSelect.innerHTML = '<option value="">◎ Snippets</option>' +
+            snippets.map((s, i) => `<option value="${i}">${s[0]}</option>`).join('');
+        snipSelect.style.cssText = `font-size:11px; font-weight:bold; background:#0d0d14; color:${t.accent}; border:1px solid ${t.accent}33; border-radius:4px; padding:3px 12px; cursor:pointer; outline:none; appearance:none; text-align:center; min-width:120px; transition: border-color 0.2s, background 0.2s;`;
+        snipSelect.onmouseenter = () => snipSelect.style.borderColor = 'rgba(255,255,255,0.3)';
+        snipSelect.onmouseleave = () => snipSelect.style.borderColor = 'rgba(255,255,255,0.1)';
+
+        toolbar.appendChild(runBtn);
+        toolbar.appendChild(clearBtn);
+        toolbar.appendChild(resetBtn);
+
+        // Spacer
+        const spacer = document.createElement('div');
+        spacer.style.flex = '1';
+        toolbar.appendChild(spacer);
+        toolbar.appendChild(snipSelect);
+
+        root.appendChild(toolbar);
+
+        // ── Editor ─────────────────────────────────────────────────────────
+        const editorWrap = document.createElement('div');
+        editorWrap.style.cssText = `flex:0 0 200px;position:relative;border-bottom:1px solid rgba(255,255,255,0.1);overflow:hidden;`;
+
+        // Line numbers
+        const lineNums = document.createElement('div');
+        lineNums.style.cssText = `position:absolute;left:0;top:0;bottom:0;width:32px;background:rgba(0,0,0,0.35);border-right:1px solid rgba(255,255,255,0.06);padding-top:8px;font-size:11px;line-height:1.6;text-align:right;padding-right:6px;color:rgba(255,255,255,0.2);overflow:hidden;user-select:none;pointer-events:none;`;
+
+        const editor = document.createElement('textarea');
+        editor.spellcheck = false;
+        editor.placeholder = '# Python script — Ctrl+Enter to run\nprint("Hello from Radiance Terminal")';
+        editor.value = localStorage.getItem(STORAGE_SCRIPT) || '';
+        editor.style.cssText = `width:100%;height:100%;box-sizing:border-box;padding:8px 8px 8px 40px;background:rgba(0,0,0,0.45);color:#e2e2f0;border:none;outline:none;resize:none;font-size:12px;font-family:'JetBrains Mono','Fira Code',monospace;line-height:1.6;tab-size:4;`;
+
+        const updateLineNums = () => {
+            const lines = editor.value.split('\n').length;
+            lineNums.innerHTML = Array.from({length: lines}, (_, i) => i + 1).join('<br>');
+        };
+        updateLineNums();
+
+        editorWrap.appendChild(lineNums);
+        editorWrap.appendChild(editor);
+        root.appendChild(editorWrap);
+
+        // ── Resize handle between editor and output ─────────────────────────
+        const resizeHandle = document.createElement('div');
+        resizeHandle.style.cssText = `height:4px;background:transparent;cursor:ns-resize;flex-shrink:0;z-index:10;`;
+        resizeHandle.title = 'Drag to resize';
+        resizeHandle.onmouseenter = () => resizeHandle.style.background = t.accent + '66';
+        resizeHandle.onmouseleave = () => resizeHandle.style.background = 'transparent';
+        let _rszDragging = false;
+        resizeHandle.addEventListener('mousedown', e => {
+            _rszDragging = true; e.preventDefault();
+            const startY = e.clientY;
+            const startH = editorWrap.offsetHeight;
+            const onMove = me => {
+                const newH = Math.max(60, Math.min(600, startH + me.clientY - startY));
+                editorWrap.style.flex = `0 0 ${newH}px`;
+            };
+            const onUp = () => {
+                _rszDragging = false;
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+            };
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+        root.appendChild(resizeHandle);
+
+        // ── Output panel ────────────────────────────────────────────────────
+        const outputPanel = document.createElement('div');
+        outputPanel.style.cssText = `flex:1;overflow-y:auto;padding:10px 12px;background:rgba(0,0,0,0.6);font-size:11px;font-family:'JetBrains Mono',monospace;line-height:1.6;min-height:0;scrollbar-width:thin;`;
+
+        const appendOutput = (text, isError, cmdEcho) => {
+            if (cmdEcho) {
+                const cmdLine = document.createElement('div');
+                cmdLine.style.cssText = `color:rgba(0,168,255,0.7);margin-top:6px;font-weight:600;`;
+                cmdLine.textContent = '>>> ' + cmdEcho.split('\n')[0] + (cmdEcho.includes('\n') ? '...' : '');
+                outputPanel.appendChild(cmdLine);
+            }
+            if (!text && !isError) {
+                const ok = document.createElement('div');
+                ok.style.cssText = `color:rgba(100,200,100,0.5);font-size:10px;padding-left:12px;`;
+                ok.textContent = '✓ OK';
+                outputPanel.appendChild(ok);
+                return;
+            }
+            const lines = text.split('\n');
+            lines.forEach(line => {
+                if (!line && lines.length === 1) return;
+                const el = document.createElement('div');
+                el.style.color = isError ? '#ff7070' : '#b0f0b0';
+                el.textContent = line;
+                outputPanel.appendChild(el);
+            });
+            // Auto-scroll to bottom
+            outputPanel.scrollTop = outputPanel.scrollHeight;
+        };
+
+        // Separator line
+        const sep = document.createElement('div');
+        sep.style.cssText = `height:1px;background:rgba(255,255,255,0.05);margin:6px 0;`;
+        outputPanel.appendChild(sep);
+
+        root.appendChild(outputPanel);
+
+        // ── Status bar ─────────────────────────────────────────────────────
+        const statusBar = document.createElement('div');
+        statusBar.style.cssText = `display:flex;justify-content:space-between;padding:4px 10px;background:rgba(10,10,15,0.8);font-size:9px;color:rgba(255,255,255,0.3);letter-spacing:0.5px;flex-shrink:0;border-top:1px solid rgba(255,255,255,0.05);`;
+        statusBar.innerHTML = `
+            <div style="display:flex;gap:15px;align-items:center;">
+                <span style="color:#666;font-weight:600;">PYTHON 3.11 REPL</span>
+                <span id="rad-term-copy" style="cursor:pointer;color:${t.accent};opacity:0.6;transition:opacity 0.2s;">[COPY OUTPUT]</span>
+                <span id="rad-term-clean" style="cursor:pointer;color:#e87;opacity:0.6;transition:opacity 0.2s;">[CLEAN MEM]</span>
+            </div>
+            <div style="display:flex;gap:12px;align-items:center;">
+                <a href="https://radiance.fxtd.org" target="_blank" style="color:rgba(0,168,255,0.5);text-decoration:none;" onmouseover="this.style.color='#00a8ff'" onmouseout="this.style.color='rgba(0,168,255,0.5)'">📖 DOCS</a>
+                <span id="rad-term-status">READY</span>
+            </div>
+        `;
+        root.appendChild(statusBar);
+
+        // Status bar interactions
+        const copyBtn = statusBar.querySelector('#rad-term-copy');
+        copyBtn.onmouseenter = () => copyBtn.style.opacity = '1';
+        copyBtn.onmouseleave = () => copyBtn.style.opacity = '0.6';
+        copyBtn.onclick = () => {
+            navigator.clipboard.writeText(outputPanel.innerText);
+            copyBtn.textContent = '[COPIED!]';
+            setTimeout(() => copyBtn.textContent = '[COPY OUTPUT]', 1500);
+        };
+
+        const cleanBtn = statusBar.querySelector('#rad-term-clean');
+        cleanBtn.onmouseenter = () => cleanBtn.style.opacity = '1';
+        cleanBtn.onmouseleave = () => cleanBtn.style.opacity = '0.6';
+        cleanBtn.onclick = () => {
+            outputPanel.innerHTML = '';
+            resetNamespace();
+        };
+
+        const setStatus = (msg, color) => {
+            const el = statusBar.querySelector('#rad-term-status');
+            if (el) { 
+                el.textContent = msg.toUpperCase(); 
+                el.style.color = color || 'rgba(255,255,255,0.3)'; 
+            }
+        };
+
+        // ── Run script ─────────────────────────────────────────────────────
+        const runScript = async () => {
+            const code = editor.value.trim();
+            if (!code) return;
+
+            // Persist script
+            localStorage.setItem(STORAGE_SCRIPT, editor.value);
+
+            // Add to history
+            if (history[history.length - 1] !== code) {
+                history.push(code);
+                if (history.length > MAX_HIST) history.shift();
+                localStorage.setItem(STORAGE_HIST, JSON.stringify(history));
+            }
+            histIdx = history.length;
+
+            setStatus('EXECUTING...', t.accent);
+            runBtn.style.opacity = '0.5';
+
+            try {
+                const resp = await fetch('/radiance/terminal', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code })
+                });
+                const data = await resp.json();
+                appendOutput(data.output || '', data.status === 'error', code);
+                setStatus(data.status === 'error' ? '✗ ERROR' : '✓ OK', data.status === 'error' ? '#ff7070' : '#80e080');
+            } catch (e) {
+                appendOutput(`Network error: ${e.message}`, true, code);
+                setStatus('✗ NET ERROR', '#ff7070');
+            } finally {
+                runBtn.style.opacity = '1';
+            }
+        };
+
+        // ── Reset namespace ────────────────────────────────────────────────
+        const resetNamespace = async () => {
+            try {
+                const resp = await fetch('/radiance/terminal', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code: '__radiance_reset__ = True', _reset: true })
+                });
+                const data = await resp.json();
+                const msg = document.createElement('div');
+                msg.style.cssText = `color:#e87;font-size:10px;margin-top:8px;font-style:italic;opacity:0.8;`;
+                msg.textContent = '— SYSTEM: PYTHON NAMESPACE RESET COMPLETE —';
+                outputPanel.appendChild(msg);
+                outputPanel.scrollTop = outputPanel.scrollHeight;
+                setStatus('RESET OK', '#e87');
+            } catch(e) {
+                setStatus('RESET FAILED', '#ff7070');
+            }
+        };
+
+        // ── Event wiring ────────────────────────────────────────────────────
+        editor.addEventListener('input', () => {
+            updateLineNums();
+            localStorage.setItem(STORAGE_SCRIPT, editor.value);
+        });
+
+        editor.addEventListener('scroll', () => {
+            lineNums.scrollTop = editor.scrollTop;
+        });
+
+        editor.addEventListener('keydown', e => {
+            // Ctrl+Enter → Run
+            if (e.ctrlKey && e.key === 'Enter') { e.preventDefault(); runScript(); return; }
+            // Ctrl+L → Clear output
+            if (e.ctrlKey && e.key === 'l') { e.preventDefault(); outputPanel.innerHTML = ''; setStatus('READY'); return; }
+            
+            // Tab → 4 spaces
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                const start = editor.selectionStart;
+                const end = editor.selectionEnd;
+                editor.value = editor.value.substring(0, start) + '    ' + editor.value.substring(end);
+                editor.selectionStart = editor.selectionEnd = start + 4;
+                updateLineNums();
+                return;
+            }
+
+            // Expert Feature: Auto-indent on Enter
+            if (e.key === 'Enter' && !e.ctrlKey && !e.shiftKey) {
+                const start = editor.selectionStart;
+                const lines = editor.value.substring(0, start).split('\n');
+                const lastLine = lines[lines.length - 1];
+                const indentMatch = lastLine.match(/^\s*/);
+                const indent = indentMatch ? indentMatch[0] : '';
+                
+                // Allow a tiny delay so the actual newline is inserted by browser, then we add indent
+                setTimeout(() => {
+                    const newPos = editor.selectionStart;
+                    editor.value = editor.value.substring(0, newPos) + indent + editor.value.substring(newPos);
+                    editor.selectionStart = editor.selectionEnd = newPos + indent.length;
+                    updateLineNums();
+                }, 0);
+            }
+
+            // ↑↓ History (Alt + Up/Down)
+            if (e.altKey && e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (histIdx > 0) { histIdx--; editor.value = history[histIdx]; updateLineNums(); }
+            }
+            if (e.altKey && e.key === 'ArrowDown') {
+                e.preventDefault();
+                if (histIdx < history.length - 1) { histIdx++; editor.value = history[histIdx]; }
+                else { histIdx = history.length; editor.value = ''; }
+                updateLineNums();
+            }
+        });
+
+        runBtn.onclick = () => runScript();
+        clearBtn.onclick = () => { outputPanel.innerHTML = ''; setStatus('READY'); };
+        resetBtn.onclick = () => {
+            if (confirm('Reset Python namespace and clear all variables?')) {
+                resetNamespace();
+            }
+        };
+
+        snipSelect.onchange = () => {
+            const idx = parseInt(snipSelect.value);
+            if (!isNaN(idx) && snippets[idx]) {
+                editor.value = snippets[idx][1];
+                updateLineNums();
+                localStorage.setItem(STORAGE_SCRIPT, editor.value);
+            }
+            snipSelect.value = '';
+        };
+
+        container.appendChild(root);
+    }
+
 
     exportToCDL() {
         console.log("[Radiance] Generating ASC CDL (.cdl)...");
@@ -9500,6 +10529,62 @@ class RadianceViewer {
         throw new Error('[Radiance] Synchronous zlib inflate is not supported. Use _zlibInflateAsync() instead.');
     }
 
+    _setupComfyListeners() {
+        const onProgress = (e) => {
+            const { value, max } = e.detail;
+            const p = value / max;
+            this._lastProgress = p;
+            if (this.neuralMonitor) {
+                this.neuralMonitor.setProgress(p);
+                // Detection for sampling vs decoding based on p jumps
+                if (p > 0.01 && p < 1.0) {
+                    this.neuralMonitor.setPhase('sampling');
+                }
+            }
+        };
+
+        const onExecuted = () => {
+            this._lastProgress = 0;
+            if (this.neuralMonitor) {
+                this.neuralMonitor.setProgress(1.0);
+                this.neuralMonitor.setPhase('stable');
+            }
+        };
+
+        const onExecuting = (e) => {
+            if (this.neuralMonitor) {
+                // If we hit a VAE Decode node specifically (heuristic)
+                const nodeId = e.detail;
+                const node = app.graph.getNodeById(nodeId);
+                const type = node?.type?.toLowerCase() || '';
+                
+                if (type.includes('sampling') || type.includes('sampler')) {
+                    this.neuralMonitor.setPhase('sampling');
+                } else if (type.includes('vae') || type.includes('decode')) {
+                    this.neuralMonitor.setPhase('decoding');
+                } else {
+                    this.neuralMonitor.setPhase('init');
+                }
+
+                // Visual "Process Log"
+                const nodeTitle = node?.title || type || nodeId;
+                this._termLog('event', `[PROCESS] Executing: ${nodeTitle}`);
+            }
+        };
+
+        const onStatus = (e) => {
+            const queueCount = e.detail?.status?.exec_info?.queue_remaining || 0;
+            if (queueCount > 0 && this.neuralMonitor && this.neuralMonitor.phase === 'stable') {
+                this.neuralMonitor.setPhase('init');
+            }
+        };
+
+        api.addEventListener("progress", onProgress);
+        api.addEventListener("executed", onExecuted);
+        api.addEventListener("executing", onExecuting);
+        api.addEventListener("status", onStatus);
+    }
+
     destroy() {
         RadianceViewer.allInstances.delete(this);
         if (RadianceViewer.activeInstance === this) {
@@ -9822,6 +10907,7 @@ class RadianceCurveEditor {
             'HueVsSat': '#fff144',
             'HueVsLuma': '#44ffaa'
         };
+        this.rangeY = 1.0; // Default: 0..1 (LDR)
 
         this.levels = { inBlack: 0, inWhite: 255 };
 
@@ -9846,14 +10932,14 @@ class RadianceCurveEditor {
     normToCanvas(nx, ny) {
         return {
             cx: this.plotX + nx * this.plotW,
-            cy: this.plotY + (1 - ny) * this.plotH
+            cy: this.plotY + (1 - (ny / this.rangeY)) * this.plotH
         };
     }
 
     canvasToNorm(cx, cy) {
         return {
             x: (cx - this.plotX) / this.plotW,
-            y: 1.0 - (cy - this.plotY) / this.plotH
+            y: (1.0 - (cy - this.plotY) / this.plotH) * this.rangeY
         };
     }
 
@@ -10074,15 +11160,15 @@ class RadianceCurveEditor {
 
                 // Endpoints: lock X, allow Y
                 if (idx === 0) {
-                    p.y = Math.max(0, Math.min(1, norm.y));
+                    p.y = norm.y;
                 } else if (idx === pts.length - 1) {
-                    p.y = Math.max(0, Math.min(1, norm.y));
+                    p.y = norm.y;
                 } else {
                     // Interior point: constrain X between neighbors
                     const minX = pts[idx - 1].x + 0.005;
                     const maxX = pts[idx + 1].x - 0.005;
                     p.x = Math.max(minX, Math.min(maxX, norm.x));
-                    p.y = Math.max(0, Math.min(1, norm.y));
+                    p.y = norm.y;
                 }
                 this.notifyChange();
             } else {
@@ -10268,9 +11354,11 @@ class RadianceCurveEditor {
                 h01 * ys[k + 1] + h11 * hk * m[k + 1];
         }
 
-        // Clamp output to [0, 1]
-        for (let i = 0; i < 256; i++) {
-            lut[i] = Math.max(0, Math.min(1, lut[i]));
+        // HDR Output: no clamping to [0, 1] unless it's a Hue curve
+        if (points === this.curves['HueVsHue'] || points === this.curves['HueVsSat'] || points === this.curves['HueVsLuma']) {
+            for (let i = 0; i < 256; i++) {
+                lut[i] = Math.max(0, Math.min(1, lut[i]));
+            }
         }
 
         return lut;
@@ -10315,14 +11403,23 @@ class RadianceCurveEditor {
         }
         ctx.stroke();
 
-        // Major grid (4 divisions = quarter-stop)
+        // Major grid (4 divisions = quarter-stop in 0..1, adapted for rangeY)
         ctx.strokeStyle = 'rgba(255, 255, 255, 0.07)';
         ctx.beginPath();
+
+        // Vertical grid (Input 0..1)
         for (let i = 1; i < 4; i++) {
             const n = i * 0.25;
             const { cx: gx } = this.normToCanvas(n, 0);
-            const { cy: gy } = this.normToCanvas(0, n);
             ctx.moveTo(gx, pY); ctx.lineTo(gx, pY + pH);
+        }
+
+        // Horizontal grid (Output 0..rangeY)
+        const segments = this.rangeY > 1.0 ? Math.floor(this.rangeY * 4) : 4;
+        const step = this.rangeY / segments;
+        for (let i = 1; i < segments; i++) {
+            const n = i * step;
+            const { cy: gy } = this.normToCanvas(0, n);
             ctx.moveTo(pX, gy); ctx.lineTo(pX + pW, gy);
         }
         ctx.stroke();
@@ -10330,7 +11427,7 @@ class RadianceCurveEditor {
         // Center cross (midpoint reference)
         ctx.strokeStyle = 'rgba(255, 255, 255, 0.10)';
         ctx.beginPath();
-        const mid = this.normToCanvas(0.5, 0.5);
+        const mid = this.normToCanvas(0.5, 0.5 * this.rangeY);
         ctx.moveTo(mid.cx - 6, mid.cy); ctx.lineTo(mid.cx + 6, mid.cy);
         ctx.moveTo(mid.cx, mid.cy - 6); ctx.lineTo(mid.cx, mid.cy + 6);
         ctx.stroke();
@@ -10344,7 +11441,9 @@ class RadianceCurveEditor {
             const h0 = this.normToCanvas(0, 0.5), h1 = this.normToCanvas(1, 0.5);
             ctx.moveTo(h0.cx, h0.cy); ctx.lineTo(h1.cx, h1.cy);
         } else {
-            const d0 = this.normToCanvas(0, 0), d1 = this.normToCanvas(1, 1);
+            // Identity line usually goes 0..1 even in HDR view
+            const d1Val = Math.min(1.0, this.rangeY);
+            const d0 = this.normToCanvas(0, 0), d1 = this.normToCanvas(d1Val, d1Val);
             ctx.moveTo(d0.cx, d0.cy); ctx.lineTo(d1.cx, d1.cy);
         }
         ctx.stroke();
@@ -10556,14 +11655,22 @@ class RadianceCurveEditor {
         ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
         ctx.font = `9px ${this.theme.mono}`;
         ctx.textAlign = 'center';
+        // X-axis (Always 0..255)
         [0, 64, 128, 192, 255].forEach(v => {
             const { cx } = this.normToCanvas(v / 255, 0);
             ctx.fillText(v.toString(), cx, pY + pH + 13);
         });
+
+        // Y-axis (Scaled by rangeY)
         ctx.textAlign = 'right';
-        [0, 64, 128, 192, 255].forEach(v => {
-            const { cy } = this.normToCanvas(0, v / 255);
-            ctx.fillText(v.toString(), pX - 5, cy + 3);
+        const yStops = [0, 0.25, 0.5, 0.75, 1.0];
+        if (this.rangeY > 1.0) yStops.push(1.5, 2.0);
+        if (this.rangeY > 2.0) yStops.push(3.0, 4.0);
+
+        yStops.filter(v => v <= this.rangeY).forEach(v => {
+            const { cy } = this.normToCanvas(0, v);
+            const label = Math.round(v * 255).toString();
+            ctx.fillText(label, pX - 5, cy + 3);
         });
     }
 
@@ -10611,9 +11718,9 @@ class RadianceCurveEditor {
             const g = lookup(gCurve, mVal);
             const b = lookup(bCurve, mVal);
 
-            lut[i * 4 + 0] = Math.max(0, Math.min(1, r));
-            lut[i * 4 + 1] = Math.max(0, Math.min(1, g));
-            lut[i * 4 + 2] = Math.max(0, Math.min(1, b));
+            lut[i * 4 + 0] = r;
+            lut[i * 4 + 1] = g;
+            lut[i * 4 + 2] = b;
             lut[i * 4 + 3] = 1.0;
 
             // Secondary LUT

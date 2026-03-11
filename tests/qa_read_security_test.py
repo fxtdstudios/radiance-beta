@@ -35,12 +35,24 @@ class TestReadSecurity(unittest.TestCase):
         self.assertIn("escapes base directory", str(cm.exception))
 
     def test_sequence_path_traversal(self):
-        evil_path = "C:/Windows/System32" 
-        if os.name == 'nt':
-            with self.assertRaises(ValueError) as cm:
-                self.seq_node.read_sequence(folder_path=evil_path, pattern="*", 
-                                          start_frame=0, frame_limit=1, input_colorspace="sRGB (Standard)")
-            self.assertIn("escapes base directory", str(cm.exception))
+        evil_path = "../../../Windows/System32" 
+        with self.assertRaises(ValueError) as cm:
+            self.seq_node.read_sequence(folder_path=evil_path, pattern="*", 
+                                      start_frame=0, frame_limit=1, input_colorspace="sRGB (Standard)")
+        self.assertIn("escapes base directory", str(cm.exception))
+
+    def test_absolute_path_allowed(self):
+        # We now allow explicit absolute paths
+        dummy_file = os.path.join(self.input_dir, "test.mp4")
+        with open(dummy_file, "w") as f: f.write("dummy")
+        
+        abs_path = os.path.abspath(dummy_file)
+        # Should not raise ValueError for path traversal
+        try:
+            self.video_node.read_video(video_path=abs_path, start_frame=0, frame_count=1, 
+                                      input_colorspace="sRGB (Standard)", frame_stride=1)
+        except (IOError, RuntimeError):
+            pass
 
     def test_valid_input_path(self):
         # Create a dummy file in input_dir

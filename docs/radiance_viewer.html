@@ -25,6 +25,7 @@
             <a href="installation.html">Install</a>
             <a href="node_reference.html">Nodes</a>
             <a href="radiance_viewer.html" class="active">Viewer</a>
+            <a href="scripting.html">Scripting</a>
             <a href="tutorials.html">Tutorials</a>
             <a href="faq.html">FAQ</a>
             <a href="changelog.html">Changelog</a>
@@ -45,6 +46,7 @@
             <a href="installation.html">Install</a>
             <a href="node_reference.html">Nodes</a>
             <a href="radiance_viewer.html" class="active">Viewer</a>
+            <a href="scripting.html">Scripting</a>
             <a href="tutorials.html">Tutorials</a>
             <a href="faq.html">FAQ</a>
             <a href="changelog.html">Changelog</a>
@@ -90,7 +92,7 @@
                 <h1 class="text-gradient">Radiance Pro Viewer</h1>
                 <p class="page-subtitle">VFX Industry-Standard Image Analysis & Grading Suite for ComfyUI</p>
                 <div style="display:flex; gap:.6rem; margin-top:1rem;">
-                    <span class="badge badge-gold">v2.1 Features</span>
+                    <span class="badge badge-gold">v2.2 Features</span>
                     <span class="badge badge-teal">GPU Accelerated</span>
                     <span class="badge badge-violet">Interactive</span>
                 </div>
@@ -153,12 +155,32 @@
                 </div>
             </section>
 
+            <!-- Terminal HUD -->
+            <section class="wiki-section" id="terminal" style="margin-bottom: 3rem;">
+                <div class="node-card">
+                    <div class="node-title">
+                        <span class="node-icon">⌨</span>
+                        <span class="node-name">3. Terminal HUD (New in v2.2)</span>
+                    </div>
+                    <p class="node-desc">A live Python REPL and automation environment built directly into the viewer dock.</p>
+
+                    <div style="margin-top: 1.5rem;">
+                        <ul class="wiki-list">
+                            <li><strong>Live Execution:</strong> Run Python commands directly against the ComfyUI backend with real-time output.</li>
+                            <li><strong>Persistent Namespace:</strong> Variables and imports survive between executions, allowing for complex multi-step scripting.</li>
+                            <li><strong>Safety First:</strong> 30-second timeout guard prevents long-running scripts from freezing the UI.</li>
+                            <li><strong>Rich Context:</strong> Pre-injected with <code>torch</code>, <code>numpy</code>, <code>os</code>, <code>json</code>, and <code>folder_paths</code>.</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
             <!-- Post FX -->
             <section class="wiki-section" id="post" style="margin-bottom: 3rem;">
                 <div class="node-card">
                     <div class="node-title">
                         <span class="node-icon">✨</span>
-                        <span class="node-name">3. Post FX & Optics</span>
+                        <span class="node-name">4. Post FX & Optics</span>
                     </div>
 
                     <div style="margin-top: 1.5rem;">
@@ -181,7 +203,7 @@
                 <div class="node-card">
                     <div class="node-title">
                         <span class="node-icon">📊</span>
-                        <span class="node-name">4. Scopes & Analysis HUD</span>
+                        <span class="node-name">5. Scopes & Analysis HUD</span>
                     </div>
                     <p class="node-desc">Analyze your image with precision using GPU-accelerated scopes that run at
                         60fps on 4K renders.</p>
@@ -217,7 +239,7 @@
                 <div class="node-card">
                     <div class="node-title">
                         <span class="node-icon">⚖️</span>
-                        <span class="node-name">5. Comparison Bridge & A/B Wipe</span>
+                        <span class="node-name">6. Comparison Bridge & A/B Wipe</span>
                     </div>
 
                     <div style="margin-top: 1.5rem;">

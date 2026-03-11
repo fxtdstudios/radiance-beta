@@ -1052,5 +1052,5 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceUnifiedLoader": "◎ Radiance Unified Loader",
-    "RadianceLoraStack":     "◎ Radiance LoRA Stack",
+    "RadianceLoraStack": "◎ Radiance LoRA Stack",
 }

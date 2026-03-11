@@ -25,6 +25,7 @@
             <a href="installation.html">Install</a>
             <a href="node_reference.html">Nodes</a>
             <a href="radiance_viewer.html">Viewer</a>
+            <a href="scripting.html">Scripting</a>
             <a href="tutorials.html">Tutorials</a>
             <a href="faq.html">FAQ</a>
             <a href="changelog.html" class="active">Changelog</a>
@@ -45,6 +46,7 @@
             <a href="installation.html">Install</a>
             <a href="node_reference.html">Nodes</a>
             <a href="radiance_viewer.html">Viewer</a>
+            <a href="scripting.html">Scripting</a>
             <a href="tutorials.html">Tutorials</a>
             <a href="faq.html">FAQ</a>
             <a href="changelog.html" class="active">Changelog</a>
@@ -67,6 +69,7 @@
             <nav class="sidebar-nav">
                 <div class="sidebar-group">
                     <div class="sidebar-label">Major Releases</div>
+                    <a href="#v210" class="sidebar-link">v2.1.0</a>
                     <a href="#v210" class="sidebar-link">v2.1.0</a>
                     <a href="#v110" class="sidebar-link">v1.1.0</a>
                     <a href="#v101" class="sidebar-link">v1.0.1</a>
@@ -100,6 +103,46 @@
                         <span style="font-size:1.2rem;font-weight:800;color:var(--text-primary);">v2.1.0</span>
                         <span class="version-date">March 2026</span>
                         <span class="badge badge-green">Latest</span>
+                    </div>
+                    <div class="change-section">
+                        <h3 class="added">Added</h3>
+                        <ul>
+                            <li><strong>TERMINAL HUD Tab</strong>: Live Python REPL embedded directly in the Radiance Viewer. Features a persistent namespace (variables survive between runs), a 30-second timeout guard, pre-injected modules (<code>torch</code>, <code>numpy</code>, <code>folder_paths</code>…), Reset Namespace button, and a snippet dropdown.</li>
+                            <li><strong>Documentation Links</strong>: Radiance Workspace node now has two new buttons — <a href="https://radiance.fxtd.org" target="_blank">📖 radiance.fxtd.org</a> and <a href="https://www.fxtd.org" target="_blank">🌐 fxtd.org</a>. Links also embedded in the Terminal tab status bar.</li>
+                        </ul>
+                    </div>
+                    <div class="change-section">
+                        <h3 class="changed">Changed — Viewer UI (5 Design Improvements)</h3>
+                        <ul>
+                            <li><strong>Toolbar Group Labels</strong>: 9 labeled clusters (<code>FILE · GRADE · VIEW · CH · NAV · ANALYSIS · COMPARE · SCOPES · ANNOTATE · MEASURE</code>) with hairline separator rules for fast visual scanning.</li>
+                            <li><strong>Panel Typography</strong>: All HUD sub-labels bumped to <code>11px</code> + <code>letter-spacing: 0.06em</code> — matching DaVinci Resolve's readability standard.</li>
+                            <li><strong>Bottom Dock Colors</strong>: Terminal tab now renders in brand blue (<code>#00a8ff</code>); Script Editor in muted slate (<code>#7a92b0</code>). Removes the previous garish green/pink palette.</li>
+                            <li><strong>Film Preset Active State</strong>: Clicking a film stock pill now shows a blue-glow border — the selected preset is always visually indicated.</li>
+                            <li><strong>Right Panel Height</strong>: Grading controls now fill the full panel height using <code>flex:1</code> instead of leaving a black void.</li>
+                        </ul>
+                    </div>
+                    <div class="change-section">
+                        <h3 class="changed">Changed — Nodes</h3>
+                        <ul>
+                            <li><strong>◎ Radiance Depth Map</strong>: Renamed from <em>Depth Map Generator</em>. Internal class name unchanged — existing workflows are unaffected.</li>
+                            <li><strong>Output Path Unification</strong>: Widget parameter renamed to <code>output_path</code> in both <code>RadianceWrite</code> (was <code>subfolder</code>) and <code>RadianceSaveEXR</code> (was <code>custom_path</code>).</li>
+                        </ul>
+                    </div>
+                    <div class="change-section">
+                        <h3 class="fixed">Fixed</h3>
+                        <ul>
+                            <li>Added missing <code>import json</code> to <code>nodes_radiance_viewer.py</code>.</li>
+                            <li>Restored accidentally dropped <code>exportToCDL()</code> declaration after Terminal tab injection.</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <section class="wiki-section" id="v210" style="margin-bottom: 3rem;">
+                <div class="node-card">
+                    <div class="version-header">
+                        <span style="font-size:1.2rem;font-weight:800;color:var(--text-primary);">v2.1.0</span>
+                        <span class="version-date">March 2026</span>
                     </div>
                     <div class="change-section">
                         <h3 class="added">Added</h3>

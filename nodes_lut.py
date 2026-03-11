@@ -151,13 +151,15 @@ def _parse_cube_file(path: str) -> Tuple[torch.Tensor, int]:
     return torch.tensor(values, dtype=torch.float32), size
 
 
-def _apply_cube_lut_to_image(img: torch.Tensor, lut: torch.Tensor, lut_size: int) -> torch.Tensor:
+def _apply_cube_lut_to_image(img: torch.Tensor, lut: torch.Tensor, lut_size: int, clamp_input: bool = True) -> torch.Tensor:
     """
     Trilinear lookup of a (N³, 3) LUT on an (..., H, W, 3) image tensor.
     Returns same shape as img.
     """
     orig_shape = img.shape
-    flat = img.reshape(-1, 3).clamp(0.0, 1.0)
+    flat = img.reshape(-1, 3)
+    if clamp_input:
+        flat = flat.clamp(0.0, 1.0)
     n = lut_size
 
     # .cube: R fastest, B slowest → index = B*n² + G*n + R
@@ -290,7 +292,7 @@ class RadianceLUTBake:
         logger.info(f"[Radiance LUT] Saved {size}³ .cube → {abs_path}")
 
         # Apply to input image for preview
-        preview = _apply_cube_lut_to_image(image.float(), lut, size)
+        preview = _apply_cube_lut_to_image(image.float(), lut, size, clamp_input=True)
 
         return (preview, abs_path)
 
@@ -324,6 +326,15 @@ class RadianceLUTApply:
                         "tooltip": "Blend strength: 0 = bypass, 1 = full LUT.",
                     },
                 ),
+                "clamp_input": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "label_on": "Clamp (SDR)",
+                        "label_off": "No Clamp (HDR)",
+                        "tooltip": "Clamp input image to 0-1 range before LUT application. Standard .cube LUTs expect 0-1 range.",
+                    },
+                ),
             },
         }
 
@@ -333,7 +344,7 @@ class RadianceLUTApply:
     CATEGORY = "FXTD Studios/Radiance/Color"
     DESCRIPTION = "Apply an external .cube LUT file (Resolve / Nuke / Premiere format) to an image."
 
-    def apply_lut(self, image: torch.Tensor, cube_path: str, strength: float = 1.0):
+    def apply_lut(self, image: torch.Tensor, cube_path: str, strength: float = 1.0, clamp_input: bool = True):
         abs_path = os.path.abspath(cube_path)
 
         # Security: validate file extension
@@ -352,7 +363,7 @@ class RadianceLUTApply:
             return (image,)
 
         img_f = image.float()
-        graded = _apply_cube_lut_to_image(img_f, lut, lut_size)
+        graded = _apply_cube_lut_to_image(img_f, lut, lut_size, clamp_input=clamp_input)
 
         if strength < 1.0:
             graded = img_f * (1.0 - strength) + graded * strength
@@ -367,6 +378,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceLUTBake":  "◎ Radiance LUT Bake",
+    "RadianceLUTBake": "◎ Radiance LUT Bake",
     "RadianceLUTApply": "◎ Radiance LUT Apply",
 }

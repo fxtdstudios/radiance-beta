@@ -263,5 +263,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceDepthMapGenerator": "◎ Depth Map Generator",
+    "RadianceDepthMapGenerator": "◎ Radiance Depth Map",
 }

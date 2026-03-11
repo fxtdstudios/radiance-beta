@@ -1,0 +1,944 @@
+import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════
+ *                    RADIANCE VFX MASK EDITOR (PRO)
+ *                      Radiance © 2024-2026
+ * 
+ * High-end masking tool featuring Vector Rotoscoping (Polygons/Splines),
+ * Procedural Qualifiers (HSL), and Soft-Brush painting with full undo/redo.
+ * ═══════════════════════════════════════════════════════════════════════════════
+ */
+
+class RadianceMaskEditor {
+    constructor() {
+        this.node = null;
+        this.imageEl = null;
+
+        // Display
+        this.zoom = 1.0;
+        this.panX = 0;
+        this.panY = 0;
+        this.isPanning = false;
+
+        // Tools: brush, eraser, polygon, magic_wand
+        this.tool = 'brush';
+
+        // Brush Settings
+        this.brushSize = 50;
+        this.brushOpacity = 1.0;
+        this.brushHardness = 0.2;
+        this.isDrawing = false;
+
+        // Vector State
+        this.polygons = [];       // Array of { points: [{x,y}], closed: bool, feather: float }
+        this.currentPoly = null;
+        this.activePoint = null;
+
+        // View Mode
+        this.viewMode = 'overlay'; // overlay, matte, false_color
+
+        // Qualifiers (HSL)
+        this.qualifier = {
+            enabled: false,
+            h: 0.5, hW: 0.1, hS: 0.05,
+            s: 0.5, sW: 0.5, sS: 0.1,
+            l: 0.5, lW: 0.5, lS: 0.1
+        };
+
+        // History
+        this.history = [];
+        this.historyIndex = -1;
+
+        this.createUI();
+        this.setupEventListeners();
+    }
+
+    createUI() {
+        // Overlay container matching Radiance standard
+        this.overlay = document.createElement("div");
+        this.overlay.className = "radiance-mask-overlay radiance-glass-dock";
+        this.overlay.style.cssText = `
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            background: rgba(10, 10, 15, 0.95);
+            z-index: 9999; display: none; align-items: center; justify-content: center;
+            font-family: 'Inter', sans-serif; backdrop-filter: blur(14px);
+        `;
+
+        this.container = document.createElement("div");
+        this.container.style.cssText = `
+            width: 95vw; height: 95vh;
+            background: #0a0a0f; border-radius: 8px;
+            display: flex; flex-direction: column;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.8);
+            border: 1px solid rgba(60, 70, 100, 0.25);
+            overflow: hidden;
+        `;
+
+        // ── TOPBAR ─────────────────────────────────────────────────────────────
+        const topbar = document.createElement("div");
+        topbar.style.cssText = `
+            flex: 0 0 44px; background: rgba(16, 16, 24, 0.95);
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0 16px; border-bottom: 1px solid rgba(60, 70, 100, 0.3);
+        `;
+
+        const title = document.createElement("div");
+        title.innerHTML = "<span style='color:#00a8ff; font-weight:600;'>Radiance</span> VFX Mask Editor";
+        title.style.color = "#fff"; title.style.fontSize = "14px";
+
+        const actionsDiv = document.createElement("div");
+        actionsDiv.style.display = "flex"; actionsDiv.style.gap = "8px";
+
+        const closeBtn = this.createBtn("Cancel", () => this.hide(), true);
+        const saveBtn = this.createBtn("Save & Return", () => this.saveMask());
+        saveBtn.style.background = "#00a8ff"; saveBtn.style.color = "#fff"; saveBtn.style.border = "none";
+
+        actionsDiv.appendChild(closeBtn);
+        actionsDiv.appendChild(saveBtn);
+
+        topbar.appendChild(title);
+        topbar.appendChild(actionsDiv);
+
+        // ── MAIN CONTENT ───────────────────────────────────────────────────────
+        const contentArea = document.createElement("div");
+        contentArea.style.cssText = "flex: 1; display: flex; overflow: hidden;";
+
+        // ── LEFT TOOLBAR (Tools) ───────────────────────────────────────────────
+        const leftToolbar = document.createElement("div");
+        leftToolbar.style.cssText = `
+            flex: 0 0 50px; background: #0e0e16;
+            border-right: 1px solid rgba(60, 70, 100, 0.2);
+            display: flex; flex-direction: column; align-items: center; padding-top: 10px; gap: 8px;
+        `;
+
+        this.toolBtns = {};
+        const addTool = (id, icon, tooltip) => {
+            const btn = document.createElement("button");
+            btn.innerHTML = icon; btn.title = tooltip;
+            btn.style.cssText = `
+                width: 36px; height: 36px; border-radius: 6px; border: 1px solid transparent;
+                background: transparent; color: #a0a0b0; cursor: pointer; font-size: 16px;
+                display: flex; align-items: center; justify-content: center; transition: 0.2s;
+            `;
+            btn.onclick = () => this.setTool(id);
+            this.toolBtns[id] = btn;
+            leftToolbar.appendChild(btn);
+        };
+
+        addTool('brush', '🖌️', 'Soft Brush (B)');
+        addTool('eraser', '🧹', 'Eraser (E)');
+        addTool('polygon', '⬡', 'Polygon/Spline (P)');
+        addTool('magic_wand', '✨', 'Magic Wand (W)');
+
+        // ── CANVAS AREA ────────────────────────────────────────────────────────
+        this.canvasContainer = document.createElement("div");
+        this.canvasContainer.style.cssText = `
+            flex: 1; background: #000; position: relative; overflow: hidden; cursor: crosshair;
+        `;
+
+        this.displayCanvas = document.createElement("canvas");
+        this.displayCanvas.style.cssText = "position: absolute; top: 0; left: 0; transform-origin: top left;";
+
+        // Raster Mask Context
+        this.maskCanvas = document.createElement("canvas");
+        this.maskCtx = this.maskCanvas.getContext('2d', { willReadFrequently: true });
+        this.displayCtx = this.displayCanvas.getContext('2d');
+
+        this.canvasContainer.appendChild(this.displayCanvas);
+
+        // ── RIGHT PROPERTIES PANEL ─────────────────────────────────────────────
+        const rightPanel = document.createElement("div");
+        rightPanel.style.cssText = `
+            flex: 0 0 280px; background: #12121a;
+            border-left: 1px solid rgba(60, 70, 100, 0.2);
+            padding: 16px; color: #ddd; display: flex; flex-direction: column; gap: 16px;
+            overflow-y: auto; font-size: 13px;
+        `;
+
+        // Tool Settings Group
+        const createGroup = (title) => {
+            const g = document.createElement("div");
+            g.style.cssText = "display: flex; flex-direction: column; gap: 12px; background: rgba(255,255,255,0.02); padding: 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.05);";
+            const h = document.createElement("div");
+            h.innerText = title; h.style.cssText = "font-size: 11px; color: #00a8ff; text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid rgba(0,168,255,0.2); padding-bottom: 4px;";
+            g.appendChild(h);
+            return g;
+        };
+
+        const viewGroup = createGroup("Visualization");
+        const viewSelect = document.createElement("select");
+        viewSelect.style.cssText = "background: #1a1a24; color: #fff; border: 1px solid #3c4664; padding: 4px; border-radius: 4px;";
+        ['overlay', 'matte', 'false_color'].forEach(v => {
+            const opt = document.createElement("option"); opt.value = v; opt.innerText = v.replace('_', ' ').toUpperCase();
+            viewSelect.appendChild(opt);
+        });
+        viewSelect.onchange = (e) => { this.viewMode = e.target.value; this.drawDisplay(); };
+        viewGroup.appendChild(viewSelect);
+
+        this.brushGroup = createGroup("Raster Brush Settings");
+        this.brushGroup.appendChild(this.createSlider("Size", 1, 500, 1, this.brushSize, (v) => this.brushSize = v));
+        this.brushGroup.appendChild(this.createSlider("Opacity", 0.01, 1.0, 0.01, this.brushOpacity, (v) => this.brushOpacity = v));
+        this.brushGroup.appendChild(this.createSlider("Softness", 0.0, 1.0, 0.01, this.brushHardness, (v) => this.brushHardness = v));
+
+        this.vectorGroup = createGroup("Vector Shape Settings");
+        this.vectorGroup.style.display = "none";
+        const closePolyBtn = this.createBtn("Close / Fill Shape", () => this.closePolygon());
+        const delPolyBtn = this.createBtn("Delete Shape", () => this.deletePolygon(), true);
+        this.vectorFeather = this.createSlider("Feather", 0, 100, 1, 0, (v) => {
+            if (this.currentPoly) { this.currentPoly.feather = v; this.drawDisplay(); }
+        });
+        this.vectorGroup.appendChild(closePolyBtn);
+        this.vectorGroup.appendChild(this.vectorFeather);
+        this.vectorGroup.appendChild(delPolyBtn);
+
+        const qualifierGroup = createGroup("HSL Qualifier Keyer");
+        qualifierGroup.style.display = "none";
+
+        const qToggle = document.createElement("button");
+        qToggle.innerText = "Enable Qualifier";
+        qToggle.style.cssText = "padding:6px; background: rgba(255,255,255,0.05); color:#aaa; border:1px solid rgba(255,255,255,0.1); border-radius:4px; cursor:pointer;";
+        qToggle.onclick = () => {
+            this.qualifier.enabled = !this.qualifier.enabled;
+            qToggle.style.background = this.qualifier.enabled ? "rgba(0,168,255,0.2)" : "rgba(255,255,255,0.05)";
+            qToggle.style.color = this.qualifier.enabled ? "#00a8ff" : "#aaa";
+            qToggle.style.borderColor = this.qualifier.enabled ? "#00a8ff" : "rgba(255,255,255,0.1)";
+            this.drawDisplay();
+        };
+        qualifierGroup.appendChild(qToggle);
+
+        const updateQ = (key, val) => { this.qualifier[key] = val; if (this.qualifier.enabled) this.drawDisplay(); };
+
+        qualifierGroup.appendChild(this.createSlider("Hue", 0, 1, 0.01, this.qualifier.h, v => updateQ('h', v)));
+        qualifierGroup.appendChild(this.createSlider("Hue Softness", 0, 1, 0.01, this.qualifier.hS, v => updateQ('hS', v)));
+        qualifierGroup.appendChild(this.createSlider("Sat", 0, 1, 0.01, this.qualifier.s, v => updateQ('s', v)));
+        qualifierGroup.appendChild(this.createSlider("Sat Softness", 0, 1, 0.01, this.qualifier.sS, v => updateQ('sS', v)));
+        qualifierGroup.appendChild(this.createSlider("Lum", 0, 1, 0.01, this.qualifier.l, v => updateQ('l', v)));
+        qualifierGroup.appendChild(this.createSlider("Lum Softness", 0, 1, 0.01, this.qualifier.lS, v => updateQ('lS', v)));
+
+        const qBakeBtn = this.createBtn("Bake Qualifier to Mask", () => this.bakeQualifier());
+        qualifierGroup.appendChild(qBakeBtn);
+
+        this.qualifierGroup = qualifierGroup;
+
+        // Magic Wand settings
+        this.wandGroup = createGroup("Magic Wand (Flood Fill)");
+        this.wandGroup.style.display = "none";
+        this.wandTolerance = 0.1;
+        this.wandGroup.appendChild(this.createSlider("Tolerance", 0, 1, 0.01, this.wandTolerance, (v) => this.wandTolerance = v));
+
+        const actionsGroup = createGroup("Global Actions");
+        actionsGroup.style.marginTop = "auto";
+        const clearBtn = this.createBtn("Clear All Masks", () => this.clearMask(), true);
+        actionsGroup.appendChild(clearBtn);
+
+        rightPanel.appendChild(viewGroup);
+        rightPanel.appendChild(this.brushGroup);
+        rightPanel.appendChild(this.vectorGroup);
+        rightPanel.appendChild(this.qualifierGroup);
+        rightPanel.appendChild(this.wandGroup);
+        rightPanel.appendChild(actionsGroup);
+
+        // Assembly
+        contentArea.appendChild(leftToolbar);
+        contentArea.appendChild(this.canvasContainer);
+        contentArea.appendChild(rightPanel);
+
+        this.container.appendChild(topbar);
+        this.container.appendChild(contentArea);
+        this.overlay.appendChild(this.container);
+        document.body.appendChild(this.overlay);
+
+        this.setTool('brush');
+    }
+
+    createBtn(text, onClick, danger = false) {
+        const btn = document.createElement("button");
+        btn.innerText = text;
+        btn.style.cssText = `
+            padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;
+            background: ${danger ? 'rgba(255,50,50,0.1)' : 'rgba(255,255,255,0.05)'};
+            color: ${danger ? '#f55' : '#ccc'};
+            border: 1px solid ${danger ? 'rgba(255,50,50,0.3)' : 'rgba(255,255,255,0.1)'};
+            transition: 0.2s;
+        `;
+        btn.onclick = onClick;
+        return btn;
+    }
+
+    createSlider(label, min, max, step, val, onChange) {
+        const wrap = document.createElement("div");
+        wrap.style.display = "flex"; wrap.style.flexDirection = "column"; wrap.style.gap = "4px";
+
+        const head = document.createElement("div");
+        head.style.display = "flex"; head.style.justifyContent = "space-between"; head.style.fontSize = "12px";
+        head.innerHTML = `<span style="color:#aaa">${label}</span><span id="val_${label.replace(/\s/g, '')}">${val}</span>`;
+
+        const slider = document.createElement("input");
+        slider.type = "range"; slider.min = min; slider.max = max; slider.step = step; slider.value = val;
+        slider.style.width = "100%"; slider.style.accentColor = "#00a8ff";
+
+        slider.oninput = (e) => {
+            const v = parseFloat(e.target.value);
+            wrap.querySelector(`#val_${label.replace(/\s/g, '')}`).innerText = v;
+            onChange(v);
+        };
+
+        wrap.appendChild(head);
+        wrap.appendChild(slider);
+        return wrap;
+    }
+
+    setTool(tool) {
+        this.tool = tool;
+        Object.keys(this.toolBtns).forEach(k => {
+            const b = this.toolBtns[k];
+            if (k === tool) {
+                b.style.background = "rgba(0,168,255,0.2)";
+                b.style.borderColor = "#00a8ff"; b.style.color = "#00a8ff";
+            } else {
+                b.style.background = "transparent";
+                b.style.borderColor = "transparent"; b.style.color = "#a0a0b0";
+            }
+        });
+
+        if (tool === 'polygon') {
+            this.brushGroup.style.display = "none";
+            this.vectorGroup.style.display = "flex";
+            this.wandGroup.style.display = "none";
+            this.qualifierGroup.style.display = "none";
+            if (!this.currentPoly) this.startPolygon();
+        } else if (tool === 'magic_wand') {
+            this.brushGroup.style.display = "none";
+            this.vectorGroup.style.display = "none";
+            this.wandGroup.style.display = "flex";
+            this.qualifierGroup.style.display = "flex"; // Contextual pairing
+            this.currentPoly = null;
+        } else {
+            this.brushGroup.style.display = "flex";
+            this.vectorGroup.style.display = "none";
+            this.wandGroup.style.display = "none";
+            this.qualifierGroup.style.display = "none";
+            this.currentPoly = null;
+        }
+
+        this.drawDisplay();
+    }
+
+    setupEventListeners() {
+        const ro = new ResizeObserver(() => this.drawDisplay());
+        ro.observe(this.canvasContainer);
+
+        // Use pointer events for pressure sensitivity
+        this.canvasContainer.addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            if (e.button === 1 || (e.button === 0 && e.shiftKey) || e.button === 2) {
+                this.isPanning = true;
+                this.canvasContainer.style.cursor = 'grabbing';
+                return;
+            }
+
+            const pos = this.getLogicalPos(e.clientX, e.clientY);
+
+            if (this.tool === 'magic_wand') {
+                this.saveUndoState();
+                this.executeMagicWand(pos);
+                return;
+            }
+
+            if (this.tool === 'polygon') {
+                if (!this.currentPoly) this.startPolygon();
+
+                // Check if clicking near start point to close
+                if (this.currentPoly.points.length > 2) {
+                    const first = this.currentPoly.points[0];
+                    const dist = Math.hypot(first.x - pos.x, first.y - pos.y);
+                    // Hit radius relative to zoom
+                    if (dist * this.zoom < 10) {
+                        this.closePolygon();
+                        return;
+                    }
+                }
+
+                this.currentPoly.points.push({ x: pos.x, y: pos.y });
+                this.saveUndoState();
+                this.drawDisplay();
+                return;
+            }
+
+            if (e.button === 0) {
+                this.isDrawing = true;
+                this.saveUndoState();
+                this.paint(e);
+            }
+        });
+
+        window.addEventListener('pointerup', () => {
+            this.isPanning = false;
+            if (this.isDrawing) {
+                this.isDrawing = false;
+                this.drawDisplay(); // Final commit draw
+            }
+            this.canvasContainer.style.cursor = 'crosshair';
+        });
+
+        this.canvasContainer.addEventListener('pointermove', (e) => {
+            if (this.isPanning) {
+                this.panX += e.movementX;
+                this.panY += e.movementY;
+                this.updateCanvasTransform();
+            } else if (this.isDrawing) {
+                this.paint(e);
+            } else {
+                // Interactive hover for polygon
+                if (this.tool === 'polygon' && this.currentPoly && !this.currentPoly.closed) {
+                    this.drawDisplay(this.getLogicalPos(e.clientX, e.clientY));
+                }
+            }
+        });
+
+        // Context menu block (for pan)
+        this.canvasContainer.addEventListener('contextmenu', e => e.preventDefault());
+
+        this.canvasContainer.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const zoomFactor = 1.15;
+            const mouseX = e.clientX - this.canvasContainer.getBoundingClientRect().left;
+            const mouseY = e.clientY - this.canvasContainer.getBoundingClientRect().top;
+
+            const oldZoom = this.zoom;
+            if (e.deltaY < 0) this.zoom *= zoomFactor;
+            else this.zoom /= zoomFactor;
+            this.zoom = Math.max(0.05, Math.min(this.zoom, 20));
+
+            this.panX = mouseX - (mouseX - this.panX) * (this.zoom / oldZoom);
+            this.panY = mouseY - (mouseY - this.panY) * (this.zoom / oldZoom);
+            this.updateCanvasTransform();
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (this.overlay.style.display === "flex") {
+                if (e.key === "z" && e.ctrlKey) this.undo();
+                else if (e.key === "Escape") this.hide();
+                else if (e.key.toLowerCase() === "b") this.setTool('brush');
+                else if (e.key.toLowerCase() === "e") this.setTool('eraser');
+                else if (e.key.toLowerCase() === "p") this.setTool('polygon');
+                else if (e.key === "Enter" && this.tool === 'polygon') this.closePolygon();
+            }
+        });
+    }
+
+    getLogicalPos(clientX, clientY) {
+        const rect = this.canvasContainer.getBoundingClientRect();
+        return {
+            x: (clientX - rect.left - this.panX) / this.zoom,
+            y: (clientY - rect.top - this.panY) / this.zoom
+        };
+    }
+
+    updateCanvasTransform() {
+        this.displayCanvas.style.transform = `translate(${this.panX}px, ${this.panY}px) scale(${this.zoom})`;
+    }
+
+    // Raster Painting
+    paint(e) {
+        const pos = this.getLogicalPos(e.clientX, e.clientY);
+        const pressure = e.pressure !== undefined ? Math.max(0.1, e.pressure) : 1.0;
+
+        const ctx = this.maskCtx;
+        ctx.save();
+
+        if (this.tool === 'eraser') {
+            ctx.globalCompositeOperation = 'destination-out';
+        } else {
+            ctx.globalCompositeOperation = 'source-over';
+        }
+
+        const radius = (this.brushSize / 2) * pressure;
+        const grad = ctx.createRadialGradient(pos.x, pos.y, radius * this.brushHardness, pos.x, pos.y, radius);
+
+        const opac = this.brushOpacity * pressure;
+        grad.addColorStop(0, `rgba(255,255,255, ${opac})`);
+        grad.addColorStop(1, `rgba(255,255,255, 0)`);
+
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+        this.drawDisplay();
+    }
+
+    // Vector Rotoscoping
+    startPolygon() {
+        this.currentPoly = { points: [], closed: false, feather: 0 };
+        this.polygons.push(this.currentPoly);
+    }
+
+    closePolygon() {
+        if (this.currentPoly && this.currentPoly.points.length > 2) {
+            this.saveUndoState();
+            this.currentPoly.closed = true;
+            this.bakePolygon(this.currentPoly);
+            this.currentPoly = null;
+            this.drawDisplay();
+        }
+    }
+
+    deletePolygon() {
+        if (this.polygons.length > 0) {
+            this.saveUndoState();
+            this.polygons.pop();
+            this.currentPoly = null;
+            // Since we baked to raster, deleting a polygon requires full raster rebuild if we want true non-destructive.
+            // For now, we mix vector & raster by clearing and rebaking.
+            this.rebuildMaskFromState();
+        }
+    }
+
+    bakePolygon(poly) {
+        const ctx = this.maskCtx;
+        ctx.save();
+        ctx.fillStyle = "rgba(255,255,255,1)";
+        ctx.beginPath();
+        poly.points.forEach((p, i) => {
+            if (i === 0) ctx.moveTo(p.x, p.y);
+            else ctx.lineTo(p.x, p.y);
+        });
+        ctx.closePath();
+
+        // Very basic feather simulation by drawing blurred shadow
+        if (poly.feather > 0) {
+            ctx.shadowColor = "white";
+            ctx.shadowBlur = poly.feather;
+        }
+        ctx.fill();
+        ctx.restore();
+    }
+
+    rebuildMaskFromState() {
+        // Simple rebuild: if we had a pure vector workflow this is how we'd do it.
+        // But since we mix raster (brush) and vector (polygon), true undo relies on the raster snapshots.
+        this.undo();
+    }
+
+    clearMask() {
+        this.saveUndoState();
+        this.maskCtx.clearRect(0, 0, this.maskCanvas.width, this.maskCanvas.height);
+        this.polygons = [];
+        this.currentPoly = null;
+        this.drawDisplay();
+    }
+
+    saveUndoState() {
+        if (this.historyIndex < this.history.length - 1) {
+            this.history = this.history.slice(0, this.historyIndex + 1);
+        }
+        // Save raster payload + vector metadata clone
+        this.history.push({
+            imgData: this.maskCtx.getImageData(0, 0, this.maskCanvas.width, this.maskCanvas.height),
+            polys: JSON.parse(JSON.stringify(this.polygons))
+        });
+        if (this.history.length > 30) this.history.shift();
+        else this.historyIndex++;
+    }
+
+    undo() {
+        if (this.historyIndex >= 0) {
+            const state = this.history[this.historyIndex];
+            this.maskCtx.putImageData(state.imgData, 0, 0);
+            this.polygons = JSON.parse(JSON.stringify(state.polys));
+            this.currentPoly = this.polygons.find(p => !p.closed) || null;
+            this.historyIndex--;
+            this.drawDisplay();
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // HSL Qualifier & Magic Wand
+    // ─────────────────────────────────────────────────────────────────
+
+    rgbToHsl(r, g, b) {
+        r /= 255; g /= 255; b /= 255;
+        const max = Math.max(r, g, b), min = Math.min(r, g, b);
+        let h, s, l = (max + min) / 2;
+        if (max === min) {
+            h = s = 0; // achromatic
+        } else {
+            const d = max - min;
+            s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+            switch (max) {
+                case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+                case g: h = (b - r) / d + 2; break;
+                case b: h = (r - g) / d + 4; break;
+            }
+            h /= 6;
+        }
+        return [h, s, l];
+    }
+
+    // Helper math for smoothstep feathering in qualifiers
+    smoothstep(edge0, edge1, x) {
+        const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+        return t * t * (3 - 2 * t);
+    }
+
+    evalQualifierAlpha(r, g, b) {
+        if (!this.qualifier.enabled) return 0;
+
+        const [h, s, l] = this.rgbToHsl(r, g, b);
+        const q = this.qualifier;
+
+        // Hue distance with wrapping
+        let hDist = Math.abs(h - q.h);
+        if (hDist > 0.5) hDist = 1.0 - hDist;
+
+        const hAlpha = 1.0 - this.smoothstep(q.hW, q.hW + q.hS, hDist);
+        const sAlpha = 1.0 - this.smoothstep(q.sW, q.sW + q.sS, Math.abs(s - q.s));
+        const lAlpha = 1.0 - this.smoothstep(q.lW, q.lW + q.lS, Math.abs(l - q.l));
+
+        return hAlpha * sAlpha * lAlpha;
+    }
+
+    executeMagicWand(pos) {
+        if (!this.imageEl) return;
+
+        // Quick flood fill approximation directly mimicking magic wand selection
+        // In JS Canvas, true Flood Fill can be slow, but it's acceptable for editing.
+        const width = this.maskCanvas.width;
+        const height = this.maskCanvas.height;
+        let startX = Math.floor(pos.x);
+        let startY = Math.floor(pos.y);
+
+        if (startX < 0 || startX >= width || startY < 0 || startY >= height) return;
+
+        // We need source image data
+        const tempCanvas = document.createElement("canvas");
+        tempCanvas.width = width; tempCanvas.height = height;
+        const tCtx = tempCanvas.getContext('2d');
+        tCtx.drawImage(this.imageEl, 0, 0);
+        const srcData = tCtx.getImageData(0, 0, width, height).data;
+
+        // Destination mask
+        const maskDataObj = this.maskCtx.getImageData(0, 0, width, height);
+        const mData = maskDataObj.data;
+
+        // Pick color at startX, startY
+        const startIdx = (startY * width + startX) * 4;
+        const startR = srcData[startIdx];
+        const startG = srcData[startIdx + 1];
+        const startB = srcData[startIdx + 2];
+
+        // Basic scanline flood fill
+        const stack = [[startX, startY]];
+        const visited = new Uint8Array(width * height);
+
+        const colorDist = (r1, g1, b1, r2, g2, b2) => {
+            return Math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2) / 441.67; // max distance is sqrt(3*255^2)
+        };
+
+        const tol = this.wandTolerance;
+
+        while (stack.length > 0) {
+            const [x, y] = stack.pop();
+            const idx = y * width + x;
+
+            if (visited[idx]) continue;
+            visited[idx] = 1;
+
+            const pIdx = idx * 4;
+            const r = srcData[pIdx];
+            const g = srcData[pIdx + 1];
+            const b = srcData[pIdx + 2];
+
+            if (colorDist(startR, startG, startB, r, g, b) <= tol) {
+                // Fill mask pixel (pure white)
+                mData[pIdx] = 255; // R
+                mData[pIdx + 1] = 255; // G
+                mData[pIdx + 2] = 255; // B
+                mData[pIdx + 3] = 255; // Alpha
+
+                // push neighbors
+                if (x > 0) stack.push([x - 1, y]);
+                if (x < width - 1) stack.push([x + 1, y]);
+                if (y > 0) stack.push([x, y - 1]);
+                if (y < height - 1) stack.push([x, y + 1]);
+            }
+        }
+
+        this.maskCtx.putImageData(maskDataObj, 0, 0);
+        this.drawDisplay();
+    }
+
+    bakeQualifier() {
+        if (!this.qualifier.enabled || !this.imageEl) return;
+        this.saveUndoState();
+
+        const width = this.maskCanvas.width;
+        const height = this.maskCanvas.height;
+
+        // We need source image data
+        const tempCanvas = document.createElement("canvas");
+        tempCanvas.width = width; tempCanvas.height = height;
+        const tCtx = tempCanvas.getContext('2d');
+        tCtx.drawImage(this.imageEl, 0, 0);
+        const srcData = tCtx.getImageData(0, 0, width, height).data;
+
+        // Destination mask
+        const maskDataObj = this.maskCtx.getImageData(0, 0, width, height);
+        const mData = maskDataObj.data;
+
+        for (let i = 0; i < srcData.length; i += 4) {
+            const alpha = this.evalQualifierAlpha(srcData[i], srcData[i + 1], srcData[i + 2]);
+            if (alpha > 0) {
+                // Screen composite or Replace, depending on what user wants.
+                // We'll do simple Add for now.
+                const val = Math.min(255, mData[i + 3] + alpha * 255);
+                mData[i] = 255; mData[i + 1] = 255; mData[i + 2] = 255;
+                mData[i + 3] = val; // Set alpha channel
+            }
+        }
+
+        this.maskCtx.putImageData(maskDataObj, 0, 0);
+        this.qualifier.enabled = false;
+
+        // Reset qualifier UI button state visually
+        const qToggle = this.qualifierGroup.querySelector("button");
+        if (qToggle) {
+            qToggle.style.background = "rgba(255,255,255,0.05)";
+            qToggle.style.color = "#aaa";
+            qToggle.style.borderColor = "rgba(255,255,255,0.1)";
+        }
+
+        this.drawDisplay();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Compositing Render
+    // ─────────────────────────────────────────────────────────────────
+    drawDisplay(hoverPos = null) {
+        if (!this.imageEl || !this.imageEl.complete) return;
+
+        this.displayCanvas.width = this.imageEl.width;
+        this.displayCanvas.height = this.imageEl.height;
+        const ctx = this.displayCtx;
+
+        // 1. Base Image
+        if (this.viewMode === 'matte') {
+            ctx.fillStyle = 'black';
+            ctx.fillRect(0, 0, this.displayCanvas.width, this.displayCanvas.height);
+        } else {
+            ctx.drawImage(this.imageEl, 0, 0);
+        }
+
+        // Live Qualifier overlay (dynamic procedural matte)
+        if (this.qualifier.enabled) {
+            const imgData = ctx.getImageData(0, 0, this.displayCanvas.width, this.displayCanvas.height);
+            const data = imgData.data;
+            for (let i = 0; i < data.length; i += 4) {
+                const alpha = this.evalQualifierAlpha(data[i], data[i + 1], data[i + 2]);
+                if (alpha > 0) {
+                    if (this.viewMode === 'matte') {
+                        // Blend white over black
+                        data[i] = Math.max(data[i], alpha * 255);
+                        data[i + 1] = Math.max(data[i + 1], alpha * 255);
+                        data[i + 2] = Math.max(data[i + 2], alpha * 255);
+                    } else if (this.viewMode === 'overlay') {
+                        // Blend Red over image
+                        data[i] = Math.min(255, data[i] + alpha * 255);
+                        data[i + 1] *= (1 - alpha * 0.5);
+                        data[i + 2] *= (1 - alpha * 0.5);
+                    }
+                }
+            }
+            ctx.putImageData(imgData, 0, 0);
+        }
+
+        // 2. Overlay Base Mask
+        ctx.save();
+        if (this.viewMode === 'overlay') {
+            // Ruby Red overlay common in Nuke
+            const tempCanvas = document.createElement("canvas");
+            tempCanvas.width = this.maskCanvas.width; tempCanvas.height = this.maskCanvas.height;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(this.maskCanvas, 0, 0);
+            tempCtx.globalCompositeOperation = 'source-in';
+            tempCtx.fillStyle = 'rgba(255, 30, 30, 0.45)';
+            tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+            ctx.drawImage(tempCanvas, 0, 0);
+
+        } else if (this.viewMode === 'matte') {
+            ctx.drawImage(this.maskCanvas, 0, 0);
+        } else if (this.viewMode === 'false_color') {
+            // Advanced false color visualization
+            const tempCanvas = document.createElement("canvas");
+            tempCanvas.width = this.maskCanvas.width; tempCanvas.height = this.maskCanvas.height;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(this.maskCanvas, 0, 0);
+            tempCtx.globalCompositeOperation = 'source-in';
+            const grad = tempCtx.createLinearGradient(0, 0, tempCanvas.width, 0);
+            grad.addColorStop(0, 'blue'); grad.addColorStop(0.5, 'green'); grad.addColorStop(1, 'red');
+            tempCtx.fillStyle = grad;
+            tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+            ctx.drawImage(tempCanvas, 0, 0);
+        }
+        ctx.restore();
+
+        // 3. Draw Vector UI Elements (Lines and Points)
+        if (this.tool === 'polygon') {
+            ctx.save();
+            this.polygons.forEach(poly => {
+                if (poly.points.length === 0) return;
+
+                ctx.beginPath();
+                ctx.strokeStyle = poly.closed ? '#00a8ff' : '#00ffaa';
+                ctx.lineWidth = 1.5 / this.zoom; // Keep line width constant relative to screen
+
+                poly.points.forEach((p, i) => {
+                    if (i === 0) ctx.moveTo(p.x, p.y);
+                    else ctx.lineTo(p.x, p.y);
+                });
+
+                if (poly.closed) ctx.closePath();
+                else if (hoverPos && poly === this.currentPoly) {
+                    ctx.lineTo(hoverPos.x, hoverPos.y);
+                }
+                ctx.stroke();
+
+                // Draw points
+                ctx.fillStyle = '#fff';
+                poly.points.forEach((p, i) => {
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, 3 / this.zoom, 0, Math.PI * 2);
+
+                    if (!poly.closed && i === 0) {
+                        ctx.fillStyle = '#ffaa00'; // Highlight start point for closing
+                        ctx.fill();
+                        ctx.fillStyle = '#fff';
+                    } else {
+                        ctx.fill();
+                    }
+                });
+            });
+            ctx.restore();
+        }
+    }
+
+    async load(node) {
+        this.node = node;
+        const imgWidget = node.widgets.find(w => w.name === "image");
+        if (!imgWidget || !imgWidget.value) {
+            alert("Please upload/select an image first.");
+            return;
+        }
+
+        const filename = imgWidget.value;
+        const pureName = filename.substring(0, filename.lastIndexOf('.')) || filename;
+        const compMaskName = `${pureName}_radmask.png`;
+
+        const imgUrl = api.apiURL(`/view?filename=${encodeURIComponent(filename)}&type=input`);
+        const maskUrl = api.apiURL(`/view?filename=${encodeURIComponent(compMaskName)}&type=input`);
+
+        this.imageEl = new Image();
+        this.imageEl.crossOrigin = "Anonymous";
+        this.imageEl.onload = () => {
+            this.maskCanvas.width = this.imageEl.width;
+            this.maskCanvas.height = this.imageEl.height;
+
+            const maskImg = new Image();
+            maskImg.crossOrigin = "Anonymous";
+            maskImg.onload = () => {
+                this.maskCtx.drawImage(maskImg, 0, 0);
+                this.finishLoadSetup();
+            };
+            maskImg.onerror = () => this.finishLoadSetup();
+            maskImg.src = maskUrl + "&timestamp=" + Date.now();
+        };
+        this.imageEl.src = imgUrl;
+
+        this.overlay.style.display = "flex";
+        this.zoom = 1.0; this.panX = 0; this.panY = 0;
+        this.history = []; this.historyIndex = -1;
+        this.polygons = []; this.currentPoly = null;
+    }
+
+    finishLoadSetup() {
+        const rect = this.canvasContainer.getBoundingClientRect();
+        const scaleX = rect.width / this.imageEl.width;
+        const scaleY = rect.height / this.imageEl.height;
+        this.zoom = Math.min(scaleX, scaleY) * 0.9;
+        this.panX = (rect.width - this.imageEl.width * this.zoom) / 2;
+        this.panY = (rect.height - this.imageEl.height * this.zoom) / 2;
+        this.updateCanvasTransform();
+        this.saveUndoState();
+        this.drawDisplay();
+    }
+
+    hide() {
+        this.overlay.style.display = "none";
+    }
+
+    saveMask() {
+        if (this.currentPoly && !this.currentPoly.closed) {
+            this.closePolygon();
+        }
+
+        const imgWidget = this.node.widgets.find(w => w.name === "image");
+        if (!imgWidget) return;
+
+        const filename = imgWidget.value;
+        const pureName = filename.substring(0, filename.lastIndexOf('.')) || filename;
+        const compMaskName = `${pureName}_radmask.png`;
+        const metaName = `${pureName}_radmask_meta.json`;
+
+        // Save Raster Mask
+        this.maskCanvas.toBlob(async (blob) => {
+            const formData = new FormData();
+            formData.append("image", blob, compMaskName);
+            formData.append("type", "input");
+            formData.append("overwrite", "true");
+
+            try {
+                await fetch(api.apiURL("/upload/image"), { method: "POST", body: formData });
+                console.log("[Radiance] Raster mask saved.");
+
+                // Save Vector/Node Metadata
+                const metaBlob = new Blob([JSON.stringify({ polygons: this.polygons })], { type: "application/json" });
+                const metaForm = new FormData();
+                metaForm.append("image", metaBlob, metaName);
+                metaForm.append("type", "input");
+                metaForm.append("overwrite", "true");
+
+                await fetch(api.apiURL("/upload/image"), { method: "POST", body: metaForm });
+
+                if (app.graph) {
+                    this.node.setDirtyCanvas(true, true);
+                    app.graph.setDirtyCanvas(true, true);
+                }
+                this.hide();
+            } catch (error) {
+                console.error("[Radiance] Save error", error);
+            }
+        }, "image/png");
+    }
+}
+
+const RADIANCE_MASK_EDITOR = new RadianceMaskEditor();
+
+app.registerExtension({
+    name: "FXTD.Radiance.MaskEditorPro",
+    nodeCreated(node) {
+        if (node.comfyClass === "RadianceLoadImageMask") {
+            const editBtn = node.addWidget("button", "🎬 Radiance Mask", "edit", () => {
+                RADIANCE_MASK_EDITOR.load(node);
+            });
+            editBtn.serialize = false;
+
+            // Apply standard Radiance header colors so it looks premium
+            node.color = "#232330";
+            node.bgcolor = "#0f0f14";
+        }
+    }
+});

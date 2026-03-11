@@ -451,7 +451,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceWaveform":    "◎ Radiance Waveform",
+    "RadianceWaveform": "◎ Radiance Waveform",
     "RadianceVectorscope": "◎ Radiance Vectorscope",
-    "RadianceFalseColor":  "◎ Radiance False Color",
+    "RadianceFalseColor": "◎ Radiance False Color",
 }

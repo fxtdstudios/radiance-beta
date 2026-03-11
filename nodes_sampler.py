@@ -1387,7 +1387,7 @@ def correct_sigma_end(
     if len(sigmas) < 2:
         return sigmas
 
-    if sigmas[-1].item() > 0.001 and target_end == 0.0:
+    if sigmas[-1].item() > 0.0 and target_end == 0.0:
         # REPLACE, not append — keeps schedule at steps+1 elements
         result = sigmas.clone()
         result[-1] = target_end
@@ -1510,36 +1510,48 @@ def _perlin_noise(shape: tuple, device: torch.device) -> torch.Tensor:
         n = torch.randn(shape, device=device) * amplitude
         # Smooth by blending adjacent values (cheap approx of Perlin)
         if shape[-1] > 1:
+            kernel = max(1, int(shape[-1] / frequency))
             n = torch.nn.functional.avg_pool2d(
                 n.view(-1, 1, shape[-2], shape[-1]),
-                kernel_size=max(1, int(shape[-1] / frequency)),
-                stride=1, padding=max(0, int(shape[-1] / frequency) // 2),
-            ).view(shape)
+                kernel_size=kernel,
+                stride=1, padding=kernel // 2,
+            ).view(-1, 1, n.shape[-2] + (kernel // 2) * 2 - kernel + 1, n.shape[-1] + (kernel // 2) * 2 - kernel + 1)
+            # Crop to original shape since even kernels change dimension
+            n = n[..., :shape[-2], :shape[-1]].contiguous().view(shape)
         noise = noise + n
         amplitude *= 0.5
         frequency *= 2.0
-    # Normalise to unit std
-    std = noise.std()
-    return noise / (std + 1e-6) if std > 1e-6 else noise
+    
+    # Normalise to unit std and zero mean to prevent color shifts
+    noise = noise - noise.mean()
+    std = noise.std().clamp(min=1e-6)
+    return noise / std
 
 
 def _spectral_noise(shape: tuple, device: torch.device) -> torch.Tensor:
     """Frequency-weighted noise (pink noise approximation)."""
     white = torch.randn(shape, device=device)
     fft = torch.fft.rfft2(white)
-    # Build 1/f frequency weight
-    freqs_h = torch.fft.rfftfreq(shape[-2], device=device).abs()
+    # Build 1/f frequency weight. Note: rfft2 only halves the LAST dimension.
+    freqs_h = torch.fft.fftfreq(shape[-2], device=device).abs()
     freqs_w = torch.fft.rfftfreq(shape[-1], device=device).abs()
     freq_grid = torch.sqrt(
         freqs_h.unsqueeze(-1) ** 2 + freqs_w.unsqueeze(0) ** 2
     ).clamp(min=1e-6)
     weight = (1.0 / freq_grid).unsqueeze(0).unsqueeze(0)
+    
+    # Zero out DC to prevent huge mean shifts
+    weight[..., 0, 0] = 0.0
+
     if weight.shape[-2] != fft.shape[-2] or weight.shape[-1] != fft.shape[-1]:
         weight = weight.expand_as(fft[..., :fft.shape[-2], :fft.shape[-1]])
     filtered = fft * weight
     result = torch.fft.irfft2(filtered, s=(shape[-2], shape[-1]))
-    std = result.std()
-    return result / (std + 1e-6) if std > 1e-6 else result
+    
+    # Force zero mean and unit variance
+    result = result - result.mean()
+    std = result.std().clamp(min=1e-6)
+    return result / std
 
 
 def _brownian_noise(
@@ -1754,6 +1766,12 @@ def tile_sample(
         except Exception as e:
             logger.warning(f"[TileSample] Tile ({y1},{y2},{x1},{x2}) failed: {e} — using input")
             t_out = t_latent
+
+        # Ensure t_out is on the same device/dtype as output.
+        # In low-VRAM / offloaded mode ComfyUI may return results on CPU
+        # even when the input latent was on CUDA, causing a device mismatch.
+        if t_out.device != device or t_out.dtype != latent_samples.dtype:
+            t_out = t_out.to(device=device, dtype=latent_samples.dtype)
 
         th = y2 - y1
         tw = x2 - x1
@@ -2799,54 +2817,55 @@ class RadianceSamplerPro:
                 except (RuntimeError, ValueError) as e:
                     logger.error(f"Error in Stage {i+1}: {e}")
                     raise
+
+            # FIX #12: Ensure result is on CPU to prevent VRAM accumulation
+            if current_latent.is_cuda:
+                samples = current_latent.cpu()
+            else:
+                samples = current_latent
+
+            timings["sampling"] = time.time() - t0
+
+            # ─────────────────────────────────────────────────────────────────
+            # v4.0 Feature 6: Tile sampling (post-stage, replaces normal pipeline result)
+            # Only applies to 4D (image) latents; video tile sampling not yet supported.
+            # ─────────────────────────────────────────────────────────────────
+            if tile_mode and latent_samples.ndim == 4:
+                logger.info(
+                    f"[v4.0] Tile sampling: size={tile_size}, overlap={tile_overlap}, blend={tile_blend}"
+                )
+                t_tile = time.time()
+                sampler_obj = comfy.samplers.sampler_object(primary_sampler)
+                samples = tile_sample(
+                    model=model,
+                    noise=noise,
+                    latent_samples=work_latent,
+                    positive=positive,
+                    negative=negative,
+                    sigmas=sigmas,
+                    sampler_obj=sampler_obj,
+                    seed=seed,
+                    tile_size=tile_size,
+                    tile_overlap=tile_overlap,
+                    tile_blend=tile_blend,
+                    noise_mask=noise_mask,
+                )
+                timings["tile_sampling"] = time.time() - t_tile
+                logger.info(f"[v4.0] Tile sampling done in {timings['tile_sampling']:.2f}s")
+                
         finally:
             # ─────────────────────────────────────────────────────────────────
             # v3.2 FIX: Free GPU noise tensor to prevent VRAM leak (FIX #10)
             # ─────────────────────────────────────────────────────────────────
             if "noise" in locals():
-                del noise
+                try: del noise
+                except UnboundLocalError: pass
             if "work_latent" in locals():
-                del work_latent
+                try: del work_latent
+                except UnboundLocalError: pass
             
             # v3.1 FIX: Proactively cleanup GPU memory to prevent VGA crashes
             cleanup_gpu_memory()
-
-        # (noise deleted in finally block)
-
-        # FIX #12: Ensure result is on CPU to prevent VRAM accumulation
-        if current_latent.is_cuda:
-            samples = current_latent.cpu()
-        else:
-            samples = current_latent
-
-        timings["sampling"] = time.time() - t0
-
-        # ─────────────────────────────────────────────────────────────────
-        # v4.0 Feature 6: Tile sampling (post-stage, replaces normal pipeline result)
-        # Only applies to 4D (image) latents; video tile sampling not yet supported.
-        # ─────────────────────────────────────────────────────────────────
-        if tile_mode and latent_samples.ndim == 4:
-            logger.info(
-                f"[v4.0] Tile sampling: size={tile_size}, overlap={tile_overlap}, blend={tile_blend}"
-            )
-            t_tile = time.time()
-            sampler_obj = comfy.samplers.sampler_object(primary_sampler)
-            samples = tile_sample(
-                model=model,
-                noise=noise,
-                latent_samples=work_latent,
-                positive=positive,
-                negative=negative,
-                sigmas=sigmas,
-                sampler_obj=sampler_obj,
-                seed=seed,
-                tile_size=tile_size,
-                tile_overlap=tile_overlap,
-                tile_blend=tile_blend,
-                noise_mask=noise_mask,
-            )
-            timings["tile_sampling"] = time.time() - t_tile
-            logger.info(f"[v4.0] Tile sampling done in {timings['tile_sampling']:.2f}s")
 
         # ─────────────────────────────────────────────────────────────────
         # Prepare output
