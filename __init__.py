@@ -100,7 +100,7 @@ for file_path in node_files:
         logger.error(f"FAILED to load {module_name}: {e}")
 
 # Package info
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 __author__ = "Radiance"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
 

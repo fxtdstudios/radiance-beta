@@ -24,7 +24,9 @@ Example Usage (Cinematic Encoder):
 """
 
 import logging
+import re
 import torch
+from typing import Optional
 
 logger = logging.getLogger("radiance.prompt")
 
@@ -639,38 +641,45 @@ class NeuralGrammar:
     """
 
     SCIENTIFIC_REPLACEMENTS = {
-        "visualize": "volumetric rendering of latent dynamics",
-        "accurate": "high-fidelity mathematical precision",
-        "precise": "sub-pixel accurate spatial distribution",
-        "design": "topological architectural structure",
-        "process": "sequential tensor transformation flow",
-        "generation": "stochastic manifold reconstruction",
+        # v3.1: Toned down from jargon to natural cinematic language.
+        # Diffusion models respond better to concrete visual descriptors
+        # than compound technical terms.
+        "visualize": "render with volumetric detail",
+        "accurate": "high-fidelity",
+        "precise": "pixel-perfect",
+        "design": "architectural composition",
+        "process": "sequential transformation",
+        "generation": "procedural reconstruction",
     }
 
     @staticmethod
     def scientificize(text: str) -> str:
-        """Replace common words with high-precision scientific cinematic terms."""
+        """Replace common words with high-precision cinematic terms."""
         words = text.lower().split()
         new_words = []
+        modified = False
         for word in words:
             clean_word = word.strip(".,!?;:")
             if clean_word in NeuralGrammar.SCIENTIFIC_REPLACEMENTS:
                 replacement = NeuralGrammar.SCIENTIFIC_REPLACEMENTS[clean_word]
-                # Preserve punctuation
                 new_words.append(word.replace(clean_word, replacement))
+                modified = True
             else:
                 new_words.append(word)
+        if modified:
+            logger.debug("[NeuralGrammar] Applied cinematic vocabulary enhancement.")
         return " ".join(new_words)
 
     @staticmethod
     def enhance_syntax(prompt_parts: list) -> list:
         """Improve grammar and technical structure of prompt parts."""
-        # Ensure 'Shot on' has proper articles, etc.
         enhanced = []
         for part in prompt_parts:
             if part.startswith("Shot on"):
-                # "Shot on ARRI Alexa" -> "Captured with high-precision ARRI Alexa"
-                part = part.replace("Shot on ", "Captured with high-precision ARRI ")
+                # v3.1 FIX: Preserve original camera name.
+                # Previously hardcoded "ARRI" which corrupted non-ARRI cameras.
+                camera_name = part.replace("Shot on ", "", 1)
+                part = f"Captured with high-precision {camera_name}"
             enhanced.append(part)
         return enhanced
 
@@ -733,6 +742,39 @@ DEFAULT_YEAR = 2024  # v2.1: Used for year_era comparison instead of hardcoded v
 PROSE_ARCHS = {"flux", "sd3", "sd3.5", "wan", "ltx", "pixart", "kolors",
                "hunyuan_video", "aura_flow"}
 
+
+def _detect_arch_from_clip(clip, target_arch: str) -> str:
+    """
+    v3.1: Detect architecture from CLIP tokenizer keys when target_arch is 'Auto'.
+    Falls back to 'sdxl' (structured format) if detection fails — safer than
+    defaulting to prose which hurts CLIP-only encoders.
+
+    Detection logic:
+      - 't5xxl' key → Flux/SD3 family (T5 encoder present)
+      - 'llm' key   → Kolors/PixArt family (LLM encoder)
+      - 'g' + 'l'   → SDXL dual CLIP
+      - 'l' only     → SD1.5 single CLIP
+    """
+    if target_arch != "Auto":
+        return target_arch.lower()
+
+    try:
+        test_tokens = clip.tokenize("test")
+        keys = set(test_tokens.keys())
+
+        if "t5xxl" in keys:
+            return "flux"   # Flux, SD3, SD3.5 all use T5
+        if "llm" in keys:
+            return "kolors"
+        if "g" in keys and "l" in keys:
+            return "sdxl"
+        if "l" in keys:
+            return "sd1.5"
+    except Exception as e:
+        logger.debug(f"[Encoder] Arch detection failed: {e}, defaulting to sdxl")
+
+    return "sdxl"  # Safe fallback — structured format for CLIP-only
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #                  SCENE MOOD VOCABULARY  (v3.0)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -767,6 +809,11 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
     """
     Get actual token count using the connected CLIP tokenizer.
     Falls back to estimate_tokens() if tokenizer API is unavailable.
+
+    v3.1 FIX: For T5/LLM encoders, tokens are padded to a fixed length
+    (e.g., 256 or 512). shape[-1] returns the padded length, not the
+    actual token count. We count non-padding tokens where possible.
+    T5 uses pad_token_id=0; CLIP uses pad_token_id=49407.
     """
     if tokens is None:
         try:
@@ -778,10 +825,22 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
         # Try each known encoder key in order of preference
         for key in ("t5xxl", "l", "g", "llm"):
             if key in tokens and tokens[key]:
-                if hasattr(tokens[key][0], "shape"):
-                    return int(tokens[key][0].shape[-1])
-                elif hasattr(tokens[key][0], "__len__"):
-                    return len(tokens[key][0])
+                tok_data = tokens[key][0]
+                if hasattr(tok_data, "shape"):
+                    # Try to count non-padding tokens for accuracy
+                    try:
+                        import torch as _torch
+                        if _torch.is_tensor(tok_data):
+                            # T5 pad=0, CLIP pad=49407. Count non-pad tokens.
+                            pad_id = 0 if key in ("t5xxl", "llm") else 49407
+                            non_pad = (tok_data != pad_id).sum().item()
+                            if non_pad > 0:
+                                return non_pad
+                    except Exception:
+                        pass
+                    return int(tok_data.shape[-1])
+                elif hasattr(tok_data, "__len__"):
+                    return len(tok_data)
         # Fallback: count all token entries if shape not accessible
         for val in tokens.values():
             if val and hasattr(val[0], "shape"):
@@ -913,8 +972,6 @@ def insert_break_points(prompt: str, max_tokens: int = 70) -> str:
 
     # Split on sentence boundaries: period/exclamation/question followed by space
     # This avoids splitting on "f/2.8", "A7S III.", decimal numbers, etc.
-    import re
-
     # Split after sentence-ending punctuation followed by whitespace
     sentences = re.split(r"(?<=[.!?])\s+", prompt)
 
@@ -943,12 +1000,17 @@ def insert_break_points(prompt: str, max_tokens: int = 70) -> str:
     return f" {BREAK_TOKEN} ".join(result)
 
 
-def enhance_prompt_grammar(prompt: str, level: str) -> str:
-    """Fix common grammar/formatting issues and optionally inject creative tags."""
+def enhance_prompt_grammar(prompt: str, level: str, arch: str = "sdxl") -> str:
+    """
+    Fix common grammar/formatting issues and optionally inject creative tags.
+
+    v3.1: arch parameter controls which creative tags to inject.
+    Danbooru-style tags (masterpiece, best quality) only help SD1.5/SDXL.
+    Prose architectures get natural-language quality descriptors instead.
+    """
     if level == "Off" or not prompt:
         return prompt
 
-    import re
     p = prompt
     # Remove redundant spaces
     p = re.sub(r' {2,}', ' ', p)
@@ -958,8 +1020,16 @@ def enhance_prompt_grammar(prompt: str, level: str) -> str:
     p = re.sub(r',\s*,', ',', p)
 
     if level == "Creative Enhancement":
-        # Inject universally high-quality aesthetic modifiers
-        creative_tags = "masterpiece, best quality, highly detailed, stunning, ultra-high resolution"
+        if arch in PROSE_ARCHS:
+            # Natural language quality descriptors for T5/LLM encoders
+            creative_tags = (
+                "Exceptionally detailed with stunning visual clarity "
+                "and ultra-high resolution rendering"
+            )
+        else:
+            # Danbooru-style tags for CLIP-only encoders (SD1.5/SDXL)
+            creative_tags = "masterpiece, best quality, highly detailed, stunning, ultra-high resolution"
+
         if p.endswith('.'):
             p = p[:-1] + ", " + creative_tags + "."
         else:
@@ -1039,16 +1109,20 @@ def build_cinematic_prompt_v3(
     def c(v): return "" if v in ("None", None, "") else v
 
     # A/B prompt mode
-    effective_base = (base_prompt_b.strip()
-                      if (active_prompt == "B" and base_prompt_b.strip())
-                      else base_prompt.strip())
+    if active_prompt == "B" and base_prompt_b.strip():
+        effective_base = base_prompt_b.strip()
+    else:
+        effective_base = base_prompt.strip()
+        if active_prompt == "B":
+            logger.info("[Encoder] Prompt B is empty — falling back to Prompt A.")
 
-    # Apply attention weight to subject if requested
-    if subject_weight != 1.0:
-        effective_base = _apply_subject_weight(effective_base, subject_weight)
+    # v3.1 FIX: Subject weight is applied INSIDE each path (prose/structured),
+    # not here. Previously it was applied at both levels, causing double-weight
+    # on the structured path: ((subject:1.2):1.2) → effective 1.44×.
 
-    # Architecture-aware format selection
-    use_prose = (target_arch.lower() in PROSE_ARCHS or target_arch == "Auto")
+    # v3.1: Actual architecture detection from CLIP tokenizer keys
+    resolved_arch = _detect_arch_from_clip(clip, target_arch)
+    use_prose = resolved_arch in PROSE_ARCHS
 
     if use_prose:
         final_prompt = _build_prose_prompt(
@@ -1058,7 +1132,7 @@ def build_cinematic_prompt_v3(
             color_grading=color_grading, aspect_ratio=aspect_ratio,
             custom_details=custom_details, year_era=year_era,
             lora_keywords=lora_keywords, art_direction=art_direction,
-            scene_mood=scene_mood, subject_weight=1.0,
+            scene_mood=scene_mood, subject_weight=subject_weight,
             weight_mode=prompt_weight_mode,
         )
     else:
@@ -1066,14 +1140,17 @@ def build_cinematic_prompt_v3(
         parts = []
         style = c(style_aesthetic)
 
+        # Apply subject weight once in the structured path
+        weighted_base = _apply_subject_weight(effective_base, subject_weight)
+
         if prompt_weight_mode == "technique_first" and c(camera_type):
             parts.append(f"Shot on {camera_type}.")
             prefix = f"{c(framing)} of " if c(framing) else ""
-            parts.append(f"{prefix}{effective_base}.")
+            parts.append(f"{prefix}{weighted_base}.")
         elif c(framing):
-            parts.append(f"{framing} of {effective_base}.")
+            parts.append(f"{framing} of {weighted_base}.")
         else:
-            parts.append(f"{effective_base}.")
+            parts.append(f"{weighted_base}.")
 
         if art_direction and art_direction.strip():
             parts.insert(1, art_direction.strip())
@@ -1111,10 +1188,10 @@ def build_cinematic_prompt_v3(
 
     # ── Auto-negative (arch-aware) ──────────────────────────────────────────
     style_val = c(style_aesthetic)
-    if use_prose and target_arch.lower() in ("flux", "kolors"):
+    if use_prose and resolved_arch in ("flux", "kolors"):
         if negative_strength not in ("Off", "Soft"):
             logger.info(
-                f"[Encoder] target_arch='{target_arch}': negative prompts have limited "
+                f"[Encoder] target_arch='{resolved_arch}': negative prompts have limited "
                 "effect. Consider 'Soft' or 'Off' for better results."
             )
 
@@ -1419,6 +1496,9 @@ class RadianceCinematicPromptEncoder:
         else:
             token_limit = 512
 
+        # ── Resolve architecture once ────────────────────────────────────────
+        resolved_arch = _detect_arch_from_clip(clip, target_arch)
+
         # ── Apply style preset ──────────────────────────────────────────────
         settings = {
             "framing": framing, "camera_type": camera_type,
@@ -1451,7 +1531,7 @@ class RadianceCinematicPromptEncoder:
             negative_custom=negative_custom,
             lora_keywords=lora_keywords,
             use_break=False,
-            target_arch=target_arch,
+            target_arch=resolved_arch,  # Pass resolved, not raw
             scene_mood=scene_mood,
             subject_weight=subject_weight,
             art_direction=art_direction,
@@ -1460,7 +1540,7 @@ class RadianceCinematicPromptEncoder:
 
         # ── Enhance Prompt Grammar ──────────────────────────────────────────
         if prompt_enhancer != "Off":
-            final_prompt = enhance_prompt_grammar(final_prompt, prompt_enhancer)
+            final_prompt = enhance_prompt_grammar(final_prompt, prompt_enhancer, arch=resolved_arch)
 
         # ── BREAK tokens ────────────────────────────────────────────────────
         if use_break == "On":
@@ -1475,12 +1555,21 @@ class RadianceCinematicPromptEncoder:
                 f"[Encoder] Prompt has {real_count} tokens (limit {token_limit}). "
                 "Enable 'use_break' or increase context_window. Truncating to prevent OOM."
             )
-            # Safe truncation of token lists to prevent VRAM overflow and node crashes
+            # v3.1 FIX: Slice into new lists instead of mutating in-place.
+            # In-place mutation of tokenizer output can corrupt internal caches.
+            truncated = {}
             for key in pos_tokens:
                 if isinstance(pos_tokens[key], list):
-                    for i in range(len(pos_tokens[key])):
-                        if hasattr(pos_tokens[key][i], "__len__") and len(pos_tokens[key][i]) > token_limit:
-                            pos_tokens[key][i] = pos_tokens[key][i][:token_limit]
+                    new_list = []
+                    for item in pos_tokens[key]:
+                        if hasattr(item, "__len__") and len(item) > token_limit:
+                            new_list.append(item[:token_limit])
+                        else:
+                            new_list.append(item)
+                    truncated[key] = new_list
+                else:
+                    truncated[key] = pos_tokens[key]
+            pos_tokens = truncated
 
         # ── CLIP skip ───────────────────────────────────────────────────────
         if clip_skip > 0:

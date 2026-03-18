@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════════════════════════
- *                       RADIANCE WEBGL RENDERER v2.1
+ *                       RADIANCE WEBGL RENDERER v2.1.1
  *                    GPU-Accelerated Viewer Enhancement
  * ═══════════════════════════════════════════════════════════════════════════════
  *
@@ -134,7 +134,7 @@ class RadianceWebGLRenderer {
 
         this.channelMode = 0;
         this.focusPeaking = false;
-        this.focusPeakingThreshold = 30.0;
+        this.focusPeakingThreshold = 120.0;
         this.displayLutMode = 0;
 
         this.denoise = 0.0;
@@ -146,6 +146,17 @@ class RadianceWebGLRenderer {
         // v3.4: Start at 0 — only activate when secondary curves have been explicitly edited.
         // This prevents a grayscale flash on first render before the neutral LUT is uploaded.
         this.secondaryCurveMix = 0.0;
+        // FIX 5: Highlight slope for curve extrapolation above 1.0 (identity = 1.0 per channel)
+        this.curveSlope = [1.0, 1.0, 1.0];
+
+        // ── v4.1: Pipeline Precision Mode ─────────────────────────────────────
+        // Controls internal FBO, scope buffer, and curve LUT bit depth.
+        //   'u8'  — RGBA/UNSIGNED_BYTE   (8-bit  per channel, legacy SDR)
+        //   'f16' — RGBA16F/HALF_FLOAT   (16-bit per channel, half-float HDR)
+        //   'f32' — RGBA32F/FLOAT        (32-bit per channel, full float, industry standard)
+        // Default: 'f32' on WebGL2 (matches Nuke / Flame / Baselight pipeline precision).
+        // Falls back to 'u8' if WebGL2 or EXT_color_buffer_float is unavailable.
+        this.pipelinePrecision = 'f32';
         this.curveData = new Uint8Array(256 * 4);
         for (let i = 0; i < 256; i++) {
             this.curveData[i * 4 + 0] = i;
@@ -280,14 +291,34 @@ class RadianceWebGLRenderer {
         // Setup specialized viewport for scope (Square 512x512 internally)
         const size = 512;
         if (!this.scopeFBO) {
+            // v4.1: Scope FBO precision tracks pipelinePrecision so HDR waveforms
+            // and vectorscopes accumulate in float rather than clamping to 8-bit.
+            const precFmt = this._glPrecFmt();
             this.scopeFBO = gl.createFramebuffer();
             this.scopeTex = gl.createTexture();
             gl.bindTexture(gl.TEXTURE_2D, this.scopeTex);
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+            gl.texImage2D(gl.TEXTURE_2D, 0, precFmt.internalFmt, size, size, 0, gl.RGBA, precFmt.type, null);
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
             gl.bindFramebuffer(gl.FRAMEBUFFER, this.scopeFBO);
             gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.scopeTex, 0);
+            // Validate FBO — fall back to RGBA/UNSIGNED_BYTE if float FBO not supported
+            const fboStatus = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+            if (fboStatus !== gl.FRAMEBUFFER_COMPLETE) {
+                console.warn(`[Radiance] Scope FBO at ${precFmt.label} failed (${fboStatus}), falling back to RGBA8`);
+                gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+                gl.deleteTexture(this.scopeTex);
+                gl.deleteFramebuffer(this.scopeFBO);
+                // Recreate at safe RGBA8
+                this.scopeFBO = gl.createFramebuffer();
+                this.scopeTex = gl.createTexture();
+                gl.bindTexture(gl.TEXTURE_2D, this.scopeTex);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+                gl.bindFramebuffer(gl.FRAMEBUFFER, this.scopeFBO);
+                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.scopeTex, 0);
+            }
         }
 
         // Render scope into offscreen FBO — never touch the display framebuffer
@@ -448,9 +479,9 @@ class RadianceWebGLRenderer {
 
         const tex = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, tex);
-        // Use RGBA16F for half-float storage — good quality at half cost vs RGBA32F
-        const internalFmt = this.isWebGL2 ? gl.RGBA16F : gl.RGBA;
-        const dataType = this.isWebGL2 ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+        // v4.0: RGBA32F for full 32-bit float pipeline (was RGBA16F)
+        const internalFmt = this.isWebGL2 ? gl.RGBA32F : gl.RGBA;
+        const dataType = this.isWebGL2 ? gl.FLOAT : gl.UNSIGNED_BYTE;
         gl.texImage2D(gl.TEXTURE_2D, 0, internalFmt, halfW, halfH, 0, gl.RGBA, dataType, null);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
@@ -483,6 +514,162 @@ class RadianceWebGLRenderer {
         gl.deleteTexture(this._bilateralFBO.tex);
         gl.deleteFramebuffer(this._bilateralFBO.fbo);
         this._bilateralFBO = null;
+    }
+
+    // ── v4.0: Multi-pass Kawase Bloom FBO Chain ──────────────────────────────
+    // Industry-standard progressive downsample/upsample bloom (UE4/Flame/Resolve style).
+    // 6 mip levels at [1/2, 1/4, 1/8, 1/16, 1/32, 1/64] — wide glow with minimal cost.
+    // All FBOs use RGBA32F for full HDR precision throughout the chain.
+
+    _initBloomFBOs(srcW, srcH) {
+        const gl = this.gl;
+        if (!this.isWebGL2) return;
+
+        // Check if already allocated at this resolution
+        if (this._bloomFBOs && this._bloomFBOs.length &&
+            this._bloomSrcW === srcW && this._bloomSrcH === srcH) return;
+
+        this._destroyBloomFBOs();
+
+        const LEVELS = 6;
+        this._bloomFBOs = [];
+        this._bloomSrcW = srcW;
+        this._bloomSrcH = srcH;
+
+        let w = Math.max(1, Math.floor(srcW / 2));
+        let h = Math.max(1, Math.floor(srcH / 2));
+
+        for (let i = 0; i < LEVELS; i++) {
+            const tex = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, tex);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, w, h, 0, gl.RGBA, gl.FLOAT, null);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+            const fbo = gl.createFramebuffer();
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+
+            const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+            if (status !== gl.FRAMEBUFFER_COMPLETE) {
+                console.warn(`[Radiance Bloom] FBO level ${i} incomplete (${status}), bloom disabled`);
+                gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+                this._destroyBloomFBOs();
+                return;
+            }
+
+            this._bloomFBOs.push({ fbo, tex, width: w, height: h });
+            w = Math.max(1, Math.floor(w / 2));
+            h = Math.max(1, Math.floor(h / 2));
+        }
+
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        console.log(`[Radiance Bloom] Allocated ${LEVELS}-level FBO chain from ${this._bloomFBOs[0].width}×${this._bloomFBOs[0].height}`);
+    }
+
+    _destroyBloomFBOs() {
+        if (!this._bloomFBOs) return;
+        const gl = this.gl;
+        for (const level of this._bloomFBOs) {
+            gl.deleteTexture(level.tex);
+            gl.deleteFramebuffer(level.fbo);
+        }
+        this._bloomFBOs = null;
+        this._bloomSrcW = 0;
+        this._bloomSrcH = 0;
+    }
+
+    /**
+     * Run the full bloom pipeline: threshold → progressive downsample → upsample.
+     * Returns the final bloom texture (at half source resolution), or null if
+     * bloom is disabled or not supported.
+     *
+     * Uses dual-filter Kawase approach:
+     *   Downsample: 5-tap filter (center + 4 diagonal half-texel offsets)
+     *   Upsample:   8-tap tent filter (3×3 minus corners, half-texel offsets)
+     *
+     * The first downsample pass also applies a brightness threshold with a
+     * soft knee to isolate overbright pixels.
+     */
+    _renderBloomChain() {
+        if (!this.isWebGL2 || this.bloom <= 0 || !this.textures.image) return null;
+
+        const gl = this.gl;
+        const imgW = this.imageWidth || this.canvas.width;
+        const imgH = this.imageHeight || this.canvas.height;
+
+        // Save the currently bound framebuffer so we can restore it after bloom passes
+        const prevFBO = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+
+        // Ensure FBO chain is allocated
+        this._initBloomFBOs(imgW, imgH);
+        if (!this._bloomFBOs || !this._bloomFBOs.length) return null;
+
+        const progDown = this.programs.bloomDown;
+        const progUp   = this.programs.bloomUp;
+        if (!progDown || !progUp) return null;
+
+        // ── Pass 1: Threshold + Downsample into level 0 ──────────────────────
+        const lvl0 = this._bloomFBOs[0];
+        gl.bindFramebuffer(gl.FRAMEBUFFER, lvl0.fbo);
+        gl.viewport(0, 0, lvl0.width, lvl0.height);
+
+        gl.useProgram(progDown);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, this.textures.image);
+        gl.uniform1i(this.getUniform(progDown, 'u_src'), 0);
+        gl.uniform2f(this.getUniform(progDown, 'u_srcTexelSize'), 1.0 / imgW, 1.0 / imgH);
+        gl.uniform1i(this.getUniform(progDown, 'u_applyThreshold'), 1);
+        // Adaptive threshold: scene-linear HDR needs higher threshold than sRGB
+        const threshLo = this.isLinearTexture ? 1.0  : 0.82;
+        const threshHi = this.isLinearTexture ? 4.0  : 1.4;
+        gl.uniform1f(this.getUniform(progDown, 'u_thresholdLo'), threshLo);
+        gl.uniform1f(this.getUniform(progDown, 'u_thresholdHi'), threshHi);
+        gl.uniform1f(this.getUniform(progDown, 'u_exposure'), this.exposure);
+        gl.uniform1i(this.getUniform(progDown, 'u_isLinear'), this.isLinearTexture ? 1 : 0);
+        this.drawQuad(progDown);
+
+        // ── Pass 2..N: Progressive downsample (no threshold) ─────────────────
+        for (let i = 1; i < this._bloomFBOs.length; i++) {
+            const src = this._bloomFBOs[i - 1];
+            const dst = this._bloomFBOs[i];
+            gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
+            gl.viewport(0, 0, dst.width, dst.height);
+
+            gl.useProgram(progDown);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, src.tex);
+            gl.uniform1i(this.getUniform(progDown, 'u_src'), 0);
+            gl.uniform2f(this.getUniform(progDown, 'u_srcTexelSize'), 1.0 / src.width, 1.0 / src.height);
+            gl.uniform1i(this.getUniform(progDown, 'u_applyThreshold'), 0);
+            this.drawQuad(progDown);
+        }
+
+        // ── Pass N..1: Progressive upsample + accumulate ─────────────────────
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.ONE, gl.ONE);  // additive
+
+        for (let i = this._bloomFBOs.length - 2; i >= 0; i--) {
+            const src = this._bloomFBOs[i + 1];
+            const dst = this._bloomFBOs[i];
+            gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
+            gl.viewport(0, 0, dst.width, dst.height);
+
+            gl.useProgram(progUp);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, src.tex);
+            gl.uniform1i(this.getUniform(progUp, 'u_src'), 0);
+            gl.uniform2f(this.getUniform(progUp, 'u_srcTexelSize'), 1.0 / src.width, 1.0 / src.height);
+            this.drawQuad(progUp);
+        }
+
+        gl.disable(gl.BLEND);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, prevFBO);
+
+        // Return the accumulated bloom texture at level 0 (half-res)
+        return this._bloomFBOs[0].tex;
     }
 
     /**
@@ -537,10 +724,12 @@ class RadianceWebGLRenderer {
         }
         gl.bindTexture(gl.TEXTURE_2D, this.curveLutTexture);
         if (data instanceof Float32Array && this.isWebGL2) {
-            // Float32 precision — eliminates banding in HDR grading
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, 256, 1, 0, gl.RGBA, gl.FLOAT, data);
+            // v4.1: Always use RGBA32F/FLOAT for curve LUT — it's only 256×1 (4KB),
+            // so f16 savings are negligible.  Using HALF_FLOAT with a Float32Array
+            // triggers WebGL INVALID_OPERATION ("type HALF_FLOAT but not Uint16Array").
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 256, 1, 0, gl.RGBA, gl.FLOAT, data);
         } else {
-            // Legacy 8-bit fallback
+            // Legacy 8-bit fallback (Uint8Array or WebGL1)
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
         }
     }
@@ -559,7 +748,10 @@ class RadianceWebGLRenderer {
         }
         gl.bindTexture(gl.TEXTURE_2D, this.secondaryCurveLutTexture);
         if (data instanceof Float32Array && this.isWebGL2) {
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, 256, 1, 0, gl.RGBA, gl.FLOAT, data);
+            // v4.1: Always use RGBA32F/FLOAT for curve LUT — it's only 256×1 (4KB),
+            // so f16 savings are negligible.  Using HALF_FLOAT with a Float32Array
+            // triggers WebGL INVALID_OPERATION ("type HALF_FLOAT but not Uint16Array").
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 256, 1, 0, gl.RGBA, gl.FLOAT, data);
         } else {
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
         }
@@ -568,6 +760,111 @@ class RadianceWebGLRenderer {
     setCurveMix(v) { this.curveMix = v; }
     /** Enable secondary curve pass (HvH/HvS/HvL). Called automatically when user edits secondary curves. */
     setSecondaryCurveMix(v) { this.secondaryCurveMix = v; }
+    /** FIX 5: Set slope of curve at highlight end for HDR extrapolation. Values are
+     *  (lut[255]-lut[254])*255 per channel, clamped to [0,4] on the CPU side. */
+    setCurveSlope(r, g, b) { this.curveSlope = [r, g, b]; }
+
+    // ── v4.1: Pipeline Precision API ──────────────────────────────────────────
+
+    /**
+     * Returns the WebGL internal format, data type, and bytes-per-channel for
+     * the current pipelinePrecision mode, with automatic capability fallback.
+     * Used by every FBO and LUT texture allocation in the renderer.
+     *
+     * @returns {{ internalFmt, type, bytesPerChannel, label }}
+     */
+    _glPrecFmt() {
+        const gl = this.gl;
+        const mode = this.pipelinePrecision;
+
+        // WebGL1 or no float extension: always 8-bit
+        if (!this.isWebGL2 || !this.extColorBufferFloat) {
+            return { internalFmt: gl.RGBA, type: gl.UNSIGNED_BYTE, bytesPerChannel: 1, label: 'INT 8-bit' };
+        }
+
+        if (mode === 'f16') {
+            return { internalFmt: gl.RGBA16F, type: gl.HALF_FLOAT, bytesPerChannel: 2, label: 'FLOAT 16-bit' };
+        }
+        if (mode === 'f32') {
+            return { internalFmt: gl.RGBA32F, type: gl.FLOAT, bytesPerChannel: 4, label: 'FLOAT 32-bit' };
+        }
+        // 'u8' fallback
+        return { internalFmt: gl.RGBA, type: gl.UNSIGNED_BYTE, bytesPerChannel: 1, label: 'INT 8-bit' };
+    }
+
+    /**
+     * Switch pipeline precision mode at runtime.
+     * Destroys all precision-dependent GPU resources so they are recreated
+     * at the new precision on the next render call.
+     *
+     * @param {'u8'|'f16'|'f32'} mode
+     */
+    setPipelinePrecision(mode) {
+        if (mode === this.pipelinePrecision) return;
+        if (!['u8', 'f16', 'f32'].includes(mode)) {
+            console.warn(`[Radiance] Unknown precision mode '${mode}', ignoring.`);
+            return;
+        }
+
+        const gl = this.gl;
+        const prev = this.pipelinePrecision;
+        this.pipelinePrecision = mode;
+
+        // Destroy scope FBO — recreated at new precision by renderScope()
+        if (this.scopeFBO) {
+            gl.deleteFramebuffer(this.scopeFBO);
+            gl.deleteTexture(this.scopeTex);
+            this.scopeFBO = null;
+            this.scopeTex = null;
+        }
+
+        // Destroy curve LUT textures — recreated by updateCurveLut() / updateSecondaryCurveLut()
+        if (this.curveLutTexture) {
+            gl.deleteTexture(this.curveLutTexture);
+            this.curveLutTexture = null;
+        }
+        if (this.secondaryCurveLutTexture) {
+            gl.deleteTexture(this.secondaryCurveLutTexture);
+            this.secondaryCurveLutTexture = null;
+        }
+
+        // Destroy bilateral FBO — recreated at new precision by _getBilateralFBO()
+        this._destroyBilateralFBO();
+
+        // Destroy bloom FBOs — recreated at new precision by _initBloomFBOs()
+        this._destroyBloomFBOs?.();
+
+        const fmt = this._glPrecFmt();
+        console.log(`[Radiance] Pipeline precision: ${prev} -> ${mode} (${fmt.label}, ${fmt.bytesPerChannel * 8}-bit per channel)`);
+    }
+
+    /**
+     * Returns a structured description of the full pipeline precision chain.
+     * Used by the viewer status bar to show Nuke/Flame style pipeline info.
+     *
+     * @returns {{ input: string, grading: string, display: string, label: string }}
+     */
+    getPipelineInfo() {
+        const fmt = this._glPrecFmt();
+        const inputLabel = this.isLinearTexture
+            ? (this.textures.image ? 'Linear Float' : '—')
+            : 'sRGB 8-bit';
+
+        // Detect actual texture precision from upload path
+        let inputPrecision = 'INT 8';
+        if (this.isLinearTexture) {
+            // Check if fp16 or fp32 was used for the image texture
+            inputPrecision = (this.pipelinePrecision === 'f16') ? 'FP16' : 'FP32';
+        }
+
+        return {
+            input:   inputPrecision,
+            grading: fmt.label,
+            display: this.isWebGL2 ? 'sRGB 8-bit Canvas' : 'WebGL1 8-bit',
+            label:   fmt.label,
+            mode:    this.pipelinePrecision
+        };
+    }
 
     // ── v3.0 #9: Linear-space False Color & Zebra setter ─────────────────────
     /** When true, false color + zebra are evaluated in scene-linear space (pre-OETF),
@@ -659,6 +956,49 @@ class RadianceWebGLRenderer {
         }
 
         const tex = this.loadFloat16Texture(fp16data, width, height, channels);
+        if (tex) this._frameCache.set(frameId, { tex, lastUsed: now });
+        return tex;
+    }
+
+    /**
+     * Upload a float32 frame and cache it by frameId.
+     * Mirror of loadFloat16TextureCached for full-precision float32 data
+     * (EXR FLOAT, TIFF float32, RF32 binary, RGBE decoded).
+     * Evicts the LRU entry when the 8-frame cache is full.
+     *
+     * @param {string|number}  frameId   – unique identifier for the frame
+     * @param {Float32Array}   data      – raw float32 pixel data
+     * @param {number}         width
+     * @param {number}         height
+     * @param {number}         channels  – 3 or 4
+     * @returns {WebGLTexture|null}
+     */
+    loadFloat32TextureCached(frameId, data, width, height, channels) {
+        const now = Date.now();
+        if (this._frameCache.has(frameId)) {
+            const entry = this._frameCache.get(frameId);
+            entry.lastUsed = now;
+            this.textures.image = entry.tex;
+            this.imageWidth  = width;
+            this.imageHeight = height;
+            this.isLinearTexture = true;
+            return entry.tex;
+        }
+
+        // Evict LRU when at capacity
+        if (this._frameCache.size >= this._frameCacheMaxSize) {
+            let oldest = null, oldestTime = Infinity;
+            for (const [id, entry] of this._frameCache) {
+                if (entry.lastUsed < oldestTime) { oldestTime = entry.lastUsed; oldest = id; }
+            }
+            if (oldest !== null) {
+                const ev = this._frameCache.get(oldest);
+                if (ev && this.gl) this.gl.deleteTexture(ev.tex);
+                this._frameCache.delete(oldest);
+            }
+        }
+
+        const tex = this.loadFloat32Texture(data, width, height, channels);
         if (tex) this._frameCache.set(frameId, { tex, lastUsed: now });
         return tex;
     }
@@ -916,6 +1256,17 @@ class RadianceWebGLRenderer {
             this.extColorBufferFloat = null;
         }
 
+        // v4.1: Auto-downgrade pipelinePrecision if GPU lacks float FBO support.
+        // EXT_color_buffer_float is required for rendering into RGBA32F / RGBA16F FBOs.
+        if (!this.isWebGL2 || !this.extColorBufferFloat) {
+            if (this.pipelinePrecision !== 'u8') {
+                console.warn(`[Radiance] EXT_color_buffer_float unavailable — pipeline precision downgraded from '${this.pipelinePrecision}' to 'u8' (INT 8-bit)`);
+                this.pipelinePrecision = 'u8';
+            }
+        } else {
+            console.log(`[Radiance] Pipeline precision: ${this.pipelinePrecision} (EXT_color_buffer_float OK)`);
+        }
+
         // Create shader programs
         this.createPrograms();
 
@@ -961,6 +1312,18 @@ class RadianceWebGLRenderer {
             this.getScopePointVertexShader('waveform'),
             this.getScopePointFragmentShader()
         );
+
+        // v4.0: Multi-pass Kawase bloom programs
+        if (this.isWebGL2) {
+            this.programs.bloomDown = this.createProgram(
+                this.getBasicVertexShader(),
+                this._getBloomDownsampleShader()
+            );
+            this.programs.bloomUp = this.createProgram(
+                this.getBasicVertexShader(),
+                this._getBloomUpsampleShader()
+            );
+        }
 
         console.log("[Radiance] Shader programs compiled");
     }
@@ -1098,6 +1461,100 @@ class RadianceWebGLRenderer {
         this.quadBuffer = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
         gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+    }
+
+    // ── v4.0: Bloom Downsample Shader (Kawase dual-filter) ──────────────────
+    // 5-tap filter: center (weight 4) + 4 diagonal half-texel offsets (weight 1 each).
+    // First pass applies brightness threshold with soft knee; subsequent passes skip it.
+    // Linearizes sRGB input on first pass if source is not scene-linear.
+    _getBloomDownsampleShader() {
+        return `#version 300 es
+            precision highp float;
+            in vec2 v_texcoord;
+            out vec4 fragColor;
+
+            uniform sampler2D u_src;
+            uniform vec2  u_srcTexelSize;
+            uniform int   u_applyThreshold;
+            uniform float u_thresholdLo;
+            uniform float u_thresholdHi;
+            uniform float u_exposure;
+            uniform int   u_isLinear;
+
+            vec3 linearize(vec3 c) {
+                bvec3 lo = lessThan(c, vec3(0.04045));
+                return mix(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, vec3(lo));
+            }
+
+            void main() {
+                vec2 uv = v_texcoord;
+                vec2 hs = u_srcTexelSize * 0.5; // half-texel
+
+                // 5-tap Kawase downsample (center weight 4, corners weight 1)
+                vec3 c  = texture(u_src, uv).rgb;
+                vec3 tl = texture(u_src, uv + vec2(-hs.x,  hs.y)).rgb;
+                vec3 tr = texture(u_src, uv + vec2( hs.x,  hs.y)).rgb;
+                vec3 bl = texture(u_src, uv + vec2(-hs.x, -hs.y)).rgb;
+                vec3 br = texture(u_src, uv + vec2( hs.x, -hs.y)).rgb;
+
+                vec3 color = (c * 4.0 + tl + tr + bl + br) / 8.0;
+
+                if (u_applyThreshold == 1) {
+                    // Linearize if sRGB input
+                    if (u_isLinear == 0) color = linearize(color);
+
+                    // Apply exposure before threshold (so user exposure affects what blooms)
+                    color *= pow(2.0, u_exposure);
+
+                    // Soft knee threshold: smoothstep from lo→hi
+                    float lum = dot(color, vec3(0.2126, 0.7152, 0.0722));
+                    float knee = smoothstep(u_thresholdLo, u_thresholdHi, lum);
+                    color *= knee;
+
+                    // v4.1: Reinhard soft-clamp to prevent extreme HDR values (fire,
+                    // specular >>10.0) from propagating through the 6-level FBO chain.
+                    // Without this, accumulated bloom values can reach 1000s, causing
+                    // blocky blowout artefacts in the final composite.
+                    color = color / (vec3(1.0) + color);
+                }
+
+                fragColor = vec4(color, 1.0);
+            }
+        `;
+    }
+
+    // ── v4.0: Bloom Upsample Shader (Kawase dual-filter) ─────────────────────
+    // 9-tap tent filter (3×3 bilinear samples at half-texel offsets).
+    // Weighted: corners=1, edges=2, center=4 → /16 total.
+    // Used with additive blending to accumulate into the next-larger FBO.
+    _getBloomUpsampleShader() {
+        return `#version 300 es
+            precision highp float;
+            in vec2 v_texcoord;
+            out vec4 fragColor;
+
+            uniform sampler2D u_src;
+            uniform vec2 u_srcTexelSize;
+
+            void main() {
+                vec2 uv = v_texcoord;
+                vec2 hs = u_srcTexelSize * 0.5;
+
+                // 3×3 tent filter (9 taps)
+                vec3 sum = vec3(0.0);
+                sum += texture(u_src, uv + vec2(-hs.x,  hs.y)).rgb;       // TL  ×1
+                sum += texture(u_src, uv + vec2( 0.0,   hs.y)).rgb * 2.0; // T   ×2
+                sum += texture(u_src, uv + vec2( hs.x,  hs.y)).rgb;       // TR  ×1
+                sum += texture(u_src, uv + vec2(-hs.x,  0.0 )).rgb * 2.0; // L   ×2
+                sum += texture(u_src, uv).rgb * 4.0;                       // C   ×4
+                sum += texture(u_src, uv + vec2( hs.x,  0.0 )).rgb * 2.0; // R   ×2
+                sum += texture(u_src, uv + vec2(-hs.x, -hs.y)).rgb;       // BL  ×1
+                sum += texture(u_src, uv + vec2( 0.0,  -hs.y)).rgb * 2.0; // B   ×2
+                sum += texture(u_src, uv + vec2( hs.x, -hs.y)).rgb;       // BR  ×1
+
+                fragColor = vec4(sum / 16.0, 1.0);
+            }
+        `;
     }
 
     getBasicVertexShader() {
@@ -1283,6 +1740,10 @@ class RadianceWebGLRenderer {
             // Alpha channel is unused (or could be Luma curve master)
             uniform sampler2D u_curveLut; 
             uniform float u_curveMix; // 0.0 = disabled, 1.0 = full effect
+            // FIX 5: Slope of the curve at the highlight end (lut[255]-lut[254])*255.
+            // Used for physically correct HDR extrapolation above 1.0 instead of
+            // a linear pass-through that bypasses the user's curve shape entirely.
+            uniform vec3 u_curveSlope;
             
             // v3.4: Secondary Curves (Hue vs X)
             uniform sampler2D u_secondaryCurveLut;
@@ -1332,6 +1793,10 @@ class RadianceWebGLRenderer {
             uniform float u_bloom;
             uniform float u_halation;
             uniform float u_diffusion;
+
+            // v4.0: Pre-computed multi-pass bloom texture (Kawase chain result)
+            uniform sampler2D u_bloomTex;
+            uniform int u_bloomTexEnabled;
 
             // ── v3.2 Phase 11: Anamorphic Streaks + k2 Distortion ────────────
             uniform float u_lensDistortionK2;   // Brown-Conrady quartic term
@@ -1443,9 +1908,16 @@ class RadianceWebGLRenderer {
                 float g = texture(u_curveLut, vec2(c.g, 0.5)).g;
                 float b = texture(u_curveLut, vec2(c.b, 0.5)).b;
                 
-                // Preserve HDR highlights: additive extrapolation for values > 1.0
-                // This ensures Specular Highlights aren't crushed if the curve is at identity.
-                vec3 curved = vec3(r, g, b) + max(vec3(0.0), color - 1.0);
+                // FIX 5: Slope-based HDR extrapolation for values > 1.0.
+                // Old code used additive linear pass-through (+ max(0, color - 1.0))
+                // which bypassed the user's curve shape for any HDR highlight.
+                // New: extrapolate using the tangent slope at lut[255], so a Film
+                // Print or Bleach Bypass curve that rolls off highlights continues
+                // rolling off correctly above 1.0, preserving the grade intent.
+                // u_curveSlope is computed on the CPU as (lut[255]-lut[254])*255
+                // and clamped to [0, 4] to avoid runaway extrapolation.
+                vec3 excess = max(vec3(0.0), color - 1.0);
+                vec3 curved = vec3(r, g, b) + excess * u_curveSlope;
                 
                 return mix(color, curved, u_curveMix);
             }
@@ -1462,10 +1934,12 @@ class RadianceWebGLRenderer {
                 // R = HueVsHue, G = HueVsSat, B = HueVsLuma
                 vec3 lookup = texture(u_secondaryCurveLut, vec2(hsv.x, 0.5)).rgb;
                 
-                // R: HueVsHue — 0.5 is no change. <0.5 negative hue shift, >0.5 positive.
-                float hueShift = (lookup.r - 0.5); 
+                // R: HueVsHue — 0.5 = no change. Range: +/-0.5 = +/-180 deg hue rotation.
+                // fract() wraps the hue into [0.0, 1.0) and correctly handles
+                // negative arguments in GLSL (fract(-0.1) = 0.9).
+                // FIX 2: removed dead 'if (hsv.x < 0.0)' guard — fract() makes it unreachable.
+                float hueShift = (lookup.r - 0.5);
                 hsv.x = fract(hsv.x + hueShift);
-                if (hsv.x < 0.0) { hsv.x += 1.0; }
                 
                 // G: HueVsSat — 0.5 = 1× sat. 0.0 = 0× sat. 1.0 = 2× sat.
                 float satMult = lookup.g * 2.0; 
@@ -1473,7 +1947,12 @@ class RadianceWebGLRenderer {
 
                 // B: HueVsLuma — 0.5 = no change. <0.5 darken, >0.5 lift.
                 float lumaShift = (lookup.b - 0.5) * 2.0;  // -1.0 → +1.0
-                hsv.z = clamp(hsv.z + lumaShift * 0.5, 0.0, 65504.0);
+                // FIX 6: Clamp HSV Value to appropriate ceiling depending on pipeline.
+                // For SDR (u_isLinear=false) the V channel is [0,1]; clamping to 65504
+                // (HALF_FLOAT max) leaves it effectively unclamped, producing out-of-gamut
+                // RGB after hsv2rgb(). For HDR linear we keep the wide ceiling.
+                float maxLuma = u_isLinear ? 65504.0 : 1.0;
+                hsv.z = clamp(hsv.z + lumaShift * 0.5, 0.0, maxLuma);
                 
                 vec3 curved = hsv2rgb(hsv);
                 return mix(color, curved, u_secondaryCurveMix);
@@ -1899,19 +2378,29 @@ const float GOLDEN_ANGLE = 2.39996323;
 
 
             // Sobel edge detection for focus peaking
+            // FIX (v3.5.1): For linear HDR input, raw luma can be 0–100+.
+            // The Sobel gradient magnitude * 255 would be enormous, causing
+            // the threshold=30 to fire on every bright-area transition (red
+            // overlay on all highlights instead of just sharp edges).
+            // Solution: compress luma through Reinhard before Sobel so the
+            // gradient lives in 0–1 display-normalised space in both SDR and HDR.
+            float fp_compressLuma(float l) {
+                return u_isLinear ? l / (l + 1.0) : l;
+            }
             vec3 applyFocusPeaking(vec3 color, vec2 uv) {
                 vec2 px = 1.0 / u_texSize;
-                // 3x3 Sobel on luminance
-                float tl = dot(texture(u_image, uv + vec2(-px.x, -px.y)).rgb, vec3(0.2126, 0.7152, 0.0722));
-                float tc = dot(texture(u_image, uv + vec2(  0.0, -px.y)).rgb, vec3(0.2126, 0.7152, 0.0722));
-                float tr = dot(texture(u_image, uv + vec2( px.x, -px.y)).rgb, vec3(0.2126, 0.7152, 0.0722));
-                float ml = dot(texture(u_image, uv + vec2(-px.x,   0.0)).rgb, vec3(0.2126, 0.7152, 0.0722));
-                float mr = dot(texture(u_image, uv + vec2( px.x,   0.0)).rgb, vec3(0.2126, 0.7152, 0.0722));
-                float bl = dot(texture(u_image, uv + vec2(-px.x,  px.y)).rgb, vec3(0.2126, 0.7152, 0.0722));
-                float bc = dot(texture(u_image, uv + vec2(  0.0,  px.y)).rgb, vec3(0.2126, 0.7152, 0.0722));
-                float br = dot(texture(u_image, uv + vec2( px.x,  px.y)).rgb, vec3(0.2126, 0.7152, 0.0722));
+                // 3x3 Sobel — luma sampled from u_image, HDR-compressed if linear
+                float tl = fp_compressLuma(dot(texture(u_image, uv + vec2(-px.x, -px.y)).rgb, vec3(0.2126, 0.7152, 0.0722)));
+                float tc = fp_compressLuma(dot(texture(u_image, uv + vec2(  0.0, -px.y)).rgb, vec3(0.2126, 0.7152, 0.0722)));
+                float tr = fp_compressLuma(dot(texture(u_image, uv + vec2( px.x, -px.y)).rgb, vec3(0.2126, 0.7152, 0.0722)));
+                float ml = fp_compressLuma(dot(texture(u_image, uv + vec2(-px.x,   0.0)).rgb, vec3(0.2126, 0.7152, 0.0722)));
+                float mr = fp_compressLuma(dot(texture(u_image, uv + vec2( px.x,   0.0)).rgb, vec3(0.2126, 0.7152, 0.0722)));
+                float bl = fp_compressLuma(dot(texture(u_image, uv + vec2(-px.x,  px.y)).rgb, vec3(0.2126, 0.7152, 0.0722)));
+                float bc = fp_compressLuma(dot(texture(u_image, uv + vec2(  0.0,  px.y)).rgb, vec3(0.2126, 0.7152, 0.0722)));
+                float br = fp_compressLuma(dot(texture(u_image, uv + vec2( px.x,  px.y)).rgb, vec3(0.2126, 0.7152, 0.0722)));
                 float gx = -tl + tr - 2.0*ml + 2.0*mr - bl + br;
                 float gy = -tl - 2.0*tc - tr + bl + 2.0*bc + br;
+                // Gradient is now in 0–1 space → multiply by 255 gives 0–255 equivalent
                 float mag = sqrt(gx*gx + gy*gy) * 255.0;
                 if (mag > u_focusPeakThreshold) {
                     return mix(color, vec3(1.0, 0.0, 0.2), 0.85);
@@ -2344,63 +2833,82 @@ vec3 getDenoiseColor(vec2 uv) {
              }
         }
 
-        // 7. LUT (Global - applied after qualification)
-        vec3 lutInput = color;
-        if (u_lutEnabled) {
-            vec3 lutted = applyLUT(lutInput, u_lut, u_lutSize);
-            color = mix(color, lutted, u_lutStrength);
-        }
+        // ── Optical Effects (graded linear space, before creative LUT) ──────
+        // These simulate physical lens/film phenomena.  They sample u_image
+        // (scene-linear input) so we linearise sRGB sources and apply
+        // Reinhard HDR compression to keep contributions bounded — otherwise
+        // HDR values >>1.0 (e.g. fire, specular) cause massive blowout /
+        // blocky artefacts when added to the graded colour.
 
-        // 5b. Bloom/Halation/Diffusion (linear space, before display transform)
-        // These sample u_image (linear input) and add to graded linear color.
-        // Must happen BEFORE tonemap/LUT which maps to display range.
-        // 5b. Pro Bloom (optimized single-pass with better highlights preservation)
+        // v4.0: Multi-pass Kawase bloom (pre-computed FBO chain — already thresholded
+        // and exposure-adjusted in the downsample pass).
         if (u_bloom > 0.0) {
-            vec3 bloomAcc = vec3(0.0);
-            float bloomW = 0.0;
-            vec2 px = 1.2 / u_texSize; // Slightly larger spread
-            for (int bx = -3; bx <= 3; bx++) {
-                for (int by = -3; by <= 3; by++) {
-                    vec2 off = vec2(float(bx), float(by)) * px * 2.5;
-                    vec3 s = texture(u_image, uv + off).rgb;
-                    if (!u_isLinear) {
-                        bvec3 cutoff = lessThan(s, vec3(0.04045));
-                        s = mix(pow((s + vec3(0.055)) / vec3(1.055), vec3(2.4)), s / vec3(12.92), vec3(cutoff));
-                    }
-                    float lum = dot(s, vec3(0.2126, 0.7152, 0.0722));
-                    // Higher threshold (0.8) and softer knee for Pro Bloom
-                    float w = smoothstep(0.7, 1.2, lum);
-                    bloomAcc += s * w;
-                    bloomW += w;
+            if (u_bloomTexEnabled == 1) {
+                vec3 bloomSample = texture(u_bloomTex, uv).rgb;
+                // Reinhard compress bloom contribution for HDR scenes
+                bloomSample = bloomSample / (vec3(1.0) + bloomSample);
+                color += bloomSample * u_bloom * 1.2;
+            } else {
+                // Fallback: lightweight 16-sample spiral for WebGL1 or when FBOs fail
+                vec3 bloomAcc = vec3(0.0);
+                float bloomW = 0.0;
+                vec2 px = 1.0 / u_texSize;
+                const float BLOOM_GOLDEN = 2.399963;
+                const int   BLOOM_N      = 16;
+                const float BLOOM_RADIUS = 8.0;
+                for (int i = 0; i < BLOOM_N; i++) {
+                    float t     = (float(i) + 0.5) / float(BLOOM_N);
+                    float r     = sqrt(t) * BLOOM_RADIUS;
+                    float angle = float(i) * BLOOM_GOLDEN;
+                    vec2 off    = vec2(cos(angle), sin(angle)) * r * px;
+                    vec3 s      = texture(u_image, uv + off).rgb;
+                    if (!u_isLinear) s = sRGBToLinear(s);
+                    float lum    = dot(s, vec3(0.2126, 0.7152, 0.0722));
+                    float bl_lo = u_isLinear ? 1.0  : 0.82;
+                    float bl_hi = u_isLinear ? 3.0  : 1.4;
+                    float thresh = smoothstep(bl_lo, bl_hi, lum);
+                    float radW   = exp(-t * 3.0);
+                    float w      = thresh * radW;
+                    vec3 sc      = s / (vec3(1.0) + s);  // Reinhard compress
+                    bloomAcc    += sc * w;
+                    bloomW      += w;
                 }
+                if (bloomW > 0.0) color += (bloomAcc / bloomW) * u_bloom * 0.5;
             }
-            if (bloomW > 0.0) color += (bloomAcc / bloomW) * u_bloom * 0.35;
         }
 
-        // 5c. Halation (red channel highlight bleed — classic film gate bounce)
+        // Halation (red channel highlight bleed — classic film gate bounce)
+        // v4.1: Gaussian-weighted circular kernel with HDR compression.
+        // Replaces the old 9×9 box grid that produced blocky artefacts on HDR.
         if (u_halation > 0.0) {
             float halAcc = 0.0;
-            float halW = 0.0;
-            vec2 px2 = 1.0 / u_texSize;
-            for (int hx = -4; hx <= 4; hx++) {
-                for (int hy = -4; hy <= 4; hy++) {
-                    vec2 off = vec2(float(hx), float(hy)) * px2 * 4.0;
+            float halW   = 0.0;
+            vec2  px2    = 1.0 / u_texSize;
+            const int   HAL_RINGS  = 6;
+            const int   HAL_DIRS   = 8;
+            const float HAL_RADIUS = 5.0;
+            for (int ring = 1; ring <= HAL_RINGS; ring++) {
+                float rFrac = float(ring) / float(HAL_RINGS);
+                float rad   = rFrac * HAL_RADIUS;
+                float gw    = exp(-rFrac * rFrac * 2.0);
+                for (int dir = 0; dir < HAL_DIRS; dir++) {
+                    float a = float(dir) * (6.28318 / float(HAL_DIRS));
+                    vec2 off = vec2(cos(a), sin(a)) * rad * px2;
                     vec3 s = texture(u_image, uv + off).rgb;
+                    if (!u_isLinear) s = sRGBToLinear(s);
+                    s = s / (vec3(1.0) + s);  // Reinhard compress
                     float lum = dot(s, vec3(0.2126, 0.7152, 0.0722));
-                    float w = max(lum - 0.6, 0.0);
+                    float w = max(lum - 0.35, 0.0) * gw;
                     halAcc += s.r * w;
-                    halW += w;
+                    halW   += w;
                 }
             }
             if (halW > 0.0) halAcc /= halW;
-            color.r += halAcc * u_halation * 0.4;
+            color.r += halAcc * u_halation * 0.7;
         }
 
-        // ── v3.2 Phase 11: Anamorphic Lens Streaks ───────────────────────────
-        // Horizontal bloom streaks from bright highlights.
-        // Classic anamorphic signature: horizontal blue-cyan flares on specular
-        // sources.  The streak length is expressed as a UV fraction so it scales
-        // with the image resolution automatically.
+        // ── Anamorphic Lens Streaks ──────────────────────────────────────────
+        // v4.1: HDR-compressed samples prevent blowout on 32-bit float scenes.
         if (u_anamorphicStreaks > 0.0) {
             vec3  streakAcc = vec3(0.0);
             float streakW   = 0.0;
@@ -2410,44 +2918,48 @@ vec3 getDenoiseColor(vec2 uv) {
                 float t = float(si) / float(STREAK_SAMPLES);
                 vec2 sUV = clamp(vec2(uv.x + t * u_streakLength, uv.y), 0.0, 1.0);
                 vec3 s   = texture(u_image, sUV).rgb;
-
-                // Linearise sRGB samples if needed
-                if (!u_isLinear) {
-                    bvec3 cut = lessThan(s, vec3(0.04045));
-                    s = mix(pow((s + vec3(0.055)) / vec3(1.055), vec3(2.4)),
-                            s / vec3(12.92), vec3(cut));
-                }
+                if (!u_isLinear) s = sRGBToLinear(s);
+                s = s / (vec3(1.0) + s);  // Reinhard compress
 
                 float lum = dot(s, vec3(0.2126, 0.7152, 0.0722));
-                // Only pixels above threshold contribute; soft knee
                 float trigger = smoothstep(u_streakThreshold - 0.05, u_streakThreshold + 0.05, lum);
-                // Gaussian falloff along streak axis
                 float w = exp(-abs(t) * 10.0) * trigger;
                 streakAcc += s * w;
                 streakW   += w;
             }
 
             if (streakW > 0.0) {
-                // Anamorphic streaks are characteristically cyan-blue tinted
                 vec3 streak = (streakAcc / streakW) * vec3(0.55, 0.80, 1.0);
                 color += streak * u_anamorphicStreaks * 0.45;
             }
         }
 
-        // 5d. Diffusion (soft filter — blend with blurred version)
+        // Diffusion (soft filter — blend graded colour with blurred neighbourhood)
+        // v4.1: Gaussian-weighted 5×5 with HDR compression for clean softening.
         if (u_diffusion > 0.0) {
-            vec3 diffAcc = vec3(0.0);
-            vec2 px3 = 1.0 / u_texSize;
-            float diffW = 0.0;
+            vec3  diffAcc = vec3(0.0);
+            float diffW   = 0.0;
+            vec2  px3     = 1.0 / u_texSize;
             for (int dx = -2; dx <= 2; dx++) {
                 for (int dy = -2; dy <= 2; dy++) {
+                    float gw = exp(-float(dx*dx + dy*dy) / 4.5);
                     vec2 off = vec2(float(dx), float(dy)) * px3 * 2.0;
-                    diffAcc += texture(u_image, uv + off).rgb;
-                    diffW += 1.0;
+                    vec3 s = texture(u_image, uv + off).rgb;
+                    if (!u_isLinear) s = sRGBToLinear(s);
+                    s = s / (vec3(1.0) + s);  // Reinhard compress
+                    diffAcc += s * gw;
+                    diffW   += gw;
                 }
             }
             diffAcc /= diffW;
             color = mix(color, diffAcc, u_diffusion * 0.6);
+        }
+
+        // 7. LUT (Global - applied after qualification + optical effects)
+        vec3 lutInput = color;
+        if (u_lutEnabled) {
+            vec3 lutted = applyLUT(lutInput, u_lut, u_lutSize);
+            color = mix(color, lutted, u_lutStrength);
         }
 
         // 6. Display LUT / Tonemap
@@ -2924,7 +3436,7 @@ vec3 getDenoiseColor(vec2 uv) {
         return texture;
     }
 
-    // Read pixels from WebGL framebuffer for export
+    // Read pixels from WebGL framebuffer for export (8-bit legacy)
     readPixels() {
         const gl = this.gl;
         if (!this.textures.image) return null;
@@ -2932,6 +3444,74 @@ vec3 getDenoiseColor(vec2 uv) {
         const pixels = new Uint8Array(w * h * 4);
         gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
         return { data: pixels, width: w, height: h };
+    }
+
+    // ── v4.0: Read pixels as Float32 for 32-bit EXR export ──────────────────
+    // Renders the full composite pipeline at the specified resolution into an
+    // offscreen RGBA32F FBO, then reads back the result as Float32Array.
+    // This captures the graded/processed image at full float precision.
+    //
+    // @param {number} [width]  - Output width  (default: source image width)
+    // @param {number} [height] - Output height (default: source image height)
+    // @param {number} [lutStrength] - LUT intensity for the render
+    // @returns {{ data: Float32Array, width: number, height: number }} | null
+    readPixelsFloat32(width, height, lutStrength = 1.0) {
+        const gl = this.gl;
+        if (!this.isWebGL2 || !this.textures.image) return null;
+
+        const w = width  || this.imageWidth  || this.canvas.width;
+        const h = height || this.imageHeight || this.canvas.height;
+
+        // Create temporary RGBA32F FBO at target resolution
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, w, h, 0, gl.RGBA, gl.FLOAT, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+        const fbo = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+
+        const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+        if (status !== gl.FRAMEBUFFER_COMPLETE) {
+            console.error(`[Radiance] Float32 export FBO incomplete: ${status}`);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.deleteTexture(tex);
+            gl.deleteFramebuffer(fbo);
+            return null;
+        }
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+        // Set export target — render() will bind this FBO instead of default framebuffer
+        this._exportFBO = { fbo, width: w, height: h };
+
+        // Render composite pass into the FBO
+        this.render(lutStrength);
+
+        // Read back float32 pixels from the FBO
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+        const pixels = new Float32Array(w * h * 4);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.FLOAT, pixels);
+
+        // Clean up
+        this._exportFBO = null;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.deleteTexture(tex);
+        gl.deleteFramebuffer(fbo);
+
+        // WebGL readPixels returns bottom-to-top; flip vertically
+        const flipped = new Float32Array(w * h * 4);
+        for (let y = 0; y < h; y++) {
+            const srcRow = (h - 1 - y) * w * 4;
+            const dstRow = y * w * 4;
+            flipped.set(pixels.subarray(srcRow, srcRow + w * 4), dstRow);
+        }
+
+        console.log(`[Radiance] Float32 readback: ${w}×${h} (${(flipped.byteLength / 1048576).toFixed(1)} MB)`);
+        return { data: flipped, width: w, height: h };
     }
 
     // Load 3D LUT from .cube file data (WebGL2: float32, WebGL1: fallback)
@@ -3114,7 +3694,19 @@ vec3 getDenoiseColor(vec2 uv) {
 
         if (!program || !this.textures.image) return;
 
-        gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+        // ── v4.0: Run multi-pass bloom chain before composite ────────────────
+        // This renders to offscreen FBOs and does NOT touch the display framebuffer.
+        const bloomTex = this._renderBloomChain();
+
+        // v4.0: If an export FBO is set, render into it instead of the canvas
+        const exportTarget = this._exportFBO;
+        if (exportTarget) {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, exportTarget.fbo);
+            gl.viewport(0, 0, exportTarget.width, exportTarget.height);
+        } else {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+        }
         gl.clearColor(0, 0, 0, 1);
         gl.clear(gl.COLOR_BUFFER_BIT);
 
@@ -3139,6 +3731,9 @@ vec3 getDenoiseColor(vec2 uv) {
 
         // Curves (Texture unit 3)
         this._uf1(program, 'u_curveMix', this.curveMix);
+        // FIX 5: Upload highlight slope for proper HDR curve extrapolation
+        const slope = this.curveSlope || [1.0, 1.0, 1.0];
+        gl.uniform3f(this.getUniform(program, 'u_curveSlope'), slope[0], slope[1], slope[2]);
         gl.activeTexture(gl.TEXTURE3);
         if (this.curveLutTexture) {
             gl.bindTexture(gl.TEXTURE_2D, this.curveLutTexture);
@@ -3150,7 +3745,10 @@ vec3 getDenoiseColor(vec2 uv) {
         this._ui1(program, 'u_curveLut', 3);
 
         // Secondary Curves (Hue vs Hue / Sat) (Texture unit 4)
-        this._uf1(program, 'u_secondaryCurveMix', this.secondaryCurveMix !== undefined ? this.secondaryCurveMix : 1.0);
+        // FIX 3: Fallback must be 0.0 (bypass), not 1.0 (full effect).
+        // If secondaryCurveMix is somehow undefined (e.g. old deserialized state),
+        // defaulting to 1.0 would activate secondary curves unexpectedly.
+        this._uf1(program, 'u_secondaryCurveMix', this.secondaryCurveMix ?? 0.0);
         gl.activeTexture(gl.TEXTURE4);
         if (this.secondaryCurveLutTexture) {
             gl.bindTexture(gl.TEXTURE_2D, this.secondaryCurveLutTexture);
@@ -3274,9 +3872,9 @@ vec3 getDenoiseColor(vec2 uv) {
         this._uf1(program, 'u_wipe', this.wipe);
         this._ui1(program, 'u_wipeRefEnabled', this.wipeRefEnabled ? 1 : 0);
 
-        gl.activeTexture(gl.TEXTURE4);
+        gl.activeTexture(gl.TEXTURE6);
         gl.bindTexture(gl.TEXTURE_2D, this.textures.reference || this.textures.empty);
-        this._ui1(program, 'u_referenceImage', 4);
+        this._ui1(program, 'u_referenceImage', 6);
 
         // v2.2 Pro: Grids
         this._ui1(program, 'u_gridMode', this.gridMode);
@@ -3308,6 +3906,17 @@ vec3 getDenoiseColor(vec2 uv) {
         this._uf1(program, 'u_bloom', this.bloom || 0.0);
         this._uf1(program, 'u_halation', this.halation || 0.0);
         this._uf1(program, 'u_diffusion', this.diffusion || 0.0);
+
+        // v4.0: Bind pre-computed bloom texture on TEXTURE5
+        gl.activeTexture(gl.TEXTURE5);
+        if (bloomTex) {
+            gl.bindTexture(gl.TEXTURE_2D, bloomTex);
+            this._ui1(program, 'u_bloomTexEnabled', 1);
+        } else {
+            gl.bindTexture(gl.TEXTURE_2D, null);
+            this._ui1(program, 'u_bloomTexEnabled', 0);
+        }
+        this._ui1(program, 'u_bloomTex', 5);
 
         // ── v3.2 Phase 11: Anamorphic Streaks + k2 Distortion ────────────────
         this._uf1(program, 'u_lensDistortionK2', this.lensDistortionK2 || 0.0);
@@ -3404,7 +4013,7 @@ vec3 getDenoiseColor(vec2 uv) {
 
 
 
-    setFocusPeaking(enabled, threshold = 30.0) {
+    setFocusPeaking(enabled, threshold = 120.0) {
         this.focusPeaking = enabled;
         this.focusPeakingThreshold = threshold;
     }

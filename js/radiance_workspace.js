@@ -5,10 +5,93 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 const HEADER = "RAD_WORKSPACE_V1::";
+const SEARCH_DEBOUNCE_MS = 200;
+const TOAST_DURATION_MS = 3000;
 
-// Inject styles for the Assets Library modal
-const style = document.createElement('style');
+// ═══════════════════════════════════════════════════════════════════════════════
+//                           ENCODING HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * UTF-8 safe Base64 encode using TextEncoder (no deprecated unescape/escape).
+ */
+function utf8ToBase64(str) {
+    const bytes = new TextEncoder().encode(str);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+}
+
+/**
+ * UTF-8 safe Base64 decode using TextDecoder.
+ */
+function base64ToUtf8(b64) {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+    return new TextDecoder().decode(bytes);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//                           TOAST NOTIFICATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function showToast(message, type = "info") {
+    const existing = document.querySelector(".radiance-toast");
+    if (existing) existing.remove();
+
+    const toast = document.createElement("div");
+    toast.className = `radiance-toast radiance-toast-${type}`;
+    toast.textContent = message;
+    document.body.appendChild(toast);
+
+    // Trigger reflow then animate in
+    requestAnimationFrame(() => {
+        toast.style.opacity = "1";
+        toast.style.transform = "translateY(0)";
+    });
+
+    setTimeout(() => {
+        toast.style.opacity = "0";
+        toast.style.transform = "translateY(10px)";
+        setTimeout(() => toast.remove(), 300);
+    }, TOAST_DURATION_MS);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//                           DEBOUNCE UTILITY
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function debounce(fn, ms) {
+    let timer;
+    return function (...args) {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn.apply(this, args), ms);
+    };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//                           STYLES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const style = document.createElement("style");
 style.textContent = `
+    .radiance-toast {
+        position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(10px);
+        background: rgba(30, 32, 40, 0.95); color: #fff; padding: 12px 24px;
+        border-radius: 8px; font-size: 0.9em; z-index: 10001;
+        opacity: 0; transition: opacity 0.3s, transform 0.3s;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.1);
+        pointer-events: none; font-family: 'Inter', sans-serif;
+    }
+    .radiance-toast-success { border-left: 3px solid #34c759; }
+    .radiance-toast-error   { border-left: 3px solid #ff3b30; }
+    .radiance-toast-info    { border-left: 3px solid #4db3ff; }
+
     .radiance-modal-overlay {
         position: fixed; top: 0; left: 0; right: 0; bottom: 0;
         background: rgba(0,0,0,0.7); backdrop-filter: blur(8px); z-index: 10000;
@@ -25,10 +108,11 @@ style.textContent = `
         margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 15px;
     }
     .radiance-modal h2 { margin: 0; color: #fff; font-size: 1.5em; letter-spacing: -0.02em; }
-    
+
     .radiance-search-container { margin-bottom: 20px; }
     .radiance-search-input {
-        width: 100%; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1);
+        width: 100%; box-sizing: border-box;
+        background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1);
         padding: 10px 15px; border-radius: 6px; color: #fff; font-size: 1em; outline: none;
     }
     .radiance-search-input:focus { border-color: #4db3ff; box-shadow: 0 0 0 2px rgba(77, 179, 255, 0.2); }
@@ -36,34 +120,38 @@ style.textContent = `
     .radiance-workflow-list { list-style: none; padding: 0; margin: 0; }
     .radiance-workflow-item {
         display: flex; justify-content: space-between; align-items: center;
-        padding: 15px; border-bottom: 1px solid rgba(255,255,255,0.05); 
+        padding: 15px; border-bottom: 1px solid rgba(255,255,255,0.05);
         background: rgba(255,255,255,0.02); margin-bottom: 8px; border-radius: 8px;
         transition: transform 0.2s, background 0.2s;
     }
     .radiance-workflow-item:hover { background: rgba(255,255,255,0.05); transform: translateX(4px); }
-    .radiance-workflow-info { display: flex; flex-direction: column; flex: 1; margin-right: 15px; }
-    .radiance-workflow-name { font-weight: 600; color: #fff; font-size: 1.1em; }
+    .radiance-workflow-info { display: flex; flex-direction: column; flex: 1; margin-right: 15px; min-width: 0; }
+    .radiance-workflow-name {
+        font-weight: 600; color: #fff; font-size: 1.1em;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
     .radiance-workflow-desc { font-size: 0.85em; color: #888; margin-top: 4px; line-height: 1.4; }
     .radiance-workflow-meta { font-size: 0.75em; color: #555; margin-top: 6px; font-variant-numeric: tabular-nums; }
-    
-    .radiance-actions { display: flex; gap: 8px; }
+
+    .radiance-actions { display: flex; gap: 8px; flex-shrink: 0; }
     .radiance-btn {
         background: rgba(255,255,255,0.1); color: white; border: none; padding: 8px 14px;
         border-radius: 6px; cursor: pointer; font-size: 0.85em; font-weight: 500;
         transition: background 0.2s, color 0.2s;
     }
     .radiance-btn:hover { background: rgba(255,255,255,0.2); }
+    .radiance-btn:focus-visible { outline: 2px solid #4db3ff; outline-offset: 2px; }
     .radiance-btn.primary { background: #005bb7; }
     .radiance-btn.primary:hover { background: #0076eb; }
     .radiance-btn.danger { background: rgba(255, 59, 48, 0.1); color: #ff3b30; }
     .radiance-btn.danger:hover { background: rgba(255, 59, 48, 0.2); }
-    
+
     .radiance-badge {
         background: #444; color: #aaa; padding: 2px 6px; border-radius: 4px;
         font-size: 0.7em; text-transform: uppercase; margin-left: 8px; vertical-align: middle;
     }
     .radiance-badge.system { background: #1a1c23; color: #4db3ff; border: 1px solid #005bb7; }
-    
+
     .radiance-folder-group { margin-bottom: 25px; }
     .radiance-folder-header {
         font-size: 0.9em; font-weight: 700; color: #4db3ff; text-transform: uppercase;
@@ -76,387 +164,422 @@ style.textContent = `
     }
 
     .radiance-modal-close { margin-top: 25px; width: 100%; padding: 12px; font-weight: bold; background: #333; }
+    
+    .radiance-empty-state {
+        text-align: center; padding: 40px 20px; opacity: 0.5;
+    }
+    .radiance-empty-state p { margin: 0; }
 `;
 document.head.appendChild(style);
 
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//                       NODE EXTENSION REGISTRATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
 app.registerExtension({
     name: "Radiance.Workspace",
-    async beforeRegisterNodeDef(nodeType, nodeData, app) {
-        if (nodeData.name === "RadianceWorkspace") {
-            const onNodeCreated = nodeType.prototype.onNodeCreated;
 
-            nodeType.prototype.onNodeCreated = function () {
-                if (onNodeCreated) {
-                    onNodeCreated.apply(this, arguments);
-                }
+    async beforeRegisterNodeDef(nodeType, nodeData, _app) {
+        if (nodeData.name !== "RadianceWorkspace") return;
 
-                // Add Export Button
-                this.addWidget("button", "Export .rad", "export", () => {
-                    this.exportRadWorkspace();
-                });
+        const origOnNodeCreated = nodeType.prototype.onNodeCreated;
 
-                // Add Import Button
-                this.addWidget("button", "Import .rad", "import", () => {
-                    this.importRadWorkspace();
-                });
+        nodeType.prototype.onNodeCreated = function () {
+            origOnNodeCreated?.apply(this, arguments);
 
-                // Add Assets Library Buttons
-                this.addWidget("button", "Save to Library", "save_lib", () => {
-                    this.saveToLibrary();
-                });
-                this.addWidget("button", "Open Library", "open_lib", () => {
-                    this.openLibrary();
-                });
+            this.addWidget("button", "Export .rad", "export", () => this.exportRadWorkspace());
+            this.addWidget("button", "Import .rad", "import", () => this.importRadWorkspace());
+            this.addWidget("button", "Save to Library", "save_lib", () => this.saveToLibrary());
+            this.addWidget("button", "Open Library", "open_lib", () => this.openLibrary());
+            this.addWidget("button", "Docs", "docs_link", () => window.open("https://radiance.fxtd.org", "_blank"));
+            this.addWidget("button", "FXTD Studios", "site_link", () => window.open("https://www.fxtd.org", "_blank"));
 
-                // Documentation links
-                this.addWidget("button", "Docs", "docs_link", () => {
-                    window.open("https://radiance.fxtd.org", "_blank");
-                });
-                this.addWidget("button", "FXTD Studios", "site_link", () => {
-                    window.open("https://www.fxtd.org", "_blank");
-                });
+            this.color = "#1a1c23";
+            this.bgcolor = "#1a1c23";
+            this.size = [300, 200];
+        };
 
-                // Style the node
-                this.color = "#1a1c23";
-                this.bgcolor = "#1a1c23";
-                this.size = [300, 200];
-            };
+        // ─── Serialization ───────────────────────────────────────────
 
-            nodeType.prototype.buildRadContent = function () {
-                const graphData = app.graph.serialize();
-                const jsonString = JSON.stringify(graphData);
-                const base64Data = btoa(unescape(encodeURIComponent(jsonString)));
-                return HEADER + base64Data;
-            };
+        nodeType.prototype.buildRadContent = function () {
+            const graphData = app.graph.serialize();
+            const jsonString = JSON.stringify(graphData);
+            return HEADER + utf8ToBase64(jsonString);
+        };
 
-            nodeType.prototype.exportRadWorkspace = function () {
-                try {
-                    let defaultName = `workspace_${Date.now()}`;
-                    let chosenName = prompt("Enter a name for the workflow export:", defaultName);
+        nodeType.prototype.parseAndLoadRadContent = function (content, append = false) {
+            if (!content.startsWith(HEADER)) {
+                showToast("Invalid .rad file: Missing Radiance header.", "error");
+                return false;
+            }
 
-                    if (chosenName === null) {
-                        return; // User cancelled
-                    }
-                    if (chosenName.trim() === "") {
-                        chosenName = defaultName;
-                    }
-                    if (!chosenName.endsWith(".rad")) {
-                        chosenName += ".rad";
-                    }
-
-                    const radContent = this.buildRadContent();
-
-                    const blob = new Blob([radContent], { type: 'application/octet-stream' });
-                    const url = URL.createObjectURL(blob);
-
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = chosenName;
-                    document.body.appendChild(a);
-                    a.click();
-
-                    setTimeout(() => {
-                        document.body.removeChild(a);
-                        URL.revokeObjectURL(url);
-                    }, 0);
-
-                    console.log("[Radiance] Successfully exported .rad workspace.");
-                } catch (e) {
-                    console.error("[Radiance] Failed to export workspace:", e);
-                    alert("Failed to export Radiance Workspace. Check console for details.");
-                }
-            };
-
-            nodeType.prototype.saveToLibrary = async function () {
-                try {
-                    let defaultName = `workspace_${Date.now()}`;
-                    let chosenName = prompt("Enter filename (e.g., Experiments/Test01):", defaultName);
-
-                    if (chosenName === null || chosenName.trim() === "") {
-                        return;
-                    }
-                    if (!chosenName.endsWith(".rad")) {
-                        chosenName += ".rad";
-                    }
-
-                    let description = prompt("Optional: Enter a short description for this workflow:");
-                    if (description === null) description = "";
-
-                    const radContent = this.buildRadContent();
-
-                    const response = await api.fetchApi("/radiance/workflows/save", {
-                        method: "POST",
-                        body: JSON.stringify({ 
-                            filename: chosenName, 
-                            content: radContent,
-                            description: description
-                        }),
-                        headers: { "Content-Type": "application/json" }
-                    });
-
-                    if (response.ok) {
-                        alert(`Saved ${chosenName} to Assets Library successfully.`);
-                    } else {
-                        const err = await response.json();
-                        alert(`Failed to save: ${err.error || 'Unknown error'}`);
-                    }
-                } catch (e) {
-                    console.error("[Radiance] Failed to save to library:", e);
-                    alert("Failed to save to Assets Library. Check console for details.");
-                }
-            };
-
-            nodeType.prototype.openLibrary = async function () {
-                try {
-                    const response = await api.fetchApi("/radiance/workflows/list");
-                    if (!response.ok) throw new Error("Failed to fetch library.");
-                    const data = await response.json();
-
-                    this.showLibraryModal(data.workflows || []);
-                } catch (e) {
-                    console.error("[Radiance] Failed to load library:", e);
-                    alert("Failed to load Assets Library. Check console for details.");
-                }
-            };
-
-            nodeType.prototype.showLibraryModal = function (workflows) {
-                const overlay = document.createElement('div');
-                overlay.className = 'radiance-modal-overlay';
-
-                const modal = document.createElement('div');
-                modal.className = 'radiance-modal';
-
-                const header = document.createElement('div');
-                header.className = 'radiance-modal-header';
-                
-                const title = document.createElement('h2');
-                title.textContent = "Radiance Assets Library";
-                header.appendChild(title);
-                modal.appendChild(header);
-
-                // Search Bar
-                const searchContainer = document.createElement('div');
-                searchContainer.className = 'radiance-search-container';
-                const searchInput = document.createElement('input');
-                searchInput.placeholder = "Search workflows by name or description...";
-                searchInput.className = 'radiance-search-input';
-                searchContainer.appendChild(searchInput);
-                modal.appendChild(searchContainer);
-
-                const list = document.createElement('ul');
-                list.className = 'radiance-workflow-list';
-                modal.appendChild(list);
-
-                const renderList = (filter = "") => {
-                    list.innerHTML = "";
-                    const filtered = workflows.filter(wf => {
-                        const searchStr = `${wf.filename} ${wf.metadata?.description || ""}`.toLowerCase();
-                        return searchStr.includes(filter.toLowerCase());
-                    });
-
-                    if (filtered.length === 0) {
-                        const emptyMsg = document.createElement('p');
-                        emptyMsg.textContent = "No workflows found.";
-                        emptyMsg.style.textAlign = "center";
-                        emptyMsg.style.opacity = "0.5";
-                        list.appendChild(emptyMsg);
-                        return;
-                    }
-
-                    // Group by folder
-                    const groups = {};
-                    filtered.forEach(wf => {
-                        const parts = wf.filename.split('/');
-                        const folder = parts.length > 1 ? parts[0] : "Root";
-                        if (!groups[folder]) groups[folder] = [];
-                        groups[folder].push(wf);
-                    });
-
-                    // Sort folders (Root first)
-                    const sortedFolders = Object.keys(groups).sort((a, b) => {
-                        if (a === "Root") return -1;
-                        if (b === "Root") return 1;
-                        return a.localeCompare(b);
-                    });
-
-                    sortedFolders.forEach(folder => {
-                        const groupDiv = document.createElement('div');
-                        groupDiv.className = 'radiance-folder-group';
-                        
-                        const header = document.createElement('div');
-                        header.className = 'radiance-folder-header';
-                        header.textContent = folder === "Root" ? "General Workflows" : folder;
-                        groupDiv.appendChild(header);
-
-                        const groupList = document.createElement('ul');
-                        groupList.className = 'radiance-workflow-list';
-
-                        groups[folder].forEach(wf => {
-                            const li = document.createElement('li');
-                            li.className = 'radiance-workflow-item';
-
-                            const info = document.createElement('div');
-                            info.className = 'radiance-workflow-info';
-
-                            const nameSpan = document.createElement('span');
-                            nameSpan.className = 'radiance-workflow-name';
-                            const displayName = wf.filename.split('/').pop().replace('.rad', '');
-                            nameSpan.textContent = displayName;
-
-                            if (wf.filename === 'default.rad') {
-                                const badge = document.createElement('span');
-                                badge.className = 'radiance-badge system';
-                                badge.textContent = 'System';
-                                nameSpan.appendChild(badge);
-                            }
-
-                            info.appendChild(nameSpan);
-
-                            if (wf.metadata?.description) {
-                                const descDiv = document.createElement('div');
-                                descDiv.className = 'radiance-workflow-desc';
-                                descDiv.textContent = wf.metadata.description;
-                                info.appendChild(descDiv);
-                            }
-
-                            const metaSpan = document.createElement('span');
-                            metaSpan.className = 'radiance-workflow-meta';
-                            const date = new Date(wf.mtime * 1000).toLocaleString();
-                            const sizeKB = Math.round(wf.size / 1024);
-                            metaSpan.textContent = `${date}  •  ${sizeKB} KB`;
-
-                            info.appendChild(metaSpan);
-                            li.appendChild(info);
-
-                            const actions = document.createElement('div');
-                            actions.className = 'radiance-actions';
-
-                            const appendBtn = document.createElement('button');
-                            appendBtn.className = 'radiance-btn';
-                            appendBtn.textContent = 'Append';
-                            appendBtn.onclick = () => {
-                                this.loadFromLibrary(wf.filename, true);
-                                document.body.removeChild(overlay);
-                            };
-
-                            const loadBtn = document.createElement('button');
-                            loadBtn.className = 'radiance-btn primary';
-                            loadBtn.textContent = 'Load';
-                            loadBtn.onclick = () => {
-                                if (confirm(`Replace graph with '${displayName}'?`)) {
-                                    this.loadFromLibrary(wf.filename, false);
-                                    document.body.removeChild(overlay);
-                                }
-                            };
-
-                            const delBtn = document.createElement('button');
-                            delBtn.className = 'radiance-btn danger';
-                            delBtn.textContent = 'Delete';
-                            delBtn.onclick = async () => {
-                                if (confirm(`Permanently delete '${wf.filename}'?`)) {
-                                    await this.deleteFromLibrary(wf.filename);
-                                    const response = await api.fetchApi("/radiance/workflows/list");
-                                    const data = await response.json();
-                                    workflows = data.workflows || [];
-                                    renderList(searchInput.value);
-                                }
-                            };
-
-                            actions.appendChild(appendBtn);
-                            actions.appendChild(loadBtn);
-                            actions.appendChild(delBtn);
-                            li.appendChild(actions);
-
-                            groupList.appendChild(li);
-                        });
-                        
-                        groupDiv.appendChild(groupList);
-                        list.appendChild(groupDiv);
-                    });
-                };
-
-                searchInput.oninput = (e) => renderList(e.target.value);
-                renderList();
-
-                const closeBtn = document.createElement('button');
-                closeBtn.className = 'radiance-btn radiance-modal-close';
-                closeBtn.textContent = 'Close';
-                closeBtn.onclick = () => document.body.removeChild(overlay);
-                modal.appendChild(closeBtn);
-
-                overlay.onclick = (e) => {
-                    if (e.target === overlay) document.body.removeChild(overlay);
-                };
-
-                overlay.appendChild(modal);
-                document.body.appendChild(overlay);
-            };
-
-            nodeType.prototype.loadFromLibrary = async function (filename, append = false) {
-                try {
-                    const response = await api.fetchApi(`/radiance/workflows/get?filename=${encodeURIComponent(filename)}`);
-                    if (!response.ok) throw new Error("Failed to fetch workflow content.");
-                    const data = await response.json();
-                    if (!data.success) throw new Error(data.error);
-
-                    this.parseAndLoadRadContent(data.content, append);
-                } catch (e) {
-                    console.error("[Radiance] Failed to load workflow:", e);
-                    alert("Failed to load workflow from Library.");
-                }
-            };
-
-            nodeType.prototype.deleteFromLibrary = async function (filename) {
-                try {
-                    const response = await api.fetchApi("/radiance/workflows/delete", {
-                        method: "POST",
-                        body: JSON.stringify({ filename }),
-                        headers: { "Content-Type": "application/json" }
-                    });
-                    if (!response.ok) throw new Error("Delete request failed.");
-                } catch (e) {
-                    console.error("[Radiance] Failed to delete workflow:", e);
-                    alert("Failed to delete from Library.");
-                }
-            };
-
-            nodeType.prototype.parseAndLoadRadContent = function (content, append = false) {
-                if (!content.startsWith(HEADER)) {
-                    alert("Invalid .rad file: Missing Radiance Header.");
-                    return;
-                }
-
-                const base64Data = content.replace(HEADER, '');
-                const jsonString = decodeURIComponent(escape(atob(base64Data)));
+            try {
+                const base64Data = content.slice(HEADER.length);
+                const jsonString = base64ToUtf8(base64Data);
                 const graphData = JSON.parse(jsonString);
 
                 app.loadGraphData(graphData, append);
-                console.log(`[Radiance] Successfully ${append ? 'appended' : 'loaded'} .rad workspace.`);
-            };
+                console.log(`[Radiance] Successfully ${append ? "appended" : "loaded"} .rad workspace.`);
+                return true;
+            } catch (err) {
+                console.error("[Radiance] Failed to parse .rad content:", err);
+                showToast("Failed to parse .rad file — it may be corrupted.", "error");
+                return false;
+            }
+        };
 
-            nodeType.prototype.importRadWorkspace = function () {
-                const input = document.createElement('input');
-                input.type = 'file';
-                input.accept = '.rad';
+        // ─── Export / Import (local file) ────────────────────────────
 
-                input.onchange = e => {
-                    const file = e.target.files[0];
-                    if (!file) return;
+        nodeType.prototype.exportRadWorkspace = function () {
+            try {
+                const defaultName = `workspace_${Date.now()}`;
+                let chosenName = prompt("Enter a name for the workflow export:", defaultName);
 
-                    const reader = new FileReader();
-                    reader.onload = (event) => {
-                        try {
-                            this.parseAndLoadRadContent(event.target.result);
-                        } catch (err) {
-                            console.error("[Radiance] Failed to parse .rad file:", err);
-                            alert("Failed to load .rad Workspace: File may be corrupted.");
-                        }
-                    };
-                    reader.readAsText(file);
+                if (chosenName === null) return;
+                chosenName = chosenName.trim() || defaultName;
+                if (!chosenName.endsWith(".rad")) chosenName += ".rad";
+
+                const radContent = this.buildRadContent();
+                const blob = new Blob([radContent], { type: "application/octet-stream" });
+                const url = URL.createObjectURL(blob);
+
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = chosenName;
+                document.body.appendChild(a);
+                a.click();
+
+                // Clean up in microtask to ensure download starts
+                setTimeout(() => {
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                }, 100);
+
+                showToast(`Exported ${chosenName}`, "success");
+            } catch (e) {
+                console.error("[Radiance] Failed to export workspace:", e);
+                showToast("Export failed — check console for details.", "error");
+            }
+        };
+
+        nodeType.prototype.importRadWorkspace = function () {
+            const input = document.createElement("input");
+            input.type = "file";
+            input.accept = ".rad";
+
+            input.onchange = (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+
+                // Guard against absurdly large files on the client side
+                if (file.size > 100 * 1024 * 1024) {
+                    showToast("File too large (>100MB). Aborting import.", "error");
+                    return;
+                }
+
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const success = this.parseAndLoadRadContent(event.target.result);
+                    if (success) {
+                        showToast(`Imported ${file.name}`, "success");
+                    }
                 };
-
-                input.click();
+                reader.onerror = () => {
+                    showToast("Failed to read file.", "error");
+                };
+                reader.readAsText(file);
             };
-        }
-    }
+
+            input.click();
+        };
+
+        // ─── Library: Save ───────────────────────────────────────────
+
+        nodeType.prototype.saveToLibrary = async function () {
+            try {
+                const defaultName = `workspace_${Date.now()}`;
+                let chosenName = prompt("Enter filename (e.g., Experiments/Test01):", defaultName);
+
+                if (chosenName === null || chosenName.trim() === "") return;
+                if (!chosenName.endsWith(".rad")) chosenName += ".rad";
+
+                const description = prompt("Optional: Enter a short description for this workflow:") ?? "";
+                const radContent = this.buildRadContent();
+
+                const response = await api.fetchApi("/radiance/workflows/save", {
+                    method: "POST",
+                    body: JSON.stringify({
+                        filename: chosenName,
+                        content: radContent,
+                        description: description,
+                    }),
+                    headers: { "Content-Type": "application/json" },
+                });
+
+                if (response.ok) {
+                    showToast(`Saved "${chosenName}" to library.`, "success");
+                } else {
+                    const err = await response.json().catch(() => ({}));
+                    showToast(`Save failed: ${err.error || response.statusText}`, "error");
+                }
+            } catch (e) {
+                console.error("[Radiance] Failed to save to library:", e);
+                showToast("Save failed — check console.", "error");
+            }
+        };
+
+        // ─── Library: Open ───────────────────────────────────────────
+
+        nodeType.prototype.openLibrary = async function () {
+            try {
+                const response = await api.fetchApi("/radiance/workflows/list");
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                this.showLibraryModal(data.workflows || []);
+            } catch (e) {
+                console.error("[Radiance] Failed to load library:", e);
+                showToast("Failed to open Assets Library.", "error");
+            }
+        };
+
+        // ─── Library: Load / Delete ──────────────────────────────────
+
+        nodeType.prototype.loadFromLibrary = async function (filename, append = false) {
+            try {
+                const response = await api.fetchApi(
+                    `/radiance/workflows/get?filename=${encodeURIComponent(filename)}`
+                );
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                if (!data.success) throw new Error(data.error);
+
+                const success = this.parseAndLoadRadContent(data.content, append);
+                if (success) {
+                    const action = append ? "Appended" : "Loaded";
+                    showToast(`${action} workflow from library.`, "success");
+                }
+            } catch (e) {
+                console.error("[Radiance] Failed to load workflow:", e);
+                showToast("Failed to load workflow from library.", "error");
+            }
+        };
+
+        nodeType.prototype.deleteFromLibrary = async function (filename) {
+            try {
+                const response = await api.fetchApi("/radiance/workflows/delete", {
+                    method: "POST",
+                    body: JSON.stringify({ filename }),
+                    headers: { "Content-Type": "application/json" },
+                });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                showToast("Workflow deleted.", "info");
+            } catch (e) {
+                console.error("[Radiance] Failed to delete workflow:", e);
+                showToast("Delete failed.", "error");
+            }
+        };
+
+        // ─── Library: Modal UI ───────────────────────────────────────
+
+        nodeType.prototype.showLibraryModal = function (initialWorkflows) {
+            // Mutable reference that the delete handler can update
+            let workflows = initialWorkflows;
+
+            const overlay = document.createElement("div");
+            overlay.className = "radiance-modal-overlay";
+
+            const modal = document.createElement("div");
+            modal.className = "radiance-modal";
+
+            // Header
+            const headerDiv = document.createElement("div");
+            headerDiv.className = "radiance-modal-header";
+            const title = document.createElement("h2");
+            title.textContent = "Radiance Assets Library";
+            headerDiv.appendChild(title);
+            modal.appendChild(headerDiv);
+
+            // Search
+            const searchContainer = document.createElement("div");
+            searchContainer.className = "radiance-search-container";
+            const searchInput = document.createElement("input");
+            searchInput.placeholder = "Search workflows by name or description…";
+            searchInput.className = "radiance-search-input";
+            searchContainer.appendChild(searchInput);
+            modal.appendChild(searchContainer);
+
+            // List container
+            const list = document.createElement("ul");
+            list.className = "radiance-workflow-list";
+            modal.appendChild(list);
+
+            // ── Cleanup helper ──
+            const closeModal = () => {
+                overlay.remove();
+                document.removeEventListener("keydown", onKeyDown);
+            };
+
+            const onKeyDown = (e) => {
+                if (e.key === "Escape") closeModal();
+            };
+            document.addEventListener("keydown", onKeyDown);
+
+            // ── Render list ──
+            const renderList = (filter = "") => {
+                list.innerHTML = "";
+                const lowerFilter = filter.toLowerCase();
+                const filtered = workflows.filter((wf) => {
+                    const haystack = `${wf.filename} ${wf.metadata?.description || ""}`.toLowerCase();
+                    return haystack.includes(lowerFilter);
+                });
+
+                if (filtered.length === 0) {
+                    const empty = document.createElement("div");
+                    empty.className = "radiance-empty-state";
+                    const p = document.createElement("p");
+                    p.textContent = filter ? "No workflows match your search." : "Library is empty — save a workflow to get started.";
+                    empty.appendChild(p);
+                    list.appendChild(empty);
+                    return;
+                }
+
+                // Group by folder
+                const groups = {};
+                for (const wf of filtered) {
+                    const parts = wf.filename.split("/");
+                    const folder = parts.length > 1 ? parts[0] : "Root";
+                    (groups[folder] ||= []).push(wf);
+                }
+
+                const sortedFolders = Object.keys(groups).sort((a, b) => {
+                    if (a === "Root") return -1;
+                    if (b === "Root") return 1;
+                    return a.localeCompare(b);
+                });
+
+                for (const folder of sortedFolders) {
+                    const groupDiv = document.createElement("div");
+                    groupDiv.className = "radiance-folder-group";
+
+                    const header = document.createElement("div");
+                    header.className = "radiance-folder-header";
+                    header.textContent = folder === "Root" ? "General Workflows" : folder;
+                    groupDiv.appendChild(header);
+
+                    const groupList = document.createElement("ul");
+                    groupList.className = "radiance-workflow-list";
+
+                    for (const wf of groups[folder]) {
+                        const li = document.createElement("li");
+                        li.className = "radiance-workflow-item";
+
+                        const info = document.createElement("div");
+                        info.className = "radiance-workflow-info";
+
+                        const nameSpan = document.createElement("span");
+                        nameSpan.className = "radiance-workflow-name";
+                        const displayName = wf.filename.split("/").pop().replace(".rad", "");
+                        nameSpan.textContent = displayName;
+
+                        if (wf.filename === "default.rad") {
+                            const badge = document.createElement("span");
+                            badge.className = "radiance-badge system";
+                            badge.textContent = "System";
+                            nameSpan.appendChild(badge);
+                        }
+
+                        info.appendChild(nameSpan);
+
+                        if (wf.metadata?.description) {
+                            const descDiv = document.createElement("div");
+                            descDiv.className = "radiance-workflow-desc";
+                            descDiv.textContent = wf.metadata.description;
+                            info.appendChild(descDiv);
+                        }
+
+                        const metaSpan = document.createElement("span");
+                        metaSpan.className = "radiance-workflow-meta";
+                        const date = new Date(wf.mtime * 1000).toLocaleString();
+                        const sizeKB = Math.round(wf.size / 1024);
+                        metaSpan.textContent = `${date}  •  ${sizeKB} KB`;
+                        info.appendChild(metaSpan);
+                        li.appendChild(info);
+
+                        // Action buttons
+                        const actions = document.createElement("div");
+                        actions.className = "radiance-actions";
+
+                        const appendBtn = document.createElement("button");
+                        appendBtn.className = "radiance-btn";
+                        appendBtn.textContent = "Append";
+                        appendBtn.onclick = () => {
+                            this.loadFromLibrary(wf.filename, true);
+                            closeModal();
+                        };
+
+                        const loadBtn = document.createElement("button");
+                        loadBtn.className = "radiance-btn primary";
+                        loadBtn.textContent = "Load";
+                        loadBtn.onclick = () => {
+                            if (confirm(`Replace current graph with "${displayName}"?`)) {
+                                this.loadFromLibrary(wf.filename, false);
+                                closeModal();
+                            }
+                        };
+
+                        const delBtn = document.createElement("button");
+                        delBtn.className = "radiance-btn danger";
+                        delBtn.textContent = "Delete";
+                        delBtn.onclick = async () => {
+                            if (!confirm(`Permanently delete "${wf.filename}"?`)) return;
+                            await this.deleteFromLibrary(wf.filename);
+
+                            // Refresh list from server
+                            try {
+                                const response = await api.fetchApi("/radiance/workflows/list");
+                                const data = await response.json();
+                                workflows = data.workflows || [];
+                            } catch {
+                                // Remove locally as fallback
+                                workflows = workflows.filter((w) => w.filename !== wf.filename);
+                            }
+                            renderList(searchInput.value);
+                        };
+
+                        actions.appendChild(appendBtn);
+                        actions.appendChild(loadBtn);
+                        actions.appendChild(delBtn);
+                        li.appendChild(actions);
+                        groupList.appendChild(li);
+                    }
+
+                    groupDiv.appendChild(groupList);
+                    list.appendChild(groupDiv);
+                }
+            };
+
+            // Debounced search
+            searchInput.oninput = debounce((e) => renderList(e.target.value), SEARCH_DEBOUNCE_MS);
+            renderList();
+
+            // Close button
+            const closeBtn = document.createElement("button");
+            closeBtn.className = "radiance-btn radiance-modal-close";
+            closeBtn.textContent = "Close";
+            closeBtn.onclick = closeModal;
+            modal.appendChild(closeBtn);
+
+            // Click-outside to dismiss
+            overlay.onclick = (e) => {
+                if (e.target === overlay) closeModal();
+            };
+
+            overlay.appendChild(modal);
+            document.body.appendChild(overlay);
+
+            // Focus search on open
+            requestAnimationFrame(() => searchInput.focus());
+        };
+    },
 });

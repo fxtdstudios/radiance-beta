@@ -114,7 +114,7 @@ try:
 except ImportError:
     HAS_IMAGEIO = False
 
-BIT_DEPTH_MODES = ["8-bit (Fast)", "16-bit (Quality)", "16-bit + HDR Data"]
+BIT_DEPTH_MODES = ["8-bit (Fast)", "16-bit (Quality)", "16-bit + HDR Data", "32-bit Float"]
 CV2_PNG_COMPRESSION = 4
 
 
@@ -1170,7 +1170,9 @@ class RadianceViewer:
                         "tooltip": (
                             "8-bit: Fast, 256 levels. "
                             "16-bit: Quality, 65536 levels. "
-                            "16-bit + HDR: Adds float32 sidecar for true HDR color picker."
+                            "16-bit + HDR: Adds float16 sidecar for HDR color picker. "
+                            "32-bit Float: Full IEEE 754 fp32 sidecar — industry standard, "
+                            "matches Nuke/Flame/Resolve viewer precision. Larger files."
                         ),
                     },
                 ),
@@ -1238,13 +1240,15 @@ class RadianceViewer:
 
         # ── Parse bit depth ──
         use_16bit = "16-bit" in bit_depth and HAS_CV2
-        # v2.1: ALWAYS save HDR sidecar — essential for 32-bit viewer display.
-        # The sidecar enables proper HDR viewing via WebGL float textures.
-        # Without it, the viewer only has the clipped [0,1] PNG preview.
-        # v2.3: Only if 16-bit is actually requested.
-        save_hdr_sidecar = use_16bit
+        # v4.1: 32-bit Float — full IEEE 754 fp32 RHDR sidecar.
+        # Uses RHDR format with flags=1 (fp32 marker) so viewer detects and
+        # uploads as Float32 texture instead of HALF_FLOAT. Twice the VRAM of
+        # fp16 but eliminates all precision loss — matches Nuke/Flame pipeline.
+        use_32bit = bit_depth == "32-bit Float"
+        # HDR sidecar: enabled for 16-bit+HDR, 16-bit Quality, and 32-bit Float modes.
+        save_hdr_sidecar = use_16bit or use_32bit
 
-        if "16-bit" in bit_depth and not HAS_CV2:
+        if "16-bit" in bit_depth and not HAS_CV2 and not use_32bit:
             logger.warning(
                 "16-bit mode requested but cv2 not available. "
                 "Falling back to 8-bit. Install opencv-python for 16-bit support."
@@ -1273,6 +1277,7 @@ class RadianceViewer:
                         frame_idx,
                         output_dir,
                         use_16bit=use_16bit,
+                        use_32bit=use_32bit,
                         save_hdr_sidecar=save_hdr_sidecar,
                         prefix="radiance_viewer",
                     )
@@ -1308,9 +1313,16 @@ class RadianceViewer:
             output_image = image
 
             # ── Metadata string ──
+            if use_32bit:
+                depth_label = "32-bit Float"
+            elif use_16bit:
+                depth_label = "16-bit"
+            else:
+                depth_label = "8-bit"
+
             meta_dict = {
-                "bit_depth": "16-bit" if use_16bit else "8-bit",
-                "hdr_sidecar": True,  # v2.1: always enabled
+                "bit_depth": depth_label,
+                "hdr_sidecar": save_hdr_sidecar,
                 "batch_size": batch_size,
             }
             metadata_str = json.dumps(meta_dict, indent=2)
@@ -1325,7 +1337,7 @@ class RadianceViewer:
                 "ui": {
                     "radiance_images": images_list,
                     "batch_size": [batch_size],
-                    "bit_depth": ["16-bit" if use_16bit else "8-bit"],
+                    "bit_depth": [depth_label],
                 },
                 "result": (),
             }
@@ -1371,6 +1383,7 @@ class RadianceViewer:
         frame_idx: int,
         output_dir: str,
         use_16bit: bool = True,
+        use_32bit: bool = False,
         save_hdr_sidecar: bool = False,
         prefix: str = "radiance_viewer",
     ) -> Optional[Dict[str, Any]]:
@@ -1420,29 +1433,60 @@ class RadianceViewer:
         else:
             frame_to_save = frame
 
-        # ── 1. PRIMARY: Save .rhdr compressed float16 ──
-        # Only if usage of 16-bit is requested.
+        # ── 1. PRIMARY: Save .rhdr sidecar ──────────────────────────────────
+        # Supports two precisions controlled by header flags field:
+        #   flags = 0  →  fp16 payload  (HALF_FLOAT, half VRAM, existing behaviour)
+        #   flags = 1  →  fp32 payload  (FLOAT, full IEEE 754, 32-bit Float mode)
+        #
+        # Header layout (12 bytes, little-endian):
+        #   [0:4]  magic  "RHDR"
+        #   [4:6]  width  uint16
+        #   [6:8]  height uint16
+        #   [8:10] channels uint16
+        #   [10:12] flags uint16  — 0=fp16, 1=fp32
+        #   [12:]  zlib-compressed pixel data
         rhdr_filename = f"{prefix}_{unique_id}_{frame_idx}.rhdr"
         rhdr_saved = False
 
-        if use_16bit:
+        if use_32bit:
+            # ── 32-bit Float path: full IEEE 754 fp32, flags=1 ────────────────
+            try:
+                import struct
+
+                rhdr_filepath = safe_join(output_dir, rhdr_filename)
+                fp32_bytes = frame_to_save.astype(np.float32).tobytes()
+                compressed = zlib.compress(fp32_bytes, level=6)
+                # flags=1 signals fp32 to the viewer parser
+                header = struct.pack("<4sHHHH", b"RHDR", w_frame, h_frame, c_frame, 1)
+                with open(rhdr_filepath, "wb") as rhdr_f:
+                    rhdr_f.write(header)
+                    rhdr_f.write(compressed)
+                rhdr_saved = True
+                ratio = len(compressed) / len(fp32_bytes) * 100 if fp32_bytes else 0
+                logger.debug(
+                    f"RHDR fp32 saved: {rhdr_filename} "
+                    f"({len(compressed)//1024}KB, {ratio:.0f}% ratio | "
+                    f"range [{d_min:.3f}, {d_max:.3f}])"
+                )
+            except (IOError, OSError, ValueError) as e:
+                logger.warning(f"Failed to save fp32 RHDR for frame {frame_idx}: {e}")
+
+        elif use_16bit:
+            # ── 16-bit Float path: fp16, flags=0 (existing behaviour) ─────────
             try:
                 import struct
 
                 rhdr_filepath = safe_join(output_dir, rhdr_filename)
                 fp16_data = frame_to_save.astype(np.float16).tobytes()
                 compressed = zlib.compress(fp16_data, level=6)
-
                 header = struct.pack("<4sHHHH", b"RHDR", w_frame, h_frame, c_frame, 0)
                 with open(rhdr_filepath, "wb") as rhdr_f:
                     rhdr_f.write(header)
                     rhdr_f.write(compressed)
                 rhdr_saved = True
-                ratio = (
-                    len(compressed) / len(fp16_data) * 100 if len(fp16_data) > 0 else 0
-                )
+                ratio = len(compressed) / len(fp16_data) * 100 if fp16_data else 0
                 logger.debug(
-                    f"RHDR primary saved: {rhdr_filename} "
+                    f"RHDR fp16 saved: {rhdr_filename} "
                     f"({len(compressed)//1024}KB, {ratio:.0f}% ratio | "
                     f"range [{d_min:.3f}, {d_max:.3f}])"
                 )
@@ -1547,6 +1591,9 @@ class RadianceViewer:
         if rhdr_saved:
             result["hdr_sidecar"] = rhdr_filename
             result["hdr_primary"] = True  # tells viewer to load .rhdr as display source
+            # v4.1: tag fp32 sidecars so viewer uses loadFloat32Texture instead of
+            # loadFloat16Texture — full pipeline precision end-to-end
+            result["hdr_fp32"] = use_32bit
 
         # v3.0 Feature #5: fp32 picking buffer — true scene-linear HDR color picker
         pick_filename = f"{prefix}_{unique_id}_{frame_idx}.rpick"

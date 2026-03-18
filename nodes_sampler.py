@@ -166,6 +166,10 @@ MODEL_TYPES = [
     "chroma",
 ]
 
+# v4.1: Video models requiring 5D latent (batch, channels, frames, height, width).
+# Used for early validation — prevents cryptic errors deep inside model forward pass.
+VIDEO_MODEL_TYPES = {"wan", "ltxv", "hunyuan_video", "cosmos"}
+
 # v3.3: Extended model defaults with sampler, shift, and denoise range
 MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "flux": {
@@ -1502,26 +1506,41 @@ def build_sigma_report(
 # --- Feature 3: Noise Generation -------------------------------------------
 
 def _perlin_noise(shape: tuple, device: torch.device) -> torch.Tensor:
-    """Octave-based coherent noise. Provides structured texture character."""
+    """Octave-based coherent noise. Provides structured texture character.
+
+    v4.1: Rewritten to properly handle 5D video latents.
+    Uses unfold-based smoothing instead of fragile avg_pool2d view chain.
+    """
     noise = torch.zeros(shape, device=device)
     amplitude = 1.0
     frequency = 1.0
+    spatial_h, spatial_w = shape[-2], shape[-1]
+
     for _ in range(4):  # 4 octaves
         n = torch.randn(shape, device=device) * amplitude
-        # Smooth by blending adjacent values (cheap approx of Perlin)
-        if shape[-1] > 1:
-            kernel = max(1, int(shape[-1] / frequency))
-            n = torch.nn.functional.avg_pool2d(
-                n.view(-1, 1, shape[-2], shape[-1]),
-                kernel_size=kernel,
-                stride=1, padding=kernel // 2,
-            ).view(-1, 1, n.shape[-2] + (kernel // 2) * 2 - kernel + 1, n.shape[-1] + (kernel // 2) * 2 - kernel + 1)
-            # Crop to original shape since even kernels change dimension
-            n = n[..., :shape[-2], :shape[-1]].contiguous().view(shape)
+
+        if spatial_w > 1:
+            kernel = max(1, int(spatial_w / frequency))
+            # Flatten all leading dims → (N, 1, H, W) for avg_pool2d
+            leading = n.shape[:-2]
+            n_flat = n.reshape(-1, 1, spatial_h, spatial_w)
+
+            # avg_pool2d with stride=1 and same-padding
+            pad = kernel // 2
+            pooled = torch.nn.functional.avg_pool2d(
+                n_flat, kernel_size=kernel, stride=1, padding=pad
+            )
+
+            # Even kernels produce H+1/W+1 output — crop back to original spatial dims
+            pooled = pooled[..., :spatial_h, :spatial_w]
+
+            # Restore original leading dims
+            n = pooled.reshape(*leading, spatial_h, spatial_w)
+
         noise = noise + n
         amplitude *= 0.5
         frequency *= 2.0
-    
+
     # Normalise to unit std and zero mean to prevent color shifts
     noise = noise - noise.mean()
     std = noise.std().clamp(min=1e-6)
@@ -1529,7 +1548,11 @@ def _perlin_noise(shape: tuple, device: torch.device) -> torch.Tensor:
 
 
 def _spectral_noise(shape: tuple, device: torch.device) -> torch.Tensor:
-    """Frequency-weighted noise (pink noise approximation)."""
+    """Frequency-weighted noise (pink noise approximation).
+
+    v4.1: Fixed weight tensor broadcasting for 5D video latents.
+    Previous code used expand_as which requires matching ndim.
+    """
     white = torch.randn(shape, device=device)
     fft = torch.fft.rfft2(white)
     # Build 1/f frequency weight. Note: rfft2 only halves the LAST dimension.
@@ -1538,16 +1561,19 @@ def _spectral_noise(shape: tuple, device: torch.device) -> torch.Tensor:
     freq_grid = torch.sqrt(
         freqs_h.unsqueeze(-1) ** 2 + freqs_w.unsqueeze(0) ** 2
     ).clamp(min=1e-6)
-    weight = (1.0 / freq_grid).unsqueeze(0).unsqueeze(0)
-    
-    # Zero out DC to prevent huge mean shifts
-    weight[..., 0, 0] = 0.0
+    weight = 1.0 / freq_grid  # Shape: (H, rfft_W)
 
-    if weight.shape[-2] != fft.shape[-2] or weight.shape[-1] != fft.shape[-1]:
-        weight = weight.expand_as(fft[..., :fft.shape[-2], :fft.shape[-1]])
+    # Zero out DC to prevent huge mean shifts
+    weight[0, 0] = 0.0
+
+    # Reshape weight to broadcast against fft: add leading 1-dims to match ndim
+    # e.g., for 5D fft (B, C, T, H, W'), weight becomes (1, 1, 1, H, W')
+    for _ in range(fft.ndim - 2):
+        weight = weight.unsqueeze(0)
+
     filtered = fft * weight
     result = torch.fft.irfft2(filtered, s=(shape[-2], shape[-1]))
-    
+
     # Force zero mean and unit variance
     result = result - result.mean()
     std = result.std().clamp(min=1e-6)
@@ -1557,12 +1583,33 @@ def _spectral_noise(shape: tuple, device: torch.device) -> torch.Tensor:
 def _brownian_noise(
     shape: tuple, device: torch.device, frames: Optional[int] = None
 ) -> torch.Tensor:
-    """Temporally-correlated noise for video models (Brownian bridge)."""
-    if frames is None or shape[0] == 1:
-        # No temporal dimension — use spectral as fallback for single frames
+    """Temporally-correlated noise for video models (Brownian bridge).
+
+    v4.1: Fixed for 5D video latents. Previous version correlated across
+    batch dimension (shape[0]) instead of temporal dimension (shape[2]).
+    Now correctly builds correlated walk along the frames axis.
+    """
+    # For 5D video latents: shape = (B, C, T, H, W)
+    if len(shape) == 5 and shape[2] > 1:
+        B, C, T, H, W = shape
+        alpha = 0.7  # Correlation coefficient between frames
+        # Build per-frame correlated walk
+        frame_shape = (B, C, H, W)
+        noises = []
+        prev = torch.randn(frame_shape, device=device)
+        for _ in range(T):
+            curr = alpha * prev + math.sqrt(1 - alpha ** 2) * torch.randn(frame_shape, device=device)
+            noises.append(curr)
+            prev = curr
+        # Stack along temporal dim → (B, C, T, H, W)
+        return torch.stack(noises, dim=2)
+
+    # For 4D or single-frame — use spectral as fallback
+    if frames is None or (len(shape) == 4 and shape[0] == 1):
         return _spectral_noise(shape, device)
-    # Build frame-by-frame correlated walk
-    alpha = 0.7  # Correlation coefficient between frames
+
+    # Legacy 4D path: correlate across batch dim (for multi-batch single frames)
+    alpha = 0.7
     noises = []
     prev = torch.randn(shape[1:], device=device)
     for _ in range(shape[0]):
@@ -1724,6 +1771,12 @@ def tile_sample(
     Typical: tile_size=128 latent = 1024px image (8x VAE factor).
     """
     import comfy.sample as cs
+
+    if latent_samples.ndim != 4:
+        raise ValueError(
+            f"[Radiance] tile_sample requires 4D latent (B, C, H, W), "
+            f"got {latent_samples.ndim}D. Video tile sampling is not supported."
+        )
 
     B, C, H, W = latent_samples.shape
     step = max(1, tile_size - tile_overlap)
@@ -2199,6 +2252,26 @@ class RadianceSamplerPro:
         timings["latent_copy"] = time.time() - t0
 
         # ─────────────────────────────────────────────────────────────────
+        # v4.1: Auto-reshape 4D latents for video models.
+        # Video models (WAN, LTX, HunyuanVideo) require 5D tensors
+        # (batch, channels, frames, height, width). If the user connected
+        # an EmptyLatentImage (4D) instead of a video latent node, we
+        # auto-reshape by inserting frames=1 and warn about it.
+        # This prevents a cryptic "not enough values to unpack" crash
+        # deep inside the model's forward() pass.
+        # ─────────────────────────────────────────────────────────────────
+        if detected_type in VIDEO_MODEL_TYPES and latent_samples.ndim == 4:
+            b, c, h, w = latent_samples.shape
+            latent_samples = latent_samples.unsqueeze(2)  # (B,C,H,W) → (B,C,1,H,W)
+            frames = 1
+            logger.warning(
+                f"[Radiance] Video model '{detected_type}' received a 4D latent "
+                f"[{b},{c},{h},{w}] — auto-reshaped to 5D [{b},{c},1,{h},{w}] "
+                f"(frames=1). For proper video generation, use a video latent node "
+                f"(e.g., WAN EmptyLatentVideo) with the desired frame count."
+            )
+
+        # ─────────────────────────────────────────────────────────────────
         # v4.0 Feature 4: Latent format / channel validation
         # ─────────────────────────────────────────────────────────────────
         if latent_format:
@@ -2237,6 +2310,17 @@ class RadianceSamplerPro:
 
         noise = noise.to(device)
         timings["prepare_noise"] = time.time() - t0
+
+        # v4.1: Ensure noise matches latent shape after auto-reshape.
+        # If latent was reshaped 4D→5D for a video model, noise generated
+        # from the reshaped latent should already be 5D. This is a safety
+        # net for noise_override or edge cases where shapes diverge.
+        if latent_samples.ndim == 5 and noise.ndim == 4:
+            noise = noise.unsqueeze(2)
+            logger.debug("[Radiance] Auto-reshaped noise 4D→5D to match video latent.")
+        if latent_samples.ndim == 5 and noise_mask is not None and noise_mask.ndim == 4:
+            noise_mask = noise_mask.unsqueeze(2)
+            logger.debug("[Radiance] Auto-reshaped noise_mask 4D→5D to match video latent.")
 
         # ─────────────────────────────────────────────────────────────────
         # v3.2: Seed handled by prepare_noise / sampler_object.
@@ -2834,6 +2918,7 @@ class RadianceSamplerPro:
                 logger.info(
                     f"[v4.0] Tile sampling: size={tile_size}, overlap={tile_overlap}, blend={tile_blend}"
                 )
+
                 t_tile = time.time()
                 sampler_obj = comfy.samplers.sampler_object(primary_sampler)
                 samples = tile_sample(
@@ -2852,6 +2937,10 @@ class RadianceSamplerPro:
                 )
                 timings["tile_sampling"] = time.time() - t_tile
                 logger.info(f"[v4.0] Tile sampling done in {timings['tile_sampling']:.2f}s")
+            elif tile_mode and latent_samples.ndim == 5:
+                logger.warning(
+                    "[v4.0] Tile sampling requested but not supported for video (5D) latents. Skipping."
+                )
                 
         finally:
             # ─────────────────────────────────────────────────────────────────

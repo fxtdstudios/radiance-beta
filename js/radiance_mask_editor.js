@@ -5,16 +5,25 @@ import { api } from "../../scripts/api.js";
  * ═══════════════════════════════════════════════════════════════════════════════
  *                    RADIANCE VFX MASK EDITOR (PRO)
  *                      Radiance © 2024-2026
- * 
+ *
  * High-end masking tool featuring Vector Rotoscoping (Polygons/Splines),
  * Procedural Qualifiers (HSL), and Soft-Brush painting with full undo/redo.
  * ═══════════════════════════════════════════════════════════════════════════════
  */
 
+// ─── Configuration ───────────────────────────────────────────────────────────
+const MAX_UNDO_STATES = 30;
+const ZOOM_MIN = 0.05;
+const ZOOM_MAX = 20;
+const ZOOM_FACTOR = 1.15;
+const POINT_HIT_RADIUS_PX = 10; // screen-space pixels
+const FLOOD_FILL_YIELD_INTERVAL = 50000; // yield every N pixels to avoid blocking
+
 class RadianceMaskEditor {
     constructor() {
         this.node = null;
         this.imageEl = null;
+        this._cachedSourceData = null; // Cached source image pixel data
 
         // Display
         this.zoom = 1.0;
@@ -47,13 +56,26 @@ class RadianceMaskEditor {
             l: 0.5, lW: 0.5, lS: 0.1
         };
 
-        // History
+        // History (undo/redo)
         this.history = [];
         this.historyIndex = -1;
+
+        // RAF gating for paint performance
+        this._rafPending = false;
+
+        // Bound listener refs for cleanup
+        this._boundListeners = [];
+
+        // Unique ID counter for slider elements (avoids DOM ID collisions)
+        this._sliderId = 0;
 
         this.createUI();
         this.setupEventListeners();
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //                              UI CREATION
+    // ═══════════════════════════════════════════════════════════════════════════
 
     createUI() {
         // Overlay container matching Radiance standard
@@ -196,17 +218,15 @@ class RadianceMaskEditor {
         const qualifierGroup = createGroup("HSL Qualifier Keyer");
         qualifierGroup.style.display = "none";
 
-        const qToggle = document.createElement("button");
-        qToggle.innerText = "Enable Qualifier";
-        qToggle.style.cssText = "padding:6px; background: rgba(255,255,255,0.05); color:#aaa; border:1px solid rgba(255,255,255,0.1); border-radius:4px; cursor:pointer;";
-        qToggle.onclick = () => {
+        this.qToggle = document.createElement("button");
+        this.qToggle.innerText = "Enable Qualifier";
+        this.qToggle.style.cssText = "padding:6px; background: rgba(255,255,255,0.05); color:#aaa; border:1px solid rgba(255,255,255,0.1); border-radius:4px; cursor:pointer;";
+        this.qToggle.onclick = () => {
             this.qualifier.enabled = !this.qualifier.enabled;
-            qToggle.style.background = this.qualifier.enabled ? "rgba(0,168,255,0.2)" : "rgba(255,255,255,0.05)";
-            qToggle.style.color = this.qualifier.enabled ? "#00a8ff" : "#aaa";
-            qToggle.style.borderColor = this.qualifier.enabled ? "#00a8ff" : "rgba(255,255,255,0.1)";
+            this._updateQualifierToggleUI();
             this.drawDisplay();
         };
-        qualifierGroup.appendChild(qToggle);
+        qualifierGroup.appendChild(this.qToggle);
 
         const updateQ = (key, val) => { this.qualifier[key] = val; if (this.qualifier.enabled) this.drawDisplay(); };
 
@@ -253,6 +273,13 @@ class RadianceMaskEditor {
         this.setTool('brush');
     }
 
+    _updateQualifierToggleUI() {
+        const on = this.qualifier.enabled;
+        this.qToggle.style.background = on ? "rgba(0,168,255,0.2)" : "rgba(255,255,255,0.05)";
+        this.qToggle.style.color = on ? "#00a8ff" : "#aaa";
+        this.qToggle.style.borderColor = on ? "#00a8ff" : "rgba(255,255,255,0.1)";
+    }
+
     createBtn(text, onClick, danger = false) {
         const btn = document.createElement("button");
         btn.innerText = text;
@@ -268,12 +295,25 @@ class RadianceMaskEditor {
     }
 
     createSlider(label, min, max, step, val, onChange) {
+        // Use unique ID to avoid DOM collisions
+        const uid = `rad_sl_${this._sliderId++}`;
+
         const wrap = document.createElement("div");
         wrap.style.display = "flex"; wrap.style.flexDirection = "column"; wrap.style.gap = "4px";
 
         const head = document.createElement("div");
         head.style.display = "flex"; head.style.justifyContent = "space-between"; head.style.fontSize = "12px";
-        head.innerHTML = `<span style="color:#aaa">${label}</span><span id="val_${label.replace(/\s/g, '')}">${val}</span>`;
+
+        const labelSpan = document.createElement("span");
+        labelSpan.style.color = "#aaa";
+        labelSpan.textContent = label;
+
+        const valSpan = document.createElement("span");
+        valSpan.id = uid;
+        valSpan.textContent = val;
+
+        head.appendChild(labelSpan);
+        head.appendChild(valSpan);
 
         const slider = document.createElement("input");
         slider.type = "range"; slider.min = min; slider.max = max; slider.step = step; slider.value = val;
@@ -281,7 +321,7 @@ class RadianceMaskEditor {
 
         slider.oninput = (e) => {
             const v = parseFloat(e.target.value);
-            wrap.querySelector(`#val_${label.replace(/\s/g, '')}`).innerText = v;
+            valSpan.textContent = v;
             onChange(v);
         };
 
@@ -326,9 +366,33 @@ class RadianceMaskEditor {
         this.drawDisplay();
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    //                           EVENT LISTENERS
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Register a global listener with automatic cleanup tracking.
+     */
+    _addGlobalListener(target, event, handler, options) {
+        target.addEventListener(event, handler, options);
+        this._boundListeners.push({ target, event, handler, options });
+    }
+
+    /**
+     * Remove all tracked global listeners. Called on hide().
+     */
+    _removeGlobalListeners() {
+        for (const { target, event, handler, options } of this._boundListeners) {
+            target.removeEventListener(event, handler, options);
+        }
+        this._boundListeners = [];
+    }
+
     setupEventListeners() {
-        const ro = new ResizeObserver(() => this.drawDisplay());
-        ro.observe(this.canvasContainer);
+        this._resizeObserver = new ResizeObserver(() => {
+            if (this.overlay.style.display === "flex") this.drawDisplay();
+        });
+        this._resizeObserver.observe(this.canvasContainer);
 
         // Use pointer events for pressure sensitivity
         this.canvasContainer.addEventListener('pointerdown', (e) => {
@@ -354,8 +418,7 @@ class RadianceMaskEditor {
                 if (this.currentPoly.points.length > 2) {
                     const first = this.currentPoly.points[0];
                     const dist = Math.hypot(first.x - pos.x, first.y - pos.y);
-                    // Hit radius relative to zoom
-                    if (dist * this.zoom < 10) {
+                    if (dist * this.zoom < POINT_HIT_RADIUS_PX) {
                         this.closePolygon();
                         return;
                     }
@@ -372,15 +435,6 @@ class RadianceMaskEditor {
                 this.saveUndoState();
                 this.paint(e);
             }
-        });
-
-        window.addEventListener('pointerup', () => {
-            this.isPanning = false;
-            if (this.isDrawing) {
-                this.isDrawing = false;
-                this.drawDisplay(); // Final commit draw
-            }
-            this.canvasContainer.style.cursor = 'crosshair';
         });
 
         this.canvasContainer.addEventListener('pointermove', (e) => {
@@ -403,31 +457,66 @@ class RadianceMaskEditor {
 
         this.canvasContainer.addEventListener('wheel', (e) => {
             e.preventDefault();
-            const zoomFactor = 1.15;
-            const mouseX = e.clientX - this.canvasContainer.getBoundingClientRect().left;
-            const mouseY = e.clientY - this.canvasContainer.getBoundingClientRect().top;
+            const rect = this.canvasContainer.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
 
             const oldZoom = this.zoom;
-            if (e.deltaY < 0) this.zoom *= zoomFactor;
-            else this.zoom /= zoomFactor;
-            this.zoom = Math.max(0.05, Math.min(this.zoom, 20));
+            if (e.deltaY < 0) this.zoom *= ZOOM_FACTOR;
+            else this.zoom /= ZOOM_FACTOR;
+            this.zoom = Math.max(ZOOM_MIN, Math.min(this.zoom, ZOOM_MAX));
 
             this.panX = mouseX - (mouseX - this.panX) * (this.zoom / oldZoom);
             this.panY = mouseY - (mouseY - this.panY) * (this.zoom / oldZoom);
             this.updateCanvasTransform();
         });
 
-        document.addEventListener('keydown', (e) => {
-            if (this.overlay.style.display === "flex") {
-                if (e.key === "z" && e.ctrlKey) this.undo();
-                else if (e.key === "Escape") this.hide();
-                else if (e.key.toLowerCase() === "b") this.setTool('brush');
-                else if (e.key.toLowerCase() === "e") this.setTool('eraser');
-                else if (e.key.toLowerCase() === "p") this.setTool('polygon');
-                else if (e.key === "Enter" && this.tool === 'polygon') this.closePolygon();
+        // NOTE: pointerup and keydown are registered as global listeners
+        // only when the editor is shown, and removed on hide. See show()/hide().
+    }
+
+    /**
+     * Attach global listeners that should only be active while the editor is open.
+     */
+    _attachActiveListeners() {
+        this._addGlobalListener(window, 'pointerup', () => {
+            this.isPanning = false;
+            if (this.isDrawing) {
+                this.isDrawing = false;
+                this.drawDisplay(); // Final commit draw
+            }
+            this.canvasContainer.style.cursor = 'crosshair';
+        });
+
+        this._addGlobalListener(document, 'keydown', (e) => {
+            if (e.key === "z" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+                e.preventDefault();
+                this.undo();
+            } else if (e.key === "z" && (e.ctrlKey || e.metaKey) && e.shiftKey) {
+                e.preventDefault();
+                this.redo();
+            } else if (e.key === "y" && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                this.redo();
+            } else if (e.key === "Escape") {
+                this.hide();
+            } else if (e.key.toLowerCase() === "b") {
+                this.setTool('brush');
+            } else if (e.key.toLowerCase() === "e") {
+                this.setTool('eraser');
+            } else if (e.key.toLowerCase() === "p") {
+                this.setTool('polygon');
+            } else if (e.key.toLowerCase() === "w") {
+                this.setTool('magic_wand');
+            } else if (e.key === "Enter" && this.tool === 'polygon') {
+                this.closePolygon();
             }
         });
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //                         COORDINATE HELPERS
+    // ═══════════════════════════════════════════════════════════════════════════
 
     getLogicalPos(clientX, clientY) {
         const rect = this.canvasContainer.getBoundingClientRect();
@@ -441,7 +530,10 @@ class RadianceMaskEditor {
         this.displayCanvas.style.transform = `translate(${this.panX}px, ${this.panY}px) scale(${this.zoom})`;
     }
 
-    // Raster Painting
+    // ═══════════════════════════════════════════════════════════════════════════
+    //                          RASTER PAINTING
+    // ═══════════════════════════════════════════════════════════════════════════
+
     paint(e) {
         const pos = this.getLogicalPos(e.clientX, e.clientY);
         const pressure = e.pressure !== undefined ? Math.max(0.1, e.pressure) : 1.0;
@@ -468,10 +560,27 @@ class RadianceMaskEditor {
         ctx.fill();
         ctx.restore();
 
-        this.drawDisplay();
+        // RAF-gated display update — avoids compositing on every single pointermove
+        this._scheduleDisplayUpdate();
     }
 
-    // Vector Rotoscoping
+    /**
+     * Schedule a drawDisplay via requestAnimationFrame.
+     * Coalesces multiple calls per frame into a single composite.
+     */
+    _scheduleDisplayUpdate(hoverPos = null) {
+        if (this._rafPending) return;
+        this._rafPending = true;
+        requestAnimationFrame(() => {
+            this._rafPending = false;
+            this.drawDisplay(hoverPos);
+        });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //                        VECTOR ROTOSCOPING
+    // ═══════════════════════════════════════════════════════════════════════════
+
     startPolygon() {
         this.currentPoly = { points: [], closed: false, feather: 0 };
         this.polygons.push(this.currentPoly);
@@ -492,8 +601,8 @@ class RadianceMaskEditor {
             this.saveUndoState();
             this.polygons.pop();
             this.currentPoly = null;
-            // Since we baked to raster, deleting a polygon requires full raster rebuild if we want true non-destructive.
-            // For now, we mix vector & raster by clearing and rebaking.
+            // Since we baked to raster, deleting requires undo to revert.
+            // rebuildMaskFromState falls through to undo correctly.
             this.rebuildMaskFromState();
         }
     }
@@ -509,7 +618,7 @@ class RadianceMaskEditor {
         });
         ctx.closePath();
 
-        // Very basic feather simulation by drawing blurred shadow
+        // Basic feather simulation via shadowBlur
         if (poly.feather > 0) {
             ctx.shadowColor = "white";
             ctx.shadowBlur = poly.feather;
@@ -519,8 +628,7 @@ class RadianceMaskEditor {
     }
 
     rebuildMaskFromState() {
-        // Simple rebuild: if we had a pure vector workflow this is how we'd do it.
-        // But since we mix raster (brush) and vector (polygon), true undo relies on the raster snapshots.
+        // Mixed raster/vector workflow: true rebuild requires undo snapshot.
         this.undo();
     }
 
@@ -532,40 +640,69 @@ class RadianceMaskEditor {
         this.drawDisplay();
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    //                       UNDO / REDO (FIXED)
+    // ═══════════════════════════════════════════════════════════════════════════
+
     saveUndoState() {
+        // Discard any redo states ahead of current position
         if (this.historyIndex < this.history.length - 1) {
             this.history = this.history.slice(0, this.historyIndex + 1);
         }
+
         // Save raster payload + vector metadata clone
         this.history.push({
             imgData: this.maskCtx.getImageData(0, 0, this.maskCanvas.width, this.maskCanvas.height),
             polys: JSON.parse(JSON.stringify(this.polygons))
         });
-        if (this.history.length > 30) this.history.shift();
-        else this.historyIndex++;
+
+        // Evict oldest if over capacity — keep historyIndex aligned
+        if (this.history.length > MAX_UNDO_STATES) {
+            this.history.shift();
+            // historyIndex stays the same: it now correctly points to the
+            // same logical entry (which shifted down by one, but we didn't
+            // increment it yet, and the push added one, so net = same)
+        }
+
+        this.historyIndex = this.history.length - 1;
     }
 
     undo() {
-        if (this.historyIndex >= 0) {
-            const state = this.history[this.historyIndex];
-            this.maskCtx.putImageData(state.imgData, 0, 0);
-            this.polygons = JSON.parse(JSON.stringify(state.polys));
-            this.currentPoly = this.polygons.find(p => !p.closed) || null;
+        // historyIndex points to the most recently saved state (current).
+        // To undo, we need to go back one step.
+        if (this.historyIndex > 0) {
             this.historyIndex--;
-            this.drawDisplay();
+            this._restoreState(this.history[this.historyIndex]);
+        } else if (this.historyIndex === 0) {
+            // Already at the earliest snapshot — nothing to undo to.
+            // Optionally: restore initial blank state.
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────
-    // HSL Qualifier & Magic Wand
-    // ─────────────────────────────────────────────────────────────────
+    redo() {
+        if (this.historyIndex < this.history.length - 1) {
+            this.historyIndex++;
+            this._restoreState(this.history[this.historyIndex]);
+        }
+    }
+
+    _restoreState(state) {
+        this.maskCtx.putImageData(state.imgData, 0, 0);
+        this.polygons = JSON.parse(JSON.stringify(state.polys));
+        this.currentPoly = this.polygons.find(p => !p.closed) || null;
+        this.drawDisplay();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //                     HSL QUALIFIER & MAGIC WAND
+    // ═══════════════════════════════════════════════════════════════════════════
 
     rgbToHsl(r, g, b) {
         r /= 255; g /= 255; b /= 255;
         const max = Math.max(r, g, b), min = Math.min(r, g, b);
         let h, s, l = (max + min) / 2;
         if (max === min) {
-            h = s = 0; // achromatic
+            h = s = 0;
         } else {
             const d = max - min;
             s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
@@ -579,8 +716,8 @@ class RadianceMaskEditor {
         return [h, s, l];
     }
 
-    // Helper math for smoothstep feathering in qualifiers
     smoothstep(edge0, edge1, x) {
+        if (edge1 === edge0) return x < edge0 ? 0 : 1; // Guard against division by zero
         const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
         return t * t * (3 - 2 * t);
     }
@@ -602,24 +739,38 @@ class RadianceMaskEditor {
         return hAlpha * sAlpha * lAlpha;
     }
 
-    executeMagicWand(pos) {
-        if (!this.imageEl) return;
+    /**
+     * Cache the source image pixels so we don't re-draw to a temp canvas
+     * every time magic wand or bake qualifier runs.
+     */
+    _getSourceImageData() {
+        if (this._cachedSourceData &&
+            this._cachedSourceData.width === this.maskCanvas.width &&
+            this._cachedSourceData.height === this.maskCanvas.height) {
+            return this._cachedSourceData;
+        }
 
-        // Quick flood fill approximation directly mimicking magic wand selection
-        // In JS Canvas, true Flood Fill can be slow, but it's acceptable for editing.
         const width = this.maskCanvas.width;
         const height = this.maskCanvas.height;
-        let startX = Math.floor(pos.x);
-        let startY = Math.floor(pos.y);
-
-        if (startX < 0 || startX >= width || startY < 0 || startY >= height) return;
-
-        // We need source image data
         const tempCanvas = document.createElement("canvas");
         tempCanvas.width = width; tempCanvas.height = height;
         const tCtx = tempCanvas.getContext('2d');
         tCtx.drawImage(this.imageEl, 0, 0);
-        const srcData = tCtx.getImageData(0, 0, width, height).data;
+        this._cachedSourceData = tCtx.getImageData(0, 0, width, height);
+        return this._cachedSourceData;
+    }
+
+    executeMagicWand(pos) {
+        if (!this.imageEl) return;
+
+        const width = this.maskCanvas.width;
+        const height = this.maskCanvas.height;
+        const startX = Math.floor(pos.x);
+        const startY = Math.floor(pos.y);
+
+        if (startX < 0 || startX >= width || startY < 0 || startY >= height) return;
+
+        const srcData = this._getSourceImageData().data;
 
         // Destination mask
         const maskDataObj = this.maskCtx.getImageData(0, 0, width, height);
@@ -631,40 +782,81 @@ class RadianceMaskEditor {
         const startG = srcData[startIdx + 1];
         const startB = srcData[startIdx + 2];
 
-        // Basic scanline flood fill
-        const stack = [[startX, startY]];
+        const tol = this.wandTolerance;
+        const maxDistSq = (441.67 * tol) * (441.67 * tol); // Pre-square for faster compare
+
+        // Scanline flood fill — much faster than naive 4-neighbor stack
         const visited = new Uint8Array(width * height);
 
-        const colorDist = (r1, g1, b1, r2, g2, b2) => {
-            return Math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2) / 441.67; // max distance is sqrt(3*255^2)
+        const colorMatch = (idx4) => {
+            const dr = srcData[idx4] - startR;
+            const dg = srcData[idx4 + 1] - startG;
+            const db = srcData[idx4 + 2] - startB;
+            return (dr * dr + dg * dg + db * db) <= maxDistSq;
         };
 
-        const tol = this.wandTolerance;
+        const fillPixel = (idx4) => {
+            mData[idx4] = 255;
+            mData[idx4 + 1] = 255;
+            mData[idx4 + 2] = 255;
+            mData[idx4 + 3] = 255;
+        };
+
+        const stack = [[startX, startY]];
 
         while (stack.length > 0) {
-            const [x, y] = stack.pop();
-            const idx = y * width + x;
+            let [x, y] = stack.pop();
+            const lineIdx = y * width;
 
-            if (visited[idx]) continue;
-            visited[idx] = 1;
+            // Walk left
+            let lx = x;
+            while (lx >= 0 && !visited[lineIdx + lx] && colorMatch((lineIdx + lx) * 4)) {
+                lx--;
+            }
+            lx++; // Back to last valid
 
-            const pIdx = idx * 4;
-            const r = srcData[pIdx];
-            const g = srcData[pIdx + 1];
-            const b = srcData[pIdx + 2];
+            // Walk right
+            let rx = x;
+            while (rx < width && !visited[lineIdx + rx] && colorMatch((lineIdx + rx) * 4)) {
+                rx++;
+            }
+            rx--; // Back to last valid
 
-            if (colorDist(startR, startG, startB, r, g, b) <= tol) {
-                // Fill mask pixel (pure white)
-                mData[pIdx] = 255; // R
-                mData[pIdx + 1] = 255; // G
-                mData[pIdx + 2] = 255; // B
-                mData[pIdx + 3] = 255; // Alpha
+            // Fill the span and check neighbors above/below
+            let aboveAdded = false;
+            let belowAdded = false;
 
-                // push neighbors
-                if (x > 0) stack.push([x - 1, y]);
-                if (x < width - 1) stack.push([x + 1, y]);
-                if (y > 0) stack.push([x, y - 1]);
-                if (y < height - 1) stack.push([x, y + 1]);
+            for (let cx = lx; cx <= rx; cx++) {
+                const ci = lineIdx + cx;
+                if (visited[ci]) continue;
+                visited[ci] = 1;
+                fillPixel(ci * 4);
+
+                // Check above
+                if (y > 0) {
+                    const aboveIdx = ci - width;
+                    if (!visited[aboveIdx] && colorMatch(aboveIdx * 4)) {
+                        if (!aboveAdded) {
+                            stack.push([cx, y - 1]);
+                            aboveAdded = true;
+                        }
+                    } else {
+                        aboveAdded = false;
+                    }
+                }
+
+                // Check below
+                if (y < height - 1) {
+                    const belowIdx = ci + width;
+                    if (!visited[belowIdx] && colorMatch(belowIdx * 4)) {
+                        if (!belowAdded) {
+                            stack.push([cx, y + 1]);
+                            belowAdded = true;
+                        }
+                    } else {
+                        belowAdded = false;
+                    }
+                }
             }
         }
 
@@ -679,45 +871,30 @@ class RadianceMaskEditor {
         const width = this.maskCanvas.width;
         const height = this.maskCanvas.height;
 
-        // We need source image data
-        const tempCanvas = document.createElement("canvas");
-        tempCanvas.width = width; tempCanvas.height = height;
-        const tCtx = tempCanvas.getContext('2d');
-        tCtx.drawImage(this.imageEl, 0, 0);
-        const srcData = tCtx.getImageData(0, 0, width, height).data;
+        const srcData = this._getSourceImageData().data;
 
-        // Destination mask
         const maskDataObj = this.maskCtx.getImageData(0, 0, width, height);
         const mData = maskDataObj.data;
 
         for (let i = 0; i < srcData.length; i += 4) {
             const alpha = this.evalQualifierAlpha(srcData[i], srcData[i + 1], srcData[i + 2]);
             if (alpha > 0) {
-                // Screen composite or Replace, depending on what user wants.
-                // We'll do simple Add for now.
                 const val = Math.min(255, mData[i + 3] + alpha * 255);
                 mData[i] = 255; mData[i + 1] = 255; mData[i + 2] = 255;
-                mData[i + 3] = val; // Set alpha channel
+                mData[i + 3] = val;
             }
         }
 
         this.maskCtx.putImageData(maskDataObj, 0, 0);
         this.qualifier.enabled = false;
-
-        // Reset qualifier UI button state visually
-        const qToggle = this.qualifierGroup.querySelector("button");
-        if (qToggle) {
-            qToggle.style.background = "rgba(255,255,255,0.05)";
-            qToggle.style.color = "#aaa";
-            qToggle.style.borderColor = "rgba(255,255,255,0.1)";
-        }
-
+        this._updateQualifierToggleUI();
         this.drawDisplay();
     }
 
-    // ─────────────────────────────────────────────────────────────────
-    // Compositing Render
-    // ─────────────────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    //                      COMPOSITING RENDER
+    // ═══════════════════════════════════════════════════════════════════════════
+
     drawDisplay(hoverPos = null) {
         if (!this.imageEl || !this.imageEl.complete) return;
 
@@ -741,12 +918,10 @@ class RadianceMaskEditor {
                 const alpha = this.evalQualifierAlpha(data[i], data[i + 1], data[i + 2]);
                 if (alpha > 0) {
                     if (this.viewMode === 'matte') {
-                        // Blend white over black
                         data[i] = Math.max(data[i], alpha * 255);
                         data[i + 1] = Math.max(data[i + 1], alpha * 255);
                         data[i + 2] = Math.max(data[i + 2], alpha * 255);
                     } else if (this.viewMode === 'overlay') {
-                        // Blend Red over image
                         data[i] = Math.min(255, data[i] + alpha * 255);
                         data[i + 1] *= (1 - alpha * 0.5);
                         data[i + 2] *= (1 - alpha * 0.5);
@@ -771,18 +946,44 @@ class RadianceMaskEditor {
 
         } else if (this.viewMode === 'matte') {
             ctx.drawImage(this.maskCanvas, 0, 0);
+
         } else if (this.viewMode === 'false_color') {
-            // Advanced false color visualization
-            const tempCanvas = document.createElement("canvas");
-            tempCanvas.width = this.maskCanvas.width; tempCanvas.height = this.maskCanvas.height;
-            const tempCtx = tempCanvas.getContext('2d');
-            tempCtx.drawImage(this.maskCanvas, 0, 0);
-            tempCtx.globalCompositeOperation = 'source-in';
-            const grad = tempCtx.createLinearGradient(0, 0, tempCanvas.width, 0);
-            grad.addColorStop(0, 'blue'); grad.addColorStop(0.5, 'green'); grad.addColorStop(1, 'red');
-            tempCtx.fillStyle = grad;
-            tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
-            ctx.drawImage(tempCanvas, 0, 0);
+            // Per-pixel alpha-to-color-ramp (Flame/Nuke-style false color)
+            // Maps mask alpha: 0=black, low=blue, mid=green, high=red, 1.0=white
+            const maskData = this.maskCtx.getImageData(0, 0, this.maskCanvas.width, this.maskCanvas.height);
+            const md = maskData.data;
+            const outData = ctx.getImageData(0, 0, this.displayCanvas.width, this.displayCanvas.height);
+            const od = outData.data;
+
+            for (let i = 0; i < md.length; i += 4) {
+                const a = md[i + 3] / 255; // Normalized alpha 0..1
+                if (a <= 0) continue;
+
+                let r, g, b;
+                if (a < 0.25) {
+                    // Black → Blue
+                    const t = a / 0.25;
+                    r = 0; g = 0; b = t * 255;
+                } else if (a < 0.5) {
+                    // Blue → Green
+                    const t = (a - 0.25) / 0.25;
+                    r = 0; g = t * 255; b = (1 - t) * 255;
+                } else if (a < 0.75) {
+                    // Green → Red
+                    const t = (a - 0.5) / 0.25;
+                    r = t * 255; g = (1 - t) * 255; b = 0;
+                } else {
+                    // Red → White
+                    const t = (a - 0.75) / 0.25;
+                    r = 255; g = t * 255; b = t * 255;
+                }
+
+                od[i] = r;
+                od[i + 1] = g;
+                od[i + 2] = b;
+                od[i + 3] = 255;
+            }
+            ctx.putImageData(outData, 0, 0);
         }
         ctx.restore();
 
@@ -794,7 +995,7 @@ class RadianceMaskEditor {
 
                 ctx.beginPath();
                 ctx.strokeStyle = poly.closed ? '#00a8ff' : '#00ffaa';
-                ctx.lineWidth = 1.5 / this.zoom; // Keep line width constant relative to screen
+                ctx.lineWidth = 1.5 / this.zoom;
 
                 poly.points.forEach((p, i) => {
                     if (i === 0) ctx.moveTo(p.x, p.y);
@@ -814,7 +1015,7 @@ class RadianceMaskEditor {
                     ctx.arc(p.x, p.y, 3 / this.zoom, 0, Math.PI * 2);
 
                     if (!poly.closed && i === 0) {
-                        ctx.fillStyle = '#ffaa00'; // Highlight start point for closing
+                        ctx.fillStyle = '#ffaa00';
                         ctx.fill();
                         ctx.fillStyle = '#fff';
                     } else {
@@ -825,6 +1026,10 @@ class RadianceMaskEditor {
             ctx.restore();
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //                       LIFECYCLE: LOAD / SHOW / HIDE / SAVE
+    // ═══════════════════════════════════════════════════════════════════════════
 
     async load(node) {
         this.node = node;
@@ -841,6 +1046,9 @@ class RadianceMaskEditor {
         const imgUrl = api.apiURL(`/view?filename=${encodeURIComponent(filename)}&type=input`);
         const maskUrl = api.apiURL(`/view?filename=${encodeURIComponent(compMaskName)}&type=input`);
 
+        // Invalidate source data cache for new image
+        this._cachedSourceData = null;
+
         this.imageEl = new Image();
         this.imageEl.crossOrigin = "Anonymous";
         this.imageEl.onload = () => {
@@ -856,12 +1064,21 @@ class RadianceMaskEditor {
             maskImg.onerror = () => this.finishLoadSetup();
             maskImg.src = maskUrl + "&timestamp=" + Date.now();
         };
+        this.imageEl.onerror = () => {
+            console.error("[Radiance] Failed to load source image:", filename);
+            alert("Failed to load source image.");
+        };
         this.imageEl.src = imgUrl;
 
+        this.show();
+    }
+
+    show() {
         this.overlay.style.display = "flex";
         this.zoom = 1.0; this.panX = 0; this.panY = 0;
         this.history = []; this.historyIndex = -1;
         this.polygons = []; this.currentPoly = null;
+        this._attachActiveListeners();
     }
 
     finishLoadSetup() {
@@ -878,11 +1095,15 @@ class RadianceMaskEditor {
 
     hide() {
         this.overlay.style.display = "none";
+        this._removeGlobalListeners();
     }
 
     saveMask() {
-        if (this.currentPoly && !this.currentPoly.closed) {
-            this.closePolygon();
+        // Close any open polygon before saving
+        if (this.currentPoly && !this.currentPoly.closed && this.currentPoly.points.length > 2) {
+            this.currentPoly.closed = true;
+            this.bakePolygon(this.currentPoly);
+            this.currentPoly = null;
         }
 
         const imgWidget = this.node.widgets.find(w => w.name === "image");
@@ -895,17 +1116,26 @@ class RadianceMaskEditor {
 
         // Save Raster Mask
         this.maskCanvas.toBlob(async (blob) => {
+            if (!blob) {
+                console.error("[Radiance] Failed to create mask blob.");
+                return;
+            }
+
             const formData = new FormData();
             formData.append("image", blob, compMaskName);
             formData.append("type", "input");
             formData.append("overwrite", "true");
 
             try {
-                await fetch(api.apiURL("/upload/image"), { method: "POST", body: formData });
+                const resp = await fetch(api.apiURL("/upload/image"), { method: "POST", body: formData });
+                if (!resp.ok) throw new Error(`Upload failed: HTTP ${resp.status}`);
                 console.log("[Radiance] Raster mask saved.");
 
                 // Save Vector/Node Metadata
-                const metaBlob = new Blob([JSON.stringify({ polygons: this.polygons })], { type: "application/json" });
+                const metaBlob = new Blob(
+                    [JSON.stringify({ polygons: this.polygons })],
+                    { type: "application/json" }
+                );
                 const metaForm = new FormData();
                 metaForm.append("image", metaBlob, metaName);
                 metaForm.append("type", "input");
@@ -919,7 +1149,8 @@ class RadianceMaskEditor {
                 }
                 this.hide();
             } catch (error) {
-                console.error("[Radiance] Save error", error);
+                console.error("[Radiance] Save error:", error);
+                alert("Failed to save mask. Check console for details.");
             }
         }, "image/png");
     }

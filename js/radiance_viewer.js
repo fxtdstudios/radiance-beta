@@ -16,7 +16,7 @@
 
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { RadianceWebGLRenderer } from "./radiance_webgl.js?v=2.1.0";
+import { RadianceWebGLRenderer } from "./radiance_webgl.js?v=2.1.1";
 import { RadianceNeuralMonitor } from "./radiance_neural.js";
 
 
@@ -241,7 +241,7 @@ class RadianceViewer {
         // Focus Peaking
         this.focusPeaking = false;
         this.focusPeakingColor = '#ff0000';
-        this.focusPeakingThreshold = 30;
+        this.focusPeakingThreshold = 120;
 
         // Pixel Loupe
         this.showLoupe = true;
@@ -309,6 +309,13 @@ class RadianceViewer {
         ];
         this.denoise = 0.0;
         this.grain = 0.0;
+        this.grainSize = 1.0;
+        this.grainColor = 0.0;
+        this.grainAnimate = false;
+        this.bloom = 0.0;
+        this.halation = 0.0;
+        this.diffusion = 0.0;
+        this.anamorphicStreaks = 0.0;
 
         // Grading State
         this.exposure = 0.0;
@@ -557,6 +564,98 @@ class RadianceViewer {
         }
     }
 
+    // ── v4.1: Pipeline Precision Control ─────────────────────────────────────
+
+    /**
+     * Cycle through pipeline precision modes: u8 → f16 → f32 → u8 …
+     * Called by status bar badge click and Alt+B keyboard shortcut.
+     */
+    _cyclePipelinePrecision() {
+        const modes = ['u8', 'f16', 'f32'];
+        const current = this.renderer ? this.renderer.pipelinePrecision : 'f32';
+        const next = modes[(modes.indexOf(current) + 1) % modes.length];
+        this._setPipelinePrecision(next);
+    }
+
+    /**
+     * Set pipeline precision to a specific mode and update all UI + renderer state.
+     * @param {'u8'|'f16'|'f32'} mode
+     */
+    _setPipelinePrecision(mode) {
+        if (this.renderer) {
+            this.renderer.setPipelinePrecision(mode);
+            // Re-upload curve LUTs at new precision so they take effect immediately
+            if (this.curveEditor) {
+                this.curveEditor.notifyChange();
+            }
+            this.render();
+        }
+        this._updateBitDepthBadge();
+        // Persist to localStorage so the choice survives page reload
+        localStorage.setItem('radiance_pipeline_precision', mode);
+        this._termLog?.('info', `[Pipeline] Precision set to ${mode.toUpperCase()} — ${this._precisionLabel(mode)}`);
+    }
+
+    /** Human-readable label for a precision mode. */
+    _precisionLabel(mode) {
+        return mode === 'f32' ? 'FLOAT 32-bit (IEEE 754)' :
+               mode === 'f16' ? 'FLOAT 16-bit (Half Float)' :
+                                'INT 8-bit (SDR)';
+    }
+
+    /**
+     * Update the status bar bit-depth badge with full pipeline chain info.
+     * Format: "FP32 · RGBA32F" (matches Nuke / Flame / Baselight style)
+     */
+    _updateBitDepthBadge() {
+        if (!this.bitDepthInfo) return;
+
+        // Input precision derived from image type
+        let inputLabel = 'INT8';
+        let inputColor = this.theme.textDim;
+
+        if (this.hdrData) {
+            if (this.hdrData.format === 'rhdr') {
+                inputLabel = 'FP16';
+                inputColor = '#60a5fa'; // blue — half-float
+            } else if (this.hdrData.format === 'rhdr_f32') {
+                inputLabel = 'FP32';
+                inputColor = '#4ade80'; // green — full float
+            } else {
+                inputLabel = 'FP32';
+                inputColor = '#4ade80'; // green — full float (EXR, npy, etc.)
+            }
+        } else if (this.image) {
+            inputLabel = 'INT8';
+            inputColor = this.theme.textDim;
+        }
+
+        // Pipeline precision from renderer
+        let pipeLabel = '·  RGBA32F';
+        let pipeColor = '#4ade80';
+        if (this.renderer) {
+            const mode = this.renderer.pipelinePrecision;
+            if (mode === 'f32') {
+                pipeLabel = '·  RGBA32F'; pipeColor = '#4ade80';  // green
+            } else if (mode === 'f16') {
+                pipeLabel = '·  RGBA16F'; pipeColor = '#60a5fa';  // blue
+            } else {
+                pipeLabel = '·  RGBA8';   pipeColor = this.theme.textDim;
+            }
+        }
+
+        // Badge: "FP32 · RGBA32F"
+        const dominantColor = (inputLabel === 'FP32' || (this.renderer && this.renderer.pipelinePrecision === 'f32'))
+            ? '#4ade80' : (inputLabel === 'FP16' || (this.renderer && this.renderer.pipelinePrecision === 'f16'))
+            ? '#60a5fa' : this.theme.textDim;
+
+        this.bitDepthInfo.textContent = `${inputLabel}  ${pipeLabel}`;
+        this.bitDepthInfo.style.color = dominantColor;
+        this.bitDepthInfo.style.background = `${dominantColor}15`;
+        this.bitDepthInfo.style.border = `1px solid ${dominantColor}35`;
+        this.bitDepthInfo.title = `Input: ${inputLabel} | Pipeline: ${this.renderer ? this._precisionLabel(this.renderer.pipelinePrecision) : '—'}\nClick to cycle precision (INT 8 / FLOAT 16 / FLOAT 32)\nShortcut: Alt+B`;
+    }
+
     showUI(visible) {
         const opacity = visible ? '1' : '0';
         const pointerEvents = visible ? 'all' : 'none';
@@ -749,6 +848,13 @@ class RadianceViewer {
                 this.renderer = new RadianceWebGLRenderer(this.glCanvas);
                 if (this.renderer.init()) {
                     console.log("[Radiance] WebGL Renderer Initialized");
+                    // v4.1: Restore pipeline precision from localStorage
+                    // (renderer.init() sets extColorBufferFloat; check happens in setPipelinePrecision)
+                    const savedPrec = localStorage.getItem('radiance_pipeline_precision') || 'f32';
+                    if (savedPrec !== 'f32') {
+                        // f32 is already the constructor default; only call if different
+                        this.renderer.setPipelinePrecision(savedPrec);
+                    }
                 }
             } else {
                 console.warn("[Radiance] WebGL Renderer class not found, falling back to 2D.");
@@ -946,16 +1052,21 @@ class RadianceViewer {
         this.zoomInfo.style.color = t.accent;
         this.statusBar.appendChild(this.zoomInfo);
 
-        // Bit depth indicator
+        // v4.1: Pipeline precision indicator — shows full INPUT → PIPELINE chain
+        // like Nuke's viewer bit-depth badge: "FP32  ·  RGBA32F"
         this.bitDepthInfo = document.createElement('span');
         this.bitDepthInfo.textContent = '—';
         this.bitDepthInfo.style.cssText = `
-            padding: 1px 6px;
+            padding: 1px 8px;
             border-radius: 3px;
-            font-weight: 600;
-            font-size: 8px;
-            letter-spacing: 0.5px;
+            font-weight: 700;
+            font-size: 9px;
+            letter-spacing: 0.6px;
+            cursor: pointer;
+            user-select: none;
         `;
+        this.bitDepthInfo.title = 'Pipeline bit depth — click to cycle precision (INT 8 / FLOAT 16 / FLOAT 32)';
+        this.bitDepthInfo.addEventListener('click', () => this._cyclePipelinePrecision());
         this.statusBar.appendChild(this.bitDepthInfo);
 
         // Create metadata overlay (once, not per-render)
@@ -1637,6 +1748,7 @@ class RadianceViewer {
                     ['<python>', 'Arbitrary python commands sent to backend!'],
                     ['status', 'Show viewer + renderer state'],
                     ['export [name]', 'Export current frame as PNG'],
+                    ['export exr32 [name]', 'Export graded frame as 32-bit EXR'],
                     ['frame <next|prev|#>', 'Navigate image sequence'],
                     ['compare <save|toggle>', 'A/B split between grades (or: ab)'],
                     ['metadata', 'Show parsed EXR/image metadata'],
@@ -1833,11 +1945,21 @@ else:
                     this.temperature = 0.0; this.tint = 0.0; this.contrast = 1.0; this.pivot = 0.5; this.saturation = 1.0;
                     this.grain = 0.0; this.denoise = 0.0;
                     this.printerR = 0; this.printerG = 0; this.printerB = 0; this.softClip = 0.0;
+                    this.bloom = 0.0; this.halation = 0.0; this.diffusion = 0.0;
+                    this.grainSize = 1.0; this.grainColor = 0.0; this.grainAnimate = false;
+                    this.bokehHighlightBias = 0.0; this.bokehSoapBubble = 0.0; this.bokehOpticalVig = 0.0;
+                    this.apertureBlades = 0; this.apertureRotation = 0.0; this.apertureAnamorphic = 1.0;
+                    this.anamorphicStreaks = 0.0; this.lensDistortion = 0.0; this.lensFringe = 0.0;
+                    this.vignetteIntensity = 0.0; this.vignetteFalloff = 0.5;
                     if (this.curveEditor) this.curveEditor.resetAllChannels?.();
                     if (this.renderer) {
                         this.renderer.setExposure(0); this.renderer.setLift(0, 0, 0); this.renderer.setGamma(1, 1, 1); this.renderer.setGain(1, 1, 1);
                         this.renderer.setTemperature(0); this.renderer.setTint(0); this.renderer.setContrast(1); this.renderer.setPivot(0.5);
-                        this.renderer.setSaturation(1); this.renderer.setGrain(0); this.renderer.setDenoise(0);
+                        this.renderer.setSaturation(1); this.renderer.setGrain(0); this.renderer.setGrainSize(1.0); this.renderer.setGrainColor(0.0); this.renderer.setGrainAnimate(false);
+                        this.renderer.setDenoise(0); this.renderer.setBloom(0); this.renderer.setHalation(0); this.renderer.setDiffusion(0);
+                        this.renderer.setLensDistortion(0, 0); this.renderer.setVignette(0, 0.5);
+                        this.renderer.setBokehPhysics(0, 0, 0); this.renderer.setApertureShape(0, 0, 1.0);
+                        if (this.renderer.setAnamorphicStreaks) this.renderer.setAnamorphicStreaks(0);
                         this.renderer.setPrinterLights(0, 0, 0); this.renderer.setSoftClip(0);
                     }
                     this.render();
@@ -2017,7 +2139,17 @@ else:
             case 'info': {
                 if (!this.image) { this._termLog('warn', '[Info] No image loaded.'); break; }
                 this._termLog('result', `  Dimensions  : ${this.imageWidth}×${this.imageHeight}`);
-                this._termLog('result', `  Format      : ${this.hdrData ? (this.hdrData.format === 'rhdr' ? 'RHDR fp16' : 'Float32 HDR') : 'PNG 8-bit'}`);
+                this._termLog('result', `  Format      : ${this.hdrData ? (
+                    this.hdrData.format === 'rhdr'    ? 'RHDR fp16'     :
+                    this.hdrData.format === 'rhdr_f32'? 'RHDR fp32'     :
+                    this.hdrData.format === 'exr'     ? 'OpenEXR'       :
+                    this.hdrData.format === 'rgbe'    ? 'Radiance RGBE (.hdr)' :
+                    this.hdrData.format === 'tiff_f32'? 'TIFF float32'  :
+                    this.hdrData.format === 'tiff_u16'? 'TIFF 16-bit'   :
+                    this.hdrData.format === 'tiff_u8' ? 'TIFF 8-bit'    :
+                    this.hdrData.format === 'rf32'    ? 'RF32 float32'  :
+                    'Float32 HDR'
+                ) : 'PNG 8-bit'}`);
                 this._termLog('result', `  Frame       : ${(this.currentFrame || 0) + 1} / ${(this.frameImages || []).length || 1}`);
                 this._termLog('result', `  Zoom        : ${((this.zoom || 1) * 100).toFixed(0)}%`);
                 this._termLog('result', `  WebGL       : ${this.useWebGL ? '✓ Active' : '✗ Fallback (2D)'}`);
@@ -2142,6 +2274,13 @@ else:
 
             case 'export': {
                 if (!this.image) { this._termLog('warn', '[Export] No image loaded.'); break; }
+
+                // v4.0: `export exr32 [name]` — 32-bit graded EXR
+                if (args[0] === 'exr32') {
+                    this.exportSnapshot('exr32');
+                    break;
+                }
+
                 const canvas = this.useWebGL && this.renderer ? this.renderer.canvas : this.canvas2d;
                 if (!canvas) { this._termLog('warn', '[Export] Canvas not available.'); break; }
 
@@ -3255,6 +3394,12 @@ else:
         }
 
         const key = e.key.toLowerCase();
+        // v4.1: Alt+B — cycle pipeline bit depth (INT 8 / FLOAT 16 / FLOAT 32)
+        if (e.altKey && key === 'b') {
+            e.preventDefault();
+            this._cyclePipelinePrecision();
+            return;
+        }
         switch (key) {
             case '?': case '/': if (e.shiftKey) this.toggleHelp(); break;
             case 'f': this.fitToView(); break;
@@ -3432,6 +3577,7 @@ else:
 
         addOption('Save PNG (Result)', '🖼️', () => this.exportSnapshot('png'));
         addOption('Save EXR (Source)', '🏗️', () => this.exportSnapshot('exr'), !hasEXR);
+        addOption('Save EXR 32-bit (Graded)', '🎞️', () => this.exportSnapshot('exr32'), !this.useWebGL || !this.renderer);
 
         // v3.0 #7: CDL Export — ASC CDL XML from current grading state
         addOption('Export CDL (Grade)', '🎨', () => this._exportCDL());
@@ -3552,6 +3698,39 @@ else:
             return;
         }
 
+        // ── v4.0: 32-bit Graded EXR Export ───────────────────────────────────
+        // Renders the full composite pipeline into an RGBA32F FBO, reads back
+        // the float data, and encodes it as an OpenEXR file with FLOAT pixel
+        // type (pixelType=2) and uncompressed scanlines.
+        if (format === 'exr32') {
+            if (!this.useWebGL || !this.renderer) {
+                this._termLog?.('warn', '[Export] EXR 32-bit export requires WebGL renderer.');
+                return;
+            }
+            const result = this.renderer.readPixelsFloat32(
+                this.imageWidth, this.imageHeight, this.lutIntensity || 1.0
+            );
+            if (!result) {
+                this._termLog?.('warn', '[Export] Float32 readback failed (WebGL2 required).');
+                return;
+            }
+
+            const blob = this._encodeEXR32(result.data, result.width, result.height);
+            if (!blob) {
+                this._termLog?.('warn', '[Export] EXR encoding failed.');
+                return;
+            }
+
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.download = `radiance_graded_${Date.now()}.exr`;
+            link.href = url;
+            link.click();
+            URL.revokeObjectURL(url);
+            this._termLog?.('success', `[Export] Saved 32-bit graded EXR: ${result.width}×${result.height}`);
+            return;
+        }
+
         // Default PNG Export
         const exp = document.createElement('canvas');
         exp.width = this.imageWidth;
@@ -3574,6 +3753,170 @@ else:
         link.download = `radiance_${Date.now()}.png`;
         link.href = exp.toDataURL('image/png');
         link.click();
+    }
+
+    // ── v4.0: OpenEXR 32-bit FLOAT Encoder ───────────────────────────────────
+    // Encodes an RGBA Float32Array as a valid OpenEXR file with:
+    //   - pixelType = 2 (FLOAT, 32-bit IEEE 754)
+    //   - compression = 0 (NONE — lossless, maximum quality)
+    //   - 4 channels: R, G, B, A (stored alphabetically: A, B, G, R per EXR spec)
+    //   - Single-part scanline layout
+    //
+    // @param {Float32Array} pixels - RGBA interleaved float32 data (top-to-bottom)
+    // @param {number} width
+    // @param {number} height
+    // @returns {Blob|null} - application/octet-stream blob of the .exr file
+    _encodeEXR32(pixels, width, height) {
+        if (!pixels || pixels.length < width * height * 4) return null;
+
+        const nCh = 4;  // RGBA
+        const bytesPerPixel = 4;  // float32
+        const scanlineBytes = nCh * width * bytesPerPixel;
+
+        // ── Helper: write null-terminated string ──────────────────────────────
+        const encoder = new TextEncoder();
+        const encStr = (s) => {
+            const b = encoder.encode(s);
+            const r = new Uint8Array(b.length + 1);
+            r.set(b); r[b.length] = 0;
+            return r;
+        };
+
+        // ── Build header ──────────────────────────────────────────────────────
+        const headerParts = [];
+
+        // channels attribute (alphabetical: A, B, G, R)
+        // Each channel: name\0 + pixelType(4) + pLinear(1) + reserved(3) + xSampling(4) + ySampling(4)
+        const channelNames = ['A', 'B', 'G', 'R'];
+        const channelEntries = [];
+        for (const ch of channelNames) {
+            const nameBytes = encStr(ch);
+            const entry = new Uint8Array(nameBytes.length + 16);
+            entry.set(nameBytes, 0);
+            const dv = new DataView(entry.buffer, entry.byteOffset);
+            dv.setInt32(nameBytes.length, 2, true);      // pixelType=2 (FLOAT)
+            dv.setUint8(nameBytes.length + 4, 0);        // pLinear=0
+            // 3 bytes reserved (already 0)
+            dv.setInt32(nameBytes.length + 8, 1, true);   // xSampling=1
+            dv.setInt32(nameBytes.length + 12, 1, true);  // ySampling=1
+            channelEntries.push(entry);
+        }
+        // channels value = all entries + null terminator byte
+        const channelsValueLen = channelEntries.reduce((s, e) => s + e.length, 0) + 1;
+        const channelsValue = new Uint8Array(channelsValueLen);
+        let cp = 0;
+        for (const e of channelEntries) { channelsValue.set(e, cp); cp += e.length; }
+        channelsValue[cp] = 0; // null terminator for channel list
+
+        // Write attribute: name\0 + type\0 + size(4) + value
+        const writeAttr = (name, type, valueBytes) => {
+            const n = encStr(name);
+            const t = encStr(type);
+            const sizeBytes = new Uint8Array(4);
+            new DataView(sizeBytes.buffer).setInt32(0, valueBytes.length, true);
+            headerParts.push(n, t, sizeBytes, valueBytes);
+        };
+
+        // channels
+        writeAttr('channels', 'chlist', channelsValue);
+
+        // compression = 0 (NONE)
+        writeAttr('compression', 'compression', new Uint8Array([0]));
+
+        // dataWindow
+        const dwBytes = new Uint8Array(16);
+        const dwView = new DataView(dwBytes.buffer);
+        dwView.setInt32(0, 0, true);           // xMin
+        dwView.setInt32(4, 0, true);           // yMin
+        dwView.setInt32(8, width - 1, true);   // xMax
+        dwView.setInt32(12, height - 1, true); // yMax
+        writeAttr('dataWindow', 'box2i', dwBytes);
+
+        // displayWindow (same as dataWindow)
+        writeAttr('displayWindow', 'box2i', dwBytes);
+
+        // lineOrder = 0 (increasing Y)
+        writeAttr('lineOrder', 'lineOrder', new Uint8Array([0]));
+
+        // pixelAspectRatio = 1.0
+        const parBytes = new Uint8Array(4);
+        new DataView(parBytes.buffer).setFloat32(0, 1.0, true);
+        writeAttr('pixelAspectRatio', 'float', parBytes);
+
+        // screenWindowCenter = (0, 0)
+        const swcBytes = new Uint8Array(8);
+        writeAttr('screenWindowCenter', 'v2f', swcBytes);
+
+        // screenWindowWidth = 1.0
+        const swwBytes = new Uint8Array(4);
+        new DataView(swwBytes.buffer).setFloat32(0, 1.0, true);
+        writeAttr('screenWindowWidth', 'float', swwBytes);
+
+        // End of header (null byte)
+        headerParts.push(new Uint8Array([0]));
+
+        // ── Compute sizes ─────────────────────────────────────────────────────
+        const headerSize = headerParts.reduce((s, p) => s + p.length, 0);
+        const magicAndVersion = 8; // 4 bytes magic + 4 bytes version
+        const offsetTableSize = height * 8; // one uint64 per scanline
+        const headerTotalSize = magicAndVersion + headerSize;
+        const dataStart = headerTotalSize + offsetTableSize;
+
+        // Each scanline block: y_coord(4) + data_size(4) + pixel_data
+        const scanlineBlockSize = 4 + 4 + scanlineBytes;
+        const totalSize = dataStart + height * scanlineBlockSize;
+
+        // ── Assemble file ─────────────────────────────────────────────────────
+        const buffer = new ArrayBuffer(totalSize);
+        const out = new Uint8Array(buffer);
+        const view = new DataView(buffer);
+
+        // Magic number: 20000630 (0x01312F76)
+        view.setUint32(0, 20000630, true);
+        // Version: 2 (single-part scanline, no flags)
+        view.setUint32(4, 2, true);
+
+        // Header attributes
+        let wp = 8;
+        for (const part of headerParts) {
+            out.set(part, wp);
+            wp += part.length;
+        }
+
+        // Offset table
+        for (let y = 0; y < height; y++) {
+            const offset = dataStart + y * scanlineBlockSize;
+            // Write as two 32-bit values (low, high) since JS doesn't have native uint64
+            view.setUint32(wp, offset, true);      // low 32 bits
+            view.setUint32(wp + 4, 0, true);       // high 32 bits (0 for files < 4GB)
+            wp += 8;
+        }
+
+        // ── Scanline data ─────────────────────────────────────────────────────
+        // EXR stores channels in alphabetical order per scanline:
+        // For each scanline: [all A pixels][all B pixels][all G pixels][all R pixels]
+        // Channel order: A=0, B=1, G=2, R=3
+        // Source RGBA order: R=0, G=1, B=2, A=3
+        const chMap = [3, 2, 1, 0]; // A→src[3], B→src[2], G→src[1], R→src[0]
+
+        for (let y = 0; y < height; y++) {
+            const blockOff = dataStart + y * scanlineBlockSize;
+            view.setInt32(blockOff, y, true);               // y coordinate
+            view.setUint32(blockOff + 4, scanlineBytes, true); // data size
+
+            const pixelOff = blockOff + 8;
+            for (let ci = 0; ci < nCh; ci++) {
+                const srcCh = chMap[ci];
+                const chOff = pixelOff + ci * width * bytesPerPixel;
+                for (let x = 0; x < width; x++) {
+                    const srcIdx = (y * width + x) * 4 + srcCh;
+                    view.setFloat32(chOff + x * 4, pixels[srcIdx], true);
+                }
+            }
+        }
+
+        console.log(`[Radiance EXR] Encoded ${width}×${height}×4ch FLOAT (${(totalSize / 1048576).toFixed(1)} MB)`);
+        return new Blob([buffer], { type: 'application/octet-stream' });
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -4670,6 +5013,9 @@ else:
         if (this.curveEditor && this.image) {
             this.curveEditor.updateHistogram(this.image);
         }
+
+        // v4.1: Refresh pipeline precision badge whenever a new image is loaded
+        this._updateBitDepthBadge();
     }
 
     async loadStandardImage(src) {
@@ -4703,8 +5049,9 @@ else:
         });
     }
 
-    // v3.1: Load HDR data from .rhdr (compressed fp16) or legacy .npy
-    // Consolidated: now uses _parseHDRBuffer (which delegates to _parseRHDR)
+    // v3.5: Load HDR data — supports .rhdr (fp16), .npy (f32), .exr, .hdr (RGBE),
+    // .tif/.tiff (16/32-bit), and .f32 (RF32 binary). Format is auto-detected
+    // from magic bytes by _parseHDRBuffer — no extension matching required.
     async loadHDRData(hdr_path) {
         const response = await fetch(hdr_path);
         const arrayBuffer = await response.arrayBuffer();
@@ -4713,40 +5060,103 @@ else:
 
         if (!parsed) throw new Error('Failed to parse HDR sidecar');
 
-        const height = parsed.shape[0];
-        const width = parsed.shape[1];
+        const height   = parsed.shape[0];
+        const width    = parsed.shape[1];
         const channels = parsed.shape[2] || 3;
 
         const hdrData = {
-            data: parsed.data,       // Float32Array (CPU reads)
-            fp16data: parsed.fp16data, // Uint16Array (GPU upload, RHDR only)
+            data:     parsed.data,        // Float32Array (CPU reads, scopes, probe)
+            fp16data: parsed.fp16data,    // Uint16Array (GPU HALF_FLOAT, RHDR only)
             width, height, channels,
-            shape: parsed.shape,
-            format: parsed.format || 'npy'
+            shape:    parsed.shape,
+            format:   parsed.format || 'npy',
+            isLinear: parsed.isLinear !== false  // true for all float/HDR formats
         };
 
-        // v2.2: Prefer HALF_FLOAT upload for .rhdr (2x faster upload, half VRAM)
-        if (hdrData.fp16data && this.renderer) {
-            this.renderer.loadFloat16Texture(
-                hdrData.fp16data, width, height, channels
-            );
-        } else if (this.renderer) {
-            this.renderer.loadFloat32Texture(
-                hdrData.data, width, height, channels
-            );
+        if (this.renderer) {
+            if (hdrData.fp16data) {
+                // .rhdr: prefer HALF_FLOAT — half the VRAM, 2× faster upload
+                this.renderer.loadFloat16Texture(hdrData.fp16data, width, height, channels);
+            } else {
+                this.renderer.loadFloat32Texture(hdrData.data, width, height, channels);
+            }
+            // Override isLinearTexture for formats that are normalized SDR
+            // (tiff_u8 is display-encoded; tiff_u16/f32, exr, rgbe, rf32 are scene-linear)
+            if (hdrData.format === 'tiff_u8') {
+                this.renderer.isLinearTexture = false;
+            }
         }
 
-        this.imageWidth = width;
+        this.imageWidth  = width;
         this.imageHeight = height;
-        this.hdrData = hdrData;
+        this.hdrData     = hdrData;
 
+        console.log(`[Radiance] Loaded ${hdrData.format.toUpperCase()} ${width}×${height}×${channels}ch (isLinear=${hdrData.isLinear})`);
         this.createPlaceholderImage(width, height);
+        // v4.1: Update pipeline badge to reflect new HDR input precision
+        this._updateBitDepthBadge();
     }
 
     // v3.1: _loadRHDR removed — consolidated into _parseRHDR (single implementation)
     // The loadHDRData method now uses _parseHDRBuffer → _parseRHDR.
 
 
+
+    // v3.5: Load an image/HDR File object dropped onto the viewer.
+    // Routes: float/HDR formats → _parseHDRBuffer → float32 GPU texture
+    //         standard images (PNG/JPG) → ImageBitmap → loadImageTexture
+    async _loadDroppedImageFile(file) {
+        const name = file.name.toLowerCase();
+        const FLOAT_EXTS = /\.(exr|hdr|tif|tiff|f32|rf32|rhdr|npy)$/;
+
+        try {
+            if (FLOAT_EXTS.test(name)) {
+                // Float / HDR path
+                const buffer = await file.arrayBuffer();
+                const parsed = await this._parseHDRBuffer(buffer);
+                if (!parsed) { console.warn('[Radiance] Failed to parse dropped file:', name); return; }
+
+                const H = parsed.shape[0], W = parsed.shape[1], C = parsed.shape[2] || 3;
+                this.hdrData = {
+                    data: parsed.data, fp16data: parsed.fp16data,
+                    width: W, height: H, channels: C,
+                    shape: parsed.shape, format: parsed.format,
+                    isLinear: parsed.isLinear !== false
+                };
+                this.imageWidth  = W;
+                this.imageHeight = H;
+
+                if (this.renderer) {
+                    if (parsed.fp16data) {
+                        this.renderer.loadFloat16Texture(parsed.fp16data, W, H, C);
+                    } else {
+                        this.renderer.loadFloat32Texture(parsed.data, W, H, C);
+                    }
+                    if (parsed.format === 'tiff_u8') this.renderer.isLinearTexture = false;
+                }
+
+                this.createPlaceholderImage(W, H);
+                this.fitToView(); this.render();
+                this.updateScopes && this.updateScopes();
+                this.updateInfo  && this.updateInfo();
+                console.log(`[Radiance] Loaded dropped ${parsed.format.toUpperCase()} ${W}×${H}×${C}ch`);
+
+            } else {
+                // Standard image (PNG, JPG, WebP) — use browser decode
+                const bitmap = await createImageBitmap(file);
+                this.hdrData = null;
+                this.image   = bitmap;
+                this.imageWidth  = bitmap.width;
+                this.imageHeight = bitmap.height;
+                if (this.renderer) this.renderer.loadImageTexture(bitmap);
+                this.fitToView(); this.render();
+                this.updateInfo && this.updateInfo();
+                console.log(`[Radiance] Loaded dropped image ${bitmap.width}×${bitmap.height}`);
+            }
+        } catch (err) {
+            console.error('[Radiance] Error loading dropped file:', err);
+        }
+    }
 
     createPlaceholderImage(width, height) {
         // Create a small placeholder for 2D canvas operations
@@ -5233,7 +5643,7 @@ else:
             // v2.2: Channel isolation + focus peaking + display LUT on GPU
             const chMap = { 'rgb': 0, 'r': 1, 'g': 2, 'b': 3, 'luma': 4, 'a': 5 };
             this.renderer.setChannelMode(chMap[this.channel] || 0);
-            this.renderer.setFocusPeaking(this.focusPeaking || false);
+            this.renderer.setFocusPeaking(this.focusPeaking || false, this.focusPeakingThreshold || 120);
             const lutMap = {
                 'None': 0,
                 'sRGB (Display)': 1,
@@ -5258,6 +5668,27 @@ else:
             this.renderer.setPrinterLights(this.printerR || 0, this.printerG || 0, this.printerB || 0);
             this.renderer.setSoftClip(this.softClip || 0.0);
 
+            // ── Effects panel: push ALL state every frame ──────────────────
+            // Grain
+            this.renderer.setGrain(this.grain || 0.0);
+            this.renderer.setGrainSize(this.grainSize || 1.0);
+            this.renderer.setGrainColor(this.grainColor || 0.0);
+            this.renderer.setGrainAnimate(this.grainAnimate || false);
+            // Bloom / Halation / Diffusion
+            this.renderer.setBloom(this.bloom || 0.0);
+            this.renderer.setHalation(this.halation || 0.0);
+            this.renderer.setDiffusion(this.diffusion || 0.0);
+            // Lens Distortion + Chromatic Aberration
+            this.renderer.setLensDistortion(this.lensDistortion || 0.0, this.lensFringe || 0.0);
+            // Vignette
+            this.renderer.setVignette(this.vignetteIntensity || 0.0, this.vignetteFalloff !== undefined ? this.vignetteFalloff : 0.5);
+            // Bokeh physics (always, not only when DoF enabled — affects CA+highlight)
+            this.renderer.setBokehPhysics(this.bokehHighlightBias || 0.0, this.bokehSoapBubble || 0.0, this.bokehOpticalVig || 0.0);
+            // Aperture shape (always pushed for CA / anamorphic ratio in fringe mode)
+            this.renderer.setApertureShape(this.apertureBlades || 0, this.apertureRotation || 0.0, this.apertureAnamorphic || 1.0);
+            // Anamorphic streaks
+            if (this.renderer.setAnamorphicStreaks) this.renderer.setAnamorphicStreaks(this.anamorphicStreaks || 0.0);
+
             // Time + frame must always be updated so grain, zebra-blink, and other
             // time-driven effects animate even when DoF is disabled.
             this.renderer.setTime(performance.now() / 1000.0);
@@ -5268,10 +5699,6 @@ else:
                 this.renderer.setDoFEnabled(true);
                 this.renderer.setFocusDistance(this.focusDistance || 0.5);
                 this.renderer.setAperture(this.aperture || 0.0);
-                this.renderer.setBokehPhysics(this.bokehHighlightBias || 0.0, this.bokehSoapBubble || 0.0, this.bokehOpticalVig || 0.0);
-
-                // v3.1: Optical shape
-                this.renderer.setApertureShape(this.apertureBlades || 0, this.apertureRotation || 0.0, this.apertureAnamorphic || 1.0);
             } else {
                 this.renderer.setDoFEnabled(false);
             }
@@ -5704,55 +6131,35 @@ else:
         this.dimensionInfo.textContent = `${this.imageWidth}×${this.imageHeight}`;
         this.zoomInfo.textContent = `${z}%`;
 
-        // Always update bit depth indicator in status bar
-        if (this.bitDepthInfo) {
-            let bitDepth = 'Int 8-bit';
-            let bitColor = this.theme.textDim;
-            if (this.hdrData) {
-                if (this.hdrData.format === 'rhdr') {
-                    bitDepth = 'Float 16-bit';
-                    bitColor = '#60a5fa';
-                } else {
-                    bitDepth = 'Float 32-bit';
-                    bitColor = '#4ade80';
-                }
-            }
-            this.bitDepthInfo.textContent = bitDepth;
-            this.bitDepthInfo.style.color = bitColor;
-            this.bitDepthInfo.style.background = `${bitColor}15`;
-            this.bitDepthInfo.style.border = `1px solid ${bitColor}30`;
-        }
+        // v4.1: Pipeline precision badge (replaces old simple bit-depth text)
+        this._updateBitDepthBadge();
 
         // Update metadata panel if visible
         if (this.metadataContent && this.metadataPanel.style.display !== 'none') {
             let hdrStatus = '—';
             let formatStr = 'PNG 8-bit';
-            let bitDepth = 'Int 8-bit';
-            let bitColor = this.theme.textDim;
             if (this.hdrData) {
                 const hasHighValues = this.hdrData.data &&
                     Array.from(this.hdrData.data.slice(0, 1000)).some(v => v > 1.0 || v < 0.0);
                 hdrStatus = hasHighValues ? '✓ HDR Content' : '✗ Standard Range';
                 if (this.hdrData.format === 'rhdr') {
                     formatStr = 'RHDR fp16 (primary)';
-                    bitDepth = 'Float 16-bit';
-                    bitColor = '#60a5fa'; // blue
                 } else {
                     formatStr = 'Float32 HDR';
-                    bitDepth = 'Float 32-bit';
-                    bitColor = '#4ade80'; // green
                 }
             } else if (this.imageData) {
                 hdrStatus = '✗ Standard Range';
             }
 
-            // Update status bar bit depth
-            if (this.bitDepthInfo) {
-                this.bitDepthInfo.textContent = bitDepth;
-                this.bitDepthInfo.style.color = bitColor;
-                this.bitDepthInfo.style.background = `${bitColor}15`;
-                this.bitDepthInfo.style.border = `1px solid ${bitColor}30`;
-            }
+            // v4.1: Get full pipeline info from renderer for metadata panel
+            const pipeInfo = this.renderer ? this.renderer.getPipelineInfo() : null;
+            const pipeLabel = pipeInfo ? pipeInfo.label : '—';
+            const pipeColor = pipeInfo
+                ? (pipeInfo.mode === 'f32' ? '#4ade80' : pipeInfo.mode === 'f16' ? '#60a5fa' : this.theme.textDim)
+                : this.theme.textDim;
+
+            // Also refresh the status bar badge
+            this._updateBitDepthBadge();
 
             this.metadataContent.innerHTML = `
                 <div style="margin-bottom: 6px;">
@@ -5760,11 +6167,15 @@ else:
                     <span style="color:${this.theme.accent}">${this.imageWidth} × ${this.imageHeight}</span>
                 </div>
                 <div style="margin-bottom: 6px;">
-                    <span style="color:${formatStr.includes('RHDR') ? '#4ade80' : this.theme.text}">${formatStr}</span>
+                    <span style="color:${this.hdrData ? '#4ade80' : this.theme.text}">${formatStr}</span>
+                </div>
+                <div style="margin-bottom: 6px;">
+                    <span style="color:${this.theme.textDim}">Pipeline:</span><br/>
+                    <span style="color:${pipeColor}">${pipeLabel}</span>
                 </div>
                 <div style="margin-bottom: 6px;">
                     <span style="color:${this.theme.textDim}">Channels:</span><br/>
-                    <span>${this.hdrData ? `${this.hdrData.channels || 3}ch fp16` : 'RGBA (4)'}</span>
+                    <span>${this.hdrData ? `${this.hdrData.channels || 3}ch` : 'RGBA (4)'}</span>
                 </div>
                 <div style="margin-bottom: 6px;">
                     <span style="color:${this.theme.textDim}">HDR Status:</span><br/>
@@ -6262,15 +6673,23 @@ else:
                 active._savedGrading = {
                     exposure: active.exposure, lift: [...(active.lift || [0, 0, 0])], gamma: [...(active.gamma || [1, 1, 1])], gain: [...(active.gain || [1, 1, 1])],
                     temperature: active.temperature, tint: active.tint, contrast: active.contrast, pivot: active.pivot, saturation: active.saturation,
-                    grain: active.grain, denoise: active.denoise,
+                    grain: active.grain, grainSize: active.grainSize ?? 1.0, grainColor: active.grainColor ?? 0.0, grainAnimate: active.grainAnimate ?? false,
+                    denoise: active.denoise,
+                    bloom: active.bloom ?? 0.0, halation: active.halation ?? 0.0, diffusion: active.diffusion ?? 0.0,
                     lensDistortion: active.lensDistortion, lensFringe: active.lensFringe,
                     vignetteIntensity: active.vignetteIntensity, vignetteFalloff: active.vignetteFalloff,
+                    bokehHighlightBias: active.bokehHighlightBias ?? 0.0, bokehSoapBubble: active.bokehSoapBubble ?? 0.0, bokehOpticalVig: active.bokehOpticalVig ?? 0.0,
+                    apertureBlades: active.apertureBlades ?? 0, apertureRotation: active.apertureRotation ?? 0.0, apertureAnamorphic: active.apertureAnamorphic ?? 1.0,
+                    anamorphicStreaks: active.anamorphicStreaks ?? 0.0,
                 };
                 if (active.renderer) {
                     active.renderer.setExposure(0); active.renderer.setLift(0, 0, 0); active.renderer.setGamma(1, 1, 1); active.renderer.setGain(1, 1, 1);
                     active.renderer.setTemperature(0); active.renderer.setTint(0); active.renderer.setContrast(1); active.renderer.setPivot(0.5); active.renderer.setSaturation(1);
-                    active.renderer.setGrain(0); active.renderer.setDenoise(0);
+                    active.renderer.setGrain(0); active.renderer.setGrainSize(1.0); active.renderer.setGrainColor(0.0); active.renderer.setGrainAnimate(false);
+                    active.renderer.setDenoise(0); active.renderer.setBloom(0); active.renderer.setHalation(0); active.renderer.setDiffusion(0);
                     active.renderer.setLensDistortion(0, 0); active.renderer.setVignette(0, 0.5);
+                    active.renderer.setBokehPhysics(0, 0, 0); active.renderer.setApertureShape(0, 0, 1.0);
+                    if (active.renderer.setAnamorphicStreaks) active.renderer.setAnamorphicStreaks(0);
                 }
                 bypassBtn.textContent = '● BYPASSED'; bypassBtn.style.color = '#ff6b6b'; bypassBtn.style.borderColor = 'rgba(255,100,100,0.3)';
             } else {
@@ -6280,8 +6699,13 @@ else:
                     active.renderer.setExposure(s.exposure); active.renderer.setLift(s.lift[0], s.lift[1], s.lift[2]);
                     active.renderer.setGamma(s.gamma[0], s.gamma[1], s.gamma[2]); active.renderer.setGain(s.gain[0], s.gain[1], s.gain[2]);
                     active.renderer.setTemperature(s.temperature); active.renderer.setTint(s.tint); active.renderer.setContrast(s.contrast); active.renderer.setPivot(s.pivot); active.renderer.setSaturation(s.saturation);
-                    active.renderer.setGrain(s.grain); active.renderer.setDenoise(s.denoise);
+                    active.renderer.setGrain(s.grain); active.renderer.setGrainSize(s.grainSize ?? 1.0); active.renderer.setGrainColor(s.grainColor ?? 0.0); active.renderer.setGrainAnimate(s.grainAnimate ?? false);
+                    active.renderer.setDenoise(s.denoise);
+                    active.renderer.setBloom(s.bloom ?? 0.0); active.renderer.setHalation(s.halation ?? 0.0); active.renderer.setDiffusion(s.diffusion ?? 0.0);
                     active.renderer.setLensDistortion(s.lensDistortion, s.lensFringe); active.renderer.setVignette(s.vignetteIntensity, s.vignetteFalloff);
+                    active.renderer.setBokehPhysics(s.bokehHighlightBias ?? 0.0, s.bokehSoapBubble ?? 0.0, s.bokehOpticalVig ?? 0.0);
+                    active.renderer.setApertureShape(s.apertureBlades ?? 0, s.apertureRotation ?? 0.0, s.apertureAnamorphic ?? 1.0);
+                    if (active.renderer.setAnamorphicStreaks) active.renderer.setAnamorphicStreaks(s.anamorphicStreaks ?? 0.0);
                 }
                 bypassBtn.textContent = 'A/B'; bypassBtn.style.color = '#666'; bypassBtn.style.borderColor = 'rgba(255,255,255,0.08)';
             }
@@ -6330,12 +6754,16 @@ else:
             active.temperature = 0.0; active.tint = 0.0;
             active.contrast = 1.0; active.pivot = 0.5; active.saturation = 1.0;
             // Film / Effects
-            active.grain = 0.0; active.denoise = 0.0;
+            active.grain = 0.0; active.grainSize = 1.0; active.grainColor = 0.0; active.grainAnimate = false;
+            active.denoise = 0.0; active.bloom = 0.0; active.halation = 0.0; active.diffusion = 0.0;
+            active.anamorphicStreaks = 0.0;
             // Lens
             active.focusDistance = 0.5; active.aperture = 0.0; active.dofEnabled = false;
             active.apertureBlades = 0; active.apertureRotation = 0.0; active.apertureAnamorphic = 1.0;
             active.lensDistortion = 0.0; active.lensFringe = 0.0;
             active.vignetteIntensity = 0.0; active.vignetteFalloff = 0.5;
+            active.bokehHighlightBias = 0.0; active.bokehSoapBubble = 0.0; active.bokehOpticalVig = 0.0;
+            active.activeLensSignature = null; active._activeFilmPreset = 'No Grain';
             // Curves
             if (active.curveEditor) active.curveEditor.resetAllChannels?.();
             // Qualifier
@@ -6348,10 +6776,13 @@ else:
                 active.renderer.setLift(0, 0, 0); active.renderer.setGamma(1, 1, 1); active.renderer.setGain(1, 1, 1);
                 active.renderer.setTemperature(0); active.renderer.setTint(0);
                 active.renderer.setContrast(1); active.renderer.setPivot(0.5); active.renderer.setSaturation(1);
-                active.renderer.setGrain(0); active.renderer.setDenoise(0);
+                active.renderer.setGrain(0); active.renderer.setGrainSize(1.0); active.renderer.setGrainColor(0.0); active.renderer.setGrainAnimate(false);
+                active.renderer.setDenoise(0); active.renderer.setBloom(0); active.renderer.setHalation(0); active.renderer.setDiffusion(0);
                 active.renderer.setDoFEnabled(false); active.renderer.setFocusDistance(0.5); active.renderer.setAperture(0);
                 active.renderer.setApertureShape(0, 0, 1.0);
                 active.renderer.setLensDistortion(0, 0); active.renderer.setVignette(0, 0.5);
+                active.renderer.setBokehPhysics(0, 0, 0);
+                if (active.renderer.setAnamorphicStreaks) active.renderer.setAnamorphicStreaks(0);
                 active.renderer.setCurveMix(0);
                 if (active.qualifierState && active.renderer.setQualifier) {
                     active.renderer.setQualifier(active.qualifierState);
@@ -6500,7 +6931,7 @@ else:
             fileInput.click();
         };
 
-        // Drag-and-drop on canvasWrapper
+        // Drag-and-drop on canvasWrapper — accepts video AND image/HDR files
         this.canvasWrapper.addEventListener('dragover', (e) => {
             e.preventDefault();
             if ([...e.dataTransfer.types].includes('Files')) {
@@ -6514,12 +6945,28 @@ else:
         this.canvasWrapper.addEventListener('drop', (e) => {
             e.preventDefault();
             fileStrip.style.background = '';
-            const f = [...e.dataTransfer.files].find(f => f.type.startsWith('video/'));
-            if (f) {
-                this._fileNameLabel.textContent = f.name;
+            const files = [...e.dataTransfer.files];
+
+            // Priority: video first, then image/HDR
+            const videoFile = files.find(f => f.type.startsWith('video/'));
+            if (videoFile) {
+                this._fileNameLabel.textContent = videoFile.name;
                 unloadBtn.style.display = '';
                 this.transportPanel.style.display = 'flex';
-                this.loadVideo(f);
+                this.loadVideo(videoFile);
+                return;
+            }
+
+            // Image / HDR / float file
+            const IMAGE_EXTS = /\.(exr|hdr|tif|tiff|f32|rf32|rhdr|npy|png|jpg|jpeg|webp)$/i;
+            const imgFile = files.find(f =>
+                IMAGE_EXTS.test(f.name) ||
+                f.type.startsWith('image/') ||
+                f.type === 'application/octet-stream'
+            );
+            if (imgFile) {
+                this._fileNameLabel.textContent = imgFile.name;
+                this._loadDroppedImageFile(imgFile);
             }
         });
 
@@ -7224,7 +7671,13 @@ else:
     }
 
     renderLensTab(container) {
-        container.style.cssText = 'display: flex; flex-direction: column; flex: 1; gap: 10px; padding: 10px; min-height: 0; overflow-y: auto;';
+        // ── Idempotent guard: remove any previous lens content to prevent duplication
+        const existingLens = container.querySelector('[data-radiance-lens-tab]');
+        if (existingLens) existingLens.remove();
+
+        const lensWrap = document.createElement('div');
+        lensWrap.setAttribute('data-radiance-lens-tab', '1');
+        lensWrap.style.cssText = 'display: flex; flex-direction: column; gap: 10px; padding: 10px;';
 
         // 1. Focus & DoF Top Row
         const topRow = document.createElement('div');
@@ -7250,13 +7703,13 @@ else:
         pickBtn.textContent = '◎ Pick Focus';
         pickBtn.style.cssText = 'background: #333; color: #ccc; border: 1px solid #555; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px;';
         pickBtn.onclick = () => this.activateFocusPicker(() => {
-            // Update the HUD slider if it exists, though knobs are reactive
+            // Safe re-render: just replace the lens section
             this.renderLensTab(this.tabContentContainer);
         });
         dofLeft.appendChild(pickBtn);
 
         topRow.appendChild(dofLeft);
-        container.appendChild(topRow);
+        lensWrap.appendChild(topRow);
 
         // 2. Main Knobs Row (Focus, Aperture, Distortion)
         const knobsRow = document.createElement('div');
@@ -7280,7 +7733,7 @@ else:
             this.requestRender();
         }));
 
-        container.appendChild(knobsRow);
+        lensWrap.appendChild(knobsRow);
 
         // 3. Bokeh Shape Presets
         const shapeGroup = document.createElement('div');
@@ -7291,7 +7744,7 @@ else:
         const presetRow = document.createElement('div');
         presetRow.style.cssText = 'display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap;';
 
-        const presetBtnStyle = `background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: #aaa; padding: 4px 10px; border - radius: 4px; font - size: 10px; cursor: pointer; transition: background 0.15s; `;
+        const presetBtnStyle = `background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: #aaa; padding: 4px 10px; border-radius: 4px; font-size: 10px; cursor: pointer; transition: background 0.15s; `;
         const presetBtnActiveStyle = `background: rgba(100, 140, 255, 0.2); border: 1px solid rgba(100, 140, 255, 0.4); color: #9cf; `;
 
         const bokehPresets = [
@@ -7304,8 +7757,8 @@ else:
         const signaturePresets = [
             { label: 'Zeiss MP', blades: 0, angle: 0, anamorphic: 1.0, distort: 0.0, fringe: 0.0, halation: 0.05, diffusion: 0.0 },
             { label: 'Cooke S4', blades: 8, angle: 22, anamorphic: 1.0, distort: 0.04, fringe: 0.35, halation: 0.15, diffusion: 0.2 },
-            { label: 'Anamorphic', blades: 0, angle: 0, anamorphic: 2.0, distort: 0.18, fringe: 0.75, halation: 0.1, diffusion: 0.15 },
-            { label: 'Petzval', blades: 0, angle: 0, anamorphic: 1.0, distort: -0.1, fringe: 0.0, opticalVig: 0.85, highlight: 1.5 },
+            { label: 'Anamorphic', blades: 0, angle: 0, anamorphic: 2.0, distort: 0.18, fringe: 0.75, halation: 0.1, diffusion: 0.15, streaks: 0.5 },
+            { label: 'Petzval', blades: 0, angle: 0, anamorphic: 1.0, distort: -0.1, fringe: 0.0, opticalVig: 0.5, highlight: 0.4 },
             { label: 'Dreamy', blades: 0, angle: 0, anamorphic: 1.0, distort: 0.0, fringe: 0.2, halation: 0.4, diffusion: 0.6 }
         ];
 
@@ -7322,7 +7775,8 @@ else:
                 this.apertureRotation = p.angle;
                 if (this.renderer) this.renderer.setApertureShape(p.blades, p.angle, this.apertureAnamorphic || 1.0);
                 this.render();
-                this._lastRenderContent();
+                // Safe: renderLensTab is now idempotent (removes old content first)
+                this.renderLensTab(this.tabContentContainer);
             };
             presetRow.appendChild(btn);
         });
@@ -7349,11 +7803,6 @@ else:
             btn.onclick = () => {
                 const isAlreadyActive = this.activeLensSignature === p.label;
 
-                // Update all sibling buttons to deactivated style
-                sigRow.querySelectorAll('div').forEach(b => {
-                    b.style.cssText = presetBtnStyle;
-                });
-
                 if (isAlreadyActive) {
                     // Toggle OFF — reset to neutral
                     this.activeLensSignature = null;
@@ -7362,10 +7811,10 @@ else:
                     this.lensDistortion = 0.0; this.lensFringe = 0.0;
                     this.halation = 0.0; this.diffusion = 0.0;
                     this.bokehOpticalVig = 0.0; this.bokehHighlightBias = 0.0;
+                    this.anamorphicStreaks = 0.0;
                 } else {
                     // Apply preset
                     this.activeLensSignature = p.label;
-                    btn.style.cssText = presetBtnStyle + presetBtnActiveStyle;
                     this.apertureBlades = p.blades;
                     this.apertureRotation = p.angle;
                     this.apertureAnamorphic = p.anamorphic || 1.0;
@@ -7375,6 +7824,7 @@ else:
                     this.diffusion = p.diffusion || 0.0;
                     this.bokehOpticalVig = p.opticalVig || 0.0;
                     this.bokehHighlightBias = p.highlight || 0.0;
+                    this.anamorphicStreaks = p.streaks || 0.0;
                 }
 
                 if (this.renderer) {
@@ -7383,9 +7833,11 @@ else:
                     this.renderer.setHalation(this.halation);
                     this.renderer.setDiffusion(this.diffusion);
                     this.renderer.setBokehPhysics(this.bokehHighlightBias, this.bokehSoapBubble || 0.0, this.bokehOpticalVig);
+                    if (this.renderer.setAnamorphicStreaks) this.renderer.setAnamorphicStreaks(this.anamorphicStreaks);
                 }
                 this.render();
-                // No full renderLensTab() — we update the DOM in-place above
+                // Safe: renderLensTab is now idempotent (removes old content first)
+                this.renderLensTab(this.tabContentContainer);
             };
             sigRow.appendChild(btn);
         });
@@ -7414,7 +7866,7 @@ else:
         }));
 
         shapeGroup.appendChild(shapeGrid);
-        container.appendChild(shapeGroup);
+        lensWrap.appendChild(shapeGroup);
 
         // 4. Optical Filters
         const filterGroup = document.createElement('div');
@@ -7443,7 +7895,7 @@ else:
         }));
 
         filterGroup.appendChild(filterGrid);
-        container.appendChild(filterGroup);
+        lensWrap.appendChild(filterGroup);
 
         // 5. Lens Effects (Bloom, Halation, Diffusion)
         const fxGroup = document.createElement('div');
@@ -7478,6 +7930,7 @@ else:
                     this.renderer.setDiffusion(p.diffusion);
                 }
                 this.render();
+                // Safe: renderLensTab is now idempotent (removes old content first)
                 this.renderLensTab(this.tabContentContainer);
             };
             dfRow.appendChild(btn);
@@ -7503,7 +7956,7 @@ else:
         }));
 
         fxGroup.appendChild(fxGrid);
-        container.appendChild(fxGroup);
+        lensWrap.appendChild(fxGroup);
 
         // 6. Bokeh Physics
         const bokehGroup = document.createElement('div');
@@ -7532,7 +7985,10 @@ else:
         }));
 
         bokehGroup.appendChild(bokehGrid);
-        container.appendChild(bokehGroup);
+        lensWrap.appendChild(bokehGroup);
+
+        // Append the complete lens wrapper to the container
+        container.appendChild(lensWrap);
     }
 
     renderCurvesTab(container) {
@@ -7549,13 +8005,28 @@ else:
             this.curveEditor = new RadianceCurveEditor(280, 280, this.theme, (data, secData) => {
                 if (this.renderer) {
                     this.renderer.updateCurveLut(data);
+
+                    // FIX 5: Compute per-channel slope at lut[255] for HDR extrapolation.
+                    // slope = (lut[255] - lut[254]) * 255, clamped to [0, 4].
+                    // A flat or rolled-off curve (e.g. Film Print) will have slope < 1.0,
+                    // correctly carrying that rolloff into HDR specular highlights.
+                    const sR = Math.max(0, Math.min(4, (data[255 * 4 + 0] - data[254 * 4 + 0]) * 255));
+                    const sG = Math.max(0, Math.min(4, (data[255 * 4 + 1] - data[254 * 4 + 1]) * 255));
+                    const sB = Math.max(0, Math.min(4, (data[255 * 4 + 2] - data[254 * 4 + 2]) * 255));
+                    this.renderer.setCurveSlope(sR, sG, sB);
+
                     if (secData) {
                         this.renderer.updateSecondaryCurveLut(secData);
                         // Only activate secondary curves if they were actually edited
                         // (identity LUT has all values at exactly 0.5)
+                        // FIX 4: Reset secondaryCurveMix to 0.0 when identity is
+                        // restored (e.g. after user hits Reset), so the GPU bypass
+                        // kicks in again and the secondary pass doesn't run for nothing.
                         const isIdentity = secData.every((v, i) => i % 4 === 3 ? true : Math.abs(v - 0.5) < 0.001);
                         if (!isIdentity) {
                             this.renderer.setSecondaryCurveMix(1.0);
+                        } else {
+                            this.renderer.setSecondaryCurveMix(0.0);
                         }
                     }
                     this.renderer.setCurveMix(this.curveMix !== undefined ? this.curveMix : 1.0);
@@ -7757,16 +8228,138 @@ else:
             return row;
         };
 
-        const inBlackRow = createLevelSlider('IN BLACK', 0, 100, this.curveEditor.levels.inBlack, (v) => {
+        // FIX 7: Allow full 0–255 range on both sliders. Cross-guard is enforced
+        // dynamically: inBlack slider max tracks (inWhite - 5), inWhite slider min
+        // tracks (inBlack + 5). This eliminates the 100–150 dead zone while still
+        // preventing the two handles from crossing (which would invert the LUT).
+        let _inBlackSlider, _inWhiteSlider;
+
+        const _updateSliderConstraints = () => {
+            if (!_inBlackSlider || !_inWhiteSlider) return;
+            const bv = parseInt(_inBlackSlider.value);
+            const wv = parseInt(_inWhiteSlider.value);
+            _inBlackSlider.max = String(wv - 5);
+            _inWhiteSlider.min = String(bv + 5);
+        };
+
+        const inBlackRow = createLevelSlider('IN BLACK', 0, 250, this.curveEditor.levels.inBlack, (v) => {
             this.curveEditor.setLevels(v, this.curveEditor.levels.inWhite);
+            _updateSliderConstraints();
         });
-        const inWhiteRow = createLevelSlider('IN WHITE', 150, 255, this.curveEditor.levels.inWhite, (v) => {
+        const inWhiteRow = createLevelSlider('IN WHITE', 5, 255, this.curveEditor.levels.inWhite, (v) => {
             this.curveEditor.setLevels(this.curveEditor.levels.inBlack, v);
+            _updateSliderConstraints();
         });
+
+        // Grab slider elements for cross-constraint wiring
+        _inBlackSlider = inBlackRow.querySelector('input[type="range"]');
+        _inWhiteSlider = inWhiteRow.querySelector('input[type="range"]');
+        _updateSliderConstraints(); // Apply initial constraints
 
         levelsRow.appendChild(inBlackRow);
         levelsRow.appendChild(inWhiteRow);
         container.appendChild(levelsRow);
+
+        // ── v4.1: Pipeline Bit-Depth Selector ────────────────────────────────
+        // Industry-standard 3-button group: INT 8 / FLOAT 16 / FLOAT 32
+        // Matches the precision selector found in Nuke, Flame, and Baselight.
+        const precSection = document.createElement('div');
+        precSection.style.cssText = 'display: flex; flex-direction: column; gap: 6px; padding: 10px; background: rgba(0,0,0,0.25); border-radius: 4px; margin-top: 4px; border: 1px solid rgba(255,255,255,0.06);';
+
+        const precHeader = document.createElement('div');
+        precHeader.style.cssText = `display: flex; align-items: center; justify-content: space-between;`;
+        const precTitle = document.createElement('div');
+        precTitle.textContent = 'PIPELINE BIT DEPTH';
+        precTitle.style.cssText = `color: ${this.theme.textDim}; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px;`;
+        const precHint = document.createElement('div');
+        precHint.textContent = 'Alt+B';
+        precHint.style.cssText = 'color: rgba(255,255,255,0.2); font-size: 9px; font-family: ' + this.theme.mono + ';';
+        precHeader.appendChild(precTitle);
+        precHeader.appendChild(precHint);
+        precSection.appendChild(precHeader);
+
+        const precBtnRow = document.createElement('div');
+        precBtnRow.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px;';
+
+        const precModes = [
+            { mode: 'u8',  label: 'INT 8',     sub: '8-bit SDR',       color: '#707088' },
+            { mode: 'f16', label: 'FLOAT 16',  sub: 'Half Float HDR',  color: '#60a5fa' },
+            { mode: 'f32', label: 'FLOAT 32',  sub: 'Full Float',      color: '#4ade80' }
+        ];
+
+        const getCurrentMode = () => this.renderer ? this.renderer.pipelinePrecision : (localStorage.getItem('radiance_pipeline_precision') || 'f32');
+
+        const precBtns = {};
+        const refreshPrecBtns = () => {
+            const cur = getCurrentMode();
+            precModes.forEach(({ mode, color }) => {
+                const btn = precBtns[mode];
+                if (!btn) return;
+                const active = cur === mode;
+                btn.style.background = active ? `${color}22` : 'rgba(255,255,255,0.03)';
+                btn.style.borderColor = active ? color : 'rgba(255,255,255,0.08)';
+                btn.style.color = active ? color : '#666';
+                btn.querySelector('.prec-sub').style.color = active ? `${color}aa` : '#444';
+            });
+        };
+
+        precModes.forEach(({ mode, label, sub, color }) => {
+            const btn = document.createElement('button');
+            btn.style.cssText = `
+                display: flex; flex-direction: column; align-items: center; justify-content: center;
+                gap: 2px; padding: 8px 4px; border-radius: 5px; cursor: pointer;
+                border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03);
+                transition: all 0.15s ease; font-family: ${this.theme.mono};
+            `;
+            const labelEl = document.createElement('div');
+            labelEl.textContent = label;
+            labelEl.style.cssText = 'font-size: 10px; font-weight: 700; letter-spacing: 0.5px;';
+
+            const subEl = document.createElement('div');
+            subEl.className = 'prec-sub';
+            subEl.textContent = sub;
+            subEl.style.cssText = 'font-size: 8px; letter-spacing: 0.3px;';
+
+            btn.appendChild(labelEl);
+            btn.appendChild(subEl);
+            precBtns[mode] = btn;
+
+            btn.addEventListener('mouseenter', () => {
+                if (getCurrentMode() !== mode) btn.style.background = 'rgba(255,255,255,0.07)';
+            });
+            btn.addEventListener('mouseleave', () => refreshPrecBtns());
+            btn.addEventListener('click', () => {
+                this._setPipelinePrecision(mode);
+                refreshPrecBtns();
+            });
+
+            precBtnRow.appendChild(btn);
+        });
+
+        // Memory estimate label
+        const memLabel = document.createElement('div');
+        memLabel.style.cssText = 'color: rgba(255,255,255,0.25); font-size: 9px; text-align: center; margin-top: 2px; font-family: ' + this.theme.mono + ';';
+        const updateMemLabel = () => {
+            if (!this.imageWidth || !this.imageHeight) { memLabel.textContent = ''; return; }
+            const px = this.imageWidth * this.imageHeight;
+            const mode = getCurrentMode();
+            const bpp = mode === 'f32' ? 16 : mode === 'f16' ? 8 : 4; // bytes per pixel RGBA
+            const mb = (px * bpp / 1048576).toFixed(1);
+            memLabel.textContent = `${this.imageWidth}x${this.imageHeight}  ·  ${mb} MB VRAM est.`;
+        };
+
+        precSection.appendChild(precBtnRow);
+        precSection.appendChild(memLabel);
+        container.appendChild(precSection);
+
+        // Restore saved precision and refresh button state
+        const savedPrec = localStorage.getItem('radiance_pipeline_precision') || 'f32';
+        if (this.renderer && this.renderer.pipelinePrecision !== savedPrec) {
+            this._setPipelinePrecision(savedPrec);
+        }
+        refreshPrecBtns();
+        updateMemLabel();
+        this._updateBitDepthBadge();
     }
 
     renderQualifiersTab(container) {
@@ -9029,11 +9622,24 @@ else:
             pivot: this.pivot ?? 0.5,
             saturation: this.saturation || 1.0,
             grain: this.grain || 0.0,
+            grainSize: this.grainSize || 1.0,
+            grainColor: this.grainColor || 0.0,
+            grainAnimate: this.grainAnimate || false,
             denoise: this.denoise || 0.0,
+            bloom: this.bloom || 0.0,
+            halation: this.halation || 0.0,
+            diffusion: this.diffusion || 0.0,
             lensDistortion: this.lensDistortion || 0.0,
             lensFringe: this.lensFringe || 0.0,
             vignetteIntensity: this.vignetteIntensity || 0.0,
             vignetteFalloff: this.vignetteFalloff ?? 0.5,
+            bokehHighlightBias: this.bokehHighlightBias || 0.0,
+            bokehSoapBubble: this.bokehSoapBubble || 0.0,
+            bokehOpticalVig: this.bokehOpticalVig || 0.0,
+            apertureBlades: this.apertureBlades || 0,
+            apertureRotation: this.apertureRotation || 0.0,
+            apertureAnamorphic: this.apertureAnamorphic || 1.0,
+            anamorphicStreaks: this.anamorphicStreaks || 0.0,
             // v3.4 additions
             printerR: this.printerR || 0,
             printerG: this.printerG || 0,
@@ -9053,11 +9659,24 @@ else:
         this.pivot = snapshot.pivot;
         this.saturation = snapshot.saturation;
         this.grain = snapshot.grain;
+        this.grainSize = snapshot.grainSize ?? 1.0;
+        this.grainColor = snapshot.grainColor ?? 0.0;
+        this.grainAnimate = snapshot.grainAnimate ?? false;
         this.denoise = snapshot.denoise;
+        this.bloom = snapshot.bloom ?? 0.0;
+        this.halation = snapshot.halation ?? 0.0;
+        this.diffusion = snapshot.diffusion ?? 0.0;
         this.lensDistortion = snapshot.lensDistortion;
         this.lensFringe = snapshot.lensFringe;
         this.vignetteIntensity = snapshot.vignetteIntensity;
         this.vignetteFalloff = snapshot.vignetteFalloff;
+        this.bokehHighlightBias = snapshot.bokehHighlightBias ?? 0.0;
+        this.bokehSoapBubble = snapshot.bokehSoapBubble ?? 0.0;
+        this.bokehOpticalVig = snapshot.bokehOpticalVig ?? 0.0;
+        this.apertureBlades = snapshot.apertureBlades ?? 0;
+        this.apertureRotation = snapshot.apertureRotation ?? 0.0;
+        this.apertureAnamorphic = snapshot.apertureAnamorphic ?? 1.0;
+        this.anamorphicStreaks = snapshot.anamorphicStreaks ?? 0.0;
         // v3.4: Printer Lights + Soft Clip
         this.printerR = snapshot.printerR ?? 0;
         this.printerG = snapshot.printerG ?? 0;
@@ -9075,9 +9694,18 @@ else:
             this.renderer.setPivot(this.pivot);
             this.renderer.setSaturation(this.saturation);
             this.renderer.setGrain(this.grain);
+            this.renderer.setGrainSize(this.grainSize);
+            this.renderer.setGrainColor(this.grainColor);
+            this.renderer.setGrainAnimate(this.grainAnimate);
             this.renderer.setDenoise(this.denoise);
+            this.renderer.setBloom(this.bloom);
+            this.renderer.setHalation(this.halation);
+            this.renderer.setDiffusion(this.diffusion);
             this.renderer.setLensDistortion(this.lensDistortion, this.lensFringe);
             this.renderer.setVignette(this.vignetteIntensity, this.vignetteFalloff);
+            this.renderer.setBokehPhysics(this.bokehHighlightBias, this.bokehSoapBubble, this.bokehOpticalVig);
+            this.renderer.setApertureShape(this.apertureBlades, this.apertureRotation, this.apertureAnamorphic);
+            if (this.renderer.setAnamorphicStreaks) this.renderer.setAnamorphicStreaks(this.anamorphicStreaks);
             this.renderer.setPrinterLights(this.printerR, this.printerG, this.printerB);
             this.renderer.setSoftClip(this.softClip);
         }
@@ -10133,21 +10761,21 @@ else:
         lbl.textContent = label;
         lbl.style.cssText = `
     color: ${this.theme.textDim};
-    font - size: 11px;
-    font - family: ${this.theme.font};
-    min - width: 50px;
-    font - weight: 500;
+    font-size: 11px;
+    font-family: ${this.theme.font};
+    min-width: 50px;
+    font-weight: 500;
     `;
 
         const value = document.createElement('div');
         value.textContent = initial.toFixed(2);
         value.style.cssText = `
-    font - family: ${this.theme.mono};
-    font - size: 11px;
+    font-family: ${this.theme.mono};
+    font-size: 11px;
     color: ${this.theme.accent};
-    min - width: 40px;
-    text - align: right;
-    font - variant - numeric: tabular - nums;
+    min-width: 40px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
     `;
 
         metaRow.appendChild(lbl);
@@ -10158,15 +10786,15 @@ else:
 
         const sliderFill = document.createElement('div');
         sliderFill.style.cssText = `
-    position: absolute; left: 0; top: 0; height: 100 %; background: #445;
-    width: 50 %; pointer - events: none; border - radius: 2px;
+    position: absolute; left: 0; top: 0; height: 100%; background: #445;
+    width: 50%; pointer-events: none; border-radius: 2px;
     `;
 
         const sliderInput = document.createElement('input');
         sliderInput.type = 'range';
         sliderInput.min = min; sliderInput.max = max; sliderInput.step = step; sliderInput.value = initial;
         sliderInput.style.cssText = `
-    position: absolute; left: 0; top: -6px; width: 100 %; height: 16px; opacity: 0; cursor: ew - resize; margin: 0;
+    position: absolute; left: 0; top: -6px; width: 100%; height: 16px; opacity: 0; cursor: ew-resize; margin: 0;
     `;
 
         const updateVisuals = (val) => {
@@ -10221,22 +10849,22 @@ else:
     position: absolute;
     bottom: 0;
     left: 0;
-    width: 100 %;
+    width: 100%;
     height: 4px;
     background: rgba(0, 0, 0, 0.5);
-    z - index: 50;
-    pointer - events: none;
+    z-index: 50;
+    pointer-events: none;
     opacity: 0;
     transition: opacity 0.3s ease;
     `;
 
         this.progressBar = document.createElement('div');
         this.progressBar.style.cssText = `
-    width: 0 %;
-    height: 100 %;
-    background: linear - gradient(90deg, ${t.accent}, #4f4);
+    width: 0%;
+    height: 100%;
+    background: linear-gradient(90deg, ${t.accent}, #4f4);
     transition: width 0.1s linear;
-    box - shadow: 0 0 10px ${t.accent};
+    box-shadow: 0 0 10px ${t.accent};
     `;
 
         this.progressText = document.createElement('div');
@@ -10244,16 +10872,16 @@ else:
     position: absolute;
     bottom: 6px;
     right: 10px;
-    font - size: 10px;
-    font - family: monospace;
+    font-size: 10px;
+    font-family: monospace;
     color: rgba(255, 255, 255, 0.8);
-    text - shadow: 0 1px 2px black;
-    pointer - events: none;
+    text-shadow: 0 1px 2px black;
+    pointer-events: none;
     opacity: 0;
     transition: opacity 0.3s ease;
     background: rgba(0, 0, 0, 0.6);
     padding: 2px 6px;
-    border - radius: 4px;
+    border-radius: 4px;
     `;
 
         this.progressContainer.appendChild(this.progressBar);
@@ -10349,11 +10977,32 @@ else:
     // ═══════════════════════════════════════════════════════════════════════════
 
     // v2.2: Async HDR buffer parser (for fetch chain in onExecuted)
+    // ── v3.5: Universal HDR/float buffer dispatcher ──────────────────────────
+    // Dispatches to the correct parser based on magic bytes or NumPy dtype.
+    // Supported: RHDR fp16, OpenEXR (HALF/FLOAT, NONE/ZIPS/ZIP), Radiance RGBE
+    // (.hdr), 16-bit/32-bit float TIFF, RF32 raw binary, legacy NumPy .npy.
     async _parseHDRBuffer(buffer) {
-        const magic = String.fromCharCode(...new Uint8Array(buffer.slice(0, 4)));
-        if (magic === 'RHDR') {
-            return await this._parseRHDR(buffer);
-        }
+        const b4 = new Uint8Array(buffer.slice(0, 4));
+        const magic4 = String.fromCharCode(...b4);
+        const magic2 = String.fromCharCode(b4[0], b4[1]);
+        const u32le  = new DataView(buffer).getUint32(0, true);
+
+        // RHDR — proprietary zlib-compressed fp16 sidecar
+        if (magic4 === 'RHDR') return await this._parseRHDR(buffer);
+
+        // OpenEXR — magic 0x762f3101 = 20000630 (LE uint32)
+        if (u32le === 20000630) return await this._parseEXR(buffer);
+
+        // RF32 — raw float32 binary with 16-byte header
+        if (magic4 === 'RF32') return this._parseRaw32(buffer);
+
+        // Radiance RGBE .hdr — starts with "#?RADIANCE" or "#?RGBE" or "#?RG"
+        if (magic4.startsWith('#?')) return this._parseRGBE(buffer);
+
+        // TIFF — 'II' (little-endian) or 'MM' (big-endian)
+        if (magic2 === 'II' || magic2 === 'MM') return this._parseTIFF(buffer);
+
+        // Legacy NumPy .npy fallback
         return this._parseNumpy(buffer);
     }
 
@@ -10378,23 +11027,44 @@ else:
     // Parse .rhdr: zlib-compressed float16 with 12-byte header
     async _parseRHDR(buffer) {
         const view = new DataView(buffer);
-        const width = view.getUint16(4, true);
-        const height = view.getUint16(6, true);
+        const width    = view.getUint16(4, true);
+        const height   = view.getUint16(6, true);
         const channels = view.getUint16(8, true);
-        // reserved = view.getUint16(10, true);
+        // v4.1: flags field (byte 10-11).
+        //   flags = 0 → fp16 payload (legacy, HALF_FLOAT upload)
+        //   flags = 1 → fp32 payload (32-bit Float mode, FLOAT upload)
+        const flags = view.getUint16(10, true);
+        const isFp32 = (flags & 1) !== 0;
 
-        // Decompress zlib payload — pass expected size from header for smart limit
-        const expectedSize = width * height * channels * 2; // 2 bytes per float16
+        const bytesPerSample = isFp32 ? 4 : 2;
+        const expectedSize = width * height * channels * bytesPerSample;
         const compressed = new Uint8Array(buffer, 12);
         const decompressed = await this._zlibInflateAsync(compressed, expectedSize);
         if (!decompressed) return null;
 
-        // v3.0 FIX: Validate decompressed size
         if (decompressed.byteLength !== expectedSize) {
-            console.error(`[Radiance] RHDR integrity failure: expected ${expectedSize} bytes, got ${decompressed.byteLength} (${width}×${height}×${channels}ch)`);
+            console.error(`[Radiance] RHDR integrity failure: expected ${expectedSize} bytes, got ${decompressed.byteLength} (${width}×${height}×${channels}ch, ${isFp32 ? 'fp32' : 'fp16'})`);
             return null;
         }
 
+        if (isFp32) {
+            // v4.1: fp32 path — direct Float32Array, no conversion needed.
+            // fp16data is null so loadHDRData uses loadFloat32Texture (full precision).
+            const fp32 = new Float32Array(
+                decompressed.buffer,
+                decompressed.byteOffset,
+                decompressed.byteLength / 4
+            );
+            console.log(`[Radiance] RHDR fp32 decoded: ${width}×${height}×${channels}ch (${(decompressed.byteLength / 1048576).toFixed(1)} MB)`);
+            return {
+                data:     fp32,   // Float32Array for CPU reads (probe, scopes)
+                fp16data: null,   // null → viewer uses loadFloat32Texture
+                shape:    [height, width, channels],
+                format:   'rhdr_f32'
+            };
+        }
+
+        // Legacy fp16 path (flags=0)
         // Raw float16 as Uint16Array (for WebGL HALF_FLOAT upload)
         const fp16Raw = new Uint16Array(decompressed.buffer, decompressed.byteOffset, decompressed.byteLength / 2);
 
@@ -10405,10 +11075,10 @@ else:
         }
 
         return {
-            data: fp32,           // Float32Array for CPU reads
-            fp16data: fp16Raw,    // Uint16Array for GPU HALF_FLOAT upload
-            shape: [height, width, channels],
-            format: 'rhdr'
+            data:     fp32,      // Float32Array for CPU reads
+            fp16data: fp16Raw,   // Uint16Array for GPU HALF_FLOAT upload
+            shape:    [height, width, channels],
+            format:   'rhdr'
         };
     }
 
@@ -10435,6 +11105,405 @@ else:
             };
         }
         return null;
+    }
+
+    // ── v3.5: OpenEXR parser ─────────────────────────────────────────────────
+    // Supports: single-part scanline, HALF or FLOAT pixels, 1–4 channels.
+    // Compression: NONE (0), ZIPS (2, 1 scanline/block), ZIP (3, 16 scanlines/block).
+    // Channels are re-ordered from EXR alphabetical (A,B,G,R) to RGBA output.
+    async _parseEXR(buffer) {
+        const bytes = new Uint8Array(buffer);
+        const view  = new DataView(buffer);
+
+        // Version flags — only single-part scanline supported
+        const flags = view.getUint32(4, true) >> 8;
+        if (flags & 0x200) { console.warn('[Radiance EXR] Tiled EXR not supported.'); return null; }
+
+        let p = 8;
+        const readNullStr = () => {
+            let e = p; while (bytes[e]) e++;
+            const s = new TextDecoder('ascii').decode(bytes.subarray(p, e));
+            p = e + 1; return s;
+        };
+
+        // ── Header ────────────────────────────────────────────────────────────
+        let compression = 0;
+        let channels    = [];
+        let dw          = { xMin: 0, yMin: 0, xMax: 0, yMax: 0 };
+
+        for (;;) {
+            const name = readNullStr(); if (!name) break;
+            const type = readNullStr();                   // attribute type string
+            const size = view.getInt32(p, true); p += 4;
+            const end  = p + size;
+
+            if (name === 'compression') {
+                compression = bytes[p];
+            } else if (name === 'dataWindow') {
+                dw = { xMin: view.getInt32(p,   true), yMin: view.getInt32(p+4,  true),
+                       xMax: view.getInt32(p+8, true), yMax: view.getInt32(p+12, true) };
+            } else if (name === 'channels') {
+                let cp = p;
+                while (cp < end) {
+                    let ce = cp; while (bytes[ce]) ce++;
+                    const chName = new TextDecoder('ascii').decode(bytes.subarray(cp, ce));
+                    if (!chName) break;
+                    cp = ce + 1;
+                    channels.push({ name: chName, pixelType: view.getInt32(cp, true),
+                                    xSampling: view.getInt32(cp+8, true),
+                                    ySampling: view.getInt32(cp+12, true) });
+                    cp += 16;
+                }
+            }
+            p = end;
+        }
+
+        if (!channels.length) { console.warn('[Radiance EXR] No channels in header.'); return null; }
+        if (compression !== 0 && compression !== 2 && compression !== 3) {
+            console.warn(`[Radiance EXR] Unsupported compression ${compression} (supported: 0/2/3).`);
+            return null;
+        }
+
+        const W = dw.xMax - dw.xMin + 1;
+        const H = dw.yMax - dw.yMin + 1;
+        const nCh           = channels.length;
+        const pixelType     = channels[0].pixelType;   // 1=HALF, 2=FLOAT (assume homogeneous)
+        const bytesPerVal   = pixelType === 2 ? 4 : 2;
+        const linesPerBlock = compression === 3 ? 16 : 1;
+        const nBlocks       = Math.ceil(H / linesPerBlock);
+
+        // ── Offset table ──────────────────────────────────────────────────────
+        const offsets = [];
+        for (let i = 0; i < nBlocks; i++) { offsets.push(view.getUint32(p, true)); p += 8; }
+
+        // ── Channel → RGBA slot ───────────────────────────────────────────────
+        // EXR stores channels in alphabetical order: A,B,G,R for RGBA; B,G,R for RGB
+        const SLOT  = { R: 0, G: 1, B: 2, A: 3 };
+        const outCh = Math.min(nCh, 4);
+        const chSlots = channels.map(ch => {
+            const k = ch.name.toUpperCase();
+            return (k in SLOT) ? SLOT[k] : (channels.indexOf(ch) < outCh ? channels.indexOf(ch) : 0);
+        });
+
+        const out = new Float32Array(W * H * outCh);
+
+        // ── Block inflate (ZIP/ZIPS) — parallel ───────────────────────────────
+        let blockDatas = null;
+        if (compression !== 0) {
+            blockDatas = await Promise.all(offsets.map(async (bOff, b) => {
+                const bSize      = view.getUint32(bOff + 4, true);
+                const linesInBlk = Math.min(linesPerBlock, H - b * linesPerBlock);
+                const uncompSize = linesInBlk * nCh * W * bytesPerVal;
+                const compData   = bytes.subarray(bOff + 8, bOff + 8 + bSize);
+
+                const inflated = await this._zlibInflateAsync(compData, uncompSize);
+                if (!inflated) return null;
+
+                // EXR un-prediction: running sum (inverse of delta encode)
+                for (let i = 1; i < inflated.length; i++)
+                    inflated[i] = (inflated[i] + inflated[i - 1]) & 0xff;
+
+                // EXR reinterleave: [firstHalf | secondHalf] → interleaved bytes
+                const half        = (uncompSize + 1) >> 1;
+                const interleaved = new Uint8Array(uncompSize);
+                let k = 0, k1 = 0, k2 = 0;
+                while (k < uncompSize) {
+                    interleaved[k++] = inflated[k1++];
+                    if (k < uncompSize) interleaved[k++] = inflated[half + k2++];
+                }
+                return interleaved;
+            }));
+        }
+
+        // ── Decode scanlines ──────────────────────────────────────────────────
+        for (let b = 0; b < nBlocks; b++) {
+            const bOff      = offsets[b];
+            const bY        = view.getInt32(bOff, true);
+            const bSize     = view.getUint32(bOff + 4, true);
+            const linesInBlk = Math.min(linesPerBlock, H - b * linesPerBlock);
+
+            let bBytes, bView;
+            if (compression === 0) {
+                bBytes = bytes.subarray(bOff + 8, bOff + 8 + bSize);
+                bView  = new DataView(bBytes.buffer, bBytes.byteOffset, bBytes.byteLength);
+            } else {
+                if (!blockDatas[b]) continue;
+                bBytes = blockDatas[b];
+                bView  = new DataView(bBytes.buffer, bBytes.byteOffset, bBytes.byteLength);
+            }
+
+            const lineStride = nCh * W * bytesPerVal;
+
+            for (let li = 0; li < linesInBlk; li++) {
+                const scanY = (bY - dw.yMin) + li;
+                if (scanY < 0 || scanY >= H) continue;
+
+                for (let ci = 0; ci < nCh; ci++) {
+                    const slot   = chSlots[ci];
+                    if (slot >= outCh) continue;
+                    const chBase = li * lineStride + ci * W * bytesPerVal;
+
+                    for (let x = 0; x < W; x++) {
+                        const vo  = chBase + x * bytesPerVal;
+                        const val = pixelType === 2
+                            ? bView.getFloat32(vo, true)
+                            : this._halfToFloat(bView.getUint16(vo, true));
+                        out[(scanY * W + x) * outCh + slot] = val;
+                    }
+                }
+            }
+        }
+
+        console.log(`[Radiance EXR] Decoded ${W}×${H}×${outCh}ch, comp=${compression}, type=${pixelType===2?'FLOAT':'HALF'}`);
+        return { data: out, shape: [H, W, outCh], format: 'exr', isLinear: true };
+    }
+
+    // ── v3.5: Radiance RGBE (.hdr) parser ────────────────────────────────────
+    // Parses both new RLE (scanline 02 02 whi wlo) and uncompressed RGBE.
+    // Output: scene-linear Float32Array, 3 channels (RGB).
+    _parseRGBE(buffer) {
+        const bytes = new Uint8Array(buffer);
+        let p = 0;
+
+        // Read header lines until blank line
+        const readLine = () => {
+            let e = p;
+            while (e < bytes.length && bytes[e] !== 0x0a) e++;
+            const line = new TextDecoder('ascii').decode(bytes.subarray(p, e));
+            p = e + 1; return line;
+        };
+
+        let width = 0, height = 0, foundFormat = false;
+        for (let i = 0; i < 200; i++) {          // cap at 200 header lines
+            const line = readLine();
+            if (!line || line === '\r') break;
+            if (line.startsWith('FORMAT=32-bit_rle_rgbe') || line.startsWith('FORMAT=32-bit_rle_xyze'))
+                foundFormat = true;
+            const m = line.match(/^-Y\s+(\d+)\s+\+X\s+(\d+)/);
+            if (m) { height = parseInt(m[1]); width = parseInt(m[2]); break; }
+        }
+        // Size line may be after the blank-line separator
+        if (!width) {
+            const sizeLine = readLine();
+            const m = sizeLine.match(/-Y\s+(\d+)\s+\+X\s+(\d+)/);
+            if (!m) return null;
+            height = parseInt(m[1]); width = parseInt(m[2]);
+        }
+        if (!width || !height) return null;
+
+        const out = new Float32Array(width * height * 3);
+
+        const decodeRGBE = (r, g, b, e, outIdx) => {
+            if (e === 0) return;
+            const scale = Math.pow(2, e - 128 - 8);
+            out[outIdx    ] = r * scale;
+            out[outIdx + 1] = g * scale;
+            out[outIdx + 2] = b * scale;
+        };
+
+        for (let y = 0; y < height; y++) {
+            if (p + 4 > bytes.length) break;
+
+            if (bytes[p] === 2 && bytes[p + 1] === 2) {
+                // ── New RLE scanline ──────────────────────────────────────────
+                const scanW = (bytes[p + 2] << 8) | bytes[p + 3];
+                if (scanW !== width) return null;
+                p += 4;
+
+                // Decode 4 channels (R, G, B, E) independently
+                const scanline = new Uint8Array(4 * width);
+                for (let ch = 0; ch < 4; ch++) {
+                    let x = 0;
+                    while (x < width) {
+                        if (p >= bytes.length) break;
+                        const code = bytes[p++];
+                        if (code > 128) {
+                            const runLen = code - 128, val = bytes[p++];
+                            for (let i = 0; i < runLen && x < width; i++, x++)
+                                scanline[ch * width + x] = val;
+                        } else {
+                            for (let i = 0; i < code && x < width; i++, x++)
+                                scanline[ch * width + x] = bytes[p++];
+                        }
+                    }
+                }
+
+                for (let x = 0; x < width; x++)
+                    decodeRGBE(scanline[x], scanline[width + x], scanline[2 * width + x],
+                               scanline[3 * width + x], (y * width + x) * 3);
+
+            } else {
+                // ── Uncompressed / old RLE ────────────────────────────────────
+                for (let x = 0; x < width; x++) {
+                    if (p + 4 > bytes.length) break;
+                    // Old RLE repeat token: R==G==B==1 means repeat E times
+                    if (bytes[p] === 1 && bytes[p + 1] === 1 && bytes[p + 2] === 1) {
+                        const count = bytes[p + 3]; p += 4;
+                        const prev  = (y * width + x - 1) * 3;
+                        const pr = out[prev], pg = out[prev + 1], pb = out[prev + 2];
+                        for (let i = 0; i < count && x < width; i++, x++) {
+                            out[(y * width + x) * 3    ] = pr;
+                            out[(y * width + x) * 3 + 1] = pg;
+                            out[(y * width + x) * 3 + 2] = pb;
+                        }
+                        x--;  // outer loop increments
+                    } else {
+                        decodeRGBE(bytes[p], bytes[p + 1], bytes[p + 2], bytes[p + 3],
+                                   (y * width + x) * 3);
+                        p += 4;
+                    }
+                }
+            }
+        }
+
+        console.log(`[Radiance RGBE] Decoded ${width}×${height} HDR`);
+        return { data: out, shape: [height, width, 3], format: 'rgbe', isLinear: true };
+    }
+
+    // ── v3.5: TIFF parser ─────────────────────────────────────────────────────
+    // Supports: uncompressed strips, little-endian and big-endian,
+    // 8-bit uint, 16-bit uint, 32-bit uint, and 32-bit float samples.
+    // Multi-sample (RGB/RGBA) interleaved or planar (PlanarConfiguration 1/2).
+    _parseTIFF(buffer) {
+        const view  = new DataView(buffer);
+        const bytes = new Uint8Array(buffer);
+        const order = view.getUint16(0);
+        const le    = (order === 0x4949);  // II = little-endian
+
+        const g8  = (o) => bytes[o];
+        const g16 = (o) => view.getUint16(o, le);
+        const g32 = (o) => view.getUint32(o, le);
+        const gF32 = (o) => view.getFloat32(o, le);
+
+        if (g16(2) !== 42) { console.warn('[Radiance TIFF] Not a valid TIFF.'); return null; }
+
+        const ifdOff  = g32(4);
+        const nEntry  = g16(ifdOff);
+        const tags    = {};
+
+        // Type byte-sizes: BYTE=1, ASCII=1, SHORT=2, LONG=4, RATIONAL=8
+        const tSz = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8];
+
+        const readVal = (type, off) => {
+            if (type === 3) return g16(off);
+            if (type === 4) return g32(off);
+            return g8(off);
+        };
+
+        for (let i = 0; i < nEntry; i++) {
+            const eOff  = ifdOff + 2 + i * 12;
+            const tag   = g16(eOff);
+            const type  = g16(eOff + 2);
+            const count = g32(eOff + 4);
+            const sz    = tSz[type] || 1;
+            const dataOff = (count * sz > 4) ? g32(eOff + 8) : (eOff + 8);
+
+            if (count === 1) {
+                tags[tag] = readVal(type, dataOff);
+            } else {
+                const arr = [];
+                for (let j = 0; j < count; j++) arr.push(readVal(type, dataOff + j * sz));
+                tags[tag] = arr;
+            }
+        }
+
+        const width   = tags[256];
+        const height  = tags[257];
+        const bps     = Array.isArray(tags[258]) ? tags[258][0] : (tags[258] || 8);
+        const comp    = tags[259] || 1;
+        const spp     = tags[277] || 3;  // SamplesPerPixel
+        const sfmt    = Array.isArray(tags[339]) ? tags[339][0] : (tags[339] || 1); // SampleFormat
+        const planar  = tags[284] || 1;  // 1=interleaved, 2=planar
+        const rps     = tags[278] || height;
+
+        if (!width || !height) return null;
+        if (comp !== 1) {
+            console.warn(`[Radiance TIFF] Compression ${comp} not supported (uncompressed only).`);
+            return null;
+        }
+
+        const stripOffsets    = Array.isArray(tags[273]) ? tags[273] : [tags[273]];
+        const stripByteCounts = Array.isArray(tags[279]) ? tags[279] : [tags[279]];
+        const bytesPerSample  = bps / 8;
+        const isFloat32TIFF   = (bps === 32 && sfmt === 3);
+        const outCh           = Math.min(spp, 4);
+        const out             = new Float32Array(width * height * outCh);
+
+        let globalRow = 0;
+        for (let s = 0; s < stripOffsets.length; s++) {
+            const sOff  = stripOffsets[s];
+            const nRows = Math.min(rps, height - globalRow);
+
+            if (planar === 1) {
+                // Interleaved: pixel = [R, G, B, (A)] contiguous
+                for (let r = 0; r < nRows; r++) {
+                    for (let x = 0; x < width; x++) {
+                        const pxOff = sOff + (r * width + x) * spp * bytesPerSample;
+                        for (let ch = 0; ch < outCh; ch++) {
+                            const cOff = pxOff + ch * bytesPerSample;
+                            let val;
+                            if      (bps === 32 && sfmt === 3) val = gF32(cOff);
+                            else if (bps === 32)               val = g32(cOff) / 4294967295.0;
+                            else if (bps === 16)               val = g16(cOff) / 65535.0;
+                            else                               val = g8(cOff)  / 255.0;
+                            out[((globalRow + r) * width + x) * outCh + ch] = val;
+                        }
+                    }
+                }
+            } else {
+                // Planar: each channel in separate strip-planes
+                // stripOffsets has spp × nStrips entries; this is a simplified pass
+                const chStripCount = Math.ceil(height / rps);
+                for (let ch = 0; ch < outCh; ch++) {
+                    const chSoff = stripOffsets[ch * chStripCount + s] || sOff;
+                    for (let r = 0; r < nRows; r++) {
+                        for (let x = 0; x < width; x++) {
+                            const cOff = chSoff + (r * width + x) * bytesPerSample;
+                            let val;
+                            if      (bps === 32 && sfmt === 3) val = gF32(cOff);
+                            else if (bps === 32)               val = g32(cOff) / 4294967295.0;
+                            else if (bps === 16)               val = g16(cOff) / 65535.0;
+                            else                               val = g8(cOff)  / 255.0;
+                            out[((globalRow + r) * width + x) * outCh + ch] = val;
+                        }
+                    }
+                }
+            }
+            globalRow += nRows;
+        }
+
+        const fmt = isFloat32TIFF ? 'tiff_f32' : (bps === 16 ? 'tiff_u16' : 'tiff_u8');
+        console.log(`[Radiance TIFF] Decoded ${width}×${height}×${outCh}ch ${bps}-bit (${fmt})`);
+        return { data: out, shape: [height, width, outCh], format: fmt,
+                 isLinear: isFloat32TIFF };
+    }
+
+    // ── v3.5: RF32 raw float32 binary parser ─────────────────────────────────
+    // Minimal binary container for passing full-precision linear float data:
+    //   Bytes 0–3  : magic 'RF32'
+    //   Bytes 4–7  : width  (uint32 LE)
+    //   Bytes 8–11 : height (uint32 LE)
+    //   Bytes 12–15: channels (uint32 LE, typically 3 or 4)
+    //   Bytes 16+  : raw IEEE 754 float32 values, interleaved RGBARGBA...
+    // The Python-side encoder is: struct.pack('<4sIII', b'RF32', W, H, C) + data.tobytes()
+    _parseRaw32(buffer) {
+        const view = new DataView(buffer);
+        const magic = String.fromCharCode(...new Uint8Array(buffer.slice(0, 4)));
+        if (magic !== 'RF32') return null;
+
+        const width    = view.getUint32(4,  true);
+        const height   = view.getUint32(8,  true);
+        const channels = view.getUint32(12, true);
+        const expected = width * height * channels * 4;
+
+        if (buffer.byteLength < 16 + expected) {
+            console.warn(`[Radiance RF32] Buffer too small: need ${16 + expected}, got ${buffer.byteLength}`);
+            return null;
+        }
+
+        const data = new Float32Array(buffer.slice(16, 16 + expected));
+        console.log(`[Radiance RF32] Decoded ${width}×${height}×${channels}ch float32`);
+        return { data, shape: [height, width, channels], format: 'rf32', isLinear: true };
     }
 
     // IEEE 754 half-float (16-bit) → single-precision float (32-bit)
@@ -11125,9 +12194,14 @@ class RadianceCurveEditor {
             } else if (norm.x > 0.005 && norm.x < 0.995) {
                 // Add new point (not at endpoints)
                 const pts = this.curves[this.activeChannel];
+                // FIX 1: Clamp Y against rangeY (not hard 1.0) so HDR points
+                // can be placed above 1.0 when HDR range mode is active.
+                const yMax = (this.activeChannel === 'HueVsHue' ||
+                              this.activeChannel === 'HueVsSat' ||
+                              this.activeChannel === 'HueVsLuma') ? 1.0 : this.rangeY;
                 const newPt = {
                     x: Math.max(0.005, Math.min(0.995, norm.x)),
-                    y: Math.max(0, Math.min(1, norm.y))
+                    y: Math.max(0, Math.min(yMax, norm.y))
                 };
                 pts.push(newPt);
                 pts.sort((a, b) => a.x - b.x);
@@ -11273,15 +12347,31 @@ class RadianceCurveEditor {
             delta[i] = (h[i] > 1e-10) ? (ys[i + 1] - ys[i]) / h[i] : 0;
         }
 
-        // Step 2: Compute initial tangents (Catmull-Rom style)
+        // Step 2: Compute initial tangents
+        // FIX 8: Two boundary modes are supported:
+        //   naturalBoundary = true  → tangent = 0 at endpoints (DaVinci Resolve / natural spline)
+        //     Produces flat entry/exit at anchor endpoints. Avoids the "pull" artefact
+        //     when the first or last segment is steep. Recommended for color grading.
+        //   naturalBoundary = false → tangent = Δ of adjacent segment (Catmull-Rom / not-a-knot)
+        //     More "elastic" feel — curve arrives with momentum. Better for animation curves.
+        // Defaults to true (natural) to match DaVinci Resolve behavior.
+        const naturalBoundary = this.naturalBoundary !== false; // default true
+
         const m = new Float64Array(n);
         if (n === 2) {
             m[0] = delta[0];
             m[1] = delta[0];
         } else {
-            // Endpoint tangents: one-sided difference
-            m[0] = delta[0];
-            m[n - 1] = delta[n - 2];
+            // Endpoint tangents
+            if (naturalBoundary) {
+                // Natural spline: zero tangent at anchor endpoints (Resolve style)
+                m[0] = 0;
+                m[n - 1] = 0;
+            } else {
+                // Catmull-Rom: one-sided difference (original behavior)
+                m[0] = delta[0];
+                m[n - 1] = delta[n - 2];
+            }
 
             // Interior tangents: weighted harmonic mean (Fritsch-Carlson)
             for (let i = 1; i < n - 1; i++) {

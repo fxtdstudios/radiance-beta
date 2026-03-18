@@ -2,6 +2,11 @@
 
 All notable changes to FXTD Radiance will be documented in this file.
 
+## [2.1.1] - 2026-03-17
+
+### Changed
+- Maintenance update to version 2.1.1.
+
 ## [2.1.0] - 2026-03-10
 
 ### Added — Radiance Viewer v2.2 (Terminal & UX Overhaul)
