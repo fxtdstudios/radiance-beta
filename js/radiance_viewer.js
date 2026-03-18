@@ -16,7 +16,7 @@
 
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { RadianceWebGLRenderer } from "./radiance_webgl.js?v=2.1.1";
+import { RadianceWebGLRenderer } from "./radiance_webgl.js?v=2.2";
 import { RadianceNeuralMonitor } from "./radiance_neural.js";
 
 

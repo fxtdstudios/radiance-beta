@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-                    RADIANCE SAMPLER PRO v2.1.0
+                    RADIANCE SAMPLER PRO v4.2.0
          Professional Flux-Optimized Sampling Engine
                    Radiance © 2024-2026
 
@@ -10,6 +10,7 @@
  - PAG (Perturbed Attention Guidance) via attention hooking (v3.0, fixed v3.2)
  - CFG++ with perpendicular scheduling for better saturation control (v3.0)
  - Multi-Model Support: Auto-detect Flux/SD3/SDXL with optimal defaults (v3.1)
+ - Video Model Support: WAN, LTX-Video, HunyuanVideo with auto-shift (v4.1)
  - Sigma Blend: Smooth phase transitions for phase-shift mode (v3.1)
  - Live Preview: TAESD/Latent2RGB preview during sampling (v3.1)
  - Sigma Report: Diagnostic string output with ETA/speed (v3.2, enhanced v3.5)
@@ -17,7 +18,7 @@
  - AYS (Align Your Steps) research-optimized sigma schedules (v3.5)
  - Guidance Rescale (Imagen-style) to prevent oversaturation (v3.5)
  - Terminal sigma correction for complete denoising (v3.6, replaces v3.5 Karras-only)
- - Workflow presets (txt2img, img2img, inpaint, high-res, turbo)
+ - Workflow presets (txt2img, img2img, inpaint, high-res, turbo, video)
  - Full step control with timing diagnostics
  - SIGMAS output for advanced chaining
  - Professional error handling and logging
@@ -30,6 +31,46 @@
      - flux_guidance = 3.5 (default, higher = more prompt adherence)
      - flux_shift = 1.0 (increase to 3.0 for high-res detail boost)
      - pag_scale = 1.5 (optional, improves prompt adherence via attention perturbation)
+
+ VERSION HISTORY:
+
+ v4.1 - Video Support & Cache Fix (March 2026)
+ - FIX: CRITICAL (BUG-34) — SigmaCache poisoned across denoise values.
+   Trimmed schedules were cached without denoise in the key. A second call
+   with different denoise got stale trimmed sigmas. Now caches UNTRIMMED
+   schedules (keyed by total_steps), trims after retrieval.
+ - FIX: CRITICAL (BUG-35) — Auto-defaults didn't apply shift for video models.
+   WAN (shift=8.0), LTX (2.37), HunyuanVideo (7.0) all got shift=1.0.
+   Now auto-applies shift/sampler from MODEL_DEFAULTS when at widget defaults.
+ - FIX: HIGH (BUG-36) — Guidance embedding only applied for Flux/Chroma.
+   Added GUIDANCE_EMBED_MODELS set: {flux, chroma, lumina2, z_image, ltxv}.
+ - FIX: HIGH (BUG-37) — Channel validation missing "hunyuan".
+ - NEW: HIGH (BUG-38) — Video workflow presets: WAN txt2vid/img2vid,
+   LTX-Video, HunyuanVideo with correct shift, steps, scheduler.
+ - FIX: MEDIUM (BUG-39) — Sigma report and latent_meta now include frame
+   count and is_video flag for video diagnostics.
+ - NEW: MEDIUM (BUG-40) — Experimental AYS anchors for WAN and LTX-Video.
+   HunyuanVideo mapped to WAN anchors.
+ - FIX: MEDIUM (BUG-41) — Perlin/Spectral noise lacked temporal coherence
+   for 5D video latents. Added _temporally_correlate() AR(1) wrapper.
+
+ v4.2 - Cinema Production Pass (March 2026)
+ - FIX: WAN/HunyuanVideo CFG defaults corrected — was 1.0 (no guidance),
+   now 6.0 matching Alibaba's reference inference code. Added guidance_type
+   field to MODEL_DEFAULTS for explicit cfg vs embedding classification.
+ - NEW: Dynamic CFG ramp for CFG-guided video models (WAN, HunyuanVideo).
+   compute_dynamic_cfg() boosts CFG ×1.2 early for structure, tapers ×0.7
+   late for clean convergence and reduced temporal artifacts.
+ - NEW: CFG_GUIDED_MODELS constant separates CFG-guided models from
+   embedding-guided (GUIDANCE_EMBED_MODELS). Sampling loop now correctly
+   routes to either dynamic guidance or dynamic CFG based on model type.
+ - NEW: Per-frame noise seeding for all 5D video noise generators.
+   Each frame uses seed+frame_idx — extending a video preserves existing
+   frame noise for reproducible keyframe locking.
+ - FIX: Phase-Shift mode auto-disabled for VIDEO_MODEL_TYPES with warning.
+   Sampler switching mid-schedule causes temporal discontinuities ("pop").
+ - FIX: DPM solver incompatibility warning expanded to all flow-matching
+   models including video (WAN, HunyuanVideo).
 
  VERSION HISTORY:
 
@@ -149,6 +190,18 @@ PAG_LAYER_NAMES = ["middle_block"]  # Attention layers to perturb
 # CFG++ configuration
 CFG_PLUS_PLUS_DEFAULT_SCALE = 1.6  # Recommended CFG++ scale
 
+# v4.2: Models that use traditional CFG for guidance (not embedding).
+# These need CFG > 1.0 for any guidance effect. Dynamic CFG ramp applies here.
+CFG_GUIDANCE_MODELS = {"wan", "hunyuan_video"}
+
+# v4.2: Dynamic CFG ramp parameters for video models.
+# Video models benefit from higher CFG early (structure) tapering to lower CFG
+# late (clean convergence, reduces temporal artifacts in final frames).
+DYNAMIC_CFG_EARLY_MULTIPLIER = 1.2   # Early: boost CFG 20% for strong structure
+DYNAMIC_CFG_LATE_MULTIPLIER = 0.7    # Late: reduce CFG 30% for clean convergence
+DYNAMIC_CFG_EARLY_THRESHOLD = 0.15   # First 15% boosted
+DYNAMIC_CFG_LATE_THRESHOLD = 0.85    # Last 15% reduced
+
 # v3.1: Model type detection and defaults
 # v3.3: Extended with video and modern model types (S-BUG-10)
 MODEL_TYPES = [
@@ -169,6 +222,17 @@ MODEL_TYPES = [
 # v4.1: Video models requiring 5D latent (batch, channels, frames, height, width).
 # Used for early validation — prevents cryptic errors deep inside model forward pass.
 VIDEO_MODEL_TYPES = {"wan", "ltxv", "hunyuan_video", "cosmos"}
+
+# v4.1 FIX (BUG-36): Models that use guidance embedding in conditioning dict.
+# These are flow-matching models where guidance is injected as an embedding
+# into the conditioning, NOT via traditional CFG scaling. Must be kept in sync
+# with new flow-matching model additions.
+GUIDANCE_EMBED_MODELS = {"flux", "chroma", "lumina2", "z_image", "ltxv"}
+
+# v4.2: Models that use traditional CFG as primary guidance mechanism.
+# These need CFG > 1.0 for quality output. Dynamic CFG ramp applies to these.
+# WAN and HunyuanVideo look like flow-matching but use CFG, not embedding.
+CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd35"}
 
 # v3.3: Extended model defaults with sampler, shift, and denoise range
 MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
@@ -213,13 +277,16 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "denoise_range": (0.3, 1.0),
     },
     # v3.3: Video & modern models (S-BUG-10)
+    # v4.2 FIX: WAN and HunyuanVideo use CFG-based guidance, NOT embedding.
+    # cfg=1.0 was a silent quality killer — Alibaba's reference is cfg=5.0-7.0.
     "wan": {
-        "cfg": 1.0,
+        "cfg": 6.0,
         "scheduler": "simple",
         "guidance": 0.0,
         "shift": 8.0,
         "sampler": "euler",
         "denoise_range": (0.3, 1.0),
+        "guidance_type": "cfg",  # v4.2: WAN uses CFG, not guidance embedding
     },
     "ltxv": {
         "cfg": 1.0,
@@ -228,14 +295,16 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "shift": 2.37,
         "sampler": "euler",
         "denoise_range": (0.3, 1.0),
+        "guidance_type": "embedding",
     },
     "hunyuan_video": {
-        "cfg": 1.0,
+        "cfg": 6.0,
         "scheduler": "simple",
         "guidance": 0.0,
         "shift": 7.0,
         "sampler": "euler",
         "denoise_range": (0.3, 1.0),
+        "guidance_type": "cfg",  # v4.2: HunyuanVideo uses CFG, not guidance embedding
     },
     "lumina2": {
         "cfg": 1.0,
@@ -330,8 +399,15 @@ class SigmaCache:
         self._cache: Dict[tuple, torch.Tensor] = {}
 
     @staticmethod
-    def _make_key(model, scheduler: str) -> tuple:
-        """Build a GC-safe cache key from model sampling config."""
+    def _make_key(model, scheduler: str, total_steps: int) -> tuple:
+        """Build a GC-safe cache key from model sampling config.
+
+        v4.1 FIX (BUG-34): Added total_steps to key. Previously, denoise
+        trimming was applied before caching, but denoise was NOT in the key.
+        A second call with different denoise got the stale trimmed schedule.
+        Now we cache untrimmed schedules (keyed by total_steps) and trim
+        after retrieval — so all denoise values share one cache entry.
+        """
         try:
             ms = model.get_model_object("model_sampling")
             sigma_max = ms.sigma_max.item() if hasattr(ms, "sigma_max") else 0.0
@@ -344,18 +420,18 @@ class SigmaCache:
             except (AttributeError, RuntimeError):
                 pass
 
-            return (config_name, round(sigma_max, 6), round(sigma_min, 6), scheduler)
+            return (config_name, round(sigma_max, 6), round(sigma_min, 6), scheduler, total_steps)
         except (AttributeError, RuntimeError):
             # Absolute fallback — unique per call (no caching)
             logger.debug("SigmaCache: failed to build config key, cache disabled for this model")
-            return (id(model), scheduler, time.time())
+            return (id(model), scheduler, total_steps, time.time())
 
-    def get(self, model, scheduler: str) -> Optional[torch.Tensor]:
+    def get(self, model, scheduler: str, total_steps: int) -> Optional[torch.Tensor]:
         """Retrieve cached sigmas, or None on miss."""
-        key = self._make_key(model, scheduler)
+        key = self._make_key(model, scheduler, total_steps)
         return self._cache.get(key)
 
-    def put(self, model, scheduler: str, sigmas: torch.Tensor) -> None:
+    def put(self, model, scheduler: str, total_steps: int, sigmas: torch.Tensor) -> None:
         """Store sigmas in cache, evicting oldest if full."""
         if len(self._cache) >= self.MAX_ENTRIES:
             # Evict oldest entry (first inserted)
@@ -363,7 +439,7 @@ class SigmaCache:
             del self._cache[oldest]
             logger.debug(f"SigmaCache: evicted oldest entry, {len(self._cache)} remaining")
 
-        key = self._make_key(model, scheduler)
+        key = self._make_key(model, scheduler, total_steps)
         self._cache[key] = sigmas
 
     def clear(self) -> None:
@@ -783,6 +859,53 @@ def compute_dynamic_guidance(
         return g_high * DYNAMIC_GUIDANCE_LATE_MULTIPLIER
 
 
+def compute_dynamic_cfg(
+    base_cfg: float,
+    step: int,
+    total_steps: int,
+    denoise: float,
+) -> float:
+    """
+    v4.2: Compute dynamic CFG value for video models (WAN, HunyuanVideo).
+
+    These models use traditional CFG-based guidance (not embedding), so the
+    guidance ramp operates on the CFG scale directly. The curve:
+      1. Early (0-15%): Boosted CFG (×1.2) for strong structural composition
+      2. Middle (15-85%): Full CFG for detail and prompt adherence
+      3. Late (85-100%): Reduced CFG (×0.7) for clean convergence and
+         reduced temporal artifacts in the final frames
+
+    Uses cosine interpolation for smooth transitions (same approach as
+    compute_dynamic_guidance but operating on CFG instead of guidance embedding).
+    """
+    # Progress relative to effective denoising range
+    denoising_steps = max(1, int(total_steps * denoise) if denoise < 1.0 else total_steps)
+    denoising_start = total_steps - denoising_steps
+    progress = max(0.0, min(1.0, (step - denoising_start) / denoising_steps))
+
+    RAMP = DYNAMIC_GUIDANCE_RAMP_WIDTH  # Reuse 5% ramp from guidance
+    EARLY_T = DYNAMIC_CFG_EARLY_THRESHOLD
+    LATE_T = DYNAMIC_CFG_LATE_THRESHOLD
+
+    cfg_early = base_cfg * DYNAMIC_CFG_EARLY_MULTIPLIER
+    cfg_late = base_cfg * DYNAMIC_CFG_LATE_MULTIPLIER
+
+    if progress < EARLY_T - RAMP:
+        return cfg_early
+    elif progress < EARLY_T + RAMP:
+        t = (progress - (EARLY_T - RAMP)) / (2 * RAMP)
+        blend = 0.5 * (1.0 - math.cos(math.pi * t))
+        return cfg_early + (base_cfg - cfg_early) * blend
+    elif progress < LATE_T - RAMP:
+        return base_cfg
+    elif progress < LATE_T + RAMP:
+        t = (progress - (LATE_T - RAMP)) / (2 * RAMP)
+        blend = 0.5 * (1.0 - math.cos(math.pi * t))
+        return base_cfg + (cfg_late - base_cfg) * blend
+    else:
+        return cfg_late
+
+
 def compute_base_sigmas(
     model,
     scheduler_name: str,
@@ -798,12 +921,17 @@ def compute_base_sigmas(
     v3.7: Extracted from closure inside sample(). All dependencies are
     now explicit parameters instead of implicit captures from enclosing scope.
 
+    v4.1 FIX (BUG-34): Cache stores the UNTRIMMED schedule (steps+1 elements).
+    Denoise trimming is applied AFTER cache retrieval. Previously, trimmed
+    schedules were cached without denoise in the key, so a second call with
+    a different denoise value got the wrong (stale trimmed) schedule.
+
     Handles:
       - Cache lookup/store via SigmaCache
       - Flux shift for non-primary schedulers (Phase-Shift SGM mode)
       - Terminal sigma correction (BUG-28/29/32)
       - Schedule length validation
-      - Denoise trimming
+      - Denoise trimming (post-cache)
 
     Args:
         model: ComfyUI model wrapper
@@ -817,37 +945,40 @@ def compute_base_sigmas(
     Returns:
         Sigma schedule tensor (may be trimmed for denoise < 1.0)
     """
-    # Check cache first
-    cached = cache.get(model, scheduler_name)
+    # Check cache first — cache stores UNTRIMMED schedules
+    cached = cache.get(model, scheduler_name, total_steps)
     if cached is not None:
-        return cached
+        bs = cached
+    else:
+        # Compute fresh sigmas
+        ms = model.get_model_object("model_sampling")
+        bs = comfy.samplers.calculate_sigmas(ms, scheduler_name, total_steps)
 
-    # Compute fresh sigmas
-    ms = model.get_model_object("model_sampling")
-    bs = comfy.samplers.calculate_sigmas(ms, scheduler_name, total_steps)
+        # v3.3 (S-BUG-7): Shift already applied in get_flux_sigmas() for primary.
+        # Only apply for non-primary schedulers (e.g., Phase-Shift SGM).
+        if flux_shift != 1.0 and scheduler_name != primary_scheduler:
+            bs = flux_shift_sigmas(bs, flux_shift)
 
-    # v3.3 (S-BUG-7): Shift already applied in get_flux_sigmas() for primary.
-    # Only apply for non-primary schedulers (e.g., Phase-Shift SGM).
-    if flux_shift != 1.0 and scheduler_name != primary_scheduler:
-        bs = flux_shift_sigmas(bs, flux_shift)
+        # v3.6 FIX (BUG-28/29/32): Universal terminal sigma correction
+        bs = correct_sigma_end(bs)
 
-    # v3.6 FIX (BUG-28/29/32): Universal terminal sigma correction
-    bs = correct_sigma_end(bs)
+        # v3.6: Validate schedule length (the invariant BUG-28 violated)
+        assert len(bs) == total_steps + 1, (
+            f"compute_base_sigmas: schedule length {len(bs)} != steps+1 "
+            f"({total_steps + 1}) for scheduler '{scheduler_name}'. "
+            f"A sigma correction may have appended instead of replacing."
+        )
 
-    # v3.6: Validate schedule length (the invariant BUG-28 violated)
-    assert len(bs) == total_steps + 1, (
-        f"compute_base_sigmas: schedule length {len(bs)} != steps+1 "
-        f"({total_steps + 1}) for scheduler '{scheduler_name}'. "
-        f"A sigma correction may have appended instead of replacing."
-    )
+        # Cache the UNTRIMMED schedule
+        cache.put(model, scheduler_name, total_steps, bs)
 
-    # Trim for denoise < 1.0
+    # v4.1 FIX (BUG-34): Trim AFTER cache retrieval — each denoise value
+    # trims independently from the same cached untrimmed schedule.
     if denoise < 1.0:
         n = len(bs) - 1
         if n > 0:
             bs = bs[max(0, int(n * (1.0 - denoise))):]
 
-    cache.put(model, scheduler_name, bs)
     return bs
 
 
@@ -868,6 +999,11 @@ WORKFLOW_PRESETS = [
     "→ Flux Schnell (4 steps)",
     "→ SD3.5 Turbo (4 steps)",
     "→ Flux Ultra Fast (8 steps)",
+    # v4.1: Video model presets (BUG-38)
+    "▶ WAN txt2vid (30 steps)",
+    "▶ WAN img2vid (20 steps)",
+    "▶ LTX-Video (25 steps)",
+    "▶ HunyuanVideo (30 steps)",
     # v4.0: Universal quality tiers (any arch)
     "◈ Draft (4-step / AYS)",
     "◈ Fast (8-step / AYS)",
@@ -967,6 +1103,44 @@ PRESET_CONFIGS: Dict[str, Dict[str, Any]] = {
         "denoise": 1.0,
         "flux_shift": 1.0,
         "flux_guidance": 2.0,
+    },
+    # v4.1: Video model presets (BUG-38)
+    # v4.2 FIX: WAN/HunyuanVideo use CFG-based guidance — cfg must be > 1.0
+    "▶ WAN txt2vid (30 steps)": {
+        "steps": 30,
+        "cfg": 6.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 8.0,
+        "flux_guidance": 0.0,
+    },
+    "▶ WAN img2vid (20 steps)": {
+        "steps": 20,
+        "cfg": 6.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 0.75,
+        "flux_shift": 8.0,
+        "flux_guidance": 0.0,
+    },
+    "▶ LTX-Video (25 steps)": {
+        "steps": 25,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 2.37,
+        "flux_guidance": 0.0,
+    },
+    "▶ HunyuanVideo (30 steps)": {
+        "steps": 30,
+        "cfg": 6.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 7.0,
+        "flux_guidance": 0.0,
     },
     # v4.0: Universal quality-tier presets (architecture-agnostic)
     "◈ Draft (4-step / AYS)": {
@@ -1241,6 +1415,13 @@ AYS_ANCHORS = {
     # with smoother tail for clean convergence. (Experimental — not from paper.)
     "flux": [1.0, 0.90, 0.70, 0.45, 0.22, 0.08, 0.02, 0.0],
     "sd3": [14.615, 6.291, 3.438, 1.566, 0.741, 0.288, 0.079, 0.0],
+    # v4.1 FIX (BUG-40): Experimental video model anchors.
+    # WAN uses high shift (8.0) — sigma distribution is compressed with
+    # heavy early denoising. Anchors tuned for temporal coherence:
+    # slower early ramp preserves inter-frame consistency.
+    "wan": [1.0, 0.92, 0.78, 0.58, 0.35, 0.15, 0.04, 0.0],
+    # LTX-Video uses moderate shift (2.37) — closer to Flux distribution.
+    "ltxv": [1.0, 0.88, 0.68, 0.42, 0.20, 0.07, 0.015, 0.0],
 }
 
 
@@ -1261,11 +1442,15 @@ def get_ays_sigmas(model_type: str, steps: int) -> Optional[torch.Tensor]:
             key = "sd3"
         elif model_type in ("chroma",):
             key = "flux"
+        elif model_type in ("hunyuan_video",):
+            key = "wan"  # Similar flow-matching + high shift
+        elif model_type in ("lumina2", "z_image"):
+            key = "flux"  # Flow-matching family
         else:
             return None
 
     # v3.6: Warn about experimental (non-paper) anchor sets
-    if key in ("flux",):
+    if key in ("flux", "wan", "ltxv"):
         logger.info(
             f"AYS for {model_type}: using experimental anchors (not from original paper)"
         )
@@ -1457,14 +1642,18 @@ def build_sigma_report(
     stage_timings: List[Tuple[int, int, int, str, float]],
     total_time: float,
     ays_active: bool = False,
+    frames: Optional[int] = None,
 ) -> str:
     """
     Build a human-readable sigma schedule report for diagnostics.
     v3.5: Added ETA, speed (it/s), and AYS indicator.
+    v4.1 FIX (BUG-39): Added frames count for video diagnostics.
     """
+    # v4.1: Show video info in header when applicable
+    video_tag = f" | Frames: {frames}" if frames is not None and frames > 1 else ""
     lines = [
-        f"═══ Radiance Sampler Pro v3.7 ═══",
-        f"Model: {detected_type} | Steps: {steps} | Scheduler: {scheduler}{'  [AYS]' if ays_active else ''}",
+        f"═══ Radiance Sampler Pro v4.2 ═══",
+        f"Model: {detected_type} | Steps: {steps} | Scheduler: {scheduler}{'  [AYS]' if ays_active else ''}{video_tag}",
         f"Shift: {flux_shift} | Denoise: {denoise} | Mode: {sampler_mode}",
     ]
 
@@ -1505,12 +1694,70 @@ def build_sigma_report(
 
 # --- Feature 3: Noise Generation -------------------------------------------
 
-def _perlin_noise(shape: tuple, device: torch.device) -> torch.Tensor:
+def _temporally_correlate(
+    noise_fn, shape: tuple, device: torch.device, alpha: float = 0.6,
+    seed: Optional[int] = None,
+) -> torch.Tensor:
+    """
+    v4.1 FIX (BUG-41): Generate temporally-correlated noise for 5D video latents.
+
+    For video (B, C, T, H, W), generates per-frame noise using `noise_fn`
+    then blends adjacent frames with an AR(1) process for temporal coherence.
+    Without this, each frame gets independent noise → temporal flickering.
+
+    v4.2: Per-frame seeding when seed is provided. Each frame's base noise
+    is seeded with seed+frame_idx BEFORE generating, so frame 0's noise is
+    deterministic regardless of total frame count. The temporal correlation
+    (alpha blending with previous frame) still provides coherence while
+    each frame's "innovation" noise is independently reproducible.
+
+    Args:
+        noise_fn: Callable(shape, device) → Tensor. Generates single-frame noise.
+        shape: Full 5D shape (B, C, T, H, W)
+        device: Target device
+        alpha: Temporal correlation (0=independent, 1=identical). 0.6 is a good
+               balance between coherence and per-frame variation.
+        seed: Optional base seed. If provided, frame f uses seed+f.
+    """
+    B, C, T, H, W = shape
+    frame_shape = (B, C, H, W)
+
+    frames = []
+    if seed is not None:
+        torch.manual_seed(seed)
+    prev = noise_fn(frame_shape, device)
+    for f in range(T):
+        if seed is not None:
+            torch.manual_seed(seed + f + 1)  # +1 because prev consumed seed+0
+        curr = noise_fn(frame_shape, device)
+        blended = alpha * prev + math.sqrt(1 - alpha ** 2) * curr
+        frames.append(blended)
+        prev = blended
+
+    result = torch.stack(frames, dim=2)  # → (B, C, T, H, W)
+    # Re-normalize to unit std
+    result = result - result.mean()
+    std = result.std().clamp(min=1e-6)
+    return result / std
+
+
+def _perlin_noise(shape: tuple, device: torch.device, seed: Optional[int] = None) -> torch.Tensor:
     """Octave-based coherent noise. Provides structured texture character.
 
     v4.1: Rewritten to properly handle 5D video latents.
     Uses unfold-based smoothing instead of fragile avg_pool2d view chain.
+    v4.1 FIX (BUG-41): 5D video latents use temporal correlation wrapper.
+    v4.2: Per-frame seeding for reproducible video noise.
     """
+    # v4.1 FIX (BUG-41): Temporally-correlated noise for video
+    if len(shape) == 5 and shape[2] > 1:
+        return _temporally_correlate(_perlin_noise_2d, shape, device, seed=seed)
+
+    return _perlin_noise_2d(shape, device)
+
+
+def _perlin_noise_2d(shape: tuple, device: torch.device) -> torch.Tensor:
+    """Core Perlin noise generator for 2D/4D shapes."""
     noise = torch.zeros(shape, device=device)
     amplitude = 1.0
     frequency = 1.0
@@ -1547,12 +1794,21 @@ def _perlin_noise(shape: tuple, device: torch.device) -> torch.Tensor:
     return noise / std
 
 
-def _spectral_noise(shape: tuple, device: torch.device) -> torch.Tensor:
+def _spectral_noise(shape: tuple, device: torch.device, seed: Optional[int] = None) -> torch.Tensor:
     """Frequency-weighted noise (pink noise approximation).
 
-    v4.1: Fixed weight tensor broadcasting for 5D video latents.
-    Previous code used expand_as which requires matching ndim.
+    v4.1 FIX (BUG-41): 5D video latents use temporal correlation wrapper.
+    v4.2: Per-frame seeding for reproducible video noise.
     """
+    # v4.1 FIX (BUG-41): Temporally-correlated noise for video
+    if len(shape) == 5 and shape[2] > 1:
+        return _temporally_correlate(_spectral_noise_2d, shape, device, seed=seed)
+
+    return _spectral_noise_2d(shape, device)
+
+
+def _spectral_noise_2d(shape: tuple, device: torch.device) -> torch.Tensor:
+    """Core spectral (pink) noise generator for 2D/4D shapes."""
     white = torch.randn(shape, device=device)
     fft = torch.fft.rfft2(white)
     # Build 1/f frequency weight. Note: rfft2 only halves the LAST dimension.
@@ -1567,7 +1823,7 @@ def _spectral_noise(shape: tuple, device: torch.device) -> torch.Tensor:
     weight[0, 0] = 0.0
 
     # Reshape weight to broadcast against fft: add leading 1-dims to match ndim
-    # e.g., for 5D fft (B, C, T, H, W'), weight becomes (1, 1, 1, H, W')
+    # e.g., for 4D fft (B, C, H, W'), weight becomes (1, 1, H, W')
     for _ in range(fft.ndim - 2):
         weight = weight.unsqueeze(0)
 
@@ -1581,13 +1837,18 @@ def _spectral_noise(shape: tuple, device: torch.device) -> torch.Tensor:
 
 
 def _brownian_noise(
-    shape: tuple, device: torch.device, frames: Optional[int] = None
+    shape: tuple, device: torch.device, frames: Optional[int] = None,
+    seed: Optional[int] = None,
 ) -> torch.Tensor:
     """Temporally-correlated noise for video models (Brownian bridge).
 
     v4.1: Fixed for 5D video latents. Previous version correlated across
     batch dimension (shape[0]) instead of temporal dimension (shape[2]).
     Now correctly builds correlated walk along the frames axis.
+
+    v4.2: Per-frame seeding when seed is provided. The initial frame uses
+    seed, and each subsequent innovation noise uses seed+f. Since the AR(1)
+    chain carries forward, frames 0-19 remain identical if you extend to 40.
     """
     # For 5D video latents: shape = (B, C, T, H, W)
     if len(shape) == 5 and shape[2] > 1:
@@ -1596,8 +1857,12 @@ def _brownian_noise(
         # Build per-frame correlated walk
         frame_shape = (B, C, H, W)
         noises = []
+        if seed is not None:
+            torch.manual_seed(seed)
         prev = torch.randn(frame_shape, device=device)
-        for _ in range(T):
+        for f in range(T):
+            if seed is not None:
+                torch.manual_seed(seed + f + 1)
             curr = alpha * prev + math.sqrt(1 - alpha ** 2) * torch.randn(frame_shape, device=device)
             noises.append(curr)
             prev = curr
@@ -1629,12 +1894,35 @@ def generate_noise(
     v4.0: Generate noise matching `latent_samples` shape in the requested style.
     Falls back to Gaussian if the requested generator fails.
 
+    v4.2: Per-frame seeding for 5D video latents. Each frame uses seed+frame_idx
+    so frame 0's noise is deterministic regardless of total frame count. This
+    enables reproducible keyframe locking — you can extend a video and the
+    existing frames keep identical noise.
+
     noise_type options: Gaussian, Perlin, Uniform, Spectral, Brownian
     """
-    torch.manual_seed(seed)
     shape = latent_samples.shape
     device = latent_samples.device
     dtype = latent_samples.dtype
+
+    # v4.2: Per-frame seeding for 5D video latents (Gaussian/Uniform)
+    is_video = len(shape) == 5 and shape[2] > 1
+    if is_video and noise_type in ("Gaussian", "Uniform"):
+        B, C, T, H, W = shape
+        frame_shape = (B, C, H, W)
+        frame_noises = []
+        for f in range(T):
+            torch.manual_seed(seed + f)
+            if noise_type == "Gaussian":
+                frame_noises.append(torch.randn(frame_shape, device=device, dtype=dtype))
+            else:  # Uniform
+                frame_noises.append(
+                    (torch.rand(frame_shape, device=device, dtype=dtype) * 2 - 1) * (3 ** 0.5)
+                )
+        return torch.stack(frame_noises, dim=2)  # → (B, C, T, H, W)
+
+    # Non-video or noise types with their own temporal handling
+    torch.manual_seed(seed)
 
     try:
         if noise_type == "Gaussian":
@@ -1643,11 +1931,11 @@ def generate_noise(
             # Uniform scaled to same RMS as Gaussian (σ=1 → uniform [-√3, √3])
             return (torch.rand(shape, device=device, dtype=dtype) * 2 - 1) * (3 ** 0.5)
         elif noise_type == "Perlin":
-            return _perlin_noise(shape, device).to(dtype)
+            return _perlin_noise(shape, device, seed=seed).to(dtype)
         elif noise_type == "Spectral":
-            return _spectral_noise(shape, device).to(dtype)
+            return _spectral_noise(shape, device, seed=seed).to(dtype)
         elif noise_type == "Brownian":
-            return _brownian_noise(shape, device, frames=frames).to(dtype)
+            return _brownian_noise(shape, device, frames=frames, seed=seed).to(dtype)
     except Exception as e:
         logger.warning(f"[Noise] Failed to generate {noise_type} noise ({e}), falling back to Gaussian")
 
@@ -1881,14 +2169,20 @@ def _build_latent_meta(
     seed: int,
     total_time_ms: int,
     latent_format: str = "",
+    frames: Optional[int] = None,
 ) -> str:
-    """Build a JSON telemetry string for downstream nodes to consume."""
+    """Build a JSON telemetry string for downstream nodes to consume.
+    v4.1 FIX (BUG-39): Added frames, is_video fields for video diagnostics.
+    """
     import json
     sigma_min = float(sigmas[sigmas > 0].min()) if (sigmas > 0).any() else 0.0
     sigma_max = float(sigmas.max())
+    is_video = frames is not None and frames > 1
     meta = {
-        "version": "4.0",
+        "version": "4.2",
         "detected_arch": detected_type,
+        "is_video": is_video,
+        "frames": frames if is_video else None,
         "steps": steps,
         "scheduler": scheduler,
         "flux_shift": flux_shift,
@@ -2115,7 +2409,11 @@ class RadianceSamplerPro:
     FUNCTION = "sample"
     CATEGORY = "FXTD Studios/Radiance/Generate"
     DESCRIPTION = (
-        "v4.0 — Universal sampler. External sigma override, 5 noise types, "
+        "v4.2 — Cinema-grade universal sampler. "
+        "WAN/LTX/HunyuanVideo with auto-shift + dynamic CFG ramp, "
+        "per-frame seeding for reproducible video, 5D latent handling, "
+        "temporally-correlated noise, Phase-Shift safety gate for video, "
+        "external sigma override, 5 noise types, "
         "tiled high-res sampling, multi-conditioning merge, CLIP encoder routing, "
         "quality-tier presets, latent_meta JSON output, "
         "plus all v3.x features: Flux Shift, dynamic guidance, PAG, CFG++, AYS, guidance rescale."
@@ -2210,12 +2508,31 @@ class RadianceSamplerPro:
             if flux_guidance == 3.5 and detected_type != "flux":
                 flux_guidance = defaults.get("guidance", flux_guidance)
 
-            # v3.3 FIX (S-BUG-3): Do NOT override scheduler/sampler.
-            # The user's explicit widget choices should be respected.
-            # Only cfg and guidance are overridden when at default values.
+            # v4.1 FIX (BUG-35): Auto-apply shift for video/modern models.
+            # Without correct shift, sigma schedules are completely wrong.
+            # Only override when user hasn't touched the widget (still at 1.0)
+            # and the model's optimal shift differs.
+            default_shift = defaults.get("shift", 1.0)
+            if flux_shift == 1.0 and default_shift != 1.0:
+                flux_shift = default_shift
+                logger.info(
+                    f"Auto-applied shift={flux_shift} for {detected_type} "
+                    f"(widget was at default 1.0)"
+                )
+
+            # v4.1 FIX (BUG-35): Auto-apply optimal sampler for video models
+            # when the user hasn't changed from the ComfyUI default (euler).
+            # Video models like WAN need euler; SDXL/SD15 need dpmpp_2m.
+            default_sampler = defaults.get("sampler", sampler)
+            if sampler == "euler" and default_sampler != "euler":
+                sampler = default_sampler
+                logger.info(
+                    f"Auto-applied sampler={sampler} for {detected_type}"
+                )
 
             logger.info(
-                f"Auto-detected model type: {detected_type} (CFG={cfg}, guidance={flux_guidance}, scheduler={scheduler})"
+                f"Auto-detected model type: {detected_type} (CFG={cfg}, guidance={flux_guidance}, "
+                f"shift={flux_shift}, scheduler={scheduler})"
             )
         else:
             logger.info(f"Model type: {detected_type}")
@@ -2277,7 +2594,7 @@ class RadianceSamplerPro:
         if latent_format:
             # Infer expected channels from format string (SD=4, Flux=16, SD3=16, etc.)
             fmt_lower = latent_format.lower()
-            expected_ch = 16 if any(k in fmt_lower for k in ("flux", "sd3", "16ch", "wan", "ltx")) else 4
+            expected_ch = 16 if any(k in fmt_lower for k in ("flux", "sd3", "16ch", "wan", "ltx", "hunyuan")) else 4
             if channels != expected_ch:
                 logger.warning(
                     f"[v4.0] Latent has {channels} channels but latent_format='{latent_format}' "
@@ -2399,6 +2716,7 @@ class RadianceSamplerPro:
                 [],
                 [],
                 0.0,
+                frames=frames,
             )
             return (latent_image.copy(), sigmas, report, "{}")
 
@@ -2501,6 +2819,16 @@ class RadianceSamplerPro:
             logger.info(f"Guidance Rescale applied (phi={phi:.2f})")
 
         # v3.2: Phase-Shift setup using SamplerMode constants
+        # v4.2: Disable Phase-Shift for video models — sampler switching mid-schedule
+        # causes temporal discontinuities visible as a "pop" at the transition frame.
+        if SamplerMode.is_phase_shift(sampler_mode) and detected_type in VIDEO_MODEL_TYPES:
+            logger.warning(
+                f"[v4.2] Phase-Shift mode is not supported for video model '{detected_type}' — "
+                f"sampler switching mid-schedule causes temporal discontinuities. "
+                f"Falling back to Standard mode."
+            )
+            sampler_mode = SamplerMode.STANDARD
+
         if SamplerMode.is_phase_shift(sampler_mode):
             # v3.4 FIX (BUG-18): Auto-enable sigma blending for phase-shift.
             # Without blending, the sigma schedule has a hard discontinuity
@@ -2514,11 +2842,14 @@ class RadianceSamplerPro:
                 secondary_sampler = "dpmpp_2m"
                 secondary_scheduler = None  # Keep same scheduler
                 
-                # BUG-FIX: Warn about DPM solvers on Flux
-                if detected_type in ("flux", "chroma"):
+                # BUG-FIX: Warn about DPM solvers on flow-matching models
+                # v4.1: Expanded from (flux, chroma) to include video flow-matching models
+                flow_match_types = GUIDANCE_EMBED_MODELS | {"wan", "hunyuan_video"}
+                if detected_type in flow_match_types:
                     logger.warning(
-                        f"WARNING: DPM solvers are generally incompatible with Flux's Flow Matching "
-                        f"and may produce severe noise/grain. Recommended to use Euler or Phase-Shift SGM."
+                        f"WARNING: DPM solvers are generally incompatible with {detected_type}'s "
+                        f"Flow Matching and may produce severe noise/grain. "
+                        f"Recommended to use Euler or Phase-Shift SGM."
                     )
             elif sampler_mode == SamplerMode.PHASE_SHIFT_SGM:
                 # v3.2 FIX: SGM mode swaps the SCHEDULER, not the sampler.
@@ -2559,12 +2890,15 @@ class RadianceSamplerPro:
         # through. Splits must land within the active range or guidance timing
         # is completely wrong (e.g., "creative start" phase gets skipped entirely).
         #
-        # v3.5 FIX (BUG-23): Only create dynamic guidance splits for Flux models.
-        # Non-Flux models ignore guidance anyway — the extra stages just add overhead.
-        is_dynamic = "Dynamic" in flux_guidance_profile and detected_type in (
-            "flux",
-            "chroma",
-        )
+        # v3.5 FIX (BUG-23): Only create dynamic guidance splits for models
+        # that use guidance embedding. Others ignore it — extra stages just add overhead.
+        # v4.1 FIX (BUG-36): Expanded from (flux, chroma) to GUIDANCE_EMBED_MODELS.
+        is_dynamic = "Dynamic" in flux_guidance_profile and detected_type in GUIDANCE_EMBED_MODELS
+
+        # v4.2: Dynamic CFG for CFG-guided models (WAN, HunyuanVideo, etc.)
+        # When the user selects "Dynamic" profile and the model uses CFG (not
+        # embedding), apply compute_dynamic_cfg() to ramp CFG over the schedule.
+        is_dynamic_cfg = "Dynamic" in flux_guidance_profile and detected_type in CFG_GUIDED_MODELS
 
         if is_dynamic:
             # Calculate effective denoising range for correct threshold mapping
@@ -2588,6 +2922,25 @@ class RadianceSamplerPro:
             logger.info(
                 f"Dynamic Guidance Active (effective range: steps {denoising_start}-{total_steps}, "
                 f"early={idx_20}, late={idx_90})"
+            )
+
+        elif is_dynamic_cfg:
+            # Split points for CFG ramp — different thresholds than guidance
+            denoising_steps = (
+                int(total_steps * denoise) if denoise < 1.0 else total_steps
+            )
+            denoising_start = total_steps - denoising_steps
+
+            idx_15 = denoising_start + int(denoising_steps * DYNAMIC_CFG_EARLY_THRESHOLD)
+            idx_85 = denoising_start + int(denoising_steps * DYNAMIC_CFG_LATE_THRESHOLD)
+
+            if effective_start < idx_15 < effective_end:
+                splits.add(idx_15)
+            if effective_start < idx_85 < effective_end:
+                splits.add(idx_85)
+            logger.info(
+                f"Dynamic CFG Active for {detected_type} (effective range: steps "
+                f"{denoising_start}-{total_steps}, boost→{idx_15}, taper→{idx_85})"
             )
 
         # Sort and filter splits — constrain to effective sampling range
@@ -2643,7 +2996,7 @@ class RadianceSamplerPro:
         # v3.7: Pre-seed SigmaCache with global sigmas so stage indexing
         # is guaranteed to match the split points computed from total_steps.
         # compute_base_sigmas is now a module-level function with explicit params.
-        _sigma_cache.put(model, scheduler, sigmas)
+        _sigma_cache.put(model, scheduler, total_steps, sigmas)
 
         # Helper to call compute_base_sigmas with current sampling context
         def _get_base_sigmas(mdl, sched: str = scheduler) -> torch.Tensor:
@@ -2734,8 +3087,8 @@ class RadianceSamplerPro:
                         f"Dynamic Guidance @ step {s_start}: {effective_guidance:.2f}"
                     )
 
-                elif detected_type in ("flux", "chroma"):
-                    # Static guidance — Flux and Chroma use guidance embedding
+                elif detected_type in GUIDANCE_EMBED_MODELS:
+                    # Static guidance — flow-matching models use guidance embedding
                     stage_positive = apply_flux_guidance(positive, flux_guidance)
 
                 logger.info(
@@ -2802,6 +3155,15 @@ class RadianceSamplerPro:
                         )
                         logger.debug(
                             f"CFG++: {cfg:.2f} → {effective_cfg:.2f} at sigma {stage_sigmas[0].item():.4f}"
+                        )
+                    elif is_dynamic_cfg:
+                        # v4.2: Dynamic CFG ramp for video/CFG-guided models.
+                        # Boosts CFG early for structure, tapers late for clean convergence.
+                        effective_cfg = compute_dynamic_cfg(
+                            cfg, s_start, total_steps, denoise
+                        )
+                        logger.debug(
+                            f"Dynamic CFG @ step {s_start}: {cfg:.2f} → {effective_cfg:.2f}"
                         )
                     else:
                         effective_cfg = cfg
@@ -2996,6 +3358,7 @@ class RadianceSamplerPro:
             stage_timings,
             total_time,
             ays_active=ays_schedule,
+            frames=frames,
         )
 
         # v4.0: Build latent_meta JSON (Feature 2)
@@ -3015,6 +3378,7 @@ class RadianceSamplerPro:
             seed=seed,
             total_time_ms=int(total_time * 1000),
             latent_format=latent_format,
+            frames=frames,
         )
 
         return (out, output_sigmas, sigma_report, latent_meta)

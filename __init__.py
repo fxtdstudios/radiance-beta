@@ -75,32 +75,82 @@ check_dependencies()
 #                       DYNAMIC NODE LOADING
 # ═══════════════════════════════════════════════════════════════════════════════
 
+from . import (
+    nodes_camera,
+    nodes_color,
+    nodes_denoise,
+    nodes_depth,
+    nodes_dna,
+    nodes_exr,
+    nodes_filmgrain,
+    nodes_grade,
+    nodes_hdr,
+    nodes_io,
+    nodes_layout,
+    nodes_loader,
+    nodes_lut,
+    nodes_nuke,
+    nodes_overlay,
+    nodes_prompt,
+    nodes_qc,
+    nodes_radiance_mask,
+    nodes_radiance_viewer,
+    nodes_resolution,
+    nodes_sampler,
+    nodes_scopes,
+    nodes_studio,
+    nodes_temporal,
+    nodes_text,
+    nodes_upscale,
+    nodes_workspace
+)
+
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 WEB_DIRECTORY = "./js"
 
-# Find all files starting with "nodes_"
-node_files = glob.glob(os.path.join(os.path.dirname(__file__), "nodes_*.py"))
+modules = [
+    nodes_camera,
+    nodes_color,
+    nodes_denoise,
+    nodes_depth,
+    nodes_dna,
+    nodes_exr,
+    nodes_filmgrain,
+    nodes_grade,
+    nodes_hdr,
+    nodes_io,
+    nodes_layout,
+    nodes_loader,
+    nodes_lut,
+    nodes_nuke,
+    nodes_overlay,
+    nodes_prompt,
+    nodes_qc,
+    nodes_radiance_mask,
+    nodes_radiance_viewer,
+    nodes_resolution,
+    nodes_sampler,
+    nodes_scopes,
+    nodes_studio,
+    nodes_temporal,
+    nodes_text,
+    nodes_upscale,
+    nodes_workspace
+]
 
-for file_path in node_files:
-    module_name = os.path.splitext(os.path.basename(file_path))[0]
-
+for module in modules:
     try:
-        module = importlib.import_module(f".{module_name}", package=__name__)
-
         if hasattr(module, "NODE_CLASS_MAPPINGS"):
             NODE_CLASS_MAPPINGS.update(module.NODE_CLASS_MAPPINGS)
-
         if hasattr(module, "NODE_DISPLAY_NAME_MAPPINGS"):
             NODE_DISPLAY_NAME_MAPPINGS.update(module.NODE_DISPLAY_NAME_MAPPINGS)
-
-        logger.debug(f"Loaded {module_name}")
-
+        logger.debug(f"Loaded {module.__name__}")
     except Exception as e:
-        logger.error(f"FAILED to load {module_name}: {e}")
+        logger.error(f"FAILED to load {module.__name__}: {e}")
 
 # Package info
-__version__ = "2.1.1"
+__version__ = "2.2"
 __author__ = "Radiance"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
 
