@@ -16,16 +16,16 @@
 
 ---
 
-## What's New — v2.2
+## What's New - v2.2
 
 ### ◎ Radiance v2.2 (The Professional Suite)
-- **Video-Native Workflow** — Radiance Viewer now accepts `VIDEO` and `IMAGE` inputs interchangeably with real-time frame extraction.
-- **Cinematic Prompt Enhancer** — Built-in AI refinement widget in `Cinematic Prompt Machine` for physically-accurate camera/lighting prompts.
-- **Terminal HUD & Live REPL** — Nuke-style Python interaction directly inside the viewer. Inspect tensors or run math in real-time.
-- **Interactive Mask Editor** — `◎ Radiance Load Image` now includes a non-destructive soft-brush mask editor for immediate compositing.
-- **◎ Radiance 32-bit Denoise** — new edge-preserving bilateral filter for 32-bit float images.
+- **Video-Native Workflow** - Radiance Viewer now accepts `VIDEO` and `IMAGE` inputs interchangeably with real-time frame extraction.
+- **Cinematic Prompt Enhancer** - Built-in AI refinement widget in `Cinematic Prompt Machine` for physically-accurate camera/lighting prompts.
+- **Terminal HUD & Live REPL** - Nuke-style Python interaction directly inside the viewer. Inspect tensors or run math in real-time.
+- **Interactive Mask Editor** - `◎ Radiance Load Image` now includes a non-destructive soft-brush mask editor for immediate compositing.
+- **◎ Radiance 32-bit Denoise** - new edge-preserving bilateral filter for 32-bit float images.
 - **◎ Radiance Reroute / Reroute+** — compact visual reroute nodes with auto-type detection.
-- **◎ Show Text (Radiance)** — display string, JSON, or any data type output directly on the node UI.
+- **◎ Show Text (Radiance)** - display string, JSON, or any data type output directly on the node UI.
 
 ### ◎ New Color Nodes (4)
 | Node | File | What it does |
@@ -404,8 +404,8 @@ All critical operations are GPU-accelerated (CUDA + Apple MPS) with automatic CP
 
 ## Documentation & Support
 
-- ◎ **[Official Docs](https://fxtd.org/radiance_docs/)**
-- ◎ **[Bug Tracker](https://fxtd.org/radiance_docs/faq.html)**
+- ◎ **[Official Docs](https://radiance.fxtd.org)**
+- ◎ **[Bug Tracker](https://radiance.fxtd.or/faq.html)**
 - ◎ **[FXTD Studios](https://www.linkedin.com/company/fxtdstudios)**
 
 ---
