@@ -25,13 +25,13 @@ dependencies = ["opencv-python", "imageio", "Pillow", "OpenEXR", "Imath", "openc
 [project.urls]
 Repository = "https://github.com/fxtdstudios/radiance"
 #  Used by Comfy Registry https://registry.comfy.org
-Documentation = "https://fxtd.org/radiance_docs/"
-"Bug Tracker" = "https://fxtd.org/radiance_docs/faq.html"
+Documentation = "https://radiance.fxtd.org/index.html"
+"Bug Tracker" = "https://radiance.fxtd.org/faq.html"
 
 [tool.comfy]
 PublisherId = "fxtdstudios"
 DisplayName = "radiance"
-Icon = "js/FLOGO.png"
+Icon = "docs/FLOGO.png"
 includes = [] 
 # "requires-comfyui" = ">=1.0.0"  # ComfyUI version compatibility
 
