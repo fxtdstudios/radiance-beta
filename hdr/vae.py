@@ -663,6 +663,36 @@ class RadianceVAE4KEncode:
             shape = img.shape
             img = img.reshape(-1, 3) @ AP1_TO_REC709
             img = img.reshape(shape)
+        elif source_space == "ACES 2065-1":
+            # v2.1 FIX (BUG-43): ACES 2065-1 (AP0) → Rec.709 linear
+            # Matrix from ACES reference implementation (SMPTE ST 2065-1)
+            AP0_TO_REC709 = torch.tensor(
+                [
+                    [ 2.5216494, -1.1368885, -0.3847609],
+                    [-0.2752136,  1.3697052, -0.0944916],
+                    [-0.0159027, -0.1478148,  1.1637175],
+                ],
+                dtype=torch.float32,
+                device=img.device,
+            ).T
+            shape = img.shape
+            img = img.reshape(-1, 3) @ AP0_TO_REC709
+            img = img.reshape(shape)
+        elif source_space == "Rec.2020 Linear":
+            # v2.1 FIX (BUG-43): Rec.2020 → Rec.709 linear
+            # Standard ITU-R BT.2087 primary conversion matrix
+            REC2020_TO_REC709 = torch.tensor(
+                [
+                    [ 1.6604910, -0.5876411, -0.0728499],
+                    [-0.1245505,  1.1328999, -0.0083494],
+                    [-0.0181508, -0.1005789,  1.1187297],
+                ],
+                dtype=torch.float32,
+                device=img.device,
+            ).T
+            shape = img.shape
+            img = img.reshape(-1, 3) @ REC2020_TO_REC709
+            img = img.reshape(shape)
 
         # 2. Exposure (linear domain)
         if exposure != 0.0:
@@ -1138,11 +1168,14 @@ class RadianceVAE4KDecode:
                     },
                 ),
                 # v2.0 Feature 8: Tile processing mode for decode
+                # v2.1 FIX (BUG-44): Removed "batched" — decode is much more VRAM-intensive
+                # than encode and was never actually implemented for decode. The parameter
+                # existed in the UI but silently ran sequential. Encode batched still works.
                 "processing_mode": (
-                    ["sequential", "batched"],
+                    ["sequential"],
                     {
                         "default": "sequential",
-                        "tooltip": "'sequential' = min VRAM. 'batched' = 2-4x faster on high-VRAM GPUs.",
+                        "tooltip": "'sequential' processes one tile at a time with minimal VRAM usage.",
                     },
                 ),
             },
@@ -1170,6 +1203,7 @@ class RadianceVAE4KDecode:
         tile_size_px: int,
         overlap_px: int,
         pbar: Any = None,
+        vae_factor: int = 8,
     ) -> torch.Tensor:
         """
         Decode full latent in overlapping tiles with cosine blend.
@@ -1182,9 +1216,10 @@ class RadianceVAE4KDecode:
         Args:
             samples:      {"samples": (B, C, H, W)} latent dict
             vae:          ComfyUI VAE model
-            tile_size_px: Tile size in pixel space (divided by 8 for latent space)
+            tile_size_px: Tile size in pixel space (divided by vae_factor for latent space)
             overlap_px:   Overlap in pixel space
             pbar:         Optional ComfyUI ProgressBar
+            vae_factor:   Spatial downscale factor (auto-detected by caller)
 
         Returns:
             Tuple of:
@@ -1196,7 +1231,10 @@ class RadianceVAE4KDecode:
         b, c = latent.shape[0], latent.shape[1]
         lat_h, lat_w = latent.shape[-2], latent.shape[-1]
         device = latent.device
-        scale = 8
+        # v2.1 FIX (BUG-42): Use detected vae_factor instead of hardcoded 8.
+        # Stable Cascade Stage C uses factor=42 — hardcoded 8 gave completely
+        # wrong tile pixel coordinates, corrupting the output.
+        scale = vae_factor
 
         pix_h = lat_h * scale
         pix_w = lat_w * scale
@@ -1406,6 +1444,34 @@ class RadianceVAE4KDecode:
             shape = img.shape
             img = img.reshape(-1, 3) @ REC709_TO_AP1
             img = img.reshape(shape)
+        elif target_space == "ACES 2065-1":
+            # v2.1 FIX (BUG-43): Rec.709 linear → ACES 2065-1 (AP0)
+            REC709_TO_AP0 = torch.tensor(
+                [
+                    [0.4339316, 0.3762584, 0.1898100],
+                    [0.0886227, 0.8131989, 0.0981784],
+                    [0.0177087, 0.1095613, 0.8727300],
+                ],
+                dtype=torch.float32,
+                device=img.device,
+            ).T
+            shape = img.shape
+            img = img.reshape(-1, 3) @ REC709_TO_AP0
+            img = img.reshape(shape)
+        elif target_space == "Rec.2020 Linear":
+            # v2.1 FIX (BUG-43): Rec.709 linear → Rec.2020 linear
+            REC709_TO_REC2020 = torch.tensor(
+                [
+                    [0.6274039, 0.3292830, 0.0433131],
+                    [0.0690973, 0.9195404, 0.0113623],
+                    [0.0163914, 0.0880132, 0.8955954],
+                ],
+                dtype=torch.float32,
+                device=img.device,
+            ).T
+            shape = img.shape
+            img = img.reshape(-1, 3) @ REC709_TO_REC2020
+            img = img.reshape(shape)
         elif target_space in self.LOG_SPACES and _HAS_LOG_CURVES:
             converters = RadianceVAE4KEncode._get_linear_to_log()
             img = converters[target_space](img)
@@ -1539,10 +1605,29 @@ class RadianceVAE4KDecode:
 
             try:
                 meta_json = json.loads(meta_str)
-            except:
+            except (json.JSONDecodeError, TypeError, ValueError):
                 meta_json = {}
             meta_json["video"] = True
             meta_json["frames"] = F
+
+            # v2.1 FIX (BUG-46): Export RHDR sidecars for video frames.
+            # Previously skipped because per-frame decode passed export_rhdr=False.
+            # Now runs on the concatenated output after all frames are decoded.
+            rhdr_filenames = []
+            if export_rhdr:
+                output_dir = folder_paths.get_temp_directory()
+                for fi in range(all_frames.shape[0]):
+                    frame_np = all_frames[fi, ..., :3].cpu().numpy()
+                    while frame_np.ndim > 3:
+                        frame_np = frame_np[0]
+                    fname = self._save_rhdr(
+                        frame_np, output_dir,
+                        prefix=f"radiance_4k_f{fi:04d}",
+                    )
+                    if fname:
+                        rhdr_filenames.append(fname)
+                if rhdr_filenames:
+                    meta_json["rhdr_export"] = rhdr_filenames
 
             return (all_frames, json.dumps(meta_json, indent=2), latent_fmt)
 
@@ -1588,7 +1673,7 @@ class RadianceVAE4KDecode:
                     img = img.reshape(_B5 * _F5, _H5, _W5, _C5)
                 pbar.update_absolute(100, 100)
             else:
-                img, _tiled_video_frames = self._tiled_decode(samples, vae, ts_px, overlap, pbar)
+                img, _tiled_video_frames = self._tiled_decode(samples, vae, ts_px, overlap, pbar, vae_factor=vae_factor)
                 if _tiled_video_frames is not None:
                     decoded_video_frames = _tiled_video_frames
 

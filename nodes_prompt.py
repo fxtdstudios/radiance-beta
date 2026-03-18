@@ -1120,8 +1120,9 @@ def build_cinematic_prompt_v3(
     # not here. Previously it was applied at both levels, causing double-weight
     # on the structured path: ((subject:1.2):1.2) → effective 1.44×.
 
-    # v3.1: Actual architecture detection from CLIP tokenizer keys
-    resolved_arch = _detect_arch_from_clip(clip, target_arch)
+    # v3.1: Architecture is resolved by the caller and passed as target_arch.
+    # Fallback to sdxl if somehow 'Auto' slipped through an older node call.
+    resolved_arch = target_arch if target_arch != "Auto" else "sdxl"
     use_prose = resolved_arch in PROSE_ARCHS
 
     if use_prose:

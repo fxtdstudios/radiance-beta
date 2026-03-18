@@ -2,6 +2,13 @@
 
 All notable changes to FXTD Radiance will be documented in this file.
 
+## [2.2] - 2026-03-18
+
+### Changed
+- Major version update to 2.2.
+- Refined terminal and viewer UI.
+- Improved console noise filtering and error stabilization.
+
 ## [2.1.1] - 2026-03-17
 
 ### Changed

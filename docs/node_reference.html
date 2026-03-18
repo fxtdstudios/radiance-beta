@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Node Reference — Radiance</title>
-    <meta name="description" content="Comprehensive guide to all 79 nodes in Radiance v2.1.0.">
+    <meta name="description" content="Comprehensive guide to all 79 nodes in Radiance v2.2.">
     <link rel="stylesheet" href="wiki.css">
 </head>
 
@@ -67,7 +67,7 @@
         <header style="margin-bottom: 3rem;" class="animate-in">
             <h1 class="text-gradient">Node Reference</h1>
             <p class="page-subtitle">Comprehensive guide to all <strong>79 nodes</strong> in Radiance
-                <span class="badge badge-gold">v2.1.0</span>
+                <span class="badge badge-gold">v2.2</span>
             </p>
         </header>
 
@@ -495,7 +495,7 @@
                         <span class="node-name">◎ Radiance Unified Loader</span>
                     </div>
                     <code class="node-class">RadianceUnifiedLoader</code>
-                    <p class="node-description">Universal loader v2.1.0 — auto-detects architecture, named CLIP slots, chainable LORA_STACK, model_meta JSON, latent_format, offload mode. ZERO stale cache hits (mtime + size fingerprinting).</p>
+                    <p class="node-description">Universal loader v2.2 — auto-detects architecture, named CLIP slots, chainable LORA_STACK, model_meta JSON, latent_format, offload mode. ZERO stale cache hits (mtime + size fingerprinting).</p>
                     <div class="io-section"><h4>Inputs</h4><table><tr><th width="30%">Name</th><th width="40%">Type</th><th width="30%">Default</th></tr><tr><td>preset</td><td><code>?</code></td><td></td></tr><tr><td>unet_name</td><td><code>?</code></td><td></td></tr><tr><td>weight_dtype</td><td><code>?</code></td><td></td></tr><tr><td>model_type</td><td><code>?</code></td><td></td></tr><tr><td>vae_name</td><td><code>?</code></td><td></td></tr><tr><td>clip_l (opt)</td><td><code>?</code></td><td></td></tr><tr><td>clip_g (opt)</td><td><code>?</code></td><td></td></tr><tr><td>t5xxl (opt)</td><td><code>?</code></td><td></td></tr><tr><td>llm_encoder (opt)</td><td><code>?</code></td><td></td></tr><tr><td>clip_dtype (opt)</td><td><code>?</code></td><td></td></tr><tr><td>offload_mode (opt)</td><td><code>?</code></td><td></td></tr><tr><td>lora_stack (opt)</td><td><code>LORA_STACK</code></td><td></td></tr><tr><td>lora_1 (opt)</td><td><code>?</code></td><td></td></tr><tr><td>lora_1_model_str (opt)</td><td><code>FLOAT</code></td><td></td></tr><tr><td>lora_1_clip_str (opt)</td><td><code>FLOAT</code></td><td></td></tr><tr><td>lora_2 (opt)</td><td><code>?</code></td><td></td></tr><tr><td>lora_2_model_str (opt)</td><td><code>FLOAT</code></td><td></td></tr><tr><td>lora_2_clip_str (opt)</td><td><code>FLOAT</code></td><td></td></tr><tr><td>lora_3 (opt)</td><td><code>?</code></td><td></td></tr><tr><td>lora_3_model_str (opt)</td><td><code>FLOAT</code></td><td></td></tr><tr><td>lora_3_clip_str (opt)</td><td><code>FLOAT</code></td><td></td></tr><tr><td>controlnet_name (opt)</td><td><code>?</code></td><td></td></tr><tr><td>controlnet_strength (opt)</td><td><code>FLOAT</code></td><td></td></tr><tr><td>controlnet_start (opt)</td><td><code>FLOAT</code></td><td></td></tr><tr><td>controlnet_end (opt)</td><td><code>FLOAT</code></td><td></td></tr><tr><td>check_vram (opt)</td><td><code>COMBO</code></td><td></td></tr><tr><td>use_cache (opt)</td><td><code>COMBO</code></td><td></td></tr><tr><td>lora_on_error (opt)</td><td><code>COMBO</code></td><td></td></tr></table></div>
                     <div class="io-section"><h4>Outputs</h4><table><tr><th width="30%">Name</th><th width="70%">Type</th></tr><tr><td>MODEL</td><td><code>MODEL</code></td></tr><tr><td>CLIP</td><td><code>CLIP</code></td></tr><tr><td>VAE</td><td><code>VAE</code></td></tr><tr><td>CONTROL_NET</td><td><code>CONTROL_NET</code></td></tr><tr><td>LORA_STACK</td><td><code>LORA_STACK</code></td></tr><tr><td>STRING</td><td><code>STRING</code></td></tr><tr><td>STRING</td><td><code>STRING</code></td></tr><tr><td>STRING</td><td><code>STRING</code></td></tr></table></div>
                 </div>
@@ -1000,7 +1000,7 @@
             <a href="https://discord.gg/fxtdstudios" target="_blank">Discord</a>
             <a href="https://facebook.com/fxtdstudios" target="_blank">Facebook</a>
         </div>
-        <p><strong>Radiance v2.1.0</strong> · © FXTD Studios</p>
+        <p><strong>Radiance v2.2</strong> · © FXTD Studios</p>
     </footer>
 
     <script>
