@@ -2,11 +2,11 @@
 
 ![RADIANCE](docs/RADIANCE.png)
 
-![Version](https://img.shields.io/badge/version-2.2-blue)
+![Version](https://img.shields.io/badge/version-2.2.1-blue)
 ![License](https://img.shields.io/badge/license-GPL--3.0-green)
 ![ComfyUI](https://img.shields.io/badge/ComfyUI-Compatible-purple)
 ![Nodes](https://img.shields.io/badge/Nodes-79-blue?style=for-the-badge&logo=comfyui)
-![Version](https://img.shields.io/badge/Version-2.2-orange?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-2.2.1-orange?style=for-the-badge)
 
 </div>
 
@@ -16,14 +16,14 @@
 
 ---
 
-## What's New - v2.2
+## What's New — v2.2.1
 
-### ◎ Radiance v2.2 (The Professional Suite)
-- **Video-Native Workflow** - Radiance Viewer now accepts `VIDEO` and `IMAGE` inputs interchangeably with real-time frame extraction.
-- **Cinematic Prompt Enhancer** - Built-in AI refinement widget in `Cinematic Prompt Machine` for physically-accurate camera/lighting prompts.
-- **Terminal HUD & Live REPL** - Nuke-style Python interaction directly inside the viewer. Inspect tensors or run math in real-time.
-- **Interactive Mask Editor** - `◎ Radiance Load Image` now includes a non-destructive soft-brush mask editor for immediate compositing.
-- **◎ Radiance 32-bit Denoise** - new edge-preserving bilateral filter for 32-bit float images.
+### ◎ Radiance v2.2.1 (The Professional Suite)
+- **Video-Native Workflow** — Radiance Viewer now accepts `VIDEO` and `IMAGE` inputs interchangeably with real-time frame extraction.
+- **Cinematic Prompt Enhancer** — Built-in AI refinement widget in `Cinematic Prompt Machine` for physically-accurate camera/lighting prompts.
+- **Terminal HUD & Live REPL** — Nuke-style Python interaction directly inside the viewer. Inspect tensors or run math in real-time.
+- **Interactive Mask Editor** — `◎ Radiance Load Image` now includes a non-destructive soft-brush mask editor for immediate compositing.
+- **◎ Radiance 32-bit Denoise** — new edge-preserving bilateral filter for 32-bit float images.
 - **◎ Radiance Reroute / Reroute+** — compact visual reroute nodes with auto-type detection.
 - **◎ Show Text (Radiance)** - display string, JSON, or any data type output directly on the node UI.
 
@@ -154,20 +154,20 @@ Image → ImageToFloat32 → Float32ColorCorrect → HDRToneMap → SaveImageEXR
 Image → FXTDFilmGrain → FXTDLensEffects → FXTDFilmLook → Output
 ```
 
-### Grade Matching (New in v2.2)
+### Grade Matching (New in v2.2.1)
 ```
 SourceShot  ──┐
               ├─→ RadianceGradeMatch → matched_image
 ReferenceShot ┘                     → grade_info → ApplyGradeInfo(OtherShot)
 ```
 
-### LUT Pipeline (New in v2.2)
+### LUT Pipeline (New in v2.2.1)
 ```
 RadianceGrade → grade_info → RadianceLUTBake → grade.cube (share with Resolve)
 any_image → RadianceLUTApply(grade.cube) → graded_image
 ```
 
-### Video Flicker Fix (New in v2.2)
+### Video Flicker Fix (New in v2.2.1)
 ```
 generated_video → RadianceFlickerAnalyze → flicker_report (before)
 generated_video → RadianceTemporalSmooth(alpha=0.6) → clean_video
@@ -380,7 +380,7 @@ All critical operations are GPU-accelerated (CUDA + Apple MPS) with automatic CP
 ## Credits
 
 **Special Thanks**
-- To all our dedicated beta testers and the ComfyUI community for their invaluable bug reports, feedback, and support in making Radiance v2.2 possible.
+- To all our dedicated beta testers and the ComfyUI community for their invaluable bug reports, feedback, and support in making Radiance v2.2.1 possible.
 
 
 **Color Science**

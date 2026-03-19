@@ -59,6 +59,7 @@ import json
 import traceback
 from aiohttp import web
 from server import PromptServer
+import re
 
 # v3.1: Enable OpenEXR support in OpenCV
 # Essential for 32-bit float export
@@ -116,6 +117,13 @@ except ImportError:
 
 BIT_DEPTH_MODES = ["8-bit (Fast)", "16-bit (Quality)", "16-bit + HDR Data", "32-bit Float"]
 CV2_PNG_COMPRESSION = 4
+
+
+# Stores the last processed IMAGE batch for each node to allow HUD-based export.
+_VIEWER_CACHE: Dict[str, torch.Tensor] = {}
+# Stores active export progress: {instance_id: {current, total, status, message}}
+_VIEWER_PROGRESS: Dict[str, Dict[str, Any]] = {}
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1333,9 +1341,15 @@ class RadianceViewer:
             _TERMINAL_NS["prompt"] = prompt
             _TERMINAL_NS["metadata"] = extra_pnginfo
 
+            # ── v4.2: Delivery Cache (Update node frames) ───────────
+            # Use unique ID per node instance if available, otherwise fallback to class logic
+            instance_key = str(id(self))
+            _VIEWER_CACHE[instance_key] = image
+
             return {
                 "ui": {
                     "radiance_images": images_list,
+                    "instance_id": [instance_key],
                     "batch_size": [batch_size],
                     "bit_depth": [depth_label],
                 },
@@ -2002,6 +2016,254 @@ async def radiance_terminal_endpoint(request):
 
     except Exception as e:
         return web.json_response({"output": str(e), "status": "error"})
+
+# ── Apex Delivery Helpers ──────────────────────────────────────────────────
+
+def get_next_version(directory: str, filename_base: str) -> str:
+    """Scan directory for existing versions and returns the next one (e.g., v02)."""
+    if not os.path.exists(directory):
+        return "v01"
+    
+    # Look for pattern: base_vXX.ext or base_vXX
+    # Use re.escape to handle base with dots/etc safely
+    pattern = re.compile(rf"{re.escape(filename_base)}_v(\d+)")
+    max_v = 0
+    
+    try:
+        for f in os.listdir(directory):
+            match = pattern.search(f)
+            if match:
+                v = int(match.group(1))
+                if v > max_v:
+                    max_v = v
+    except Exception:
+        pass
+        
+    return f"v{max_v + 1:02d}"
+
+def apply_burn_in(image: torch.Tensor, settings: Dict, version_str: str) -> torch.Tensor:
+    """Apply slate, timecode, and version burn-ins using RadianceMetadataOverlay logic."""
+    try:
+        from .nodes_overlay import RadianceMetadataOverlay
+        overlay = RadianceMetadataOverlay()
+        
+        # Extract settings
+        burn_tc = settings.get("burn_in_tc", False)
+        burn_ver = settings.get("burn_in_ver", False)
+        include_slate = settings.get("include_slate", False)
+        filename = settings.get("filename", "output")
+        
+        device = image.device
+
+        # 1. Handle Slate (Prepend 10 frames of black with metadata)
+        if include_slate:
+            # Create a black frame for the slate (1 frame batch)
+            slate_frame = torch.zeros((1, image.shape[1], image.shape[2], 3), device=device)
+            
+            # Apply high-opacity slate metadata
+            slate_result = overlay.overlay_metadata(
+                slate_frame,
+                enabled=True,
+                project="RADIANCE_PROJECT",
+                shot=filename,
+                frame=1,
+                timecode="00:00:00:00",
+                position="Bottom Bar (Slate)",
+                font_size=24,
+                opacity=1.0,
+                user_text=f"VERSION: {version_str}\nEXPORT DATE: PRODUCTION MASTER",
+            )[0]
+            
+            # Repeat for 10 frames
+            slate_batch = slate_result.repeat(10, 1, 1, 1)
+            image = torch.cat([slate_batch, image], dim=0)
+
+        # 2. Handle Continuous Burn-In (TC / Version)
+        if burn_tc or burn_ver:
+            user_text = version_str if burn_ver else ""
+            tc_str = "00:00:00:00" if burn_tc else ""
+            
+            # Add overlay to all frames
+            image = overlay.overlay_metadata(
+                image,
+                enabled=True,
+                project="",
+                shot="",
+                frame=0,
+                timecode=tc_str,
+                position="Top Right" if burn_ver else "Bottom Right",
+                font_size=18,
+                opacity=0.6,
+                user_text=user_text
+            )[0]
+
+        return image
+    except Exception as e:
+        logger.error(f"Failed to apply burn-in: {e}")
+        return image
+
+
+@PromptServer.instance.routes.post('/radiance/deliver')
+async def radiance_deliver_endpoint(request):
+    """
+    VFX Delivery Endpoint: Receives grading state + export settings from HUD.
+    Applies grading, AI-Upscaling, and Burn-ins before high-quality encoding.
+    """
+    try:
+        data = await request.json()
+        instance_key = data.get('instance_id')
+        grading = data.get('grading', {})
+        settings = data.get('settings', {})
+
+        if instance_key not in _VIEWER_CACHE:
+            return web.json_response({"error": "No frames found in cache for this node. Run the workflow first.", "status": "error"})
+
+        images = _VIEWER_CACHE[instance_key]
+        
+        # ─── Process Options ──────────────────────────────────────────
+        filename_prefix = settings.get('filename', 'Radiance_Deliver')
+        output_format = settings.get('format', 'Video — MP4 (H.264)')
+        fps = float(settings.get('fps', 24.0))
+        quality = int(settings.get('quality', 18))
+        output_path = settings.get('path', '')
+        
+        # Apex Features
+        upscale_2x = settings.get('upscale_2x', False)
+        smart_ver = settings.get('smart_versioning', True)
+        
+        # Handle Versioning
+        version_str = "v01"
+        if smart_ver:
+            import folder_paths
+            base_path = output_path if output_path else folder_paths.get_output_directory()
+            version_str = get_next_version(base_path, filename_prefix)
+            filename_prefix = f"{filename_prefix}_{version_str}"
+
+        # ─── Process Grading ──────────────────────────────────────────
+        
+        # Grading params (Use safe_float to handle potential array inputs from JS)
+        def safe_float(v, default):
+            if isinstance(v, (list, tuple)) and len(v) > 0: return float(v[0])
+            try: return float(v)
+            except (TypeError, ValueError): return default
+
+        exposure = safe_float(grading.get('exposure'), 0.0)
+        gamma = safe_float(grading.get('gamma'), 1.0)
+        gain = safe_float(grading.get('gain'), 1.0)
+        lift = safe_float(grading.get('lift'), 0.0)
+        saturation = safe_float(grading.get('saturation'), 1.0)
+        temperature = safe_float(grading.get('temperature'), 6500.0)
+        
+        # Apply grading to whole batch
+        out_batch = []
+        for i in range(images.shape[0]):
+            frame_np = images[i].cpu().numpy()
+            graded = apply_grading(
+                img=frame_np,
+                exposure=exposure,
+                gamma=gamma,
+                gain=gain,
+                lift=lift,
+                saturation=saturation,
+                temperature=temperature,
+                color_science=1 if grading.get('colorScience') == 'ACEScct' else 0
+            )
+            out_batch.append(torch.from_numpy(np.clip(graded, 0.0, 1.0)))
+        
+        graded_tensor = torch.stack(out_batch)
+
+        # ─── AI Upscale (2x) ──────────────────────────────────────────
+        if upscale_2x:
+            try:
+                from .nodes_upscale import RadianceAIUpscale
+                upscaler = RadianceAIUpscale()
+                # RealESRGAN_x2plus is ideal for performance/quality trade-off
+                graded_tensor, _ = upscaler.upscale(
+                    image=graded_tensor,
+                    model_name="RealESRGAN_x2plus",
+                    mode="Refine (HDR)",
+                    tile_size=512
+                )
+            except Exception as e:
+                logger.error(f"AI Upscale failed, continuing with original: {e}")
+
+        # ─── Burn-Ins (Slate, TC, Version) ────────────────────────────
+        graded_tensor = apply_burn_in(graded_tensor, settings, version_str)
+
+        # ─── Integrated QC Pass ───────────────────────────────────────
+        qc_report = ""
+        try:
+            v_min = graded_tensor.min().item()
+            v_max = graded_tensor.max().item()
+            if v_min < 0.0 or v_max > 1.0:
+                qc_report = f"◎ [QC WARNING] Out-of-Gamut detected: Min={v_min:.3f}, Max={v_max:.3f}. (Illegal levels for broadcast)."
+            else:
+                qc_report = f"◎ [QC PASS] Levels within legal broadcast range (0.0 - 1.0)."
+        except Exception:
+            pass
+
+        # ─── Save using RadianceWrite Logic ────────────────────────────
+        from .nodes_io import RadianceWrite
+        writer = RadianceWrite()
+        
+        # Track progress for writer (approximate since writer is external)
+        _VIEWER_PROGRESS[instance_key] = {"current": 90, "total": 100, "status": "encoding", "message": "Encoding Master..."}
+
+        _, path, _ = writer.write(
+            filename_prefix=filename_prefix,
+            output_format=output_format,
+            fps=fps,
+            quality=quality,
+            output_color_space="sRGB (Standard)",
+            image=graded_tensor,
+            output_path=output_path
+        )
+
+        # ─── Post-Export: Thumbnails & Sidecars ────────────────────────
+        try:
+            # Save Thumbnail (.jpg)
+            import PIL.Image
+            thumb_frame = graded_tensor[min(images.shape[0]-1, 10 if images.shape[0] > 10 else 0)]
+            thumb_np = (thumb_frame.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+            thumb_img = PIL.Image.fromarray(thumb_np)
+            thumb_path = os.path.splitext(path)[0] + "_thumb.jpg"
+            thumb_img.save(thumb_path, quality=85)
+            
+            # Save Metadata Sidecar (.json)
+            meta = {
+                "version": version_str,
+                "grading": grading,
+                "export_settings": settings,
+                "qc": qc_report,
+                "timestamp": os.path.getmtime(path)
+            }
+            with open(os.path.splitext(path)[0] + "_meta.json", 'w') as f:
+                json.dump(meta, f, indent=4)
+        except Exception as e:
+            logger.error(f"Sidecar generation failed: {e}")
+
+        _VIEWER_PROGRESS[instance_key] = {"current": 100, "total": 100, "status": "done", "message": "Delivery Complete"}
+
+        return web.json_response({
+            "status": "success",
+            "path": path,
+            "qc": qc_report,
+            "message": f"Export delivered successfully: {os.path.basename(path)} ({version_str})"
+        })
+
+    except Exception as e:
+        logger.error(f"Delivery failed: {traceback.format_exc()}")
+        return web.json_response({"error": str(e), "status": "error"})
+
+@PromptServer.instance.routes.get('/radiance/progress')
+async def radiance_progress_endpoint(request):
+    """Returns active delivery progress for a node instance."""
+    instance_id = request.query.get('id')
+    if not instance_id:
+        return web.json_response({"error": "Missing ID", "status": "error"})
+    
+    progress = _VIEWER_PROGRESS.get(instance_id, {"current": 0, "total": 100, "status": "idle", "message": "Waiting..."})
+    return web.json_response(progress)
 
 
 
