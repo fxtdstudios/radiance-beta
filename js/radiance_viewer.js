@@ -16,7 +16,7 @@
 
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { RadianceWebGLRenderer } from "./radiance_webgl.js?v=2.2";
+import { RadianceWebGLRenderer } from "./radiance_webgl.js?v=2.2.1";
 import { RadianceNeuralMonitor } from "./radiance_neural.js";
 
 
@@ -1154,11 +1154,13 @@ class RadianceViewer {
             return btn;
         };
 
-        const tabTerm = createTab('⌨ TERMINAL', true);
-        const tabScript = createTab('✎ SCRIPT EDITOR', false);
+        const tabTerm = createTab('◎ TERMINAL', true);
+        const tabScript = createTab('◎ SCRIPTS', false);
+        const tabDeliver = createTab('◎ DELIVER', false);
 
         tabsContainer.appendChild(tabTerm);
         tabsContainer.appendChild(tabScript);
+        tabsContainer.appendChild(tabDeliver);
         header.appendChild(tabsContainer);
 
         // Session counter badge
@@ -1302,6 +1304,154 @@ class RadianceViewer {
         scContainer.appendChild(scTextarea);
         termContainer.appendChild(scContainer);
 
+        // ── VFX Delivery Area (Phase 5) ──────────────────────────────────
+        const dvContainer = document.createElement('div');
+        dvContainer.style.cssText = `flex: 1; display: none; flex-direction: column; background: #0b0e14; padding: 12px; overflow-y: auto;`;
+        
+        const dvTitle = document.createElement('div');
+        dvTitle.textContent = '◎ RENDER SETTINGS — EXPORT GRADED MASTER';
+        dvTitle.style.cssText = `font-size: 10px; font-weight: 800; color: #777; letter-spacing: 0.15em; margin-bottom: 12px; border-bottom: 1px solid #222; padding-bottom: 5px;`;
+        dvContainer.appendChild(dvTitle);
+
+        const dvForm = document.createElement('div');
+        dvForm.style.cssText = `display: grid; grid-template-columns: 100px 1fr 100px 1fr; gap: 10px; align-items: center;`;
+
+        const addRow = (label, el, span=1) => {
+            const lbl = document.createElement('label');
+            lbl.textContent = label;
+            lbl.style.cssText = `font-size: 9px; color: #555; text-transform: uppercase; font-weight: bold;`;
+            dvForm.appendChild(lbl);
+            if (span > 1) el.style.gridColumn = `span ${span}`;
+            dvForm.appendChild(el);
+        };
+
+        const dvFilename = document.createElement('input');
+        dvFilename.value = 'Radiance_Export';
+        dvFilename.style.cssText = `background: #1a1e24; color: #ccc; border: 1px solid #333; padding: 3px 6px; font-size: 10px; border-radius: 2px;`;
+        addRow('Filename', dvFilename);
+
+        const dvPath = document.createElement('input');
+        dvPath.placeholder = 'Default Output Folder';
+        dvPath.style.cssText = `background: #1a1e24; color: #ccc; border: 1px solid #333; padding: 3px 6px; font-size: 10px; border-radius: 2px;`;
+        addRow('Location', dvPath);
+
+        const dvFormat = document.createElement('select');
+        dvFormat.style.cssText = `background: #1a1e24; color: #ccc; border: 1px solid #333; padding: 2px; font-size: 10px; border-radius: 2px;`;
+        ['Video — MP4 (H.264)', 'Video — MP4 (H.265)', 'Video — MOV (ProRes 422)', 'Video — MOV (ProRes 4444)', 'Image Sequence — PNG', 'Image Sequence — EXR (fp32)', 'Animated GIF', 'Animated WEBP'].forEach(f => {
+            const opt = document.createElement('option'); opt.value = f; opt.textContent = f; dvFormat.appendChild(opt);
+        });
+        addRow('Format', dvFormat);
+
+        const dvFPS = document.createElement('input');
+        dvFPS.type = 'number'; dvFPS.value = '24';
+        dvFPS.style.cssText = `background: #1a1e24; color: #ccc; border: 1px solid #333; padding: 3px 6px; font-size: 10px; border-radius: 2px; width: 50px;`;
+        addRow('Frame Rate', dvFPS);
+
+        const dvQuality = document.createElement('input');
+        dvQuality.type = 'range'; dvQuality.min = '0'; dvQuality.max = '51'; dvQuality.value = '18';
+        dvQuality.style.cssText = `width: 100%; height: 4px; accent-color: #00a8ff;`;
+        addRow('Quality (CRF)', dvQuality);
+
+        // Apex Options Section
+        const dvApexSection = document.createElement('div');
+        dvApexSection.style.cssText = `grid-column: span 4; margin-top: 15px; border-top: 1px solid #222; padding-top: 10px; display: flex; flex-wrap: wrap; gap: 15px;`;
+        
+        const createCheck = (label, id, def=false) => {
+            const wrap = document.createElement('label');
+            wrap.style.cssText = `display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 9px; color: #aaa; font-weight: 600; text-transform: uppercase;`;
+            const cb = document.createElement('input');
+            cb.type = 'checkbox'; cb.checked = def;
+            cb.style.cssText = `accent-color: #00a8ff;`;
+            wrap.appendChild(cb);
+            wrap.appendChild(document.createTextNode(label));
+            return { wrap, cb };
+        };
+
+        const { wrap: wUpscale, cb: dvUpscale } = createCheck('◎ AI Upscale (2x)', 'dvUpscale', false);
+        const { wrap: wSmartVer, cb: dvSmartVer } = createCheck('◎ Smart Versioning', 'dvSmartVer', true);
+        const { wrap: wSlate, cb: dvSlate } = createCheck('◎ Include Slate', 'dvSlate', false);
+        const { wrap: wBurnTC, cb: dvBurnTC } = createCheck('◎ Burn Timecode', 'dvBurnTC', false);
+        const { wrap: wBurnVer, cb: dvBurnVer } = createCheck('◎ Burn Version', 'dvBurnVer', false);
+
+        dvApexSection.appendChild(wUpscale);
+        dvApexSection.appendChild(wSmartVer);
+        dvApexSection.appendChild(wSlate);
+        dvApexSection.appendChild(wBurnTC);
+        dvApexSection.appendChild(wBurnVer);
+        dvForm.appendChild(dvApexSection);
+
+        dvContainer.appendChild(dvForm);
+
+        const dvSubmitRow = document.createElement('div');
+        dvSubmitRow.style.cssText = `margin-top: 20px; display: flex; gap: 10px; border-top: 1px solid #222; padding-top: 15px;`;
+        
+        const dvRenderBtn = document.createElement('button');
+        dvRenderBtn.textContent = '◎ ADD TO RENDER QUEUE & START EXPORT';
+        dvRenderBtn.style.cssText = `background: #00a8ff; color: #fff; border: none; font-size: 10px; font-weight: 900; letter-spacing: 0.1em; border-radius: 3px; padding: 8px 20px; cursor: pointer; transition: 0.2s; box-shadow: 0 4px 15px rgba(0, 168, 255, 0.3);`;
+        dvRenderBtn.onmouseenter = () => dvRenderBtn.style.background = '#33beff';
+        dvRenderBtn.onmouseleave = () => dvRenderBtn.style.background = '#00a8ff';
+        
+        dvSubmitRow.appendChild(dvRenderBtn);
+
+        // Progress Tracking UI
+        const dvProgressContainer = document.createElement('div');
+        dvProgressContainer.style.cssText = `margin-top: 15px; display: none; flex-direction: column; gap: 5px;`;
+        
+        const dvProgressLabel = document.createElement('div');
+        dvProgressLabel.style.cssText = `font-size: 9px; color: #00a8ff; font-weight: bold; text-transform: uppercase;`;
+        dvProgressLabel.textContent = 'READY TO EXPORT';
+        
+        const dvProgressTrack = document.createElement('div');
+        dvProgressTrack.style.cssText = `width: 100%; height: 2px; background: #1a1e24; border-radius: 1px; overflow: hidden;`;
+        
+        const dvProgressBar = document.createElement('div');
+        dvProgressBar.style.cssText = `width: 0%; height: 100%; background: #00a8ff; transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1); box-shadow: 0 0 10px rgba(0, 168, 255, 0.5);`;
+        
+        dvProgressTrack.appendChild(dvProgressBar);
+        dvProgressContainer.appendChild(dvProgressLabel);
+        dvProgressContainer.appendChild(dvProgressTrack);
+        dvContainer.appendChild(dvProgressContainer);
+
+        // Render History UI
+        const dvHistoryTitle = document.createElement('div');
+        dvHistoryTitle.textContent = '◎ RECENT EXPORTS';
+        dvHistoryTitle.style.cssText = `font-size: 9px; font-weight: 800; color: #444; margin-top: 25px; margin-bottom: 10px; border-bottom: 1px solid #1a1e24; padding-bottom: 3px;`;
+        dvContainer.appendChild(dvHistoryTitle);
+
+        const dvHistoryList = document.createElement('div');
+        dvHistoryList.style.cssText = `display: flex; flex-direction: column; gap: 5px; max-height: 150px; overflow-y: auto;`;
+        dvContainer.appendChild(dvHistoryList);
+
+        const addHistoryItem = (path, name, qc) => {
+            const item = document.createElement('div');
+            item.style.cssText = `background: #111; border: 1px solid #222; padding: 6px 10px; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; font-size: 10px;`;
+            
+            const info = document.createElement('div');
+            info.innerHTML = `
+                <div style="color: #eee; font-weight: bold;">${name}</div>
+                <div style="color: #555; font-size: 9px; margin-top: 2px;">${path}</div>
+                <div style="color: ${qc.includes('[QC PASS]') ? '#00ff88' : '#ff4444'}; font-size: 8px; margin-top: 2px;">${qc}</div>
+            `;
+            
+            const openBtn = document.createElement('button');
+            openBtn.textContent = '◎';
+            openBtn.title = 'Open Path';
+            openBtn.style.cssText = `background: transparent; border: none; cursor: pointer; filter: grayscale(1) opacity(0.5); font-size: 12px;`;
+            openBtn.onclick = () => {
+                // Try to open folder if supported by backend bridge, otherwise just log
+                this._termLog('system', `Opening: ${path}`);
+            };
+            
+            item.appendChild(info);
+            item.appendChild(openBtn);
+            
+            if (dvHistoryList.firstChild) dvHistoryList.insertBefore(item, dvHistoryList.firstChild);
+            else dvHistoryList.appendChild(item);
+        };
+
+        dvContainer.appendChild(dvSubmitRow);
+        termContainer.appendChild(dvContainer);
+
         // Tab Switching Logic
         let activeTab = 'term';
         tabTerm.onclick = () => {
@@ -1317,10 +1467,124 @@ class RadianceViewer {
             activeTab = 'script';
             tabScript.style.color = '#7a92b0'; tabScript.style.borderColor = '#7a92b0';
             tabTerm.style.color = '#555'; tabTerm.style.borderColor = 'transparent';
+            tabDeliver.style.color = '#555'; tabDeliver.style.borderColor = 'transparent';
             outputEl.style.display = 'none';
             this._termInputRow.style.display = 'none';
             scContainer.style.display = 'flex';
+            dvContainer.style.display = 'none';
             setTimeout(() => scTextarea.focus(), 50);
+        };
+        tabDeliver.onclick = () => {
+            activeTab = 'deliver';
+            tabDeliver.style.color = '#00a8ff'; tabDeliver.style.borderColor = '#00a8ff';
+            tabTerm.style.color = '#555'; tabTerm.style.borderColor = 'transparent';
+            tabScript.style.color = '#555'; tabScript.style.borderColor = 'transparent';
+            outputEl.style.display = 'none';
+            this._termInputRow.style.display = 'none';
+            scContainer.style.display = 'none';
+            dvContainer.style.display = 'flex';
+        };
+
+        // Tab Switching Logic (cont)
+        const oldTabTermClick = tabTerm.onclick;
+        tabTerm.onclick = () => {
+            oldTabTermClick();
+            tabDeliver.style.color = '#555'; tabDeliver.style.borderColor = 'transparent';
+            dvContainer.style.display = 'none';
+        };
+
+        // VFX Delivery Logic (Phase 5)
+        dvRenderBtn.onclick = async () => {
+            const nodeId = this.node.id;
+            if (!nodeId) {
+                alert("Viewer not initialized properly (Missing instance ID). Please queue a prompt first.");
+                return;
+            }
+
+            dvRenderBtn.disabled = true;
+            dvRenderBtn.textContent = '◎ PROCESSING VFX RENDER...';
+            dvRenderBtn.style.opacity = '0.5';
+            dvProgressContainer.style.display = 'flex';
+            dvProgressBar.style.width = '0%';
+            dvProgressLabel.textContent = 'Initializing Export Pipeline...';
+
+            let progressInterval = setInterval(async () => {
+                try {
+                    const progRes = await fetch(`/radiance/progress?id=${nodeId}`);
+                    const prog = await progRes.json();
+                    const percent = (prog.current / prog.total) * 100;
+                    dvProgressBar.style.width = `${percent}%`;
+                    dvProgressLabel.textContent = `${prog.message} [${percent.toFixed(0)}%]`;
+                    if (prog.status === 'done' || prog.status === 'error') clearInterval(progressInterval);
+                } catch (e) {
+                    clearInterval(progressInterval);
+                }
+            }, 800);
+
+            try {
+                const response = await api.fetchApi('/radiance/deliver', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        instance_id: nodeId,
+                        grading: {
+                            exposure: this.exposure,
+                            gamma: Array.isArray(this.gamma) ? this.gamma[0] : (this.gamma || 1.0),
+                            gain: Array.isArray(this.gain) ? this.gain[0] : (this.gain || 1.0),
+                            lift: Array.isArray(this.lift) ? this.lift[0] : (this.lift || 0.0),
+                            saturation: this.saturation,
+                            temperature: this.temperature,
+                            colorScience: this.colorScience || 0
+                        },
+                        settings: {
+                            filename: dvFilename.value,
+                            path: dvPath.value,
+                            format: dvFormat.value,
+                            fps: dvFPS.value,
+                            quality: dvQuality.value,
+                            upscale_2x: dvUpscale.checked,
+                            smart_versioning: dvSmartVer.checked,
+                            include_slate: dvSlate.checked,
+                            burn_in_tc: dvBurnTC.checked,
+                            burn_in_ver: dvBurnVer.checked
+                        }
+                    })
+                });
+
+                const result = await response.json();
+                clearInterval(progressInterval);
+                
+                if (result.status === 'success') {
+                    dvProgressBar.style.width = '100%';
+                    dvProgressLabel.textContent = '◎ EXPORT COMPLETE';
+                    this._termLog('success', `[DELIVERY] ${result.message}`);
+                    if (result.qc) {
+                        const qcColor = result.qc.includes('[QC PASS]') ? '#00ff88' : '#ff4444';
+                        this._termLog('system', `<span style="color: ${qcColor}">${result.qc}</span>`);
+                    }
+                    this._termLog('system', ` Saved to: ${result.path}`);
+                    
+                    addHistoryItem(result.path, dvFilename.value, result.qc || 'QC N/A');
+                    
+                    setTimeout(() => {
+                        dvProgressContainer.style.display = 'none';
+                    }, 3000);
+
+                    tabTerm.onclick(); // Show success in terminal
+                } else {
+                    this._termLog('error', `[DELIVERY FAILED] ${result.error}`);
+                    dvProgressLabel.textContent = '◎ EXPORT FAILED';
+                    dvProgressBar.style.background = '#ff4444';
+                    tabTerm.onclick();
+                }
+            } catch (e) {
+                clearInterval(progressInterval);
+                this._termLog('error', `[API ERROR] ${e.message}`);
+                tabTerm.onclick();
+            } finally {
+                dvRenderBtn.disabled = false;
+                dvRenderBtn.textContent = '◎ ADD TO RENDER QUEUE & START EXPORT';
+                dvRenderBtn.style.opacity = '1';
+            }
         };
 
         // Script Runner Logic
@@ -7992,24 +8256,41 @@ else:
     }
 
     renderCurvesTab(container) {
-        container.style.cssText = 'display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 10px;';
+        container.style.cssText = 'display: flex; flex-direction: column; align-items: stretch; gap: 0; padding: 0;';
 
-        // 1. Create Editor Container — fixed height to prevent infinite resize loop
-        // (parent HUD is height:auto, so 100% or flex:1 would feed back into itself)
+        // ════════════════════════════════════════════════════════════════
+        //  DaVinci Resolve–style two-panel layout:
+        //    LEFT:  Curve editor canvas (fills available space)
+        //    RIGHT: Edit controls + Soft Clip panel (~190px sidebar)
+        // ════════════════════════════════════════════════════════════════
+
+        const mainRow = document.createElement('div');
+        mainRow.style.cssText = 'display: flex; flex: 1; min-height: 280px; border: 1px solid rgba(255,255,255,0.06); border-radius: 4px; overflow: hidden; background: #1a1a22;';
+        container.appendChild(mainRow);
+
+        // ── LEFT: Curve Editor Canvas ───────────────────────────────────
         const editorContainer = document.createElement('div');
-        editorContainer.style.cssText = 'position: relative; height: 300px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden;';
-        container.appendChild(editorContainer);
+        editorContainer.style.cssText = 'flex: 1; position: relative; min-width: 0;';
+        mainRow.appendChild(editorContainer);
 
-        // 2. Initialize Curve Editor
+        // ── RIGHT: Controls Sidebar ─────────────────────────────────────
+        const sidebar = document.createElement('div');
+        sidebar.style.cssText = `
+            width: 190px; min-width: 190px; background: #1e1e28;
+            border-left: 1px solid rgba(255,255,255,0.06);
+            display: flex; flex-direction: column; overflow-y: auto;
+            font-family: ${this.theme.mono};
+        `;
+        mainRow.appendChild(sidebar);
+
+        // ─────────────────────────────────────────────────────────────────
+        //  Initialize Curve Editor
+        // ─────────────────────────────────────────────────────────────────
         if (!this.curveEditor) {
             this.curveEditor = new RadianceCurveEditor(280, 280, this.theme, (data, secData) => {
                 if (this.renderer) {
                     this.renderer.updateCurveLut(data);
 
-                    // FIX 5: Compute per-channel slope at lut[255] for HDR extrapolation.
-                    // slope = (lut[255] - lut[254]) * 255, clamped to [0, 4].
-                    // A flat or rolled-off curve (e.g. Film Print) will have slope < 1.0,
-                    // correctly carrying that rolloff into HDR specular highlights.
                     const sR = Math.max(0, Math.min(4, (data[255 * 4 + 0] - data[254 * 4 + 0]) * 255));
                     const sG = Math.max(0, Math.min(4, (data[255 * 4 + 1] - data[254 * 4 + 1]) * 255));
                     const sB = Math.max(0, Math.min(4, (data[255 * 4 + 2] - data[254 * 4 + 2]) * 255));
@@ -8017,11 +8298,6 @@ else:
 
                     if (secData) {
                         this.renderer.updateSecondaryCurveLut(secData);
-                        // Only activate secondary curves if they were actually edited
-                        // (identity LUT has all values at exactly 0.5)
-                        // FIX 4: Reset secondaryCurveMix to 0.0 when identity is
-                        // restored (e.g. after user hits Reset), so the GPU bypass
-                        // kicks in again and the secondary pass doesn't run for nothing.
                         const isIdentity = secData.every((v, i) => i % 4 === 3 ? true : Math.abs(v - 0.5) < 0.001);
                         if (!isIdentity) {
                             this.renderer.setSecondaryCurveMix(1.0);
@@ -8034,79 +8310,360 @@ else:
                 }
             });
             if (this.image) this.curveEditor.updateHistogram(this.image);
-            // Immediately upload neutral default LUTs to clear any stale texture state
             this.curveEditor.notifyChange();
         }
 
         editorContainer.appendChild(this.curveEditor.canvas);
+        this.curveEditor.canvas.style.cssText = 'width: 100%; height: 100%; display: block;';
 
-        // Observe resize
-        const curveResizeObs = new ResizeObserver(entries => {
+        // Observe resize — clean up previous observer if tab was re-rendered
+        if (this._curveResizeObs) {
+            this._curveResizeObs.disconnect();
+        }
+        this._curveResizeObs = new ResizeObserver(entries => {
             for (const entry of entries) {
                 const { width, height } = entry.contentRect;
                 if (width > 0 && height > 0) {
-                    this.curveEditor.resize(width, height);
+                    this.curveEditor.resize(Math.round(width), Math.round(height));
                 }
             }
         });
-        curveResizeObs.observe(editorContainer);
+        this._curveResizeObs.observe(editorContainer);
 
-        // 3. Channel Selectors (top-left overlay)
-        const channels = document.createElement('div');
-        channels.style.cssText = 'position: absolute; top: 10px; left: 36px; display: flex; gap: 4px; align-items: center;';
+        // ─────────────────────────────────────────────────────────────────
+        //  SIDEBAR: Edit Section
+        // ─────────────────────────────────────────────────────────────────
+        const editSection = document.createElement('div');
+        editSection.style.cssText = 'padding: 12px 10px; border-bottom: 1px solid rgba(255,255,255,0.06);';
+        sidebar.appendChild(editSection);
 
-        ['RGB', 'R', 'G', 'B', 'HueVsHue', 'HueVsSat', 'HueVsLuma'].forEach(ch => {
+        // "Edit" header with pencil + channel buttons
+        const editHeader = document.createElement('div');
+        editHeader.style.cssText = 'display: flex; align-items: center; gap: 6px; margin-bottom: 10px;';
+        editSection.appendChild(editHeader);
+
+        const editLabel = document.createElement('div');
+        editLabel.textContent = 'Edit';
+        editLabel.style.cssText = 'color: #999; font-size: 11px; font-weight: 600; margin-right: 4px;';
+        editHeader.appendChild(editLabel);
+
+        // Pencil icon
+        const editPen = document.createElement('div');
+        editPen.innerHTML = '✎';
+        editPen.style.cssText = 'color: #666; font-size: 12px; margin-right: 2px;';
+        editHeader.appendChild(editPen);
+
+        // Y / R / G / B channel buttons — DaVinci colored squares
+        const channelMap = [
+            { ch: 'RGB', label: 'Y', color: '#e0e0e0', bg: 'rgba(255,255,255,0.12)' },
+            { ch: 'R',   label: 'R', color: '#ff4444', bg: 'rgba(255,68,68,0.2)' },
+            { ch: 'G',   label: 'G', color: '#44cc44', bg: 'rgba(68,204,68,0.2)' },
+            { ch: 'B',   label: 'B', color: '#4488ff', bg: 'rgba(68,136,255,0.2)' }
+        ];
+
+        const channelBtns = {};
+
+        const refreshChannelBtns = () => {
+            channelMap.forEach(({ ch, color, bg }) => {
+                const btn = channelBtns[ch];
+                if (!btn) return;
+                const isActive = this.curveEditor.activeChannel === ch;
+                btn.style.background = isActive ? bg : 'rgba(255,255,255,0.04)';
+                btn.style.borderColor = isActive ? color : 'rgba(255,255,255,0.1)';
+                btn.style.color = isActive ? '#fff' : color;
+                btn.style.boxShadow = isActive ? `0 0 6px ${color}44` : 'none';
+            });
+        };
+
+        channelMap.forEach(({ ch, label, color, bg }) => {
             const btn = document.createElement('div');
-            const label = ch === 'HueVsHue' ? 'HvH' : ch === 'HueVsSat' ? 'HvS' : ch === 'HueVsLuma' ? 'HvL' : ch;
             btn.textContent = label;
-            const isActive = this.curveEditor.activeChannel === ch;
-            const color = ch === 'R' ? '#ff4d4d' : ch === 'G' ? '#4dff4d' : ch === 'B' ? '#4d4dff' :
-                ch === 'HueVsHue' ? '#ffaaaa' : ch === 'HueVsSat' ? '#ffff44' : ch === 'HueVsLuma' ? '#44ffaa' : '#ffffff';
-
             btn.style.cssText = `
-            width: 32px; height: 20px;
-            background: ${isActive ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.6)'};
-            color: ${isActive ? '#fff' : color};
-            border: 1px solid ${isActive ? color : 'rgba(255,255,255,0.1)'};
-            border-radius: 3px;
-            display: flex; align-items: center; justify-content: center;
-            font-size: 10px; font-weight: bold; cursor: pointer;
-            transition: all 0.15s;
-            text-shadow: ${isActive ? `0 0 5px ${color}` : 'none'};
-        `;
-            btn.onmouseenter = () => { if (!isActive) btn.style.background = 'rgba(255,255,255,0.1)'; };
-            btn.onmouseleave = () => { if (!isActive) btn.style.background = 'rgba(0,0,0,0.6)'; };
+                width: 22px; height: 20px;
+                background: rgba(255,255,255,0.04);
+                color: ${color};
+                border: 1px solid rgba(255,255,255,0.1);
+                border-radius: 3px;
+                display: flex; align-items: center; justify-content: center;
+                font-size: 11px; font-weight: bold; cursor: pointer;
+                transition: all 0.12s;
+            `;
+            btn.onmouseenter = () => { if (this.curveEditor.activeChannel !== ch) btn.style.background = 'rgba(255,255,255,0.08)'; };
+            btn.onmouseleave = () => refreshChannelBtns();
             btn.onclick = () => {
                 this.curveEditor.setActiveChannel(ch);
-                this._lastRenderContent();
+                refreshChannelBtns();
+                refreshGainInputs();
             };
-            channels.appendChild(btn);
+            channelBtns[ch] = btn;
+            editHeader.appendChild(btn);
         });
 
         // Copy to All Button
         const copyBtn = document.createElement('div');
         copyBtn.textContent = '📋';
         copyBtn.title = 'Copy RGB to All Channels';
-        copyBtn.style.cssText = 'width: 28px; height: 20px; background: rgba(0,0,0,0.6); border: 1px solid rgba(255,255,255,0.1); border-radius: 3px; display: flex; align-items: center; justify-content: center; font-size: 10px; cursor: pointer; transition: all 0.15s; margin-left: 4px;';
+        copyBtn.style.cssText = 'width: 22px; height: 20px; background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.1); border-radius: 3px; display: flex; align-items: center; justify-content: center; font-size: 10px; cursor: pointer; transition: all 0.15s; margin-left: 2px;';
         copyBtn.onmouseenter = () => copyBtn.style.background = 'rgba(255,255,255,0.1)';
-        copyBtn.onmouseleave = () => copyBtn.style.background = 'rgba(0,0,0,0.6)';
+        copyBtn.onmouseleave = () => copyBtn.style.background = 'rgba(0,0,0,0.4)';
         copyBtn.onclick = () => {
             this.curveEditor.copyRGBToAll();
             this._lastRenderContent();
         };
-        channels.appendChild(copyBtn);
+        editHeader.appendChild(copyBtn);
 
-        editorContainer.appendChild(channels);
+        refreshChannelBtns();
 
-        // 4. Reset & Presets Group (top-right overlay)
-        const topButtons = document.createElement('div');
-        topButtons.style.cssText = 'position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; align-items: center;';
+        // Per-channel gain rows (DaVinci "intensity" inputs)
+        const gainContainer = document.createElement('div');
+        gainContainer.style.cssText = 'display: flex; flex-direction: column; gap: 4px;';
+        editSection.appendChild(gainContainer);
 
-        // HDR Range Dropdown (v2.1)
+        const gainInputs = {};
+
+        const refreshGainInputs = () => {
+            Object.keys(gainInputs).forEach(key => {
+                const gainKey = key === 'RGB' ? 'Y' : key;
+                gainInputs[key].value = this.curveEditor.channelGain[gainKey];
+            });
+        };
+
+        const createGainRow = (ch, label, dotColor) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display: flex; align-items: center; gap: 6px; height: 24px;';
+
+            // Color dot
+            const dot = document.createElement('div');
+            dot.style.cssText = `width: 6px; height: 6px; border-radius: 50%; background: ${dotColor}; flex-shrink: 0;`;
+            row.appendChild(dot);
+
+            // Numeric input
+            const input = document.createElement('input');
+            input.type = 'number';
+            input.min = '0'; input.max = '200'; input.step = '1';
+            const gainKey = ch === 'RGB' ? 'Y' : ch;
+            input.value = this.curveEditor.channelGain[gainKey];
+            input.style.cssText = `
+                width: 50px; background: #2a2a35; color: #ddd;
+                border: 1px solid rgba(255,255,255,0.1); border-radius: 3px;
+                font-size: 11px; font-family: ${this.theme.mono};
+                padding: 2px 6px; text-align: center; outline: none;
+            `;
+            input.onfocus = () => { input.style.borderColor = 'rgba(255,255,255,0.3)'; };
+            input.onblur = () => { input.style.borderColor = 'rgba(255,255,255,0.1)'; };
+            input.oninput = () => {
+                const v = Math.max(0, Math.min(200, parseInt(input.value) || 0));
+                this.curveEditor.channelGain[gainKey] = v;
+                this.curveEditor.notifyChange();
+            };
+            gainInputs[ch] = input;
+            row.appendChild(input);
+
+            // Reset ↺ per channel
+            const resetBtn = document.createElement('div');
+            resetBtn.innerHTML = '↺';
+            resetBtn.title = `Reset ${label}`;
+            resetBtn.style.cssText = 'color: #555; cursor: pointer; font-size: 14px; margin-left: auto; transition: color 0.15s;';
+            resetBtn.onmouseenter = () => { resetBtn.style.color = '#aaa'; };
+            resetBtn.onmouseleave = () => { resetBtn.style.color = '#555'; };
+            resetBtn.onclick = () => {
+                this.curveEditor.channelGain[gainKey] = 100;
+                input.value = 100;
+                if (this.curveEditor.activeChannel === ch) {
+                    this.curveEditor.resetActiveChannel();
+                }
+                this.curveEditor.notifyChange();
+                this._lastRenderContent();
+            };
+            row.appendChild(resetBtn);
+
+            return row;
+        };
+
+        gainContainer.appendChild(createGainRow('RGB', 'Y (Master)', '#e0e0e0'));
+        gainContainer.appendChild(createGainRow('R', 'Red', '#ff4444'));
+        gainContainer.appendChild(createGainRow('G', 'Green', '#44cc44'));
+        gainContainer.appendChild(createGainRow('B', 'Blue', '#4488ff'));
+
+        // ─────────────────────────────────────────────────────────────────
+        //  SIDEBAR: Soft Clip Section
+        // ─────────────────────────────────────────────────────────────────
+        const softClipSection = document.createElement('div');
+        softClipSection.style.cssText = 'padding: 12px 10px; border-bottom: 1px solid rgba(255,255,255,0.06);';
+        sidebar.appendChild(softClipSection);
+
+        // Header with toggle + R/G/B buttons
+        const scHeader = document.createElement('div');
+        scHeader.style.cssText = 'display: flex; align-items: center; gap: 6px; margin-bottom: 10px;';
+        softClipSection.appendChild(scHeader);
+
+        const scLabel = document.createElement('div');
+        scLabel.textContent = 'Soft Clip';
+        scLabel.style.cssText = 'color: #999; font-size: 11px; font-weight: 600; margin-right: 4px;';
+        scHeader.appendChild(scLabel);
+
+        // Enable toggle (pen icon)
+        const scToggle = document.createElement('div');
+        scToggle.innerHTML = '✎';
+        scToggle.style.cssText = `
+            color: ${this.curveEditor.softClipEnabled ? '#fff' : '#555'};
+            font-size: 12px; cursor: pointer; transition: color 0.15s; margin-right: 2px;
+        `;
+        scToggle.onclick = () => {
+            this.curveEditor.softClipEnabled = !this.curveEditor.softClipEnabled;
+            scToggle.style.color = this.curveEditor.softClipEnabled ? '#fff' : '#555';
+            this.curveEditor.notifyChange();
+            this.render();
+        };
+        scHeader.appendChild(scToggle);
+
+        // R / G / B channel toggles for Soft Clip
+        ['R', 'G', 'B'].forEach(ch => {
+            const colors = { R: '#ff4444', G: '#44cc44', B: '#4488ff' };
+            const btn = document.createElement('div');
+            btn.textContent = ch;
+            const isOn = this.curveEditor.softClipChannels[ch];
+            btn.style.cssText = `
+                width: 22px; height: 20px;
+                background: ${isOn ? colors[ch] + '33' : 'rgba(255,255,255,0.04)'};
+                color: ${isOn ? '#fff' : colors[ch]};
+                border: 1px solid ${isOn ? colors[ch] : 'rgba(255,255,255,0.1)'};
+                border-radius: 3px;
+                display: flex; align-items: center; justify-content: center;
+                font-size: 10px; font-weight: bold; cursor: pointer;
+                transition: all 0.12s;
+            `;
+            btn.onclick = () => {
+                this.curveEditor.softClipChannels[ch] = !this.curveEditor.softClipChannels[ch];
+                const on = this.curveEditor.softClipChannels[ch];
+                btn.style.background = on ? colors[ch] + '33' : 'rgba(255,255,255,0.04)';
+                btn.style.color = on ? '#fff' : colors[ch];
+                btn.style.borderColor = on ? colors[ch] : 'rgba(255,255,255,0.1)';
+                this.curveEditor.notifyChange();
+            };
+            scHeader.appendChild(btn);
+        });
+
+        // Soft Clip sliders
+        const scSliders = document.createElement('div');
+        scSliders.style.cssText = 'display: flex; flex-direction: column; gap: 6px;';
+        softClipSection.appendChild(scSliders);
+
+        const createSCSlider = (label, paramKey, min, max, step) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display: flex; align-items: center; gap: 6px;';
+
+            const lbl = document.createElement('div');
+            lbl.textContent = label;
+            lbl.style.cssText = 'color: #777; font-size: 10px; min-width: 55px;';
+            row.appendChild(lbl);
+
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.min = min; slider.max = max; slider.step = step;
+            slider.value = this.curveEditor.softClipParams[paramKey];
+            slider.style.cssText = 'flex: 1; accent-color: #888; height: 3px; cursor: pointer;';
+            slider.oninput = () => {
+                this.curveEditor.softClipParams[paramKey] = parseFloat(slider.value);
+                this.curveEditor.notifyChange();
+                this.render();
+            };
+            row.appendChild(slider);
+
+            return row;
+        };
+
+        scSliders.appendChild(createSCSlider('Low', 'low', '0', '0.5', '0.005'));
+        scSliders.appendChild(createSCSlider('Low Soft', 'lowSoft', '0', '0.5', '0.005'));
+        scSliders.appendChild(createSCSlider('High', 'high', '0.5', '1.0', '0.005'));
+        scSliders.appendChild(createSCSlider('High Soft', 'highSoft', '0', '0.5', '0.005'));
+
+        // ─────────────────────────────────────────────────────────────────
+        //  SIDEBAR: Levels Section
+        // ─────────────────────────────────────────────────────────────────
+        const levelsSection = document.createElement('div');
+        levelsSection.style.cssText = 'padding: 12px 10px; border-bottom: 1px solid rgba(255,255,255,0.06);';
+        sidebar.appendChild(levelsSection);
+
+        const levelsTitle = document.createElement('div');
+        levelsTitle.textContent = 'Levels';
+        levelsTitle.style.cssText = 'color: #999; font-size: 11px; font-weight: 600; margin-bottom: 8px;';
+        levelsSection.appendChild(levelsTitle);
+
+        const createLevelSlider = (label, min, max, val, setter) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display: flex; align-items: center; gap: 6px; margin-bottom: 4px;';
+            const lbl = document.createElement('div');
+            lbl.style.cssText = 'color: #777; font-size: 10px; min-width: 55px;';
+            lbl.textContent = label;
+            row.appendChild(lbl);
+
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.min = min; slider.max = max; slider.step = '1';
+            slider.value = val;
+            slider.style.cssText = 'flex: 1; accent-color: #888; height: 3px; cursor: pointer;';
+
+            const valLabel = document.createElement('div');
+            valLabel.style.cssText = `color: #888; font-size: 9px; min-width: 24px; text-align: right; font-family: ${this.theme.mono};`;
+            valLabel.textContent = val;
+
+            slider.oninput = (e) => {
+                const v = parseInt(e.target.value) || 0;
+                valLabel.textContent = v;
+                setter(v);
+            };
+            row.appendChild(slider);
+            row.appendChild(valLabel);
+            return row;
+        };
+
+        let _inBlackSlider, _inWhiteSlider;
+        const _updateSliderConstraints = () => {
+            if (!_inBlackSlider || !_inWhiteSlider) return;
+            const bv = parseInt(_inBlackSlider.value) || 0;
+            const wv = parseInt(_inWhiteSlider.value) || 255;
+            _inBlackSlider.max = String(wv - 5);
+            _inWhiteSlider.min = String(bv + 5);
+        };
+
+        const inBlackRow = createLevelSlider('In Black', 0, 250, this.curveEditor.levels.inBlack, (v) => {
+            this.curveEditor.setLevels(v, this.curveEditor.levels.inWhite);
+            _updateSliderConstraints();
+        });
+        const inWhiteRow = createLevelSlider('In White', 5, 255, this.curveEditor.levels.inWhite, (v) => {
+            this.curveEditor.setLevels(this.curveEditor.levels.inBlack, v);
+            _updateSliderConstraints();
+        });
+
+        _inBlackSlider = inBlackRow.querySelector('input[type="range"]');
+        _inWhiteSlider = inWhiteRow.querySelector('input[type="range"]');
+        _updateSliderConstraints();
+
+        levelsSection.appendChild(inBlackRow);
+        levelsSection.appendChild(inWhiteRow);
+
+        // ─────────────────────────────────────────────────────────────────
+        //  SIDEBAR: Presets & Mix
+        // ─────────────────────────────────────────────────────────────────
+        const bottomSection = document.createElement('div');
+        bottomSection.style.cssText = 'padding: 12px 10px; border-bottom: 1px solid rgba(255,255,255,0.06);';
+        sidebar.appendChild(bottomSection);
+
+        // HDR Range + Presets row
+        const rangePresetsRow = document.createElement('div');
+        rangePresetsRow.style.cssText = 'display: flex; gap: 6px; margin-bottom: 8px;';
+        bottomSection.appendChild(rangePresetsRow);
+
+        // HDR Range Dropdown
         const rangeSelect = document.createElement('select');
         rangeSelect.title = 'HDR Range Visualization';
-        rangeSelect.style.cssText = 'background: rgba(0,0,0,0.85); color: #e2a; border: 1px solid rgba(221,34,170,0.3); border-radius: 3px; font-size: 10px; padding: 2px 4px; outline: none; cursor: pointer; height: 20px; font-weight: bold;';
-
+        rangeSelect.style.cssText = `
+            flex: 0 0 auto; background: #2a2a35; color: #e2a;
+            border: 1px solid rgba(221,34,170,0.3); border-radius: 3px;
+            font-size: 10px; padding: 2px 6px; outline: none; cursor: pointer;
+            font-family: ${this.theme.mono}; font-weight: bold;
+        `;
         ['1x', '2x', '4x'].forEach(r => {
             const opt = document.createElement('option');
             opt.value = parseFloat(r);
@@ -8117,12 +8674,16 @@ else:
             this.curveEditor.rangeY = parseFloat(e.target.value);
             this.curveEditor.draw();
         };
-        topButtons.appendChild(rangeSelect);
+        rangePresetsRow.appendChild(rangeSelect);
 
-        // Presets Dropdown
+        // Presets dropdown
         const presetsSelect = document.createElement('select');
-        presetsSelect.style.cssText = 'background: rgba(0,0,0,0.85); color: #ccc; border: 1px solid rgba(255,255,255,0.15); border-radius: 3px; font-size: 10px; padding: 2px 4px; outline: none; cursor: pointer; height: 20px;';
-
+        presetsSelect.style.cssText = `
+            flex: 1; background: #2a2a35; color: #ccc;
+            border: 1px solid rgba(255,255,255,0.1); border-radius: 3px;
+            font-size: 10px; padding: 2px 6px; outline: none; cursor: pointer;
+            font-family: ${this.theme.mono};
+        `;
         ['Presets...', 'Punchy', 'High Contrast', 'Flat / Log', 'Shadow Lift', 'S-Curve', 'Film Print', 'Bleach Bypass', 'Cross Process'].forEach(p => {
             const opt = document.createElement('option');
             opt.value = p === 'Presets...' ? '' : p;
@@ -8136,155 +8697,166 @@ else:
                 this._lastRenderContent();
             }
         };
-        topButtons.appendChild(presetsSelect);
+        rangePresetsRow.appendChild(presetsSelect);
 
-        const resetGroup = document.createElement('div');
-        resetGroup.style.cssText = 'display: flex; gap: 4px;';
-
-        const resetChBtn = document.createElement('div');
-        resetChBtn.textContent = '↺';
-        resetChBtn.title = 'Reset Active Channel';
-        resetChBtn.style.cssText = 'width: 24px; height: 20px; background: rgba(0,0,0,0.6); border: 1px solid rgba(255,255,255,0.1); border-radius: 3px; display: flex; align-items: center; justify-content: center; color: #888; cursor: pointer; font-size: 14px; transition: all 0.15s;';
-        resetChBtn.onmouseenter = () => { resetChBtn.style.color = '#fff'; resetChBtn.style.background = 'rgba(255,255,255,0.1)'; };
-        resetChBtn.onmouseleave = () => { resetChBtn.style.color = '#888'; resetChBtn.style.background = 'rgba(0,0,0,0.6)'; };
-        resetChBtn.onclick = () => { this.curveEditor.resetActiveChannel(); this._lastRenderContent(); };
-        resetGroup.appendChild(resetChBtn);
-
-        const resetAllBtn = document.createElement('div');
-        resetAllBtn.textContent = '⟲';
-        resetAllBtn.title = 'Reset All Channels';
-        resetAllBtn.style.cssText = 'width: 24px; height: 20px; background: rgba(0,0,0,0.6); border: 1px solid rgba(255,255,255,0.1); border-radius: 3px; display: flex; align-items: center; justify-content: center; color: #888; cursor: pointer; font-size: 14px; transition: all 0.15s;';
-        resetAllBtn.onmouseenter = () => { resetAllBtn.style.color = '#ff4d4d'; resetAllBtn.style.background = 'rgba(255,0,0,0.1)'; };
-        resetAllBtn.onmouseleave = () => { resetAllBtn.style.color = '#888'; resetAllBtn.style.background = 'rgba(0,0,0,0.6)'; };
-        resetAllBtn.onclick = () => {
-            this.curveEditor.resetAll();
-            this.curveMix = 1.0;
-            if (this.renderer) this.renderer.setCurveMix(1.0);
-            this._lastRenderContent();
-        };
-        resetGroup.appendChild(resetAllBtn);
-
-        topButtons.appendChild(resetGroup);
-        editorContainer.appendChild(topButtons);
-
-        // 5. Mix Slider
+        // Mix slider
         const mixRow = document.createElement('div');
-        mixRow.style.cssText = 'display: flex; align-items: center; gap: 10px; padding: 4px 5px; background: rgba(0,0,0,0.25); border-radius: 4px;';
+        mixRow.style.cssText = 'display: flex; align-items: center; gap: 6px;';
 
         const mixLabel = document.createElement('div');
-        mixLabel.style.cssText = `color: ${this.theme.textDim}; font-size: 10px; font-weight: 600; text-transform: uppercase; min-width: 35px;`;
         mixLabel.textContent = 'MIX';
+        mixLabel.style.cssText = 'color: #666; font-size: 9px; font-weight: 700; min-width: 26px;';
         mixRow.appendChild(mixLabel);
 
         const mixSlider = document.createElement('input');
         mixSlider.type = 'range';
         mixSlider.min = '0'; mixSlider.max = '100'; mixSlider.step = '1';
         mixSlider.value = String(Math.round((this.curveMix !== undefined ? this.curveMix : 1.0) * 100));
-        mixSlider.style.cssText = 'flex: 1; accent-color: #00a8ff; height: 4px; cursor: pointer;';
+        mixSlider.style.cssText = 'flex: 1; accent-color: #888; height: 3px; cursor: pointer;';
+
+        const mixValue = document.createElement('div');
+        mixValue.style.cssText = `color: #888; font-size: 9px; min-width: 28px; text-align: right; font-family: ${this.theme.mono};`;
+        mixValue.textContent = Math.round((this.curveMix !== undefined ? this.curveMix : 1.0) * 100) + '%';
+
         mixSlider.oninput = (e) => {
-            this.curveMix = parseInt(e.target.value) / 100;
+            this.curveMix = (parseInt(e.target.value) || 0) / 100;
             if (this.renderer) this.renderer.setCurveMix(this.curveMix);
             mixValue.textContent = e.target.value + '%';
             this.render();
         };
         mixRow.appendChild(mixSlider);
-
-        const mixValue = document.createElement('div');
-        mixValue.style.cssText = 'color: #aaa; font-size: 10px; min-width: 32px; text-align: right; font-family: ' + this.theme.mono + ';';
-        mixValue.textContent = Math.round((this.curveMix !== undefined ? this.curveMix : 1.0) * 100) + '%';
         mixRow.appendChild(mixValue);
+        bottomSection.appendChild(mixRow);
 
-        container.appendChild(mixRow);
+        // Reset buttons
+        const resetRow = document.createElement('div');
+        resetRow.style.cssText = 'display: flex; gap: 6px; margin-top: 10px;';
+        bottomSection.appendChild(resetRow);
 
-        // 6. Levels Controls
-        const levelsRow = document.createElement('div');
-        levelsRow.style.cssText = 'display: flex; flex-direction: column; gap: 4px; padding: 10px; background: rgba(0,0,0,0.25); border-radius: 4px; margin-top: 4px;';
+        const resetChBtn = document.createElement('button');
+        resetChBtn.textContent = '↺ Channel';
+        resetChBtn.style.cssText = `
+            flex: 1; padding: 4px; background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08); border-radius: 3px;
+            color: #888; font-size: 9px; cursor: pointer; transition: all 0.15s;
+            font-family: ${this.theme.mono};
+        `;
+        resetChBtn.onmouseenter = () => { resetChBtn.style.color = '#fff'; resetChBtn.style.borderColor = 'rgba(255,255,255,0.2)'; };
+        resetChBtn.onmouseleave = () => { resetChBtn.style.color = '#888'; resetChBtn.style.borderColor = 'rgba(255,255,255,0.08)'; };
+        resetChBtn.onclick = () => { this.curveEditor.resetActiveChannel(); this._lastRenderContent(); };
+        resetRow.appendChild(resetChBtn);
 
-        const createLevelSlider = (label, min, max, val, setter) => {
-            const row = document.createElement('div');
-            row.style.cssText = 'display: flex; align-items: center; gap: 10px;';
-            const lbl = document.createElement('div');
-            lbl.style.cssText = `color: ${this.theme.textDim}; font-size: 10px; font-weight: 600; text-transform: uppercase; min-width: 60px;`;
-            lbl.textContent = label;
-            row.appendChild(lbl);
+        const resetAllBtn = document.createElement('button');
+        resetAllBtn.textContent = '⟲ All';
+        resetAllBtn.style.cssText = `
+            flex: 1; padding: 4px; background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08); border-radius: 3px;
+            color: #888; font-size: 9px; cursor: pointer; transition: all 0.15s;
+            font-family: ${this.theme.mono};
+        `;
+        resetAllBtn.onmouseenter = () => { resetAllBtn.style.color = '#ff4d4d'; resetAllBtn.style.borderColor = 'rgba(255,0,0,0.2)'; };
+        resetAllBtn.onmouseleave = () => { resetAllBtn.style.color = '#888'; resetAllBtn.style.borderColor = 'rgba(255,255,255,0.08)'; };
+        resetAllBtn.onclick = () => {
+            this.curveEditor.resetAll();
+            this.curveMix = 1.0;
+            if (this.renderer) this.renderer.setCurveMix(1.0);
+            this._lastRenderContent();
+        };
+        resetRow.appendChild(resetAllBtn);
 
-            const slider = document.createElement('input');
-            slider.type = 'range';
-            slider.min = min; slider.max = max; slider.step = '1';
-            slider.value = val;
-            slider.style.cssText = 'flex: 1; accent-color: #00a8ff; height: 3px; cursor: pointer;';
+        // Snapshot row
+        const snapRow = document.createElement('div');
+        snapRow.style.cssText = 'display: flex; gap: 6px; margin-top: 4px;';
+        bottomSection.appendChild(snapRow);
 
-            const valLabel = document.createElement('div');
-            valLabel.style.cssText = 'color: #aaa; font-size: 10px; min-width: 25px; text-align: right;';
-            valLabel.textContent = val;
+        const mkSnapBtn = (text, title, onClick) => {
+            const btn = document.createElement('button');
+            btn.textContent = text;
+            btn.title = title;
+            btn.style.cssText = `
+                flex: 1; padding: 4px; background: rgba(255,255,255,0.04);
+                border: 1px solid rgba(255,255,255,0.08); border-radius: 3px;
+                color: #888; font-size: 9px; cursor: pointer; transition: all 0.15s;
+                font-family: ${this.theme.mono};
+            `;
+            btn.onmouseenter = () => { btn.style.color = '#fff'; btn.style.borderColor = 'rgba(255,255,255,0.2)'; };
+            btn.onmouseleave = () => { btn.style.color = '#888'; btn.style.borderColor = 'rgba(255,255,255,0.08)'; };
+            btn.onclick = onClick;
+            return btn;
+        };
 
-            slider.oninput = (e) => {
-                const v = parseInt(e.target.value);
-                valLabel.textContent = v;
-                setter(v);
+        snapRow.appendChild(mkSnapBtn('📌 Snap', 'Save reference snapshot (O)', () => {
+            this.curveEditor.saveSnapshot();
+        }));
+        snapRow.appendChild(mkSnapBtn('✕ Clear', 'Clear snapshot', () => {
+            this.curveEditor.clearSnapshot();
+        }));
+
+        // ─────────────────────────────────────────────────────────────────
+        //  SIDEBAR: Hue Curves (collapsible)
+        // ─────────────────────────────────────────────────────────────────
+        const hueSection = document.createElement('div');
+        hueSection.style.cssText = 'padding: 12px 10px; border-bottom: 1px solid rgba(255,255,255,0.06);';
+        sidebar.appendChild(hueSection);
+
+        const hueHeader = document.createElement('div');
+        hueHeader.style.cssText = 'display: flex; align-items: center; gap: 6px; margin-bottom: 6px;';
+
+        const hueLabel = document.createElement('div');
+        hueLabel.textContent = 'Hue Curves';
+        hueLabel.style.cssText = 'color: #999; font-size: 11px; font-weight: 600;';
+        hueHeader.appendChild(hueLabel);
+        hueSection.appendChild(hueHeader);
+
+        const hueBtns = document.createElement('div');
+        hueBtns.style.cssText = 'display: flex; gap: 4px;';
+        hueSection.appendChild(hueBtns);
+
+        [
+            { ch: 'HueVsHue', label: 'HvH', color: '#ffaaaa' },
+            { ch: 'HueVsSat', label: 'HvS', color: '#fff144' },
+            { ch: 'HueVsLuma', label: 'HvL', color: '#44ffaa' }
+        ].forEach(({ ch, label, color }) => {
+            const btn = document.createElement('div');
+            btn.textContent = label;
+            btn.style.cssText = `
+                padding: 3px 8px; background: rgba(255,255,255,0.04);
+                border: 1px solid rgba(255,255,255,0.08); border-radius: 3px;
+                color: ${color}; font-size: 10px; font-weight: bold; cursor: pointer;
+                transition: all 0.12s;
+            `;
+            btn.onmouseenter = () => { btn.style.background = 'rgba(255,255,255,0.08)'; };
+            btn.onmouseleave = () => { btn.style.background = this.curveEditor.activeChannel === ch ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.04)'; };
+            btn.onclick = () => {
+                this.curveEditor.setActiveChannel(ch);
+                refreshChannelBtns();
+                this._lastRenderContent();
             };
-            row.appendChild(slider);
-            row.appendChild(valLabel);
-            return row;
-        };
-
-        // FIX 7: Allow full 0–255 range on both sliders. Cross-guard is enforced
-        // dynamically: inBlack slider max tracks (inWhite - 5), inWhite slider min
-        // tracks (inBlack + 5). This eliminates the 100–150 dead zone while still
-        // preventing the two handles from crossing (which would invert the LUT).
-        let _inBlackSlider, _inWhiteSlider;
-
-        const _updateSliderConstraints = () => {
-            if (!_inBlackSlider || !_inWhiteSlider) return;
-            const bv = parseInt(_inBlackSlider.value);
-            const wv = parseInt(_inWhiteSlider.value);
-            _inBlackSlider.max = String(wv - 5);
-            _inWhiteSlider.min = String(bv + 5);
-        };
-
-        const inBlackRow = createLevelSlider('IN BLACK', 0, 250, this.curveEditor.levels.inBlack, (v) => {
-            this.curveEditor.setLevels(v, this.curveEditor.levels.inWhite);
-            _updateSliderConstraints();
+            hueBtns.appendChild(btn);
         });
-        const inWhiteRow = createLevelSlider('IN WHITE', 5, 255, this.curveEditor.levels.inWhite, (v) => {
-            this.curveEditor.setLevels(this.curveEditor.levels.inBlack, v);
-            _updateSliderConstraints();
-        });
-
-        // Grab slider elements for cross-constraint wiring
-        _inBlackSlider = inBlackRow.querySelector('input[type="range"]');
-        _inWhiteSlider = inWhiteRow.querySelector('input[type="range"]');
-        _updateSliderConstraints(); // Apply initial constraints
-
-        levelsRow.appendChild(inBlackRow);
-        levelsRow.appendChild(inWhiteRow);
-        container.appendChild(levelsRow);
 
         // ── v4.1: Pipeline Bit-Depth Selector ────────────────────────────────
         // Industry-standard 3-button group: INT 8 / FLOAT 16 / FLOAT 32
         // Matches the precision selector found in Nuke, Flame, and Baselight.
         const precSection = document.createElement('div');
-        precSection.style.cssText = 'display: flex; flex-direction: column; gap: 6px; padding: 10px; background: rgba(0,0,0,0.25); border-radius: 4px; margin-top: 4px; border: 1px solid rgba(255,255,255,0.06);';
+        precSection.style.cssText = 'padding: 12px 10px; display: flex; flex-direction: column; gap: 6px;';
+        sidebar.appendChild(precSection);
 
         const precHeader = document.createElement('div');
-        precHeader.style.cssText = `display: flex; align-items: center; justify-content: space-between;`;
+        precHeader.style.cssText = 'display: flex; align-items: center; justify-content: space-between;';
         const precTitle = document.createElement('div');
-        precTitle.textContent = 'PIPELINE BIT DEPTH';
-        precTitle.style.cssText = `color: ${this.theme.textDim}; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px;`;
-        const precHint = document.createElement('div');
-        precHint.textContent = 'Alt+B';
-        precHint.style.cssText = 'color: rgba(255,255,255,0.2); font-size: 9px; font-family: ' + this.theme.mono + ';';
+        precTitle.textContent = 'BIT DEPTH';
+        precTitle.style.cssText = `color: ${this.theme.textDim}; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px;`;
         precHeader.appendChild(precTitle);
-        precHeader.appendChild(precHint);
         precSection.appendChild(precHeader);
 
         const precBtnRow = document.createElement('div');
-        precBtnRow.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px;';
+        precBtnRow.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 3px;';
 
         const precModes = [
-            { mode: 'u8',  label: 'INT 8',     sub: '8-bit SDR',       color: '#707088' },
-            { mode: 'f16', label: 'FLOAT 16',  sub: 'Half Float HDR',  color: '#60a5fa' },
-            { mode: 'f32', label: 'FLOAT 32',  sub: 'Full Float',      color: '#4ade80' }
+            { mode: 'u8',  label: 'INT 8',     color: '#707088' },
+            { mode: 'f16', label: 'FP 16',     color: '#60a5fa' },
+            { mode: 'f32', label: 'FP 32',     color: '#4ade80' }
         ];
 
         const getCurrentMode = () => this.renderer ? this.renderer.pipelinePrecision : (localStorage.getItem('radiance_pipeline_precision') || 'f32');
@@ -8298,30 +8870,19 @@ else:
                 const active = cur === mode;
                 btn.style.background = active ? `${color}22` : 'rgba(255,255,255,0.03)';
                 btn.style.borderColor = active ? color : 'rgba(255,255,255,0.08)';
-                btn.style.color = active ? color : '#666';
-                btn.querySelector('.prec-sub').style.color = active ? `${color}aa` : '#444';
+                btn.style.color = active ? color : '#555';
             });
         };
 
-        precModes.forEach(({ mode, label, sub, color }) => {
+        precModes.forEach(({ mode, label, color }) => {
             const btn = document.createElement('button');
+            btn.textContent = label;
             btn.style.cssText = `
-                display: flex; flex-direction: column; align-items: center; justify-content: center;
-                gap: 2px; padding: 8px 4px; border-radius: 5px; cursor: pointer;
+                padding: 4px 2px; border-radius: 3px; cursor: pointer;
                 border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03);
                 transition: all 0.15s ease; font-family: ${this.theme.mono};
+                font-size: 9px; font-weight: 700; letter-spacing: 0.3px;
             `;
-            const labelEl = document.createElement('div');
-            labelEl.textContent = label;
-            labelEl.style.cssText = 'font-size: 10px; font-weight: 700; letter-spacing: 0.5px;';
-
-            const subEl = document.createElement('div');
-            subEl.className = 'prec-sub';
-            subEl.textContent = sub;
-            subEl.style.cssText = 'font-size: 8px; letter-spacing: 0.3px;';
-
-            btn.appendChild(labelEl);
-            btn.appendChild(subEl);
             precBtns[mode] = btn;
 
             btn.addEventListener('mouseenter', () => {
@@ -8336,31 +8897,17 @@ else:
             precBtnRow.appendChild(btn);
         });
 
-        // Memory estimate label
-        const memLabel = document.createElement('div');
-        memLabel.style.cssText = 'color: rgba(255,255,255,0.25); font-size: 9px; text-align: center; margin-top: 2px; font-family: ' + this.theme.mono + ';';
-        const updateMemLabel = () => {
-            if (!this.imageWidth || !this.imageHeight) { memLabel.textContent = ''; return; }
-            const px = this.imageWidth * this.imageHeight;
-            const mode = getCurrentMode();
-            const bpp = mode === 'f32' ? 16 : mode === 'f16' ? 8 : 4; // bytes per pixel RGBA
-            const mb = (px * bpp / 1048576).toFixed(1);
-            memLabel.textContent = `${this.imageWidth}x${this.imageHeight}  ·  ${mb} MB VRAM est.`;
-        };
-
         precSection.appendChild(precBtnRow);
-        precSection.appendChild(memLabel);
-        container.appendChild(precSection);
 
-        // Restore saved precision and refresh button state
+        // Restore saved precision
         const savedPrec = localStorage.getItem('radiance_pipeline_precision') || 'f32';
         if (this.renderer && this.renderer.pipelinePrecision !== savedPrec) {
             this._setPipelinePrecision(savedPrec);
         }
         refreshPrecBtns();
-        updateMemLabel();
         this._updateBitDepthBadge();
     }
+
 
     renderQualifiersTab(container) {
         container.style.cssText = 'display: flex; flex-direction: column; flex: 1; gap: 10px; padding: 10px; min-height: 0; overflow-y: auto;';
@@ -11913,72 +12460,99 @@ app.registerExtension({
                 zImg.onerror = (e) => console.warn("[Radiance] Failed to load zdepth image:", imgData.filename);
                 zImg.src = api.apiURL(`/view?filename=${encodeURIComponent(imgData.filename)}&subfolder=${encodeURIComponent(imgData.subfolder || '')}&type=${imgData.type || 'temp'}`);
             });
+
+            // Phase 5: Capture Instance ID
+            if (message.instance_id && message.instance_id.length > 0) {
+                viewer.instanceId = message.instance_id[0];
+            }
         };
     }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//                           CURVE EDITOR
+// ═══════════════════════════════════════════════════════════════════════════════
+//                    CURVE EDITOR — DaVinci Resolve Style
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class RadianceCurveEditor {
     /**
-     * Industry-standard curve editor (DaVinci Resolve / Nuke / Flame paradigm).
+     * DaVinci Resolve–style curve editor with Fritsch–Carlson monotonic interpolation.
      *
-     * Interpolation: Monotonic cubic Hermite (Fritsch–Carlson, 1980).
-     *   - Guaranteed no overshoot between control points
-     *   - Smooth C¹ continuity
-     *   - Same algorithm used by DaVinci Resolve and Nuke curve tools
+     * Visual style matches Resolve's Curves – Custom panel:
+     *   - All RGB histograms rendered simultaneously as soft fills
+     *   - Clean curve line with round control points
+     *   - Minimal grid, dark cinematic background
+     *   - Per-channel gain multipliers (Edit intensity 0–200)
+     *   - Soft Clip controls (Low, Low Soft, High, High Soft)
      *
-     * Points are simple {x, y} — tangents are auto-computed from neighbors.
-     * No manual tangent handles; auto-smooth only (Resolve behaviour).
-     *
-     * LUT output is Float32Array(256×4 = 1024) RGBA for full HDR precision.
-     * Master RGB curve is evaluated first, then per-channel R/G/B on top.
+     * LUT output: Float32Array(256×4 = 1024) RGBA for full HDR precision.
+     * Master RGB curve evaluated first, then per-channel R/G/B on top.
      */
     constructor(width, height, theme, onChange) {
         this.width = width;
         this.height = height;
         this.theme = theme || { mono: 'monospace', textDim: '#888' };
         this.onChange = onChange;
-        this.padding = { left: 35, bottom: 25, top: 10, right: 10 };
+        this.padding = { left: 2, bottom: 2, top: 2, right: 2 };
 
         this.canvas = document.createElement('canvas');
         this.canvas.width = width;
         this.canvas.height = height;
+        this.canvas.tabIndex = 1;
+        this.canvas.style.outline = 'none';
         this.canvas.style.cursor = 'crosshair';
         this.ctx = this.canvas.getContext('2d');
 
         this.histograms = { R: null, G: null, B: null, L: null };
+        this.snapshots = null;
 
-        // Simple {x, y} points — endpoints pinned at x=0 and x=1
+        // Curve data — endpoints pinned at x=0 and x=1
         this.curves = {
             'RGB': [{ x: 0, y: 0 }, { x: 1, y: 1 }],
-            'R': [{ x: 0, y: 0 }, { x: 1, y: 1 }],
-            'G': [{ x: 0, y: 0 }, { x: 1, y: 1 }],
-            'B': [{ x: 0, y: 0 }, { x: 1, y: 1 }],
-            'HueVsHue': [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }],
-            'HueVsSat': [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }],
+            'R':   [{ x: 0, y: 0 }, { x: 1, y: 1 }],
+            'G':   [{ x: 0, y: 0 }, { x: 1, y: 1 }],
+            'B':   [{ x: 0, y: 0 }, { x: 1, y: 1 }],
+            'HueVsHue':  [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }],
+            'HueVsSat':  [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }],
             'HueVsLuma': [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }]
         };
 
         this.activeChannel = 'RGB';
         this.hoverPoint = null;
         this.draggingPoint = null;
+        this.selectedPoints = [];
         this.mousePos = { x: -1, y: -1 };
 
         this.channelColors = {
-            'RGB': '#ffffff',
-            'R': '#ff4d4d',
-            'G': '#4dff4d',
-            'B': '#4d88ff',
-            'HueVsHue': '#ffaaaa',
-            'HueVsSat': '#fff144',
+            'RGB': '#e0e0e0',
+            'R':   '#ff4444',
+            'G':   '#44cc44',
+            'B':   '#4488ff',
+            'HueVsHue':  '#ffaaaa',
+            'HueVsSat':  '#fff144',
             'HueVsLuma': '#44ffaa'
         };
-        this.rangeY = 1.0; // Default: 0..1 (LDR)
 
+        this.rangeY = 1.0;
         this.levels = { inBlack: 0, inWhite: 255 };
+
+        // Per-channel gain multipliers (DaVinci "Edit" intensity, 0–200, default 100)
+        this.channelGain = { Y: 100, R: 100, G: 100, B: 100 };
+
+        // Soft Clip controls (DaVinci Resolve style)
+        this.softClipEnabled = false;
+        this.softClipChannels = { R: true, G: true, B: true };
+        this.softClipParams = {
+            low: 0, lowSoft: 0, high: 1.0, highSoft: 0
+        };
+
+        // Viewport state
+        this.view = {
+            zoomX: 1.0, zoomY: 1.0,
+            offsetX: 0.0, offsetY: 0.0,
+            minZoom: 1.0, maxZoom: 20.0,
+            logX: false
+        };
 
         this.setupEvents();
         this.draw();
@@ -11999,16 +12573,28 @@ class RadianceCurveEditor {
     get plotH() { return this.height - this.padding.top - this.padding.bottom; }
 
     normToCanvas(nx, ny) {
+        let lx = nx;
+        if (this.view.logX) {
+            lx = (nx > 0) ? Math.log10(nx * 9 + 1) : 0;
+        }
+        const vx = (lx - this.view.offsetX) * this.view.zoomX;
+        const vy = (ny - this.view.offsetY) * this.view.zoomY;
         return {
-            cx: this.plotX + nx * this.plotW,
-            cy: this.plotY + (1 - (ny / this.rangeY)) * this.plotH
+            cx: this.plotX + vx * this.plotW,
+            cy: this.plotY + (1 - (vy / this.rangeY)) * this.plotH
         };
     }
 
     canvasToNorm(cx, cy) {
+        const vx = (cx - this.plotX) / this.plotW;
+        const vy = (1.0 - (cy - this.plotY) / this.plotH) * this.rangeY;
+        let nx = this.view.offsetX + (vx / this.view.zoomX);
+        if (this.view.logX) {
+            nx = (Math.pow(10, nx) - 1) / 9;
+        }
         return {
-            x: (cx - this.plotX) / this.plotW,
-            y: (1.0 - (cy - this.plotY) / this.plotH) * this.rangeY
+            x: nx,
+            y: this.view.offsetY + (vy / this.view.zoomY)
         };
     }
 
@@ -12039,7 +12625,6 @@ class RadianceCurveEditor {
             L[luma]++;
         }
 
-        // Normalize — ignore extremes (0 and 255 bins often spike)
         let max = 0;
         for (let i = 1; i < buckets - 1; i++) {
             max = Math.max(max, L[i], R[i], G[i], B[i]);
@@ -12080,11 +12665,13 @@ class RadianceCurveEditor {
             this.curves[ch] = [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }];
         }
         this.levels = { inBlack: 0, inWhite: 255 };
+        this.channelGain = { Y: 100, R: 100, G: 100, B: 100 };
+        this.softClipEnabled = false;
+        this.softClipParams = { low: 0, lowSoft: 0, high: 1.0, highSoft: 0 };
         this.notifyChange();
         this.draw();
     }
 
-    // Legacy compat
     resetAllChannels() { this.resetAll(); }
 
     applyPreset(preset) {
@@ -12098,7 +12685,6 @@ class RadianceCurveEditor {
     }
 
     applyIndustryPreset(name) {
-        // Industry-standard curve presets (DaVinci Resolve reference values)
         const presets = {
             'Punchy': [
                 { x: 0, y: 0 }, { x: 0.15, y: 0.08 },
@@ -12140,10 +12726,8 @@ class RadianceCurveEditor {
         if (!preset) return;
 
         if (Array.isArray(preset)) {
-            // Apply to active channel
             this.curves[this.activeChannel] = preset.map(p => ({ x: p.x, y: p.y }));
         } else {
-            // Multi-channel preset (like Cross Process)
             for (const ch of ['RGB', 'R', 'G', 'B']) {
                 if (preset[ch]) {
                     this.curves[ch] = preset[ch].map(p => ({ x: p.x, y: p.y }));
@@ -12163,19 +12747,30 @@ class RadianceCurveEditor {
         this.draw();
     }
 
+    saveSnapshot() {
+        this.snapshots = JSON.parse(JSON.stringify(this.curves));
+        this.draw();
+    }
+
+    clearSnapshot() {
+        this.snapshots = null;
+        this.draw();
+    }
+
     // ─── Events ────────────────────────────────────────────────
     setupEvents() {
         const cvs = this.canvas;
-        const GRAB_RADIUS_PX = 8; // Hit radius in pixels
+        const GRAB_RADIUS_PX = 8;
 
         const hitTest = (e) => {
             const rect = cvs.getBoundingClientRect();
-            const px = e.clientX - rect.left;
-            const py = e.clientY - rect.top;
+            const px = (e.clientX - rect.left) * (cvs.width / rect.width);
+            const py = (e.clientY - rect.top) * (cvs.height / rect.height);
             const norm = this.canvasToNorm(px, py);
 
             const pts = this.curves[this.activeChannel];
             let best = null, bestDist = GRAB_RADIUS_PX * GRAB_RADIUS_PX;
+
             for (const p of pts) {
                 const c = this.normToCanvas(p.x, p.y);
                 const d = (px - c.cx) ** 2 + (py - c.cy) ** 2;
@@ -12185,36 +12780,39 @@ class RadianceCurveEditor {
         };
 
         cvs.onmousedown = (e) => {
-            if (e.button !== 0) return; // Left click only
-            const { norm, best } = hitTest(e);
+            if (e.button !== 0) return;
+            const { norm, best, px, py } = hitTest(e);
 
             if (best) {
+                if (!this.selectedPoints.includes(best)) {
+                    this.selectedPoints = [best];
+                }
                 this.draggingPoint = best;
+                this.lastDragNorm = { ...norm };
                 cvs.style.cursor = 'grabbing';
-            } else if (norm.x > 0.005 && norm.x < 0.995) {
-                // Add new point (not at endpoints)
+            } else if (norm.x > -0.05 && norm.x < 1.05) {
+                this.selectedPoints = [];
                 const pts = this.curves[this.activeChannel];
-                // FIX 1: Clamp Y against rangeY (not hard 1.0) so HDR points
-                // can be placed above 1.0 when HDR range mode is active.
-                const yMax = (this.activeChannel === 'HueVsHue' ||
-                              this.activeChannel === 'HueVsSat' ||
-                              this.activeChannel === 'HueVsLuma') ? 1.0 : this.rangeY;
+                const yMax = (this.activeChannel.startsWith('Hue')) ? 1.0 : this.rangeY;
                 const newPt = {
-                    x: Math.max(0.005, Math.min(0.995, norm.x)),
+                    x: Math.max(0, Math.min(1.0, norm.x)),
                     y: Math.max(0, Math.min(yMax, norm.y))
                 };
                 pts.push(newPt);
                 pts.sort((a, b) => a.x - b.x);
                 this.draggingPoint = newPt;
+                this.selectedPoints = [newPt];
+                this.lastDragNorm = { ...norm };
                 cvs.style.cursor = 'grabbing';
                 this.notifyChange();
+            } else {
+                this.selectedPoints = [];
             }
             this.draw();
         };
 
         cvs.onmousemove = (e) => {
             if (this.draggingPoint && e.buttons !== 1) {
-                // If the user released the mouse button globally but ComfyUI stole the event
                 this.draggingPoint = null;
                 cvs.style.cursor = 'crosshair';
                 this.draw();
@@ -12222,28 +12820,37 @@ class RadianceCurveEditor {
             }
 
             const rect = cvs.getBoundingClientRect();
-            const px = e.clientX - rect.left;
-            const py = e.clientY - rect.top;
+            const px = (e.clientX - rect.left) * (cvs.width / rect.width);
+            const py = (e.clientY - rect.top) * (cvs.height / rect.height);
             const norm = this.canvasToNorm(px, py);
             this.mousePos = norm;
 
             if (this.draggingPoint) {
-                const pts = this.curves[this.activeChannel];
-                const idx = pts.indexOf(this.draggingPoint);
-                const p = this.draggingPoint;
+                const dx = norm.x - this.lastDragNorm.x;
+                const dy = norm.y - this.lastDragNorm.y;
 
-                // Endpoints: lock X, allow Y
-                if (idx === 0) {
-                    p.y = norm.y;
-                } else if (idx === pts.length - 1) {
-                    p.y = norm.y;
-                } else {
-                    // Interior point: constrain X between neighbors
-                    const minX = pts[idx - 1].x + 0.005;
-                    const maxX = pts[idx + 1].x - 0.005;
-                    p.x = Math.max(minX, Math.min(maxX, norm.x));
-                    p.y = norm.y;
-                }
+                this.selectedPoints.forEach(p => {
+                    const pts = this.curves[this.activeChannel];
+                    const idx = pts.indexOf(p);
+                    const yMax = (this.activeChannel.startsWith('Hue')) ? 1.0 : this.rangeY;
+
+                    if (idx === 0) {
+                        const maxX = pts.length > 1 ? (pts[1].x - 0.001) : 1.0;
+                        p.x = Math.max(0, Math.min(maxX, p.x + dx));
+                        p.y = Math.max(0, Math.min(yMax, p.y + dy));
+                    } else if (idx === pts.length - 1) {
+                        const minX = pts.length > 1 ? (pts[idx - 1].x + 0.001) : 0.0;
+                        p.x = Math.max(minX, Math.min(1.0, p.x + dx));
+                        p.y = Math.max(0, Math.min(yMax, p.y + dy));
+                    } else {
+                        const minX = pts[idx - 1].x + 0.001;
+                        const maxX = pts[idx + 1].x - 0.001;
+                        p.x = Math.max(minX, Math.min(maxX, p.x + dx));
+                        p.y = Math.max(0, Math.min(yMax, p.y + dy));
+                    }
+                });
+
+                this.lastDragNorm = { ...norm };
                 this.notifyChange();
             } else {
                 const { best } = hitTest(e);
@@ -12271,7 +12878,6 @@ class RadianceCurveEditor {
             if (!best) return;
             const pts = this.curves[this.activeChannel];
             const idx = pts.indexOf(best);
-            // Cannot delete first or last (endpoints)
             if (idx > 0 && idx < pts.length - 1) {
                 pts.splice(idx, 1);
                 this.hoverPoint = null;
@@ -12295,11 +12901,125 @@ class RadianceCurveEditor {
             }
         };
 
-        // Mouse leave: hide crosshair
         cvs.onmouseleave = () => {
             this.mousePos = { x: -1, y: -1 };
             if (!this.draggingPoint) this.draw();
         };
+
+        // Zoom
+        cvs.onwheel = (e) => {
+            e.preventDefault();
+            const rect = cvs.getBoundingClientRect();
+            const mouseX = (e.clientX - rect.left) * (cvs.width / rect.width);
+            const mouseY = (e.clientY - rect.top) * (cvs.height / rect.height);
+
+            const before = this.canvasToNorm(mouseX, mouseY);
+            const delta = -Math.sign(e.deltaY) * 0.15;
+            const factor = 1 + delta;
+
+            this.view.zoomX = Math.max(this.view.minZoom, Math.min(this.view.maxZoom, this.view.zoomX * factor));
+            this.view.zoomY = Math.max(this.view.minZoom, Math.min(this.view.maxZoom, this.view.zoomY * factor));
+
+            const after = this.canvasToNorm(mouseX, mouseY);
+            this.view.offsetX += (before.x - after.x);
+            this.view.offsetY += (before.y - after.y);
+            this._clampView();
+            this.draw();
+        };
+
+        // Pan (middle mouse or Alt+drag)
+        let isPanning = false;
+        let lastPanPos = { x: 0, y: 0 };
+
+        cvs.addEventListener('mousedown', (e) => {
+            if (e.button === 1 || (e.button === 0 && e.altKey)) {
+                isPanning = true;
+                lastPanPos = { x: e.clientX, y: e.clientY };
+                cvs.style.cursor = 'move';
+                e.preventDefault();
+            }
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (isPanning) {
+                const dx = e.clientX - lastPanPos.x;
+                const dy = e.clientY - lastPanPos.y;
+                const normDx = (dx / this.plotW) / this.view.zoomX;
+                const normDy = (dy / this.plotH) * (this.rangeY / this.view.zoomY);
+                this.view.offsetX -= normDx;
+                this.view.offsetY += normDy;
+                lastPanPos = { x: e.clientX, y: e.clientY };
+                this._clampView();
+                this.draw();
+            }
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (isPanning) {
+                isPanning = false;
+                cvs.style.cursor = 'crosshair';
+            }
+        });
+
+        // Keyboard nudge
+        cvs.addEventListener('keydown', (e) => {
+            if (this.selectedPoints.length === 0) return;
+
+            const step = e.shiftKey ? 10/255 : 1/255;
+            let dx = 0, dy = 0;
+
+            const key = e.key.toLowerCase();
+            if (key === 'arrowup') dy = step;
+            else if (key === 'arrowdown') dy = -step;
+            else if (key === 'arrowleft') dx = -step;
+            else if (key === 'arrowright') dx = step;
+            else if (key === 'delete' || key === 'backspace') {
+                const pts = this.curves[this.activeChannel];
+                this.selectedPoints.forEach(p => {
+                    const idx = pts.indexOf(p);
+                    if (idx > 0 && idx < pts.length - 1) pts.splice(idx, 1);
+                });
+                this.selectedPoints = [];
+                this.notifyChange();
+                this.draw();
+                e.preventDefault();
+                return;
+            } else return;
+
+            e.preventDefault();
+
+            this.selectedPoints.forEach(p => {
+                const pts = this.curves[this.activeChannel];
+                const idx = pts.indexOf(p);
+                const yMax = (this.activeChannel.startsWith('Hue')) ? 1.0 : this.rangeY;
+
+                if (idx === 0 || idx === pts.length - 1) {
+                    p.y = Math.max(0, Math.min(yMax, p.y + dy));
+                } else {
+                    const minX = pts[idx - 1].x + 0.001;
+                    const maxX = pts[idx + 1].x - 0.001;
+                    p.x = Math.max(minX, Math.min(maxX, p.x + dx));
+                    p.y = Math.max(0, Math.min(yMax, p.y + dy));
+                }
+            });
+
+            this.notifyChange();
+            this.draw();
+        });
+    }
+
+    _clampView() {
+        const margin = 0.5 / this.view.zoomX;
+        this.view.offsetX = Math.max(-margin, Math.min(1.0 + margin - 1/this.view.zoomX, this.view.offsetX));
+        this.view.offsetY = Math.max(-margin * this.rangeY, Math.min(this.rangeY + margin * this.rangeY - this.rangeY / this.view.zoomY, this.view.offsetY));
+    }
+
+    resetView() {
+        this.view.zoomX = 1.0;
+        this.view.zoomY = 1.0;
+        this.view.offsetX = 0.0;
+        this.view.offsetY = 0.0;
+        this.draw();
     }
 
     getMousePos(e) {
@@ -12308,7 +13028,6 @@ class RadianceCurveEditor {
     }
 
     findPoint(pos) {
-        // Legacy compat
         const pts = this.curves[this.activeChannel];
         const threshX = 0.04, threshY = 0.04;
         return pts.find(p =>
@@ -12317,17 +13036,6 @@ class RadianceCurveEditor {
     }
 
     // ─── Monotonic Cubic Hermite (Fritsch–Carlson) ─────────────
-    /**
-     * Industry-standard spline interpolation.
-     * Guarantees no overshoot between control points — essential for
-     * color grading where overshoot means clipping or color inversions.
-     *
-     * Algorithm: Fritsch & Carlson (1980), "Monotone Piecewise Cubic Interpolation"
-     * Used by: DaVinci Resolve, Nuke, Flame, Baselight
-     *
-     * @param {Array} points - Sorted array of {x, y} control points
-     * @returns {Float32Array} 256-entry LUT
-     */
     evaluateCurve(points) {
         const n = points.length;
         if (n === 0) return new Float32Array(256).fill(0);
@@ -12339,7 +13047,7 @@ class RadianceCurveEditor {
         const ys = points.map(p => p.y);
         const lut = new Float32Array(256);
 
-        // Step 1: Compute secant slopes (Δk)
+        // Step 1: Secant slopes
         const delta = new Float64Array(n - 1);
         const h = new Float64Array(n - 1);
         for (let i = 0; i < n - 1; i++) {
@@ -12347,39 +13055,17 @@ class RadianceCurveEditor {
             delta[i] = (h[i] > 1e-10) ? (ys[i + 1] - ys[i]) / h[i] : 0;
         }
 
-        // Step 2: Compute initial tangents
-        // FIX 8: Two boundary modes are supported:
-        //   naturalBoundary = true  → tangent = 0 at endpoints (DaVinci Resolve / natural spline)
-        //     Produces flat entry/exit at anchor endpoints. Avoids the "pull" artefact
-        //     when the first or last segment is steep. Recommended for color grading.
-        //   naturalBoundary = false → tangent = Δ of adjacent segment (Catmull-Rom / not-a-knot)
-        //     More "elastic" feel — curve arrives with momentum. Better for animation curves.
-        // Defaults to true (natural) to match DaVinci Resolve behavior.
-        const naturalBoundary = this.naturalBoundary !== false; // default true
-
+        // Step 2: Initial tangents
         const m = new Float64Array(n);
-        if (n === 2) {
-            m[0] = delta[0];
-            m[1] = delta[0];
-        } else {
-            // Endpoint tangents
-            if (naturalBoundary) {
-                // Natural spline: zero tangent at anchor endpoints (Resolve style)
-                m[0] = 0;
-                m[n - 1] = 0;
+        for (let i = 0; i < n; i++) {
+            if (i === 0) {
+                m[i] = delta[0] || 0;
+            } else if (i === n - 1) {
+                m[i] = delta[n - 2] || 0;
             } else {
-                // Catmull-Rom: one-sided difference (original behavior)
-                m[0] = delta[0];
-                m[n - 1] = delta[n - 2];
-            }
-
-            // Interior tangents: weighted harmonic mean (Fritsch-Carlson)
-            for (let i = 1; i < n - 1; i++) {
                 if (delta[i - 1] * delta[i] <= 0) {
-                    // Sign change → flat tangent (prevents overshoot)
                     m[i] = 0;
                 } else {
-                    // Weighted harmonic mean — adapts to non-uniform spacing
                     const w1 = 2 * h[i] + h[i - 1];
                     const w2 = h[i] + 2 * h[i - 1];
                     m[i] = (w1 + w2) / (w1 / delta[i - 1] + w2 / delta[i]);
@@ -12390,15 +13076,11 @@ class RadianceCurveEditor {
         // Step 3: Fritsch-Carlson monotonicity preservation
         for (let i = 0; i < n - 1; i++) {
             if (Math.abs(delta[i]) < 1e-10) {
-                // Flat segment: force zero tangents at both ends
                 m[i] = 0;
                 m[i + 1] = 0;
             } else {
                 const alpha = m[i] / delta[i];
-                const beta = m[i + 1] / delta[i];
-
-                // Fritsch-Carlson criterion: α² + β² ≤ 9
-                // If violated, scale tangents to satisfy
+                const beta = m[i+1] / delta[i];
                 const tau = alpha * alpha + beta * beta;
                 if (tau > 9) {
                     const s = 3.0 / Math.sqrt(tau);
@@ -12408,15 +13090,13 @@ class RadianceCurveEditor {
             }
         }
 
-        // Step 4: Evaluate cubic Hermite at each LUT index
+        // Step 4: Evaluate cubic Hermite
         for (let i = 0; i < 256; i++) {
             const t = i / 255;
 
-            // Clamp to endpoint values outside range
             if (t <= xs[0]) { lut[i] = ys[0]; continue; }
             if (t >= xs[n - 1]) { lut[i] = ys[n - 1]; continue; }
 
-            // Find segment (binary search for efficiency)
             let lo = 0, hi = n - 2;
             while (lo < hi) {
                 const mid = (lo + hi) >> 1;
@@ -12424,7 +13104,6 @@ class RadianceCurveEditor {
             }
             const k = lo;
 
-            // Hermite basis evaluation
             const hk = h[k];
             if (hk < 1e-10) { lut[i] = ys[k]; continue; }
 
@@ -12432,9 +13111,6 @@ class RadianceCurveEditor {
             const s2 = s * s;
             const s3 = s2 * s;
 
-            // Hermite basis functions:
-            // h00 = 2s³ - 3s² + 1,  h10 = s³ - 2s² + s
-            // h01 = -2s³ + 3s²,     h11 = s³ - s²
             const h00 = 2 * s3 - 3 * s2 + 1;
             const h10 = s3 - 2 * s2 + s;
             const h01 = -2 * s3 + 3 * s2;
@@ -12444,7 +13120,7 @@ class RadianceCurveEditor {
                 h01 * ys[k + 1] + h11 * hk * m[k + 1];
         }
 
-        // HDR Output: no clamping to [0, 1] unless it's a Hue curve
+        // Hue curve clamping
         if (points === this.curves['HueVsHue'] || points === this.curves['HueVsSat'] || points === this.curves['HueVsLuma']) {
             for (let i = 0; i < 256; i++) {
                 lut[i] = Math.max(0, Math.min(1, lut[i]));
@@ -12454,153 +13130,105 @@ class RadianceCurveEditor {
         return lut;
     }
 
-    // Legacy compat aliases
+    // Legacy compat
     solveBezierSpline(points) { return this.evaluateCurve(points); }
     solveMonotonicSpline(points) { return this.evaluateCurve(points); }
 
-    // ─── Drawing ───────────────────────────────────────────────
+    // ─── Drawing — DaVinci Resolve Aesthetic ─────────────────────
     draw() {
         const ctx = this.ctx;
         const w = this.width, h = this.height;
         const pX = this.plotX, pY = this.plotY, pW = this.plotW, pH = this.plotH;
-        const dpr = window.devicePixelRatio || 1;
 
-        // 1. Background
-        ctx.fillStyle = '#0d0d12';
+        // 1. Background — deep DaVinci dark
+        ctx.fillStyle = '#1a1a22';
         ctx.fillRect(0, 0, w, h);
-
-        // Plot area
-        ctx.fillStyle = '#111118';
-        ctx.fillRect(pX, pY, pW, pH);
 
         ctx.save();
         ctx.beginPath();
         ctx.rect(pX, pY, pW, pH);
         ctx.clip();
 
-        // 2. Grid — 10-stop minor, 4-stop major (Resolve standard)
+        // 2. Subtle grid — very faint, DaVinci style (only major grid visible)
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
         ctx.lineWidth = 1;
-
-        // Minor grid (10 divisions)
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.03)';
         ctx.beginPath();
-        for (let i = 1; i < 10; i++) {
-            const n = i * 0.1;
-            const { cx: gx } = this.normToCanvas(n, 0);
-            const { cy: gy } = this.normToCanvas(0, n);
-            ctx.moveTo(gx, pY); ctx.lineTo(gx, pY + pH);
-            ctx.moveTo(pX, gy); ctx.lineTo(pX + pW, gy);
+        for (let i = 1; i <= 3; i++) {
+            const { cx } = this.normToCanvas(i / 4, 0);
+            ctx.moveTo(cx, pY); ctx.lineTo(cx, pY + pH);
+            const { cy } = this.normToCanvas(0, i / 4);
+            ctx.moveTo(pX, cy); ctx.lineTo(pX + pW, cy);
         }
         ctx.stroke();
 
-        // Major grid (4 divisions = quarter-stop in 0..1, adapted for rangeY)
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.07)';
-        ctx.beginPath();
-
-        // Vertical grid (Input 0..1)
-        for (let i = 1; i < 4; i++) {
-            const n = i * 0.25;
-            const { cx: gx } = this.normToCanvas(n, 0);
-            ctx.moveTo(gx, pY); ctx.lineTo(gx, pY + pH);
-        }
-
-        // Horizontal grid (Output 0..rangeY)
-        const segments = this.rangeY > 1.0 ? Math.floor(this.rangeY * 4) : 4;
-        const step = this.rangeY / segments;
-        for (let i = 1; i < segments; i++) {
-            const n = i * step;
-            const { cy: gy } = this.normToCanvas(0, n);
-            ctx.moveTo(pX, gy); ctx.lineTo(pX + pW, gy);
-        }
-        ctx.stroke();
-
-        // Center cross (midpoint reference)
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.10)';
-        ctx.beginPath();
-        const mid = this.normToCanvas(0.5, 0.5 * this.rangeY);
-        ctx.moveTo(mid.cx - 6, mid.cy); ctx.lineTo(mid.cx + 6, mid.cy);
-        ctx.moveTo(mid.cx, mid.cy - 6); ctx.lineTo(mid.cx, mid.cy + 6);
-        ctx.stroke();
-
-        // Identity diagonal / line
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
-        ctx.setLineDash([3, 5]);
+        // Identity diagonal — very subtle
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+        ctx.lineWidth = 1;
         ctx.beginPath();
         if (this.activeChannel.startsWith('Hue')) {
-            // Horizontal line for Hue curves
-            const h0 = this.normToCanvas(0, 0.5), h1 = this.normToCanvas(1, 0.5);
+            const h0 = this.normToCanvas(-1, 0.5), h1 = this.normToCanvas(2, 0.5);
             ctx.moveTo(h0.cx, h0.cy); ctx.lineTo(h1.cx, h1.cy);
         } else {
-            // Identity line usually goes 0..1 even in HDR view
-            const d1Val = Math.min(1.0, this.rangeY);
-            const d0 = this.normToCanvas(0, 0), d1 = this.normToCanvas(d1Val, d1Val);
+            const d0 = this.normToCanvas(0, 0), d1 = this.normToCanvas(1, 1);
             ctx.moveTo(d0.cx, d0.cy); ctx.lineTo(d1.cx, d1.cy);
         }
         ctx.stroke();
-        ctx.setLineDash([]);
 
         // Rainbow background for Hue curves
         if (this.activeChannel.startsWith('Hue')) {
-            const grad = ctx.createLinearGradient(pX, 0, pX + pW, 0);
-            grad.addColorStop(0, '#ff0000');
-            grad.addColorStop(1 / 6, '#ffff00');
-            grad.addColorStop(2 / 6, '#00ff00');
-            grad.addColorStop(3 / 6, '#00ffff');
-            grad.addColorStop(4 / 6, '#0000ff');
-            grad.addColorStop(5 / 6, '#ff00ff');
-            grad.addColorStop(1, '#ff0000');
-            ctx.globalAlpha = 0.1;
-            ctx.fillStyle = grad;
+            const r0 = this.normToCanvas(0, 0).cx;
+            const r1 = this.normToCanvas(1, 0).cx;
+            const stops = [
+                { pos: 0, col: '#ff0000' }, { pos: 1/6, col: '#ffff00' },
+                { pos: 2/6, col: '#00ff00' }, { pos: 3/6, col: '#00ffff' },
+                { pos: 4/6, col: '#0000ff' }, { pos: 5/6, col: '#ff00ff' },
+                { pos: 1, col: '#ff0000' }
+            ];
+            ctx.globalAlpha = 0.08;
+            const hGrad = ctx.createLinearGradient(r0, 0, r1, 0);
+            stops.forEach(s => { if (s.pos >= 0 && s.pos <= 1) hGrad.addColorStop(s.pos, s.col); });
+            ctx.fillStyle = hGrad;
             ctx.fillRect(pX, pY, pW, pH);
             ctx.globalAlpha = 1.0;
         }
 
-        // 3. Histogram (soft fill, Resolve aesthetic)
-        if (this.histograms.L) {
-            const drawHist = (hist, color) => {
+        // 3. Histograms — all RGB channels shown simultaneously (DaVinci Resolve style)
+        if (this.histograms.R) {
+            const drawHistFill = (hist, color, alpha) => {
                 if (!hist) return;
-                ctx.globalAlpha = 0.25;
-                ctx.fillStyle = color;
+                ctx.globalAlpha = alpha;
                 ctx.beginPath();
                 const b0 = this.normToCanvas(0, 0);
                 ctx.moveTo(b0.cx, b0.cy);
                 for (let i = 0; i < 256; i++) {
-                    // Perceptual compression — sqrt makes quiet areas visible
-                    const val = Math.pow(hist[i], 0.5) * 0.85;
+                    const val = Math.pow(hist[i], 0.55) * 0.7;
                     const { cx, cy } = this.normToCanvas(i / 255, val);
                     ctx.lineTo(cx, cy);
                 }
                 const bEnd = this.normToCanvas(1, 0);
                 ctx.lineTo(bEnd.cx, bEnd.cy);
                 ctx.closePath();
+                ctx.fillStyle = color;
                 ctx.fill();
                 ctx.globalAlpha = 1.0;
             };
 
-            if (this.activeChannel === 'RGB') {
-                drawHist(this.histograms.L, 'rgba(140, 150, 190, 0.5)');
-            } else if (this.activeChannel === 'R') {
-                drawHist(this.histograms.R, 'rgba(255, 80, 80, 0.4)');
-            } else if (this.activeChannel === 'G') {
-                drawHist(this.histograms.G, 'rgba(80, 255, 80, 0.4)');
-            } else {
-                drawHist(this.histograms.B, 'rgba(80, 120, 255, 0.4)');
-            }
+            // Always show all 3 RGB histograms simultaneously like DaVinci
+            drawHistFill(this.histograms.R, '#cc2222', 0.22);
+            drawHistFill(this.histograms.G, '#22aa22', 0.18);
+            drawHistFill(this.histograms.B, '#2244cc', 0.22);
         }
 
         // 4. Ghost curves (inactive channels at low opacity)
         let ghostChannels = [];
         if (this.activeChannel === 'RGB') ghostChannels = ['R', 'G', 'B'];
-        else if (this.activeChannel === 'R' || this.activeChannel === 'G' || this.activeChannel === 'B') ghostChannels = ['RGB'];
-        else if (this.activeChannel === 'HueVsHue') ghostChannels = ['HueVsSat', 'HueVsLuma'];
-        else if (this.activeChannel === 'HueVsSat') ghostChannels = ['HueVsHue', 'HueVsLuma'];
-        else if (this.activeChannel === 'HueVsLuma') ghostChannels = ['HueVsHue', 'HueVsSat'];
+        else if (['R', 'G', 'B'].includes(this.activeChannel)) ghostChannels = ['RGB'];
 
         ghostChannels.forEach(ch => {
             const pts = this.curves[ch];
             if (pts.length < 2) return;
             const lut = this.evaluateCurve(pts);
-            ctx.globalAlpha = 0.15;
+            ctx.globalAlpha = 0.12;
             ctx.strokeStyle = this.channelColors[ch];
             ctx.lineWidth = 1;
             ctx.beginPath();
@@ -12612,17 +13240,32 @@ class RadianceCurveEditor {
             ctx.globalAlpha = 1.0;
         });
 
-        // 5. Active curve
+        // 5. Snapshot ghost
+        if (this.snapshots && this.snapshots[this.activeChannel]) {
+            const sLut = this.evaluateCurve(this.snapshots[this.activeChannel]);
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+            ctx.setLineDash([4, 4]);
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            for (let i = 0; i < 256; i++) {
+                const { cx, cy } = this.normToCanvas(i / 255, sLut[i]);
+                if (i === 0) ctx.moveTo(cx, cy); else ctx.lineTo(cx, cy);
+            }
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        // 6. Active curve — DaVinci Resolve style (clean, smooth, with glow)
         const pts = this.curves[this.activeChannel];
         const lut = this.evaluateCurve(pts);
         const color = this.channelColors[this.activeChannel];
 
-        // Glow layer (bloom effect)
-        ctx.shadowBlur = 6;
+        // Glow layer
+        ctx.shadowBlur = 8;
         ctx.shadowColor = color;
         ctx.strokeStyle = color;
         ctx.lineWidth = 1.5;
-        ctx.globalAlpha = 0.4;
+        ctx.globalAlpha = 0.3;
         ctx.beginPath();
         for (let i = 0; i < 256; i++) {
             const { cx, cy } = this.normToCanvas(i / 255, lut[i]);
@@ -12633,8 +13276,8 @@ class RadianceCurveEditor {
 
         // Main curve line
         ctx.strokeStyle = color;
-        ctx.lineWidth = 1.8;
-        ctx.globalAlpha = 0.95;
+        ctx.lineWidth = 2.0;
+        ctx.globalAlpha = 0.9;
         ctx.beginPath();
         for (let i = 0; i < 256; i++) {
             const { cx, cy } = this.normToCanvas(i / 255, lut[i]);
@@ -12645,53 +13288,40 @@ class RadianceCurveEditor {
 
         ctx.restore(); // Unclip
 
-        // 6. Clipping indicators (top/bottom edge bars)
-        if (lut[255] >= 0.99) {
-            ctx.fillStyle = 'rgba(255, 60, 60, 0.3)';
-            ctx.fillRect(pX, pY, pW, 2);
-        }
-        if (lut[0] > 0.01) {
-            ctx.fillStyle = 'rgba(100, 140, 255, 0.3)';
-            ctx.fillRect(pX, pY + pH - 2, pW, 2);
-        }
-
-        // 7. Control points
+        // 7. Control points — DaVinci style (clean white circles)
         ctx.save();
         pts.forEach((p, idx) => {
             const { cx, cy } = this.normToCanvas(p.x, p.y);
             const isHover = (p === this.hoverPoint);
             const isDrag = (p === this.draggingPoint);
+            const isSelected = this.selectedPoints.includes(p);
             const isEndpoint = (idx === 0 || idx === pts.length - 1);
-            const r = (isHover || isDrag) ? 5.5 : isEndpoint ? 3.5 : 4;
 
-            // Glow
-            if (isHover || isDrag) {
-                ctx.shadowBlur = 8;
+            const r = (isHover || isDrag) ? 5 : isEndpoint ? 3.5 : 4.5;
+
+            // Outer glow for active points
+            if (isHover || isDrag || isSelected) {
+                ctx.shadowBlur = 10;
                 ctx.shadowColor = color;
             }
 
-            // Endpoint: square. Interior: circle (DaVinci Resolve convention)
-            ctx.fillStyle = (isHover || isDrag) ? '#ffffff' : color;
-            if (isEndpoint) {
-                ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
-                ctx.strokeStyle = '#1a1a1f';
-                ctx.lineWidth = 1;
-                ctx.strokeRect(cx - r, cy - r, r * 2, r * 2);
-            } else {
-                ctx.beginPath();
-                ctx.arc(cx, cy, r, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.strokeStyle = '#1a1a1f';
-                ctx.lineWidth = 1;
-                ctx.stroke();
-            }
+            // White filled circle with dark outline — DaVinci style
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+
             ctx.shadowBlur = 0;
         });
         ctx.restore();
 
-        // 8. Interactive crosshair + readout
+        // 8. Crosshair on hover
         if (this.mousePos.x >= 0 && this.mousePos.x <= 1 &&
-            this.mousePos.y >= 0 && this.mousePos.y <= 1) {
+            this.mousePos.y >= 0 && this.mousePos.y <= this.rangeY) {
             const mPos = this.normToCanvas(this.mousePos.x, this.mousePos.y);
 
             ctx.save();
@@ -12699,14 +13329,12 @@ class RadianceCurveEditor {
             ctx.rect(pX, pY, pW, pH);
             ctx.clip();
 
-            ctx.strokeStyle = 'rgba(0, 168, 255, 0.2)';
-            ctx.setLineDash([3, 4]);
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
             ctx.lineWidth = 1;
             ctx.beginPath();
             ctx.moveTo(mPos.cx, pY); ctx.lineTo(mPos.cx, pY + pH);
             ctx.moveTo(pX, mPos.cy); ctx.lineTo(pX + pW, mPos.cy);
             ctx.stroke();
-            ctx.setLineDash([]);
             ctx.restore();
         }
 
@@ -12717,17 +13345,16 @@ class RadianceCurveEditor {
             const outVal = Math.round(target.y * 255);
             const { cx, cy } = this.normToCanvas(target.x, target.y);
 
-            // Background pill
             const text = `${inVal} → ${outVal}`;
             ctx.font = `bold 10px ${this.theme.mono}`;
             const tw = ctx.measureText(text).width + 12;
-            const tx = Math.min(cx + 12, pX + pW - tw - 4);
-            const ty = Math.max(cy - 8, pY + 4);
+            const tx = Math.min(cx + 14, pX + pW - tw - 4);
+            const ty = Math.max(cy - 10, pY + 16);
 
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+            // Dark pill background
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+            const rx = tx, ry = ty - 12, rw = tw, rh = 18, rr = 4;
             ctx.beginPath();
-            // Rounded rect (compat)
-            const rx = tx, ry = ty - 12, rw = tw, rh = 18, rr = 3;
             ctx.moveTo(rx + rr, ry);
             ctx.arcTo(rx + rw, ry, rx + rw, ry + rh, rr);
             ctx.arcTo(rx + rw, ry + rh, rx, ry + rh, rr);
@@ -12736,38 +13363,16 @@ class RadianceCurveEditor {
             ctx.closePath();
             ctx.fill();
 
-            ctx.fillStyle = '#ddd';
+            ctx.fillStyle = '#ccc';
             ctx.textAlign = 'left';
             ctx.fillText(text, tx + 6, ty + 1);
         }
-
-        // 10. Axis labels
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
-        ctx.font = `9px ${this.theme.mono}`;
-        ctx.textAlign = 'center';
-        // X-axis (Always 0..255)
-        [0, 64, 128, 192, 255].forEach(v => {
-            const { cx } = this.normToCanvas(v / 255, 0);
-            ctx.fillText(v.toString(), cx, pY + pH + 13);
-        });
-
-        // Y-axis (Scaled by rangeY)
-        ctx.textAlign = 'right';
-        const yStops = [0, 0.25, 0.5, 0.75, 1.0];
-        if (this.rangeY > 1.0) yStops.push(1.5, 2.0);
-        if (this.rangeY > 2.0) yStops.push(3.0, 4.0);
-
-        yStops.filter(v => v <= this.rangeY).forEach(v => {
-            const { cy } = this.normToCanvas(0, v);
-            const label = Math.round(v * 255).toString();
-            ctx.fillText(label, pX - 5, cy + 3);
-        });
     }
 
+    // ─── LUT Generation ─────────────────────────────────────────
     notifyChange() {
         if (!this.onChange) return;
 
-        // Evaluate all curves
         const master = this.evaluateCurve(this.curves['RGB']);
         const rCurve = this.evaluateCurve(this.curves['R']);
         const gCurve = this.evaluateCurve(this.curves['G']);
@@ -12782,7 +13387,6 @@ class RadianceCurveEditor {
         const inWhite = this.levels.inWhite / 255;
         const inRange = Math.max(0.001, inWhite - inBlack);
 
-        // Sub-sample lookup with linear interpolation for precision
         const lookup = (curve, u) => {
             const f = u * 255;
             const k = Math.floor(f);
@@ -12792,31 +13396,72 @@ class RadianceCurveEditor {
             return curve[k] * (1 - frac) + curve[k + 1] * frac;
         };
 
-        // Float32 LUT: 256 × RGBA = 1024 floats
+        // Channel gain multipliers (Edit intensity, mapped from 0–200 → 0.0–2.0)
+        const gY = this.channelGain.Y / 100;
+        const gR = this.channelGain.R / 100;
+        const gG = this.channelGain.G / 100;
+        const gB = this.channelGain.B / 100;
+
+        // Soft Clip parameters
+        const sc = this.softClipEnabled ? this.softClipParams : null;
+
         const lut = new Float32Array(256 * 4);
         const secLut = new Float32Array(256 * 4);
 
         for (let i = 0; i < 256; i++) {
-            // Apply input levels
             const leveled = Math.max(0, Math.min(1, (i / 255 - inBlack) / inRange));
 
-            // Master curve (RGB)
-            const mVal = lookup(master, leveled);
+            // Master curve (Y channel gain)
+            let mVal = lookup(master, leveled);
+            // Apply master gain: lerp between identity and curve output
+            mVal = leveled + (mVal - leveled) * gY;
 
-            // Per-channel curves applied to master output
-            const r = lookup(rCurve, mVal);
-            const g = lookup(gCurve, mVal);
-            const b = lookup(bCurve, mVal);
+            // Per-channel curves with individual gain
+            let r = lookup(rCurve, mVal);
+            let g = lookup(gCurve, mVal);
+            let b = lookup(bCurve, mVal);
+
+            // Apply per-channel gain (lerp between mVal and curve output)
+            r = mVal + (r - mVal) * gR;
+            g = mVal + (g - mVal) * gG;
+            b = mVal + (b - mVal) * gB;
+
+            // Apply Soft Clip if enabled
+            if (sc) {
+                const applyClip = (v, ch) => {
+                    if (!this.softClipChannels[ch]) return v;
+                    // Low clip
+                    if (sc.lowSoft > 0 && v < sc.low + sc.lowSoft) {
+                        const t = Math.max(0, (v - sc.low) / Math.max(0.001, sc.lowSoft));
+                        v = sc.low + (v - sc.low) * t * t * (3 - 2 * t);
+                        v = Math.max(sc.low, v);
+                    } else {
+                        v = Math.max(sc.low, v);
+                    }
+                    // High clip
+                    if (sc.highSoft > 0 && v > sc.high - sc.highSoft) {
+                        const t = Math.max(0, (sc.high - v) / Math.max(0.001, sc.highSoft));
+                        v = sc.high - (sc.high - v) * t * t * (3 - 2 * t);
+                        v = Math.min(sc.high, v);
+                    } else {
+                        v = Math.min(sc.high, v);
+                    }
+                    return v;
+                };
+                r = applyClip(r, 'R');
+                g = applyClip(g, 'G');
+                b = applyClip(b, 'B');
+            }
 
             lut[i * 4 + 0] = r;
             lut[i * 4 + 1] = g;
             lut[i * 4 + 2] = b;
             lut[i * 4 + 3] = 1.0;
 
-            // Secondary LUT
-            secLut[i * 4 + 0] = Math.max(0, Math.min(1, hvhCurve[i])); // HueVsHue (0..1)
-            secLut[i * 4 + 1] = Math.max(0, Math.min(1, hvsCurve[i])); // HueVsSat (0..1)
-            secLut[i * 4 + 2] = Math.max(0, Math.min(1, hvlCurve[i])); // HueVsLuma (0..1)
+            // Secondary LUT (Hue curves)
+            secLut[i * 4 + 0] = Math.max(0, Math.min(1, hvhCurve[i]));
+            secLut[i * 4 + 1] = Math.max(0, Math.min(1, hvsCurve[i]));
+            secLut[i * 4 + 2] = Math.max(0, Math.min(1, hvlCurve[i]));
             secLut[i * 4 + 3] = 1.0;
         }
 
@@ -12830,4 +13475,5 @@ class RadianceCurveEditor {
         this.draw();
     }
 }
+
 

@@ -22,6 +22,7 @@ import time
 import logging
 import subprocess  # nosec B404
 import tempfile
+from typing import Dict, Any, Optional, List, Tuple
 
 import torch
 import numpy as np
@@ -37,6 +38,17 @@ import folder_paths
 
 
 logger = logging.getLogger("radiance.io")
+
+
+class RadianceType(str):
+    """
+    Multi-type helper for LiteGraph (IMAGE,VIDEO).
+    """
+    def __ne__(self, __value: object) -> bool:
+        return False
+
+
+image_video_type = RadianceType("IMAGE,VIDEO")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                         COLOR SPACE DEFINITIONS
@@ -210,8 +222,69 @@ def _extract_audio_ffmpeg(video_path: str) -> dict | None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#                         NODE: READ VIDEO
+#                         VIDEO LOADING HELPER
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def find_video_path(data: Any) -> Optional[str]:
+    """Recursively search for a video file path in diverse nested structures."""
+    if isinstance(data, str):
+        # Check if it looks like a video path
+        exts = (".mp4", ".mov", ".gif", ".webp", ".avi", ".mkv", ".webm")
+        if data.lower().endswith(exts):
+            return data
+        return None
+        
+    if isinstance(data, dict):
+        # Priority keys
+        for key in ["source", "filename", "video", "gif", "full_path"]:
+            if key in data:
+                res = find_video_path(data[key])
+                if res: return res
+        
+        # VHS style: {"gifs": [{"filename": "..."}]}
+        if "gifs" in data and isinstance(data["gifs"], list) and len(data["gifs"]) > 0:
+            return find_video_path(data["gifs"][0])
+            
+        # Generic recursion for all values
+        for val in data.values():
+            res = find_video_path(val)
+            if res: return res
+            
+    if isinstance(data, list):
+        for item in data:
+            res = find_video_path(item)
+            if res: return res
+            
+    return None
+
+
+def _load_video_frames(video_path: str, input_colorspace: str = "sRGB (Standard)") -> torch.Tensor | None:
+    """Helper to load all frames from a video file into a Linear IMAGE tensor."""
+    if not os.path.exists(video_path):
+        return None
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return None
+
+    frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frames.append(frame)
+    cap.release()
+
+    if not frames:
+        return None
+
+    # Stack and convert to float32 [0,1]
+    frames_np = np.stack(frames).astype(np.float32) / 255.0
+    frames_tensor = torch.from_numpy(frames_np)
+
+    # Apply Input Transform (Linearize)
+    return apply_input_transform(frames_tensor, input_colorspace)
 
 
 class RadianceReadVideo:
@@ -252,7 +325,7 @@ class RadianceReadVideo:
                 "extract_audio": ("BOOLEAN", {"default": True}),
             },
             "optional": {
-                "vhs_video": ("VHS_VIDEO",),
+                "vhs_video": (image_video_type,),
             },
         }
 
@@ -280,7 +353,9 @@ class RadianceReadVideo:
             elif isinstance(vhs_video, dict) and "source" in vhs_video:
                 video_path = vhs_video["source"]
             elif isinstance(vhs_video, list) and len(vhs_video) > 0:
-                video_path = vhs_video[0]
+                video_path = vhs_video[0] if isinstance(vhs_video[0], str) else None
+            elif isinstance(vhs_video, dict) and "filename" in vhs_video:
+                video_path = vhs_video["filename"]
 
         video_path = get_safe_input_path(folder_paths.get_input_directory(), video_path)
 
@@ -570,7 +645,6 @@ class RadianceWrite:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "images": ("IMAGE",),
                 "filename_prefix": ("STRING", {"default": "Radiance"}),
                 "output_format": (OUTPUT_FORMATS, {"default": "Video — MP4 (H.264)"}),
                 "fps": (
@@ -593,6 +667,7 @@ class RadianceWrite:
                 "output_path": ("STRING", {"default": "", "tooltip": "Absolute or relative output path. Leave empty for ComfyUI default output folder."}),
             },
             "optional": {
+                "image": (image_video_type,),
                 "audio": ("AUDIO",),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
@@ -615,18 +690,46 @@ class RadianceWrite:
 
     def write(
         self,
-        images,
         filename_prefix,
         output_format,
         fps,
         quality,
         output_color_space,
+        image=None,
         output_path="",
         audio=None,
         prompt=None,
         extra_pnginfo=None,
     ):
         from folder_paths import get_output_directory
+
+        # ─── Resolve Input Source ──────────────────────────────────────
+        video_path = None
+        images = None
+        
+        if image is None:
+             raise ValueError("Radiance Write: 'image' input must be provided (Batch or Video).")
+
+        if isinstance(image, torch.Tensor):
+            images = image
+        else:
+            # It's a video reference (string, list, or dict)
+            video_path = find_video_path(image)
+            
+            if not video_path:
+                logger.error(f"Radiance Write: Failed to resolve path. Input type: {type(image)}")
+                logger.error(f"Input content: {str(image)[:500]}") # Log first 500 chars
+                raise ValueError(f"Radiance Write: Could not resolve video path from 'image' input. ({type(image)})")
+                
+            video_path = get_safe_input_path(folder_paths.get_input_directory(), video_path)
+            images = _load_video_frames(video_path, "sRGB (Standard)")
+            
+            if images is None:
+                raise ValueError(f"Radiance Write: Failed to load frames from video: {video_path}")
+
+            # Capture audio if not provided
+            if audio is None:
+                audio = _extract_audio_ffmpeg(video_path)
 
         full_output_dir = get_safe_output_dir(get_output_directory(), output_path)
 

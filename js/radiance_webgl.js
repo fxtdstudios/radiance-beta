@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════════════════════════
- *                       RADIANCE WEBGL RENDERER v2.2
+ *                       RADIANCE WEBGL RENDERER v2.2.1
  *                    GPU-Accelerated Viewer Enhancement
  * ═══════════════════════════════════════════════════════════════════════════════
  *
@@ -113,6 +113,9 @@ class RadianceWebGLRenderer {
         this.logShadow = [0.0, 0.0, 0.0];
         this.logMidtone = [0.0, 0.0, 0.0];
         this.logHighlight = [0.0, 0.0, 0.0];
+
+        // Color Science mode: 0 = Linear/sRGB, 1 = ACEScct
+        this.colorScience = 0;
 
         // v3.4: Printer Lights (per-channel integer offsets, -50..+50)
         this.printerLightsR = 0;
@@ -276,6 +279,7 @@ class RadianceWebGLRenderer {
     setMidDetail(v) { this.midDetail = v; }
     setHueShift(v) { this.hueShift = v; }
     setLumaMix(v) { this.lumaMix = v; }
+    setColorScience(v) { this.colorScience = v; }
 
     // v3.3: Log Wheels
     setLogShadow(r, g, b) { this.logShadow = (g === undefined) ? [r, r, r] : [r, g, b]; }
