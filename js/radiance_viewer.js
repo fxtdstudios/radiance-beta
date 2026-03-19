@@ -1510,7 +1510,7 @@ class RadianceViewer {
 
             let progressInterval = setInterval(async () => {
                 try {
-                    const progRes = await fetch(`/radiance/progress?id=${nodeId}`);
+                    const progRes = await fetch(`/radiance/progress?id=${this.instanceId || nodeId}`);
                     const prog = await progRes.json();
                     const percent = (prog.current / prog.total) * 100;
                     dvProgressBar.style.width = `${percent}%`;
@@ -1525,7 +1525,7 @@ class RadianceViewer {
                 const response = await api.fetchApi('/radiance/deliver', {
                     method: 'POST',
                     body: JSON.stringify({
-                        instance_id: nodeId,
+                        instance_id: this.instanceId || nodeId,
                         grading: {
                             exposure: this.exposure,
                             gamma: Array.isArray(this.gamma) ? this.gamma[0] : (this.gamma || 1.0),
