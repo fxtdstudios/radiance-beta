@@ -1,1 +1,0 @@
-# Radiance Tests Package
