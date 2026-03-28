@@ -305,6 +305,6 @@ class RadianceCinemaStudio:
 # NODE MAPPINGS
 # =============================================================================
 
-NODE_CLASS_MAPPINGS = {"RadianceCinemaStudio": RadianceCinemaStudio}
+NODE_CLASS_MAPPINGS = {"◎ RadianceCinemaStudio": RadianceCinemaStudio}
 
-NODE_DISPLAY_NAME_MAPPINGS = {"RadianceCinemaStudio": "◎ Radiance Manager"}
+NODE_DISPLAY_NAME_MAPPINGS = {"◎ RadianceCinemaStudio": "◎ Radiance Manager"}

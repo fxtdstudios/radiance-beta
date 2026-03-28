@@ -11,7 +11,7 @@ logger = logging.getLogger("radiance.color.transform")
 try:
     # Try importing from package root using relative import (most robust)
     from ..color_utils import (
-        # Log curves
+        # Log curves — numpy (CPU path, matrix ops)
         linear_to_logc3,
         logc3_to_linear,
         linear_to_logc4,
@@ -29,6 +29,23 @@ try:
         # RED Log3G10
         linear_to_log3g10,
         log3g10_to_linear,
+        # GPU tensor log curves — FIX #10: wire these for the GPU path
+        tensor_linear_to_logc3,
+        tensor_logc3_to_linear,
+        tensor_linear_to_logc4,
+        tensor_logc4_to_linear,
+        tensor_linear_to_slog3,
+        tensor_slog3_to_linear,
+        tensor_linear_to_vlog,
+        tensor_vlog_to_linear,
+        tensor_linear_to_log3g10,
+        tensor_log3g10_to_linear,
+        tensor_linear_to_davinci_intermediate,
+        tensor_davinci_intermediate_to_linear,
+        tensor_linear_to_acescct,
+        tensor_acescct_to_linear,
+        tensor_linear_to_canonlog3,
+        tensor_canonlog3_to_linear,
         # Tensor helpers
         tensor_to_numpy_float32,
         numpy_to_tensor_float32,
@@ -466,6 +483,19 @@ class RadianceLogCurveDecode:
     CATEGORY = "FXTD Studios/Radiance/Color"
     DESCRIPTION = "Decode log footage (LogC3/4, S-Log3, Log3G10, etc.) to linear with EI control and gamut transform."
 
+    # FIX #10: GPU tensor curve map — these run entirely on the existing GPU
+    # tensor without a host round-trip. Previously use_gpu was silently ignored.
+    TENSOR_CURVES = {
+        "ARRI LogC3":           (tensor_logc3_to_linear,              tensor_linear_to_logc3),
+        "ARRI LogC4":           (tensor_logc4_to_linear,              tensor_linear_to_logc4),
+        "Sony S-Log3":          (tensor_slog3_to_linear,              tensor_linear_to_slog3),
+        "Panasonic V-Log":      (tensor_vlog_to_linear,               tensor_linear_to_vlog),
+        "Canon Log 3":          (tensor_canonlog3_to_linear,          tensor_linear_to_canonlog3),
+        "RED Log3G10":          (tensor_log3g10_to_linear,            tensor_linear_to_log3g10),
+        "ACEScct":              (tensor_acescct_to_linear,            tensor_linear_to_acescct),
+        "DaVinci Intermediate": (tensor_davinci_intermediate_to_linear, tensor_linear_to_davinci_intermediate),
+    }
+
     def decode(
         self,
         image,
@@ -474,32 +504,56 @@ class RadianceLogCurveDecode:
         exposure_index="EI 800",
         use_gpu=True,
     ):
-
-        # FIX #10: use_gpu param was silently ignored — no GPU path exists yet.
-        # Log a warning so users aren't misled by the "GPU Accelerated" UI label.
-        if use_gpu:
-            logger.debug(
-                "RadianceLogCurveDecode: GPU-accelerated decode is not yet "
-                "implemented — running on CPU."
-            )
-
-        # Parse EI value
+        # Parse EI value (used by LogC3 CPU path)
         ei = int(exposure_index.replace("EI ", ""))
 
-        # CPU path
+        if use_gpu and curve in self.TENSOR_CURVES:
+            # ── GPU PATH ──────────────────────────────────────────────────────
+            # Runs entirely on the input tensor — no CPU round-trip.
+            # EI is only relevant for ARRI LogC3; the tensor variant accepts it
+            # as a keyword argument so all other curves are called without it.
+            decode_fn, _ = self.TENSOR_CURVES[curve]
+            if curve == "ARRI LogC3":
+                img_t = decode_fn(image, ei=ei)
+            else:
+                img_t = decode_fn(image)
+
+            # Gamut transform in tensor space (matrix on CPU, applied via matmul)
+            if target_gamut != "Native / No Transform":
+                source_matrix = self.CURVE_TO_MATRIX.get(curve)
+                if source_matrix is not None:
+                    mat = torch.tensor(source_matrix, dtype=torch.float32,
+                                       device=image.device)
+                    shape = img_t.shape
+                    img_t = (img_t[..., :3].reshape(-1, 3) @ mat.T).reshape(shape[:-1] + (3,))
+
+                if target_gamut == "Linear sRGB (Rec.709)":
+                    mat2 = torch.tensor(ACESCG_TO_SRGB, dtype=torch.float32, device=image.device)
+                    shape = img_t.shape
+                    img_t = (img_t[..., :3].reshape(-1, 3) @ mat2.T).reshape(shape[:-1] + (3,))
+                elif target_gamut == "Linear P3-D65":
+                    mat2 = torch.tensor(ACESCG_TO_P3D65, dtype=torch.float32, device=image.device)
+                    shape = img_t.shape
+                    img_t = (img_t[..., :3].reshape(-1, 3) @ mat2.T).reshape(shape[:-1] + (3,))
+                elif target_gamut == "Linear Rec.2020":
+                    mat2 = torch.tensor(ACESCG_TO_REC2020, dtype=torch.float32, device=image.device)
+                    shape = img_t.shape
+                    img_t = (img_t[..., :3].reshape(-1, 3) @ mat2.T).reshape(shape[:-1] + (3,))
+
+            return (img_t,)
+
+        # ── CPU PATH ──────────────────────────────────────────────────────────
         func = self.CURVES.get(curve)
         if not func:
             return (image,)
 
         img_np = tensor_to_numpy_float32(image)
 
-        # Apply curve with EI for LogC3
         if curve == "ARRI LogC3":
             res_np = func(img_np, ei=ei)
         else:
             res_np = func(img_np)
 
-        # Apply Gamut Transform
         if target_gamut != "Native / No Transform":
             source_to_aces_matrix = self.CURVE_TO_MATRIX.get(curve)
             if source_to_aces_matrix is not None:
@@ -636,7 +690,6 @@ class RadianceLogCurveEncode:
         exposure=0.0,
         clamp_output=True,
     ):
-
         func = self.CURVES.get(curve)
         if not func:
             return (image,)
@@ -644,22 +697,56 @@ class RadianceLogCurveEncode:
         # Parse EI value
         ei = int(exposure_index.replace("EI ", ""))
 
-        # Pre-process (Linearise gamma, then apply EV exposure)
+        # Pre-process: linearise input gamma then apply exposure — stays on GPU
         if apply_gamma:
-            # FIX #5: previous code used pow(x, gamma=2.2) which ENCODES
-            # (darkens, compresses) — the opposite of what's needed here.
-            # The node encodes linear footage to log; if the input arrives in
-            # sRGB (gamma-encoded), we must first LINEARISE it: pow(x, 1/gamma).
-            # Sign-preserving variant to avoid NaN on negative scene-linear values.
-            sign = torch.sign(image)
+            sign  = torch.sign(image)
             image = sign * torch.pow(torch.abs(image), 1.0 / gamma)
 
         if exposure != 0.0:
-            image = image * (2.0**exposure)
+            image = image * (2.0 ** exposure)
 
+        # ── GPU PATH ──────────────────────────────────────────────────────────
+        # FIX #10: use tensor encode variants so there is no CPU round-trip.
+        # Gamut matrices are applied as inline matmuls on the GPU tensor.
+        _, encode_fn = RadianceLogCurveDecode.TENSOR_CURVES.get(
+            curve, (None, None)
+        )
+        if encode_fn is not None:
+            img_t = image
+
+            if source_gamut != "Native / No Transform":
+                if source_gamut == "Linear sRGB (Rec.709)":
+                    mat = torch.tensor(self._SRGB_TO_ACESCG, dtype=torch.float32,
+                                       device=image.device)
+                    img_t = (img_t[..., :3].reshape(-1, 3) @ mat.T).reshape(img_t.shape)
+                elif source_gamut == "Linear P3-D65":
+                    mat = torch.tensor(self._P3D65_TO_ACESCG, dtype=torch.float32,
+                                       device=image.device)
+                    img_t = (img_t[..., :3].reshape(-1, 3) @ mat.T).reshape(img_t.shape)
+                elif source_gamut == "Linear Rec.2020":
+                    mat = torch.tensor(self._REC2020_TO_ACESCG, dtype=torch.float32,
+                                       device=image.device)
+                    img_t = (img_t[..., :3].reshape(-1, 3) @ mat.T).reshape(img_t.shape)
+
+                native_to_aces = self.CURVE_TO_MATRIX.get(curve)
+                if native_to_aces is not None:
+                    aces_to_native = np.linalg.inv(native_to_aces).astype(np.float32)
+                    mat2 = torch.tensor(aces_to_native, dtype=torch.float32,
+                                        device=image.device)
+                    img_t = (img_t[..., :3].reshape(-1, 3) @ mat2.T).reshape(img_t.shape)
+
+            if curve == "ARRI LogC3":
+                result = encode_fn(img_t, ei=ei)
+            else:
+                result = encode_fn(img_t)
+
+            if clamp_output:
+                result = torch.clamp(result, 0.0, 1.0)
+            return (result,)
+
+        # ── CPU FALLBACK ───────────────────────────────────────────────────────
         img_np = tensor_to_numpy_float32(image)
 
-        # Apply Gamut Transform (Inverse) — FIX #11: use pre-computed inverses
         if source_gamut != "Native / No Transform":
             if source_gamut == "Linear sRGB (Rec.709)":
                 img_np = apply_matrix_transform(img_np, self._SRGB_TO_ACESCG)
@@ -673,7 +760,6 @@ class RadianceLogCurveEncode:
                 aces_to_native = np.linalg.inv(native_to_aces)
                 img_np = apply_matrix_transform(img_np, aces_to_native)
 
-        # Apply Log Encoding with EI for LogC3
         if curve == "ARRI LogC3":
             res_np = func(img_np, ei=ei)
         else:
@@ -685,98 +771,9 @@ class RadianceLogCurveEncode:
         return (numpy_to_tensor_float32(res_np),)
 
 
-class RadianceACES2OutputTransform:
-    """
-    ACES 2.0 Output Transform for professional display delivery.
-    """
-
-    DISPLAY_TARGETS = [
-        "sRGB (Rec.709)",
-        "Display P3",
-        "Rec.2020 SDR",
-        "Rec.2020 PQ (HDR)",
-        "Rec.2020 HLG (HDR)",
-    ]
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-                "display_target": (cls.DISPLAY_TARGETS, {"default": "sRGB (Rec.709)"}),
-                "peak_luminance": (
-                    "FLOAT",
-                    {
-                        "default": 100.0,
-                        "min": 48.0,
-                        "max": 10000.0,
-                        "step": 10.0,
-                        "tooltip": "Peak display luminance in nits (100 for SDR, 1000+ for HDR)",
-                    },
-                ),
-                "contrast": (
-                    "FLOAT",
-                    {"default": 1.0, "min": 0.5, "max": 2.0, "step": 0.05},
-                ),
-            },
-            "optional": {
-                "gamut_compress": (
-                    "BOOLEAN",
-                    {"default": True, "tooltip": "Apply perceptual gamut compression"},
-                ),
-                "gamut_threshold": (
-                    "FLOAT",
-                    {"default": 0.75, "min": 0.5, "max": 0.95, "step": 0.05},
-                ),
-            },
-        }
-
-    RETURN_TYPES = ("IMAGE",)
-    FUNCTION = "transform"
-    CATEGORY = "FXTD Studios/Radiance/Color"
-    DESCRIPTION = "ACES 2.0 Output Transform for professional SDR/HDR display delivery with improved gamut mapping."
-
-    def transform(
-        self,
-        image,
-        display_target,
-        peak_luminance,
-        contrast,
-        gamut_compress=True,
-        gamut_threshold=0.75,
-    ):
-
-        img_np = tensor_to_numpy_float32(image)
-
-        # 1. Apply gamut compression if enabled
-        if gamut_compress:
-            img_np = aces2_gamut_compress(img_np, threshold=gamut_threshold)
-
-        # 2. Apply ACES 2.0 tone mapping
-        img_np = aces2_tonemap(img_np, peak_luminance=peak_luminance, contrast=contrast)
-
-        # 3. Convert to target color space
-        if "P3" in display_target:
-            img_np = apply_matrix_transform(img_np, ACESCG_TO_P3D65)
-        elif "2020" in display_target:
-            img_np = apply_matrix_transform(img_np, ACESCG_TO_REC2020)
-        else:  # sRGB
-            img_np = apply_matrix_transform(img_np, ACESCG_TO_SRGB)
-
-        # 4. Apply display encoding (EOTF)
-        if "PQ" in display_target:
-            img_np = linear_to_pq(img_np, peak_nits=peak_luminance)
-        elif "HLG" in display_target:
-            img_np = linear_to_hlg(img_np)
-        else:  # SDR gamma
-            img_np = linear_to_srgb(img_np)
-
-        return (numpy_to_tensor_float32(img_np),)
-
-
 # =============================================================================
 # NODE MAPPINGS
-# FIX #2: NODE_CLASS_MAPPINGS was absent — all 6 nodes were invisible to ComfyUI.
+# FIX #2: NODE_CLASS_MAPPINGS was absent — all 5 nodes were invisible to ComfyUI.
 # =============================================================================
 
 NODE_CLASS_MAPPINGS = {
@@ -785,7 +782,6 @@ NODE_CLASS_MAPPINGS = {
     "RadianceSceneLinearWorkflow": RadianceSceneLinearWorkflow,
     "RadianceLogCurveDecode": RadianceLogCurveDecode,
     "RadianceLogCurveEncode": RadianceLogCurveEncode,
-    "RadianceACES2OutputTransform": RadianceACES2OutputTransform,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -794,5 +790,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceSceneLinearWorkflow": "◎ Scene Linear Workflow",
     "RadianceLogCurveDecode": "◎ Log Curve Decode",
     "RadianceLogCurveEncode": "◎ Log Curve Encode",
-    "RadianceACES2OutputTransform": "◎ ACES 2.0 Output Transform",
 }

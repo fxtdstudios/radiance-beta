@@ -1,35 +1,3 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-    Radiance Film Grain v3.0 — HDR-Native Photographic Grain Simulation
-                        Radiance © 2024-2026 FXTD STUDIOS
-
-One unified node. Camera profiles + film stock emulation.
-Full float32/HDR pipeline — zero output clamping.
-
-Physically-based grain model:
- - Exposure-dependent grain density (simplified H&D characteristic curve)
- - HDR-aware luminance masking (Reinhard tonemap for mask, image untouched)
- - Per-channel spectral sensitivity matching real emulsion layers
- - Silver halide cluster simulation (non-Gaussian grain shape)
- - Halation as part of image formation (before grain compositing)
- - Photon noise √(exposure) scaling for digital sensor profiles
- - Gate weave / film base texture options
-
-v3.0 vs v2.0:
- - MERGED: RadianceFilmGrain + RadianceCameraNoise + RadianceLensEffects → 1 node
- - FIX: 13 clamp operations that destroyed HDR — all removed or made mask-only
- - FIX: Overlay/Soft Light blend modes now HDR-safe (decompose → blend → restore)
- - FIX: Luma masking uses Reinhard tonemap (works for values 0→∞)
- - FIX: Halation detects HDR highlights (not just 0.7-1.0 range)
- - FIX: CameraNoise hdr_safe now defaults to True
- - NEW: Exposure-dependent grain density (H&D curve)
- - NEW: Non-Gaussian grain shape (grain_character parameter)
- - NEW: Gate weave simulation
- - NEW: Film base density / color cast
- - REMOVED: 3 separate nodes → 1 unified node
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
 import torch
 import torch.nn.functional as F
 import math
@@ -697,8 +665,9 @@ def _generate_grain_texture(
     noise_h = max(1, int(h / max(grain_size, 0.1)))
     noise_w = max(1, int(w / max(grain_size, 0.1)))
 
-    # Base Gaussian noise
-    noise = torch.randn((b, noise_h, noise_w, c), device=device, generator=generator)
+    # Base Gaussian noise — generated on CPU (generator lives on CPU for MPS
+    # compatibility), then moved to compute device.
+    noise = torch.randn((b, noise_h, noise_w, c), device="cpu", generator=generator).to(device)
 
     # Silver halide clumping: square → re-center → normalize
     if grain_character > 0.01:
@@ -767,7 +736,8 @@ def _apply_halation(
 
     # Apply with halation color
     hc = torch.tensor(halation_color[:3], device=device, dtype=torch.float32)
-    img = img.clone()
+    # Caller is responsible for passing a mutable tensor (img is already cloned
+    # in apply_grain). No redundant .clone() here.
     img[..., :3] = img[..., :3] + glow[..., :3] * hc * halation
 
     return img
@@ -782,6 +752,8 @@ def _apply_gate_weave(
     """
     Simulate film gate registration jitter (gate weave).
     Sub-pixel random translation per frame.
+
+    Batched: single affine_grid + grid_sample call for all frames.
     """
     if weave_amount <= 0.0:
         return img
@@ -789,48 +761,29 @@ def _apply_gate_weave(
     b, h, w, c = img.shape
 
     # Random offset in pixels (weave_amount is fraction of frame height).
-    # Each frame in the batch gets its own independent shift — a single shared
-    # offset (previous behaviour) made every frame in an animation batch identical.
+    # Each frame in the batch gets its own independent shift.
+    # Generate on CPU (generator lives on CPU for MPS compat), then move.
     max_shift_px = weave_amount * h
-    results = []
-    for i in range(b):
-        dx = (
-            (torch.rand(1, generator=generator, device=device).item() - 0.5)
-            * 2.0
-            * max_shift_px
-        )
-        dy = (
-            (torch.rand(1, generator=generator, device=device).item() - 0.5)
-            * 2.0
-            * max_shift_px
-        )
+    offsets = (torch.rand(b, 2, generator=generator, device="cpu") - 0.5) * 2.0 * max_shift_px
+    offsets = offsets.to(device)
 
-        shift_x = dx / w * 2.0
-        shift_y = dy / h * 2.0
+    # Build batched theta: (b, 2, 3) identity + per-frame translation
+    theta = torch.zeros(b, 2, 3, device=device, dtype=torch.float32)
+    theta[:, 0, 0] = 1.0
+    theta[:, 1, 1] = 1.0
+    theta[:, 0, 2] = offsets[:, 0] / w * 2.0  # dx → normalised shift_x
+    theta[:, 1, 2] = offsets[:, 1] / h * 2.0  # dy → normalised shift_y
 
-        theta = torch.tensor(
-            [
-                [1.0, 0.0, shift_x],
-                [0.0, 1.0, shift_y],
-            ],
-            device=device,
-            dtype=torch.float32,
-        ).unsqueeze(
-            0
-        )  # (1, 2, 3)
-
-        grid = F.affine_grid(theta, [1, c, h, w], align_corners=False)
-        frame_bchw = img[i : i + 1].permute(0, 3, 1, 2)
-        shifted = F.grid_sample(
-            frame_bchw,
-            grid,
-            mode="bilinear",
-            padding_mode="border",
-            align_corners=False,
-        )
-        results.append(shifted.permute(0, 2, 3, 1))
-
-    return torch.cat(results, dim=0)
+    img_bchw = img.permute(0, 3, 1, 2)  # BHWC → BCHW
+    grid = F.affine_grid(theta, img_bchw.shape, align_corners=False)
+    shifted = F.grid_sample(
+        img_bchw,
+        grid,
+        mode="bilinear",
+        padding_mode="border",
+        align_corners=False,
+    )
+    return shifted.permute(0, 2, 3, 1)  # BCHW → BHWC
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -972,6 +925,44 @@ class RadianceFilmGrain:
             logger.error(f"Expected 3D/4D tensor, got {image.dim()}D")
             return (image,)
 
+        try:
+            return self._apply_grain_impl(
+                image, profile, intensity, seed, size, iso,
+                halation, blend_mode, gate_weave, use_gpu,
+            )
+        except RuntimeError as e:
+            # FIX 5: CUDA OOM / device error — retry on CPU.
+            # grain.py previously had no fallback unlike every other Radiance node.
+            # CineStill 800T on a 4K image can OOM on 8 GB cards due to large
+            # halation kernel + grain blur + gate_weave affine_grid all in VRAM.
+            if use_gpu and ("CUDA out of memory" in str(e) or "out of memory" in str(e).lower()):
+                logger.warning(
+                    f"[RadianceFilmGrain] CUDA OOM — retrying on CPU. "
+                    f"Consider reducing image resolution or disabling halation. ({e})"
+                )
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                return self._apply_grain_impl(
+                    image, profile, intensity, seed, size, iso,
+                    halation, blend_mode, gate_weave, False,
+                )
+            raise
+
+    @torch.no_grad()
+    def _apply_grain_impl(
+        self,
+        image: torch.Tensor,
+        profile: str,
+        intensity: float,
+        seed: int,
+        size: float,
+        iso: int,
+        halation: float,
+        blend_mode: str,
+        gate_weave: float,
+        use_gpu: bool,
+    ) -> tuple:
+
         # ── Device ──
         if use_gpu and torch.cuda.is_available():
             device = torch.device("cuda")
@@ -989,6 +980,12 @@ class RadianceFilmGrain:
             img = img.unsqueeze(0)
 
         b, h, w, c = img.shape
+
+        if c not in (3, 4):
+            logger.warning(
+                f"Grain expects 3 or 4 channel (RGB/RGBA) images, got {c} channels. "
+                "Results may be incorrect — grain will only affect existing channels."
+            )
 
         # ── Load Profile ──
         if profile not in PROFILES:
@@ -1027,14 +1024,20 @@ class RadianceFilmGrain:
             grain_intensity *= 2.0 ** (push_stops * 0.5)  # ~√2 per stop push
 
         # ── Seed ──
-        generator = torch.Generator(device=device)
+        # Generator MUST live on CPU — MPS does not support device-side
+        # generators and torch.randn/rand with an MPS generator crashes.
+        # Noise is generated on CPU then moved to device.
+        generator = torch.Generator(device="cpu")
         generator.manual_seed(seed)
 
         # ── Step 1: Film base color cast ──
+        # Clone once upfront — all subsequent steps mutate in-place.
+        # Previous code cloned up to 4 times (film_base, halation, contrast, saturation).
+        img = img.clone()
+
         # Film stocks have an orange mask (neg) or tint (reversal)
         if film_base != [1.0, 1.0, 1.0] and c >= 3:
             fb = torch.tensor(film_base[:3], device=device, dtype=torch.float32)
-            img = img.clone()
             img[..., :3] = img[..., :3] * fb
 
         # ── Step 2: HDR-aware luminance for all masking ──
@@ -1050,13 +1053,11 @@ class RadianceFilmGrain:
             # different amount, introducing a color cast whenever R/G/B means differ
             # (which is almost always).  A shared luma pivot preserves hue/saturation
             # while correctly tightening or expanding tonal contrast.
-            img = img.clone()
             pivot = luma.mean().unsqueeze(-1)  # scalar, broadcast-safe
             img[..., :3] = pivot + (img[..., :3] - pivot) * contrast
 
         if saturation != 1.0 and c >= 3:
             # BT.709 desaturation in linear space
-            img = img.clone()
             luma_3ch = (
                 0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2]
             ).unsqueeze(-1)
@@ -1142,7 +1143,7 @@ class RadianceFilmGrain:
         # Downstream nodes (viewer, export, color management) handle range.
 
         # Cleanup GPU intermediates
-        del img, noise, final_grain, density_mask, luma
+        del img, noise, final_grain, density_mask, luma, shadow_factor, highlight_fade, shoulder_t
 
         return (output.cpu(),)
 

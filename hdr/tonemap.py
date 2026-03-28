@@ -153,18 +153,18 @@ class HDRToneMap:
     # Tone map look presets
     LOOK_PRESETS = [
         "None (Custom)",
-        "🎬 Cinematic Film",
-        "📺 HDR Display",
-        "🌐 Web / Social",
-        "🖨️ Print Ready",
-        "🎮 Game Engine",
-        "📷 Photography",
-        "🌙 Low Key / Dark",
-        "☀️ High Key / Bright",
+        "◎ Cinematic Film",
+        "◎ HDR Display",
+        "◎ Web / Social",
+        "◎ Print Ready",
+        "◎ Game Engine",
+        "◎ Photography",
+        "◎ Low Key / Dark",
+        "◎ High Key / Bright",
     ]
 
     PRESET_CONFIGS = {
-        "🎬 Cinematic Film": {
+        "◎ Cinematic Film": {
             "operator": "filmic_aces",
             "exposure": 0.0,
             "gamma": 2.2,
@@ -174,7 +174,7 @@ class HDRToneMap:
             "highlight_compression": 0.8,
             "shadow_lift": 0.02,
         },
-        "📺 HDR Display": {
+        "◎ HDR Display": {
             "operator": "agx",
             "exposure": 0.3,
             "gamma": 2.2,
@@ -184,7 +184,7 @@ class HDRToneMap:
             "highlight_compression": 0.5,
             "shadow_lift": 0.0,
         },
-        "🌐 Web / Social": {
+        "◎ Web / Social": {
             "operator": "filmic_aces",
             "exposure": 0.2,
             "gamma": 2.2,
@@ -194,7 +194,7 @@ class HDRToneMap:
             "highlight_compression": 0.9,
             "shadow_lift": 0.01,
         },
-        "🖨️ Print Ready": {
+        "◎ Print Ready": {
             "operator": "reinhard_luminance",
             "exposure": -0.2,
             "gamma": 2.2,
@@ -204,7 +204,7 @@ class HDRToneMap:
             "highlight_compression": 0.7,
             "shadow_lift": 0.03,
         },
-        "🎮 Game Engine": {
+        "◎ Game Engine": {
             "operator": "filmic_uncharted2",
             "exposure": 0.0,
             "gamma": 2.2,
@@ -214,7 +214,7 @@ class HDRToneMap:
             "highlight_compression": 0.6,
             "shadow_lift": 0.0,
         },
-        "📷 Photography": {
+        "◎ Photography": {
             "operator": "reinhard_extended",
             "exposure": 0.0,
             "gamma": 2.2,
@@ -224,7 +224,7 @@ class HDRToneMap:
             "highlight_compression": 0.5,
             "shadow_lift": 0.0,
         },
-        "🌙 Low Key / Dark": {
+        "◎ Low Key / Dark": {
             "operator": "filmic_aces",
             "exposure": -0.5,
             "gamma": 2.4,
@@ -234,7 +234,7 @@ class HDRToneMap:
             "highlight_compression": 0.9,
             "shadow_lift": 0.0,
         },
-        "☀️ High Key / Bright": {
+        "◎ High Key / Bright": {
             "operator": "reinhard",
             "exposure": 0.5,
             "gamma": 2.0,
@@ -256,7 +256,7 @@ class HDRToneMap:
                 "preset": (
                     cls.LOOK_PRESETS,
                     {
-                        "default": "🎬 Cinematic Film",
+                        "default": "◎ Cinematic Film",
                         "tooltip": "Quick look preset. Overrides settings below.",
                     },
                 ),
@@ -469,7 +469,7 @@ class HDRToneMap:
     def tonemap(
         self,
         image: torch.Tensor,
-        preset: str = "🎬 Cinematic Film",
+        preset: str = "◎ Cinematic Film",
         operator: str = "filmic_aces",
         exposure: float = 0.0,
         gamma: float = 2.2,

@@ -157,15 +157,29 @@ def linear_to_srgb(img: np.ndarray) -> np.ndarray:
 
 
 def tensor_srgb_to_linear(tensor: torch.Tensor, gamma: float = 2.2) -> torch.Tensor:
-    """Convert sRGB tensor to linear color space (GPU-compatible)."""
+    """Convert sRGB tensor to linear color space (GPU-compatible).
+
+    HDR FIX: Previous implementation used tensor.clamp(min=0) inside the pow()
+    branch, which silently destroyed all values above 1.0 — correct for SDR but
+    wrong for HDR pipelines where decoded values legitimately exceed 1.0
+    (Soft Clip recovery, Passthrough, scene-linear highlights).
+
+    Fix: sign-preserving absolute-value extension so the EOTF is continuous
+    and monotonic across the full float32 range, matching IEC 61966-2-1 for
+    [0, 1] and extending smoothly outside. Identical to _safe_srgb_to_linear_extended
+    in vae.py — consolidated here so all Radiance nodes share one implementation.
+    """
     if gamma == 2.2:
-        # Proper sRGB EOTF
-        low = tensor / 12.92
-        high = torch.pow((tensor.clamp(min=0) + 0.055) / 1.055, 2.4)
-        return torch.where(tensor <= 0.04045, low, high)
+        # IEC 61966-2-1 sRGB EOTF — extended to full float32 range
+        abs_t = tensor.abs()
+        sign  = tensor.sign()
+        low   = abs_t / 12.92
+        high  = torch.pow((abs_t + 0.055) / 1.055, 2.4)
+        return torch.where(abs_t <= 0.04045, low, high) * sign
     else:
-        # Simple gamma
-        return torch.pow(tensor.clamp(min=1e-10), gamma)
+        # Simple gamma — sign-preserving for HDR symmetry
+        abs_t = tensor.abs()
+        return torch.pow(abs_t.clamp(min=1e-10), gamma) * tensor.sign()
 
 
 def tensor_linear_to_srgb(tensor: torch.Tensor) -> torch.Tensor:
@@ -582,17 +596,19 @@ def hlg_to_linear(img: np.ndarray) -> np.ndarray:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def aces2_tonemap(
+def aces_approx_tonemap(
     img: np.ndarray,
     peak_luminance: float = 1000.0,
     mid_gray: float = 0.18,
     contrast: float = 1.0,
 ) -> np.ndarray:
     """
-    ACES 2.0 simplified tone mapping curve.
+    Approximate filmic tone mapping curve inspired by ACES aesthetics.
 
-    Based on the ACES 2.0 Output Transform Reference Rendering Transform (RRT)
-    with a simplified S-curve that preserves highlight detail and shadow saturation.
+    NOTE: This is NOT the ACES 2.0 Reference Rendering Transform (RRT).
+    It uses a Michaelis-Menten (Naka-Rushton) S-curve that produces
+    ACES-like results but is not spec-compliant. For true ACES RRT output
+    use PyOpenColorIO with an ACES config (RadianceOCIODisplayView).
 
     Args:
         img: Linear ACEScg image (float32)
@@ -629,6 +645,10 @@ def aces2_tonemap(
         result[highlight_mask] = highlight_threshold + 0.1 * np.tanh(excess * 10)
 
     return np.clip(result, 0.0, 1.0).astype(np.float32)
+
+
+# Backward-compatibility alias — old name was misleadingly labelled "ACES 2.0"
+aces2_tonemap = aces_approx_tonemap
 
 
 def aces2_gamut_compress(
@@ -794,10 +814,55 @@ def numpy_to_tensor_float32(array: np.ndarray) -> torch.Tensor:
     """Convert numpy array to PyTorch tensor."""
     return torch.from_numpy(array.astype(np.float32))
 
+def savePng16(filepath, image_data):
+    """
+    Save 16-bit PNG image using cv2.
+    Provided for backwards compatibility with existing workflows.
+    """
+    try:
+        import cv2
+        # Ensure data is numpy array [0,1] float or [0,65535] uint16
+        if isinstance(image_data, torch.Tensor):
+            image_data = image_data.detach().cpu().numpy()
+        
+        if image_data.dtype == np.float32 or image_data.dtype == np.float64:
+            image_data = np.clip(image_data, 0, 1)
+            image_data = (image_data * 65535).astype(np.uint16)
+        
+        # Convert RGB to BGR for cv2
+        if image_data.shape[-1] == 3:
+            image_data = cv2.cvtColor(image_data, cv2.COLOR_RGB2BGR)
+        elif image_data.shape[-1] == 4:
+            image_data = cv2.cvtColor(image_data, cv2.COLOR_RGBA2BGRA)
+            
+        cv2.imwrite(filepath, image_data)
+        return True
+    except Exception as e:
+        import logging
+        logging.getLogger("radiance.color_utils").error(f"Failed to save 16-bit PNG: {e}")
+        return False
+
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                          GPU-ACCELERATED LOG CURVES (TORCH)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+def aces_tonemap(img: np.ndarray) -> np.ndarray:
+    """
+    Narkowicz-style ACES approximate filmic tonemapper.
+    Matches the GLSL implementation in Radiance Viewer.
+    Assumes image is scene-linear 18% grey = 0.18.
+    """
+    a = 2.51
+    b = 0.03
+    c = 2.43
+    d = 0.59
+    e = 0.14
+    # Apply curve: (x * (ax + b)) / (x * (cx + d) + e)
+    res = (img * (a * img + b)) / (img * (c * img + d) + e)
+    return np.clip(res, 0.0, 1.0)
 
 
 def tensor_linear_to_logc3(tensor: torch.Tensor, ei: int = 800) -> torch.Tensor:
@@ -855,10 +920,21 @@ def tensor_logc4_to_linear(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def tensor_linear_to_slog3(tensor: torch.Tensor) -> torch.Tensor:
-    """GPU-accelerated Sony S-Log3 encoding."""
+    """GPU-accelerated Sony S-Log3 encoding.
+
+    Official Sony S-Log3 spec (S-Log3 Technical Note v1.1):
+      For x >= 0.011250: y = (420 + log10((x + 0.01) / 0.19) × 261.5) / 1023
+      For x  < 0.011250: y = (x × (171.2102946929 − 95) / 0.01125 + 95) / 1023
+
+    BUG-1 FIX: Previous tensor code had operator-precedence error:
+      log10(tensor + 0.01) / 0.19 * 261.5   ← divides the LOG RESULT by 0.19
+    Correct form requires 0.19 INSIDE the log argument:
+      log10((tensor + 0.01) / 0.19) * 261.5  ← divides the SCENE VALUE inside log
+    At 18% grey (x=0.18) this was producing −0.56 (negative log!) instead of 0.41.
+    """
     cut = 0.011250
-    log_val = (420.0 + torch.log10(tensor + 0.01) / 0.19 * 261.5) / 1023.0
-    lin_val = (tensor + 0.01) * (4.0 * 261.5) / 1023.0 + (95.0 / 1023.0)
+    log_val = (420.0 + torch.log10((tensor + 0.01) / 0.19) * 261.5) / 1023.0
+    lin_val = (tensor + 0.01) * (171.2102946929 - 95.0) / (0.01125 * 1023.0) + (95.0 / 1023.0)
     return torch.where(tensor >= cut, log_val, lin_val)
 
 
@@ -871,10 +947,22 @@ def tensor_slog3_to_linear(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def tensor_linear_to_log3g10(tensor: torch.Tensor) -> torch.Tensor:
-    """GPU-accelerated RED Log3G10 encoding."""
+    """GPU-accelerated RED Log3G10 encoding.
+
+    BUG-4 FIX: Previous code used torch.tensor(b * cut + 1.0) to compute
+    cut_encoded, creating a CPU scalar tensor inside a GPU function. On CUDA
+    this triggers a device-mismatch in torch.where. Replaced with a
+    pre-computed Python float constant.
+
+    Pre-computed: a × log10(b × cut + 1) + c
+                = 0.224282 × log10(155.975327 × 0.01 + 1) + 0.01
+                = 0.224282 × log10(2.55975327) + 0.01
+                ≈ 0.101551
+    """
     a, b, c = 0.224282, 155.975327, 0.01
     cut = 0.01
-    cut_encoded = a * torch.log10(torch.tensor(b * cut + 1.0)) + c
+    # Pre-computed encode(cut) — avoids torch.tensor() CPU allocation inside GPU fn
+    cut_encoded = 0.101551  # a * log10(b * cut + 1) + c
 
     log_val = a * torch.log10(b * tensor + 1.0) + c
     lin_val = (tensor / cut) * cut_encoded
@@ -882,10 +970,21 @@ def tensor_linear_to_log3g10(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def tensor_log3g10_to_linear(tensor: torch.Tensor) -> torch.Tensor:
-    """GPU-accelerated RED Log3G10 decoding."""
+    """GPU-accelerated RED Log3G10 decoding.
+
+    BUG-3 FIX: Previous code used cut_encoded = a × 0.50514998 ≈ 0.1133.
+    The correct threshold is encode(cut_linear) = a × log10(b × cut + 1) + c ≈ 0.1016.
+    Using 0.1133 caused values in [0.1016, 0.1133] — encoded by the LOG formula —
+    to be decoded with the LINEAR formula, creating a discontinuity at the cut point.
+
+    Pre-computed: a × log10(155.975327 × 0.01 + 1) + c
+                = 0.224282 × log10(2.55975327) + 0.01
+                ≈ 0.101551
+    """
     a, b, c = 0.224282, 155.975327, 0.01
     cut = 0.01
-    cut_encoded = a * 0.50514998  # pre-computed log10(b * cut + 1)
+    # Correct cut in the encoded (Log3G10) domain — encode(0.01)
+    cut_encoded = 0.101551  # a * log10(b * cut + 1) + c
 
     log_val = (torch.pow(10.0, (tensor - c) / a) - 1.0) / b
     lin_val = tensor / cut_encoded * cut
@@ -903,9 +1002,22 @@ def tensor_linear_to_vlog(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def tensor_vlog_to_linear(tensor: torch.Tensor) -> torch.Tensor:
-    """GPU-accelerated Panasonic V-Log decoding."""
+    """GPU-accelerated Panasonic V-Log decoding.
+
+    BUG-2 FIX: Previous code used cut_encoded = c * 0.33893 ≈ 0.0819.
+    The correct threshold is encode(cut_linear) = c × log10(cut + b) + d ≈ 0.1810.
+    Using 0.0819 caused values in the range [0.0819, 0.1810] — encoded by the LOG
+    formula — to be decoded with the LINEAR formula, producing a visible kink in
+    the dark/midtone range of any V-Log source.
+
+    Pre-computed: c × log10(0.01 + 0.00873) + d
+                = 0.241514 × log10(0.01873) + 0.598206
+                = 0.241514 × (−1.72757) + 0.598206
+                ≈ 0.181000
+    """
     b, c, d = 0.00873, 0.241514, 0.598206
-    cut_encoded = c * 0.33893  # pre-computed: log10(cut_linear + b)
+    # Correct cut in the encoded (V-Log) domain — encode(0.01)
+    cut_encoded = 0.181000  # c * log10(0.01 + b) + d
 
     log_val = torch.pow(10.0, (tensor - d) / c) - b
     lin_val = (tensor - 0.125) / 5.625
@@ -913,20 +1025,170 @@ def tensor_vlog_to_linear(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def tensor_linear_to_davinci_intermediate(tensor: torch.Tensor) -> torch.Tensor:
-    """GPU-accelerated DaVinci Intermediate encoding."""
+    """GPU-accelerated DaVinci Intermediate encoding.
+
+    Official Blackmagic DaVinci Intermediate (DWG) spec:
+      For x >= 0.00262409: y = log10(x + 0.0075) × 0.07329248 + 0.5
+      For x  < 0.00262409: y = slope × x + intercept
+        where slope     = C / ((cut + A) × ln(10))  [C1 tangent continuity at cut]
+              intercept = log10(cut + A) × C + 0.5 − slope × cut
+
+    BUG-5 FIX: Previous code used slope = 7.0 and intercept = 0.07329248.
+    This gave a 0.262-magnitude discontinuity at the cut point (log value 0.354 vs
+    linear value 0.092 — the linear toe was essentially in a completely different
+    range). The correct C1-continuous slope is ~3.1440, intercept ~0.3456.
+
+    Pre-computed constants (A=0.0075, C=0.07329248, cut=0.00262409):
+      slope     = 0.07329248 / ((0.00262409 + 0.0075) × ln(10)) ≈ 3.14404
+      intercept = log10(0.01012409) × 0.07329248 + 0.5 − 3.14404 × 0.00262409
+               ≈ 0.35381 − 0.00825 ≈ 0.34556
+    """
     A, C = 0.0075, 0.07329248
     cut = 0.00262409
+    # C1-continuous linear toe constants (pre-computed, no runtime allocation)
+    _slope     = 3.14403760   # C / ((cut + A) * ln(10))
+    _intercept = 0.34555736   # log10(cut + A) * C + 0.5 - slope * cut
 
     log_val = torch.log10(tensor + A) * C + 0.5
-    lin_val = 7.0 * tensor + 0.07329248
+    lin_val = _slope * tensor + _intercept
     return torch.where(tensor >= cut, log_val, lin_val)
 
 
 def tensor_davinci_intermediate_to_linear(tensor: torch.Tensor) -> torch.Tensor:
-    """GPU-accelerated DaVinci Intermediate decoding."""
+    """GPU-accelerated DaVinci Intermediate decoding.
+
+    BUG-5 FIX (decode side): Inverts the corrected C1-continuous linear toe.
+    Previous decode had cut_v = 0.07329248 (the log coefficient C, which is
+    clearly wrong as a threshold in encoded space — the actual encoded cut is
+    log10(0.00262409 + 0.0075) × 0.07329248 + 0.5 ≈ 0.35381).
+
+    Pre-computed encoded cut ≈ 0.353808.
+    """
     A, C = 0.0075, 0.07329248
-    cut_v = 0.07329248
+    # Correct encoded cut: log10(cut + A) * C + 0.5 ≈ 0.353808
+    cut_v      = 0.353808
+    _slope     = 3.14403760
+    _intercept = 0.34555736
 
     log_val = torch.pow(10.0, (tensor - 0.5) / C) - A
-    lin_val = (tensor - 0.07329248) / 7.0
+    lin_val = (tensor - _intercept) / _slope
     return torch.where(tensor > cut_v, log_val, lin_val)
+
+
+def tensor_linear_to_acescct(tensor: torch.Tensor) -> torch.Tensor:
+    """GPU-accelerated ACEScct encoding."""
+    cut = 0.0078125
+    a, b = 10.5402377416545, 0.0729055341958355
+    log_val = (torch.log2(tensor.clamp(min=1e-10)) + 9.72) / 17.52
+    lin_val = a * tensor + b
+    return torch.where(tensor > cut, log_val, lin_val)
+
+
+def tensor_acescct_to_linear(tensor: torch.Tensor) -> torch.Tensor:
+    """GPU-accelerated ACEScct decoding."""
+    cut_encoded = 0.155251141552511
+    log_val = torch.pow(2.0, tensor * 17.52 - 9.72)
+    lin_val = (tensor - 0.0729055341958355) / 10.5402377416545
+    return torch.where(tensor > cut_encoded, log_val, lin_val)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GPU TENSOR VARIANTS — Canon Log 3, PQ, HLG
+# Previously only numpy implementations existed; GPU path forces a full
+# tensor→CPU→numpy→GPU round-trip on every frame in video workflows.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def tensor_linear_to_canonlog3(tensor: torch.Tensor) -> torch.Tensor:
+    """GPU-accelerated Canon Log 3 encoding.
+
+    Canon Specification constants — same as the numpy variant.
+    18% gray → 0.343 (34.3 IRE), Base ISO 800.
+    """
+    cut = 0.014
+    a   = 14.98325
+    c   = 0.36726845
+    d   = 0.12783901
+    e   = 5.449285
+    f   = 0.073059361
+
+    log_val = c * torch.log10(a * tensor + 1.0) + d
+    lin_val = e * tensor + f
+    return torch.where(tensor >= cut, log_val, lin_val)
+
+
+def tensor_canonlog3_to_linear(tensor: torch.Tensor) -> torch.Tensor:
+    """GPU-accelerated Canon Log 3 decoding."""
+    cut_encoded = 0.14926   # encoded value at linear cut point
+    a = 14.98325
+    c = 0.36726845
+    d = 0.12783901
+    e = 5.449285
+    f = 0.073059361
+
+    log_val = (torch.pow(10.0, (tensor - d) / c) - 1.0) / a
+    lin_val = (tensor - f) / e
+    return torch.where(tensor > cut_encoded, log_val, lin_val)
+
+
+def tensor_linear_to_pq(tensor: torch.Tensor, peak_nits: float = 1000.0) -> torch.Tensor:
+    """GPU-accelerated ST.2084 PQ (Perceptual Quantizer) encoding.
+
+    Encodes scene-linear light (relative to display peak) to PQ signal [0, 1].
+    Standard for HDR10, Dolby Vision mastering.
+
+    Args:
+        tensor: Scene-linear image, 1.0 = display peak / peak_nits
+        peak_nits: Display peak luminance (default 1000 nits for HDR10)
+    """
+    # Normalise to [0, 1] relative to 10 000 nits (PQ absolute reference)
+    L = torch.clamp(tensor * peak_nits / 10000.0, min=0.0)
+    m1 = torch.tensor(0.1593017578125, dtype=tensor.dtype, device=tensor.device)
+    m2 = torch.tensor(78.84375,        dtype=tensor.dtype, device=tensor.device)
+    c1 = 0.8359375
+    c2 = 18.8515625
+    c3 = 18.6875
+    Lm1 = torch.pow(L, m1)
+    return torch.pow((c1 + c2 * Lm1) / (1.0 + c3 * Lm1), m2)
+
+
+def tensor_pq_to_linear(tensor: torch.Tensor, peak_nits: float = 1000.0) -> torch.Tensor:
+    """GPU-accelerated ST.2084 PQ decoding to scene-linear."""
+    m1 = torch.tensor(0.1593017578125, dtype=tensor.dtype, device=tensor.device)
+    m2 = torch.tensor(78.84375,        dtype=tensor.dtype, device=tensor.device)
+    c1 = 0.8359375
+    c2 = 18.8515625
+    c3 = 18.6875
+    Vm2 = torch.pow(torch.clamp(tensor, min=0.0), 1.0 / m2)
+    return (
+        torch.pow(torch.clamp(Vm2 - c1, min=0.0) / (c2 - c3 * Vm2), 1.0 / m1)
+        * 10000.0 / peak_nits
+    )
+
+
+def tensor_linear_to_hlg(tensor: torch.Tensor) -> torch.Tensor:
+    """GPU-accelerated ARIB STD-B67 HLG (Hybrid Log-Gamma) encoding.
+
+    HLG is backward-compatible with SDR displays and used in broadcast HDR
+    (BBC, NHK, YouTube HDR). Output range [0, 1].
+    """
+    a = 0.17883277
+    b = 0.28466892
+    c = 0.55991073
+    t = torch.clamp(tensor, min=0.0)
+
+    lin_val = torch.sqrt(3.0 * t)
+    log_val = a * torch.log(torch.clamp(12.0 * t - b, min=1e-10)) + c
+    result  = torch.where(t <= 1.0 / 12.0, lin_val, log_val)
+    return torch.clamp(result, 0.0, 1.0)
+
+
+def tensor_hlg_to_linear(tensor: torch.Tensor) -> torch.Tensor:
+    """GPU-accelerated ARIB STD-B67 HLG decoding to scene-linear."""
+    a = 0.17883277
+    b = 0.28466892
+    c = 0.55991073
+
+    lin_val = (tensor ** 2) / 3.0
+    log_val = (torch.exp((tensor - c) / a) + b) / 12.0
+    result  = torch.where(tensor <= 0.5, lin_val, log_val)
+    return torch.clamp(result, min=0.0)

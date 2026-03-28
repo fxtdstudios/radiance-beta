@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-                 RADIANCE TEMPORAL NODES v1.0
+                 RADIANCE TEMPORAL NODES v2.2.1
           Temporal Video Processing for ComfyUI Pipelines
                       Radiance © 2024-2026
 
@@ -16,7 +16,7 @@ from typing import Tuple, List
 import torch
 import numpy as np
 
-logger = logging.getLogger("radiance.temporal")
+logger = logging.getLogger("◎ Radiance.temporal")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -244,11 +244,11 @@ class RadianceFlickerAnalyze:
 
 # ─────────────────────────────────────────────────────────────────────────────
 NODE_CLASS_MAPPINGS = {
-    "RadianceTemporalSmooth":  RadianceTemporalSmooth,
-    "RadianceFlickerAnalyze":  RadianceFlickerAnalyze,
+    "◎ RadianceTemporalSmooth":  RadianceTemporalSmooth,
+    "◎ RadianceFlickerAnalyze":  RadianceFlickerAnalyze,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceTemporalSmooth": "◎ Radiance Temporal Smooth",
-    "RadianceFlickerAnalyze": "◎ Radiance Flicker Analyze",
+    "◎ RadianceTemporalSmooth": "◎ Radiance Temporal Smooth",
+    "◎ RadianceFlickerAnalyze": "◎ Radiance Flicker Analyze",
 }

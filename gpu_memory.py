@@ -52,16 +52,28 @@ def get_gpu_memory_info() -> dict:
     Get current GPU memory usage statistics.
 
     Returns:
-        Dict with allocated, reserved, and total memory in MB
+        Dict with allocated, reserved, total memory in MB, and utilisation %.
+
+    FIX 3: Added total_mb (physical VRAM size) and utilisation_pct.
+    Without total_mb callers cannot compute how full the GPU is — the most
+    useful number for VRAM capacity planning and OOM prevention.
+    Uses torch.cuda.mem_get_info() which returns (free, total) bytes.
     """
     if not torch.cuda.is_available():
         return {"available": False}
 
+    free_bytes, total_bytes = torch.cuda.mem_get_info()
+    allocated_mb = torch.cuda.memory_allocated() / 1024 / 1024
+    total_mb     = total_bytes / 1024 / 1024
+
     return {
-        "available": True,
-        "allocated_mb": torch.cuda.memory_allocated() / 1024 / 1024,
-        "reserved_mb": torch.cuda.memory_reserved() / 1024 / 1024,
+        "available":        True,
+        "allocated_mb":     allocated_mb,
+        "reserved_mb":      torch.cuda.memory_reserved() / 1024 / 1024,
         "max_allocated_mb": torch.cuda.max_memory_allocated() / 1024 / 1024,
+        "total_mb":         total_mb,
+        "free_mb":          free_bytes / 1024 / 1024,
+        "utilisation_pct":  round(allocated_mb / total_mb * 100, 1) if total_mb > 0 else 0.0,
     }
 
 
@@ -79,15 +91,23 @@ def gpu_memory_guard(cleanup_on_success: bool = True, cleanup_on_error: bool = T
         ...     img = image.to("cuda")
         ...     result = process(img)
         ...     return result.cpu()  # Move back to CPU before exiting
+
+    FIX 1: Previous implementation called cleanup_gpu_memory() in both the
+    `except` block AND the `finally` block on error paths, causing a redundant
+    double GPU synchronize (~1-5ms stall) on every exception. The finally block
+    now only runs cleanup on the success path by tracking whether an error occurred.
     """
+    _error_occurred = False
     try:
         yield
     except Exception:
+        _error_occurred = True
         if cleanup_on_error:
             cleanup_gpu_memory()
         raise
     finally:
-        if cleanup_on_success:
+        # Only clean up here on the success path — error path already handled above
+        if not _error_occurred and cleanup_on_success:
             cleanup_gpu_memory()
 
 
@@ -127,21 +147,44 @@ def safe_gpu_operation(
         ...     device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
         ...     # ... processing ...
         ...     return result
+
+    FIX 2a: MPS (Apple Silicon) GPU is now treated as a first-class GPU path.
+    Previously the decorator only attempted GPU execution when CUDA was available,
+    so MPS users always fell through to the CPU branch even with a GPU present.
+
+    FIX 2b: OOM detection now covers MPS errors. Previous check was:
+        "out of memory" in str(e).lower() or "CUDA" in str(e)
+    MPS OOM messages say "MPS backend out of memory" — neither condition matched,
+    so Apple Silicon OOM errors bypassed the CPU fallback and raised immediately.
+    The check now tests for both "cuda" and "mps" (case-insensitive).
     """
+
+    def _has_gpu() -> bool:
+        """True if any GPU backend (CUDA or MPS) is available."""
+        if torch.cuda.is_available():
+            return True
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return True
+        return False
+
+    def _is_oom(e: RuntimeError) -> bool:
+        """Detect GPU out-of-memory errors for both CUDA and MPS."""
+        msg = str(e).lower()
+        return "out of memory" in msg or "cuda" in msg or "mps" in msg
 
     def decorator(func: Callable[..., T]) -> Callable[..., T]:
         @wraps(func)
         def wrapper(*args, **kwargs) -> T:
             use_gpu = kwargs.get("use_gpu", True)
 
-            if use_gpu and torch.cuda.is_available():
+            if use_gpu and _has_gpu():
                 try:
                     result = func(*args, **kwargs)
                     if cleanup_after:
                         cleanup_gpu_memory()
                     return result
                 except RuntimeError as e:
-                    if "out of memory" in str(e).lower() or "CUDA" in str(e):
+                    if _is_oom(e):
                         logger.warning(
                             f"GPU operation failed: {e}. Falling back to CPU."
                         )

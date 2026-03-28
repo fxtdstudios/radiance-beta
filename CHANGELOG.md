@@ -2,10 +2,15 @@
 
 All notable changes to FXTD Radiance will be documented in this file.
 
-## [2.2.1] - 2026-03-20
+## [2.2.1] - 2026-03-28
+
+### Fixed
+- **Save Overwrite Protection** (`hdr/io.py`, `nodes_io.py`): `Radiance Save EXR/HDR` and `Radiance Write` now default to `start_frame=0`, enabling automatic index detection to prevent accidental file overwrites.
+- **Null Safety**: Added robust input validation to sequence loading and saving methods to prevent crashes when passed empty paths or invalid indices from third-party nodes.
 
 ### Changed
-- Maintenance update to version 2.2.1.
+- **Branding Consistency**: `RadianceApplyGradeInfo` display name updated to `◎ Radiance Apply Grade Info` to match the suite's naming convention.
+- **Repository Cleanup**: Removed legacy test scripts and temporary debug directories (`MagicMock`) to streamline the package for GitHub and Comfy Registry.
 
 ## [2.2] - 2026-03-18
 

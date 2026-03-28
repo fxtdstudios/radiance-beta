@@ -1,5 +1,5 @@
 """
-Radiance QC Node v2.1
+Radiance QC Node v2.2.1
 Production-Grade Quality Control and Error Detection
 Author: FXTD Studios Pipeline Team
 """
@@ -22,7 +22,7 @@ try:
 except Exception:
     _OUTPUT_DIR = os.path.abspath("output")
 
-logger = logging.getLogger("radiance.qc")
+logger = logging.getLogger("◎ Radiance.qc")
 
 
 class RadianceQC:
@@ -189,7 +189,7 @@ class RadianceQC:
                 }
                 if crushed_pct > 0:
                     frame_report.append(
-                        f"  ⚠ CRUSHED: {crushed_pct:.2f}% pixels < {black_threshold}"
+                        f"  ◎ CRUSHED: {crushed_pct:.2f}% pixels < {black_threshold}"
                     )
                     frame_pass = False
 
@@ -202,7 +202,7 @@ class RadianceQC:
                 }
                 if clipped_pct > 0:
                     frame_report.append(
-                        f"  ⚠ CLIPPED: {clipped_pct:.2f}% pixels > {white_threshold}"
+                        f"  ◎ CLIPPED: {clipped_pct:.2f}% pixels > {white_threshold}"
                     )
                     frame_pass = False
 
@@ -213,7 +213,7 @@ class RadianceQC:
                     "out_of_gamut_pct": oog_pct,
                 }
                 if oog_pct > 0:
-                    frame_report.append(f"  ⚠ GAMUT: {oog_pct:.2f}% out-of-gamut")
+                    frame_report.append(f"  ◎ GAMUT: {oog_pct:.2f}% out-of-gamut")
                     if oog_pct > 1.0:  # Only fail if significant
                         frame_pass = False
 
@@ -226,7 +226,7 @@ class RadianceQC:
                 }
                 if banding_pct >= banding_threshold:
                     frame_report.append(
-                        f"  ⚠ BANDING: {banding_pct:.2f}% risk (threshold: {banding_threshold}%)"
+                        f"  ◎ BANDING: {banding_pct:.2f}% risk (threshold: {banding_threshold}%)"
                     )
 
                 # Optional: Noise
@@ -240,11 +240,11 @@ class RadianceQC:
                     }
                     if noise_score < 5.0:
                         frame_report.append(
-                            f"  ℹ NOISE: {noise_score:.2f}/100 (unusually clean, possible over-denoising)"
+                            f"  ◎ NOISE: {noise_score:.2f}/100 (unusually clean, possible over-denoising)"
                         )
                     elif noise_score > 30.0:
                         frame_report.append(
-                            f"  ℹ NOISE: {noise_score:.2f}/100 (high noise level)"
+                            f"  ◎ NOISE: {noise_score:.2f}/100 (high noise level)"
                         )
 
                 # Optional: Artifacts
@@ -257,7 +257,7 @@ class RadianceQC:
                     }
                     if artifact_score >= 10.0:
                         frame_report.append(
-                            f"  ⚠ ARTIFACTS: {artifact_score:.2f}/100 compression artifacts detected"
+                            f"  ◎ ARTIFACTS: {artifact_score:.2f}/100 compression artifacts detected"
                         )
 
                 # Optional: Focus
@@ -270,7 +270,7 @@ class RadianceQC:
                     }
                     if focus_score < 20.0:
                         frame_report.append(
-                            f"  ⚠ FOCUS: {focus_score:.2f}/100 (low sharpness)"
+                            f"  ◎ FOCUS: {focus_score:.2f}/100 (low sharpness)"
                         )
 
                 # Frame status
@@ -501,11 +501,11 @@ th { background: #2a2a2a; }
 # ═══════════════════════════════════════════════════════════════
 
 NODE_CLASS_MAPPINGS = {
-    "RadianceQC": RadianceQC,
-    "RadianceQCExport": RadianceQCExport,
+    "◎ RadianceQC": RadianceQC,
+    "◎ RadianceQCExport": RadianceQCExport,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceQC": "◎ Radiance QC Pro",
-    "RadianceQCExport": "◎ Export QC Report",
+    "◎ RadianceQC": "◎ Radiance QC Pro",
+    "◎ RadianceQCExport": "◎ Radiance Export QC Report",
 }

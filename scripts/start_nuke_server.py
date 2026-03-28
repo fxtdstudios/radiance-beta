@@ -1,7 +1,3 @@
-# Radiance Nuke Server Script
-# Run this inside Nuke's Script Editor to enable the bridge.
-# v3.4 - Added Depth Map Generator Controls
-
 import nuke
 import nukescripts
 import socket

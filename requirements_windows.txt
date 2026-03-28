@@ -7,8 +7,6 @@ opencolorio>=2.3.0,<3.0.0
 colour-science>=0.4.4,<1.0.0
 transformers>=4.36.0,<5.0.0
 scipy>=1.10.0,<2.0.0
+defusedxml>=0.7.1,<1.0.0
+imageio-ffmpeg>=0.4.9
 
-# Windows Note:
-# If OpenEXR fails to install, you may need Visual C++ Build Tools.
-# Alternatively, download a pre-built wheel for OpenEXR from:
-# https://www.lfd.uci.edu/~gohlke/pythonlibs/#openexr

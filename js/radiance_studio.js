@@ -29,14 +29,14 @@ const BACKDROP_COLORS = {
 
 // Quick presets: labeled backdrops with semantic colors
 const BACKDROP_PRESETS = [
-    { label: "Generation", color: "Purple", icon: "🎨" },
-    { label: "Conditioning", color: "Orange", icon: "📝" },
-    { label: "Post-Processing", color: "Cyan", icon: "🔧" },
-    { label: "IO", color: "Blue", icon: "📁" },
-    { label: "Upscale", color: "Green", icon: "🔍" },
-    { label: "Debug", color: "Red", icon: "🐛" },
-    { label: "Depth / Masks", color: "Gray", icon: "🎭" },
-    { label: "LoRA / Models", color: "Magenta", icon: "🧠" },
+    { label: "Generation", color: "Purple", icon: "◎" },
+    { label: "Conditioning", color: "Orange", icon: "◎" },
+    { label: "Post-Processing", color: "Cyan", icon: "◎" },
+    { label: "IO", color: "Blue", icon: "◎" },
+    { label: "Upscale", color: "Green", icon: "◎" },
+    { label: "Debug", color: "Red", icon: "◎" },
+    { label: "Depth / Masks", color: "Gray", icon: "◎" },
+    { label: "LoRA / Models", color: "Magenta", icon: "◎" },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -56,7 +56,7 @@ app.registerExtension({
         return [
             null, // Separator
             {
-                content: "🎬 Radiance Studio",
+                content: "◎ Radiance Studio",
                 submenu: {
                     options: [
                         // ── Color Backdrop ────────────────────────

@@ -445,13 +445,13 @@ class RadianceFalseColor:
 
 
 NODE_CLASS_MAPPINGS = {
-    "RadianceWaveform":   RadianceWaveform,
-    "RadianceVectorscope": RadianceVectorscope,
-    "RadianceFalseColor": RadianceFalseColor,
+    "◎ RadianceWaveform":   RadianceWaveform,
+    "◎ RadianceVectorscope": RadianceVectorscope,
+    "◎ RadianceFalseColor": RadianceFalseColor,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceWaveform": "◎ Radiance Waveform",
-    "RadianceVectorscope": "◎ Radiance Vectorscope",
-    "RadianceFalseColor": "◎ Radiance False Color",
+    "◎ RadianceWaveform": "◎ Radiance Waveform",
+    "◎ RadianceVectorscope": "◎ Radiance Vectorscope",
+    "◎ RadianceFalseColor": "◎ Radiance False Color",
 }

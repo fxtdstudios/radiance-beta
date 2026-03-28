@@ -12,7 +12,7 @@ classifiers = [
     "Framework :: ComfyUI"
 ]
 
-dependencies = ["opencv-python", "imageio", "Pillow", "OpenEXR", "Imath", "opencolorio", "colour-science", "transformers"]
+dependencies = ["opencv-python", "imageio", "Pillow", "OpenEXR", "Imath", "opencolorio", "colour-science", "transformers", "scipy", "defusedxml", "imageio-ffmpeg"]
 
 [project.urls]
 repository = "https://github.com/fxtdstudios/radiance"

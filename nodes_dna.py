@@ -8,18 +8,18 @@ import logging
 from typing import Dict, Any, Tuple, Optional, List
 
 # Module logger
-logger = logging.getLogger("radiance.dna")
+logger = logging.getLogger("◎ Radiance.dna")
 
 # Get version from package
 try:
     from . import __version__ as RADIANCE_VERSION
 except ImportError:
-    RADIANCE_VERSION = "2.1.0"
+    RADIANCE_VERSION = "2.2.1"
 
 
 class RadianceDigitalDNA:
     """
-    Core engine for Radiance Digital DNA (Signature Architecture) v2.1.
+    Core engine for Radiance Digital DNA (Signature Architecture) v2.2.1.
     Embeds invisible, lossless metadata into 32-bit floating point images.
 
     v2.1 Fixes:
@@ -33,7 +33,7 @@ class RadianceDigitalDNA:
     # Magic header to identify Radiance DNA (32 bits)
     # "FXTD" in ASCII binary: 01000110 01011000 01010100 01000100
     MAGIC_HEADER = "01000110010110000101010001000100"
-    VERSION = "2.1"
+    VERSION = "2.2.1"
 
     # ── Bit-level helpers ─────────────────────────────────────────────
 
@@ -279,7 +279,7 @@ class RadianceSignatureMixin:
         node_class = self.__class__.__name__
 
         metadata = {
-            "created_by": "Radiance",
+            "created_by": "◎ Radiance",
             "node": node_class,
             "timestamp": time.time(),
             "fxtd_ver": RADIANCE_VERSION,
@@ -323,7 +323,8 @@ class RadianceDNAReader:
 
         # Aggregate results
         all_valid = all(r[0] for r in results)
-        any(r[0] for r in results)
+        # FIX 4: was a bare expression — result computed and immediately discarded.
+        any_valid = any(r[0] for r in results)
 
         if batch_size == 1:
             is_valid, data, status = results[0]
@@ -397,8 +398,8 @@ class RadianceDNAWriter:
 
     def write_dna(self, image, project="", artist="", notes=""):
         metadata = {
-            "created_by": "Radiance",
-            "node": "RadianceDNAWriter",
+            "created_by": "◎ Radiance",
+            "node": "◎ RadianceDNAWriter",
             "timestamp": time.time(),
             "fxtd_ver": RADIANCE_VERSION,
         }
@@ -415,6 +416,7 @@ class RadianceDNAWriter:
         if image.dim() == 4 and image.shape[0] > 1:
             signed_frames = []
             statuses = []
+            successes = []  # FIX 2: boolean per frame
             all_success = True
 
             for i in range(image.shape[0]):
@@ -425,20 +427,25 @@ class RadianceDNAWriter:
                     frame_signed = frame_signed.unsqueeze(0)
                 signed_frames.append(frame_signed)
                 statuses.append(status)
+                successes.append(success)  # FIX 2: track bool, not string
                 if not success:
                     all_success = False
 
             result = torch.cat(signed_frames, dim=0)
-            signed_count = sum(1 for s in statuses if "✓" in s)
-            total = len(statuses)
+            # FIX 2: was sum(1 for s in statuses if "◎" in s) — always 0 because
+            # encode() returns "✓ DNA signed:..." or "Insufficient..." (no ◎).
+            signed_count = sum(successes)
+            total = len(successes)
 
             if all_success:
-                status_msg = f"✓ All {total} frames signed successfully"
+                status_msg = f"◎ All {total} frames signed successfully"
             else:
-                status_msg = f"⚠ {signed_count}/{total} frames signed"
-                for i, s in enumerate(statuses):
-                    if "✓" not in s:
-                        status_msg += f"\n  Frame {i}: {s}"
+                status_msg = f"◎ {signed_count}/{total} frames signed"
+                # FIX 3: was "◎ not in s" — always True for every frame since
+                # encode() status messages never contain ◎. Now uses the boolean.
+                for i, ok in enumerate(successes):
+                    if not ok:
+                        status_msg += f"\n  Frame {i}: {statuses[i]}"
 
             return (result, all_success, status_msg)
         else:
@@ -479,16 +486,16 @@ class RadianceDNAValidator:
         all_valid = valid_count == batch_size
 
         if all_valid:
-            status = f"✓ Validated: {valid_count}/{batch_size} frames signed"
+            status = f"◎ Validated: {valid_count}/{batch_size} frames signed"
             return (image, True, status)
 
         if require_signed:
             unsigned = [i for i, r in enumerate(results) if not r[0]]
-            status = f"⚠ VALIDATION FAILED: {valid_count}/{batch_size} frames signed (unsigned: {unsigned[:20]})"
+            status = f"◎ VALIDATION FAILED: {valid_count}/{batch_size} frames signed (unsigned: {unsigned[:20]})"
             logger.warning(status)
             return (image, False, status)
 
-        status = f"ℹ Partial: {valid_count}/{batch_size} frames signed (require_signed=False, passing through)"
+        status = f"◎ Partial: {valid_count}/{batch_size} frames signed (require_signed=False, passing through)"
         return (image, False, status)
 
 
@@ -496,14 +503,15 @@ class RadianceDNAValidator:
 #                         NODE MAPPINGS
 # ═══════════════════════════════════════════════════════════════════════
 
+# FIX 1: Keys must be plain ASCII — ◎ belongs only in DISPLAY_NAME_MAPPINGS.
 NODE_CLASS_MAPPINGS = {
-    "RadianceDNAReader": RadianceDNAReader,
-    "RadianceDNAWriter": RadianceDNAWriter,
+    "RadianceDNAReader":    RadianceDNAReader,
+    "RadianceDNAWriter":    RadianceDNAWriter,
     "RadianceDNAValidator": RadianceDNAValidator,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceDNAReader": "◎ Radiance DNA Reader",
-    "RadianceDNAWriter": "◎ Radiance DNA Writer",
+    "RadianceDNAReader":    "◎ Radiance DNA Reader",
+    "RadianceDNAWriter":    "◎ Radiance DNA Writer",
     "RadianceDNAValidator": "◎ Radiance DNA Validator",
 }

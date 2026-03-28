@@ -31,13 +31,57 @@ except ImportError:
     OCIO = None
     HAS_OCIO = False
 
+import threading
+
 # FIX #14: use two separate dicts instead of one shared dict with ad-hoc sub-keys.
 # Previously _get_config() stored {config_path: {"config": obj}} and
 # _get_processor() stored {"processors": {cache_key: cpu_proc}} in the SAME dict.
 # If a user's config_path was literally the string "processors", _get_config()
 # overwrote the processor sub-dict — silently breaking the processor cache.
-_OCIO_CONFIG_CACHE: dict = {}  # keyed by config_path string
-_OCIO_PROCESSOR_CACHE: dict = {}  # keyed by (display|view|look|ctx) string
+#
+# FIX (thread-safety + bounded): Both caches are now backed by a simple
+# bounded LRU implemented with an OrderedDict under a threading.RLock.
+# Max sizes: 8 configs (each ~5-50 MB of OCIO state) and 128 processors
+# (lightweight CPU processor objects). These bounds prevent unbounded growth
+# in long-running ComfyUI sessions that iterate over many display/view/look
+# combinations or swap configs repeatedly.
+
+from collections import OrderedDict
+
+
+class _BoundedCache:
+    """Thread-safe bounded LRU cache (move-to-end on hit, evict-oldest on full)."""
+
+    def __init__(self, maxsize: int):
+        self._maxsize = maxsize
+        self._data: OrderedDict = OrderedDict()
+        self._lock = threading.RLock()
+
+    def get(self, key):
+        with self._lock:
+            if key not in self._data:
+                return None
+            self._data.move_to_end(key)   # LRU: mark as recently used
+            return self._data[key]
+
+    def set(self, key, value):
+        with self._lock:
+            if key in self._data:
+                self._data.move_to_end(key)
+            else:
+                if len(self._data) >= self._maxsize:
+                    evicted = next(iter(self._data))
+                    del self._data[evicted]
+                    logger.debug(f"[OCIO cache] evicted: {evicted!r}")
+            self._data[key] = value
+
+    def __contains__(self, key):
+        with self._lock:
+            return key in self._data
+
+
+_OCIO_CONFIG_CACHE    = _BoundedCache(maxsize=8)    # OCIO Config objects
+_OCIO_PROCESSOR_CACHE = _BoundedCache(maxsize=128)  # CPU processor objects
 
 
 class RadianceOCIODisplayView:
@@ -119,8 +163,9 @@ class RadianceOCIODisplayView:
             return None
 
         # FIX #14: use the dedicated config cache (not the shared processor dict)
-        if config_path in _OCIO_CONFIG_CACHE:
-            return _OCIO_CONFIG_CACHE[config_path]
+        cached = _OCIO_CONFIG_CACHE.get(config_path)
+        if cached is not None:
+            return cached
 
         try:
             if config_path and os.path.exists(config_path):
@@ -140,7 +185,7 @@ class RadianceOCIODisplayView:
                         logger.warning("No OCIO config found. Using built-in.")
                         config = OCIO.Config.CreateBuiltinConfig("aces_cg")
 
-            _OCIO_CONFIG_CACHE[config_path] = config
+            _OCIO_CONFIG_CACHE.set(config_path, config)
             return config
 
         except Exception as e:
@@ -152,8 +197,9 @@ class RadianceOCIODisplayView:
         cache_key = f"{display}|{view}|{look}|{context_key}:{context_value}"
 
         # FIX #14: use the dedicated processor cache
-        if cache_key in _OCIO_PROCESSOR_CACHE:
-            return _OCIO_PROCESSOR_CACHE[cache_key]
+        cached = _OCIO_PROCESSOR_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
 
         try:
             # Create context if needed
@@ -194,7 +240,7 @@ class RadianceOCIODisplayView:
             cpu_processor = processor.getDefaultCPUProcessor()
 
             # FIX #14: store in the dedicated processor cache
-            _OCIO_PROCESSOR_CACHE[cache_key] = cpu_processor
+            _OCIO_PROCESSOR_CACHE.set(cache_key, cpu_processor)
             return cpu_processor
 
         except Exception as e:

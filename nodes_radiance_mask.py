@@ -1,9 +1,7 @@
 import os
-import io
-import base64
-import json
-import traceback
 import hashlib
+import logging
+# io, base64, json, traceback removed — were imported but never used in code
 
 from PIL import Image, ImageOps, ImageSequence
 import numpy as np
@@ -32,11 +30,17 @@ class RadianceLoadImageMask:
                 }
 
     CATEGORY = "FXTD Studios/Radiance/Masking"
-    SEARCH_ALIASES = ["radiance image", "radiance mask", "radiance mask editor", "load image mask"]
+    SEARCH_ALIASES = ["◎ Radiance image", "◎ Radiance mask", "◎ Radiance mask editor", "load image mask"]
 
     RETURN_TYPES = ("IMAGE", "MASK")
     RETURN_NAMES = ("IMAGE", "MASK")
     FUNCTION = "load_image"
+    DESCRIPTION = (
+        "Load an image with optional non-destructive mask override. "
+        "If a companion '_radmask.png' file exists alongside the source image, "
+        "its alpha channel is used as the mask instead of the image's own alpha. "
+        "The Radiance mask editor frontend saves masks in this companion format."
+    )
 
     def load_image(self, image):
         # 1. Load the primary image
@@ -91,7 +95,12 @@ class RadianceLoadImageMask:
                     mask_np = np.array(i.convert('RGBA').getchannel('A')).astype(np.float32) / 255.0
                     mask_tensor = 1. - torch.from_numpy(mask_np)
                 else:
-                    mask_tensor = torch.zeros((64,64), dtype=torch.float32, device="cpu")
+                    # BUG-1 FIX: Was torch.zeros((64,64)) — hardcoded size mismatches every
+                    # real image and crashes torch.cat() on multi-frame inputs. Use actual
+                    # image dimensions so mask shape is always (H, W) matching the image.
+                    # BUG-2 FIX: 'I' (32-bit int) mode images have no alpha band and always
+                    # reached this branch — they also get the correct-size zeros mask now.
+                    mask_tensor = torch.zeros((h, w), dtype=torch.float32)
                     
             output_images.append(image_tensor)
             output_masks.append(mask_tensor.unsqueeze(0))
@@ -102,9 +111,21 @@ class RadianceLoadImageMask:
         if len(output_images) > 1:
             output_image = torch.cat(output_images, dim=0)
             output_mask = torch.cat(output_masks, dim=0)
-        else:
+        elif len(output_images) == 1:
             output_image = output_images[0]
             output_mask = output_masks[0]
+        else:
+            # BUG-3 FIX: MPO edge case — if the first (and only) frame was skipped due to
+            # a size mismatch, output_images is empty. Previously this caused IndexError on
+            # output_images[0]. Fall back to a 1×1 black image + zeros mask so the node
+            # returns a valid tensor rather than crashing the entire queue.
+            # FIX 4: logging was imported here inside the loop body — moved to module top.
+            logger.warning(
+                f"[RadianceLoadImageMask] No valid frames found in '{image}' — "
+                "returning 1×1 fallback. Check image format or file integrity."
+            )
+            output_image = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
+            output_mask  = torch.zeros((1, 1, 1),    dtype=torch.float32)
 
         return (output_image, output_mask)
 
@@ -116,19 +137,24 @@ class RadianceLoadImageMask:
         companion_mask_path = f"{filename}_radmask.png"
         companion_meta_path = f"{filename}_radmask_meta.json"
 
-        m = hashlib.sha256()
-        with open(image_path, 'rb') as f:
-            m.update(f.read())
-            
-        if os.path.exists(companion_mask_path):
-            with open(companion_mask_path, 'rb') as f:
+        # FIX 3: unguarded open() crashed the ComfyUI queue on missing/race-condition
+        # paths. Return math.nan on any error so ComfyUI treats the node as always-changed
+        # (safe fallback) instead of propagating an unhandled exception.
+        import math
+        try:
+            m = hashlib.sha256()
+            with open(image_path, 'rb') as f:
                 m.update(f.read())
-                
-        if os.path.exists(companion_meta_path):
-            with open(companion_meta_path, 'rb') as f:
-                m.update(f.read())
-                
-        return m.digest().hex()
+            if os.path.exists(companion_mask_path):
+                with open(companion_mask_path, 'rb') as f:
+                    m.update(f.read())
+            if os.path.exists(companion_meta_path):
+                with open(companion_meta_path, 'rb') as f:
+                    m.update(f.read())
+            return m.digest().hex()
+        except Exception as e:
+            logger.warning(f"[RadianceLoadImageMask] IS_CHANGED hash failed: {e} — treating as changed.")
+            return math.nan
 
     @classmethod
     def VALIDATE_INPUTS(s, image):
@@ -136,6 +162,7 @@ class RadianceLoadImageMask:
             return "Invalid image file: {}".format(image)
         return True
 
+# FIX 1: Plain ASCII key — ◎ belongs only in DISPLAY_NAME_MAPPINGS.
 NODE_CLASS_MAPPINGS = {
     "RadianceLoadImageMask": RadianceLoadImageMask
 }

@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-    Radiance Nuke Bridge v3.0 — Direct Viewer Connection
+    Radiance Nuke Bridge v2.2.1 — Direct Viewer Connection
                     Radiance © 2024-2026 FXTD STUDIOS
 
 Place this at: radiance/nodes_nuke.py
@@ -86,7 +86,7 @@ try:
 except ImportError:
     from path_utils import safe_join, get_safe_output_dir
 
-logger = logging.getLogger("radiance.nuke.bridge")
+logger = logging.getLogger("◎ Radiance.nuke.bridge")
 
 # ── Security: Host allowlist for Nuke Bridge connections ──
 _DEFAULT_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -99,7 +99,7 @@ def _get_allowed_hosts() -> set:
     RADIANCE_NUKE_ALLOWED_HOSTS environment variable (comma-separated).
     """
     allowed = set(_DEFAULT_ALLOWED_HOSTS)
-    env_hosts = os.environ.get("RADIANCE_NUKE_ALLOWED_HOSTS", "")
+    env_hosts = os.environ.get("◎ Radiance_NUKE_ALLOWED_HOSTS", "")
     if env_hosts:
         for h in env_hosts.split(","):
             h = h.strip()
@@ -140,7 +140,7 @@ def _get_bridge_temp_dir() -> str:
     which may be read-only (pip install) and files were never cleaned up.
     """
     base = folder_paths.get_temp_directory()
-    bridge_dir = os.path.join(base, "radiance_nuke_bridge")
+    bridge_dir = os.path.join(base, "◎ Radiance_nuke_bridge")
     os.makedirs(bridge_dir, exist_ok=True)
     return bridge_dir
 
@@ -352,7 +352,7 @@ class RadianceNukeBridge:
                 "stream_name": (
                     "STRING",
                     {
-                        "default": "RadianceStream",
+                        "default": "◎ RadianceStream",
                         "tooltip": (
                             "Nuke Read node name. Reused across updates — "
                             "no duplicate nodes created."
@@ -578,11 +578,11 @@ class RadianceNukeBridge:
 
             # EXR metadata
             metadata = {
-                "software": "Radiance - ComfyUI",
-                "radianceColorSpace": color_space,
-                "radianceStream": stream_name,
-                "radianceFrame": frame_num,
-                "radianceBitDepth": bit_depth,
+                "software": "◎ Radiance - ComfyUI",
+                "◎ RadianceColorSpace": color_space,
+                "◎ RadianceStream": stream_name,
+                "◎ RadianceFrame": frame_num,
+                "◎ RadianceBitDepth": bit_depth,
             }
 
             # Write using full Radiance IO writer chain (atomic)
@@ -669,9 +669,9 @@ class RadianceNukeBridge:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 NODE_CLASS_MAPPINGS = {
-    "RadianceNukeBridge": RadianceNukeBridge,
+    "◎ RadianceNukeBridge": RadianceNukeBridge,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceNukeBridge": "◎ Radiance Nuke Bridge",
+    "◎ RadianceNukeBridge": "◎ Radiance Nuke Bridge",
 }

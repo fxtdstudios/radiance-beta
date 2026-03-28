@@ -1,17 +1,9 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-                    RADIANCE — UNIVERSAL VFX IO v2.1
+                    RADIANCE — UNIVERSAL DIGITAL CINEMA IO v2.2.1
 ═══════════════════════════════════════════════════════════════════════════════
-Industry-standard readers/writers for Video, Image Sequences, GIF, and WEBP
-with built-in Input/Output Transforms (IDT/ODT) for linearizing Log footage.
-
-Advantages over VHS VideoCombine and WAN SaveVideo:
-  • IMAGE passthrough on write — chain output to more nodes
-  • Image sequence export (PNG, EXR, JPEG numbered frames)
-  • GIF/WEBP animated export
-  • Audio extraction from video
-  • Full color pipeline (10+ Log/gamma spaces)
-  • ProRes 4444 XQ 12-bit support
+Industry-standard readers/writers for Video, Image Sequences, and Images.
+Consolidated into Universal "Digital Cinema" nodes for a streamlined workflow.
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
@@ -20,6 +12,7 @@ import glob
 import json
 import time
 import logging
+import datetime
 import subprocess  # nosec B404
 import tempfile
 from typing import Dict, Any, Optional, List, Tuple
@@ -30,23 +23,28 @@ import cv2
 
 from . import color_utils
 try:
-    from .path_utils import safe_join, get_safe_output_dir, get_safe_input_path
+    from .path_utils import safe_join, get_safe_output_dir, get_safe_input_path, get_next_index
 except ImportError:
-    from path_utils import safe_join, get_safe_output_dir, get_safe_input_path
+    from path_utils import safe_join, get_safe_output_dir, get_safe_input_path, get_next_index
 
 import folder_paths
 
+try:
+    from .hdr.io import write_exr_robust, write_hdr_rgbe
+except ImportError:
+    try:
+        from hdr.io import write_exr_robust, write_hdr_rgbe
+    except ImportError:
+        write_exr_robust = None
+        write_hdr_rgbe = None
 
-logger = logging.getLogger("radiance.io")
+
+logger = logging.getLogger("◎ Radiance.io")
 
 
 class RadianceType(str):
-    """
-    Multi-type helper for LiteGraph (IMAGE,VIDEO).
-    """
     def __ne__(self, __value: object) -> bool:
         return False
-
 
 image_video_type = RadianceType("IMAGE,VIDEO")
 
@@ -61,988 +59,459 @@ INPUT_COLORSPACES = [
     "ARRI LogC4",
     "Sony S-Log3",
     "Panasonic V-Log",
-    "Canon Log 3",
-    "RED Log3G10",
-    "ACEScct",
     "DaVinci Intermediate",
+    "ACEScg",
+    "ACEScct",
 ]
 
 
 def apply_input_transform(img_tensor: torch.Tensor, colorspace: str) -> torch.Tensor:
-    """Apply Input Device Transform (IDT): Source Gamma/Log → Linear."""
-    if colorspace == "Linear (sRGB)":
-        return img_tensor
-    elif colorspace == "sRGB (Standard)":
-        return color_utils.tensor_srgb_to_linear(img_tensor)
-
+    if colorspace == "Linear (sRGB)" or colorspace == "ACEScg": return img_tensor
+    elif colorspace == "sRGB (Standard)": return color_utils.tensor_srgb_to_linear(img_tensor)
+    
     device = img_tensor.device
     img_np = img_tensor.cpu().numpy()
-
     transform_map = {
         "ARRI LogC3": color_utils.logc3_to_linear,
         "ARRI LogC4": color_utils.logc4_to_linear,
         "Sony S-Log3": color_utils.slog3_to_linear,
         "Panasonic V-Log": color_utils.vlog_to_linear,
-        "Canon Log 3": color_utils.canonlog3_to_linear,
-        "RED Log3G10": color_utils.log3g10_to_linear,
-        "ACEScct": color_utils.acescct_to_linear,
         "DaVinci Intermediate": color_utils.davinci_intermediate_to_linear,
+        "ACEScct": color_utils.acescct_to_linear,
     }
-
     fn = transform_map.get(colorspace)
     out_np = fn(img_np) if fn else img_np
     return torch.from_numpy(out_np).to(device)
 
 
-def apply_output_transform(img_tensor: torch.Tensor, colorspace: str) -> torch.Tensor:
-    """Apply Output Transform (ODT): Linear → Target Gamma/Log."""
-    if colorspace == "Linear (sRGB)":
-        return img_tensor
+def apply_output_transform(img_tensor: torch.Tensor, colorspace: str, broadcast_safe: bool = True) -> torch.Tensor:
+    is_display_space = colorspace in ["sRGB (Standard)"] or ("sRGB" in colorspace and "Linear" not in colorspace)
+    if broadcast_safe and is_display_space:
+        a, b, c, d, e = 2.51, 0.03, 2.43, 0.59, 0.14
+        x = img_tensor
+        img_tensor = torch.clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0)
+
+    if colorspace == "Linear (sRGB)" or colorspace == "ACEScg":
+        return torch.clamp(img_tensor, 0.0, 1.0) if broadcast_safe else img_tensor
     elif colorspace == "sRGB (Standard)":
         return color_utils.tensor_linear_to_srgb(img_tensor)
 
     device = img_tensor.device
     img_np = img_tensor.cpu().numpy()
-
     transform_map = {
         "ARRI LogC3": color_utils.linear_to_logc3,
         "ARRI LogC4": color_utils.linear_to_logc4,
         "Sony S-Log3": color_utils.linear_to_slog3,
         "Panasonic V-Log": color_utils.linear_to_vlog,
-        "Canon Log 3": color_utils.linear_to_canonlog3,
-        "RED Log3G10": color_utils.linear_to_log3g10,
-        "ACEScct": color_utils.linear_to_acescct,
         "DaVinci Intermediate": color_utils.linear_to_davinci_intermediate,
+        "ACEScct": color_utils.linear_to_acescct,
     }
-
     fn = transform_map.get(colorspace)
     out_np = fn(img_np) if fn else img_np
     return torch.from_numpy(out_np).to(device)
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
-#                         AUDIO EXTRACTION HELPER
+#                         HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
-
 
 def _extract_audio_ffmpeg(video_path: str) -> dict | None:
-    """
-    Extract audio from video via FFmpeg → returns ComfyUI AUDIO dict
-    {waveform: Tensor (1, channels, samples), sample_rate: int} or None.
-    """
     try:
-        # Probe for audio stream
-        probe_cmd = [
-            "ffprobe",
-            "-v",
-            "quiet",
-            "-select_streams",
-            "a:0",
-            "-show_entries",
-            "stream=codec_type,sample_rate,channels",
-            "-of",
-            "json",
-            video_path,
-        ]
-        result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=10)  # nosec B603
-        if result.returncode != 0:
-            return None
-
+        probe_cmd = ["ffprobe", "-v", "quiet", "-select_streams", "a:0", "-show_entries", "stream=codec_type,sample_rate,channels", "-of", "json", video_path]
+        result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode != 0: return None
         probe_data = json.loads(result.stdout)
         streams = probe_data.get("streams", [])
-        if not streams:
-            return None  # No audio stream
-
+        if not streams: return None
         sample_rate = int(streams[0].get("sample_rate", 44100))
         channels = int(streams[0].get("channels", 2))
-
-        # Extract raw PCM audio
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp_path = tmp.name
-
-        extract_cmd = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            video_path,
-            "-vn",
-            "-acodec",
-            "pcm_f32le",
-            "-ar",
-            str(sample_rate),
-            "-ac",
-            str(channels),
-            tmp_path,
-        ]
-        subprocess.run(extract_cmd, capture_output=True, timeout=120)  # nosec B603
-
-        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) < 100:
-            return None
-
-        # Read WAV samples
+        extract_cmd = ["ffmpeg", "-y", "-i", video_path, "-vn", "-acodec", "pcm_f32le", "-ar", str(sample_rate), "-ac", str(channels), tmp_path]
+        subprocess.run(extract_cmd, capture_output=True, timeout=120)
+        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) < 100: return None
         import struct
-
-        with open(tmp_path, "rb") as f:
-            data = f.read()
-
+        with open(tmp_path, "rb") as f: data = f.read()
         os.unlink(tmp_path)
-
-        # Parse WAV: skip header (44 bytes for standard WAV)
-        # Find 'data' chunk
         data_offset = data.find(b"data")
-        if data_offset == -1:
-            return None
-        data_offset += 4  # skip 'data'
+        if data_offset == -1: return None
+        data_offset += 4
         data_size = struct.unpack_from("<I", data, data_offset)[0]
         data_offset += 4
         raw_audio = data[data_offset : data_offset + data_size]
-
-        # Parse float32 samples
         n_samples = len(raw_audio) // 4
         samples = np.frombuffer(raw_audio, dtype=np.float32)
-
-        # Reshape to (channels, samples_per_channel)
         samples_per_channel = n_samples // channels
         samples = samples[: samples_per_channel * channels]
-        waveform = samples.reshape(
-            samples_per_channel, channels
-        ).T  # (channels, samples)
-        waveform_tensor = torch.from_numpy(waveform.copy()).unsqueeze(
-            0
-        )  # (1, channels, samples)
-
-        logger.info(
-            f"Audio extracted: {sample_rate}Hz, {channels}ch, {samples_per_channel} samples"
-        )
+        waveform = samples.reshape(samples_per_channel, channels).T
+        waveform_tensor = torch.from_numpy(waveform.copy()).unsqueeze(0)
         return {"waveform": waveform_tensor, "sample_rate": sample_rate}
-
-    except Exception as e:
-        logger.warning(f"Audio extraction failed: {e}")
-        return None
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#                         VIDEO LOADING HELPER
-# ═══════════════════════════════════════════════════════════════════════════════
+    except Exception: return None
 
 def find_video_path(data: Any) -> Optional[str]:
-    """Recursively search for a video file path in diverse nested structures."""
     if isinstance(data, str):
-        # Check if it looks like a video path
-        exts = (".mp4", ".mov", ".gif", ".webp", ".avi", ".mkv", ".webm")
-        if data.lower().endswith(exts):
-            return data
+        if data.lower().endswith((".mp4", ".mov", ".gif", ".webp", ".avi", ".mkv", ".webm")): return data
         return None
-        
     if isinstance(data, dict):
-        # Priority keys
         for key in ["source", "filename", "video", "gif", "full_path"]:
             if key in data:
                 res = find_video_path(data[key])
                 if res: return res
-        
-        # VHS style: {"gifs": [{"filename": "..."}]}
-        if "gifs" in data and isinstance(data["gifs"], list) and len(data["gifs"]) > 0:
-            return find_video_path(data["gifs"][0])
-            
-        # Generic recursion for all values
         for val in data.values():
             res = find_video_path(val)
             if res: return res
-            
     if isinstance(data, list):
         for item in data:
             res = find_video_path(item)
             if res: return res
-            
     return None
 
-
 def _load_video_frames(video_path: str, input_colorspace: str = "sRGB (Standard)") -> torch.Tensor | None:
-    """Helper to load all frames from a video file into a Linear IMAGE tensor."""
-    if not os.path.exists(video_path):
-        return None
-
+    if not os.path.exists(video_path): return None
     cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        return None
-
+    if not cap.isOpened(): return None
     frames = []
     while True:
         ret, frame = cap.read()
-        if not ret:
-            break
+        if not ret: break
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         frames.append(frame)
     cap.release()
-
-    if not frames:
-        return None
-
-    # Stack and convert to float32 [0,1]
+    if not frames: return None
     frames_np = np.stack(frames).astype(np.float32) / 255.0
-    frames_tensor = torch.from_numpy(frames_np)
+    return apply_input_transform(torch.from_numpy(frames_np), input_colorspace)
 
-    # Apply Input Transform (Linearize)
-    return apply_input_transform(frames_tensor, input_colorspace)
+# ═══════════════════════════════════════════════════════════════════════════════
+#                         NODE: DIGITAL CINEMA READ (UNIVERSAL)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-
-class RadianceReadVideo:
-    """
-    Universal VFX Video Reader.
-    Reads video files, applies Input Transforms (Log→Linear),
-    and extracts audio. Outputs IMAGE batch + metadata for downstream linking.
-    """
-
-    def __init__(self):
-        pass
-
+class RadianceDigitalCinemaRead:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "video_path": ("STRING", {"default": "C:/Projects/footage.mp4"}),
-                "start_frame": ("INT", {"default": 0, "min": 0, "max": 999999}),
-                "frame_count": (
-                    "INT",
-                    {
-                        "default": 0,
-                        "min": 0,
-                        "max": 999999,
-                        "tooltip": "0 = Load all frames",
-                    },
-                ),
+                "source_path": ("STRING", {"default": "C:/Footage/shot_01.mp4"}),
+                "start_frame": ("INT", {"default": 1, "min": 1}),
+                "frame_limit": ("INT", {"default": 0, "min": 0, "tooltip": "0 = Load all"}),
                 "input_colorspace": (INPUT_COLORSPACES, {"default": "sRGB (Standard)"}),
-                "frame_stride": (
-                    "INT",
-                    {
-                        "default": 1,
-                        "min": 1,
-                        "max": 100,
-                        "tooltip": "Skip every Nth frame",
-                    },
-                ),
-                "extract_audio": ("BOOLEAN", {"default": True}),
-            },
-            "optional": {
-                "vhs_video": (image_video_type,),
+                "fps_override": ("FLOAT", {"default": 0.0, "min": 0.0, "tooltip": "0 = Auto (Detect from Video or 24.0 for Seq)"}),
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT", "INT", "FLOAT", "AUDIO", "VHS_VIDEO")
+    RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT", "INT", "FLOAT", "AUDIO", "STRING")
     RETURN_NAMES = ("IMAGE", "MASK", "frame_count", "width", "height", "fps", "audio", "video")
-    FUNCTION = "read_video"
+    FUNCTION = "read"
     CATEGORY = "FXTD Studios/Radiance/IO"
-    DESCRIPTION = (
-        "Professional video reader with color transforms and audio extraction."
-    )
 
-    def read_video(
-        self,
-        video_path,
-        start_frame,
-        frame_count,
-        input_colorspace,
-        frame_stride,
-        extract_audio=True,
-        vhs_video=None,
-    ):
-        if vhs_video is not None:
-            if isinstance(vhs_video, str):
-                video_path = vhs_video
-            elif isinstance(vhs_video, dict) and "source" in vhs_video:
-                video_path = vhs_video["source"]
-            elif isinstance(vhs_video, list) and len(vhs_video) > 0:
-                video_path = vhs_video[0] if isinstance(vhs_video[0], str) else None
-            elif isinstance(vhs_video, dict) and "filename" in vhs_video:
-                video_path = vhs_video["filename"]
+    def read(self, source_path, start_frame, frame_limit, input_colorspace, fps_override=0.0):
+        source_path = get_safe_input_path(folder_paths.get_input_directory(), source_path)
+        
+        is_video = source_path.lower().endswith((".mp4", ".mov", ".gif", ".webp", ".avi", ".mkv", ".webm"))
+        
+        if is_video:
+            cap = cv2.VideoCapture(source_path)
+            if not cap.isOpened(): raise IOError(f"Could not open: {source_path}")
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            # Smart FPS Detection
+            detected_fps = cap.get(cv2.CAP_PROP_FPS)
+            if detected_fps < 1.0 or detected_fps > 1000.0: detected_fps = 24.0
+            fps = fps_override if fps_override > 0 else detected_fps
+            
+            cv2_start = max(0, start_frame - 1)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, cv2_start)
+            frames_to_read = frame_limit if frame_limit > 0 else (total_frames - cv2_start)
+            frames_to_read = min(frames_to_read, total_frames - cv2_start)
 
-        video_path = get_safe_input_path(folder_paths.get_input_directory(), video_path)
-
-        if not os.path.exists(video_path):
-            raise FileNotFoundError(f"Video file not found: {video_path}")
-
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise IOError(f"Could not open video: {video_path}")
-
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if start_frame >= total_frames:
+            frames = []
+            for _ in range(int(frames_to_read)):
+                ret, frame = cap.read()
+                if not ret: break
+                frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             cap.release()
-            raise ValueError(
-                f"Start frame {start_frame} is beyond end of video ({total_frames} frames)"
-            )
-
-        # Determine actual frames to read
-        if frame_count <= 0:
-            frames_to_read = total_frames - start_frame
+            
+            frames_np = np.stack(frames).astype(np.float32) / 255.0
+            images = apply_input_transform(torch.from_numpy(frames_np), input_colorspace)
+            mask = torch.ones((len(frames), height, width), dtype=torch.float32)
+            audio = _extract_audio_ffmpeg(source_path)
+            return (images, mask, len(frames), width, height, float(fps), audio, source_path)
         else:
-            frames_to_read = min(frame_count, total_frames - start_frame)
+            if os.path.isdir(source_path): folder, pattern = source_path, "*"
+            else: folder, pattern = os.path.dirname(source_path), os.path.basename(source_path)
+            
+            files = sorted(glob.glob(os.path.join(folder, pattern)))
+            files = [f for f in files if f.lower().endswith((".png", ".jpg", ".jpeg", ".exr", ".hdr", ".tiff", ".tif"))]
+            
+            startIndex = 0
+            if start_frame > 1:
+                # Try to find frame by number
+                for idx, f in enumerate(files):
+                    if str(start_frame).zfill(4) in os.path.basename(f) or str(start_frame) in os.path.basename(f):
+                        startIndex = idx
+                        break
+            
+            files = files[startIndex:]
+            if frame_limit > 0: files = files[:frame_limit]
+            
+            images, masks = [], []
+            img_w, img_h = 0, 0
+            for fpath in files:
+                ext = os.path.splitext(fpath)[1].lower()
+                img = None
+                mask_np = None
+                if ext in [".exr", ".hdr"] and write_exr_robust:
+                    try:
+                        from .hdr.io import LoadImageEXRSequence
+                        rgb_np, alpha_np, _ = LoadImageEXRSequence()._load_single_exr(fpath)
+                        if rgb_np is not None:
+                             img = rgb_np
+                             mask_np = alpha_np if alpha_np is not None else np.ones(img.shape[:2], dtype=np.float32)
+                    except: pass
+                
+                if img is None:
+                    img = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
+                    if img is None: continue
+                    if img.shape[-1] == 4:
+                        mask_np = img[..., 3].astype(np.float32) / (255.0 if img.dtype == np.uint8 else 65535.0)
+                        img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+                    else:
+                        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                        mask_np = np.ones(img.shape[:2], dtype=np.float32)
 
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
+                if img.dtype == np.uint8: img = img.astype(np.float32) / 255.0
+                elif img.dtype == np.uint16: img = img.astype(np.float32) / 65535.0
+                else: img = img.astype(np.float32)
 
-        logger.info(
-            f"Reading video: {os.path.basename(video_path)} | {width}x{height} @ {fps:.2f}fps | Start: {start_frame} | Count: {frames_to_read} | IDT: {input_colorspace}"
-        )
+                if img_w == 0: img_h, img_w = img.shape[:2]
+                images.append(torch.from_numpy(img))
+                masks.append(torch.from_numpy(mask_np))
+            
+            if not images: raise ValueError(f"No valid images found in: {source_path}")
+            
+            # Finalize batch
+            batch_img = apply_input_transform(torch.stack(images), input_colorspace)
+            batch_mask = torch.stack(masks)
 
-        # Seek to start
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-
-        frames = []
-        frames_read = 0
-        current_offset = 0
-
-        while frames_read < frames_to_read:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            if current_offset % frame_stride == 0:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frames.append(frame)
-
-            current_offset += 1
-            frames_read += 1
-
-        cap.release()
-
-        if not frames:
-            raise RuntimeError("No frames were read from video")
-
-        # Stack and convert to float32 [0,1]
-        frames_np = np.stack(frames).astype(np.float32) / 255.0
-        frames_tensor = torch.from_numpy(frames_np)
-
-        # Apply Input Transform (Linearize)
-        frames_linear = apply_input_transform(frames_tensor, input_colorspace)
-
-        # Mask (full white — cv2 doesn't extract alpha from most video codecs)
-        b, h, w, c = frames_linear.shape
-        mask = torch.ones((b, h, w), dtype=torch.float32)
-
-        # Audio extraction
-        audio = None
-        if extract_audio:
-            audio = _extract_audio_ffmpeg(video_path)
-
-        return (frames_linear, mask, len(frames), width, height, fps, audio, video_path)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#                         NODE: READ IMAGE SEQUENCE
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class RadianceReadSequence:
-    """
-    Professional Image Sequence Reader.
-    Reads folder/glob patterns, supports EXR/HDR/PNG/JPG/TIFF.
-    Outputs IMAGE batch + metadata for full downstream compatibility.
-    """
-
-    def __init__(self):
-        pass
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "folder_path": ("STRING", {"default": "C:/Projects/Sequences/Shot01"}),
-                "pattern": (
-                    "STRING",
-                    {
-                        "default": "*.exr",
-                        "tooltip": "Glob pattern (e.g. *.png, Shot_*.exr)",
-                    },
-                ),
-                "start_frame": (
-                    "INT",
-                    {
-                        "default": 1001,
-                        "min": 0,
-                        "max": 999999,
-                        "tooltip": "Frame number in filename, or 0 for auto-detect first",
-                    },
-                ),
-                "frame_limit": (
-                    "INT",
-                    {"default": 0, "min": 0, "max": 99999, "tooltip": "0 = Load all"},
-                ),
-                "input_colorspace": (INPUT_COLORSPACES, {"default": "Linear (sRGB)"}),
-                "fps": (
-                    "FLOAT",
-                    {
-                        "default": 24.0,
-                        "min": 1.0,
-                        "max": 120.0,
-                        "step": 0.001,
-                        "tooltip": "Assumed FPS for image sequences",
-                    },
-                ),
-            },
-        }
-
-    RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT", "INT", "FLOAT", "STRING")
-    RETURN_NAMES = (
-        "IMAGE",
-        "MASK",
-        "frame_count",
-        "width",
-        "height",
-        "fps",
-        "filename_list",
-    )
-    FUNCTION = "read_sequence"
-    CATEGORY = "FXTD Studios/Radiance/IO"
-    DESCRIPTION = "Professional image sequence reader with EXR/HDR/PNG support and color transforms."
-
-    def read_sequence(
-        self, folder_path, pattern, start_frame, frame_limit, input_colorspace, fps=24.0
-    ):
-        folder_path = get_safe_input_path(folder_paths.get_input_directory(), folder_path)
-
-        if not os.path.exists(folder_path):
-            raise FileNotFoundError(f"Folder not found: {folder_path}")
-
-        search_path = os.path.join(folder_path, pattern)
-        files = sorted(glob.glob(search_path))
-
-        if not files:
-            raise FileNotFoundError(
-                f"No files found matching '{pattern}' in {folder_path}"
-            )
-
-        # Find start frame by number in filename
-        startIndex = 0
-        if start_frame > 0:
-            found = False
-            str_frame = str(start_frame)
-            for idx, f in enumerate(files):
-                if str_frame in os.path.basename(f):
-                    startIndex = idx
-                    found = True
-                    break
-            if not found:
-                logger.warning(
-                    f"Could not find file with frame number {start_frame}, starting from first file."
-                )
-
-        files = files[startIndex:]
-        if frame_limit > 0:
-            files = files[:frame_limit]
-
-        logger.info(f"Reading sequence: {len(files)} frames from {folder_path}")
-
-        images = []
-        masks = []
-        filenames_str = "\n".join([os.path.basename(f) for f in files])
-
-        img_width = 0
-        img_height = 0
-
-        for fpath in files:
-            os.path.splitext(fpath)[1].lower()
-            img = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
-
-            if img is None:
-                logger.warning(f"Failed to load image: {fpath}")
-                continue
-
-            # Handle channels
-            if img.ndim == 2:
-                h, w = img.shape
-                img = np.stack([img, img, img], axis=-1)
-                mask = np.ones((h, w), dtype=np.float32)
-            elif img.ndim == 3:
-                h, w, c = img.shape
-                if c == 3:
-                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    mask = np.ones((h, w), dtype=np.float32)
-                elif c == 4:
-                    img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
-                    mask = img[..., 3].astype(np.float32)
-                    if img.dtype == np.uint8:
-                        mask = mask / 255.0
-                    elif img.dtype == np.uint16:
-                        mask = mask / 65535.0
-                    img = img[..., :3]
-
-            # Normalize to float32
-            if img.dtype == np.uint8:
-                img = img.astype(np.float32) / 255.0
-            elif img.dtype == np.uint16:
-                img = img.astype(np.float32) / 65535.0
-            else:
-                img = img.astype(np.float32)
-
-            if img_width == 0:
-                img_height, img_width = img.shape[:2]
-
-            images.append(torch.from_numpy(img))
-            masks.append(torch.from_numpy(mask))
-
-        if not images:
-            raise RuntimeError("No valid images loaded from sequence")
-
-        batch_img = torch.stack(images)
-        batch_mask = torch.stack(masks)
-        batch_img = apply_input_transform(batch_img, input_colorspace)
-
-        return (
-            batch_img,
-            batch_mask,
-            len(images),
-            img_width,
-            img_height,
-            fps,
-            filenames_str,
-        )
-
+            # Smart Sequence FPS Detection
+            seq_fps = 24.0
+            fps_file = os.path.join(folder, "fps.txt")
+            if os.path.exists(fps_file):
+                try:
+                    with open(fps_file, "r") as f:
+                        seq_fps = float(f.read().strip().split()[0]) # Handle "24 fps" or just "24"
+                except: pass
+            
+            fps = fps_override if fps_override > 0 else seq_fps
+            return (batch_img, batch_mask, len(images), img_w, img_h, float(fps), None, source_path)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#                         NODE: UNIVERSAL WRITE
+#                         NODE: DIGITAL CINEMA WRITE (UNIVERSAL)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Output format categories
-VIDEO_CODECS = [
-    "H.264 High (8-bit)",
-    "H.265 Main10 (10-bit)",
-    "ProRes 422 HQ (10-bit)",
-    "ProRes 4444 (12-bit)",
-    "ProRes 4444 XQ (12-bit)",
-]
-
-OUTPUT_FORMATS = [
+WRITE_FORMATS = [
+    "Image Sequence — EXR (32-bit)",
+    "Image Sequence — Radiance HDR (.hdr)",
+    "Image Sequence — PNG (16-bit)",
+    "Image Sequence — PNG (8-bit)",
+    "Image Sequence — JPEG",
     "Video — MP4 (H.264)",
     "Video — MP4 (H.265 10-bit)",
     "Video — MOV (ProRes 422 HQ)",
     "Video — MOV (ProRes 4444)",
     "Video — MOV (ProRes 4444 XQ)",
-    "Image Sequence — PNG (8-bit)",
-    "Image Sequence — PNG (16-bit)",
-    "Image Sequence — EXR (32-bit)",
-    "Image Sequence — JPEG",
-    "GIF (Animated)",
-    "WEBP (Animated)",
+    "Video — MOV (ProRes 4444 HDR Log)",
+    "GIF", "WEBP",
 ]
 
+COMPRESSIONS = ["ZIP", "ZIPS", "PIZ", "RLE", "None", "PXR24", "B44", "B44A", "DWAA", "DWAB"]
+BIT_DEPTHS = ["16-bit Half Float", "32-bit Float"]
+ALPHA_MODES = ["None", "From Image", "Solid White", "Solid Black"]
 
-class RadianceWrite:
-    """
-    Universal VFX Writer.
-    Exports to video (H.264/H.265/ProRes), image sequences (PNG/EXR/JPEG),
-    or animated formats (GIF/WEBP). Applies Output Transforms and passes
-    IMAGE through for downstream chaining.
-    """
-
-    def __init__(self):
-        self.output_dir = "output"
-        self.type = "output"
-
+class RadianceDigitalCinemaWrite:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "filename_prefix": ("STRING", {"default": "Radiance"}),
-                "output_format": (OUTPUT_FORMATS, {"default": "Video — MP4 (H.264)"}),
-                "fps": (
-                    "FLOAT",
-                    {"default": 24.0, "min": 1.0, "max": 120.0, "step": 0.001},
-                ),
-                "quality": (
-                    "INT",
-                    {
-                        "default": 10,
-                        "min": 0,
-                        "max": 51,
-                        "tooltip": "CRF for H.264/5 (lower=better). JPEG quality (0-100) for JPEG sequences. Unused for ProRes/PNG/EXR.",
-                    },
-                ),
-                "output_color_space": (
-                    INPUT_COLORSPACES,
-                    {"default": "sRGB (Standard)"},
-                ),
-                "output_path": ("STRING", {"default": "", "tooltip": "Absolute or relative output path. Leave empty for ComfyUI default output folder."}),
+                "image": (image_video_type,),
+                "filename_prefix": ("STRING", {"default": "◎ Radiance"}),
+                "write_mode": (["Video", "Sequence", "Single Image"], {"default": "Video"}),
+                "output_format": (WRITE_FORMATS, {"default": "Video — MP4 (H.265 10-bit)"}),
+                "fps": ("FLOAT", {"default": 24.0, "min": 1.0}),
+                "quality": ("INT", {"default": 10, "min": 0, "max": 100}),
+                "output_color_space": (INPUT_COLORSPACES, {"default": "sRGB (Standard)"}),
+                "broadcast_safe": ("BOOLEAN", {"default": True}),
             },
             "optional": {
-                "image": (image_video_type,),
                 "audio": ("AUDIO",),
+                "output_path": ("STRING", {"default": ""}),
+                "start_frame": ("INT", {"default": 1, "min": 0}),
+                "bit_depth": (BIT_DEPTHS, {"default": "32-bit Float"}),
+                "compression": (COMPRESSIONS, {"default": "ZIP"}),
+                "alpha_mode": (ALPHA_MODES, {"default": "From Image"}),
+                "custom_metadata": ("STRING", {"default": "", "multiline": True}),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
-    RETURN_TYPES = (
-        "IMAGE",
-        "STRING",
-        "VHS_VIDEO",
-    )
-    RETURN_NAMES = (
-        "IMAGE",
-        "file_path",
-        "video",
-    )
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
     FUNCTION = "write"
     OUTPUT_NODE = True
     CATEGORY = "FXTD Studios/Radiance/IO"
-    DESCRIPTION = "Universal writer: video, image sequences, GIF, WEBP — with IMAGE passthrough for chaining."
 
-    def write(
-        self,
-        filename_prefix,
-        output_format,
-        fps,
-        quality,
-        output_color_space,
-        image=None,
-        output_path="",
-        audio=None,
-        prompt=None,
-        extra_pnginfo=None,
-    ):
-        from folder_paths import get_output_directory
+    def write(self, **kwargs):
+        RadianceWrite().write(**kwargs)
+        return {}
 
-        # ─── Resolve Input Source ──────────────────────────────────────
-        video_path = None
-        images = None
+class RadianceWrite:
+    def write(self, image, filename_prefix, write_mode="Video", output_format="", fps=24.0, quality=10, 
+              output_color_space="sRGB (Standard)", broadcast_safe=True, audio=None, 
+              output_path="", start_frame=1, bit_depth="32-bit Float", compression="ZIP", 
+              alpha_mode="From Image", custom_metadata="", prompt=None, extra_pnginfo=None):
         
-        if image is None:
-             raise ValueError("Radiance Write: 'image' input must be provided (Batch or Video).")
+        if hasattr(image, "get_components"): image = image.get_components().images
+        elif isinstance(image, dict) and "samples" in image: image = image["samples"]
+        
+        if not isinstance(image, torch.Tensor):
+            vpath = find_video_path(image)
+            image = _load_video_frames(vpath) if vpath else None
+        
+        if image is None: raise ValueError("No image/video data")
 
-        if isinstance(image, torch.Tensor):
-            images = image
-        else:
-            # It's a video reference (string, list, or dict)
-            video_path = find_video_path(image)
-            
-            if not video_path:
-                logger.error(f"Radiance Write: Failed to resolve path. Input type: {type(image)}")
-                logger.error(f"Input content: {str(image)[:500]}") # Log first 500 chars
-                raise ValueError(f"Radiance Write: Could not resolve video path from 'image' input. ({type(image)})")
-                
-            video_path = get_safe_input_path(folder_paths.get_input_directory(), video_path)
-            images = _load_video_frames(video_path, "sRGB (Standard)")
-            
-            if images is None:
-                raise ValueError(f"Radiance Write: Failed to load frames from video: {video_path}")
+        full_out = get_safe_output_dir(folder_paths.get_output_directory(), output_path)
+        images_out = apply_output_transform(image, output_color_space, broadcast_safe)
+        images_np = images_out.cpu().numpy()
+        ts = int(time.time())
 
-            # Capture audio if not provided
-            if audio is None:
-                audio = _extract_audio_ffmpeg(video_path)
-
-        full_output_dir = get_safe_output_dir(get_output_directory(), output_path)
-
-        timestamp = int(time.time())
-
-        # Apply Output Transform (Linear → Target)
-        images_out = apply_output_transform(images, output_color_space)
-        images_np = images_out.cpu().numpy()  # (B, H, W, C)
-
-        logger.info(
-            f"Writing: {filename_prefix} | {output_format} | {output_color_space} | {len(images_np)} frames"
-        )
-
-        # ─── Route to appropriate writer ───────────────────────────────
-        if output_format.startswith("Video"):
-            filepath = self._write_video(
-                images_np,
-                filename_prefix,
-                output_format,
-                fps,
-                quality,
-                output_color_space,
-                full_output_dir,
-                timestamp,
-                audio,
-            )
-        elif output_format.startswith("Image Sequence"):
-            filepath = self._write_sequence(
-                images_np,
-                filename_prefix,
-                output_format,
-                quality,
-                full_output_dir,
-                timestamp,
-            )
-        elif "GIF" in output_format:
-            filepath = self._write_gif(
-                images_np, filename_prefix, fps, full_output_dir, timestamp
-            )
-        elif "WEBP" in output_format:
-            filepath = self._write_webp(
-                images_np, filename_prefix, fps, full_output_dir, timestamp
-            )
-        else:
-            raise ValueError(f"Unknown output format: {output_format}")
-
-        logger.info(f"Saved: {filepath}")
-
-        # IMAGE passthrough — return original input images for chaining
-        return (images, filepath, filepath)
-
-    # ─── Video Writer (FFmpeg via imageio) ────────────────────────────────
-
-    def _write_video(
-        self, images_np, prefix, fmt, fps, quality, color_space, output_dir, ts, audio
-    ):
-        import imageio.v3 as iio
-
-        # Determine codec and extension
-        if "H.264" in fmt:
-            ext, codec_name, pixel_format = "mp4", "libx264", "yuv420p"
-            video_data = (np.clip(images_np, 0, 1) * 255).astype(np.uint8)
-            ffmpeg_params = ["-crf", str(quality), "-preset", "slow"]
-        elif "H.265" in fmt:
-            ext, codec_name, pixel_format = "mp4", "libx265", "yuv420p10le"
-            video_data = (np.clip(images_np, 0, 1) * 65535).astype(np.uint16)
-            ffmpeg_params = [
-                "-x265-params",
-                f"profile=main10:crf={quality}",
-                "-tag:v",
-                "hvc1",
-            ]
-        elif "ProRes 422" in fmt:
-            ext, codec_name, pixel_format = "mov", "prores_ks", "yuv422p10le"
-            video_data = (np.clip(images_np, 0, 1) * 65535).astype(np.uint16)
-            ffmpeg_params = ["-profile:v", "3", "-vendor", "apl0"]
-        elif "ProRes 4444 XQ" in fmt:
-            ext, codec_name, pixel_format = "mov", "prores_ks", "yuv444p12le"
-            video_data = (np.clip(images_np, 0, 1) * 65535).astype(np.uint16)
-            ffmpeg_params = ["-profile:v", "5", "-vendor", "apl0"]
-        elif "ProRes 4444" in fmt:
-            ext, codec_name, pixel_format = "mov", "prores_ks", "yuv444p12le"
-            video_data = (np.clip(images_np, 0, 1) * 65535).astype(np.uint16)
-            ffmpeg_params = ["-profile:v", "4", "-vendor", "apl0"]
-        else:
-            ext, codec_name, pixel_format = "mp4", "libx264", "yuv420p"
-            video_data = (np.clip(images_np, 0, 1) * 255).astype(np.uint8)
-            ffmpeg_params = ["-crf", "18", "-preset", "slow"]
-
-        # Color metadata (NCLC)
-        color_map = {
-            "Linear (sRGB)": ("bt709", "linear", "bt709"),
-            "sRGB (Standard)": ("bt709", "iec61966-2-1", "bt709"),
-            "ARRI LogC3": ("bt709", "bt709", "bt709"),
-            "ARRI LogC4": ("bt2020", "bt2020-10", "bt2020nc"),
-            "Sony S-Log3": ("bt2020", "bt2020-10", "bt2020nc"),
-            "Panasonic V-Log": ("bt2020", "bt2020-10", "bt2020nc"),
-            "Canon Log 3": ("bt2020", "bt2020-10", "bt2020nc"),
-            "RED Log3G10": ("bt2020", "bt2020-10", "bt2020nc"),
-            "ACEScct": ("bt2020", "linear", "bt2020nc"),
-            "DaVinci Intermediate": ("bt2020", "linear", "bt2020nc"),
+        # Build Metadata
+        meta = {
+            "software": "Radiance v2.2.1",
+            "created": datetime.datetime.now().isoformat(),
+            "colorspace": output_color_space,
         }
-        if color_space in color_map:
-            prim, trc, space = color_map[color_space]
-            ffmpeg_params += [
-                "-color_primaries",
-                prim,
-                "-color_trc",
-                trc,
-                "-colorspace",
-                space,
-            ]
+        if custom_metadata:
+            for line in custom_metadata.strip().split("\n"):
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    meta[k.strip()] = v.strip()
 
-        filepath = os.path.join(output_dir, f"{prefix}_{ts}.{ext}")
+        if write_mode == "Video" and any(x in output_format for x in ["Video", "GIF", "WEBP"]):
+            res = self._write_video(images_np, filename_prefix, output_format, fps, quality, output_color_space, full_out, ts, audio, broadcast_safe)
+        elif write_mode == "Single Image":
+            # For Single Image, we only take the first frame and save without sequence naming
+            res = self._write_sequence(images_np[:1], filename_prefix, output_format, quality, full_out, ts, start_frame, 4, False, bit_depth, compression, meta, alpha_mode, is_single_image=True)
+        else:
+            res = self._write_sequence(images_np, filename_prefix, output_format, quality, full_out, ts, start_frame, 4, True, bit_depth, compression, meta, alpha_mode)
+        
+        return (image, res, res)
 
-        iio.imwrite(
-            filepath,
-            video_data,
-            fps=fps,
-            codec=codec_name,
-            pixelformat=pixel_format,
-            macro_block_size=1,
-            output_params=ffmpeg_params,
-        )
+    def _write_video(self, images_np, prefix, fmt, fps, quality, color_space, output_dir, ts, audio, broadcast_safe):
+        import imageio.v3 as iio
+        # FIX: Scale factors must match the actual bit depth of each pixel format.
+        # Previous code used * 65535 (uint16 max) for both H.265 and ProRes 4444,
+        # but the pixel formats are 10-bit and 12-bit respectively:
+        #   yuv420p10le  → max value 1023  (2^10 - 1)
+        #   yuv444p12le  → max value 4095  (2^12 - 1)
+        # imageio received uint16 data with values up to 65535 but the format
+        # only encodes 10/12 bits — it silently dropped the low bits and fired:
+        #   "Lossy conversion from uint16 to uint8. Losing 8 bits of resolution."
+        if "H.264" in fmt:
+            ext, codec, pix = "mp4", "libx264", "yuv420p"
+            data = (np.clip(images_np, 0, 1) * 255).astype(np.uint8)
+        elif "H.265" in fmt:
+            # 10-bit YUV: scale to [0, 1023] not [0, 65535]
+            ext, codec, pix = "mp4", "libx265", "yuv420p10le"
+            data = (np.clip(images_np, 0, 1) * 1023).astype(np.uint16)
+        elif "ProRes 4444" in fmt:
+            # 12-bit YUV: scale to [0, 4095] not [0, 65535]
+            ext, codec, pix = "mov", "prores_ks", "yuv444p12le"
+            data = (np.clip(images_np, 0, 1) * 4095).astype(np.uint16)
+        else:
+            ext, codec, pix = "mp4", "libx264", "yuv420p"
+            data = (np.clip(images_np, 0, 1) * 255).astype(np.uint8)
 
-        # Mux audio if available
-        if audio is not None:
-            self._mux_audio(filepath, audio, fps)
+        fpath = os.path.join(output_dir, f"{prefix}_{ts}.{ext}")
+        iio.imwrite(fpath, data, fps=fps, codec=codec, pixelformat=pix, macro_block_size=1)
+        if audio: self._mux_audio(fpath, audio)
+        return fpath
 
-        return filepath
-
-    # ─── Image Sequence Writer ───────────────────────────────────────────
-
-    def _write_sequence(self, images_np, prefix, fmt, quality, output_dir, ts):
-        """Write numbered image frames to a subfolder."""
-        seq_dir = os.path.join(output_dir, f"{prefix}_{ts}")
-        os.makedirs(seq_dir, exist_ok=True)
-
-        padding = max(4, len(str(len(images_np))))
-
+    def _write_sequence(self, images_np, prefix, fmt, quality, output_dir, ts, start, padding, use_ts, bdepth, comp, meta, alpha_mode, is_single_image=False):
+        if is_single_image:
+            target = output_dir
+            # For single image, determine extension first to check for existence
+            if "EXR" in fmt: ext = ".exr"
+            elif "HDR" in fmt: ext = ".hdr"
+            elif "JPEG" in fmt: ext = ".jpg"
+            else: ext = ".png"
+            
+            # If base file exists, find next version index
+            if os.path.exists(os.path.join(target, f"{prefix}{ext}")):
+                v_prefix = f"{prefix}_v"
+                idx = get_next_index(target, v_prefix, ext, 1)
+                if idx == 0: idx = 2 # Start at v2 if no _vN files exist yet
+                prefix = f"{v_prefix}{idx}"
+        else:
+            target = os.path.join(output_dir, f"{prefix}_{ts}") if (use_ts and len(images_np) > 1) else output_dir
+        
+        os.makedirs(target, exist_ok=True)
+        
+        paths = []
         for i, frame in enumerate(images_np):
-            frame_num = str(i + 1).zfill(padding)
-
+            num = str(start + i).zfill(padding)
+            frame_meta = {**meta, "frame": start + i}
+            
             if "EXR" in fmt:
-                # 32-bit float EXR
-                fpath = os.path.join(seq_dir, f"{prefix}.{frame_num}.exr")
-                # OpenCV expects BGR for writing
-                bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                cv2.imwrite(fpath, bgr.astype(np.float32))
-
-            elif "16-bit" in fmt:
-                # 16-bit PNG
-                fpath = os.path.join(seq_dir, f"{prefix}.{frame_num}.png")
-                frame_16 = (np.clip(frame, 0, 1) * 65535).astype(np.uint16)
-                bgr = cv2.cvtColor(frame_16, cv2.COLOR_RGB2BGR)
-                cv2.imwrite(fpath, bgr)
-
+                ext = ".exr"
+                fname = f"{prefix}{ext}" if is_single_image else f"{prefix}.{num}{ext}"
+                fpath = os.path.join(target, fname)
+                if write_exr_robust:
+                    success = write_exr_robust(fpath, frame, bdepth, comp, frame_meta)
+                    if not success: cv2.imwrite(fpath, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR).astype(np.float32))
+                else:
+                    cv2.imwrite(fpath, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR).astype(np.float32))
+            elif "HDR" in fmt:
+                ext = ".hdr"
+                fname = f"{prefix}{ext}" if is_single_image else f"{prefix}.{num}{ext}"
+                fpath = os.path.join(target, fname)
+                if write_hdr_rgbe: write_hdr_rgbe(fpath, frame)
+                else: cv2.imwrite(fpath, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR).astype(np.float32))
             elif "JPEG" in fmt:
-                fpath = os.path.join(seq_dir, f"{prefix}.{frame_num}.jpg")
-                frame_8 = (np.clip(frame, 0, 1) * 255).astype(np.uint8)
-                bgr = cv2.cvtColor(frame_8, cv2.COLOR_RGB2BGR)
-                jpeg_quality = max(1, min(100, quality)) if quality > 0 else 95
-                cv2.imwrite(fpath, bgr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+                ext = ".jpg"
+                fname = f"{prefix}{ext}" if is_single_image else f"{prefix}.{num}{ext}"
+                fpath = os.path.join(target, fname)
+                cv2.imwrite(fpath, cv2.cvtColor((np.clip(frame, 0, 1)*255).astype(np.uint8), cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, quality * 10])
+            else: # PNG
+                ext = ".png"
+                fname = f"{prefix}{ext}" if is_single_image else f"{prefix}.{num}{ext}"
+                fpath = os.path.join(target, fname)
+                data = (np.clip(frame, 0, 1)*65535).astype(np.uint16) if "16-bit" in fmt else (np.clip(frame, 0, 1)*255).astype(np.uint8)
+                cv2.imwrite(fpath, cv2.cvtColor(data, cv2.COLOR_RGB2BGR))
+            paths.append(fpath)
+            
+        return paths[0] if len(paths) == 1 else target
 
-            else:
-                # Default: 8-bit PNG
-                fpath = os.path.join(seq_dir, f"{prefix}.{frame_num}.png")
-                frame_8 = (np.clip(frame, 0, 1) * 255).astype(np.uint8)
-                bgr = cv2.cvtColor(frame_8, cv2.COLOR_RGB2BGR)
-                cv2.imwrite(fpath, bgr)
-
-        logger.info(f"Image sequence saved: {len(images_np)} frames to {seq_dir}")
-        return seq_dir
-
-    # ─── GIF Writer ──────────────────────────────────────────────────────
-
-    def _write_gif(self, images_np, prefix, fps, output_dir, ts):
-        """Write animated GIF."""
-        from PIL import Image as PILImage
-
-        filepath = os.path.join(output_dir, f"{prefix}_{ts}.gif")
-        duration_ms = int(1000 / fps)
-
-        pil_frames = []
-        for frame in images_np:
-            frame_8 = (np.clip(frame, 0, 1) * 255).astype(np.uint8)
-            pil_frames.append(PILImage.fromarray(frame_8))
-
-        if pil_frames:
-            pil_frames[0].save(
-                filepath,
-                save_all=True,
-                append_images=pil_frames[1:],
-                duration=duration_ms,
-                loop=0,
-                optimize=True,
-            )
-
-        return filepath
-
-    # ─── WEBP Writer ─────────────────────────────────────────────────────
-
-    def _write_webp(self, images_np, prefix, fps, output_dir, ts):
-        """Write animated WEBP."""
-        from PIL import Image as PILImage
-
-        filepath = os.path.join(output_dir, f"{prefix}_{ts}.webp")
-        duration_ms = int(1000 / fps)
-
-        pil_frames = []
-        for frame in images_np:
-            frame_8 = (np.clip(frame, 0, 1) * 255).astype(np.uint8)
-            pil_frames.append(PILImage.fromarray(frame_8))
-
-        if pil_frames:
-            pil_frames[0].save(
-                filepath,
-                save_all=True,
-                append_images=pil_frames[1:],
-                duration=duration_ms,
-                loop=0,
-                lossless=True,
-            )
-
-        return filepath
-
-    # ─── Audio Muxing Helper ─────────────────────────────────────────────
-
-    def _mux_audio(self, video_path, audio, fps):
-        """Mux ComfyUI AUDIO dict into the video file."""
+    def _mux_audio(self, video_path, audio):
         try:
-            waveform = audio.get("waveform")
-            sample_rate = audio.get("sample_rate", 44100)
-
-            if waveform is None:
-                return
-
-            # Write audio to temp WAV
+            waveform, sr = audio.get("waveform"), audio.get("sample_rate", 44100)
+            if waveform is None: return
             import struct
-
-            wav_np = waveform.squeeze(0).cpu().numpy()  # (channels, samples)
-            channels, n_samples = wav_np.shape
-
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                tmp_wav = tmp.name
-
-            # Write raw WAV
+            wav_np = waveform.squeeze(0).cpu().numpy()
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp: tmp_wav = tmp.name
             with open(tmp_wav, "wb") as f:
-                # WAV header
-                data_size = n_samples * channels * 4
-                f.write(b"RIFF")
-                f.write(struct.pack("<I", 36 + data_size))
-                f.write(b"WAVE")
-                f.write(b"fmt ")
-                f.write(struct.pack("<I", 16))  # chunk size
-                f.write(struct.pack("<H", 3))  # format: IEEE float
-                f.write(struct.pack("<H", channels))
-                f.write(struct.pack("<I", sample_rate))
-                f.write(struct.pack("<I", sample_rate * channels * 4))
-                f.write(struct.pack("<H", channels * 4))
-                f.write(struct.pack("<H", 32))  # bits per sample
-                f.write(b"data")
-                f.write(struct.pack("<I", data_size))
-                # Interleave and write
-                interleaved = wav_np.T.flatten().astype(np.float32)
-                f.write(interleaved.tobytes())
-
-            # Mux with FFmpeg
-            with tempfile.NamedTemporaryFile(
-                suffix=os.path.splitext(video_path)[1], delete=False
-            ) as tmp:
-                tmp_out = tmp.name
-
-            mux_cmd = [
-                "ffmpeg",
-                "-y",
-                "-i",
-                video_path,
-                "-i",
-                tmp_wav,
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "192k",
-                "-shortest",
-                tmp_out,
-            ]
-            result = subprocess.run(mux_cmd, capture_output=True, timeout=120)  # nosec B603
-
-            if result.returncode == 0:
-                os.replace(tmp_out, video_path)
-                logger.info("Audio muxed successfully")
-            else:
-                logger.warning(f"Audio muxing failed: {result.stderr[:200]}")
-                if os.path.exists(tmp_out):
-                    os.unlink(tmp_out)
-
+                f.write(b"RIFF" + struct.pack("<I", 36 + wav_np.size*4) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 3, wav_np.shape[0], sr, sr*wav_np.shape[0]*4, wav_np.shape[0]*4, 32) + b"data" + struct.pack("<I", wav_np.size*4) + wav_np.T.flatten().astype(np.float32).tobytes())
+            tmp_out = video_path + ".tmp" + os.path.splitext(video_path)[1]
+            subprocess.run(["ffmpeg", "-y", "-i", video_path, "-i", tmp_wav, "-c:v", "copy", "-c:a", "aac", "-shortest", tmp_out], capture_output=True)
+            if os.path.exists(tmp_out): os.replace(tmp_out, video_path)
             os.unlink(tmp_wav)
-
-        except Exception as e:
-            logger.warning(f"Audio muxing error: {e}")
-
+        except: pass
 
 NODE_CLASS_MAPPINGS = {
-    "RadianceReadVideo": RadianceReadVideo,
-    "RadianceReadSequence": RadianceReadSequence,
-    "RadianceWrite": RadianceWrite,
+    "◎ RadianceDigitalCinemaRead": RadianceDigitalCinemaRead,
+    "◎ RadianceDigitalCinemaWrite": RadianceDigitalCinemaWrite,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceReadVideo": "◎ Radiance Read (Video)",
-    "RadianceReadSequence": "◎ Radiance Read (Sequence)",
-    "RadianceWrite": "◎ Radiance Write",
+    "◎ RadianceDigitalCinemaRead": "◎ Radiance Read",
+    "◎ RadianceDigitalCinemaWrite": "◎ Radiance Write",
 }

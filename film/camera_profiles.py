@@ -1,13 +1,3 @@
-"""
-Radiance Camera Profiles
-------------------------
-Database of real-world cinema cameras, lenses, and formats for the Radiance Manager node.
-"""
-
-# =============================================================================
-# CINEMA CAMERAS
-# =============================================================================
-
 CAMERAS = {
     "ARRI": {
         "Alexa 65 (IMAX)": {

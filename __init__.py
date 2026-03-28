@@ -60,6 +60,14 @@ def check_dependencies():
             ("colour-science", "Advanced OCIO/color", "pip install colour-science")
         )
 
+    # Optional: defusedxml for secure XML parsing
+    try:
+        import defusedxml  # pylint: disable=unused-import
+    except ImportError:
+        missing.append(
+            ("defusedxml", "Secure XML parsing (CDL)", "pip install defusedxml")
+        )
+
     # Print optional dependency status
     if missing:
         logger.info("Optional dependencies not installed:")
@@ -76,33 +84,30 @@ check_dependencies()
 # ═══════════════════════════════════════════════════════════════════════════════
 
 from . import (
-    nodes_camera,
-    nodes_color,
     nodes_denoise,
     nodes_depth,
     nodes_dna,
-    nodes_exr,
-    nodes_filmgrain,
     nodes_grade,
-    nodes_hdr,
     nodes_io,
     nodes_layout,
     nodes_loader,
-    nodes_lut,
     nodes_nuke,
     nodes_overlay,
     nodes_prompt,
     nodes_qc,
+    nodes_resolution,
     nodes_radiance_mask,
     nodes_radiance_viewer,
-    nodes_resolution,
     nodes_sampler,
     nodes_scopes,
     nodes_studio,
     nodes_temporal,
     nodes_text,
-    nodes_upscale,
-    nodes_workspace
+    nodes_workspace,
+    color,
+    film,
+    image,
+    hdr
 )
 
 NODE_CLASS_MAPPINGS = {}
@@ -110,32 +115,29 @@ NODE_DISPLAY_NAME_MAPPINGS = {}
 WEB_DIRECTORY = "./js"
 
 modules = [
-    nodes_camera,
-    nodes_color,
+    color,
+    film,
+    image,
+    hdr,
     nodes_denoise,
     nodes_depth,
     nodes_dna,
-    nodes_exr,
-    nodes_filmgrain,
     nodes_grade,
-    nodes_hdr,
     nodes_io,
     nodes_layout,
     nodes_loader,
-    nodes_lut,
     nodes_nuke,
     nodes_overlay,
     nodes_prompt,
     nodes_qc,
+    nodes_resolution,
     nodes_radiance_mask,
     nodes_radiance_viewer,
-    nodes_resolution,
     nodes_sampler,
     nodes_scopes,
     nodes_studio,
     nodes_temporal,
     nodes_text,
-    nodes_upscale,
     nodes_workspace
 ]
 

@@ -1,39 +1,3 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-    Radiance Nuke Connector v2.1 — TCP Client for Nuke Command Server
-                        Radiance © 2024-2026 FXTD STUDIOS
-
-This is the NukeConnector class that nodes_nuke.py imports via:
-    from .tools.nuke_connector import NukeConnector
-
-Place this at: radiance/tools/nuke_connector.py
-
-Protocol (file-based bridge, command-over-TCP):
-  ComfyUI writes EXR to shared/temp path using Radiance IO
-  → TCP sends Python command to Nuke
-  → Nuke creates/updates Read node → Viewer displays the image
-
-Why file-based, not pixel-over-TCP:
-  - 4K RGBA float32 = 127 MB per frame — TCP would be 2+ seconds
-  - EXR on disk = Nuke reads natively at memory-mapped speed
-  - EXR preserves all channels (RGBA + Z + custom layers)
-  - EXR metadata carries color space, frame range, compression
-  - Same path works over NFS/SMB for multi-machine setups
-
-Requires radiance_nuke_listener.py running inside Nuke.
-
-v3.0 fixes:
-  - NEW: load_exr() — creates Read node, sets frame range, connects Viewer
-  - NEW: ping() — connection check before sending
-  - NEW: set_frame() — remote frame control
-  - NEW: get_info() — query Nuke version/project/format
-  - FIX: sync_image() never existed — replaced with load_exr()
-  - FIX: Proper binary protocol with magic + length header
-  - FIX: Connection refused / timeout returns (False, msg) not exception
-  - FIX: All methods return (success: bool, message: str) tuples
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
 import re
 import socket
 import struct
