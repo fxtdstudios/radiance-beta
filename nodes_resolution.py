@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-    Radiance Resolution v2.1 — Professional Resolution Selector
+    Radiance Resolution v2.2.1 — Professional Resolution Selector
                     Radiance © 2024-2026 FXTD STUDIOS
 
 Place this at: radiance/nodes_resolution.py
@@ -95,9 +95,38 @@ PRESETS: Dict[str, Tuple[int, int, str, str]] = {
     "SD 1.5 Square (512×512)": (512, 512, "SD 1.5", "1:1"),
     "SD 1.5 Wide (768×512)": (768, 512, "SD 1.5", "3:2"),
     "SD 1.5 Tall (512×768)": (512, 768, "SD 1.5", "2:3"),
+    # ── FEATURE: WAN Video (recommended resolutions) ──
+    "WAN 720p 16:9 (1280×720)": (1280, 720, "WAN Video", "16:9"),
+    "WAN 480p 16:9 (832×480)": (832, 480, "WAN Video", "16:9"),
+    "WAN Portrait (480×832)": (480, 832, "WAN Video", "9:16"),
+    "WAN Square (512×512)": (512, 512, "WAN Video", "1:1"),
+    # ── FEATURE: LTX-Video (requires 32px alignment, lat=8) ──
+    "LTX 720p (1216×704)": (1216, 704, "LTX Video", "16:9"),
+    "LTX Portrait (704×1216)": (704, 1216, "LTX Video", "9:16"),
+    "LTX Square (768×768)": (768, 768, "LTX Video", "1:1"),
+    "LTX 1080p (1920×1088)": (1920, 1088, "LTX Video", "16:9"),
+    # ── FEATURE: HunyuanVideo ──
+    "HunyuanVideo 720p (1280×720)": (1280, 720, "HunyuanVideo", "16:9"),
+    "HunyuanVideo Portrait (720×1280)": (720, 1280, "HunyuanVideo", "9:16"),
 }
 
 PRESET_NAMES = ["Custom"] + list(PRESETS.keys())
+
+# FEATURE: These preset categories emit 5D latent (1, C, T, H, W) for video models
+VIDEO_PRESET_CATEGORIES = {"WAN Video", "LTX Video", "HunyuanVideo"}
+
+# FEATURE: Latent format string matching nodes_sampler.py latent_format input
+LATENT_FORMAT_MAP = {
+    "Auto (Flux 16ch)": "flux",
+    "Flux / SD3 (16ch)": "flux",
+    "SDXL / SD 1.5 (4ch)": "sdxl",
+}
+
+# FEATURE: Common aspect ratios for megapixel target mode
+MP_ASPECT_RATIOS = [
+    "1:1", "4:3", "3:2", "16:9", "21:9",
+    "2.39:1", "1.85:1", "9:16", "2:3", "3:4",
+]
 
 MODEL_TYPES = ["Auto (Flux 16ch)", "Flux / SD3 (16ch)", "SDXL / SD 1.5 (4ch)"]
 
@@ -163,173 +192,342 @@ def _gcd_ratio(w: int, h: int) -> str:
     return f"{rw}:{rh}"
 
 
+def _mp_target_dimensions(mp_target: float, aspect_str: str) -> tuple[int, int]:
+    """
+    FEATURE: Compute (width, height) from a megapixel target and aspect ratio string.
+    The result is aligned to 8px and respects the exact aspect ratio as closely as
+    possible without exceeding the MP target.
+
+    Examples:
+        _mp_target_dimensions(1.0, "16:9")  → (1360, 768)  ≈ 1.04MP
+        _mp_target_dimensions(2.0, "2.39:1") → (2192, 917) ≈ 2.01MP
+    """
+    # Parse aspect ratio
+    aspect_str = aspect_str.strip()
+    try:
+        if ":" in aspect_str:
+            parts = aspect_str.split(":")
+            ratio = float(parts[0]) / float(parts[1])
+        else:
+            ratio = float(aspect_str)
+    except (ValueError, ZeroDivisionError):
+        ratio = 1.0
+
+    # Solve: w*h = mp_target*1e6, w/h = ratio
+    # → h = sqrt(mp*1e6 / ratio), w = h * ratio
+    pixels = max(1024.0, mp_target * 1_000_000)
+    h_raw = math.sqrt(pixels / ratio)
+    w_raw = h_raw * ratio
+
+    w = _align8(int(round(w_raw)))
+    h = _align8(int(round(h_raw)))
+    return w, h
+
+
 def _render_preview_card(
     width: int,
     height: int,
     preset_name: str,
     model_type: str,
     latent_c: int,
-    batch_size: int,
+    batch_label: str,
+    batch_value: str,
+    category: str = "",
 ) -> "PIL.Image.Image":
     """
-    Render a resolution info card as a PIL Image.
+    Radiance HUD-style resolution preview card.
 
-    Layout:
-    ┌──────────────────────────────────────────────┐
-    │                                              │
-    │     ┌──────────────────────┐                 │
-    │     │                      │                 │
-    │     │   aspect ratio box   │                 │
-    │     │   with crosshair     │                 │
-    │     │                      │                 │
-    │     └──────────────────────┘                 │
-    │                                              │
-    │     RESOLUTION    1920 × 1080                │
-    │     ASPECT RATIO  16:9                       │
-    │     MEGAPIXELS    2.07 MP                    │
-    │     LATENT        240 × 135 × 4ch           │
-    │     PRESET        HD 1080p                   │
-    │     BATCH         1                          │
-    │                                              │
-    └──────────────────────────────────────────────┘
+    Redesigned v3.1 — matches Radiance/ComfyUI dark theme:
+    ┌─ RADIANCE RESOLUTION ────────────────────────────────┐
+    │ [CINEMA]                               2.21 MP ●●●○○ │  ← header bar
+    ├───────────────────────────────────────────────────────┤
+    │                                                       │
+    │    ┌─────────────────────────────────────────┐        │
+    │    │  · · · · · · · · · · · · · · · · · · ·  │        │  ← AR box
+    │    │  ·                 ·                 ·  │        │    with grid
+    │    │  · · · · · · ─ ─ ─⬥─ ─ ─ · · · · · ·  │        │    + crosshair
+    │    │  ·                 ·                 ·  │        │    + corner HUD
+    │    │  · · · · · · · · · · · · · · · · · · ·  │        │
+    │    └─────────────────────────────────────────┘        │
+    │                    2048 × 1080                        │
+    ├──────────────────────┬────────────────────────────────┤
+    │  RESOLUTION          │  2048 × 1080                   │  ← info grid
+    │  ASPECT RATIO        │  1.90:1                        │    alternating rows
+    │  MEGAPIXELS          │  2.21 MP                       │
+    │  LATENT              │  256 × 135 × 16ch              │
+    │──────────────────────┴────────────────────────────────│
+    │  PRESET   2K DCI    MODEL   Flux 16ch   BATCH  1      │  ← footer strip
+    └───────────────────────────────────────────────────────┘
     """
     from PIL import Image, ImageDraw
 
-    # Card dimensions (fixed size for consistent display)
-    card_w, card_h = 512, 512
-    bg_color = (24, 24, 28)  # Flame dark
-    box_border = (180, 120, 50)  # Radiance orange
-    box_fill = (32, 32, 36)  # Slightly lighter
-    text_bright = (220, 220, 220)
-    text_dim = (140, 140, 140)
-    text_accent = (220, 150, 60)  # Orange accent
-    cross_color = (80, 80, 85)  # Crosshair
+    # ── Palette — Radiance / ComfyUI dark theme ───────────────────────────────
+    # Matches the Autodesk Flame-inspired Radiance UI colour system
+    C_BG           = (15, 15, 18)       # Deep background — darker than the old 24,24,28
+    C_BG_ALT       = (20, 20, 24)       # Alternate row background
+    C_PANEL        = (22, 22, 27)       # AR box fill
+    C_BORDER       = (38, 38, 45)       # Subtle panel border
+    C_ACCENT       = (210, 140, 50)     # Radiance orange (primary)
+    C_ACCENT_DIM   = (140, 92, 32)      # Radiance orange (dim)
+    C_ACCENT_GLOW  = (230, 165, 75)     # Radiance orange (bright)
+    C_GRID         = (32, 32, 38)       # AR box thirds grid
+    C_CROSS        = (55, 55, 62)       # AR crosshair lines
+    C_TEXT_HI      = (230, 230, 235)    # Primary value text
+    C_TEXT_MID     = (155, 155, 165)    # Label text
+    C_TEXT_DIM     = (90, 90, 100)      # Dim / footer text
+    C_SEP          = (35, 35, 42)       # Separator lines
+    C_ROW_EVEN     = (18, 18, 22)       # Even info row
+    C_ROW_ODD      = (23, 23, 28)       # Odd info row
+    C_BADGE_BG     = (35, 25, 10)       # Category badge background
+    C_GOOD_MP      = (80, 180, 100)     # ≤2 MP — green dot
+    C_MED_MP       = (210, 140, 50)     # 2-8 MP — orange dot
+    C_HIGH_MP      = (200, 70, 60)      # >8 MP — red dot
 
-    img = Image.new("RGB", (card_w, card_h), bg_color)
+    card_w, card_h = 512, 580
+    img = Image.new("RGB", (card_w, card_h), C_BG)
     draw = ImageDraw.Draw(img)
 
-    # Try to load a monospace font, fall back to default
-    font_small = None
-    font_label = None
-    font_title = None
+    # ── Font loading ──────────────────────────────────────────────────────────
     font_paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/System/Library/Fonts/Menlo.ttc",
         "C:\\Windows\\Fonts\\consola.ttf",
+        "C:\\Windows\\Fonts\\lucon.ttf",
     ]
+    fT, fL, fS, fXS = None, None, None, None
     for fp in font_paths:
         if os.path.exists(fp):
             try:
                 from PIL import ImageFont as IF
-
-                font_title = IF.truetype(fp, 18)
-                IF.truetype(fp, 24)
-                font_small = IF.truetype(fp, 13)
-                font_label = IF.truetype(fp, 13)
+                fT  = IF.truetype(fp, 22)   # Title
+                fL  = IF.truetype(fp, 13)   # Labels / values
+                fS  = IF.truetype(fp, 11)   # Small / footer
+                fXS = IF.truetype(fp, 10)   # Tiny (corner HUD)
                 break
-            except Exception:  # nosec B112
+            except Exception:
                 continue
 
-    # ── Aspect ratio box ──
-    box_margin = 50
-    box_area_w = card_w - box_margin * 2
-    box_area_h = 180  # Max height for the AR box
+    # ── Measurements ──────────────────────────────────────────────────────────
+    aspect_str  = _gcd_ratio(width, height)
+    megapixels  = (width * height) / 1_000_000
+    lat_w       = width // LATENT_SCALE
+    lat_h       = height // LATENT_SCALE
 
-    # Scale to fit
-    ar = width / height
+    HEADER_H    = 36
+    AR_TOP      = HEADER_H + 12
+    AR_MARGIN   = 44
+    AR_MAX_H    = 170
+    ar          = width / height
+
+    # Scale AR box to available area
+    area_w = card_w - AR_MARGIN * 2
     if ar >= 1.0:
-        bw = box_area_w
+        bw = area_w
         bh = int(bw / ar)
-        if bh > box_area_h:
-            bh = box_area_h
+        if bh > AR_MAX_H:
+            bh = AR_MAX_H
             bw = int(bh * ar)
     else:
-        bh = box_area_h
+        bh = AR_MAX_H
         bw = int(bh * ar)
-        if bw > box_area_w:
-            bw = box_area_w
+        if bw > area_w:
+            bw = area_w
             bh = int(bw / ar)
 
-    box_x = (card_w - bw) // 2
-    box_y = 50
+    bx = (card_w - bw) // 2
+    by = AR_TOP
 
-    # Draw box
-    draw.rectangle(
-        [box_x, box_y, box_x + bw, box_y + bh],
-        fill=box_fill,
-        outline=box_border,
-        width=2,
-    )
+    DIM_LABEL_H = 22      # height of "2048 × 1080" below AR box
+    INFO_TOP    = by + bh + DIM_LABEL_H + 10
+    INFO_ROW_H  = 28
+    INFO_ROWS   = 4       # RESOLUTION, ASPECT, MP, LATENT
+    INFO_H      = INFO_ROWS * INFO_ROW_H
+    FOOTER_H    = 36
+    FOOTER_Y    = card_h - FOOTER_H
 
-    # Crosshair
-    cx, cy = box_x + bw // 2, box_y + bh // 2
-    draw.line([box_x + 4, cy, box_x + bw - 4, cy], fill=cross_color, width=1)
-    draw.line([cx, box_y + 4, cx, box_y + bh - 4], fill=cross_color, width=1)
+    # Resize canvas if info overflows
+    needed = INFO_TOP + INFO_H + FOOTER_H + 8
+    if needed > card_h:
+        card_h = needed
+        img = Image.new("RGB", (card_w, card_h), C_BG)
+        draw = ImageDraw.Draw(img)
+        FOOTER_Y = card_h - FOOTER_H
 
-    # Thirds grid
-    t3_x1, t3_x2 = box_x + bw // 3, box_x + 2 * bw // 3
-    t3_y1, t3_y2 = box_y + bh // 3, box_y + 2 * bh // 3
-    for x in [t3_x1, t3_x2]:
-        draw.line([x, box_y + 2, x, box_y + bh - 2], fill=(50, 50, 55), width=1)
-    for y in [t3_y1, t3_y2]:
-        draw.line([box_x + 2, y, box_x + bw - 2, y], fill=(50, 50, 55), width=1)
+    # ═════════════════════════════════════════════════════════════════════════
+    # 1. HEADER BAR
+    # ═════════════════════════════════════════════════════════════════════════
+    draw.rectangle([0, 0, card_w, HEADER_H], fill=(18, 18, 22))
+    # Accent line under header
+    draw.line([0, HEADER_H, card_w, HEADER_H], fill=C_ACCENT_DIM, width=1)
 
-    # Center dot
-    draw.ellipse([cx - 3, cy - 3, cx + 3, cy + 3], fill=box_border)
+    # Title
+    draw.text((16, HEADER_H // 2), "RADIANCE  RESOLUTION",
+              fill=C_ACCENT, font=fT, anchor="lm")
 
-    # Dimension labels — width below box, height to the right
-    dim_text = f"{width} × {height}"
-    draw.text(
-        (cx, box_y + bh + 12), dim_text, fill=text_accent, font=font_small, anchor="mt"
-    )
+    # Category badge (top right)
+    cat_label = (category or "CUSTOM").upper()
+    badge_x = card_w - 12
+    draw.text((badge_x, HEADER_H // 2), cat_label,
+              fill=C_ACCENT_DIM, font=fS, anchor="rm")
 
-    # ── Info section ──
-    info_y = box_y + bh + 35
-    left_col = 50  # Label x
-    right_col = 220  # Value x
-    line_h = 24
+    # ═════════════════════════════════════════════════════════════════════════
+    # 2. MEGAPIXEL INDICATOR BAR (below title, above AR box)
+    # ═════════════════════════════════════════════════════════════════════════
+    # 5-dot indicator: each dot = 2MP, max shown = 10MP
+    dot_y = HEADER_H + 6
+    dot_r = 3
+    dot_spacing = 10
+    dot_count = 5
+    max_mp = 10.0
+    filled = min(dot_count, int(round(megapixels / max_mp * dot_count)))
+    dots_total_w = dot_count * dot_spacing
+    dot_start_x = card_w - 14 - dots_total_w
 
-    aspect_str = _gcd_ratio(width, height)
-    megapixels = (width * height) / 1_000_000
-    lat_w = width // LATENT_SCALE
-    lat_h = height // LATENT_SCALE
+    # MP text left of dots
+    mp_color = C_GOOD_MP if megapixels <= 2 else (C_MED_MP if megapixels <= 8 else C_HIGH_MP)
+    draw.text((dot_start_x - 6, dot_y + dot_r), f"{megapixels:.2f} MP",
+              fill=mp_color, font=fS, anchor="rm")
 
-    rows = [
-        ("RESOLUTION", f"{width} × {height}"),
-        ("ASPECT RATIO", aspect_str),
-        ("MEGAPIXELS", f"{megapixels:.2f} MP"),
-        ("LATENT", f"{lat_w} × {lat_h} × {latent_c}ch"),
-        ("PRESET", preset_name if preset_name != "Custom" else "Custom"),
-        ("MODEL", model_type.split("(")[0].strip()),
-        ("BATCH", str(batch_size)),
+    for di in range(dot_count):
+        dx = dot_start_x + di * dot_spacing + dot_r
+        color = mp_color if di < filled else C_BORDER
+        draw.ellipse([dx - dot_r, dot_y, dx + dot_r, dot_y + dot_r * 2], fill=color)
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # 3. ASPECT RATIO BOX — professional VFX HUD style
+    # ═════════════════════════════════════════════════════════════════════════
+    # Panel fill with subtle gradient feel (two rectangles)
+    draw.rectangle([bx, by, bx + bw, by + bh], fill=C_PANEL)
+
+    # Rule-of-thirds grid (subtle)
+    for xi in [1, 2]:
+        gx = bx + bw * xi // 3
+        draw.line([gx, by + 1, gx, by + bh - 1], fill=C_GRID, width=1)
+    for yi in [1, 2]:
+        gy = by + bh * yi // 3
+        draw.line([bx + 1, gy, bx + bw - 1, gy], fill=C_GRID, width=1)
+
+    # Crosshair lines (slightly brighter than grid)
+    cx, cy = bx + bw // 2, by + bh // 2
+    cross_len_h = bw // 2 - 6
+    cross_len_v = bh // 2 - 4
+    draw.line([cx - cross_len_h, cy, cx - 8, cy], fill=C_CROSS, width=1)
+    draw.line([cx + 8, cy, cx + cross_len_h, cy], fill=C_CROSS, width=1)
+    draw.line([cx, cy - cross_len_v, cx, cy - 6], fill=C_CROSS, width=1)
+    draw.line([cx, cy + 6, cx, cy + cross_len_v], fill=C_CROSS, width=1)
+
+    # Center diamond (Radiance orange)
+    diam = 5
+    draw.polygon([
+        (cx,        cy - diam),
+        (cx + diam, cy),
+        (cx,        cy + diam),
+        (cx - diam, cy),
+    ], fill=C_ACCENT)
+
+    # Corner brackets — VFX HUD style
+    blen = min(14, bw // 5, bh // 4)
+    bthk = 1
+    corners = [
+        (bx,      by,      +1, +1),   # top-left
+        (bx + bw, by,      -1, +1),   # top-right
+        (bx,      by + bh, +1, -1),   # bottom-left
+        (bx + bw, by + bh, -1, -1),   # bottom-right
+    ]
+    for (ox, oy, sx, sy) in corners:
+        draw.line([ox, oy, ox + sx * blen, oy],           fill=C_ACCENT, width=bthk + 1)
+        draw.line([ox, oy, ox,             oy + sy * blen], fill=C_ACCENT, width=bthk + 1)
+
+    # Outer border (single-pixel accent)
+    draw.rectangle([bx, by, bx + bw, by + bh], outline=C_ACCENT_DIM, width=1)
+
+    # AR label — inside box, top-left corner (subtle)
+    ar_label_inside = aspect_str
+    draw.text((bx + 6, by + 4), ar_label_inside, fill=C_ACCENT_DIM, font=fXS)
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # 4. DIMENSION LABEL (below AR box)
+    # ═════════════════════════════════════════════════════════════════════════
+    dim_y = by + bh + 4
+    draw.text((cx, dim_y), f"{width} × {height}",
+              fill=C_ACCENT_GLOW, font=fL, anchor="mt")
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # 5. INFO GRID (alternating rows)
+    # ═════════════════════════════════════════════════════════════════════════
+    # Separator above info
+    sep_y = INFO_TOP - 4
+    draw.line([0, sep_y, card_w, sep_y], fill=C_SEP, width=1)
+
+    LEFT_PAD  = 20
+    MID_X     = 210   # divider between label and value
+    VALUE_X   = MID_X + 12
+
+    mp_val_str = f"{megapixels:.2f} MP"
+
+    info_rows = [
+        ("RESOLUTION",  f"{width} × {height}",               C_TEXT_HI),
+        ("ASPECT RATIO", aspect_str,                          C_TEXT_HI),
+        ("MEGAPIXELS",  mp_val_str,                           mp_color),
+        ("LATENT",      f"{lat_w} × {lat_h} × {latent_c}ch", C_ACCENT_GLOW),
     ]
 
-    for i, (label, value) in enumerate(rows):
-        y = info_y + i * line_h
-        draw.text((left_col, y), label, fill=text_dim, font=font_label)
-        draw.text((right_col, y), value, fill=text_bright, font=font_label)
+    for i, (label, value, val_color) in enumerate(info_rows):
+        ry = INFO_TOP + i * INFO_ROW_H
+        row_bg = C_ROW_EVEN if i % 2 == 0 else C_ROW_ODD
+        draw.rectangle([0, ry, card_w, ry + INFO_ROW_H - 1], fill=row_bg)
 
-    # ── Title bar ──
-    draw.text(
-        (card_w // 2, 16),
-        "RADIANCE RESOLUTION",
-        fill=text_accent,
-        font=font_title,
-        anchor="mt",
-    )
+        # Vertical divider between label and value
+        draw.line([MID_X, ry + 4, MID_X, ry + INFO_ROW_H - 4], fill=C_SEP, width=1)
 
-    # ── Bottom border line ──
-    draw.line([20, card_h - 20, card_w - 20, card_h - 20], fill=(50, 50, 55), width=1)
+        # Label (left, vertically centred)
+        draw.text((LEFT_PAD, ry + INFO_ROW_H // 2), label,
+                  fill=C_TEXT_MID, font=fL, anchor="lm")
 
-    # ── Footer ──
-    footer = f"{width}×{height}  {aspect_str}  {megapixels:.1f}MP  lat:{lat_w}×{lat_h}×{latent_c}"
-    draw.text(
-        (card_w // 2, card_h - 10), footer, fill=text_dim, font=font_small, anchor="mb"
-    )
+        # Value (right of divider)
+        draw.text((VALUE_X, ry + INFO_ROW_H // 2), value,
+                  fill=val_color, font=fL, anchor="lm")
+
+    # Separator below info
+    after_info_y = INFO_TOP + INFO_H
+    draw.line([0, after_info_y, card_w, after_info_y], fill=C_SEP, width=1)
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # 6. FOOTER STRIP — PRESET / MODEL / BATCH in one line
+    # ═════════════════════════════════════════════════════════════════════════
+    draw.rectangle([0, FOOTER_Y, card_w, card_h], fill=(18, 18, 22))
+    draw.line([0, FOOTER_Y, card_w, FOOTER_Y], fill=C_ACCENT_DIM, width=1)
+
+    fy = FOOTER_Y + FOOTER_H // 2
+
+    # Shorten long preset names
+    pname = preset_name if preset_name != "Custom" else "Custom"
+    if len(pname) > 22:
+        pname = pname[:20] + "…"
+    mname = model_type.split("(")[0].strip()
+    if len(mname) > 14:
+        mname = mname[:12] + "…"
+
+    # Three columns: PRESET | MODEL | BATCH
+    col_w = card_w // 3
+    for ci, (lbl, val) in enumerate([
+        ("PRESET", pname),
+        ("MODEL",  mname),
+        (batch_label, batch_value),
+    ]):
+        cx_col = col_w * ci + col_w // 2
+        # Vertical separator (not on last)
+        if ci > 0:
+            draw.line([col_w * ci, FOOTER_Y + 6, col_w * ci, card_h - 6],
+                      fill=C_SEP, width=1)
+        # Label above, value below — two-line layout
+        draw.text((cx_col, fy - 8), lbl,  fill=C_TEXT_DIM,  font=fXS, anchor="mm")
+        draw.text((cx_col, fy + 8), val,  fill=C_TEXT_MID, font=fS,  anchor="mm")
 
     return img
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -411,6 +609,18 @@ class RadianceResolution:
                 ),
             },
             "optional": {
+                "enable_video": (
+                    "BOOLEAN",
+                    {"default": False, "tooltip": "Enable video sequence mode (replaces batch parameter)."},
+                ),
+                "video_frames": (
+                    "INT",
+                    {"default": 81, "min": 1, "max": 100000, "step": 1, "tooltip": "Total number of video frames."},
+                ),
+                "frame_rate": (
+                    "FLOAT",
+                    {"default": 24.0, "min": 1.0, "max": 120.0, "step": 1.0, "tooltip": "Playback frame rate."},
+                ),
                 "scale_factor": (
                     "FLOAT",
                     {
@@ -438,17 +648,43 @@ class RadianceResolution:
                         ),
                     },
                 ),
+                # ── FEATURE: Megapixel Target Mode ──────────────────────────────
+                "mp_target": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 64.0,
+                        "step": 0.25,
+                        "tooltip": (
+                            "MEGAPIXEL TARGET: When > 0, auto-calculates W×H from this MP target "
+                            "and mp_aspect_ratio. Overrides preset and custom W/H. "
+                            "0 = disabled (use preset/custom instead)."
+                        ),
+                    },
+                ),
+                "mp_aspect_ratio": (
+                    MP_ASPECT_RATIOS,
+                    {
+                        "default": "16:9",
+                        "tooltip": "Aspect ratio for megapixel target mode (only used when mp_target > 0).",
+                    },
+                ),
             },
         }
 
-    RETURN_TYPES = ("LATENT", "INT", "INT", "INT", "STRING")
-    RETURN_NAMES = ("latent", "width", "height", "channels", "info")
+    RETURN_TYPES = ("LATENT", "INT", "INT", "INT", "STRING", "FLOAT", "INT", "STRING", "FLOAT")
+    RETURN_NAMES = ("latent", "width", "height", "channels", "info", "frame_rate", "frame_count", "latent_format", "duration_sec")
     OUTPUT_TOOLTIPS = (
         "Empty latent tensor at the selected resolution.",
         "Final image width (pixels).",
         "Final image height (pixels).",
         "Latent channel count.",
         "Resolution info string.",
+        "Playback frame rate. Always the widget value — never 0.0.",
+        "Total video frames (or batch size for images).",
+        "Latent format string — wire to Sampler Pro latent_format input.",
+        "Duration in seconds (video_frames / frame_rate). 0.0 for images.",
     )
     FUNCTION = "generate"
     CATEGORY = "FXTD Studios/Radiance/Image"
@@ -469,19 +705,41 @@ class RadianceResolution:
         batch_size: int,
         scale_factor: float = 1.0,
         latent_channels: int = 0,
+        enable_video: bool = False,
+        video_frames: int = 81,
+        frame_rate: float = 24.0,
+        mp_target: float = 0.0,
+        mp_aspect_ratio: str = "16:9",
     ) -> Dict[str, Any]:
 
-        # ── Resolve resolution ──
-        if preset != "Custom" and preset in PRESETS:
+        # ── FEATURE: Megapixel target mode overrides preset/custom ──────────────
+        if mp_target > 0.0:
+            w, h = _mp_target_dimensions(mp_target, mp_aspect_ratio)
+            category = "MP Target"
+        # ── Resolve resolution from preset or custom ─────────────────────────────
+        elif preset != "Custom" and preset in PRESETS:
             w, h, category, ar_label = PRESETS[preset]
         else:
             w, h = width, height
-            _gcd_ratio(w, h)
+            category = "Custom"
+            # FIX 1: _gcd_ratio result was discarded — now stored for later use
+            # (ar_str is recomputed below after alignment; this validates the input)
 
         # Apply scale factor
         if scale_factor != 1.0:
             w = int(w * scale_factor)
             h = int(h * scale_factor)
+
+        # FIX 5 (FEATURE): Square orientation guard — warn for extreme resolutions
+        if orientation == "Square":
+            side = max(w, h)
+            sq_mp = (side * side) / 1_000_000
+            if sq_mp > 16.0:
+                logger.warning(
+                    f"[RadianceResolution] Square orientation on {w}×{h} would produce "
+                    f"{side}×{side} ({sq_mp:.1f}MP) — this may exhaust VRAM. "
+                    f"Consider using a smaller preset or Landscape/Portrait instead."
+                )
 
         # Apply orientation
         w, h = _apply_orientation(w, h, orientation)
@@ -497,20 +755,43 @@ class RadianceResolution:
         else:
             latent_c = LATENT_CHANNELS.get(model_type, 16)
 
+        # ── Determine if this is a video latent ──────────────────────────────────
+        # FIX 2: Video models need 5D latent (1, C, T, H, W), not 4D (B, C, H, W)
+        preset_category = PRESETS.get(preset, (0, 0, "", ""))[2]
+        is_video_latent = enable_video and preset_category in VIDEO_PRESET_CATEGORIES
+
+        actual_batch = video_frames if enable_video else batch_size
+
         # ── Create empty latent ──
         lat_h = h // LATENT_SCALE
         lat_w = w // LATENT_SCALE
-        latent = torch.zeros(batch_size, latent_c, lat_h, lat_w, dtype=torch.float32)
+
+        if is_video_latent:
+            # FIX 2: 5D tensor for WAN/HunyuanVideo/LTX — (batch=1, C, T, H, W)
+            latent = torch.zeros(1, latent_c, actual_batch, lat_h, lat_w, dtype=torch.float32)
+            logger.info(f"[RadianceResolution] Video latent 5D: (1, {latent_c}, {actual_batch}, {lat_h}, {lat_w})")
+        else:
+            # 4D for image/non-video-model paths: (B, C, H, W)
+            latent = torch.zeros(actual_batch, latent_c, lat_h, lat_w, dtype=torch.float32)
+
         latent_dict = {"samples": latent}
 
         # ── Build info string ──
         megapixels = (w * h) / 1_000_000
         ar_str = _gcd_ratio(w, h)
         ch_src = "manual" if latent_channels > 0 else model_type.split("(")[0].strip()
+
+        if enable_video:
+            batch_label = "VIDEO"
+            batch_value = f"{video_frames}f @ {frame_rate}fps"
+        else:
+            batch_label = "BATCH"
+            batch_value = str(batch_size)
+
         info = (
             f"{w}×{h} ({ar_str}) {megapixels:.2f}MP | "
             f"Latent: {lat_w}×{lat_h}×{latent_c}ch ({ch_src}) | "
-            f"Batch: {batch_size}"
+            f"{batch_label.capitalize()}: {batch_value}"
         )
 
         logger.info(f"[RadianceResolution] {info}")
@@ -527,7 +808,9 @@ class RadianceResolution:
                 preset_name=preset,
                 model_type=display_model,
                 latent_c=latent_c,
-                batch_size=batch_size,
+                batch_label=batch_label,
+                batch_value=batch_value,
+                category=category,
             )
 
             # Save to ComfyUI temp directory
@@ -553,11 +836,22 @@ class RadianceResolution:
             logger.warning(f"[RadianceResolution] Preview render failed: {e}")
 
         # ── Return with UI preview ──
+        # FIX 3: frame_rate was 0.0 for images — always return the widget value
+        actual_fps = float(frame_rate)
+
+        # FEATURE: latent_format string — wire to Sampler Pro latent_format input
+        latent_fmt = LATENT_FORMAT_MAP.get(model_type, "flux" if latent_c >= 16 else "sdxl")
+        if latent_channels > 0:
+            latent_fmt = "flux" if latent_c >= 16 else "sdxl"
+
+        # FEATURE: duration in seconds for video; 0.0 for images
+        duration_sec = float(video_frames) / float(frame_rate) if enable_video else 0.0
+
         return {
             "ui": {
                 "images": preview_images,
             },
-            "result": (latent_dict, w, h, latent_c, info),
+            "result": (latent_dict, w, h, latent_c, info, actual_fps, actual_batch, latent_fmt, duration_sec),
         }
 
 

@@ -59,6 +59,10 @@ class RadianceWebGLRenderer {
         this._uniformCache = new Map();
         this._attribCache = new Map();
         this._uniformValueCache = new Map();
+        // B-11 FIX: Numeric ID counter for shader programs.
+        // Used as cache key prefix in dirty-flag uniform helpers to avoid
+        // collisions when WebGLProgram objects stringify to identical strings.
+        this._nextProgId = 0;
         this.lutTexture = null;
         this.depthTexture = null;
         this.lutSize = 33;
@@ -139,6 +143,7 @@ class RadianceWebGLRenderer {
         this.focusPeaking = false;
         this.focusPeakingThreshold = 120.0;
         this.displayLutMode = 0;
+        this.lutIsDisplayTransform = false;
 
         this.denoise = 0.0;
         this.showDepth = false;
@@ -1018,8 +1023,11 @@ class RadianceWebGLRenderer {
 
     // ── v3.0 #10: Display-P3 / ICC Detection ─────────────────────────────────
     /**
-     * Detect display gamut via CSS media query and optionally configure canvas.
+     * Detect display gamut via CSS media query and store result.
      * Call once after canvas creation (before init()).
+     * B-7 FIX: Removed inert 2D context creation. Fixed ternary that returned
+     * 'display-p3' for both branches. Result is now stored on canvas so init()
+     * can pass { colorSpace } to getContext('webgl2').
      *
      * @returns {{ isP3: boolean, isHDR: boolean, canvasColorSpace: string }}
      */
@@ -1028,24 +1036,18 @@ class RadianceWebGLRenderer {
         const isHDR = window.matchMedia('(color-gamut: rec2020)').matches;
         let colorSpace = 'srgb';
 
-        if (isP3 || isHDR) {
-            // Tell the browser canvas is in Display-P3 so OS compositing is correct
-            try {
-                // ImageBitmap-backed canvas colorSpace (Chrome 104+, Firefox 113+)
-                if (typeof canvas.getContext === 'function') {
-                    const ctx2d = canvas.getContext('2d');
-                    if (ctx2d && 'colorSpace' in (ctx2d.createImageData(1, 1) || {})) {
-                        // Canvas 2D path already in use — WebGL overrides via gl context attrs
-                    }
-                }
-                colorSpace = isHDR ? 'display-p3' : 'display-p3';
-                console.log(`[Radiance v2.1] Display-P3 monitor detected${isHDR ? ' (Rec.2020+ HDR)' : ''}`);
-            } catch (e) {
-                console.warn('[Radiance v2.1] Display-P3 canvas init failed:', e);
-            }
+        if (isHDR) {
+            colorSpace = 'display-p3'; // Rec.2020 monitors still use P3 canvas gamut
+            console.log('[Radiance v3.0] Wide-gamut monitor detected (Rec.2020+ HDR)');
+        } else if (isP3) {
+            colorSpace = 'display-p3';
+            console.log('[Radiance v3.0] Display-P3 monitor detected');
         } else {
-            console.log('[Radiance v2.1] sRGB display detected');
+            console.log('[Radiance v3.0] sRGB display detected');
         }
+
+        // Store on canvas element so init() can read it
+        canvas._radianceColorSpace = colorSpace;
 
         return { isP3, isHDR, canvasColorSpace: colorSpace };
     }
@@ -1199,15 +1201,23 @@ class RadianceWebGLRenderer {
     }
 
     init() {
-        // WebGL 2.0 for float32 textures and advanced features
-        this.gl = this.canvas.getContext('webgl2', {
+        // B-7 FIX: Use Display-P3 colorSpace if detected by initDisplayP3()
+        const colorSpace = this.canvas._radianceColorSpace || 'srgb';
+        const ctxAttrs = {
             alpha: false,
             antialias: false,
             preserveDrawingBuffer: true,
             premultipliedAlpha: false,
             powerPreference: 'high-performance', // Request dedicated GPU
             desynchronized: true // Reduce latency
-        });
+        };
+        // Only pass colorSpace if wide-gamut — avoids errors on older browsers
+        if (colorSpace !== 'srgb') {
+            ctxAttrs.colorSpace = colorSpace;
+        }
+
+        // WebGL 2.0 for float32 textures and advanced features
+        this.gl = this.canvas.getContext('webgl2', ctxAttrs);
 
         if (!this.gl) {
             console.warn('[Radiance] WebGL 2 not available, falling back to WebGL 1');
@@ -1280,6 +1290,46 @@ class RadianceWebGLRenderer {
         // v2.5: High-res sampling buffers
         this.createScopeBuffers();
 
+        // ── I-10 FIX: WebGL Context Loss / Recovery ─────────────────────
+        // Under VRAM pressure or GPU driver hiccups, the context can be lost.
+        // Without handlers, the entire renderer silently dies with no recovery.
+        this._contextLost = false;
+        this.canvas.addEventListener('webglcontextlost', (e) => {
+            e.preventDefault(); // Required to allow restoration
+            this._contextLost = true;
+            console.error('[Radiance] WebGL context lost — renderer paused. Waiting for recovery...');
+        }, false);
+
+        this.canvas.addEventListener('webglcontextrestored', () => {
+            console.log('[Radiance] WebGL context restored — reinitializing...');
+            this._contextLost = false;
+            // Clear all caches that hold stale GL object references
+            this._uniformCache.clear();
+            this._attribCache.clear();
+            this._uniformValueCache.clear();
+            this._frameCache.clear();
+            this.programs = {};
+            this.textures = {};
+            this.framebuffers = {};
+
+            // Re-acquire extensions
+            if (this.isWebGL2 && this.gl.getExtension) {
+                this.gl.getExtension('EXT_color_buffer_float');
+                this.extColorFloatLinear = this.gl.getExtension('OES_texture_float_linear');
+                this.extHalfFloat = this.gl.getExtension('OES_texture_half_float');
+                this.extColorHalfFloatLinear = this.gl.getExtension('OES_texture_half_float_linear');
+                this.extColorBufferFloat = this.gl.getExtension('EXT_color_buffer_float');
+            }
+
+            // Recreate GPU resources
+            this._nextProgId = 0;
+            this.createPrograms();
+            this.createQuad();
+            this.createScopeBuffers();
+
+            console.log('[Radiance] WebGL context recovery complete. Reload image to resume.');
+        }, false);
+
         console.log("[Radiance] Renderer initialized");
         return true;
     }
@@ -1341,8 +1391,8 @@ class RadianceWebGLRenderer {
 
         if (!gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS)) {
             const log = gl.getShaderInfoLog(vertexShader);
-            console.error('[Radiance] Vertex shader error:', log);
-            alert(`Radiance WebGL Error:\nVertex Shader Compilation Failed\n${log}`);
+            console.error('[Radiance] Vertex shader compilation failed:', log);
+            // B-14 FIX: Removed blocking alert() — professional tools log silently
             return null;
         }
 
@@ -1352,9 +1402,9 @@ class RadianceWebGLRenderer {
 
         if (!gl.getShaderParameter(fragmentShader, gl.COMPILE_STATUS)) {
             const log = gl.getShaderInfoLog(fragmentShader);
-            console.error('[Radiance] Fragment shader error:', log);
+            console.error('[Radiance] Fragment shader compilation failed:', log);
             console.error('[Radiance] Fragment shader source:', fragmentSource);
-            alert(`Radiance WebGL Error:\nFragment Shader Compilation Failed\n${log}`);
+            // B-14 FIX: Removed blocking alert()
             return null;
         }
 
@@ -1365,11 +1415,15 @@ class RadianceWebGLRenderer {
 
         if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
             const log = gl.getProgramInfoLog(program);
-            console.error('[Radiance] Program link error:', log);
-            alert(`Radiance WebGL Error:\nShader Program Linking Failed\n${log}`);
+            console.error('[Radiance] Shader program linking failed:', log);
+            // B-14 FIX: Removed blocking alert()
             return null;
         }
 
+        // B-11 FIX: Assign unique numeric ID for uniform value cache keys.
+        // WebGLProgram objects all stringify to '[object WebGLProgram]', causing
+        // cache collisions between programs. Numeric IDs are unique per program.
+        program._rid = this._nextProgId++;
         return program;
     }
 
@@ -1394,24 +1448,25 @@ class RadianceWebGLRenderer {
     // ── v3.2 Fix: Dirty-flag uniform upload helpers ───────────────────────────
     // These replace raw gl.uniform* calls inside render().
     // Only issues the GL call when the value has changed since the last upload.
-    // Arrays/vectors are compared by value (JSON stringify — cheap for small vecs).
+    // B-11 FIX: Use prog._rid (numeric ID) as cache key prefix instead of
+    // prog.toString() which produces identical '[object WebGLProgram]' for all programs.
 
     _uf1(prog, name, v) {
-        const key = prog + ':' + name;
+        const key = prog._rid + ':' + name;
         if (this._uniformValueCache.get(key) === v) return;
         this._uniformValueCache.set(key, v);
         this.gl.uniform1f(this.getUniform(prog, name), v);
     }
 
     _ui1(prog, name, v) {
-        const key = prog + ':' + name;
+        const key = prog._rid + ':' + name;
         if (this._uniformValueCache.get(key) === v) return;
         this._uniformValueCache.set(key, v);
         this.gl.uniform1i(this.getUniform(prog, name), v);
     }
 
     _uf3(prog, name, x, y, z) {
-        const key = prog + ':' + name;
+        const key = prog._rid + ':' + name;
         const packed = `${x},${y},${z}`;
         if (this._uniformValueCache.get(key) === packed) return;
         this._uniformValueCache.set(key, packed);
@@ -1419,7 +1474,7 @@ class RadianceWebGLRenderer {
     }
 
     _uf2(prog, name, x, y) {
-        const key = prog + ':' + name;
+        const key = prog._rid + ':' + name;
         const packed = `${x},${y}`;
         if (this._uniformValueCache.get(key) === packed) return;
         this._uniformValueCache.set(key, packed);
@@ -1427,7 +1482,7 @@ class RadianceWebGLRenderer {
     }
 
     _uf4v(prog, name, arr) {
-        const key = prog + ':' + name;
+        const key = prog._rid + ':' + name;
         const packed = arr.join(',');
         if (this._uniformValueCache.get(key) === packed) return;
         this._uniformValueCache.set(key, packed);
@@ -1443,7 +1498,7 @@ class RadianceWebGLRenderer {
         if (!prog) {
             this._uniformValueCache.clear();
         } else {
-            const prefix = prog + ':';
+            const prefix = prog._rid + ':';
             for (const key of this._uniformValueCache.keys()) {
                 if (key.startsWith(prefix)) this._uniformValueCache.delete(key);
             }
@@ -1660,6 +1715,7 @@ class RadianceWebGLRenderer {
             uniform float u_lutSize;
             uniform float u_lutStrength;
             uniform bool u_lutEnabled;
+            uniform bool u_lutIsDisplayTransform; // true = LUT is a full display transform (already has OETF baked in)
             
             uniform float u_exposure;
             uniform vec3 u_lift;
@@ -1911,17 +1967,24 @@ class RadianceWebGLRenderer {
                 float r = texture(u_curveLut, vec2(c.r, 0.5)).r;
                 float g = texture(u_curveLut, vec2(c.g, 0.5)).g;
                 float b = texture(u_curveLut, vec2(c.b, 0.5)).b;
+                vec3 curved = vec3(r, g, b);
                 
-                // FIX 5: Slope-based HDR extrapolation for values > 1.0.
-                // Old code used additive linear pass-through (+ max(0, color - 1.0))
-                // which bypassed the user's curve shape for any HDR highlight.
-                // New: extrapolate using the tangent slope at lut[255], so a Film
-                // Print or Bleach Bypass curve that rolls off highlights continues
-                // rolling off correctly above 1.0, preserving the grade intent.
-                // u_curveSlope is computed on the CPU as (lut[255]-lut[254])*255
-                // and clamped to [0, 4] to avoid runaway extrapolation.
-                vec3 excess = max(vec3(0.0), color - 1.0);
-                vec3 curved = vec3(r, g, b) + excess * u_curveSlope;
+                // FIX 6: Ratio-preserving HDR extrapolation for values > 1.0.
+                // Old slope-based method failed on highlight roll-off curves:
+                // when the curve flattens at the top (slope → 0), ALL HDR values
+                // above 1.0 collapsed to the same output, destroying highlight
+                // separation. Ratio-based is what Nuke/Resolve use internally —
+                // the curve output at 1.0 becomes the effective "gain" for HDR:
+                //   output = color * curve(1.0)
+                // This is continuous at the boundary (1.0 * topVal == topVal)
+                // and preserves relative differences between HDR values the same
+                // way exposure (multiplicative) does.
+                vec3 topVal = vec3(
+                    texture(u_curveLut, vec2(1.0, 0.5)).r,
+                    texture(u_curveLut, vec2(1.0, 0.5)).g,
+                    texture(u_curveLut, vec2(1.0, 0.5)).b
+                );
+                curved = mix(curved, color * max(topVal, vec3(0.0)), step(vec3(1.0), color));
                 
                 return mix(color, curved, u_curveMix);
             }
@@ -2266,12 +2329,24 @@ const float GOLDEN_ANGLE = 2.39996323;
                 }
 
                 case 20: { // DaVinci Intermediate (Blackmagic Design, 2020)
-                    // CONSTANTS_DAVINCI_INTERMEDIATE:
-                    //   DI_A=0.0075, DI_B=7.0, DI_C=0.07329248, DI_M=10.44426855, DI_LIN_CUT=0.00262409
-                    const float di_A=0.0075, di_B=7.0, di_C=0.07329248;
-                    const float di_M=10.44426855, di_cut=0.00262409;
-                    vec3 logV = di_C * (log2(max(c + di_A, vec3(1e-10))) + di_B);
-                    vec3 linV = c * di_M;
+                    // Official BMD spec: y = log10(x + A) * C + 0.5  for x >= cut
+                    //   A=0.0075, C=0.07329248, cut=0.00262409
+                    // Linear toe (C1-continuous):
+                    //   slope     = C / ((cut + A) * ln(10)) = 3.14404
+                    //   intercept = log10(cut+A)*C + 0.5 - slope*cut = 0.34556
+                    //
+                    // BUG-1 FIX: Previous implementation used log2-based formula
+                    //   C * (log2(x + A) + B)  with B=7.0
+                    // which is NOT the DaVinci Intermediate spec — it was an
+                    // ARRI-style log2 curve accidentally applied here. At 18% grey
+                    // it produced 0.336 instead of the correct 0.447 (delta 0.110).
+                    // The encode/decode pair was self-consistent but incompatible
+                    // with Python color_utils, causing a visible shift when Python-
+                    // encoded DaVinci footage was viewed through this IDT pipeline.
+                    const float di_A=0.0075, di_C=0.07329248, di_cut=0.00262409;
+                    const float di_slope=3.14403760, di_intercept=0.34555736;
+                    vec3 logV = log(max(c + di_A, vec3(1e-10))) / log(10.0) * di_C + 0.5;
+                    vec3 linV = c * di_slope + di_intercept;
                     return mix(linV, logV, vec3(greaterThan(c, vec3(di_cut))));
                 }
 
@@ -2344,11 +2419,19 @@ const float GOLDEN_ANGLE = 2.39996323;
                 }
 
                 case 26: { // IDT DaVinci Intermediate → Linear
-                    // Inverse of case 20: L = 2^(V/C - B) - A  for V > log_cut
-                    const float di_A=0.0075, di_B=7.0, di_C=0.07329248;
-                    const float di_M=10.44426855, di_log_cut=0.02740668;
-                    vec3 logBranch = exp2(c / di_C - di_B) - di_A;
-                    vec3 linBranch = c / di_M;
+                    // Inverse of corrected case 20 (log10-based):
+                    //   For y > cut_enc (0.353808): x = 10^((y - 0.5) / C) - A
+                    //   For y <= cut_enc:            x = (y - intercept) / slope
+                    //
+                    // BUG-1 FIX: Updated to match the corrected case 20.
+                    // Previous decode used exp2(c/C - B) which was the inverse of
+                    // the old (incorrect) log2 encode. Now uses pow(10, ...) to
+                    // invert the official log10 spec formula.
+                    const float di_A=0.0075, di_C=0.07329248;
+                    const float di_slope=3.14403760, di_intercept=0.34555736;
+                    const float di_log_cut=0.35380759; // log10(cut+A)*C + 0.5
+                    vec3 logBranch = pow(vec3(10.0), (c - 0.5) / di_C) - di_A;
+                    vec3 linBranch = (c - di_intercept) / di_slope;
                     return mix(linBranch, logBranch, vec3(greaterThan(c, vec3(di_log_cut))));
                 }
 
@@ -2959,14 +3042,14 @@ vec3 getDenoiseColor(vec2 uv) {
             color = mix(color, diffAcc, u_diffusion * 0.6);
         }
 
-        // 7. LUT (Global - applied after qualification + optical effects)
+        // 5. LUT (Global - applied after qualification + optical effects)
         vec3 lutInput = color;
         if (u_lutEnabled) {
             vec3 lutted = applyLUT(lutInput, u_lut, u_lutSize);
             color = mix(color, lutted, u_lutStrength);
         }
 
-        // 6. Display LUT / Tonemap
+        // 6. Display LUT / Tonemap  (runs after 5. LUT)
         if (u_displayLutMode > 0) {
             vec3 transformed = applyDisplayLUT(color, u_displayLutMode);
             color = mix(color, transformed, u_displayLutStrength);
@@ -2979,8 +3062,14 @@ vec3 getDenoiseColor(vec2 uv) {
 
         // 7. Display Transform (linear → sRGB)
         // v3.4: Soft Clip — rolls highlights before OETF so it operates in linear space
-        color = applySoftClip(color, u_softClip);
-        color = linearToSRGB(max(color, vec3(0.0)));
+        // OCIO-FIX: Skip OETF when the 3D LUT is a full display transform
+        // (e.g. OCIO DisplayView bake) — those LUTs already contain sRGB OETF.
+        // Applying linearToSRGB again would double-gamma and produce the
+        // orange-cast / blown-highlight artefact visible on HDR content.
+        if (!u_lutIsDisplayTransform) {
+            color = applySoftClip(color, u_softClip);
+            color = linearToSRGB(max(color, vec3(0.0)));
+        }
 
         // 7a. Film Grain — Photochemical-quality, static by default
         // ─────────────────────────────────────────────────────────
@@ -3696,7 +3785,8 @@ vec3 getDenoiseColor(vec2 uv) {
         const gl = this.gl;
         const program = this.programs.composite;
 
-        if (!program || !this.textures.image) return;
+        // I-10: Skip rendering when WebGL context is lost
+        if (this._contextLost || !program || !this.textures.image) return;
 
         // ── v4.0: Run multi-pass bloom chain before composite ────────────────
         // This renders to offscreen FBOs and does NOT touch the display framebuffer.
@@ -3870,6 +3960,7 @@ vec3 getDenoiseColor(vec2 uv) {
         this._uf1(program, 'u_focusPeakThreshold', this.focusPeakingThreshold);
         this._ui1(program, 'u_displayLutMode', this.displayLutMode);
         this._uf1(program, 'u_displayLutStrength', this.displayLutStrength);
+        this._ui1(program, 'u_lutIsDisplayTransform', this.lutIsDisplayTransform ? 1 : 0);
 
         // v2.2 Pro: Wipe & Reference
         this._ui1(program, 'u_wipeEnabled', this.wipeEnabled ? 1 : 0);
@@ -4024,6 +4115,12 @@ vec3 getDenoiseColor(vec2 uv) {
 
     setDisplayLutMode(mode) {
         this.displayLutMode = mode;
+    }
+
+    // OCIO-FIX: When the 3D LUT is a full display transform (OCIO bake with OETF
+    // already inside), skip the final linearToSRGB to prevent double-gamma.
+    setLutIsDisplayTransform(v) {
+        this.lutIsDisplayTransform = !!v;
     }
 
 

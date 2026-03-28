@@ -1,6 +1,6 @@
 """
 ═════════════════════════════════════════════════════════════════════════════
-                     RADIANCE VIEWER NODE v3.0
+                     RADIANCE VIEWER NODE v2.2.1
               VFX Industry-Standard Image Viewer for ComfyUI
                          Radiance © 2024-2026
 
@@ -24,7 +24,7 @@ Professional viewer node providing:
 
 VERSION HISTORY:
 
-v3.0 — Industry & Performance Upgrade (February 2026)
+v2.2.1 — Industry & Performance Upgrade (March 2026)
 ──────────────────────────────────────
   #1  EXR always-on as primary float sidecar (cv2/imageio)
   #3  HALF_FLOAT WebGL verified with OES_texture_half_float
@@ -46,6 +46,7 @@ v2.1 — Pro Evolution (February 2026)
 """
 
 import json
+import struct
 import torch
 import numpy as np
 import zlib
@@ -55,7 +56,6 @@ import logging
 import math
 import sys
 import io
-import json
 import traceback
 from aiohttp import web
 from server import PromptServer
@@ -74,6 +74,15 @@ try:
 except ImportError:
     from path_utils import safe_join
 
+# v3.1: Robust EXR Writer from HDR bridge
+try:
+    from .hdr.io import write_exr_robust
+except ImportError:
+    try:
+        from hdr.io import write_exr_robust
+    except ImportError:
+        write_exr_robust = None
+
 # v1.21: cv2 for 16-bit PNG support
 try:
     import cv2
@@ -81,13 +90,22 @@ try:
     HAS_CV2 = True
 except ImportError:
     HAS_CV2 = False
-    logging.getLogger("radiance.viewer").warning(
+    logging.getLogger("◎ Radiance.viewer").warning(
         "cv2 not available — 16-bit PNG disabled, falling back to 8-bit. "
         "Install opencv-python for 16-bit support."
     )
 
 # Module logger
-logger = logging.getLogger("radiance.viewer")
+logger = logging.getLogger("◎ Radiance.viewer")
+
+# Import shared ACES gamut compression — replaces inline duplicate implementation
+try:
+    from .color_utils import aces2_gamut_compress as _aces2_gamut_compress
+except ImportError:
+    try:
+        from color_utils import aces2_gamut_compress as _aces2_gamut_compress
+    except ImportError:
+        _aces2_gamut_compress = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -118,9 +136,48 @@ except ImportError:
 BIT_DEPTH_MODES = ["8-bit (Fast)", "16-bit (Quality)", "16-bit + HDR Data", "32-bit Float"]
 CV2_PNG_COMPRESSION = 4
 
+# v3.1: OCIO Integration — auto-registers /radiance/ocio/* HTTP routes
+try:
+    from .radiance_ocio import get_ocio_manager, HAS_OCIO, apply_ocio_transform
+    if HAS_OCIO:
+        logger.info("[Radiance] OCIO engine loaded — /radiance/ocio/* endpoints active")
+except ImportError:
+    HAS_OCIO = False
+    logger.info("[Radiance] OCIO module not found — OCIO features disabled")
+
 
 # Stores the last processed IMAGE batch for each node to allow HUD-based export.
-_VIEWER_CACHE: Dict[str, torch.Tensor] = {}
+# v3.1 FIX (B-3): LRU-bounded cache to prevent OOM on long sessions.
+# Max 8 nodes cached — evicts oldest entry when full.
+import collections
+import threading
+
+_VIEWER_CACHE_MAX = 8
+_VIEWER_CACHE: collections.OrderedDict = collections.OrderedDict()
+_VIEWER_CACHE_LOCK = threading.Lock()
+
+
+def _viewer_cache_set(key: str, value: torch.Tensor) -> None:
+    """Thread-safe LRU insert into the viewer cache."""
+    with _VIEWER_CACHE_LOCK:
+        if key in _VIEWER_CACHE:
+            _VIEWER_CACHE.move_to_end(key)
+        _VIEWER_CACHE[key] = value
+        while len(_VIEWER_CACHE) > _VIEWER_CACHE_MAX:
+            evicted_key, evicted_val = _VIEWER_CACHE.popitem(last=False)
+            logger.debug(f"[Radiance] Cache evicted node {evicted_key} (capacity {_VIEWER_CACHE_MAX})")
+            del evicted_val  # help GC release tensor
+
+
+def _viewer_cache_get(key: str) -> Optional[torch.Tensor]:
+    """Thread-safe LRU lookup."""
+    with _VIEWER_CACHE_LOCK:
+        if key in _VIEWER_CACHE:
+            _VIEWER_CACHE.move_to_end(key)
+            return _VIEWER_CACHE[key]
+        return None
+
+
 # Stores active export progress: {instance_id: {current, total, status, message}}
 _VIEWER_PROGRESS: Dict[str, Dict[str, Any]] = {}
 
@@ -146,8 +203,6 @@ def _save_pick_buffer(
     to fetch (256px ≈ 4 × 256 × 256 × 4 = 256KB uncompressed → ~30KB zlib).
     Float precision is kept full (fp32) so color picker reports true HDR values.
     """
-    import struct
-
     try:
         h, w = frame.shape[:2]
         c = frame.shape[2] if frame.ndim == 3 else 1
@@ -191,7 +246,7 @@ def build_cdl_xml(
     offset: Tuple[float, float, float] = (0.0, 0.0, 0.0),
     power: Tuple[float, float, float] = (1.0, 1.0, 1.0),
     saturation: float = 1.0,
-    description: str = "Radiance Viewer Grade",
+    description: str = "◎ Radiance Viewer Grade",
 ) -> str:
     """Build an ASC CDL XML string compatible with Nuke, DaVinci Resolve, OCIO.
 
@@ -206,7 +261,7 @@ def build_cdl_xml(
         '<ColorDecisionList xmlns="urn:ASC:CDL:v1.2">\n'
         '  <ColorDecision>\n'
         f'    <!-- {description} -->\n'
-        '    <ColorCorrection id="radiance_grade">\n'
+        '    <ColorCorrection id="◎ Radiance_grade">\n'
         '      <SOPNode>\n'
         f'        <Slope>{s}</Slope>\n'
         f'        <Offset>{o}</Offset>\n'
@@ -788,7 +843,7 @@ def apply_grading(
     img: np.ndarray,
     # Basic controls
     exposure: float = 0.0,
-    gamma: float = 1.0,  # artistic gamma (maps to gradingGamma[1,1,1] → scalar)
+    gamma: float = 1.0,  # scalar gamma (used when gamma_rgb is None)
     gain: float = 1.0,
     lift: float = 0.0,
     saturation: float = 1.0,
@@ -800,11 +855,20 @@ def apply_grading(
     shadows: float = 0.0,  # shadow lift/crush (-1..1)
     highlights: float = 0.0,  # highlight expand/compress (-1..1)
     hue_shift: float = 0.0,  # degrees (-180..180)
+    luma_mix: float = 1.0,   # Preserve original luminance (0.0 = full preservation)
+    # Per-channel overrides (v3.5+) — list/tuple of [R, G, B] floats.
+    # If provided, these override the scalar gamma/gain/lift/offset for each channel.
+    gamma_rgb: Optional[List[float]] = None,
+    gain_rgb: Optional[List[float]] = None,
+    lift_rgb: Optional[List[float]] = None,
+    offset_rgb: Optional[List[float]] = None,
     # LUT
     lut_name: str = "None",
     lut_intensity: float = 1.0,
     # Color Science
     color_science: int = 0, # 0 = Linear/sRGB, 1 = ACEScct
+    # Sprint 4: Gamut Compression
+    gamut_compression: bool = False,
 ) -> np.ndarray:
     """
     Apply full grading stack to a float32 image.
@@ -834,6 +898,11 @@ def apply_grading(
         float32 numpy array, same shape as input
     """
     out = img.astype(np.float32, copy=True)
+    
+    # Pre-grading luma for luma_mix
+    luma_orig = None
+    if abs(luma_mix - 1.0) > 0.001:
+        luma_orig = 0.2126 * out[..., 0] + 0.7152 * out[..., 1] + 0.0722 * out[..., 2]
 
     # Fast-path: skip if all controls are at identity
     is_default = (
@@ -853,11 +922,7 @@ def apply_grading(
     if is_default:
         return out
 
-    # ── 1. Offset ──────────────────────────────────────────────────────────────
-    if abs(offset) > 0.001:
-        out += np.float32(offset)
-
-    # ── 2. Exposure ────────────────────────────────────────────────────────────
+    # ── 1. Exposure (Linear part) ────────────────────────────────────────────────
     if abs(exposure) > 0.001:
         out *= np.float32(2.0**exposure)
 
@@ -868,25 +933,46 @@ def apply_grading(
         out[..., 1] *= np.float32(g_mult)
         out[..., 2] *= np.float32(b_mult)
 
-    # ── 4. Lift / Gain / Gamma  (Resolve-style) ───────────────────────────────
-    
+    # ── 4. Lift / Gain / Gamma  (Resolve-style, per-channel aware) ───────────
+
     def do_lift_gamma_gain(color: np.ndarray) -> np.ndarray:
         c = color.copy()
-        # Lift: additive shift to shadows, pivoted by luma so whites are unaffected
-        if abs(lift) > 0.001 and c.ndim == 3 and c.shape[2] >= 3:
+        nc = c.shape[2] if c.ndim == 3 else 0
+        has_per_ch = nc >= 3
+
+        # Build per-channel offset array (broadcast-safe)
+        _o = np.array(offset_rgb, dtype=np.float32) if (offset_rgb and len(offset_rgb) == 3) else np.array([offset, offset, offset], dtype=np.float32)
+        _l = np.array(lift_rgb,   dtype=np.float32) if (lift_rgb   and len(lift_rgb)   == 3) else np.array([lift,   lift,   lift  ], dtype=np.float32)
+        _ga = np.array(gain_rgb,  dtype=np.float32) if (gain_rgb   and len(gain_rgb)   == 3) else np.array([gain,   gain,   gain  ], dtype=np.float32)
+        _gm = np.array(gamma_rgb, dtype=np.float32) if (gamma_rgb  and len(gamma_rgb)  == 3) else np.array([gamma,  gamma,  gamma ], dtype=np.float32)
+
+        # Offset: per-channel additive shift
+        # B-9 FIX: Only fall back to scalar offset when no per-channel array was
+        # provided. Previously, if offset_rgb was [0,0,0] the scalar fallback
+        # could fire with a non-zero scalar offset value, double-applying.
+        if offset_rgb and len(offset_rgb) == 3 and has_per_ch:
+            if np.any(np.abs(_o) > 0.001):
+                c[..., :3] += _o
+        elif abs(offset) > 0.001:
+            c += np.float32(offset)
+
+        # Lift: per-channel shadow offset, luma-pivoted so highlights are unaffected
+        if np.any(np.abs(_l) > 0.001) and has_per_ch:
             luma = 0.2126 * c[..., 0] + 0.7152 * c[..., 1] + 0.0722 * c[..., 2]
-            pivot_lift = np.clip(1.0 - luma, 0.0, 1.0)[..., np.newaxis]
-            c += np.float32(lift) * pivot_lift
+            pivot_lift = np.clip(1.0 - luma, 0.0, 1.0)[..., np.newaxis]  # (H,W,1)
+            c[..., :3] += _l * pivot_lift  # broadcasts over (H,W,3)
 
-        # Gain: multiplicative slope
-        if abs(gain - 1.0) > 0.001:
-            c *= np.float32(gain)
+        # Gain: per-channel multiplicative slope
+        if np.any(np.abs(_ga - 1.0) > 0.001) and has_per_ch:
+            c[..., :3] *= _ga
 
-        # Gamma: power curve on positives only
-        if abs(gamma - 1.0) > 0.001:
-            inv_gamma = np.float32(1.0 / max(gamma, 0.01))
-            positive = c > 0
-            c[positive] = np.power(c[positive], inv_gamma)
+        # Gamma: per-channel power curve on positive values only
+        if np.any(np.abs(_gm - 1.0) > 0.001) and has_per_ch:
+            for ch in range(3):
+                inv_g = np.float32(1.0 / max(float(_gm[ch]), 0.01))
+                if abs(float(_gm[ch]) - 1.0) > 0.001:
+                    pos = c[..., ch] > 0
+                    c[pos, ch] = np.power(c[pos, ch], inv_g)
         return c
 
     if color_science == 1 and out.ndim == 3 and out.shape[2] >= 3:
@@ -948,6 +1034,24 @@ def apply_grading(
         out *= 1.0 + np.float32(highlights) * h_weight * 0.5
         out = np.maximum(out, 0.0)
 
+    # ── 6.5 Gamut Compression ──────────────────────────────────────────────────
+    # FIX: replaced inline implementation with aces2_gamut_compress() from
+    # color_utils.py. The previous inline code used Rec.709 luma coefficients
+    # (0.2126, 0.7152, 0.0722) on what is ACEScg scene-linear data — those
+    # coefficients are defined for Rec.709 primaries, not AP1, producing wrong
+    # luma-weighting in the compression. It also used a different knee algorithm
+    # than color_utils, giving inconsistent results between the viewer and any
+    # downstream node that called aces2_gamut_compress() directly.
+    if gamut_compression and out.ndim == 3 and out.shape[2] >= 3:
+        if _aces2_gamut_compress is not None:
+            out[..., :3] = _aces2_gamut_compress(out[..., :3])
+        else:
+            # Fallback if color_utils unavailable — warn once and skip
+            logger.warning(
+                "[Radiance Viewer] aces2_gamut_compress unavailable "
+                "(color_utils not found) — gamut compression skipped."
+            )
+
     # ── 7. Saturation ──────────────────────────────────────────────────────────
     if abs(saturation - 1.0) > 0.001 and out.ndim == 3 and out.shape[2] >= 3:
         luma = 0.2126 * out[..., 0] + 0.7152 * out[..., 1] + 0.0722 * out[..., 2]
@@ -956,10 +1060,10 @@ def apply_grading(
 
     # ── 8. Hue Shift ───────────────────────────────────────────────────────────
     if abs(hue_shift) > 0.1 and out.ndim == 3 and out.shape[2] >= 3:
-        pass
-
         h_shift = hue_shift / 360.0
-        rgb = out[..., :3]
+        # B-4 FIX: Clamp to non-negative before HSV — negative RGB from prior
+        # grading steps causes broken hue output (cmax < 0 → invalid saturation).
+        rgb = np.maximum(out[..., :3], 0.0)
         # Vectorised HSV shift using numpy
         r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
         cmax = np.maximum(np.maximum(r, g), b)
@@ -999,6 +1103,12 @@ def apply_grading(
         out[..., 0] = r_out
         out[..., 1] = g_out
         out[..., 2] = b_out
+
+    # ── 8.5 Luma Mix ───────────────────────────────────────────────────────────
+    if luma_orig is not None:
+        luma_curr = 0.2126 * out[..., 0] + 0.7152 * out[..., 1] + 0.0722 * out[..., 2]
+        color_with_orig_luma = out * (luma_orig / (luma_curr + 1e-10))[..., np.newaxis]
+        out = luma_mix * out + (1.0 - luma_mix) * color_with_orig_luma
 
     # ── 9. LUT (last in chain) ─────────────────────────────────────────────────
     if lut_name != "None" and lut_intensity > 0.0:
@@ -1194,6 +1304,7 @@ class RadianceViewer:
             "hidden": {
                 "prompt": "PROMPT",
                 "extra_pnginfo": "EXTRA_PNGINFO",
+                "unique_id": "UNIQUE_ID",
             },
         }
 
@@ -1222,6 +1333,7 @@ class RadianceViewer:
         # Hidden
         prompt: Optional[Any] = None,
         extra_pnginfo: Optional[Any] = None,
+        unique_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Process and display the image in the Radiance Viewer."""
 
@@ -1287,7 +1399,7 @@ class RadianceViewer:
                         use_16bit=use_16bit,
                         use_32bit=use_32bit,
                         save_hdr_sidecar=save_hdr_sidecar,
-                        prefix="radiance_viewer",
+                        prefix="◎ Radiance_viewer",
                     )
                     if frame_result is not None:
                         frame_result["frame"] = frame_idx
@@ -1342,9 +1454,13 @@ class RadianceViewer:
             _TERMINAL_NS["metadata"] = extra_pnginfo
 
             # ── v4.2: Delivery Cache (Update node frames) ───────────
-            # Use unique ID per node instance if available, otherwise fallback to class logic
-            instance_key = str(id(self))
-            _VIEWER_CACHE[instance_key] = image
+            # Use ComfyUI's unique_id (stable graph node ID) as the cache key.
+            # v4.1 used str(id(self)) which is the CPython memory address — this
+            # changes every execution and is lost on module reload, causing
+            # "No cached frame found" on delivery.  unique_id matches
+            # this.node.id in LiteGraph JS, so the fallback also works.
+            instance_key = str(unique_id) if unique_id else str(id(self))
+            _viewer_cache_set(instance_key, image)
 
             return {
                 "ui": {
@@ -1399,7 +1515,7 @@ class RadianceViewer:
         use_16bit: bool = True,
         use_32bit: bool = False,
         save_hdr_sidecar: bool = False,
-        prefix: str = "radiance_viewer",
+        prefix: str = "◎ Radiance_viewer",
     ) -> Optional[Dict[str, Any]]:
         """
         Process a single frame: grade → LUT → save at selected bit depth.
@@ -1438,6 +1554,15 @@ class RadianceViewer:
         h_frame, w_frame = frame.shape[:2]
         c_frame = frame.shape[2] if frame.ndim == 3 else 1
 
+        # B-8 FIX: RHDR header uses uint16 for width/height (max 65535).
+        # Validate dimensions to prevent silent header overflow.
+        if w_frame > 65535 or h_frame > 65535:
+            logger.error(
+                f"Frame dimensions ({w_frame}x{h_frame}) exceed RHDR uint16 header limit (65535). "
+                f"Skipping RHDR/EXR sidecar generation for this frame."
+            )
+            return None
+
         # Pad RGB to RGBA for WebGL/OpenCV consistency
         # Many Windows/NVIDIA WebGL drivers fail with 3-channel float textures
         if c_frame == 3:
@@ -1465,8 +1590,6 @@ class RadianceViewer:
         if use_32bit:
             # ── 32-bit Float path: full IEEE 754 fp32, flags=1 ────────────────
             try:
-                import struct
-
                 rhdr_filepath = safe_join(output_dir, rhdr_filename)
                 fp32_bytes = frame_to_save.astype(np.float32).tobytes()
                 compressed = zlib.compress(fp32_bytes, level=6)
@@ -1488,8 +1611,6 @@ class RadianceViewer:
         elif use_16bit:
             # ── 16-bit Float path: fp16, flags=0 (existing behaviour) ─────────
             try:
-                import struct
-
                 rhdr_filepath = safe_join(output_dir, rhdr_filename)
                 fp16_data = frame_to_save.astype(np.float16).tobytes()
                 compressed = zlib.compress(fp16_data, level=6)
@@ -1511,44 +1632,31 @@ class RadianceViewer:
         # Requested by users for "Save Image" to export true HDR.
         exr_filename = f"{prefix}_{unique_id}_{frame_idx}.exr"
         exr_saved = False
-        if HAS_CV2 or HAS_IMAGEIO:
+        
+        if write_exr_robust:
             try:
                 exr_filepath = safe_join(output_dir, exr_filename)
-
-                # Check if we have valid float data
-                save_data = frame_to_save.astype(np.float32)
-
-                if HAS_CV2:
-                    # OpenCV expects BGR
-                    if save_data.ndim == 3 and save_data.shape[2] >= 3:
-                        # RGB -> BGR (handles 3 or 4+ channels safely)
-                        bgr_order = [2, 1, 0] + list(range(3, save_data.shape[2]))
-                        exr_data = save_data[..., np.array(bgr_order)]
-                    else:
-                        exr_data = save_data
-
-                    success = cv2.imwrite(exr_filepath, exr_data)
-                    if success:
-                        exr_saved = True
-
-                # Fallback to imageio if cv2 failed or not available
-                if not exr_saved and HAS_IMAGEIO:
-                    imageio.imwrite(exr_filepath, save_data, format="EXR-FI")
+                # write_exr_robust handles R/B swap and fallback backends internally
+                # It expects RGB (ComfyUI standard)
+                success = write_exr_robust(
+                    exr_filepath, 
+                    frame_to_save, 
+                    bit_depth="32-bit Float",
+                    compression="ZIP"
+                )
+                if success:
                     exr_saved = True
-
             except Exception as e:
                 logger.warning(f"Failed to save EXR for frame {frame_idx}: {e}")
-                exr_filename = None
-        else:
-            exr_filename = None
-
+        
         if not exr_saved:
             exr_filename = None
 
-        # v3.1 FIX: Always save full-resolution PNG as fallback.
-        # Previously 256px thumbnail was used when RHDR was saved, but if RHDR
-        # decompression fails in the browser, the viewer had no usable fallback.
-        THUMB_MAX = 99999
+        # v3.1 FIX: Save PNG as RHDR fallback when decompression fails in browser.
+        # B-12 FIX: Renamed from misleading "THUMB_MAX". Since RHDR is the primary
+        # display source, the PNG only needs to be large enough for a decent fallback.
+        # 2048px covers up to ~2K content; for 4K+ the RHDR path handles display.
+        FALLBACK_MAX_DIM = 2048
 
         if has_hdr and d_max > 1.05:
             preview_safe = np.maximum(frame, 0.0)
@@ -1558,8 +1666,8 @@ class RadianceViewer:
 
         # Downsample to thumbnail
         th, tw = preview_image.shape[:2]
-        if max(th, tw) > THUMB_MAX:
-            scale = THUMB_MAX / max(th, tw)
+        if max(th, tw) > FALLBACK_MAX_DIM:
+            scale = FALLBACK_MAX_DIM / max(th, tw)
             new_w, new_h = int(tw * scale), int(th * scale)
             try:
                 if HAS_CV2:
@@ -1674,7 +1782,7 @@ class RadianceViewer:
                     output_dir,
                     use_16bit=use_16bit,
                     save_hdr_sidecar=save_hdr_sidecar,
-                    prefix="radiance_compare",
+                    prefix="◎ Radiance_compare",
                 )
                 if frame_result is not None:
                     frame_result["is_compare"] = True
@@ -1745,7 +1853,7 @@ class RadianceViewer:
                     depth_normalized = np.zeros_like(depth_np)
 
                 unique_id = uuid.uuid4().hex[:12]
-                depth_filename = f"radiance_zdepth_{unique_id}_{depth_idx}.png"
+                depth_filename = f"◎ Radiance_zdepth_{unique_id}_{depth_idx}.png"
 
                 try:
                     depth_filepath = safe_join(output_dir, depth_filename)
@@ -1786,10 +1894,8 @@ class RadianceViewer:
                 }
 
                 if save_hdr_sidecar:
-                    npy_filename = f"radiance_zdepth_{unique_id}_{depth_idx}_float.rhdr"
+                    npy_filename = f"◎ Radiance_zdepth_{unique_id}_{depth_idx}_float.rhdr"
                     try:
-                        import struct
-
                         npy_filepath = safe_join(output_dir, npy_filename)
                         fp16_data = depth_np.astype(np.float16).tobytes()
                         compressed = zlib.compress(fp16_data, level=6)
@@ -1931,8 +2037,10 @@ class RadianceGradeApply:
                 color_science=1 if color_science == "ACEScct" else 0
             )
             
-            # Clamp output and convert back to Tensor
-            graded_tensor = torch.from_numpy(np.clip(graded, 0.0, 1.0))
+            # B-5 FIX: Do NOT hard-clamp to [0,1] — this destroys HDR data.
+            # Only sanitize NaN/Inf values which would break downstream nodes.
+            graded = np.nan_to_num(graded, nan=0.0, posinf=65504.0, neginf=0.0)
+            graded_tensor = torch.from_numpy(graded)
             out_batch.append(graded_tensor)
             
         return (torch.stack(out_batch),)
@@ -1962,8 +2070,26 @@ except ImportError:
     pass
 
 
+# B-1 SECURITY FIX: Terminal is disabled by default. Set environment variable
+# RADIANCE_ENABLE_TERMINAL=1 to enable it (development use only).
+_TERMINAL_ENABLED = os.environ.get("RADIANCE_ENABLE_TERMINAL", "0") == "1"
+if not _TERMINAL_ENABLED:
+    logger.info(
+        "[Radiance] Terminal endpoint DISABLED (security). "
+        "Set RADIANCE_ENABLE_TERMINAL=1 to enable for development."
+    )
+
+
 @PromptServer.instance.routes.post('/radiance/terminal')
 async def radiance_terminal_endpoint(request):
+    # B-1 FIX: Reject all requests unless explicitly opted in
+    if not _TERMINAL_ENABLED:
+        return web.json_response({
+            "output": "Terminal is disabled for security. "
+                      "Set environment variable RADIANCE_ENABLE_TERMINAL=1 to enable.",
+            "status": "error"
+        })
+
     import threading
 
     try:
@@ -2041,7 +2167,7 @@ def get_next_version(directory: str, filename_base: str) -> str:
         
     return f"v{max_v + 1:02d}"
 
-def apply_burn_in(image: torch.Tensor, settings: Dict, version_str: str) -> torch.Tensor:
+def apply_burn_in(image: torch.Tensor, settings: Dict, grading: Dict, version_str: str) -> torch.Tensor:
     """Apply slate, timecode, and version burn-ins using RadianceMetadataOverlay logic."""
     try:
         from .nodes_overlay import RadianceMetadataOverlay
@@ -2050,8 +2176,12 @@ def apply_burn_in(image: torch.Tensor, settings: Dict, version_str: str) -> torc
         # Extract settings
         burn_tc = settings.get("burn_in_tc", False)
         burn_ver = settings.get("burn_in_ver", False)
+        burn_frame = settings.get("burn_in_frame", False)
+        burn_lut = settings.get("burn_in_lut", False)
+        burn_custom = settings.get("burn_custom_text", "")
         include_slate = settings.get("include_slate", False)
         filename = settings.get("filename", "output")
+        start_frame = max(1, int(settings.get('range_in', 1)))
         
         device = image.device
 
@@ -2064,7 +2194,7 @@ def apply_burn_in(image: torch.Tensor, settings: Dict, version_str: str) -> torc
             slate_result = overlay.overlay_metadata(
                 slate_frame,
                 enabled=True,
-                project="RADIANCE_PROJECT",
+                project="◎ Radiance_PROJECT",
                 shot=filename,
                 frame=1,
                 timecode="00:00:00:00",
@@ -2078,10 +2208,18 @@ def apply_burn_in(image: torch.Tensor, settings: Dict, version_str: str) -> torc
             slate_batch = slate_result.repeat(10, 1, 1, 1)
             image = torch.cat([slate_batch, image], dim=0)
 
-        # 2. Handle Continuous Burn-In (TC / Version)
-        if burn_tc or burn_ver:
+        # 2. Handle Continuous Burn-In (TC / Version / Frame / Custom)
+        if burn_tc or burn_ver or burn_frame or burn_lut or burn_custom:
             user_text = version_str if burn_ver else ""
+            if burn_lut:
+                lut_name = grading.get("lut_name", "None")
+                lut_text = f"LUT: {lut_name}" if lut_name != "None" else "LUT: NONE"
+                user_text = f"{user_text} | {lut_text}" if user_text else lut_text
+            if burn_custom:
+                user_text = f"{user_text}\n{burn_custom}" if user_text else burn_custom
+                
             tc_str = "00:00:00:00" if burn_tc else ""
+            start_frm = start_frame if burn_frame else 0
             
             # Add overlay to all frames
             image = overlay.overlay_metadata(
@@ -2089,9 +2227,9 @@ def apply_burn_in(image: torch.Tensor, settings: Dict, version_str: str) -> torc
                 enabled=True,
                 project="",
                 shot="",
-                frame=0,
+                frame=start_frm,
                 timecode=tc_str,
-                position="Top Right" if burn_ver else "Bottom Right",
+                position="Top Right" if (burn_ver or burn_lut) else "Bottom Center",
                 font_size=18,
                 opacity=0.6,
                 user_text=user_text
@@ -2111,21 +2249,59 @@ async def radiance_deliver_endpoint(request):
     """
     try:
         data = await request.json()
-        instance_key = data.get('instance_id')
+        # Coerce to str — JS may send a numeric node ID (from this.node.id
+        # fallback) when instanceId hasn't been set yet.  Cache keys are always
+        # strings because unique_id arrives as a string from ComfyUI.
+        instance_key = str(data.get('instance_id', ''))
         grading = data.get('grading', {})
         settings = data.get('settings', {})
 
-        if instance_key not in _VIEWER_CACHE:
+        images = _viewer_cache_get(instance_key)
+        if images is None:
             return web.json_response({"error": "No frames found in cache for this node. Run the workflow first.", "status": "error"})
-
-        images = _VIEWER_CACHE[instance_key]
+        
+        # ─── Render Range ──────────────────────────────────────────────
+        range_in = max(1, int(settings.get('range_in', 1)))
+        range_out = int(settings.get('range_out', 0))
+        total_frames = images.shape[0]
+        start_idx = range_in - 1
+        end_idx = range_out if range_out > 0 else total_frames
+        start_idx = max(0, min(start_idx, total_frames - 1))
+        end_idx = max(start_idx + 1, min(end_idx, total_frames))
+        images = images[start_idx:end_idx]
         
         # ─── Process Options ──────────────────────────────────────────
-        filename_prefix = settings.get('filename', 'Radiance_Deliver')
+        filename_prefix = settings.get('filename', '◎ Radiance_Deliver')
         output_format = settings.get('format', 'Video — MP4 (H.264)')
         fps = float(settings.get('fps', 24.0))
         quality = int(settings.get('quality', 18))
         output_path = settings.get('path', '')
+
+        # ─── I-7 FIX: Input Sanitization ─────────────────────────────
+        # Sanitize filename: allow unicode letters, digits, safe punctuation
+        _SAFE_FILENAME_RE = re.compile(r'[^\w\s◎_.() -]', re.UNICODE)
+        filename_prefix = _SAFE_FILENAME_RE.sub('', str(filename_prefix)).strip()
+        if not filename_prefix:
+            filename_prefix = 'Radiance_Deliver'
+        if len(filename_prefix) > 200:
+            filename_prefix = filename_prefix[:200]
+
+        # Sanitize output_path: canonicalize, prevent traversal
+        if output_path:
+            output_path = os.path.abspath(os.path.normpath(str(output_path)))
+            # Reject paths with traversal artifacts or invalid length
+            if '..' in output_path.split(os.sep) or len(output_path) > 1024:
+                logger.warning(f"[Deliver] Rejected suspicious output path: {output_path[:100]}")
+                return web.json_response({"error": "Invalid output path", "status": "error"})
+
+        # Clamp numeric parameters to sane ranges
+        fps = max(1.0, min(fps, 240.0))
+        quality = max(0, min(quality, 51))
+        
+        # NORMALIZED: Use a single color_space variable to avoid default mismatches
+        # between the soft-clip logic and the RadianceWrite call.
+        color_space = settings.get('colorSpace', 'sRGB (Standard)')
+        broadcast_safe = settings.get('soft_clip', True)
         
         # Apex Features
         upscale_2x = settings.get('upscale_2x', False)
@@ -2140,19 +2316,44 @@ async def radiance_deliver_endpoint(request):
             filename_prefix = f"{filename_prefix}_{version_str}"
 
         # ─── Process Grading ──────────────────────────────────────────
-        
-        # Grading params (Use safe_float to handle potential array inputs from JS)
+        # Helpers to unpack JS values safely
         def safe_float(v, default):
+            """Safely convert any JS value to a Python float."""
             if isinstance(v, (list, tuple)) and len(v) > 0: return float(v[0])
             try: return float(v)
             except (TypeError, ValueError): return default
 
-        exposure = safe_float(grading.get('exposure'), 0.0)
-        gamma = safe_float(grading.get('gamma'), 1.0)
-        gain = safe_float(grading.get('gain'), 1.0)
-        lift = safe_float(grading.get('lift'), 0.0)
-        saturation = safe_float(grading.get('saturation'), 1.0)
-        temperature = safe_float(grading.get('temperature'), 6500.0)
+        def safe_array(v, default_scalar, length=3):
+            """Return a float list[length] from a scalar or array JS value."""
+            if isinstance(v, (list, tuple)) and len(v) >= length:
+                return [float(x) for x in v[:length]]
+            try:
+                s = float(v)
+                return [s] * length
+            except (TypeError, ValueError):
+                return [default_scalar] * length
+
+        exposure    = safe_float(grading.get('exposure'), 0.0)
+        saturation  = safe_float(grading.get('saturation'), 1.0)
+        # Temperature from viewer is in internal ±2 units, not Kelvin.
+        # Convert: internal 0.0 = 6500K, +1.0 → ~10000K, -1.0 → ~3500K
+        _temp_internal = safe_float(grading.get('temperature'), 0.0)
+        temperature = 6500.0 + _temp_internal * 3500.0  # maps ±1 → ±3500K
+        contrast    = safe_float(grading.get('contrast'), 1.0)
+        pivot       = safe_float(grading.get('pivot'), 0.18)
+        shadows     = safe_float(grading.get('shadows'), 0.0)
+        highlights  = safe_float(grading.get('highlights'), 0.0)
+        hue_shift   = safe_float(grading.get('hue_shift'), 0.0)
+        lut_name    = grading.get('lut_name', 'None')
+        lut_intensity = safe_float(grading.get('lut_intensity'), 1.0)
+        gamut_compression = bool(grading.get('gamut_compression', False))
+
+        # Per-channel arrays (Sprint 1 fix: no longer collapsed to [0])
+        gamma_rgb  = safe_array(grading.get('gamma'),  1.0)
+        gain_rgb   = safe_array(grading.get('gain'),   1.0)
+        lift_rgb   = safe_array(grading.get('lift'),   0.0)
+        offset_rgb = safe_array(grading.get('offset'), 0.0)
+
         
         # Apply grading to whole batch
         out_batch = []
@@ -2161,16 +2362,98 @@ async def radiance_deliver_endpoint(request):
             graded = apply_grading(
                 img=frame_np,
                 exposure=exposure,
-                gamma=gamma,
-                gain=gain,
-                lift=lift,
+                gamma=1.0,           # scalar path is bypassed by gamma_rgb
+                gain=1.0,            # scalar path is bypassed by gain_rgb
+                lift=0.0,            # scalar path is bypassed by lift_rgb
                 saturation=saturation,
                 temperature=temperature,
-                color_science=1 if grading.get('colorScience') == 'ACEScct' else 0
+                offset=0.0,          # scalar path is bypassed by offset_rgb
+                contrast=contrast,
+                pivot=pivot,
+                shadows=shadows,
+                highlights=highlights,
+                hue_shift=hue_shift,
+                # Per-channel arrays:
+                gamma_rgb=gamma_rgb,
+                gain_rgb=gain_rgb,
+                lift_rgb=lift_rgb,
+                offset_rgb=offset_rgb,
+                lut_name=lut_name,
+                lut_intensity=lut_intensity,
+                color_science=1 if str(grading.get('colorScience')) in ['1', 'ACEScct'] else 0,
+                luma_mix=float(grading.get('lumaMix', 1.0)),
+                gamut_compression=gamut_compression
             )
-            out_batch.append(torch.from_numpy(np.clip(graded, 0.0, 1.0)))
-        
+            out_batch.append(torch.from_numpy(graded))
+
         graded_tensor = torch.stack(out_batch)
+
+        # ─── FX Baking (grain/bloom/halation/diffusion) ───────────────
+        # Apply cosmetic FX so the export matches the viewer canvas exactly.
+        _grain     = float(grading.get('grain', 0.0))
+        _bloom     = float(grading.get('bloom', 0.0))
+        _halation  = float(grading.get('halation', 0.0))
+        _diffusion = float(grading.get('diffusion', 0.0))
+        _denoise   = float(grading.get('denoise', 0.0))
+
+        if _grain > 0.01 or _bloom > 0.01 or _halation > 0.01 or _diffusion > 0.01 or _denoise > 0.01:
+            try:
+                np_batch = graded_tensor.cpu().numpy()  # (B, H, W, C)
+                fx_batch = []
+                rng = np.random.default_rng(seed=42)  # deterministic grain for exports
+                for i_frame in range(np_batch.shape[0]):
+                    f = np_batch[i_frame].astype(np.float32)
+
+                    # Denoise: simple bilateral-approximation via Gaussian smoothing
+                    if _denoise > 0.01:
+                        try:
+                            import cv2 as _cv2
+                            sigma = _denoise * 3.0
+                            f = _cv2.bilateralFilter((f * 65535).astype(np.uint16), d=5, sigmaColor=sigma*20, sigmaSpace=sigma*20).astype(np.float32) / 65535.0  # noqa: E501
+                        except Exception:
+                            pass  # cv2 unavailable; skip
+
+                    # Grain: additive Gaussian noise at the correct amplitude
+                    if _grain > 0.01:
+                        noise = rng.standard_normal(f.shape).astype(np.float32)
+                        f = f + noise * _grain * 0.02
+
+                    # Halation: red-channel Gaussian glow on highlights
+                    if _halation > 0.01:
+                        try:
+                            import cv2 as _cv2
+                            hi = np.clip(f[..., 0] - 0.8, 0, None)  # highlights only
+                            blurred = _cv2.GaussianBlur(hi, (0, 0), sigmaX=_halation * 30)
+                            f[..., 0] = np.minimum(f[..., 0] + blurred * _halation * 2.0, 2.0)
+                        except Exception:
+                            pass
+
+                    # Bloom: additive luminance glow
+                    if _bloom > 0.01:
+                        try:
+                            import cv2 as _cv2
+                            lum = 0.2126*f[...,0] + 0.7152*f[...,1] + 0.0722*f[...,2]
+                            hi = np.clip(lum - 0.7, 0, None)[..., np.newaxis]
+                            blurred = _cv2.GaussianBlur(hi * np.ones((1,1,3), np.float32), (0, 0), sigmaX=_bloom * 40)
+                            f = f + blurred * _bloom
+                        except Exception:
+                            pass
+
+                    # Diffusion: global softening (Pro Mist / Black Mist effect)
+                    if _diffusion > 0.01:
+                        try:
+                            import cv2 as _cv2
+                            soft = _cv2.GaussianBlur(f, (0, 0), sigmaX=_diffusion * 20)
+                            f = f * (1 - _diffusion * 0.5) + soft * _diffusion * 0.5
+                        except Exception:
+                            pass
+
+                    fx_batch.append(f)
+                graded_tensor = torch.from_numpy(np.stack(fx_batch))
+                logger.info(f"[Deliver] FX baked: grain={_grain:.2f} bloom={_bloom:.2f} halation={_halation:.2f} diffusion={_diffusion:.2f}")
+            except Exception as e:
+                logger.warning(f"[Deliver] FX baking failed (non-fatal): {e}")
+
 
         # ─── AI Upscale (2x) ──────────────────────────────────────────
         if upscale_2x:
@@ -2187,8 +2470,32 @@ async def radiance_deliver_endpoint(request):
             except Exception as e:
                 logger.error(f"AI Upscale failed, continuing with original: {e}")
 
-        # ─── Burn-Ins (Slate, TC, Version) ────────────────────────────
-        graded_tensor = apply_burn_in(graded_tensor, settings, version_str)
+        # ─── Aspect Ratio Blanking ────────────────────────────────────
+        aspect_ratio_str = settings.get('aspect_ratio', 'None')
+        if aspect_ratio_str != 'None':
+            try:
+                target_ratio = float(aspect_ratio_str.split(':')[0])
+                _, h, w, _ = graded_tensor.shape
+                current_ratio = w / h
+                if current_ratio > target_ratio + 0.01:
+                    target_w = int(h * target_ratio)
+                    pad = (w - target_w) // 2
+                    graded_tensor[:, :, :pad, :] = 0.0
+                    graded_tensor[:, :, -pad:, :] = 0.0
+                elif current_ratio < target_ratio - 0.01:
+                    target_h = int(w / target_ratio)
+                    pad = (h - target_h) // 2
+                    graded_tensor[:, :pad, :, :] = 0.0
+                    graded_tensor[:, -pad:, :, :] = 0.0
+            except Exception as e:
+                logger.error(f"Aspect blanking failed: {e}")
+
+        # NOTE: Soft clip (highlight compression) is now consolidated inside
+        # apply_output_transform in nodes_io.py. The 'broadcast_safe' flag set
+        # above is passed directly to RadianceWrite which calls that function.
+        # Removing the duplicate ACES tonemap block that was here.
+
+        graded_tensor = apply_burn_in(graded_tensor, settings, grading, version_str)
 
         # ─── Integrated QC Pass ───────────────────────────────────────
         qc_report = ""
@@ -2214,20 +2521,38 @@ async def radiance_deliver_endpoint(request):
             output_format=output_format,
             fps=fps,
             quality=quality,
-            output_color_space="sRGB (Standard)",
+            output_color_space=color_space,
             image=graded_tensor,
-            output_path=output_path
+            output_path=output_path,
+            broadcast_safe=broadcast_safe,
         )
 
         # ─── Post-Export: Thumbnails & Sidecars ────────────────────────
         try:
             # Save Thumbnail (.jpg)
             import PIL.Image
-            thumb_frame = graded_tensor[min(images.shape[0]-1, 10 if images.shape[0] > 10 else 0)]
+            # Thumbnail: use a mid-range frame from the graded tensor
+            n_graded = graded_tensor.shape[0]
+            thumb_frame = graded_tensor[min(n_graded - 1, 10 if n_graded > 10 else 0)]
             thumb_np = (thumb_frame.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
             thumb_img = PIL.Image.fromarray(thumb_np)
             thumb_path = os.path.splitext(path)[0] + "_thumb.jpg"
             thumb_img.save(thumb_path, quality=85)
+            
+            # ASC CDL Sidecar Export
+            if settings.get('export_cdl', False):
+                slope = grading.get('gain', 1.0)
+                offset = grading.get('offset', 0.0)
+                power = grading.get('gamma', 1.0)
+                sat = grading.get('saturation', 1.0)
+                if not isinstance(slope, list): slope = [slope]*3
+                if not isinstance(offset, list): offset = [offset]*3
+                if not isinstance(power, list): power = [power]*3
+                
+                cdl = f"""<ColorCorrection id="◎ Radiance_grade">\n  <SOPNode>\n    <Slope>{slope[0]:.6f} {slope[1]:.6f} {slope[2]:.6f}</Slope>\n    <Offset>{offset[0]:.6f} {offset[1]:.6f} {offset[2]:.6f}</Offset>\n    <Power>{power[0]:.6f} {power[1]:.6f} {power[2]:.6f}</Power>\n  </SOPNode>\n  <SatNode>\n    <Saturation>{sat:.6f}</Saturation>\n  </SatNode>\n</ColorCorrection>"""
+                cdl_path = os.path.splitext(path)[0] + ".cdl"
+                with open(cdl_path, "w") as f:
+                    f.write(cdl)
             
             # Save Metadata Sidecar (.json)
             meta = {
@@ -2239,6 +2564,21 @@ async def radiance_deliver_endpoint(request):
             }
             with open(os.path.splitext(path)[0] + "_meta.json", 'w') as f:
                 json.dump(meta, f, indent=4)
+                
+            # Reveal Folder Hook
+            if settings.get('reveal_folder', False):
+                import platform, subprocess
+                try:
+                    p = os.path.abspath(output_path)
+                    if platform.system() == "Windows":
+                        os.startfile(p)
+                    elif platform.system() == "Darwin":
+                        subprocess.Popen(["open", p])
+                    else:
+                        subprocess.Popen(["xdg-open", p])
+                except Exception as e:
+                    logger.error(f"Launch folder failed: {e}")
+                    
         except Exception as e:
             logger.error(f"Sidecar generation failed: {e}")
 

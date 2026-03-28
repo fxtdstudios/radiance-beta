@@ -14,7 +14,11 @@ import datetime
 import struct
 import zlib
 
-# Imports for RadianceSaveEXR
+# Imports
+__all__ = [
+    "RadianceSaveEXR",
+    "write_exr_robust",
+]
 try:
     from ..color_utils import (
         linear_to_logc3,
@@ -28,7 +32,12 @@ try:
         SGAMUT3_CINE_TO_ACESCG,
         ACESCG_TO_SRGB,
     )
-    from ..path_utils import safe_join, get_safe_output_dir
+    from ..path_utils import (
+        safe_join,
+        get_safe_output_dir,
+        get_safe_input_path,
+        get_next_index,
+    )
 except ImportError:
     try:
         from radiance.color_utils import (
@@ -43,7 +52,12 @@ except ImportError:
             SGAMUT3_CINE_TO_ACESCG,
             ACESCG_TO_SRGB,
         )
-        from radiance.path_utils import safe_join, get_safe_output_dir
+        from radiance.path_utils import (
+            safe_join,
+            get_safe_output_dir,
+            get_safe_input_path,
+            get_next_index,
+        )
     except ImportError:
         # Last resort fallback if needed, or logging
         pass
@@ -508,6 +522,8 @@ class LoadImageEXRSequence:
 
     @classmethod
     def IS_CHANGED(cls, folder_path, **kwargs):
+        if not folder_path or not isinstance(folder_path, str):
+            return float("nan")
         folder_path = folder_path.strip().strip('"').strip("'")
         if not folder_path or not os.path.isdir(folder_path):
             return float("nan")
@@ -518,6 +534,8 @@ class LoadImageEXRSequence:
 
     @classmethod
     def VALIDATE_INPUTS(cls, folder_path, **kwargs):
+        if not folder_path or not isinstance(folder_path, str):
+            return "No folder path provided."
         folder_path = folder_path.strip().strip('"').strip("'")
         if not folder_path:
             return "No folder path specified."
@@ -660,6 +678,8 @@ class LoadImageEXRSequence:
         import re
 
         # Clean path
+        if not folder_path or not isinstance(folder_path, str):
+            raise ValueError("No folder path provided.")
         folder_path = folder_path.strip().strip('"').strip("'")
 
         if not os.path.isdir(folder_path):
@@ -886,6 +906,8 @@ class SaveImage16bit:
                     ["Clip (Standard)", "Compress (LogC4)", "Compress (Reinhard)"],
                     {"default": "Clip (Standard)"},
                 ),
+                "output_path": ("STRING", {"default": "", "tooltip": "Absolute or relative output path. Leave empty for ComfyUI default output folder."}),
+                "start_frame": ("INT", {"default": 0, "min": 0, "max": 999999, "tooltip": "Starting frame number. 0 = auto-increment from highest existing file."}),
             }
         }
 
@@ -901,15 +923,21 @@ class SaveImage16bit:
         filename_prefix: str = "output/16bit_",
         format: str = "PNG",
         tonemap: str = "Clip (Standard)",
+        output_path: str = "",
+        start_frame: int = 0,
+        frame_padding: int = 5,
     ) -> Dict:
 
         import cv2
         import folder_paths
 
-        # Get ComfyUI output directory (use absolute path for Windows compatibility)
-        output_dir = Path(folder_paths.get_output_directory())
+        # Get the safe output directory
+        base_output_dir = folder_paths.get_output_directory()
+        output_dir = Path(get_safe_output_dir(base_output_dir, output_path))
 
         # Parse the filename prefix
+        if not filename_prefix or not isinstance(filename_prefix, str):
+            filename_prefix = "output/16bit_"
         clean_prefix = filename_prefix.replace("\\", "/")
         if clean_prefix.startswith("output/"):
             clean_prefix = clean_prefix[7:]
@@ -924,6 +952,12 @@ class SaveImage16bit:
 
         # Create directory
         full_dir.mkdir(parents=True, exist_ok=True)
+
+        # Handle auto-incrementing counter if start_frame is 0
+        current_frame = start_frame
+        if current_frame <= 0:
+            ext = ".png" if format == "PNG" else ".tiff"
+            current_frame = get_next_index(str(full_dir), base_name, ext, frame_padding)
 
         results = []
         ext = ".png" if format == "PNG" else ".tiff"
@@ -960,13 +994,18 @@ class SaveImage16bit:
             elif np_img.shape[-1] == 4:
                 np_img = cv2.cvtColor(np_img, cv2.COLOR_RGBA2BGRA)
 
-            filename = f"{base_name}{i:05d}{ext}"
+            filename = f"{base_name}{str(current_frame + i).zfill(frame_padding)}{ext}"
             filepath = full_dir / filename
 
             cv2.imwrite(str(filepath), np_img)
             results.append({"filename": str(filepath), "type": "output"})
             logger.info(f"Saved 16-bit: {filepath}")
 
+        # To prevent 'Image failed to load' errors in the UI for absolute paths,
+        # we only return the preview results if we are within the standard output directory.
+        if os.path.isabs(output_path):
+            return {"ui": {"images": []}}
+            
         return {"ui": {"images": results}}
 
 
@@ -1372,6 +1411,58 @@ def write_hdr_rgbe(filepath: str, image: np.ndarray) -> bool:
         return False
 
 
+def write_exr_robust(
+    filepath: str,
+    image: np.ndarray,
+    bit_depth: str = "32-bit Float",
+    compression: str = "ZIP",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """
+    Shared robust EXR writer that handles OpenCV, OpenEXR, and imageio fallbacks.
+    Can be used by any node in the Radiance suite.
+    """
+    import cv2
+    import numpy as np
+
+    # 1. Try OpenCV first (if enabled and compatible)
+    if write_exr_cv2(filepath, image, bit_depth, compression):
+        return True
+
+    # 2. Prepare data for more complex writers if OpenCV failed
+    # Split into channels (R, G, B, A)
+    channels = {}
+    if image.shape[-1] >= 3:
+        channels["R"], channels["G"], channels["B"] = (
+            image[..., 0],
+            image[..., 1],
+            image[..., 2],
+        )
+    if image.shape[-1] == 4:
+        channels["A"] = image[..., 3]
+    
+    pixel_type = "HALF" if "16" in str(bit_depth).lower() else "FLOAT"
+
+    # 3. Try OpenEXR python package
+    if check_openexr_available():
+        try:
+            write_exr_openexr(filepath, channels, compression, pixel_type, metadata)
+            return True
+        except Exception as e:
+            logger.warning(f"OpenEXR writer failed: {e}")
+
+    # 4. Try SimpleEXRWriter (Native Python)
+    try:
+        writer = SimpleEXRWriter()
+        writer.write(filepath, channels, compression, pixel_type, metadata)
+        return True
+    except Exception as e:
+        logger.warning(f"SimpleEXRWriter failed: {e}")
+
+    # 5. Last resort: imageio
+    return write_exr_imageio(filepath, image, pixel_type)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #                           COMFYUI NODE
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1430,7 +1521,7 @@ class RadianceSaveEXR:
                 "premultiply_alpha": ("BOOLEAN", {"default": False}),
                 "output_path": ("STRING", {"default": "", "tooltip": "Absolute or relative output path. Example: D:\\saved or my_subfolder"}),
 
-                "start_frame": ("INT", {"default": 1, "min": 0, "max": 999999}),
+                "start_frame": ("INT", {"default": 0, "min": 0, "max": 999999, "tooltip": "Starting frame number. 0 = auto-detect next available index."}),
                 "frame_padding": ("INT", {"default": 4, "min": 1, "max": 8}),
                 "add_metadata": ("BOOLEAN", {"default": True}),
                 "custom_metadata": ("STRING", {"default": "", "multiline": True}),
@@ -1499,7 +1590,7 @@ class RadianceSaveEXR:
             metadata["bitDepth"] = bit_depth
             metadata["colorSpace"] = output_color_space
 
-        if custom_metadata:
+        if custom_metadata and isinstance(custom_metadata, str):
             for line in custom_metadata.strip().split("\n"):
                 if "=" in line:
                     key, value = line.split("=", 1)
@@ -1510,6 +1601,12 @@ class RadianceSaveEXR:
         if batch_size > MAX_BATCH_SIZE:
             logger.warning(f"Batch size {batch_size} exceeds limit {MAX_BATCH_SIZE}")
             batch_size = MAX_BATCH_SIZE
+
+        # Handle auto-incrementing counter if start_frame is 0
+        actual_start_frame = start_frame
+        if actual_start_frame <= 0:
+            ext = ".hdr" if format == "HDR" else ".exr"
+            actual_start_frame = get_next_index(output_dir, filename_prefix, ext, frame_padding)
 
         logger.info(f"Radiance: Saving {batch_size} image(s) to: {output_dir}")
 
@@ -1537,7 +1634,7 @@ class RadianceSaveEXR:
                     img_out, alpha, channel_format, alpha_mode
                 )
 
-                frame_num = start_frame + i
+                frame_num = actual_start_frame + i
                 frame_str = str(frame_num).zfill(frame_padding)
                 ext = ".hdr" if format == "HDR" else ".exr"
                 filename = f"{filename_prefix}_{frame_str}{ext}"
@@ -1559,18 +1656,13 @@ class RadianceSaveEXR:
 
                 frame_metadata = {**metadata, "frame": frame_num}
 
-                success = self._write_exr_with_fallback(
+                success = write_exr_robust(
                     filepath,
-                    channels,
-                    img_out,
-                    alpha,
-                    alpha_mode,
-                    compression,
-                    pixel_type,
+                    img_out if alpha is None or alpha_mode == "None" 
+                    else np.concatenate([img_out, alpha[..., np.newaxis]], axis=-1),
                     bit_depth,
-                    frame_metadata,
-                    use_openexr,
-                    writer,
+                    compression,
+                    frame_metadata
                 )
 
                 if success:
@@ -1676,38 +1768,6 @@ class RadianceSaveEXR:
             channels["A"] = alpha
         return channels
 
-    def _write_exr_with_fallback(
-        self,
-        filepath,
-        channels,
-        img_rgb,
-        alpha,
-        alpha_mode,
-        compression,
-        pixel_type,
-        bit_depth,
-        metadata,
-        use_openexr,
-        writer,
-    ) -> bool:
-        if use_openexr:
-            try:
-                write_exr_openexr(filepath, channels, compression, pixel_type, metadata)
-                return True
-            except Exception as e:
-                logger.warning(f"OpenEXR failed: {e}, trying OpenCV")
-
-        cv_img = img_rgb.copy()
-        if alpha is not None and alpha_mode != "None":
-            cv_img = np.concatenate([cv_img, alpha[..., np.newaxis]], axis=-1)
-
-        if write_exr_cv2(filepath, cv_img, bit_depth, compression):
-            return True
-
-        try:
-            writer.write(filepath, channels, compression, pixel_type, metadata)
-            return True
-        except Exception as e:
-            logger.warning(f"SimpleEXRWriter failed: {e}, trying imageio")
-
         return write_exr_imageio(filepath, cv_img, pixel_type)
+
+    # REMOVED _write_exr_with_fallback as it's replaced by top-level write_exr_robust

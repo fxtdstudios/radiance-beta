@@ -6,8 +6,4 @@ Imath
 opencolorio>=2.3.0,<3.0.0
 colour-science>=0.4.4,<1.0.0
 transformers>=4.36.0,<5.0.0
-
-# Apple Silicon Note:
-# PyTorch with MPS (Metal Performance Shaders) support is included
-# in standard PyTorch installations on macOS 12.3+.
-# No extra packages needed for MPS acceleration.
+defusedxml>=0.7.1,<1.0.0

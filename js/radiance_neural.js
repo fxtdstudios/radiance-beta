@@ -124,9 +124,28 @@ export class RadianceNeuralMonitor {
             }
         `;
 
-        this.program = this._createProg(gl, vsPoint, fsPoint);
-        this.meshProgram = this._createProg(gl, vsMesh, fsMesh);
-        
+        this.program     = this._createProg(gl, vsPoint, fsPoint);
+        this.meshProgram = this._createProg(gl, vsMesh,  fsMesh);
+
+        // BUG-8 FIX: Cache uniform locations once after linking — not on every
+        // render() call. getUniformLocation at 60fps = 420 GL calls/sec.
+        // On mobile GPUs (~0.1ms each) this wastes up to 42ms/sec.
+        if (this.program) {
+            this._u = {
+                time:     gl.getUniformLocation(this.program, 'u_time'),
+                progress: gl.getUniformLocation(this.program, 'u_progress'),
+                mat:      gl.getUniformLocation(this.program, 'u_mat'),
+            };
+        }
+        if (this.meshProgram) {
+            this._um = {
+                time:     gl.getUniformLocation(this.meshProgram, 'u_time'),
+                progress: gl.getUniformLocation(this.meshProgram, 'u_progress'),
+                activity: gl.getUniformLocation(this.meshProgram, 'u_activity_base'),
+                mat:      gl.getUniformLocation(this.meshProgram, 'u_mat'),
+            };
+        }
+
         this._initBuffers(gl);
         this.isActive = true;
         this.render();
@@ -196,12 +215,23 @@ export class RadianceNeuralMonitor {
     }
 
     render() {
-        if (!this.isActive || !this.gl) return;
+        // BUG-10 FIX: Guard against failed shader programs. _createProg() now
+        // returns null on compile/link failure. Without this check, every
+        // gl.useProgram(null) call generates GL_INVALID_OPERATION on every frame.
+        if (!this.isActive || !this.gl || !this.program || !this.meshProgram) return;
         const gl = this.gl;
         const rect = this.canvas.getBoundingClientRect();
-        if (this.canvas.width !== Math.floor(rect.width * devicePixelRatio)) {
-            this.canvas.width = this.overlay.width = rect.width * devicePixelRatio;
-            this.canvas.height = this.overlay.height = rect.height * devicePixelRatio;
+        // BUG-1 FIX: Previous check only compared width via Math.floor, leaving
+        // height unguarded. On a vertical container resize the height changed but
+        // the if-block never fired, leaving the viewport/aspect stale.
+        // Also: assignments now use Math.floor on both dimensions to guarantee
+        // integer pixel counts and prevent fractional-pixel sub-pixel thrashing
+        // that re-triggered the resize block every single frame.
+        const targetW = Math.floor(rect.width  * devicePixelRatio);
+        const targetH = Math.floor(rect.height * devicePixelRatio);
+        if (this.canvas.width !== targetW || this.canvas.height !== targetH) {
+            this.canvas.width  = this.overlay.width  = targetW;
+            this.canvas.height = this.overlay.height = targetH;
         }
 
         gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
@@ -217,10 +247,10 @@ export class RadianceNeuralMonitor {
 
         // 1. Draw Topology
         gl.useProgram(this.meshProgram);
-        gl.uniform1f(gl.getUniformLocation(this.meshProgram, 'u_time'), time);
-        gl.uniform1f(gl.getUniformLocation(this.meshProgram, 'u_progress'), this.progress);
-        gl.uniform1f(gl.getUniformLocation(this.meshProgram, 'u_activity_base'), activity);
-        gl.uniformMatrix4fv(gl.getUniformLocation(this.meshProgram, 'u_mat'), false, mat);
+        gl.uniform1f(this._um.time,     time);
+        gl.uniform1f(this._um.progress, this.progress);
+        gl.uniform1f(this._um.activity, activity);
+        gl.uniformMatrix4fv(this._um.mat, false, mat);
         gl.bindBuffer(gl.ARRAY_BUFFER, this.vboMesh);
         gl.enableVertexAttribArray(0);
         gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
@@ -229,9 +259,9 @@ export class RadianceNeuralMonitor {
 
         // 2. Draw Synapse Flow
         gl.useProgram(this.program);
-        gl.uniform1f(gl.getUniformLocation(this.program, 'u_time'), time);
-        gl.uniform1f(gl.getUniformLocation(this.program, 'u_progress'), this.progress);
-        gl.uniformMatrix4fv(gl.getUniformLocation(this.program, 'u_mat'), false, mat);
+        gl.uniform1f(this._u.time,     time);
+        gl.uniform1f(this._u.progress, this.progress);
+        gl.uniformMatrix4fv(this._u.mat, false, mat);
         
         gl.bindBuffer(gl.ARRAY_BUFFER, this.vboPts);
         gl.enableVertexAttribArray(0);
@@ -244,6 +274,12 @@ export class RadianceNeuralMonitor {
         gl.drawArrays(gl.POINTS, 0, this.pointCount);
 
         this._drawOverlay(time, activity);
+        // BUG-2 FIX: Cancel any already-pending RAF before queuing a new one.
+        // Without this, calling render() externally while a RAF is already in
+        // flight creates a second RAF loop. dispose() only cancels this._raf
+        // (the latest id), leaving the orphaned loop calling render() on a
+        // detached/lost GL context indefinitely.
+        if (this._raf) cancelAnimationFrame(this._raf);
         this._raf = requestAnimationFrame(() => this.render());
     }
 
@@ -336,19 +372,56 @@ export class RadianceNeuralMonitor {
         const s = (t, src) => {
             const sh = gl.createShader(t);
             gl.shaderSource(sh, src); gl.compileShader(sh);
-            if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(sh));
+            if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+                console.error('[RadianceNeural] Shader compile error:', gl.getShaderInfoLog(sh));
+                gl.deleteShader(sh);
+                return null;
+            }
             return sh;
         };
+        const vsh = s(gl.VERTEX_SHADER, vs);
+        const fsh = s(gl.FRAGMENT_SHADER, fs);
+        if (!vsh || !fsh) return null; // BUG-9 FIX: bail on shader compile failure
+
         const p = gl.createProgram();
-        gl.attachShader(p, s(gl.VERTEX_SHADER, vs));
-        gl.attachShader(p, s(gl.FRAGMENT_SHADER, fs));
-        gl.linkProgram(p); return p;
+        gl.attachShader(p, vsh);
+        gl.attachShader(p, fsh);
+        gl.linkProgram(p);
+
+        // BUG-9 FIX: Check link status. Without this, a failed link returns
+        // a "valid" program object. Every subsequent gl.useProgram(p) generates
+        // GL_INVALID_OPERATION silently — no output, no error in the console.
+        if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+            console.error('[RadianceNeural] Program link error:', gl.getProgramInfoLog(p));
+            gl.deleteProgram(p);
+            gl.deleteShader(vsh);
+            gl.deleteShader(fsh);
+            return null;
+        }
+
+        // Detach and delete intermediate shader objects — not needed after linking.
+        gl.detachShader(p, vsh);
+        gl.detachShader(p, fsh);
+        gl.deleteShader(vsh);
+        gl.deleteShader(fsh);
+        return p;
     }
 
     dispose() {
         this.isActive = false;
-        if (this._raf) cancelAnimationFrame(this._raf);
+        if (this._raf) { cancelAnimationFrame(this._raf); this._raf = null; }
         if (this.gl) this.gl.getExtension('WEBGL_lose_context')?.loseContext();
+        // BUG-6 FIX: Null all GL/DOM references after disposal so any stale
+        // external reference to this object cannot accidentally call GL methods
+        // on a lost context or operate on detached DOM elements.
+        this.gl          = null;
+        this.canvas      = null;
+        this.overlay     = null;
+        this.ctx2d       = null;
+        this.program     = null;
+        this.meshProgram = null;
+        this._u          = null;
+        this._um         = null;
         this.container.innerHTML = '';
     }
 }

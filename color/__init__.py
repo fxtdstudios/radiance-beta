@@ -5,20 +5,31 @@ from .transform import (
     RadianceSceneLinearWorkflow,
     RadianceLogCurveDecode,
     RadianceLogCurveEncode,
-    RadianceACES2OutputTransform,
 )
 from .ocio_view import RadianceOCIODisplayView, RadianceOCIOCDL
 
-__all__ = [
-    "RadianceLUTApply",
-    "RadianceLUTBlend",
-    "LUTCache",
-    "RadianceGPUColorMatrix",
-    "RadianceOCIOColorTransform",
-    "RadianceSceneLinearWorkflow",
-    "RadianceLogCurveDecode",
-    "RadianceLogCurveEncode",
-    "RadianceACES2OutputTransform",
-    "RadianceOCIODisplayView",
-    "RadianceOCIOCDL",
-]
+NODE_CLASS_MAPPINGS = {
+    "RadianceLUTApply": RadianceLUTApply,
+    "RadianceLUTBlend": RadianceLUTBlend,
+    "RadianceGPUColorMatrix": RadianceGPUColorMatrix,
+    "RadianceOCIOColorTransform": RadianceOCIOColorTransform,
+    "RadianceSceneLinearWorkflow": RadianceSceneLinearWorkflow,
+    "RadianceLogCurveDecode": RadianceLogCurveDecode,
+    "RadianceLogCurveEncode": RadianceLogCurveEncode,
+    "RadianceOCIODisplayView": RadianceOCIODisplayView,
+    "RadianceOCIOCDL": RadianceOCIOCDL,
+    
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "RadianceLUTApply": "◎ Radiance LUT Apply",
+    "RadianceLUTBlend": "◎ Radiance LUT Blend",
+    "RadianceGPUColorMatrix": "◎ Radiance Color Matrix",
+    "RadianceOCIOColorTransform": "◎ Radiance OCIO Color Transform",
+    "RadianceSceneLinearWorkflow": "◎ Radiance Workflow Presets",
+    "RadianceLogCurveDecode": "◎ Radiance Log Curve Decode",
+    "RadianceLogCurveEncode": "◎ Radiance Log Curve Encode",
+    "RadianceOCIODisplayView": "◎ Radiance OCIO Display/View",
+    "RadianceOCIOCDL": "◎ Radiance CDL Transform",
+    
+}

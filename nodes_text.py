@@ -1,7 +1,7 @@
 import json
 import logging
 
-logger = logging.getLogger("radiance.text")
+logger = logging.getLogger("◎ Radiance.text")
 
 
 class AnyType(str):
@@ -69,9 +69,9 @@ class RadianceShowText:
 
 
 NODE_CLASS_MAPPINGS = {
-    "RadianceShowText": RadianceShowText,
+    "◎ RadianceShowText": RadianceShowText,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceShowText": "◎ Show Text (Radiance)",
+    "◎ RadianceShowText": "◎ Radiance Show Text",
 }

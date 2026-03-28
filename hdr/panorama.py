@@ -302,6 +302,13 @@ class HDR360Generate:
             v = (v - 0.5) / v_scale + 0.5
 
         elif projection_type == "Cube_Map":
+            # FIX 3: FOV params silently ignored for non-equirectangular projections.
+            # Log a warning so users know the inputs have no effect.
+            if horizontal_fov != 360.0 or vertical_fov != 180.0:
+                logger.warning(
+                    "[HDR360] horizontal_fov/vertical_fov only apply to Equirectangular"
+                    f" — ignored for Cube_Map."
+                )
             x, y, z = xyz[..., 0], xyz[..., 1], xyz[..., 2]
             abs_x, abs_y, abs_z = np.abs(x), np.abs(y), np.abs(z)
 
@@ -315,7 +322,11 @@ class HDR360Generate:
             face_y_pos = (y >= 0) & (abs_y > abs_x) & (abs_y >= abs_z)
             face_y_neg = (y < 0) & (abs_y > abs_x) & (abs_y >= abs_z)
             face_z_pos = (z >= 0) & (abs_z > abs_x) & (abs_z > abs_y)
-            (z < 0) & (abs_z > abs_x) & (abs_z > abs_y)
+            # FIX 2: was a bare expression — result was computed but immediately
+            # discarded (allocated a full H×W bool array for nothing). The -Z face
+            # worked only because the np.where else-arm implicitly handles it.
+            # Assigned properly so the code is explicit and NameError-safe.
+            face_z_neg = (z < 0) & (abs_z > abs_x) & (abs_z > abs_y)  # noqa: F841
 
             u = np.where(
                 face_x_pos,
@@ -362,6 +373,11 @@ class HDR360Generate:
             )
 
         elif projection_type == "Mirror_Ball":
+            if horizontal_fov != 360.0 or vertical_fov != 180.0:
+                logger.warning(
+                    "[HDR360] horizontal_fov/vertical_fov only apply to Equirectangular"
+                    f" — ignored for Mirror_Ball."
+                )
             x, y, z = xyz[..., 0], xyz[..., 1], xyz[..., 2]
             # FIX #17: removed unused variable r = sqrt(x²+y²) that was computed
             # but never referenced; the formula correctly uses m as the denominator.
@@ -370,6 +386,11 @@ class HDR360Generate:
             v = y / m + 0.5
 
         elif projection_type == "Angular_Map":
+            if horizontal_fov != 360.0 or vertical_fov != 180.0:
+                logger.warning(
+                    "[HDR360] horizontal_fov/vertical_fov only apply to Equirectangular"
+                    f" — ignored for Angular_Map."
+                )
             x, y, z = xyz[..., 0], xyz[..., 1], xyz[..., 2]
             r = np.arccos(np.clip(z, -1, 1)) / np.pi
             phi = np.arctan2(y, x)
@@ -393,7 +414,21 @@ class HDR360Generate:
         # Create UV map for visualization
         uv_map = np.stack([u, v, mask], axis=-1).astype(np.float32)
 
-        return (numpy_to_tensor_float32(panorama), numpy_to_tensor_float32(uv_map))
+        # FIX: bypass numpy_to_tensor_float32 — its batch-dim behavior varies
+        # between package implementations. In this subpackage it already adds
+        # a batch dim, so our previous .unsqueeze(0) created a 5D tensor
+        # (1, 1, H, W, C). ComfyUI's save_images iterated dim-0 giving PIL
+        # a 4D array — PIL typekey (1,1,4096,3) → KeyError.
+        # torch.from_numpy gives exact (H,W,C), .unsqueeze(0) gives (1,H,W,C).
+        # Ensure panorama is 3D before conversion — cv2.remap always returns
+        # (out_H, out_W, C) for color inputs, but be explicit for safety.
+        if panorama.ndim == 2:
+            panorama = panorama[..., np.newaxis]  # grayscale → (H,W,1)
+        if uv_map.ndim == 2:
+            uv_map = uv_map[..., np.newaxis]
+        panorama_t = torch.from_numpy(panorama.astype(np.float32)).unsqueeze(0)  # (1,H,W,C)
+        uv_map_t   = torch.from_numpy(uv_map.astype(np.float32)).unsqueeze(0)   # (1,H,W,3)
+        return (panorama_t, uv_map_t)
 
 
 # =============================================================================

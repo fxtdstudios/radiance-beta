@@ -1,3 +1,0 @@
-4593:                    ctx.strokeRect(dx + 0.5, dy + 0.5, mag - 1, mag - 1);
-4601:        ctx.strokeRect(lx, ly, size, size);
-11589:                ctx.strokeRect(cx - r, cy - r, r * 2, r * 2);

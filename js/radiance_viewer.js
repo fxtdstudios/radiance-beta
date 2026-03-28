@@ -53,12 +53,19 @@ class RadianceViewer {
         this._setupComfyListeners();
 
         // v2.1: Cinema Scope Fonts
+        // B-13 FIX: Removed external Google Fonts dependency (fails in air-gapped studios).
+        // Uses a system font stack that provides equivalent aesthetics on all platforms.
+        // If you bundle Inter/JetBrains Mono WOFF2 locally, add @font-face rules here.
         if (!document.getElementById('radiance-fonts')) {
-            const fontLink = document.createElement('link');
-            fontLink.id = 'radiance-fonts';
-            fontLink.rel = 'stylesheet';
-            fontLink.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap';
-            document.head.appendChild(fontLink);
+            const style = document.createElement('style');
+            style.id = 'radiance-fonts';
+            style.textContent = `
+                :root {
+                    --radiance-font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+                    --radiance-font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', 'Liberation Mono', monospace;
+                }
+            `;
+            document.head.appendChild(style);
         }
 
         // v2.4: Global HUD Styles
@@ -294,18 +301,32 @@ class RadianceViewer {
         // Color Space / LUT
         this.displayLut = 'None';
         this.lutOptions = [
-            'None',
-            'sRGB (Display)',
-            'Rec.709 (Broadcast)',
-            'Filmic (Cinematic)',
-            'Log C3 (ARRI)',
-            'Log C4 (ARRI)',
-            'Canon Log',
-            'Fuji F-Log',
-            'Blackmagic Gen5',
-            'Linear to Log',
-            'Reinhard Tonemap',
-            'ACES Filmic'
+            "None",
+            "sRGB (Display)",
+            "Rec.709 (Broadcast)",
+            "Filmic (Cinematic)",
+            "Reinhard Tonemap",
+            "ACES Filmic",
+            "LogC3 (ARRI EI800)",
+            "LogC4 (ARRI Alexa 35)",
+            "F-Log2 (Fujifilm)",
+            "C-Log3 (Canon)",
+            "Log3G10 (RED IPP2)",
+            "DaVinci Intermediate",
+            "BMD Film Gen5",
+            "V-Log (Panasonic)",
+            "RED Log3G10",
+            "—",
+            "N-Log (Nikon)",
+            "Linear to Log (Generic)",
+            "IDT: LogC3 → Linear",
+            "IDT: LogC4 → Linear",
+            "IDT: V-Log → Linear",
+            "IDT: Log3G10 → Linear",
+            "IDT: DaVinci → Linear",
+            "IDT: BMD Gen5 → Linear",
+            "IDT: N-Log → Linear",
+            "False Color (Exposure)"
         ];
         this.denoise = 0.0;
         this.grain = 0.0;
@@ -423,6 +444,9 @@ class RadianceViewer {
 
         // Wire ComfyUI events → terminal
         this._termWireEvents();
+
+        // v3.1: OCIO auto-discovery (async, non-blocking)
+        this.ocioInit();
     }
 
     // ── v3.4: Continuous Grain Ticker ────────────────────────────────────────
@@ -1003,7 +1027,7 @@ class RadianceViewer {
 
         const metaTitle = document.createElement('div');
         metaTitle.style.cssText = `font-weight: 600; font-size: 10px; margin-bottom: 8px; color: ${t.accent}; padding-bottom: 4px; border-bottom: 1px solid ${t.panelBorder};`;
-        metaTitle.textContent = 'ℹ️ Image Info';
+        metaTitle.textContent = '◎ Image Info';
         this.metadataPanel.appendChild(metaTitle);
 
         this.metadataContent = document.createElement('div');
@@ -1337,10 +1361,49 @@ class RadianceViewer {
 
         const dvFormat = document.createElement('select');
         dvFormat.style.cssText = `background: #1a1e24; color: #ccc; border: 1px solid #333; padding: 2px; font-size: 10px; border-radius: 2px;`;
-        ['Video — MP4 (H.264)', 'Video — MP4 (H.265)', 'Video — MOV (ProRes 422)', 'Video — MOV (ProRes 4444)', 'Image Sequence — PNG', 'Image Sequence — EXR (fp32)', 'Animated GIF', 'Animated WEBP'].forEach(f => {
+        // IMPORTANT: These strings MUST exactly match OUTPUT_FORMATS in nodes_io.py
+        [
+            'Video — MP4 (H.264)',
+            'Video — MP4 (H.265 10-bit)',
+            'Video — MOV (ProRes 422 HQ)',
+            'Video — MOV (ProRes 4444)',
+            'Video — MOV (ProRes 4444 XQ)',
+            'Video — MOV (ProRes 4444 HDR Log)',
+            'Image Sequence — PNG (8-bit)',
+            'Image Sequence — PNG (16-bit)',
+            'Image Sequence — EXR (32-bit)',
+            'Image Sequence — JPEG',
+            'GIF (Animated)',
+            'WEBP (Animated)',
+        ].forEach(f => {
             const opt = document.createElement('option'); opt.value = f; opt.textContent = f; dvFormat.appendChild(opt);
         });
         addRow('Format', dvFormat);
+
+        const dvColorSpace = document.createElement('select');
+        dvColorSpace.style.cssText = `background: #1a1e24; color: #ccc; border: 1px solid #333; padding: 2px; font-size: 10px; border-radius: 2px;`;
+        ['Linear (sRGB)', 'sRGB (Standard)', 'ARRI LogC3', 'ARRI LogC4', 'Sony S-Log3', 'Panasonic V-Log', 'Canon Log 3', 'RED Log3G10', 'ACEScct', 'DaVinci Intermediate'].forEach(f => {
+            const opt = document.createElement('option'); opt.value = f; opt.textContent = f; dvColorSpace.appendChild(opt);
+        });
+        addRow('Color Space', dvColorSpace);
+
+        const dvRangeIn = document.createElement('input');
+        dvRangeIn.type = 'number'; dvRangeIn.value = '1';
+        dvRangeIn.style.cssText = `background: #1a1e24; color: #ccc; border: 1px solid #333; padding: 3px 6px; font-size: 10px; border-radius: 2px; width: 50px;`;
+        addRow('Range In', dvRangeIn);
+
+        const dvRangeOut = document.createElement('input');
+        dvRangeOut.type = 'number'; dvRangeOut.value = '0';
+        dvRangeOut.title = '0 means exact end of sequence';
+        dvRangeOut.style.cssText = `background: #1a1e24; color: #ccc; border: 1px solid #333; padding: 3px 6px; font-size: 10px; border-radius: 2px; width: 50px;`;
+        addRow('Range Out', dvRangeOut);
+
+        const dvAspect = document.createElement('select');
+        dvAspect.style.cssText = `background: #1a1e24; color: #ccc; border: 1px solid #333; padding: 2px; font-size: 10px; border-radius: 2px;`;
+        ['None', '2.35:1 (Scope)', '1.85:1 (Flat)', '1:1 (Square)', '9:16 (Vertical)'].forEach(f => {
+            const opt = document.createElement('option'); opt.value = f; opt.textContent = f; dvAspect.appendChild(opt);
+        });
+        addRow('Letterbox', dvAspect);
 
         const dvFPS = document.createElement('input');
         dvFPS.type = 'number'; dvFPS.value = '24';
@@ -1372,13 +1435,35 @@ class RadianceViewer {
         const { wrap: wSlate, cb: dvSlate } = createCheck('◎ Include Slate', 'dvSlate', false);
         const { wrap: wBurnTC, cb: dvBurnTC } = createCheck('◎ Burn Timecode', 'dvBurnTC', false);
         const { wrap: wBurnVer, cb: dvBurnVer } = createCheck('◎ Burn Version', 'dvBurnVer', false);
+        const { wrap: wBurnFrame, cb: dvBurnFrame } = createCheck('◎ Burn Frame#', 'dvBurnFrame', false);
+        const { wrap: wBurnLUT, cb: dvBurnLUT } = createCheck('◎ Burn LUT', 'dvBurnLUT', false);
+        const { wrap: wExportCDL, cb: dvExportCDL } = createCheck('◎ Export .CDL', 'dvExportCDL', false);
+        const { wrap: wRevealTarget, cb: dvRevealTarget } = createCheck('◎ Launch Folder', 'dvRevealTarget', true);
+        const { wrap: wSoftClip, cb: dvSoftClip } = createCheck('◎ Soft Clip Highlights', 'dvSoftClip', true);
 
         dvApexSection.appendChild(wUpscale);
         dvApexSection.appendChild(wSmartVer);
+        dvApexSection.appendChild(wExportCDL);
+        dvApexSection.appendChild(wRevealTarget);
+        dvApexSection.appendChild(wSoftClip);
         dvApexSection.appendChild(wSlate);
         dvApexSection.appendChild(wBurnTC);
         dvApexSection.appendChild(wBurnVer);
+        dvApexSection.appendChild(wBurnFrame);
+        dvApexSection.appendChild(wBurnLUT);
         dvForm.appendChild(dvApexSection);
+        
+        const customTextWrap = document.createElement('div');
+        customTextWrap.style.cssText = `grid-column: span 4; display: flex; align-items: center; gap: 10px; margin-top: 5px;`;
+        const customTextLbl = document.createElement('div');
+        customTextLbl.textContent = "CUSTOM BURN-IN TEXT:";
+        customTextLbl.style.cssText = `font-size: 9px; color: #666; font-weight: bold;`;
+        const dvCustomText = document.createElement('input');
+        dvCustomText.type = 'text'; dvCustomText.placeholder = 'e.g. VFX REVIEW [DO NOT DISTRIBUTE]';
+        dvCustomText.style.cssText = `flex: 1; background: #1a1e24; color: #ccc; border: 1px solid #333; padding: 3px 6px; font-size: 10px; border-radius: 2px;`;
+        customTextWrap.appendChild(customTextLbl);
+        customTextWrap.appendChild(dvCustomText);
+        dvForm.appendChild(customTextWrap);
 
         dvContainer.appendChild(dvForm);
 
@@ -1528,24 +1613,46 @@ class RadianceViewer {
                         instance_id: this.instanceId || nodeId,
                         grading: {
                             exposure: this.exposure,
-                            gamma: Array.isArray(this.gamma) ? this.gamma[0] : (this.gamma || 1.0),
-                            gain: Array.isArray(this.gain) ? this.gain[0] : (this.gain || 1.0),
-                            lift: Array.isArray(this.lift) ? this.lift[0] : (this.lift || 0.0),
+                            // Full per-channel arrays — NOT [0] only. Avoids silently
+                            // dropping teal/orange and other per-channel grade decisions.
+                            gamma:  Array.isArray(this.gamma)  ? [...this.gamma]  : [this.gamma  || 1.0, this.gamma  || 1.0, this.gamma  || 1.0],
+                            gain:   Array.isArray(this.gain)   ? [...this.gain]   : [this.gain   || 1.0, this.gain   || 1.0, this.gain   || 1.0],
+                            lift:   Array.isArray(this.lift)   ? [...this.lift]   : [this.lift   || 0.0, this.lift   || 0.0, this.lift   || 0.0],
+                            offset: Array.isArray(this.offset) ? [...this.offset] : [this.offset || 0.0, this.offset || 0.0, this.offset || 0.0],
+                            contrast: this.contrast,
+                            pivot: this.pivot,
                             saturation: this.saturation,
                             temperature: this.temperature,
-                            colorScience: this.colorScience || 0
+                            tint: this.tint,
+                            colorScience: this.colorScience || 0,
+                            // FX params — must match viewer for what-you-see = what-you-export
+                            grain: this.grain || 0.0,
+                            bloom: this.bloom || 0.0,
+                            halation: this.halation || 0.0,
+                            diffusion: this.diffusion || 0.0,
+                            denoise: this.denoise || 0.0,
                         },
                         settings: {
                             filename: dvFilename.value,
                             path: dvPath.value,
                             format: dvFormat.value,
+                            colorSpace: dvColorSpace.value,
+                            aspect_ratio: dvAspect.value,
+                            range_in: parseInt(dvRangeIn.value) || 1,
+                            range_out: parseInt(dvRangeOut.value) || 0,
                             fps: dvFPS.value,
                             quality: dvQuality.value,
                             upscale_2x: dvUpscale.checked,
                             smart_versioning: dvSmartVer.checked,
+                            export_cdl: dvExportCDL.checked,
+                            reveal_folder: dvRevealTarget.checked,
                             include_slate: dvSlate.checked,
                             burn_in_tc: dvBurnTC.checked,
-                            burn_in_ver: dvBurnVer.checked
+                            burn_in_ver: dvBurnVer.checked,
+                            burn_in_frame: dvBurnFrame.checked,
+                            burn_in_lut: dvBurnLUT.checked,
+                            burn_custom_text: dvCustomText.value,
+                            soft_clip: dvSoftClip.checked
                         }
                     })
                 });
@@ -2395,7 +2502,11 @@ else:
                     if (this._lastRenderContent) this._lastRenderContent();
                     this._termLog('success', '[WB] Reset to neutral.');
                 } else {
-                    this._termLog('warn', `usage: wb pick  |  wb reset`);
+                    // Show current WB values with Kelvin equivalent
+                    const kelvin = Math.round(6500.0 + (this.temperature || 0) * 3500.0);
+                    this._termLog('result',
+                        `[WB] Temperature: ${(this.temperature || 0).toFixed(3)} internal  ≈ ${kelvin}K  |  Tint: ${(this.tint || 0).toFixed(3)}`);
+                    this._termLog('info', 'Use: wb pick  |  wb reset');
                 }
                 break;
             }
@@ -2808,7 +2919,7 @@ else:
 
         // ── execution_interrupted ─────────────────────────────────────────
         api.addEventListener('execution_interrupted', ({ detail }) => {
-            this._termLog('warn', `⚠️  EXECUTION INTERRUPTED`);
+            this._termLog('warn', `◎  EXECUTION INTERRUPTED`);
             if (detail?.node_id) {
                 const title = nodeTitle(detail.node_id);
                 this._termLog('warn', `   Node: ${title}`);
@@ -2839,10 +2950,10 @@ else:
                 const latCount = output.latent?.length || 0;
 
                 let outSummary = '';
-                if (imgCount) outSummary += `  🖼  ${imgCount} image${imgCount > 1 ? 's' : ''}`;
-                if (vidCount) outSummary += `  🎞  ${vidCount} video${vidCount > 1 ? 's' : ''}`;
-                if (textCount) outSummary += `  📝  text`;
-                if (latCount) outSummary += `  🔷  latent`;
+                if (imgCount) outSummary += `  ◎  ${imgCount} image${imgCount > 1 ? 's' : ''}`;
+                if (vidCount) outSummary += `  ◎  ${vidCount} video${vidCount > 1 ? 's' : ''}`;
+                if (textCount) outSummary += `  ◎  text`;
+                if (latCount) outSummary += `  ◎  latent`;
 
                 if (outSummary) {
                     this._termLog('success', `  ✓ done        ${title}${duration}${outSummary}`);
@@ -3085,7 +3196,7 @@ else:
 
         // ── GROUP: Grading ───────────────────────────────────────────────────
         this.addGrpLabel('GRADE', hud);
-        this.controlsToggle = this.addButton('🎛️', () => this.toggleControls(), 'Toggle Grading Controls (H)', hud);
+        this.controlsToggle = this.addButton('◎', () => this.toggleControls(), 'Toggle Grading Controls (H)', hud);
         this.controlsToggle.style.color = this.theme.accent;
         this.addSep(hud);
 
@@ -3103,6 +3214,7 @@ else:
         lutWrap.appendChild(lutLbl);
 
         const lutSel = document.createElement('select');
+        lutSel.className = 'radiance-ocio-select';
         lutSel.style.cssText = `
             background: #121218;
             color: ${this.theme.accent};
@@ -3150,7 +3262,7 @@ else:
         hud.appendChild(this.frameDisplay);
         this.nextFrameBtn = this.addButton('▶', () => this.nextFrame(), 'Next Frame (→)', hud);
         
-        this.playBtn = this.addButton('▶️', () => this.togglePlayback(), 'Play/Pause Sequence (Space)', hud);
+        this.playBtn = this.addButton('◎', () => this.togglePlayback(), 'Play/Pause Sequence (Space)', hud);
         this.addSep(hud);
 
         // ── GROUP: Compare ──────────────────────────────────────────────────
@@ -3180,6 +3292,17 @@ else:
             syncAll(); this.render(); 
         }, 'Clipping Monitor', hud);
 
+        // Sprint 4: Live Gamut Compression toggle (ACES RGC-style knee)
+        const gcBtn = this.addButton('GC', () => {
+            this.gamutCompression = !this.gamutCompression;
+            if (this.renderer && this.renderer.setGamutCompression) {
+                this.renderer.setGamutCompression(this.gamutCompression);
+            } else if (this.gamutCompression) {
+                this._termLog?.('warn', '[GC] Gamut compression requires WebGL renderer. Applied to delivery only.');
+            }
+            syncAll(); this.render();
+        }, 'Gamut Compression (ACES RGC knee) — compresses out-of-gamut pixels', hud);
+
         const zBtn = this.addButton('Z', () => { 
             this.toggleZdepth(); 
             syncAll(); 
@@ -3196,7 +3319,7 @@ else:
             syncAll(); 
         }, 'Grid / Safe Areas (G)', hud);
 
-        const saBtn = this.addButton('📺', () => { 
+        const saBtn = this.addButton('◎', () => { 
             this.cycleSafeAreas(); 
             syncAll(); 
         }, 'Safe Areas (S)', hud);
@@ -3220,6 +3343,7 @@ else:
             updateBtn(fcBtn, this.falseColor);
             updateBtn(gwBtn, this.gamutWarning);
             updateBtn(clpBtn, this.clippingMonitor);
+            updateBtn(gcBtn, this.gamutCompression);
             updateBtn(zBtn, this.showZdepth);
             updateBtn(this.focusPeakingBtn, this.focusPeaking);
             updateBtn(this.gridBtn, this.showGrid);
@@ -3393,7 +3517,7 @@ else:
                 this.nextFrame();
             }, 41);
         } else {
-            this.playBtn.textContent = '▶️';
+            this.playBtn.textContent = '◎';
             this.playBtn.classList.remove('active');
             this.playBtn.style.color = this.theme.textDim;
             this.playBtn.style.background = 'rgba(255,255,255,0.03)';
@@ -3839,13 +3963,13 @@ else:
         const imgData = (this.lastResult || []).find(d => d.frame === this.currentFrame && !d.is_compare && !d.is_zdepth);
         const hasEXR = !!(imgData && imgData.exr_filename);
 
-        addOption('Save PNG (Result)', '🖼️', () => this.exportSnapshot('png'));
-        addOption('Save EXR (Source)', '🏗️', () => this.exportSnapshot('exr'), !hasEXR);
-        addOption('Save EXR 32-bit (Graded)', '🎞️', () => this.exportSnapshot('exr32'), !this.useWebGL || !this.renderer);
+        addOption('Save PNG (Result)', '◎', () => this.exportSnapshot('png'));
+        addOption('Save EXR (Source)', '◎', () => this.exportSnapshot('exr'), !hasEXR);
+        addOption('Save EXR 32-bit (Graded)', '◎', () => this.exportSnapshot('exr32'), !this.useWebGL || !this.renderer);
 
-        // v3.0 #7: CDL Export — ASC CDL XML from current grading state
-        addOption('Export CDL (Grade)', '🎨', () => this._exportCDL());
-        addOption('Import CDL (Grade)', '📥', () => this._importCDL());
+        addOption('Export CDL (Grade)', '◎', () => this._exportCDL());
+        addOption('Import CDL (Grade)', '◎', () => this._importCDL());
+        addOption('Export Grade as .CUBE LUT', '◎', () => this._exportGradeLUT());
 
         document.body.appendChild(menu);
 
@@ -3898,6 +4022,78 @@ else:
         link.click();
         URL.revokeObjectURL(link.href);
         console.log('[Radiance v3.0] CDL exported');
+    }
+
+    // ── Sprint 3: .CUBE 3D LUT export from live grade ──────────────────────
+    // Bakes the current LGG/Sat/Contrast grade into a 17³-point 3D LUT .cube
+    // file that can be loaded into DaVinci Resolve, Nuke, Baselight, or SCRATCH.
+    _exportGradeLUT() {
+        const N = 17; // Grid size (17³ = 4913 points, standard for creative LUTs)
+        const lines = [
+            `# Radiance Viewer Grade LUT — exported ${new Date().toISOString()}`,
+            `# Gain: ${(this.gain||[1,1,1]).map(v=>v.toFixed(4)).join(' ')}`,
+            `# Gamma: ${(this.gamma||[1,1,1]).map(v=>v.toFixed(4)).join(' ')}`,
+            `# Lift: ${(this.lift||[0,0,0]).map(v=>v.toFixed(4)).join(' ')}`,
+            `# Saturation: ${(this.saturation||1).toFixed(4)}`,
+            `# Contrast: ${(this.contrast||1).toFixed(4)}  Pivot: ${(this.pivot||0.18).toFixed(4)}`,
+            'LUT_3D_SIZE 17',
+            'DOMAIN_MIN 0.0 0.0 0.0',
+            'DOMAIN_MAX 1.0 1.0 1.0',
+            ''
+        ];
+
+        const gain  = Array.isArray(this.gain)  ? this.gain  : [1,1,1];
+        const gamma = Array.isArray(this.gamma) ? this.gamma : [1,1,1];
+        const lift  = Array.isArray(this.lift)  ? this.lift  : [0,0,0];
+        const sat   = this.saturation || 1.0;
+        const con   = this.contrast   || 1.0;
+        const piv   = this.pivot      || 0.18;
+
+        // Apply grade inline (mirrors apply_grading Python logic)
+        const applyGrade = (r, g, b) => {
+            // Lift (luma-pivoted additive shadow shift)
+            const luma = 0.2126*r + 0.7152*g + 0.0722*b;
+            const lumaPivot = Math.max(0, 1 - luma);
+            r += lift[0] * lumaPivot;
+            g += lift[1] * lumaPivot;
+            b += lift[2] * lumaPivot;
+            // Gain (multiplicative slope)
+            r *= gain[0]; g *= gain[1]; b *= gain[2];
+            // Gamma (power curve on positives)
+            if (r > 0) r = Math.pow(r, 1.0 / Math.max(gamma[0], 0.01));
+            if (g > 0) g = Math.pow(g, 1.0 / Math.max(gamma[1], 0.01));
+            if (b > 0) b = Math.pow(b, 1.0 / Math.max(gamma[2], 0.01));
+            // Contrast (around pivot)
+            r = (r - piv) * con + piv;
+            g = (g - piv) * con + piv;
+            b = (b - piv) * con + piv;
+            // Saturation
+            const luma2 = 0.2126*r + 0.7152*g + 0.0722*b;
+            r = luma2 + sat * (r - luma2);
+            g = luma2 + sat * (g - luma2);
+            b = luma2 + sat * (b - luma2);
+            // Clamp to [0, 1] for LUT domain
+            return [Math.max(0,Math.min(1,r)), Math.max(0,Math.min(1,g)), Math.max(0,Math.min(1,b))];
+        };
+
+        // .CUBE Ordering: R varies fastest, then G, then B
+        for (let bi = 0; bi < N; bi++) {
+            for (let gi = 0; gi < N; gi++) {
+                for (let ri = 0; ri < N; ri++) {
+                    const r = ri / (N - 1), g = gi / (N - 1), bv = bi / (N - 1);
+                    const [or, og, ob] = applyGrade(r, g, bv);
+                    lines.push(`${or.toFixed(6)} ${og.toFixed(6)} ${ob.toFixed(6)}`);
+                }
+            }
+        }
+
+        const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+        const link = document.createElement('a');
+        link.download = `radiance_grade_${Date.now()}.cube`;
+        link.href = URL.createObjectURL(blob);
+        link.click();
+        URL.revokeObjectURL(link.href);
+        this._termLog?.('success', `[LUT] Exported 17³ .cube LUT from live grade`);
     }
 
     // v3.0 #7: ASC CDL Import — reads .cdl XML and applies to current grading state
@@ -4265,7 +4461,7 @@ else:
             }
         ];
 
-        let html = `<div style="color: ${this.theme.accent}; font-size: 18px; font-weight: bold; margin-bottom: 16px; text-align: center;">⌨️ Keyboard Shortcuts</div>`;
+        let html = `<div style="color: ${this.theme.accent}; font-size: 18px; font-weight: bold; margin-bottom: 16px; text-align: center;">◎ Keyboard Shortcuts</div>`;
 
         shortcuts.forEach(section => {
             html += `<div style="margin-bottom: 16px;">`;
@@ -4489,7 +4685,8 @@ else:
     }
 
     cycleCompareMode() {
-        if (!this.compareImage) { this.compareMode = 'none'; return; }
+        const hasSource = this.compareImage || (this.frameImages && this.frameImages[this.currentFrame]) || this.videoEl || this.image;
+        if (!hasSource) { this.compareMode = 'none'; return; }
         const modes = ['none', 'wipe', 'sidebyside', 'difference'];
         this.compareMode = modes[(modes.indexOf(this.compareMode) + 1) % modes.length];
         this.render();
@@ -4583,7 +4780,6 @@ else:
         // Grid
         if (this.showGrid) this.drawGrid(ctx, w, h);
 
-
         // Scope overlay
         if (this.scopeOverlay && this.histogramData) this.drawHistogramOverlay(ctx, w, h);
 
@@ -4591,6 +4787,57 @@ else:
         if (this.maskState && this.maskState.type > 0 && this.maskState.showOverlay && !this.wipeEnabled) {
             this.drawMaskInteractiveOverlay(ctx);
         }
+
+        // Sprint 4: Render persistent probe dots
+        if (this._probeMemory && this._probeMemory.length > 0) {
+            this._probeMemory.forEach((p, idx) => {
+                // Map image coords to canvas coords
+                const cx = p.imgX * this.zoom + this.panX;
+                const cy = p.imgY * this.zoom + this.panY;
+                ctx.save();
+                ctx.fillStyle = p.color || '#fff';
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+                ctx.fill(); ctx.stroke();
+                // Label
+                ctx.fillStyle = p.color || '#fff';
+                ctx.font = 'bold 9px monospace';
+                ctx.fillText(`P${idx+1} ${p.hex}`, cx + 7, cy + 4);
+                ctx.restore();
+            });
+        }
+
+        // Sprint 4: Render annotations (persistent lines)
+        this._renderAnnotationLines(ctx, this._annotationLines || []);
+        if (this._isAnnotating && this._annotationCurrentLine) {
+            this._renderAnnotationLines(ctx, [this._annotationCurrentLine]);
+        }
+    }
+
+    // Render a set of annotation line objects onto the given 2D canvas context
+    _renderAnnotationLines(ctx, lines) {
+        lines.forEach(line => {
+            if (!line.pts || line.pts.length < 2) return;
+            ctx.save();
+            ctx.strokeStyle = line.color || '#ff4';
+            ctx.lineWidth = 2;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.shadowColor = 'rgba(0,0,0,0.6)';
+            ctx.shadowBlur = 3;
+            ctx.beginPath();
+            ctx.moveTo(line.pts[0].x, line.pts[0].y);
+            for (let i = 1; i < line.pts.length; i++) ctx.lineTo(line.pts[i].x, line.pts[i].y);
+            ctx.stroke();
+            ctx.restore();
+        });
+    }
+
+    // Called during live Alt+drag drawing to show the current stroke in real-time
+    _drawAnnotations() {
+        this.renderOverlay(); // full redraw (debounce handled by RAF via renderOverlay)
     }
 
     getMaskHandleAt(x, y) {
@@ -4979,6 +5226,64 @@ else:
             }
         });
 
+        // Multi-probe memory (Sprint 4): right-click saves up to 4 persistent probe points
+        this.canvas.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            if (!this._lastProbe) return;
+            if (!this._probeMemory) this._probeMemory = [];
+            if (this._probeMemory.length >= 4) this._probeMemory.shift(); // FIFO cap at 4
+            this._probeMemory.push({ ...this._lastProbe, color: ['#f55', '#5f5', '#55f', '#ff5'][this._probeMemory.length] });
+            this.renderOverlay(); // Re-draw to show new probe dot
+            this._termLog?.('info', `[Probe] Stored ${ this._probeMemory.length}/4: Disp ${this._lastProbe.dispStr}  |  Linear ${this._lastProbe.linStr}`);
+        });
+
+        // Alt+drag annotation drawing (Sprint 4)
+        this._annotationLines = [];
+        this._isAnnotating = false;
+        this._annotationCurrentLine = null;
+
+        this.canvas.addEventListener('mousedown', (eAnn) => {
+            if (eAnn.altKey && eAnn.button === 0) {
+                eAnn.preventDefault();
+                this._isAnnotating = true;
+                const rect = this.canvas.getBoundingClientRect();
+                const mx = (eAnn.clientX - rect.left) * (this._canvasScaleX || 1);
+                const my = (eAnn.clientY - rect.top) * (this._canvasScaleY || 1);
+                const colors = ['#ff4', '#f55', '#5f5', '#55f', '#f5f', '#5ff'];
+                this._annotationCurrentLine = {
+                    pts: [{ x: mx, y: my }],
+                    color: colors[this._annotationLines.length % colors.length]
+                };
+            }
+        }, { capture: true });
+
+        document.addEventListener('mousemove', (eAnn) => {
+            if (!this._isAnnotating || !this._annotationCurrentLine) return;
+            const rect = this.canvas.getBoundingClientRect();
+            const mx = (eAnn.clientX - rect.left) * (this._canvasScaleX || 1);
+            const my = (eAnn.clientY - rect.top) * (this._canvasScaleY || 1);
+            this._annotationCurrentLine.pts.push({ x: mx, y: my });
+            this._drawAnnotations();
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (this._isAnnotating && this._annotationCurrentLine && this._annotationCurrentLine.pts.length > 1) {
+                this._annotationLines.push(this._annotationCurrentLine);
+            }
+            this._isAnnotating = false;
+            this._annotationCurrentLine = null;
+        });
+
+        // Shift+Alt+Click clears all annotations
+        this.canvas.addEventListener('click', (eAnn) => {
+            if (eAnn.altKey && eAnn.shiftKey) {
+                this._annotationLines = [];
+                this._probeMemory = [];
+                this.renderOverlay();
+                this._termLog?.('info', '[Annotation] All annotations and probes cleared.');
+            }
+        });
+
         this.canvas.addEventListener('mouseleave', () => {
             this.infoLeft.innerHTML = '';
             // Don't clear infoRight as it contains static info
@@ -5075,15 +5380,46 @@ else:
             const luma = (r * 0.2126 + g * 0.7152 + b * 0.0722).toFixed(0);
             const hex = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
 
+            // Compute display (gamma-encoded) values and scene-linear values
+            // Display: 8-bit normalized 0-255 or [0-1] 
+            const dispR = (r / 255).toFixed(4);
+            const dispG = (g / 255).toFixed(4);
+            const dispB = (b / 255).toFixed(4);
+
+            // Scene-linear: use HDR sidecar if available (true float), else sRGB gamma decode
+            let linR, linG, linB;
+            if (this.hdrData && this.hdrData.data) {
+                const ch = this.hdrData.channels || 3;
+                const hIdx2 = (imgY * this.imageWidth + imgX) * ch;
+                linR = this.hdrData.data[hIdx2];
+                linG = ch > 1 ? this.hdrData.data[hIdx2 + 1] : linR;
+                linB = ch > 2 ? this.hdrData.data[hIdx2 + 2] : linR;
+            } else {
+                // sRGB → linear approximation (IEC 61966-2-1)
+                const sRGBtoLin = c => c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+                linR = sRGBtoLin(r / 255);
+                linG = sRGBtoLin(g / 255);
+                linB = sRGBtoLin(b / 255);
+            }
+
+            const linStr = `${linR.toFixed(4)} ${linG.toFixed(4)} ${linB.toFixed(4)}`;
+            const dispStr = `${dispR} ${dispG} ${dispB}`;
+            const isHDRPick = !!(this.hdrData && this.hdrData.data);
+            const pickLabel = isHDRPick ? '🟢 HDR Linear' : '⚪ Linear~';
+
             this.colorInfo.textContent = `RGB: ${r} ${g} ${b}`;
 
-            // v2.5 Pro Probing UI
+            // v3.5 Pro Probing UI — dual display+linear readout (Nuke-style)
             this.infoLeft.innerHTML = `
                 <span style="color:#888; margin-right:8px;">X:${imgX.toString().padStart(4, '0')} Y:${imgY.toString().padStart(4, '0')}</span>
-                ${evVal}${floatVals}
-                <span style="margin-right:8px; border-left:1px solid #333; padding-left:8px;">8b: ${r} ${g} ${b}</span>
-                <span style="color:#777">Hx: ${hex} | L: ${luma}</span>
+                ${evVal}
+                <span style="color:#aaa; margin-right:6px;">Disp: ${dispStr}</span>
+                <span style="color:${isHDRPick ? this.theme.accent : '#888'}; margin-right:6px;" title="${pickLabel}: scene-linear float values">${pickLabel}: ${linStr}</span>
+                <span style="color:#777">Hex: ${hex} | L: ${luma}</span>
             `;
+
+            // Store probe for multi-probe display (Sprint 4)
+            this._lastProbe = { imgX, imgY, dispStr, linStr, hex, isHDRPick };
 
             // Draw pixel loupe on overlay
             if (this.showLoupe) {
@@ -5220,6 +5556,191 @@ else:
         const isVisible = this.metadataPanel.style.display !== 'none';
         this.metadataPanel.style.display = isVisible ? 'none' : 'block';
         if (!isVisible) this.updateInfo();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //                     OCIO COLOR MANAGEMENT
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Fetch OCIO config info from the backend.
+     * Call once on viewer init to populate the OCIO dropdown.
+     */
+    async ocioInit() {
+        try {
+            const resp = await fetch('/radiance/ocio/config');
+            if (!resp.ok) return;
+            this._ocioConfig = await resp.json();
+
+            if (this._ocioConfig.loaded) {
+                console.log(`[Radiance OCIO] Config: ${this._ocioConfig.name} (${this._ocioConfig.display_view_pairs?.length || 0} transforms)`);
+                this._ocioPopulateDropdown();
+            } else {
+                console.log('[Radiance OCIO] No config loaded');
+            }
+        } catch (e) {
+            // OCIO endpoint not available — silently degrade
+            this._ocioConfig = null;
+        }
+    }
+
+    /**
+     * Load an OCIO config from a specific file path.
+     */
+    async ocioLoadConfig(configPath) {
+        try {
+            const resp = await fetch('/radiance/ocio/load', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: configPath }),
+            });
+            const data = await resp.json();
+            if (data.status === 'success') {
+                this._ocioConfig = data.config;
+                this._ocioPopulateDropdown();
+                this._termLog?.('info', `[OCIO] Loaded: ${this._ocioConfig.name}`);
+                return true;
+            } else {
+                this._termLog?.('error', `[OCIO] ${data.error}`);
+                return false;
+            }
+        } catch (e) {
+            this._termLog?.('error', `[OCIO] Load failed: ${e.message}`);
+            return false;
+        }
+    }
+
+    /**
+     * Apply an OCIO display/view transform by baking it to a 3D LUT
+     * and uploading to the WebGL renderer.
+     *
+     * @param {string} display  - OCIO display name (e.g., "sRGB")
+     * @param {string} view     - OCIO view name (e.g., "ACES 1.0 SDR-video")
+     * @param {number} size     - LUT cube size (33 = fast, 65 = quality)
+     */
+    async ocioApplyDisplayView(display, view, size = 33) {
+        if (!this.renderer) return;
+
+        try {
+            this._termLog?.('info', `[OCIO] Baking ${size}³ LUT: ${display} / ${view}...`);
+
+            const resp = await fetch('/radiance/ocio/bake', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ display, view, size }),
+            });
+
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({ error: resp.statusText }));
+                this._termLog?.('error', `[OCIO] Bake failed: ${err.error}`);
+                return;
+            }
+
+            // Response is raw float32 binary — convert to Float32Array
+            const buffer = await resp.arrayBuffer();
+            const lutData = new Float32Array(buffer);
+
+            // Upload to WebGL via existing 3D LUT pipeline
+            this.renderer.loadLUT(lutData, size);
+            // OCIO-FIX: This LUT already contains the full display transform
+            // including sRGB OETF. Clear the analytical display LUT mode so
+            // it doesn't stack on top, and flag the shader to skip the final
+            // linearToSRGB to prevent double-gamma (orange cast / blown highlights).
+            this.renderer.setDisplayLutMode(0);
+            this.renderer.setLutIsDisplayTransform(true);
+            this.render();
+
+            this._ocioActiveTransform = `${display} / ${view}`;
+            this._termLog?.('info', `[OCIO] Active: ${this._ocioActiveTransform} (${size}³)`);
+
+        } catch (e) {
+            this._termLog?.('error', `[OCIO] Apply failed: ${e.message}`);
+        }
+    }
+
+    /**
+     * Apply a direct color space → color space OCIO transform.
+     */
+    async ocioApplyColorSpace(src, dst, size = 33) {
+        if (!this.renderer) return;
+
+        try {
+            const resp = await fetch('/radiance/ocio/bake', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ src, dst, size }),
+            });
+
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({ error: resp.statusText }));
+                this._termLog?.('error', `[OCIO] Bake failed: ${err.error}`);
+                return;
+            }
+
+            const buffer = await resp.arrayBuffer();
+            const lutData = new Float32Array(buffer);
+            this.renderer.loadLUT(lutData, size);
+            // Colorspace transforms are NOT display transforms — the shader
+            // must still apply the final linearToSRGB OETF after this LUT.
+            this.renderer.setDisplayLutMode(0);
+            this.renderer.setLutIsDisplayTransform(false);
+            this.render();
+
+            this._ocioActiveTransform = `${src} → ${dst}`;
+            this._termLog?.('info', `[OCIO] Active: ${this._ocioActiveTransform} (${size}³)`);
+
+        } catch (e) {
+            this._termLog?.('error', `[OCIO] Apply failed: ${e.message}`);
+        }
+    }
+
+    /**
+     * Remove the active OCIO LUT — reverts to built-in analytical LUTs.
+     */
+    ocioClear() {
+        if (this.renderer && this.renderer.textures.lut) {
+            this.renderer.gl.deleteTexture(this.renderer.textures.lut);
+            this.renderer.textures.lut = null;
+        }
+        // OCIO-FIX: Reset display-transform flag so normal linearToSRGB resumes.
+        if (this.renderer) this.renderer.setLutIsDisplayTransform(false);
+        this._ocioActiveTransform = null;
+        this.render();
+        this._termLog?.('info', '[OCIO] Cleared — using built-in LUTs');
+    }
+
+    /**
+     * Populate the HUD OCIO dropdown (if the HUD has one).
+     * @private
+     */
+    _ocioPopulateDropdown() {
+        const dropdown = this.container?.querySelector?.('.radiance-ocio-select');
+        if (!dropdown || !this._ocioConfig?.display_view_pairs) return;
+
+        // Clear existing options
+        dropdown.innerHTML = '<option value="">— OCIO: None —</option>';
+
+        for (const pair of this._ocioConfig.display_view_pairs) {
+            const opt = document.createElement('option');
+            opt.value = JSON.stringify({ display: pair.display, view: pair.view });
+            opt.textContent = pair.label;
+            dropdown.appendChild(opt);
+        }
+
+        // Wire up change handler
+        dropdown.onchange = async () => {
+            const val = dropdown.value;
+            if (!val) {
+                this.ocioClear();
+                return;
+            }
+            try {
+                const { display, view } = JSON.parse(val);
+                await this.ocioApplyDisplayView(display, view);
+            } catch (e) {
+                console.error('[Radiance OCIO] Dropdown error:', e);
+            }
+        };
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -5742,6 +6263,14 @@ else:
             if (this.renderer) this.renderer.loadImageTexture(this.image);
         }
 
+        // Update Z-Depth for the new frame
+        if (this.frameZdepthImages && this.frameZdepthImages[idx]) {
+            this.zdepthImage = this.frameZdepthImages[idx];
+            if (this.renderer) this.renderer.loadDepthTexture(this.zdepthImage);
+        } else {
+            this.zdepthImage = null;
+        }
+
         this.render();
         this.updateInfo();
         this.updateFrameDisplay();
@@ -6017,10 +6546,12 @@ else:
         if (this.zoom > 2.0) ctx.imageSmoothingEnabled = false; // Pixel art look for high zoom
         else ctx.imageSmoothingQuality = 'high';
 
-        if (this.compareMode === 'sidebyside' && this.compareImage) {
-            this.renderSideBySide(ctx, w, h);
-        } else if (this.compareMode === 'difference' && this.compareImage) {
-            this.renderDifference(ctx, w, h);
+        const cmpImg = this.compareImage || (this.frameImages && this.frameImages[this.currentFrame]) || this.videoEl || this.image;
+
+        if (this.compareMode === 'sidebyside' && cmpImg) {
+            this.renderSideBySide(ctx, w, h, cmpImg);
+        } else if (this.compareMode === 'difference' && cmpImg) {
+            this.renderDifference(ctx, w, h, cmpImg);
         } else {
             ctx.save();
             ctx.translate(this.panX, this.panY);
@@ -6028,7 +6559,7 @@ else:
             this.renderImage(ctx, this.image);
             ctx.restore();
 
-            if (this.compareMode === 'wipe' && this.compareImage) this.renderWipe(ctx, w, h);
+            if (this.compareMode === 'wipe' && cmpImg) this.renderWipe(ctx, w, h, cmpImg);
         }
 
         this.updateBottomBar();
@@ -6108,14 +6639,14 @@ else:
         }
     }
 
-    renderWipe(ctx, w, h) {
+    renderWipe(ctx, w, h, cmpImg) {
         const wipeX = w * this.wipePosition;
         ctx.save();
         ctx.beginPath(); ctx.rect(wipeX, 0, w - wipeX, h); ctx.clip();
         ctx.translate(this.panX, this.panY); ctx.scale(this.zoom, this.zoom); // Zoom needs adjustment for half width? No, keep relative
         // Actually for SxS usually we behave as two separate viewports or just cropped
         // Let's implement cropped view for better comparison
-        ctx.drawImage(this.compareImage, 0, 0); ctx.restore();
+        ctx.drawImage(cmpImg, 0, 0); ctx.restore();
 
         ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)'; ctx.lineWidth = 1;
         ctx.beginPath(); ctx.moveTo(wipeX, 0); ctx.lineTo(wipeX, h); ctx.stroke();
@@ -6127,21 +6658,21 @@ else:
         ctx.beginPath(); ctx.arc(wipeX, h / 2, 4, 0, Math.PI * 2); ctx.fill();
     }
 
-    renderSideBySide(ctx, w, h) {
+    renderSideBySide(ctx, w, h, cmpImg) {
         const hw = w / 2;
         ctx.save(); ctx.beginPath(); ctx.rect(0, 0, hw, h); ctx.clip();
         ctx.translate(this.panX * 0.5, this.panY); ctx.scale(this.zoom * 0.5, this.zoom);
-        ctx.drawImage(this.image, 0, 0); ctx.restore();
+        ctx.drawImage(this.renderer ? this.renderer.canvas : this.image, 0, 0); ctx.restore();
 
         ctx.save(); ctx.beginPath(); ctx.rect(hw, 0, hw, h); ctx.clip();
         ctx.translate(hw + this.panX * 0.5, this.panY); ctx.scale(this.zoom * 0.5, this.zoom);
-        ctx.drawImage(this.compareImage, 0, 0); ctx.restore();
+        ctx.drawImage(cmpImg, 0, 0); ctx.restore();
 
         ctx.strokeStyle = '#fff'; ctx.lineWidth = 1;
         ctx.beginPath(); ctx.moveTo(hw, 0); ctx.lineTo(hw, h); ctx.stroke();
     }
 
-    renderDifference(ctx, w, h) {
+    renderDifference(ctx, w, h, cmpImg) {
         if (!this.diffCanvas) {
             this.diffCanvas = document.createElement('canvas');
             this.diffCanvas.width = this.imageWidth;
@@ -6149,14 +6680,14 @@ else:
             const dCtx = this.diffCanvas.getContext('2d');
 
             // Draw A
-            dCtx.drawImage(this.image, 0, 0);
+            dCtx.drawImage(this.renderer ? this.renderer.canvas : this.image, 0, 0);
             const dA = dCtx.getImageData(0, 0, this.imageWidth, this.imageHeight);
 
             // Draw B to temporary canvas to get data
             const tmp = document.createElement('canvas');
             tmp.width = this.imageWidth; tmp.height = this.imageHeight;
             const tCtx = tmp.getContext('2d');
-            tCtx.drawImage(this.compareImage, 0, 0);
+            tCtx.drawImage(cmpImg, 0, 0);
             const dB = tCtx.getImageData(0, 0, this.imageWidth, this.imageHeight);
 
             // Compute Difference
@@ -6408,6 +6939,8 @@ else:
                 hdrStatus = hasHighValues ? '✓ HDR Content' : '✗ Standard Range';
                 if (this.hdrData.format === 'rhdr') {
                     formatStr = 'RHDR fp16 (primary)';
+                } else if (this.hdrData.format === 'rhdr_f32') {
+                    formatStr = 'RHDR fp32 (primary)';
                 } else {
                     formatStr = 'Float32 HDR';
                 }
@@ -7415,7 +7948,7 @@ else:
         rightGroup.appendChild(spdWrap);
 
         // v3.0 #8.2: GPU Cache Purge Button
-        const purgeBtn = mkBtn('🧹', 'Clear GPU Frame Cache', () => {
+        const purgeBtn = mkBtn('◎', 'Clear GPU Frame Cache', () => {
             if (this.renderer) {
                 this.renderer.clearFrameCache();
                 // If sequence mode, clear the frameImages array to force reload from disk/network
@@ -10503,7 +11036,7 @@ else:
                 <span id="rad-term-clean" style="cursor:pointer;color:#e87;opacity:0.6;transition:opacity 0.2s;">[CLEAN MEM]</span>
             </div>
             <div style="display:flex;gap:12px;align-items:center;">
-                <a href="https://radiance.fxtd.org" target="_blank" style="color:rgba(0,168,255,0.5);text-decoration:none;" onmouseover="this.style.color='#00a8ff'" onmouseout="this.style.color='rgba(0,168,255,0.5)'">📖 DOCS</a>
+                <a href="https://radiance.fxtd.org/" target="_blank" style="color:rgba(0,168,255,0.5);text-decoration:none;" onmouseover="this.style.color='#00a8ff'" onmouseout="this.style.color='rgba(0,168,255,0.5)'">📖 DOCS</a>
                 <span id="rad-term-status">READY</span>
             </div>
         `;
@@ -11720,8 +12253,16 @@ else:
         const nBlocks       = Math.ceil(H / linesPerBlock);
 
         // ── Offset table ──────────────────────────────────────────────────────
+        // B-10 FIX: OpenEXR spec uses uint64 offsets. Previously only the low 32
+        // bits were read (getUint32) which corrupts offsets for files > 4GB.
+        // Combine two uint32 reads since DataView lacks getUint64.
         const offsets = [];
-        for (let i = 0; i < nBlocks; i++) { offsets.push(view.getUint32(p, true)); p += 8; }
+        for (let i = 0; i < nBlocks; i++) {
+            const lo = view.getUint32(p, true);
+            const hi = view.getUint32(p + 4, true);
+            offsets.push(lo + hi * 0x100000000);
+            p += 8;
+        }
 
         // ── Channel → RGBA slot ───────────────────────────────────────────────
         // EXR stores channels in alphabetical order: A,B,G,R for RGBA; B,G,R for RGB
@@ -12379,7 +12920,10 @@ app.registerExtension({
                                                     npy.fp16data, npy.width, npy.height, npy.channels
                                                 );
                                             } else {
-                                                tex = viewer.renderer.loadFloat32Texture(
+                                                // B-6 FIX: Use LRU-cached fp32 loader (was loadFloat32Texture
+                                                // which bypassed the 8-frame cache, re-uploading every scrub)
+                                                tex = viewer.renderer.loadFloat32TextureCached(
+                                                    frameId,
                                                     npy.data, npy.width, npy.height, npy.channels
                                                 );
                                             }

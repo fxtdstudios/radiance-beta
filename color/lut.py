@@ -53,13 +53,7 @@ class LUTCache:
             logger.debug(f"Could not stat LUT file {filepath}: {e}")
             return (0, 0)
 
-    # Keep the old hash method name so existing call-sites don't break,
-    # but delegate to the stat validator.
-    @classmethod
-    def get_file_hash(cls, filepath: str) -> str:
-        """Legacy compatibility shim — returns hex of mtime_ns+size."""
-        mtime, size = cls._get_validator(filepath)
-        return f"{mtime:x}_{size:x}"
+
 
     @classmethod
     def get(cls, filepath: str) -> Optional[LUTData]:
@@ -171,9 +165,9 @@ class RadianceLUTApply:
 
         lut_data = []
         lut_size = None
+        lut_1d_size = None      # FIX: track 1D size separately
         domain_min = [0.0, 0.0, 0.0]
         domain_max = [1.0, 1.0, 1.0]
-        # FIX #9: track 1D LUT so we emit a clear error instead of "No valid data"
 
         with open(filepath, "r", encoding="utf-8") as f:
             for line in f:
@@ -182,11 +176,9 @@ class RadianceLUTApply:
                     continue
 
                 if line.startswith("LUT_1D_SIZE"):
-                    # FIX #9: raise immediately with an actionable message
-                    raise ValueError(
-                        "1D LUTs (.cube LUT_1D_SIZE) are not supported. "
-                        "Please use a 3D .cube file (LUT_3D_SIZE)."
-                    )
+                    # FIX: parse 1D LUT size; data is collected in the same loop
+                    lut_1d_size = int(line.split()[1])
+                    continue
 
                 if line.startswith("LUT_3D_SIZE"):
                     lut_size = int(line.split()[1])
@@ -208,19 +200,51 @@ class RadianceLUTApply:
         if not lut_data:
             raise ValueError("No valid data found in LUT file.")
 
-        if lut_size is None:
-            lut_size = round(len(lut_data) ** (1 / 3))
+        # ── 1D LUT: promote to 3D identity-composition ───────────────────────
+        # A 1D LUT applies the same 1D transfer function to each channel
+        # independently. We promote it to a 3D LUT whose identity grid has the
+        # per-channel curve baked in, so the existing trilinear/tetrahedral
+        # interpolation path works without modification.
+        # Promotion size: min(lut_1d_size, 64) — larger is more accurate but
+        # wastes VRAM; 64³ is indistinguishable from a native 1D apply.
+        if lut_1d_size is not None:
+            lut_1d = np.array(lut_data, dtype=np.float32)  # (N, 3)
+            N = lut_1d.shape[0]
+            promote_size = min(lut_1d_size, 64)
 
-        # FIX #1: .cube format stores entries R-fastest (innermost loop).
-        # After reshape(S,S,S,3) in C order, arr[i,j,k] = entry for B=i, G=j, R=k.
-        # The interpolation code queries lut[R_idx, G_idx, B_idx], so without the
-        # transpose every lookup has Red and Blue channels swapped.
-        # Transposing axes (2,1,0) gives arr[R,G,B,c] — correct for the indexing.
-        lut_array = np.array(lut_data, dtype=np.float32).reshape(
-            lut_size, lut_size, lut_size, 3
-        )
-        lut_array = lut_array.transpose(2, 1, 0, 3)  # [B,G,R,c] → [R,G,B,c]
-        lut_tensor = torch.from_numpy(lut_array.copy())  # copy needed after transpose
+            # Build index lookup: for each grid step, find nearest 1D entry
+            grid = np.linspace(0.0, 1.0, promote_size, dtype=np.float32)
+            indices = np.round(grid * (N - 1)).astype(np.int32).clip(0, N - 1)
+
+            # Build 3D array: each axis controls one channel, others are identity
+            lut_array = np.zeros((promote_size, promote_size, promote_size, 3),
+                                 dtype=np.float32)
+            for ri in range(promote_size):
+                for gi in range(promote_size):
+                    for bi in range(promote_size):
+                        lut_array[ri, gi, bi, 0] = lut_1d[indices[ri], 0]
+                        lut_array[ri, gi, bi, 1] = lut_1d[indices[gi], 1]
+                        lut_array[ri, gi, bi, 2] = lut_1d[indices[bi], 2]
+
+            lut_size = promote_size
+            logger.info(
+                f"[LUT] 1D LUT ({N} entries) promoted to {promote_size}³ 3D grid: "
+                f"{filepath}"
+            )
+        else:
+            # ── 3D LUT ───────────────────────────────────────────────────────
+            if lut_size is None:
+                lut_size = round(len(lut_data) ** (1 / 3))
+
+            # FIX #1: .cube format stores entries R-fastest (innermost loop).
+            # After reshape(S,S,S,3) in C order, arr[i,j,k] = entry for B=i, G=j, R=k.
+            # Transposing axes (2,1,0) gives arr[R,G,B,c] — correct for the indexing.
+            lut_array = np.array(lut_data, dtype=np.float32).reshape(
+                lut_size, lut_size, lut_size, 3
+            )
+            lut_array = lut_array.transpose(2, 1, 0, 3)   # [B,G,R,c] → [R,G,B,c]
+
+        lut_tensor = torch.from_numpy(lut_array.copy())   # copy needed after transpose/promote
 
         # FIX #4: use stat-based validator
         file_validator = LUTCache._get_validator(filepath)
@@ -628,9 +652,11 @@ class RadianceLUTBlend:
 NODE_CLASS_MAPPINGS = {
     "RadianceLUTApply": RadianceLUTApply,
     "RadianceLUTBlend": RadianceLUTBlend,
+    
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceLUTApply": "◎ LUT Apply",
-    "RadianceLUTBlend": "◎ LUT Blend",
+    "RadianceLUTApply": "◎ Radiance LUT Apply",
+    "RadianceLUTBlend": "◎ Radiance LUT Blend",
+    
 }

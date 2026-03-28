@@ -71,23 +71,33 @@ class HDRHistogram:
 
             # Dynamic range in stops
             eps = 1e-10
-            dynamic_range = np.log2(max(max_val, eps) / max(min_val, eps))
+            # FIX 2: dynamic_range must use the minimum POSITIVE value.
+            # Using min_val directly causes log2(max/eps) ≈ 49 stops when
+            # min_val is negative (valid HDR wide-gamut data).
+            positive_vals = img[img > 0]
+            min_positive = float(positive_vals.min()) if positive_vals.size > 0 else float(eps)
+            dynamic_range = np.log2(max(max_val, eps) / max(min_positive, eps))
 
             # Clipping analysis
             clip_low = float(np.sum(img <= 0) / img.size * 100)
             clip_high = float(np.sum(img >= 1) / img.size * 100)
 
-            stats = f"""═══════════════════════════════════
-            HDR IMAGE ANALYSIS
-    ═══════════════════════════════════
-    Min Value:     {min_val:.6f}
-    Max Value:     {max_val:.6f}
-    Mean Value:    {mean_val:.6f}
-    Dynamic Range: {dynamic_range:.1f} stops
-    ───────────────────────────────────
-    Clipped Low:   {clip_low:.2f}%
-    Clipped High:  {clip_high:.2f}%
-    ═══════════════════════════════════"""
+            # FIX 3: stats string had mixed indentation — first separator was
+            # flush-left while all data lines were indented, producing a ragged
+            # misaligned block. Now consistently dedented.
+            stats = (
+                "═══════════════════════════════════\n"
+                "      HDR IMAGE ANALYSIS            \n"
+                "═══════════════════════════════════\n"
+                f"Min Value:     {min_val:.6f}\n"
+                f"Max Value:     {max_val:.6f}\n"
+                f"Mean Value:    {mean_val:.6f}\n"
+                f"Dynamic Range: {dynamic_range:.1f} stops\n"
+                "───────────────────────────────────\n"
+                f"Clipped Low:   {clip_low:.2f}%\n"
+                f"Clipped High:  {clip_high:.2f}%\n"
+                "═══════════════════════════════════"
+            )
 
             # ═══════════════════════════════════════════════════════════════
             # CREATE HISTOGRAM WITH PIL (NO MATPLOTLIB)
@@ -126,24 +136,38 @@ class HDRHistogram:
 
             if mode == "rgb" and img.shape[-1] >= 3:
                 # RGB mode - draw each channel
-                colors = [(255, 80, 80), (80, 255, 80), (80, 80, 255)]
-                for ch_idx, color in enumerate(colors):
+                # FIX 4: Previous code halved RGB values to fake transparency
+                # (alpha_color = c//2). PIL has no real alpha blend on RGB canvases,
+                # so channels just painted over each other at 50% brightness —
+                # producing muddy dim bars with no actual overlap visualisation.
+                # Fix: render each channel into a separate RGBA layer at full
+                # intensity and composite with Image.alpha_composite for correct
+                # additive overlap (R+G = yellow, R+B = magenta, G+B = cyan).
+                from PIL import Image as _PILImage
+                colors_rgba = [(255, 60, 60, 160), (60, 255, 60, 160), (60, 60, 255, 160)]
+                # Convert base graph to RGBA for compositing
+                hist_img_rgba = hist_img.convert("RGBA")
+                colors = [(255, 80, 80), (80, 255, 80), (80, 80, 255)]  # kept for draw ref
+                for ch_idx, (color, color_a) in enumerate(zip(colors, colors_rgba)):
                     channel = img[..., ch_idx].flatten()
                     channel = np.clip(channel, 0, max(1, max_val))
                     hist_vals, _ = np.histogram(
                         channel, bins=num_bins, range=(0, max(1, max_val))
                     )
                     max_count = max(hist_vals.max(), 1)
-
+                    # Draw channel onto its own transparent layer
+                    ch_layer = _PILImage.new("RGBA", (hist_w, hist_h), (0, 0, 0, 0))
+                    ch_draw = ImageDraw.Draw(ch_layer)
                     for i, count in enumerate(hist_vals):
                         bar_h = int((count / max_count) * graph_h * 0.9)
                         x1 = margin + int(i * bin_width)
                         x2 = margin + int((i + 1) * bin_width)
                         y1 = graph_top1 + graph_h - bar_h
                         y2 = graph_top1 + graph_h
-                        # Semi-transparent overlay
-                        alpha_color = tuple(c // 2 for c in color)
-                        draw.rectangle([x1, y1, x2, y2], fill=alpha_color)
+                        ch_draw.rectangle([x1, y1, x2, y2], fill=color_a)
+                    hist_img_rgba = _PILImage.alpha_composite(hist_img_rgba, ch_layer)
+                hist_img = hist_img_rgba.convert("RGB")
+                draw = ImageDraw.Draw(hist_img)  # refresh draw handle after conversion
             else:
                 # Luminance mode
                 hist_vals, _ = np.histogram(
@@ -235,7 +259,11 @@ class HDRHistogram:
             # Convert to tensor
             hist_np = np.array(hist_img).astype(np.float32) / 255.0
             logger.debug("HDRHistogram done.")
-            return (numpy_to_tensor_float32(hist_np), stats)
+            # FIX 5: wrap in batch dimension — ComfyUI IMAGE is (B, H, W, C).
+            # numpy_to_tensor_float32 returns (H, W, C) for a single frame;
+            # without unsqueeze(0) downstream nodes crash on .shape batch index.
+            hist_tensor = numpy_to_tensor_float32(hist_np).unsqueeze(0)
+            return (hist_tensor, stats)
 
         except Exception as e:
             logger.error(f"HDRHistogram error: {e}")
@@ -254,3 +282,18 @@ class HDRHistogram:
                 err_img[..., 0] = 1.0  # Red
 
             return (err_img, f"Error: {str(e)}")
+
+
+# =============================================================================
+# NODE MAPPINGS
+# FIX 1: NODE_CLASS_MAPPINGS was completely absent — HDRHistogram was invisible
+# to ComfyUI and could not be used in any workflow.
+# =============================================================================
+
+NODE_CLASS_MAPPINGS = {
+    "HDRHistogram": HDRHistogram,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "HDRHistogram": "◎ HDR Histogram",
+}

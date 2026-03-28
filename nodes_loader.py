@@ -1,9 +1,9 @@
 """
-RADIANCE - LOADER NODES v2.1.0
+RADIANCE - LOADER NODES v2.2.1
 -----------------------------------
 Universal model loader for any diffusion architecture.
 
-v3.0.0 — Industry Upgrade (February 2026):
+v2.2.1 — Industry Upgrade (March 2026):
 - NEW: Auto-detect architecture from safetensors key-heuristics
 - NEW: mtime + size based cache keys (no stale hits after file edits)
 - NEW: Named CLIP slots — clip_l, clip_g, t5xxl, llm_encoder
@@ -33,8 +33,95 @@ import folder_paths
 import comfy.sd
 import comfy.utils
 import comfy.model_management
+from comfy.cldm.control_types import UNION_CONTROLNET_TYPES
 
-logger = logging.getLogger("radiance.loader")
+import urllib.request
+import tqdm
+
+logger = logging.getLogger("◎ Radiance.loader")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#                         RADIANCE MODEL RESOURCE MAP
+# ═══════════════════════════════════════════════════════════════════════════════
+
+RADIANCE_MODEL_MAP = {
+    # Diffusion Models (UNET / DiT)
+    "flux1-schnell-fp8.safetensors": {
+        "url": "https://huggingface.co/Kijai/flux-fp8/resolve/main/flux1-schnell-fp8.safetensors",
+        "type": "diffusion_models"
+    },
+    "flux1-dev-fp8.safetensors": {
+        "url": "https://huggingface.co/Kijai/flux-fp8/resolve/main/flux1-dev-fp8.safetensors",
+        "type": "diffusion_models"
+    },
+    "sd_xl_base_1.0.safetensors": {
+        "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
+        "type": "diffusion_models"
+    },
+    # Text Encoders (CLIP / T5)
+    "t5xxl_fp8_e4m3fn.safetensors": {
+        "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors",
+        "type": "text_encoders"
+    },
+    "clip_l.safetensors": {
+        "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors",
+        "type": "text_encoders"
+    },
+    # VAE
+    "ae.safetensors": {
+        "url": "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors",
+        "type": "vae"
+    }
+}
+
+
+def _download_model(url: str, target_path: str):
+    """Download a model with a progress bar in the terminal."""
+    try:
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        logger.info(f"📥 Radiance: Downloading model from {url}...")
+        
+        def progress_bar(t):
+            last_b = [0]
+            def update_to(b=1, bsize=1, tsize=None):
+                if tsize is not None: t.total = tsize
+                t.update((b - last_b[0]) * bsize)
+                last_b[0] = b
+            return update_to
+
+        with tqdm.tqdm(unit='B', unit_scale=True, unit_divisor=1024, miniters=1, desc=os.path.basename(target_path)) as t:
+            urllib.request.urlretrieve(url, filename=target_path, reporthook=progress_bar(t))
+        
+        logger.info(f"✅ Download complete: {target_path}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Download failed for {url}: {e}")
+        return False
+
+
+def _ensure_model_exists(name: str, folder_type: str, auto_download: bool = False) -> str | None:
+    """Check if model exists, download if missing and auto_download is enabled."""
+    if not name or name == "None":
+        return None
+        
+    path = folder_paths.get_full_path(folder_type, name)
+    if path and os.path.exists(path):
+        return path
+        
+    if auto_download and name in RADIANCE_MODEL_MAP:
+        res = RADIANCE_MODEL_MAP[name]
+        if res["type"] == folder_type:
+            # Construct target path if it doesn't exist
+            # We use the first valid folder path for the type
+            base_dir = folder_paths.get_folder_paths(folder_type)[0]
+            target_path = os.path.join(base_dir, name)
+            
+            if _download_model(res["url"], target_path):
+                # Re-scan to update ComfyUI's internal list
+                folder_paths.get_filename_list(folder_type) 
+                return target_path
+                
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -52,9 +139,15 @@ _ARCH_HEURISTICS = [
     (lambda ks: any("img_in" in k and "proj" in k for k in ks),    "hunyuan_video"),
     # LTX: patch embedding
     (lambda ks: any("patch_embedding.weight" in k for k in ks),    "ltx"),
-    # Wan 2.1: cross-attention patches with specific naming
-    (lambda ks: any("head.weight" in k and "wan" in "".join(ks[:5]).lower()
-                    for k in ks),                                   "wan"),
+    # Lumina / Z-Image: unique caption projection key
+    (lambda ks: any("cap_v_projection.weight" in k for k in ks),   "lumina2"),
+    # Wan 2.1: patch_embedding + time_embedding combination unique to Wan
+    # FIX 5: Previous heuristic checked for "wan" literal in first 5 key names
+    # which fails for all Wan 2.1 checkpoints (keys start with
+    # "model.diffusion_model.patch_embedding..." — no "wan" substring).
+    (lambda ks: any("patch_embedding.weight" in k for k in ks)
+              and any("time_embedding" in k for k in ks)
+              and not any("joint_blocks" in k for k in ks),         "wan"),
     # PixArt: adaln single
     (lambda ks: any("adaln_single" in k for k in ks),              "pixart"),
     # Kolors: Chatglm style conditioning
@@ -114,6 +207,8 @@ LATENT_CHANNELS = {
     "ltx":            16,
     "hunyuan_video":  16,
     "wan":            16,
+    "lumina2":        16,
+    "z_image":        16,
     "sdxl":            4,
     "sd1.5":           4,
     "pixart":          4,
@@ -142,6 +237,8 @@ CLIP_SLOT_ORDER = {
     "hunyuan_video":  ["llm_encoder", "clip_l"],
     "wan":            ["t5xxl"],
     "ltx":            ["t5xxl"],
+    "lumina2":        ["t5xxl"],
+    "z_image":        ["t5xxl"],
     "pixart":         ["t5xxl"],
     "aura_flow":      ["clip_l"],
     "kolors":         ["llm_encoder"],
@@ -169,7 +266,7 @@ def _assemble_clip_paths(arch: str, clip_l, clip_g, t5xxl, llm_encoder) -> list[
             if p:
                 paths.append(p)
             else:
-                logger.warning(f"⚠ CLIP slot '{slot}' file not found: {val}")
+                logger.warning(f"◎ CLIP slot '{slot}' file not found: {val}")
     return paths
 
 
@@ -220,6 +317,14 @@ CHECKPOINT_PRESETS = {
         "offload_mode":  "none",
         "clip_slots":    {"clip_l": True, "clip_g": True, "t5xxl": True},
         "vram_gb":       10,
+    },
+    "→ SD3.5 Turbo": {
+        "model_type":    "sd3.5",
+        "weight_dtype":  "bf16",
+        "clip_dtype":    "fp16",
+        "offload_mode":  "none",
+        "clip_slots":    {"clip_l": True, "clip_g": True, "t5xxl": True},
+        "vram_gb":       12,
     },
     # ── SDXL ──
     "→ SDXL Base": {
@@ -296,6 +401,22 @@ CHECKPOINT_PRESETS = {
         "offload_mode":  "none",
         "clip_slots":    {"llm_encoder": True},
         "vram_gb":       10,
+    },
+    "→ Lumina2": {
+        "model_type":    "lumina2",
+        "weight_dtype":  "bf16",
+        "clip_dtype":    "fp16",
+        "offload_mode":  "none",
+        "clip_slots":    {"t5xxl": True},
+        "vram_gb":       14,
+    },
+    "→ Z-Image": {
+        "model_type":    "z_image",
+        "weight_dtype":  "bf16",
+        "clip_dtype":    "fp16",
+        "offload_mode":  "none",
+        "clip_slots":    {"t5xxl": True},
+        "vram_gb":       16,
     },
 }
 
@@ -376,7 +497,7 @@ def get_clip_type_enum(model_type: str):
         "sd1.5":  comfy.sd.CLIPType.STABLE_DIFFUSION,
     }
 
-    for name in ("hunyuan_video", "wan", "ltx", "pixart", "aura_flow", "kolors"):
+    for name in ("hunyuan_video", "wan", "ltx", "pixart", "aura_flow", "kolors", "lumina2", "z_image"):
         enum_name = name.upper().replace(".", "_")
         for variant in (enum_name, name.upper(), name.title().replace("_", "")):
             if hasattr(comfy.sd.CLIPType, variant):
@@ -392,7 +513,7 @@ def get_clip_type_enum(model_type: str):
             clip_type = getattr(comfy.sd.CLIPType, enum_name)
         else:
             logger.warning(
-                f"⚠ No CLIPType mapping for '{model_type}', "
+                f"◎ No CLIPType mapping for '{model_type}', "
                 f"falling back to STABLE_DIFFUSION"
             )
             clip_type = comfy.sd.CLIPType.STABLE_DIFFUSION
@@ -406,39 +527,43 @@ def get_clip_type_enum(model_type: str):
 
 class _LRUCache:
     """
-    Least-Recently-Used cache.  Keys now include mtime+size fingerprint
-    so stale entries are automatically missed when files change on disk.
+    Least-Recently-Used model cache using OrderedDict for O(1) hit/evict.
+
+    Keys include mtime+size fingerprint so stale entries are automatically
+    missed when files change on disk — no manual invalidation needed.
+
+    FIX 3: Previous implementation used list.remove() on every get() and put()
+    which is O(n) — scans the entire access list on every cache hit.
+    Upgraded to collections.OrderedDict + move_to_end() for O(1) LRU,
+    consistent with the SigmaCache upgrade in nodes_sampler.py.
     """
 
-    def __init__(self, max_size=4):
-        self._cache = {}
-        self._access_order = []
+    def __init__(self, max_size: int = 4):
+        from collections import OrderedDict
+        self._cache: "OrderedDict[str, object]" = OrderedDict()
         self._max_size = max_size
 
     def get(self, key: str):
         if key in self._cache:
-            self._access_order.remove(key)
-            self._access_order.append(key)
+            self._cache.move_to_end(key)   # O(1) — mark as recently used
             return self._cache[key]
         return None
 
-    def put(self, key: str, obj):
+    def put(self, key: str, obj) -> None:
         if key in self._cache:
-            self._access_order.remove(key)
-        elif len(self._cache) >= self._max_size:
-            oldest = self._access_order.pop(0)
-            del self._cache[oldest]
-            oldest_name = oldest.split(":")[1] if ":" in oldest else oldest
-            logger.info(f"Cache evicted: {oldest_name}")
+            self._cache.move_to_end(key)
+        else:
+            if len(self._cache) >= self._max_size:
+                evicted, _ = self._cache.popitem(last=False)  # O(1) LRU evict
+                evicted_name = evicted.split(":")[1] if ":" in evicted else evicted
+                logger.info(f"Cache evicted: {evicted_name}")
         self._cache[key] = obj
-        self._access_order.append(key)
 
     def has(self, key: str) -> bool:
         return key in self._cache
 
-    def clear(self):
+    def clear(self) -> None:
         self._cache.clear()
-        self._access_order.clear()
         logger.info("Model cache cleared")
 
     def __contains__(self, key: str) -> bool:
@@ -454,6 +579,9 @@ class _LRUCache:
 
 # v3.1: Reduce default cache size to 2 to prevent VRAM exhaustion with Flux/SD3.5.
 # Users can override via RADIANCE_CACHE_SIZE env var.
+# FIX 2: Previous env var "◎ Radiance_CACHE_SIZE" was impossible to set from
+# any shell — it contained a Unicode ◎ character and a space. Renamed to the
+# standard POSIX-safe name. Set via: export RADIANCE_CACHE_SIZE=4
 _DEFAULT_CACHE_SIZE = int(os.environ.get("RADIANCE_CACHE_SIZE", 2))
 _cache = _LRUCache(max_size=_DEFAULT_CACHE_SIZE)
 
@@ -543,6 +671,7 @@ MODEL_TYPES = [
     "flux", "sd3", "sd3.5",
     "sdxl", "sd1.5",
     "hunyuan_video", "wan", "ltx",
+    "lumina2", "z_image",
     "pixart", "aura_flow", "kolors",
 ]
 
@@ -654,7 +783,9 @@ class RadianceUnifiedLoader:
                                "with the same files. Cache auto-invalidates if files change."}),
                 "lora_on_error": (["warn", "raise"], {"default": "raise",
                     "tooltip": "'warn' skips failed LoRA and continues. "
-                               "'raise' stops execution."}),
+                               " 'raise' stops execution."}),
+                "auto_download": ("BOOLEAN", {"default": False,
+                    "tooltip": "If a selected model is missing, automatically download it from Radiance mirrors."}),
             },
         }
 
@@ -694,6 +825,7 @@ class RadianceUnifiedLoader:
         check_vram="On",
         use_cache="On",
         lora_on_error="raise",
+        auto_download=False,
     ):
         load_start  = time.time()
         info_lines  = []
@@ -725,10 +857,10 @@ class RadianceUnifiedLoader:
         # ════════════════════════════════════════════════════════════════
         # 1. RESOLVE ARCHITECTURE
         # ════════════════════════════════════════════════════════════════
-        unet_path = folder_paths.get_full_path("diffusion_models", unet_name)
+        unet_path = _ensure_model_exists(unet_name, "diffusion_models", auto_download)
         if not unet_path:
             raise FileNotFoundError(
-                f"❌ UNET not found: '{unet_name}'. Was it deleted or moved?"
+                f"❌ UNET not found: '{unet_name}'. Enable auto_download or install it manually."
             )
 
         detected_type = None
@@ -736,19 +868,19 @@ class RadianceUnifiedLoader:
             detected_type = _detect_model_type(unet_path)
             if detected_type:
                 resolved_type = detected_type
-                info_lines.append(f"🔍 Auto-detected: {resolved_type}")
+                info_lines.append(f"◎ Auto-detected: {resolved_type}")
             else:
                 resolved_type = "sdxl"   # safe fallback
                 logger.warning(
-                    "⚠ Architecture auto-detect failed. Falling back to 'sdxl'. "
+                    "◎ Architecture auto-detect failed. Falling back to 'sdxl'. "
                     "Set model_type manually if this is wrong."
                 )
-                info_lines.append("⚠ Auto-detect failed — fallback: sdxl")
+                info_lines.append("◎ Auto-detect failed — fallback: sdxl")
         else:
             resolved_type = model_type
 
         latent_fmt  = _latent_format(resolved_type)
-        lat_msg     = f"📐 Latent format: {latent_fmt} ({resolved_type})"
+        lat_msg     = f"◎ Latent format: {latent_fmt} ({resolved_type})"
         logger.info(lat_msg)
         info_lines.append(lat_msg)
 
@@ -758,12 +890,13 @@ class RadianceUnifiedLoader:
         if offload_mode == "sequential":
             try:
                 comfy.model_management.set_lowvram_mode(True)
-                logger.info("🔋 Sequential CPU offload enabled")
-                info_lines.append("🔋 Offload: sequential")
+                logger.info("◎ Sequential CPU offload enabled")
+                info_lines.append("◎ Offload: sequential")
             except Exception as e:
-                logger.warning(f"⚠ Could not enable sequential offload: {e}")
+                logger.warning(f"◎ Could not enable sequential offload: {e}")
 
-        clip_load_device = "cpu" if offload_mode == "cpu_offload" else None
+        # FIX 6: ComfyUI model_options["load_device"] expects torch.device, not str.
+        clip_load_device = torch.device("cpu") if offload_mode == "cpu_offload" else None
 
         # ════════════════════════════════════════════════════════════════
         # 3. VRAM ESTIMATION
@@ -779,12 +912,12 @@ class RadianceUnifiedLoader:
                                         has_loras, has_cn)
             avail = get_available_vram()
             total = get_total_vram()
-            vram_msg = (f"📊 VRAM: ~{est} GB needed | "
+            vram_msg = (f"◎ VRAM: ~{est} GB needed | "
                         f"{avail} GB free / {total} GB total")
             logger.info(vram_msg)
             info_lines.append(vram_msg)
             if avail > 0 and est > avail * 0.9:
-                warn = (f"⚠ VRAM tight! {est} GB estimated, {avail} GB free. "
+                warn = (f"◎ VRAM tight! {est} GB estimated, {avail} GB free. "
                         f"Consider fp8 dtype or cpu_offload.")
                 logger.warning(warn)
                 info_lines.append(warn)
@@ -799,15 +932,18 @@ class RadianceUnifiedLoader:
         unet_fp   = _file_fingerprint(unet_path)
         unet_key  = f"unet:{unet_path}:{weight_dtype}:{unet_fp}"
 
-        if caching and _cache.has(unet_key):
+        # FIX 4: Record cache HIT before loading — after _cache.put() the key
+        # is always present, so checking has() post-load always returns True.
+        unet_cache_hit = caching and _cache.has(unet_key)
+        if unet_cache_hit:
             model = _cache.get(unet_key)
-            logger.info(f"⚡ UNET from cache: {unet_name}")
-            info_lines.append(f"⚡ UNET: {unet_name} (cached)")
+            logger.info(f"◎ UNET from cache: {unet_name}")
+            info_lines.append(f"◎ UNET: {unet_name} (cached)")
         else:
             model_options = {}
             is_gguf = unet_name.lower().endswith(".gguf")
             if is_gguf:
-                logger.info(f"✓ GGUF detected: {unet_name} (embedded quant)")
+                logger.info(f"◎ GGUF detected: {unet_name} (embedded quant)")
             else:
                 dtype_map = {
                     "fp8_e4m3fn": torch.float8_e4m3fn,
@@ -822,8 +958,8 @@ class RadianceUnifiedLoader:
             try:
                 model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
                 elapsed = time.time() - t0
-                logger.info(f"✓ UNET: {unet_name} [{weight_dtype}] ({elapsed:.1f}s)")
-                info_lines.append(f"✓ UNET: {unet_name} [{weight_dtype}] ({elapsed:.1f}s)")
+                logger.info(f"◎ UNET: {unet_name} [{weight_dtype}] ({elapsed:.1f}s)")
+                info_lines.append(f"◎ UNET: {unet_name} [{weight_dtype}] ({elapsed:.1f}s)")
                 if caching:
                     _cache.put(unet_key, model)
             except Exception as e:
@@ -833,6 +969,12 @@ class RadianceUnifiedLoader:
         # 5. LOAD CLIP  (named slots → ordered paths → mtime cache key)
         # ════════════════════════════════════════════════════════════════
         t0 = time.time()
+        
+        # Ensure all selected CLIPs exist/downloaded
+        for slot, val in [("clip_l", clip_l), ("clip_g", clip_g), 
+                          ("t5xxl", t5xxl), ("llm_encoder", llm_encoder)]:
+             _ensure_model_exists(val, "text_encoders", auto_download)
+
         clip_paths = _assemble_clip_paths(resolved_type, clip_l, clip_g, t5xxl, llm_encoder)
 
         if not clip_paths:
@@ -853,8 +995,8 @@ class RadianceUnifiedLoader:
 
         if caching and _cache.has(clip_key):
             clip = _cache.get(clip_key)
-            logger.info(f"⚡ CLIP from cache: {clip_slot_used}")
-            info_lines.append(f"⚡ CLIP: {'+'.join(clip_slot_used)} (cached)")
+            logger.info(f"◎ CLIP from cache: {clip_slot_used}")
+            info_lines.append(f"◎ CLIP: {'+'.join(clip_slot_used)} (cached)")
         else:
             clip_type_enum = get_clip_type_enum(resolved_type)
             clip_model_opts = {}
@@ -876,11 +1018,11 @@ class RadianceUnifiedLoader:
                 )
                 elapsed = time.time() - t0
                 logger.info(
-                    f"✓ CLIP: {'+'.join(clip_slot_used)} "
+                    f"◎ CLIP: {'+'.join(clip_slot_used)} "
                     f"[type={resolved_type}, dtype={clip_dtype}] ({elapsed:.1f}s)"
                 )
                 info_lines.append(
-                    f"✓ CLIP: {'+'.join(clip_slot_used)} [{clip_dtype}] ({elapsed:.1f}s)"
+                    f"◎ CLIP: {'+'.join(clip_slot_used)} [{clip_dtype}] ({elapsed:.1f}s)"
                 )
                 if caching:
                     _cache.put(clip_key, clip)
@@ -891,24 +1033,24 @@ class RadianceUnifiedLoader:
         # 6. LOAD VAE  (mtime cache key)
         # ════════════════════════════════════════════════════════════════
         t0 = time.time()
-        vae_path = folder_paths.get_full_path("vae", vae_name)
+        vae_path = _ensure_model_exists(vae_name, "vae", auto_download)
         if not vae_path:
-            raise FileNotFoundError(f"❌ VAE not found: '{vae_name}'.")
+            raise FileNotFoundError(f"❌ VAE not found: '{vae_name}'. Enable auto_download or install it manually.")
 
         vae_fp  = _file_fingerprint(vae_path)
         vae_key = f"vae:{vae_path}:{vae_fp}"
 
         if caching and _cache.has(vae_key):
             vae = _cache.get(vae_key)
-            logger.info(f"⚡ VAE from cache: {vae_name}")
-            info_lines.append(f"⚡ VAE: {vae_name} (cached)")
+            logger.info(f"◎ VAE from cache: {vae_name}")
+            info_lines.append(f"◎ VAE: {vae_name} (cached)")
         else:
             try:
                 sd  = comfy.utils.load_torch_file(vae_path)
                 vae = comfy.sd.VAE(sd=sd)
                 elapsed = time.time() - t0
-                logger.info(f"✓ VAE: {vae_name} ({elapsed:.1f}s)")
-                info_lines.append(f"✓ VAE: {vae_name} ({elapsed:.1f}s)")
+                logger.info(f"◎ VAE: {vae_name} ({elapsed:.1f}s)")
+                info_lines.append(f"◎ VAE: {vae_name} ({elapsed:.1f}s)")
                 if caching:
                     _cache.put(vae_key, vae)
             except Exception as e:
@@ -933,11 +1075,11 @@ class RadianceUnifiedLoader:
                 continue
             lora_path = folder_paths.get_full_path("loras", lora_name)
             if not lora_path:
-                msg = f"❌ LoRA not found: '{lora_name}'"
+                msg = f"◎ LoRA not found: '{lora_name}'"
                 if lora_on_error == "raise":
                     raise FileNotFoundError(msg)
-                logger.warning(f"⚠ {msg} — Skipping.")
-                info_lines.append(f"⚠ LoRA {i}: {lora_name} (not found)")
+                logger.warning(f"◎ {msg} — Skipping.")
+                info_lines.append(f"◎ LoRA {i}: {lora_name} (not found)")
                 continue
             try:
                 t0 = time.time()
@@ -947,10 +1089,10 @@ class RadianceUnifiedLoader:
                 )
                 elapsed = time.time() - t0
                 logger.info(
-                    f"✓ LoRA {i}: {lora_name} (model={model_str}, clip={clip_str}, {elapsed:.1f}s)"
+                    f"◎ LoRA {i}: {lora_name} (model={model_str}, clip={clip_str}, {elapsed:.1f}s)"
                 )
                 info_lines.append(
-                    f"✓ LoRA {i}: {lora_name} [m={model_str} c={clip_str}] ({elapsed:.1f}s)"
+                    f"◎ LoRA {i}: {lora_name} [m={model_str} c={clip_str}] ({elapsed:.1f}s)"
                 )
                 applied_loras.append({"name": lora_name, "model_str": model_str,
                                       "clip_str": clip_str})
@@ -958,8 +1100,8 @@ class RadianceUnifiedLoader:
                 msg = f"Failed to apply LoRA '{lora_name}': {e}"
                 if lora_on_error == "raise":
                     raise RuntimeError(f"❌ {msg}")
-                logger.warning(f"⚠ {msg} — Skipping.")
-                info_lines.append(f"⚠ LoRA {i}: {lora_name} (failed)")
+                logger.warning(f"◎ {msg} — Skipping.")
+                info_lines.append(f"◎ LoRA {i}: {lora_name} (failed)")
 
         # ════════════════════════════════════════════════════════════════
         # 8. LOAD CONTROLNET
@@ -968,20 +1110,20 @@ class RadianceUnifiedLoader:
         if controlnet_name and controlnet_name != "None":
             cn_path = folder_paths.get_full_path("controlnet", controlnet_name)
             if not cn_path:
-                logger.warning(f"⚠ ControlNet not found: '{controlnet_name}'")
-                info_lines.append(f"⚠ ControlNet: {controlnet_name} (not found)")
+                logger.warning(f"◎ ControlNet not found: '{controlnet_name}'")
+                info_lines.append(f"◎ ControlNet: {controlnet_name} (not found)")
             else:
                 try:
                     t0 = time.time()
                     controlnet = comfy.sd.load_controlnet(cn_path)
                     elapsed = time.time() - t0
                     logger.info(
-                        f"✓ ControlNet: {controlnet_name} "
+                        f"◎ ControlNet: {controlnet_name} "
                         f"(str={controlnet_strength} range={controlnet_start}-{controlnet_end}, "
                         f"{elapsed:.1f}s)"
                     )
                     info_lines.append(
-                        f"✓ ControlNet: {controlnet_name} "
+                        f"◎ ControlNet: {controlnet_name} "
                         f"[str={controlnet_strength} {controlnet_start}-{controlnet_end}] "
                         f"({elapsed:.1f}s)"
                     )
@@ -992,14 +1134,14 @@ class RadianceUnifiedLoader:
                     except Exception:
                         pass
                 except Exception as e:
-                    logger.warning(f"⚠ ControlNet load failed '{controlnet_name}': {e}")
-                    info_lines.append(f"⚠ ControlNet: {controlnet_name} (failed)")
+                    logger.warning(f"◎ ControlNet load failed '{controlnet_name}': {e}")
+                    info_lines.append(f"◎ ControlNet: {controlnet_name} (failed)")
 
         # ════════════════════════════════════════════════════════════════
         # 9. BUILD OUTPUTS
         # ════════════════════════════════════════════════════════════════
         total_ms = round((time.time() - load_start) * 1000)
-        summary  = (f"✓ Load complete in {total_ms / 1000:.1f}s"
+        summary  = (f"◎ Load complete in {total_ms / 1000:.1f}s"
                     + (f" (cache: {_cache.size})" if caching else ""))
         logger.info(summary)
         info_lines.append(summary)
@@ -1021,7 +1163,7 @@ class RadianceUnifiedLoader:
             "loras":         applied_loras,
             "controlnet":    controlnet_name if controlnet else None,
             "load_ms":       total_ms,
-            "cached_unet":   caching and _cache.has(unet_key),
+            "cached_unet":   unet_cache_hit,  # FIX 4: True only when loaded from cache
         }
 
         # Output the accumulated lora list (for chaining downstream loaders
@@ -1042,15 +1184,84 @@ class RadianceUnifiedLoader:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+class RadianceControlNetApply:
+    """
+    Advanced ControlNet application node for the Radiance suite.
+    - Gracefully bypasses if CONTROL_NET is None (prevents AttributeError crashes).
+    - Supports standard start/end percent and strength controls.
+    """
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "conditioning": ("CONDITIONING", ),
+                "control_net": ("CONTROL_NET", ),
+                "image": ("IMAGE", ),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05,
+                    "tooltip": "Global strength of the control effect."}),
+                "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Percentage of the generation where control starts (0.0 = beginning)."}),
+                "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Percentage of the generation where control ends (1.0 = end)."}),
+                "control_type": (["auto"] + list(UNION_CONTROLNET_TYPES.keys()), {"default": "auto",
+                    "tooltip": "For Union ControlNets (like Flux), select the specific control mode (Canny, Depth, etc.)."}),
+            }
+        }
+    
+    RETURN_TYPES = ("CONDITIONING",)
+    RETURN_NAMES = ("conditioning",)  # FIX 7: was missing — ComfyUI showed generic labels
+    FUNCTION = "apply_controlnet"
+    CATEGORY = "FXTD Studios/Radiance/Generate"
+
+    def apply_controlnet(self, conditioning, control_net, image, strength, start_percent, end_percent, control_type="auto"):
+        # 1. Graceful Bypass: If no control_net or zero strength, just return the input conditioning.
+        if control_net is None:
+            logger.info("◎ Radiance Control: No ControlNet connected. Bypassing.")
+            return (conditioning, )
+            
+        if strength == 0:
+            return (conditioning, )
+
+        # 2. Set Union ControlNet Type (if applicable)
+        control_net = control_net.copy()
+        type_number = UNION_CONTROLNET_TYPES.get(control_type, -1)
+        if type_number >= 0:
+            control_net.set_extra_arg("control_type", [type_number])
+        else:
+            control_net.set_extra_arg("control_type", [])
+
+        # 3. Advanced Application (Standard ComfyUI Logic with added safety)
+        c = []
+        try:
+            for t in conditioning:
+                n = [t[0], t[1].copy()]
+                c_net = control_net.copy().set_cond_hint(image, strength, (start_percent, end_percent))
+                if 'control' in n[1]:
+                    c_net.set_previous_controlnet(n[1]['control'])
+                n[1]['control'] = c_net
+                n[1]['control_apply_strength'] = strength
+                c.append(n)
+            return (c, )
+        except Exception as e:
+            logger.error(f"❌ Radiance Control: Failed to apply ControlNet: {e}")
+            return (conditioning, )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #                         NODE REGISTRATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# FIX 1: NODE_CLASS_MAPPINGS keys must be plain ASCII identifiers.
+# The ◎ prefix belongs only in NODE_DISPLAY_NAME_MAPPINGS (the user-visible label).
+# Having it in the type key breaks ComfyUI workflow JSON serialization and node lookup.
 NODE_CLASS_MAPPINGS = {
     "RadianceUnifiedLoader": RadianceUnifiedLoader,
     "RadianceLoraStack":     RadianceLoraStack,
+    "RadianceControlApply":  RadianceControlNetApply,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceUnifiedLoader": "◎ Radiance Unified Loader",
-    "RadianceLoraStack": "◎ Radiance LoRA Stack",
+    "RadianceLoraStack":     "◎ Radiance LoRA Stack",
+    "RadianceControlApply":  "◎ Radiance Control",
 }

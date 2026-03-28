@@ -1,13 +1,18 @@
 """
-RADIANCE - PROMPT ENGINEERING NODES v2.1.0
+RADIANCE - PROMPT ENGINEERING NODES v2.2.1
 --------------------------------------
 Professional tools for constructing cinematic, high-fidelity prompts for Flux and other diffusion models.
-Includes "Prompt Machine" for text output and "Cinematic Encoder" for direct CLIP conditioning.
+Includes the "Cinematic Encoder" node for direct CLIP conditioning with architecture-aware prompt building.
+
 Features:
 - Industry-standard cinematic terminology
-- One-click style presets (Film Noir, Cyberpunk, etc.)
+- One-click style presets (Film Noir, Cyberpunk, Nolan, Villeneuve, etc.)
 - Direct CLIP encoding with clip skip support
-- Smart auto-negative generation
+- Architecture-aware format: prose for Flux/T5/SD3, structured for SD1.5/SDXL
+- Smart auto-negative generation per style and architecture
+- A/B prompt mode for rapid iteration
+- Scene mood vocabulary injection
+- Real token count from CLIP tokenizer
 
 v2.1 Fixes:
 - All preset configs validated against dataset lists (no orphaned values)
@@ -17,6 +22,12 @@ v2.1 Fixes:
 - Added missing NODE_CLASS_MAPPINGS for encoder node
 - Added preset validation at import time
 - Fixed Over-The-Shoulder case mismatch
+
+v2.2 Fixes:
+- BUG-1: NeuralGrammar.scientificize no longer lowercases entire prompt
+- BUG-2: NeuralGrammar applied to raw subject before framing assembly
+- BUG-3: encode_from_tokens_scheduled falls back to encode_from_tokens for older ComfyUI
+- BUG-5: _real_token_count now counts actual non-pad tokens from CLIP list-of-tuples
 
 Example Usage (Cinematic Encoder):
     Connect CLIP model → Set base prompt → Select style preset or customize →
@@ -28,7 +39,7 @@ import re
 import torch
 from typing import Optional
 
-logger = logging.getLogger("radiance.prompt")
+logger = logging.getLogger("◎ Radiance.prompt")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -654,18 +665,30 @@ class NeuralGrammar:
 
     @staticmethod
     def scientificize(text: str) -> str:
-        """Replace common words with high-precision cinematic terms."""
-        words = text.lower().split()
+        """Replace common words with high-precision cinematic terms.
+
+        BUG-1 FIX: Previous code called text.lower().split() which lowercased
+        the ENTIRE prompt before doing the word scan. Every word — camera names,
+        proper nouns, framing labels — had its capitalisation destroyed even when
+        no replacement was made. The function always returned the lowercased string.
+
+        Fix: split without lowercasing; compare each word lowercase only for the
+        dict lookup; preserve the original word when no replacement applies.
+
+        BUG-2 (related): word.strip(".,!?;:") did not strip parentheses, so words
+        like "(Cinematic)" would fail the lookup. Added '()' to the strip set.
+        """
+        words = text.split()           # ← preserve original case
         new_words = []
         modified = False
         for word in words:
-            clean_word = word.strip(".,!?;:")
-            if clean_word in NeuralGrammar.SCIENTIFIC_REPLACEMENTS:
-                replacement = NeuralGrammar.SCIENTIFIC_REPLACEMENTS[clean_word]
-                new_words.append(word.replace(clean_word, replacement))
+            clean_word = word.strip(".,!?;:()")   # ← also strip parens
+            if clean_word.lower() in NeuralGrammar.SCIENTIFIC_REPLACEMENTS:
+                replacement = NeuralGrammar.SCIENTIFIC_REPLACEMENTS[clean_word.lower()]
+                new_words.append(replacement)
                 modified = True
             else:
-                new_words.append(word)
+                new_words.append(word)  # ← preserve original capitalisation
         if modified:
             logger.debug("[NeuralGrammar] Applied cinematic vocabulary enhancement.")
         return " ".join(new_words)
@@ -715,7 +738,7 @@ def _validate_presets():
                 errors.append(f"  [{preset_name}] {field}='{value}' not in dataset")
     if errors:
         logger.error(
-            f"⚠ PRESET VALIDATION FAILED ({len(errors)} issues):\n" + "\n".join(errors)
+            f"◎ PRESET VALIDATION FAILED ({len(errors)} issues):\n" + "\n".join(errors)
         )
     else:
         logger.debug("✓ All preset configs validated against datasets")
@@ -827,11 +850,11 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
             if key in tokens and tokens[key]:
                 tok_data = tokens[key][0]
                 if hasattr(tok_data, "shape"):
-                    # Try to count non-padding tokens for accuracy
+                    # Tensor path (T5 / newer CLIP wrappers) — single tensor,
+                    # no multi-chunk structure. Count non-pad tokens directly.
                     try:
                         import torch as _torch
                         if _torch.is_tensor(tok_data):
-                            # T5 pad=0, CLIP pad=49407. Count non-pad tokens.
                             pad_id = 0 if key in ("t5xxl", "llm") else 49407
                             non_pad = (tok_data != pad_id).sum().item()
                             if non_pad > 0:
@@ -839,8 +862,25 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
                     except Exception:
                         pass
                     return int(tok_data.shape[-1])
-                elif hasattr(tok_data, "__len__"):
-                    return len(tok_data)
+                elif isinstance(tok_data, list) and tok_data:
+                    # BUG-5 FIX: ComfyUI CLIP tokenizer returns a list of chunks:
+                    #   tokens[key] = [chunk0, chunk1, ...]
+                    # where each chunk is [(token_id, weight), ...] padded to 77.
+                    #
+                    # BUG-6 FIX: Previous code only examined tokens[key][0] —
+                    # the first chunk. For prompts > 77 tokens (BREAK or SDXL
+                    # long prompts), there are multiple chunks and the count was
+                    # severely undercounted. Fix: sum across ALL chunks.
+                    if isinstance(tok_data[0], (tuple, list)):
+                        pad_id = 0 if key in ("t5xxl", "llm") else 49407
+                        total_non_pad = 0
+                        total_len = 0
+                        for chunk in tokens[key]:   # ← iterate ALL chunks
+                            total_non_pad += sum(1 for t, *_ in chunk if t != pad_id)
+                            total_len += len(chunk)
+                        return total_non_pad if total_non_pad > 0 else total_len
+                    # Non-tuple list: sum lengths across all chunks
+                    return sum(len(chunk) for chunk in tokens[key])
         # Fallback: count all token entries if shape not accessible
         for val in tokens.values():
             if val and hasattr(val[0], "shape"):
@@ -879,6 +919,14 @@ def _build_prose_prompt(
     if subject_weight != 1.0:
         subject = _apply_subject_weight(subject, subject_weight)
 
+    # Neural Grammar Injection: If the user asks for accuracy/precision, expand it.
+    # BUG-2 FIX: Previously applied NeuralGrammar.scientificize to parts[0] which
+    # by this point already contains the framing prefix ("Medium Shot (MS) of …").
+    # This caused the framing label to be lowercased and corrupted.
+    # Apply the transform to the raw subject BEFORE it is assembled into parts[0].
+    if any(kw in subject.lower() for kw in ("accurate", "precise", "visualize")):
+        subject = NeuralGrammar.scientificize(subject)
+
     # Weight mode: technique_first leads with camera, then subject
     if weight_mode == "technique_first" and c(camera):
         parts.append(f"Photographed on {camera}, {subject}.")
@@ -886,10 +934,6 @@ def _build_prose_prompt(
         parts.append(f"{framing} of {subject}.")
     else:
         parts.append(f"{subject}.")
-
-    # Neural Grammar Injection: If the user asks for accuracy/precision, expand it
-    if "accurate" in subject or "precise" in subject or "visualize" in subject:
-        parts[0] = NeuralGrammar.scientificize(parts[0])
 
     # 2. Art direction (positioned here — right after subject)
     if art_direction and art_direction.strip():
@@ -1043,35 +1087,7 @@ def enhance_prompt_grammar(prompt: str, level: str, arch: str = "sdxl") -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def build_cinematic_prompt(
-    base_prompt,
-    framing,
-    camera_type,
-    lens_focal,
-    aperture_dof,
-    lighting,
-    style_aesthetic,
-    film_stock="None",
-    shutter_speed="None",
-    color_grading="None",
-    aspect_ratio="None",
-    custom_details="",
-    year_era=DEFAULT_YEAR,
-    negative_strength="Standard",
-    lora_keywords="",
-    use_break=False,
-):
-    """Legacy shim kept for RadiancePromptMachine backward compatibility."""
-    return build_cinematic_prompt_v3(
-        base_prompt=base_prompt, framing=framing, camera_type=camera_type,
-        lens_focal=lens_focal, aperture_dof=aperture_dof, lighting=lighting,
-        style_aesthetic=style_aesthetic, film_stock=film_stock,
-        shutter_speed=shutter_speed, color_grading=color_grading,
-        aspect_ratio=aspect_ratio, custom_details=custom_details,
-        year_era=year_era, negative_strength=negative_strength,
-        lora_keywords=lora_keywords, use_break=use_break,
-        target_arch="sdxl",
-    )
+
 
 
 def build_cinematic_prompt_v3(
@@ -1578,12 +1594,20 @@ class RadianceCinematicPromptEncoder:
             clip.clip_layer(-clip_skip)
 
         # ── Encode ──────────────────────────────────────────────────────────
-        positive_cond = clip.encode_from_tokens_scheduled(pos_tokens)
+        # BUG-3 FIX: encode_from_tokens_scheduled was added in ComfyUI ~2024-Q2.
+        # Older installs (and some custom forks) only expose encode_from_tokens().
+        # Fall back gracefully so the node works on any ComfyUI version.
+        def _encode(tokens):
+            if hasattr(clip, "encode_from_tokens_scheduled"):
+                return clip.encode_from_tokens_scheduled(tokens)
+            return clip.encode_from_tokens(tokens, return_pooled=True)
+
+        positive_cond = _encode(pos_tokens)
 
         # Ensure negative prompt is at least a space to prevent empty tensor crashes on strict arches
         safe_negative = negative_prompt if negative_prompt and negative_prompt.strip() else " "
         neg_tokens = clip.tokenize(safe_negative)
-        negative_cond = clip.encode_from_tokens_scheduled(neg_tokens)
+        negative_cond = _encode(neg_tokens)
 
         # ── image_ref passthrough ────────────────────────────────────────
         # image_ref is optional, but the output slot is typed IMAGE.
@@ -1600,12 +1624,8 @@ class RadianceCinematicPromptEncoder:
 
 NODE_CLASS_MAPPINGS = {
     "RadianceCinematicPromptEncoder": RadianceCinematicPromptEncoder,
-    # Legacy alias — kept for backwards compatibility with saved workflows
-    # that used the old FXTD node name. JS extension now uses the correct name.
-    "FXTDCinematicPromptEncoder": RadianceCinematicPromptEncoder,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceCinematicPromptEncoder": "◎ Radiance Cinematic Encoder",
-    "FXTDCinematicPromptEncoder": "◎ Radiance Cinematic Encoder (Legacy)",
 }

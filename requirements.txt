@@ -7,3 +7,5 @@ opencolorio>=2.3.0
 colour-science>=0.4.4
 transformers>=4.36.0
 scipy>=1.10.0
+defusedxml>=0.7.1
+imageio-ffmpeg>=0.4.9

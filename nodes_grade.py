@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-                    RADIANCE GRADE NODE v2.1
+                    RADIANCE GRADE NODE v2.2.1
               Professional Color Grading for ComfyUI
                        Radiance © 2024-2026
 
@@ -24,7 +24,7 @@ try:
 except ImportError:
     from exceptions import validate_image_input
 
-logger = logging.getLogger("radiance.grade")
+logger = logging.getLogger("◎ Radiance.grade")
 
 # =============================================================================
 # GRADE PRESETS - Common cinematic looks
@@ -178,11 +178,15 @@ def _apply_grade(
     img[..., 1] += offset_g
     img[..., 2] += offset_b
     # 4. Gamma (sign-preserving)
-    eps = 1e-8
+    # FIX 3: was torch.abs(x) + 1e-8 which inflates all near-zero values
+    # (a 1e-9 input becomes (1e-8)^0.45 ≈ 5.6e-4). Using clamp(min=1e-12)
+    # keeps the guard only for the numerically unstable region, consistent
+    # with Float32ColorCorrect._sign_pow_torch in color.py.
+    # sign(0) = 0 in PyTorch, so pure black always stays black.
     for ch, g in enumerate([gamma_r, gamma_g, gamma_b]):
         if g != 1.0:
             img[..., ch] = torch.sign(img[..., ch]) * torch.pow(
-                torch.abs(img[..., ch]) + eps, 1.0 / g
+                torch.clamp(torch.abs(img[..., ch]), min=1e-12), 1.0 / g
             )
     # 5. Contrast
     if contrast != 1.0:
@@ -366,7 +370,7 @@ class RadianceGrade:
     ) -> Tuple[torch.Tensor, str]:
 
         # --- Input validation ---
-        validate_image_input(image, "RadianceGrade", require_batch=True)
+        validate_image_input(image, "◎ RadianceGrade", require_batch=True)
         if image.shape[-1] < 3:
             logger.warning(
                 f"[Grade] Image has {image.shape[-1]} channel(s), expected >= 3. "
@@ -489,7 +493,7 @@ class RadianceApplyGradeInfo:
 
     def apply(self, image: torch.Tensor, grade_info: str, strength: float = 1.0):
         # --- Input validation ---
-        validate_image_input(image, "RadianceApplyGradeInfo", require_batch=True)
+        validate_image_input(image, "◎ RadianceApplyGradeInfo", require_batch=True)
         if image.shape[-1] < 3:
             if image.shape[-1] == 1:
                 image = image.repeat(1, 1, 1, 3)
@@ -557,8 +561,8 @@ class RadianceGradeMatch:
 
     def match(self, source: torch.Tensor, reference: torch.Tensor, strength: float = 1.0):
         # --- Input validation ---
-        validate_image_input(source, "RadianceGradeMatch (source)", require_batch=True)
-        validate_image_input(reference, "RadianceGradeMatch (reference)", require_batch=True)
+        validate_image_input(source, "◎ RadianceGradeMatch (source)", require_batch=True)
+        validate_image_input(reference, "◎ RadianceGradeMatch (reference)", require_batch=True)
         if source.shape[-1] < 3:
             if source.shape[-1] == 1:
                 source = source.repeat(1, 1, 1, 3)
@@ -572,7 +576,18 @@ class RadianceGradeMatch:
             logger.error(f"[GradeMatch] Failed: {e}")
             return (source, "{}")
 
-        mixed = {k: v * strength + (1.0 if "gain" in k else 0.0) * (1.0 - strength)
+        # FIX 2: Previous formula used (1.0 if "gain" in k else 0.0) as identity,
+        # which is wrong for gamma/contrast/saturation (identity=1.0) and pivot
+        # (identity=0.5). At strength=0 this gave gamma=0 (undefined power),
+        # contrast=0 (flattens image to gray), saturation=0 (full desaturate).
+        _GRADE_IDENTITY = {
+            "gain_r": 1.0, "gain_g": 1.0, "gain_b": 1.0,
+            "lift_r": 0.0, "lift_g": 0.0, "lift_b": 0.0,
+            "gamma_r": 1.0, "gamma_g": 1.0, "gamma_b": 1.0,
+            "offset_r": 0.0, "offset_g": 0.0, "offset_b": 0.0,
+            "contrast": 1.0, "pivot": 0.5, "saturation": 1.0,
+        }
+        mixed = {k: v * strength + _GRADE_IDENTITY.get(k, 0.0) * (1.0 - strength)
                  for k, v in mp.items()}
 
         graded = _apply_grade(
@@ -601,6 +616,7 @@ class RadianceGradeMatch:
 
 
 # =============================================================================
+# FIX 1: Plain ASCII keys — ◎ belongs only in DISPLAY_NAME_MAPPINGS.
 NODE_CLASS_MAPPINGS = {
     "RadianceGrade":          RadianceGrade,
     "RadianceApplyGradeInfo": RadianceApplyGradeInfo,
@@ -608,7 +624,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceGrade": "◎ Radiance Grade",
-    "RadianceApplyGradeInfo": "◎ Apply Grade Info",
-    "RadianceGradeMatch": "◎ Radiance Grade Match",
+    "RadianceGrade":          "◎ Radiance Grade",
+    "RadianceApplyGradeInfo": "◎ Radiance Apply Grade Info",
+    "RadianceGradeMatch":     "◎ Radiance Grade Match",
 }

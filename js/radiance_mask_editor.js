@@ -107,7 +107,7 @@ class RadianceMaskEditor {
         `;
 
         const title = document.createElement("div");
-        title.innerHTML = "<span style='color:#00a8ff; font-weight:600;'>Radiance</span> VFX Mask Editor";
+        title.innerHTML = "<span style='color:#00a8ff; font-weight:600;'>◎ Radiance</span> VFX Mask Editor";
         title.style.color = "#fff"; title.style.fontSize = "14px";
 
         const actionsDiv = document.createElement("div");
@@ -149,10 +149,10 @@ class RadianceMaskEditor {
             leftToolbar.appendChild(btn);
         };
 
-        addTool('brush', '🖌️', 'Soft Brush (B)');
-        addTool('eraser', '🧹', 'Eraser (E)');
+        addTool('brush', '○', 'Soft Brush (B)');
+        addTool('eraser', '◌', 'Eraser (E)');
         addTool('polygon', '⬡', 'Polygon/Spline (P)');
-        addTool('magic_wand', '✨', 'Magic Wand (W)');
+        addTool('magic_wand', '✦', 'Magic Wand (W)');
 
         // ── CANVAS AREA ────────────────────────────────────────────────────────
         this.canvasContainer = document.createElement("div");
@@ -1162,7 +1162,7 @@ app.registerExtension({
     name: "FXTD.Radiance.MaskEditorPro",
     nodeCreated(node) {
         if (node.comfyClass === "RadianceLoadImageMask") {
-            const editBtn = node.addWidget("button", "🎬 Radiance Mask", "edit", () => {
+            const editBtn = node.addWidget("button", "◎ Radiance Mask", "edit", () => {
                 RADIANCE_MASK_EDITOR.load(node);
             });
             editBtn.serialize = false;

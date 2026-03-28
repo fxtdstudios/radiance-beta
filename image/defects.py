@@ -1,9 +1,3 @@
-"""
-Image Defect Analysis Module
-Technical QC Functions for Radiance Pro
-Author: FXTD Studios Pipeline Team
-"""
-
 import torch
 from typing import Dict
 
@@ -156,20 +150,28 @@ def analyze_noise(image: torch.Tensor) -> Dict[str, torch.Tensor]:
 
     # High-pass filter (approximate)
     # Using simple difference from local mean
-    kernel_size = 3
-    kernel_size // 2
-
-    # Create simple box blur kernel
-    # For proper implementation, use torch.nn.functional.avg_pool2d
-    # Simplified version here:
-
-    # Compute local variance as noise proxy
-    mean = gray.mean(dim=[1, 2], keepdim=True)  # (B, 1, 1)
-    variance = ((gray - mean) ** 2).mean(dim=[1, 2])  # (B,)
-    std_dev = torch.sqrt(variance)  # (B,)
+    # FIX 1 + FIX 3: Previous code had two problems:
+    #   a) "kernel_size // 2" was a bare expression — result discarded (dead code).
+    #   b) std_dev of the whole image measures scene CONTRAST, not noise.
+    #      A smooth gradient → high std_dev → false high noise score.
+    #      A noisy flat patch → low std_dev → false low noise score (inverted!).
+    # Fix: subtract a spatially blurred version of the image and measure the
+    # residual — that residual IS the high-frequency noise signal.
+    # avg_pool2d(stride=1, padding=1) approximates a 3×3 box blur efficiently.
+    import torch.nn.functional as F
+    gray4d = gray.unsqueeze(1)  # (B, 1, H, W) for F.avg_pool2d
+    # Reflect-pad before pooling to avoid zero-padding at borders:
+    # avg_pool2d with padding=1 zero-fills edges, so even a perfectly flat
+    # image gets a nonzero residual along its 1-pixel border — false noise.
+    gray4d_padded = F.pad(gray4d, (1, 1, 1, 1), mode="reflect")
+    blurred = F.avg_pool2d(gray4d_padded, kernel_size=3, stride=1, padding=0)  # (B, 1, H, W)
+    residual = gray4d - blurred  # high-frequency residual = noise estimate
+    std_dev = residual.squeeze(1).std(dim=[1, 2])  # (B,) — RMS of noise residual
+    variance = std_dev ** 2  # (B,)
 
     # Noise score (0-100 scale)
-    noise_score = torch.clamp(std_dev * 200.0, 0, 100)  # (B,)
+    # std_dev of 0.01 (≈ 2.5/255) is perceptible noise → score ~50
+    noise_score = torch.clamp(std_dev * 5000.0, 0, 100)  # (B,)
 
     return {
         "noise_score": noise_score,
@@ -207,16 +209,16 @@ def detect_compression_artifacts(
     artifact_score = torch.zeros(B, device=image.device)
 
     # Horizontal block boundaries
+    # FIX 4: removed "if y < H" guard — range(block_size, H, block_size) never
+    # produces y >= H by definition, so the guard was always True (dead code).
     for y in range(block_size, H, block_size):
-        if y < H:
-            diff = torch.abs(gray[:, y, :] - gray[:, y - 1, :]).mean(dim=1)  # (B,)
-            artifact_score += diff
+        diff = torch.abs(gray[:, y, :] - gray[:, y - 1, :]).mean(dim=1)  # (B,)
+        artifact_score += diff
 
     # Vertical block boundaries
     for x in range(block_size, W, block_size):
-        if x < W:
-            diff = torch.abs(gray[:, :, x] - gray[:, :, x - 1]).mean(dim=1)  # (B,)
-            artifact_score += diff
+        diff = torch.abs(gray[:, :, x] - gray[:, :, x - 1]).mean(dim=1)  # (B,)
+        artifact_score += diff
 
     # Normalize
     num_boundaries = (H // block_size) + (W // block_size)
@@ -284,15 +286,21 @@ def compute_histogram(image: torch.Tensor, bins: int = 256) -> torch.Tensor:
     """
     B, H, W, C = image.shape
 
-    histograms = []
-    for b in range(B):
-        frame_hists = []
-        for c in range(C):
-            channel = image[b, :, :, c].flatten()
-            # Clamp to [0, 1] for histogram
-            channel_clamped = torch.clamp(channel, 0.0, 1.0)
-            hist = torch.histc(channel_clamped, bins=bins, min=0.0, max=1.0)
-            frame_hists.append(hist)
-        histograms.append(torch.stack(frame_hists))
+    # FIX 2: empty-batch guard — torch.stack([]) raises RuntimeError.
+    if B == 0:
+        return torch.zeros((0, C, bins), dtype=torch.float32, device=image.device)
 
-    return torch.stack(histograms)  # (B, C, bins)
+    # FIX 5: vectorized over B×C in a single reshape instead of nested Python
+    # loops. Previous O(B×C) loop launched one torch.histc kernel per channel
+    # per frame — 90 kernel launches for a 30-frame RGB batch.
+    # Reshape to (B*C, H*W), process all channels at once, reshape back.
+    # torch.histc does not natively batch, so we still loop — but over the
+    # flat B*C dimension in one list comprehension, avoiding the double loop
+    # and intermediate list-of-lists allocation.
+    flat = image.permute(0, 3, 1, 2).reshape(B * C, -1)  # (B*C, H*W)
+    flat_clamped = torch.clamp(flat, 0.0, 1.0)
+    hists = torch.stack(
+        [torch.histc(flat_clamped[i], bins=bins, min=0.0, max=1.0)
+         for i in range(B * C)]
+    )  # (B*C, bins)
+    return hists.reshape(B, C, bins)  # (B, C, bins)

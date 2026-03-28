@@ -1,9 +1,13 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# RADIANCE: Professional HDR & VFX Suite
+# Version: v2.2.1
+# ═══════════════════════════════════════════════════════════════════════════════
 import torch
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import logging
 
-logger = logging.getLogger("radiance.overlay")
+logger = logging.getLogger("◎ Radiance.overlay")
 
 
 class RadianceMetadataOverlay:
@@ -18,7 +22,7 @@ class RadianceMetadataOverlay:
             "required": {
                 "image": ("IMAGE",),
                 "enabled": ("BOOLEAN", {"default": True}),
-                "project": ("STRING", {"default": "RADIANCE_PRO", "multiline": False}),
+                "project": ("STRING", {"default": "◎ Radiance_PRO", "multiline": False}),
                 "shot": ("STRING", {"default": "SH_010", "multiline": False}),
                 "frame": ("INT", {"default": 1, "min": 0, "max": 999999}),
                 "timecode": ("STRING", {"default": "00:00:00:00", "multiline": False}),
@@ -348,12 +352,12 @@ class RadianceBlendComposite:
 
 
 NODE_CLASS_MAPPINGS = {
-    "RadianceMetadataOverlay": RadianceMetadataOverlay,
-    "RadianceBlendComposite":  RadianceBlendComposite,
+    "◎ RadianceMetadataOverlay": RadianceMetadataOverlay,
+    "◎ RadianceBlendComposite":  RadianceBlendComposite,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceMetadataOverlay": "◎ Radiance Metadata Overlay",
-    "RadianceBlendComposite": "◎ Radiance Blend Composite",
+    "◎ RadianceMetadataOverlay": "◎ Radiance Metadata Overlay",
+    "◎ RadianceBlendComposite": "◎ Radiance Blend Composite",
 }
 

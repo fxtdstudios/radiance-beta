@@ -677,7 +677,9 @@ def process_tiles_32bit(
 
     # Calculate tile positions
     stride = max(1, tile_size - overlap)
-    max(1, out_tile_size - out_overlap)
+    # FIX 1: "max(1, out_tile_size - out_overlap)" was a bare expression —
+    # result computed and immediately discarded. out_stride is never used;
+    # output tile positions are derived from input_pos * scale. Removed.
 
     # v1.1.0 FIX: Precompute tile positions to avoid infinite loops
     y_positions = []
@@ -1244,6 +1246,20 @@ class RadianceDownscale32bit:
                 ),
                 "process_in_linear": ("BOOLEAN", {"default": True}),
                 "use_gpu": ("BOOLEAN", {"default": True}),
+                # FIX 5: parity with RadianceProUpscale / RadianceUpscaleBySize.
+                # Without this param, linear/HDR inputs were always run through
+                # sRGB linearization when process_in_linear=True, double-converting.
+                "input_color_space": (
+                    ["sRGB", "Linear", "Auto"],
+                    {
+                        "default": "sRGB",
+                        "tooltip": (
+                            "Colour space of the input image. "
+                            "Set to 'Linear' or 'Auto' to skip the sRGB↔linear "
+                            "conversion for HDR or already-linear inputs."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -1262,6 +1278,7 @@ class RadianceDownscale32bit:
         pre_blur: float = 0.0,
         process_in_linear: bool = True,
         use_gpu: bool = True,
+        input_color_space: str = "sRGB",  # FIX 5
     ):
 
         batch_size = image.shape[0]
@@ -1276,8 +1293,9 @@ class RadianceDownscale32bit:
                 device = torch.device("cuda")
                 img = image.to(device).float()
 
-                # Apply linear conversion if needed
-                if process_in_linear:
+                # FIX 5: gate on input_color_space — prevents double-converting
+                # HDR/linear inputs when process_in_linear=True.
+                if process_in_linear and input_color_space == "sRGB":
                     # sRGB → Linear on GPU
                     img = torch.where(
                         img <= 0.04045,
@@ -1325,8 +1343,8 @@ class RadianceDownscale32bit:
 
                 result = result.permute(0, 2, 3, 1)
 
-                # Convert back to sRGB
-                if process_in_linear:
+                # FIX 5: gate on input_color_space
+                if process_in_linear and input_color_space == "sRGB":
                     result = torch.where(
                         result <= 0.0031308,
                         result * 12.92,
@@ -1337,9 +1355,12 @@ class RadianceDownscale32bit:
                 # result = torch.clamp(result, min=0)
                 return (result.cpu(), new_w, new_h)
 
-            except RuntimeError:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+            except RuntimeError as e:  # FIX 2: capture + log the error
+                logger.warning(
+                    f"[RadianceDownscale32bit] GPU path failed "
+                    f"({type(e).__name__}: {e}). Falling back to CPU."
+                )
+                torch.cuda.empty_cache()
 
         # CPU fallback
         results = []
@@ -1352,7 +1373,8 @@ class RadianceDownscale32bit:
                 alpha = img[..., 3:4]
                 img = img[..., :3]
 
-            if process_in_linear:
+            # FIX 5: gate on input_color_space
+            if process_in_linear and input_color_space == "sRGB":
                 img = srgb_to_linear_32bit(img)
 
             # Pre-blur in true 32-bit
@@ -1361,7 +1383,8 @@ class RadianceDownscale32bit:
 
             downscaled = separable_resize_32bit(img, new_h, new_w, method)
 
-            if process_in_linear:
+            # FIX 5: gate on input_color_space
+            if process_in_linear and input_color_space == "sRGB":
                 downscaled = linear_to_srgb_32bit(downscaled)
 
             if has_alpha:
@@ -1583,14 +1606,29 @@ class RadianceBitDepthConvert:
                 ]
 
             blue_noise = (noise1 - noise2_up * 0.5) * (strength / levels)
-            return img + blue_noise
+            # FIX 3: (h,w,1) noise broadcasts to ALL channels including alpha.
+            # Ordered was fixed in v1.2.0; Blue Noise + Random were missed.
+            _r3a = img.copy()
+            _nc3a = min(3, channels)  # RGB only, never alpha
+            if img.ndim == 3:
+                _r3a[..., :_nc3a] += blue_noise
+            else:
+                _r3a += blue_noise
+            return _r3a
 
         elif method == "Random":
             # v1.2.0 FIX: seeded RNG for reproducibility
             noise = rng.standard_normal((h, w, 1)).astype(np.float32) * (
                 strength / levels
             )
-            return img + noise
+            # FIX 3: same alpha-channel contamination as Blue Noise. RGB only.
+            _r3b = img.copy()
+            _nc3b = min(3, channels)  # RGB only, never alpha
+            if img.ndim == 3:
+                _r3b[..., :_nc3b] += noise
+            else:
+                _r3b += noise
+            return _r3b
 
         return img
 
@@ -1706,7 +1744,7 @@ class RadianceAIUpscale:
         large_models = {"SUPIR-v0F_fp16", "SUPIR-v0Q_fp16"}
         if model_name in large_models:
             logger.warning(
-                f"⚠ Downloading {model_name} — this is a large model (~6GB) and may take a while."
+                f"◎ Downloading {model_name} — this is a large model (~6GB) and may take a while."
             )
 
         logger.info(f"Downloading {model_name} from {url}...")
@@ -1810,7 +1848,7 @@ class RadianceAIUpscale:
                     size = os.path.getsize(model_path)
                     if size < 1000:
                         logger.warning(
-                            f"⚠ Model file '{model_name}' is suspiciously small ({size} bytes). "
+                            f"◎ Model file '{model_name}' is suspiciously small ({size} bytes). "
                             f"It may be corrupt or a failed download. Consider deleting and re-downloading: "
                             f"{model_path}"
                         )
@@ -2068,10 +2106,13 @@ class RadianceAIUpscale:
             return (result, info)
 
         except Exception as e:
-            logger.error(f"Error during upscale: {e}")
-            import traceback
-
-            traceback.print_exc()
+            # FIX 4: traceback.print_exc() goes to stderr, bypassing the logger.
+            # In ComfyUI server mode the traceback was silently lost.
+            import traceback as _tb
+            logger.error(
+                f"[RadianceAIUpscale] Error during upscale: {e}\n"
+                + _tb.format_exc()
+            )
             return self._fallback_upscale(image, model_name)
 
 
@@ -2217,6 +2258,7 @@ NODE_CLASS_MAPPINGS = {
     "RadianceBitDepthConvert": RadianceBitDepthConvert,
     "RadianceAIUpscale": RadianceAIUpscale,
     "RadianceSharpen32bit": RadianceSharpen32bit,
+    
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -2226,4 +2268,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceBitDepthConvert": "◎ Radiance Bit Depth Convert",
     "RadianceAIUpscale": "◎ Radiance AI Upscale",
     "RadianceSharpen32bit": "◎ Radiance Sharpen 32-bit",
+    
 }
