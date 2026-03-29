@@ -134,6 +134,8 @@ pip install -r requirements_windows.txt  # Or linux/mac_silicon
 
 ## <a name="viewer-shortcuts"></a>◎ Professional Keyboard Shortcuts
 
+![Radiance Pro Viewer](viewer.png)
+
 Radiance is designed for a keyboard-driven VFX workflow. Use these shortcuts to monitor, grade, and navigate your shots with industry-standard precision.
 
 ### ◎ Navigation & Playback
