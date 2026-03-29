@@ -110,30 +110,6 @@ The suite is organized into **11 specialized production zones** to mirror indust
 
 ![Basic Radiance Workflow](basic_workflow.png)
 
-### ◎ The HDR Grading Chain
-```mermaid
-graph LR
-    A[Raw Source] --> B(Radiance ImageToFloat32)
-    B --> C{Radiance OCIO}
-    C --> D[Radiance Grade]
-    D --> E(Radiance Film Grain)
-    E --> F[Radiance EXR Save]
-    style B fill:#00a8ff,stroke:#fff,color:#fff
-    style D fill:#00a8ff,stroke:#fff,color:#fff
-    style E fill:#00a8ff,stroke:#fff,color:#fff
-```
-
-### ◎ The Grade Roundtrip (Resolve/Nuke)
-```mermaid
-graph TD
-    A[Radiance Viewer HUD] -->|Tuned Grade| B(Radiance Grade Match)
-    B --> C{Radiance LUT Bake}
-    C -->|Export 33^3 .cube| D[Blackmagic Resolve]
-    C -->|Export 33^3 .cube| E[Foundry Nuke]
-    style B fill:#00a8ff,stroke:#fff,color:#fff
-    style C fill:#00a8ff,stroke:#fff,color:#fff
-```
-
 ---
 
 ## <a name="installation"></a>◎ Installation
@@ -190,19 +166,25 @@ Radiance is designed for a keyboard-driven VFX workflow. Use these shortcuts to 
 | **Shift + G** | Cycle Grid Modes |
 | **A** | Cycle A\|B Compare Modes |
 
+## ◎ Community & Support
+
+Radiance is backed by a professional team of VFX Technical Directors. Engage with us through our official channels:
+
+### ◎ Official Discord Server
+Join over 2,000+ artists and developers in the **FXTD Studios Discord**.
+- **Production Workflows:** Access exclusive `.rad` templates and cinema-grade JSON presets.
+- **Direct Engineer Support:** Real-time troubleshooting and feature requests.
+- **Showcase:** share your work and get feedback from industry veterans.
+- **Beta Access:** Test experimental HDR and temporal nodes before public release.
+
+[**Join the FXTD Studios Discord**](https://discord.gg/WU3xUQXgp)
+
 ---
 
-## ◎ Performance & Support
-
-| Target | Technology | Speedup |
-| :--- | :--- | :--- |
-| **GPU Compute** | NVIDIA CUDA | 50× (Tone Mapping) |
-| **Viewer** | WebGL 2.0 | 60 FPS (Scopes/Analysis) |
-| **I/O** | NumPy/OpenCV | Parallel Sequence Loading |
-
+### ◎ Technical Resources
 - **Documentation:** [radiance.fxtd.org](https://radiance.fxtd.org)
-- **Community:** [FXTD Studios Discord](https://discord.fxtd.org)
-- **Issues:** [GitHub Issue Tracker](https://github.com/fxtdstudios/radiance/issues)
+- **Issue Tracker:** [GitHub Issues](https://github.com/fxtdstudios/radiance/issues)
+- **Official Site:** [fxtd.org](https://fxtd.org)
 
 ---
 
