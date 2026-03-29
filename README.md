@@ -10,7 +10,7 @@
 
 **Radiance** is a professional, VFX-grade 32-bit float color science suite for ComfyUI. Built for film colorists and VFX artists who require absolute precision in their AI-assisted workflows.
 
-[Installation](#installation) · [Node Reference](#node-reference) · [Quick Start](#quick-start) · [Viewer Shortcuts](#viewer-shortcuts) · [Documentation](https://radiance.fxtd.org) · [Support](https://github.com/fxtdstudios/radiance/issues)
+[Installation](#installation) · [Getting Started](#getting-started) · [Node Reference](#node-reference) · [Quick Start](#quick-start) · [Viewer Shortcuts](#viewer-shortcuts) · [Documentation](https://radiance.fxtd.org) · [Support](https://github.com/fxtdstudios/radiance/issues)
 
 </div>
 
@@ -28,6 +28,18 @@
 - **Terminal HUD & Live REPL** — Nuke-style Python interaction directly inside the viewer for real-time data inspection.
 - **Interactive Mask Editor** — Non-destructive brush masking in `◎ Radiance Load Image`.
 - **◎ Radiance Grade Match** — Shot-to-shot color statistics transfer using CIE L\*a\*b\* mean/std math.
+
+---
+
+## <a name="getting-started"></a>◎ Getting Started
+
+![Radiance Workspace](radiance_workspace.png)
+
+The **Radiance Workspace** node is the command center for your production. It handles project paths, versioning, and state management, ensuring that all 32-bit data is tracked correctly across your workflow.
+
+1. **Add the Workspace Node**: Right-click > Radiance > Project > Radiance Workspace.
+2. **Set your Project Path**: Point it to your production directory.
+3. **Connect to Viewer**: Link the `workspace` output to the Radiance Viewer to enable live telemetry and Python REPL.
 
 ---
 
