@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Architecture — Radiance Package Design</title>
+    <meta name="description"
+        content="Full technical architecture of the Radiance ComfyUI package: pipeline design, module structure, WebGL renderer, color science foundations, and extension points.">
+    <link rel="stylesheet" href="wiki.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <style>
+        /* Research paper extras */
+        .abstract {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            padding: 1.5rem 1.75rem;
+            margin-bottom: 2rem;
+            font-size: .95rem;
+            color: var(--text-secondary);
+            font-style: italic;
+            line-height: 1.8;
+        }
+
+        .abstract strong {
+            color: var(--text-primary);
+            font-style: normal;
+        }
+
+        .section-num {
+            color: var(--text-muted);
+            font-size: .8rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: .1em;
+            margin-right: .5rem;
+        }
+
+        .pipeline-diagram {
+            background: var(--bg-code);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            padding: 1.5rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: .82rem;
+            color: var(--text-primary);
+            overflow-x: auto;
+            line-height: 1.9;
+        }
+
+        .pipeline-diagram .arrow {
+            color: var(--accent);
+        }
+
+        .pipeline-diagram .label {
+            color: var(--accent-teal);
+        }
+
+        .pipeline-diagram .note {
+            color: var(--text-muted);
+        }
+
+        .ref-list {
+            counter-reset: ref;
+            list-style: none;
+            padding: 0;
+        }
+
+        .ref-list li {
+            counter-increment: ref;
+            padding: .35rem 0;
+            font-size: .88rem;
+            color: var(--text-secondary);
+        }
+
+        .ref-list li::before {
+            content: '[' counter(ref) '] ';
+            color: var(--accent);
+            font-weight: 700;
+        }
+
+        .author-block {
+            font-size: .88rem;
+            color: var(--text-secondary);
+            border-top: 1px solid var(--border);
+            padding-top: 1rem;
+            margin-bottom: 2.5rem;
+        }
+
+        .module-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: .85rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .module-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            padding: 1rem 1.1rem;
+        }
+
+        .module-card h4 {
+            font-size: .88rem;
+            margin-bottom: .4rem;
+        }
+
+        .module-card ul {
+            font-size: .8rem;
+            padding-left: 1rem;
+            color: var(--text-secondary);
+        }
+
+        .module-card li {
+            margin-bottom: .2rem;
+        }
+
+        .data-flow {
+            display: flex;
+            align-items: center;
+            gap: .5rem;
+            flex-wrap: wrap;
+            margin: .75rem 0 1.25rem;
+            font-size: .85rem;
+        }
+
+        .flow-box {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: .3rem .75rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: .78rem;
+            white-space: nowrap;
+        }
+
+        .flow-box.accent {
+            border-color: var(--accent-border);
+            color: var(--accent);
+        }
+
+        .flow-arrow {
+            color: var(--accent);
+            font-size: 1rem;
+        }
+    </style>
+</head>
+
+<body class="wiki-page">
+    <div class="nebula-bg"></div>
+
+    <!-- TOP NAV -->
+    <nav class="wiki-nav">
+        <a href="index.html" class="brand">◎ <span>Radiance</span></a>
+        <div class="nav-links">
+            <a href="index.html">Home</a>
+            <a href="installation.html">Install</a>
+            <a href="node_reference.html">Nodes</a>
+            <a href="radiance_viewer.html">Viewer</a>
+            
+            <a href="scripting.html">Scripting</a>
+            <a href="tutorials.html">Tutorials</a>
+            <a href="faq.html">FAQ</a>
+            <a href="changelog.html">Changelog</a>
+            <a href="architecture.html" class="active">Architecture</a>
+        </div>
+        <div class="nav-spacer"></div>
+        <button class="nav-hamburger" id="navHamburger" aria-label="Open menu">
+            <span></span><span></span><span></span>
+        </button>
+    </nav>
+
+    <!-- MOBILE NAV DRAWER -->
+    <div class="mobile-nav-drawer" id="mobileNavDrawer">
+        <div class="mobile-nav-overlay" id="mobileNavOverlay"></div>
+        <div class="mobile-nav-panel">
+            <a href="index.html">Home</a>
+            <a href="installation.html">Installation</a>
+            <a href="node_reference.html">Node Reference</a>
+            <a href="radiance_viewer.html">Radiance Viewer</a>
+            <a href="scripting.html">Scripting</a>
+            <a href="tutorials.html">Tutorials</a>
+            <a href="faq.html">FAQ</a>
+            <a href="changelog.html">Changelog</a>
+            <a href="architecture.html" class="active">Architecture</a>
+            <button class="mobile-theme-btn" id="mobileThemeToggle">◎ Light</button>
+        </div>
+    </div>
+
+    <div class="wiki-layout">
+        <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+        <button class="sidebar-toggle-btn" id="sidebarToggle" aria-label="Toggle navigation">☰</button>
+        <aside class="wiki-sidebar">
+            <div class="sidebar-header">
+                <div
+                    style="font-size: 0.9rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; padding-top: 5px;">
+                    Architecture
+                </div>
+            </div>
+            <nav class="sidebar-nav">
+                <div class="sidebar-group">
+                    <div class="sidebar-label">Contents</div>
+                    <a href="#abstract" class="sidebar-link">Abstract</a>
+                    <a href="#overview" class="sidebar-link">§1. System Overview</a>
+                    <a href="#module-structure" class="sidebar-link">§2. Module Structure</a>
+                    <a href="#data-pipeline" class="sidebar-link">§3. Data Pipeline</a>
+                    <a href="#color-science" class="sidebar-link">§4. Color Science</a>
+                    <a href="#viewer-arch" class="sidebar-link">§5. Viewer Architecture</a>
+                    <a href="#webgl-renderer" class="sidebar-link">§6. WebGL Renderer</a>
+                    <a href="#temporal" class="sidebar-link">§7. Temporal Processing</a>
+                    <a href="#lut-engine" class="sidebar-link">§8. LUT Engine</a>
+                    <a href="#grade-matching" class="sidebar-link">§9. Grade Matching</a>
+                    <a href="#extension" class="sidebar-link">§10. Extension Points</a>
+                    <a href="#performance" class="sidebar-link">§11. Performance</a>
+                    <a href="#references" class="sidebar-link">References</a>
+                </div>
+            </nav>
+        </aside>
+
+        <main class="wiki-content">
+
+            <nav>
+                <ul class="breadcrumb">
+                    <li><a href="index.html">Home</a></li>
+                    <li class="current">Technical Architecture</li>
+                </ul>
+            </nav>
+
+            <header style="margin-bottom: 2rem;" class="animate-in">
+                <h1 class="text-gradient">Technical Architecture</h1>
+                <p class="page-subtitle">Inside the 32-bit linear pipeline of the Radiance VFX Suite.</p>
+                <div class="author-block">
+                    <strong>Authors:</strong> FXTD Studios Architecture Team<br>
+                    <strong>Published:</strong> March 2026<br>
+                    <strong>Keywords:</strong> <em>Color Science, PyTorch, GPU Compute, WebGL, VFX Pipeline</em>
+                </div>
+            </header>
+
+            <!-- ABSTRACT -->
+            <div class="abstract" id="abstract">
+                <strong>Abstract.</strong>
+                Radiance is a 78-node ComfyUI extension implementing production-grade HDR image processing, color
+                science, film emulation, and real-time interactive viewing for generative AI pipelines. This document
+                describes the system architecture: the 32-bit floating-point tensor pipeline, the multi-layer color
+                science stack built on OpenColorIO and colour-science, the WebGL-accelerated interactive viewer with LRU
+                frame caching and ASC CDL export, the CIE L*a*b* grade matching algorithm, the 33³ .cube LUT bake/apply
+                engine, and the motion-aware temporal smoothing system for AI-generated video flicker reduction.
+                Extension points, performance characteristics, and design rationale are discussed.
+            </div>
+
+            <!-- 1. SYSTEM OVERVIEW -->
+            <h2 id="overview"><span class="section-num">§1</span> System Overview</h2>
+            <p>Radiance extends ComfyUI with a complete VFX-grade post-production layer. Its design goals are:</p>
+            <ul>
+                <li><strong>Precision:</strong> All image data is kept as IEEE 754 fp32 tensors throughout. No clamping
+                    to [0,1] except at display output, preserving HDR values above 1.0 and below 0.0.</li>
+                <li><strong>Composability:</strong> Every node follows the ComfyUI data-flow model — IMAGE tensors flow
+                    from outputs to inputs, enabling arbitrary graph topologies.</li>
+                <li><strong>Industry compatibility:</strong> Outputs (EXR, .cube LUT, ASC CDL XML, OpenEXR metadata) are
+                    readable by Nuke, DaVinci Resolve, Flame, and OCIO pipelines.</li>
+                <li><strong>Automatic registration:</strong> <code>__init__.py</code> uses
+                    <code>glob("nodes_*.py")</code> to auto-discover and register all node files — adding a new node
+                    file requires zero configuration changes.
+                </li>
+            </ul>
+
+            <div class="pipeline-diagram">
+                <span class="label">ComfyUI Graph</span>
+                │
+                ▼
+                <span class="label">nodes_sampler.py</span> ← Radiance Sampler Pro (Flux latent → image)
+                │ image: Tensor[B, H, W, 3] fp32
+                ▼
+                <span class="label">nodes_grade.py</span> ← Lift/Gamma/Gain, LAB match, preset, grade_info JSON
+                │
+                ├──→ <span class="label">nodes_lut.py</span> ← LUTBake → .cube file (Resolve/Nuke)
+                │ LUTApply ← trilinear interp
+                │
+                ├──→ <span class="label">nodes_temporal.py</span> ← EMA flicker reduction (video batches)
+                │
+                ├──→ <span class="label">nodes_scopes.py</span> ← FalseColor, Waveform, Vectorscope
+                │
+                ├──→ <span class="label">nodes_overlay.py</span> ← BlendComposite, MetadataOverlay
+                │
+                └──→ <span class="label">nodes_radiance_viewer.py</span>
+                │ .rhdr fp32 raw data
+                │ .rpick zlib fp32 pick buffer
+                ▼
+                <span class="label">radiance_webgl.js</span> ← WebGL renderer (GLSL, fp16 textures, GPU histogram)
+                │
+                └──→ <span class="label">radiance_viewer.js</span> ← UI, CDL export, LRU cache, Display-P3
+            </div>
+
+            <!-- 2. MODULE STRUCTURE -->
+            <h2 id="module-structure"><span class="section-num">§2</span> Module Structure</h2>
+            <p>The package is organized into a flat set of <code>nodes_*.py</code> modules (auto-discovered) and
+                sub-packages for shared logic:</p>
+            <div class="module-grid">
+                <div class="module-card">
+                    <h4>◎ nodes_grade.py</h4>
+                    <ul>
+                        <li>RadianceGrade (v2.3)</li>
+                        <li>RadianceGradeMatch</li>
+                        <li>RadianceApplyGradeInfo</li>
+                        <li>_apply_grade(), _match_grade_params(), _rgb_to_lab()</li>
+                    </ul>
+                </div>
+                <div class="module-card">
+                    <h4>◎ nodes_lut.py</h4>
+                    <ul>
+                        <li>RadianceLUTBake</li>
+                        <li>RadianceLUTApply</li>
+                        <li>_generate_cube_lut(), _write_cube_file()</li>
+                        <li>_apply_cube_lut_to_image() — trilinear</li>
+                    </ul>
+                </div>
+                <div class="module-card">
+                    <h4>◎ nodes_temporal.py</h4>
+                    <ul>
+                        <li>RadianceTemporalSmooth</li>
+                        <li>RadianceFlickerAnalyze</li>
+                        <li>EMA loop, motion mask, JSON stats</li>
+                    </ul>
+                </div>
+                <div class="module-card">
+                    <h4>◎ nodes_scopes.py</h4>
+                    <ul>
+                        <li>RadianceWaveform</li>
+                        <li>RadianceVectorscope</li>
+                        <li>RadianceFalseColor (v2.3)</li>
+                        <li>_FC_ZONES — 7-zone palette</li>
+                    </ul>
+                </div>
+                <div class="module-card">
+                    <h4>◎ nodes_overlay.py</h4>
+                    <ul>
+                        <li>RadianceMetadataOverlay</li>
+                        <li>RadianceBlendComposite</li>
+                        <li>8 blend modes, MASK support</li>
+                    </ul>
+                </div>
+                <div class="module-card">
+                    <h4>◎ nodes_radiance_viewer.py</h4>
+                    <ul>
+                        <li>RadianceProViewer</li>
+                        <li>_save_pick_buffer() — zlib fp32</li>
+                        <li>build_cdl_xml() — ASC CDL v1.2</li>
+                        <li>RPICK_MAGIC header</li>
+                    </ul>
+                </div>
+                <div class="module-card">
+                    <h4>◎ color/ sub-package</h4>
+                    <ul>
+                        <li>color_utils.py — shared transforms</li>
+                        <li>Log curve encode/decode</li>
+                        <li>Color space matrices (sRGB, P3, AWG4)</li>
+                    </ul>
+                </div>
+                <div class="module-card">
+                    <h4>◎ film/ sub-package</h4>
+                    <ul>
+                        <li>camera_profiles.py — 30+ sensors</li>
+                        <li>Grain algorithms, halation</li>
+                        <li>Film stock transfer curves</li>
+                    </ul>
+                </div>
+                <div class="module-card">
+                    <h4>◎ hdr/ sub-package</h4>
+                    <ul>
+                        <li>Tone mapping operators</li>
+                        <li>Exposure blend (Mertens)</li>
+                        <li>Highlight synthesis</li>
+                    </ul>
+                </div>
+                <div class="module-card">
+                    <h4>◎ js/ (frontend)</h4>
+                    <ul>
+                        <li>radiance_webgl.js — GPU renderer</li>
+                        <li>radiance_viewer.js — viewer UI</li>
+                        <li>radiance_layout.js — node layouts</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- 3. DATA PIPELINE -->
+            <h2 id="data-pipeline"><span class="section-num">§3</span> Data Pipeline</h2>
+            <p>All inter-node communication uses <strong>PyTorch fp32 CPU tensors</strong> of shape
+                <code>[B, H, W, C]</code> where B = batch size, H = height, W = width, C = channels (typically 3 for
+                RGB). This matches ComfyUI's standard IMAGE convention.
+            </p>
+
+            <h3>fp32 Guarantee</h3>
+            <p>Every node casts inputs via <code>.float()</code> immediately and never calls <code>.clamp(0,1)</code> on
+                intermediate data. The VFX audit test suite (89 tests) verifies this with dedicated tests:</p>
+            <pre><code>test_pipeline_no_clamp_hdr   # values > 1.0 must survive full pipeline
+test_pipeline_preserves_float32  # dtype must remain fp32 at output
+test_pure_black_no_lift      # 0.0 → 0.0 through all grade nodes</code></pre>
+
+            <h3>Pick Buffer Sidecar (.rpick)</h3>
+            <p>When the viewer processes a frame, <code>_save_pick_buffer()</code> downsamples the raw fp32 tensor to
+                ≤256px and saves it as a zlib-compressed binary sidecar alongside the display PNG:</p>
+
+            <div class="data-flow">
+                <div class="flow-box">fp32 tensor [B,H,W,3]</div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-box">resize to ≤256px</div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-box">RPICK_MAGIC + zlib(numpy.tobytes)</div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-box accent">frame_N.rpick</div>
+            </div>
+            <p>The JavaScript viewer fetches <code>.rpick</code> on hover to read true scene-linear HDR values at the
+                cursor — bypassing the tonemapped 8-bit display PNG and providing accurate EV readout.</p>
+
+            <!-- 4. COLOR SCIENCE -->
+            <h2 id="color-science"><span class="section-num">§4</span> Color Science Stack</h2>
+            <p>Radiance implements a layered color pipeline that mirrors broadcast and digital cinema workflows:</p>
+
+            <div class="arch-layer">
+                <h4>Layer 1 — Input Transform (IDT)</h4>
+                <div class="arch-layer-items">
+                    <span class="arch-chip">sRGB linearize</span>
+                    <span class="arch-chip">ARRI LogC3 decode</span>
+                    <span class="arch-chip">ARRI LogC4 decode</span>
+                    <span class="arch-chip">RED Log3G10 decode</span>
+                    <span class="arch-chip">Panasonic V-Log decode</span>
+                    <span class="arch-chip">Canon Log3 decode</span>
+                    <span class="arch-chip">Sony S-Log3 decode</span>
+                </div>
+            </div>
+            <div class="arch-layer">
+                <h4>Layer 2 — Working Space</h4>
+                <div class="arch-layer-items">
+                    <span class="arch-chip">ACEScg (AP1)</span>
+                    <span class="arch-chip">ACES AP0</span>
+                    <span class="arch-chip">sRGB Linear</span>
+                    <span class="arch-chip">Rec.2020 Linear</span>
+                    <span class="arch-chip">DaVinci Wide Gamut</span>
+                    <span class="arch-chip">ARRI Wide Gamut 4</span>
+                    <span class="arch-chip">XYZ D65</span>
+                </div>
+            </div>
+            <div class="arch-layer">
+                <h4>Layer 3 — Grade (CDL)</h4>
+                <div class="arch-layer-items">
+                    <span class="arch-chip">Lift (per-channel)</span>
+                    <span class="arch-chip">Gamma (sign-preserving power)</span>
+                    <span class="arch-chip">Gain (per-channel)</span>
+                    <span class="arch-chip">Offset (global)</span>
+                    <span class="arch-chip">Contrast (pivot)</span>
+                    <span class="arch-chip">Saturation (luma-preserving)</span>
+                </div>
+            </div>
+            <div class="arch-layer">
+                <h4>Layer 4 — Look (LUT)</h4>
+                <div class="arch-layer-items">
+                    <span class="arch-chip">33³ .cube trilinear</span>
+                    <span class="arch-chip">OCIO CDL .cc/.ccc</span>
+                    <span class="arch-chip">LAB match offset</span>
+                </div>
+            </div>
+            <div class="arch-layer">
+                <h4>Layer 5 — Output Transform (ODT)</h4>
+                <div class="arch-layer-items">
+                    <span class="arch-chip">ACES 2.0 RRT+ODT</span>
+                    <span class="arch-chip">AgX</span>
+                    <span class="arch-chip">Filmic (Hable)</span>
+                    <span class="arch-chip">Reinhard</span>
+                    <span class="arch-chip">sRGB OETF</span>
+                    <span class="arch-chip">Rec.709 EOTF</span>
+                    <span class="arch-chip">Display-P3</span>
+                </div>
+            </div>
+
+            <!-- 5. VIEWER ARCHITECTURE -->
+            <h2 id="viewer-arch"><span class="section-num">§5</span> Viewer Architecture</h2>
+            <p>The Radiance Pro Viewer is a custom ComfyUI widget implemented as a full-screen canvas overlay. It
+                communicates with the Python backend through ComfyUI's websocket <code>api</code> message bus:</p>
+
+            <div class="pipeline-diagram">
+                <span class="label">Python backend</span>
+                nodes_radiance_viewer.py
+                execute() → saves frame_N.png (display), frame_N.rhdr (raw fp32), frame_N.rpick (pick)
+                → api.send_sync("radiance_result", { images: [...] })
+                │
+                │ WebSocket
+                ▼
+                <span class="label">radiance_viewer.js</span>
+                RadianceViewer class
+                ├─ loadCurrentFrame() ← fetches .rhdr, uploads via loadFloat16TextureCached()
+                ├─ _fetchPickBuffer() ← fetches .rpick for fp32 hover values
+                ├─ _renderGPUHistogram() ← delegates to renderer.renderHistogram()
+                ├─ exportCDL() ← encodes grade_info → ASC CDL v1.2 XML, downloads
+                └─ importCDL() ← parses .cdl XML, applies to active grade
+                │
+                ▼
+                <span class="label">radiance_webgl.js</span>
+                RadianceWebGLRenderer
+                ├─ loadFloat16TextureCached(frameId, data) ← LRU Map(8)
+                ├─ renderHistogram(canvas, logScale) ← 256-bin GPU pass
+                ├─ setLinearFalseColor(v) ← pre-OETF false color
+                └─ static initDisplayP3(canvas) ← CSS matchMedia P3 detection
+            </div>
+
+            <!-- 6. WEBGL RENDERER -->
+            <h2 id="webgl-renderer"><span class="section-num">§6</span> WebGL Renderer Pipeline</h2>
+            <p>The renderer uses WebGL 2.0 with the <code>OES_texture_half_float</code> extension for fp16 texture
+                storage. The GLSL pipeline processes scene-linear data and applies the OETF (display transform) on-GPU:
+            </p>
+
+            <pre><code>// GLSL fragment shader (simplified)
+uniform sampler2D u_hdrTexture;   // fp16 scene-linear
+uniform float u_exposure;
+uniform float u_gamma;
+uniform bool u_linearFalseColor;  // v2.3: evaluate before OETF
+
+vec3 hdr = texture(u_hdrTexture, v_uv).rgb;
+hdr *= pow(2.0, u_exposure);
+
+// False color evaluated in LINEAR space
+if (u_linearFalseColor) {
+    fragColor = vec4(falseColorLookup(hdr), 1.0);
+    return;
+}
+
+// OETF (configurable: sRGB / Rec.709 / P3)
+vec3 display = applyOETF(hdr, u_oetfMode);
+fragColor = vec4(display, 1.0);</code></pre>
+
+            <h3>LRU Frame Cache</h3>
+            <p>The viewer maintains an LRU Map of up to 8 WebGL texture objects keyed by frameId. This eliminates
+                re-uploads during sequence scrubbing — a common bottleneck when working with large EXR sequences at 4K.
+            </p>
+
+            <pre><code>// js/radiance_webgl.js
+loadFloat16TextureCached(frameId, data, width, height) {
+    if (this._lruCache.has(frameId)) {
+        // Move to end (most recently used)
+        const tex = this._lruCache.get(frameId);
+        this._lruCache.delete(frameId);
+        this._lruCache.set(frameId, tex);
+        return tex;
+    }
+    // Evict oldest if full
+    if (this._lruCache.size >= 8) {
+        const oldest = this._lruCache.keys().next().value;
+        this.gl.deleteTexture(this._lruCache.get(oldest));
+        this._lruCache.delete(oldest);
+    }
+    const tex = this._uploadHalfFloat(data, width, height);
+    this._lruCache.set(frameId, tex);
+    return tex;
+}</code></pre>
+
+            <!-- 7. TEMPORAL PROCESSING -->
+            <h2 id="temporal"><span class="section-num">§7</span> Temporal Processing</h2>
+
+            <h3>Exponential Moving Average (EMA)</h3>
+            <p>RadianceTemporalSmooth applies per-pixel EMA across a temporal batch to reduce high-frequency flicker in
+                AI-generated video. The update rule is:</p>
+            <pre><code>ema_t = α · frame_t + (1 - α) · ema_{t-1}</code></pre>
+            <p>where α ∈ (0,1] controls the blend weight. Lower α = more smoothing, higher α approaches passthrough.</p>
+
+            <h3>Motion-Aware Masking</h3>
+            <p>To preserve sharp moving objects while smoothing static background grain, the motion-aware mode computes
+                a per-pixel motion magnitude and adapts α locally:</p>
+            <pre><code>motion_mag = |frame_t - ema_{t-1}|.mean(dim=-1)   # H×W scalar
+motion_mask = (motion_mag > threshold).float()       # 0 or 1
+eff_alpha = α · (1 - motion_mask) + 1.0 · motion_mask
+# → α on static pixels, 1.0 on moving pixels (no blend = sharp)</code></pre>
+
+            <h3>Flicker Index Metric</h3>
+            <p>RadianceFlickerAnalyze computes the flicker index as the coefficient of variation of per-frame luma
+                means:</p>
+            <pre><code>flicker_index = std(frame_means) / mean(frame_means)</code></pre>
+            <p>Values below 0.01 are imperceptible; above 0.05 are visible to the human eye in rapid playback. This
+                metric matches the ITU-R BT.1203 temporal uniformity definition.</p>
+
+            <!-- 8. LUT ENGINE -->
+            <h2 id="lut-engine"><span class="section-num">§8</span> LUT Engine</h2>
+
+            <h3>Baking (RadianceLUTBake)</h3>
+            <p>LUT baking samples the grade function on a 33³ identity lattice and writes the .cube format:</p>
+            <pre><code># Build identity grid — .cube ordering: R fastest, B slowest
+lin = linspace(0, 1, 33)
+r_grid = lin.repeat(33 * 33)
+g_grid = lin.repeat_interleave(33).repeat(33)
+b_grid = lin.repeat_interleave(33 * 33)
+grid = stack([r_grid, g_grid, b_grid], dim=-1)   # (33³, 3)
+out = _apply_grade(grid, ...)                      # apply all grade ops
+cube = clamp(out, 0, 1)                            # clamp for SDR LUT</code></pre>
+
+            <h3>Application (RadianceLUTApply)</h3>
+            <p>LUT application uses 8-corner trilinear interpolation:</p>
+            <pre><code># .cube index: B*n² + G*n + R
+r0, r1 = floor(R*(n-1)), ceil(R*(n-1))
+# ... similarly for G, B
+out = c000*(1-rf)*(1-gf)*(1-bf) + c100*rf*(1-gf)*(1-bf) +
+      c010*(1-rf)*gf*(1-bf)   + c110*rf*gf*(1-bf) +
+      c001*(1-rf)*(1-gf)*bf   + c101*rf*(1-gf)*bf +
+      c011*(1-rf)*gf*bf       + c111*rf*gf*bf</code></pre>
+            <p>This is implemented entirely in PyTorch tensor ops, making it GPU-acceleratable without any custom CUDA
+                kernels.</p>
+
+            <!-- 9. GRADE MATCHING -->
+            <h2 id="grade-matching"><span class="section-num">§9</span> Grade Matching Algorithm</h2>
+            <p>RadianceGradeMatch transfers the color statistics of a reference image to a source image using CIE L*a*b*
+                color space. This algorithm is equivalent to the Reinhard et al. [1] color transfer method.</p>
+
+            <h3>Algorithm</h3>
+            <pre><code>1. Convert both images to CIE L*a*b* (D65 white point)
+2. Compute per-channel mean μ and std σ for source and target
+3. Scale ratio: s = σ_target / σ_source
+4. Shift: t = (μ_target - μ_source * s) / 100   (normalized)
+5. Map L* channel → uniform gain (luminance) + offset
+   Map a*, b* channels → color cast offset in R,G,B space
+6. Blend computed params at match_strength ∈ [0,1]</code></pre>
+
+            <p>The result is a CDL-compatible gain/offset set stored as JSON in <code>grade_info</code>, enabling the
+                match to be applied to arbitrary other images via <code>ApplyGradeInfo</code>.</p>
+
+            <!-- 10. EXTENSION POINTS -->
+            <h2 id="extension"><span class="section-num">§10</span> Extension Points</h2>
+
+            <h3>Adding a New Node</h3>
+            <ol>
+                <li>Create <code>nodes_myfeature.py</code> with a class, <code>NODE_CLASS_MAPPINGS</code>, and
+                    <code>NODE_DISPLAY_NAME_MAPPINGS</code>
+                </li>
+                <li>That's it. <code>__init__.py</code> discovers it automatically via <code>glob("nodes_*.py")</code>
+                </li>
+            </ol>
+
+            <h3>Adding a New Tone Mapping Operator</h3>
+            <p>All tone mapping operators are functions in <code>hdr/</code> with signature
+                <code>f(img: Tensor) → Tensor</code>. Register the function name in the <code>TONEMAPPER_MAP</code> dict
+                in <code>nodes_hdr.py</code>.
+            </p>
+
+            <h3>Adding a New Log Curve</h3>
+            <p>Encode/decode pairs are registered in <code>color_utils.py</code> as <code>(encode_fn, decode_fn)</code>
+                tuples in the <code>LOG_CURVES</code> dict. A camera preset can then reference the curve by name string.
+            </p>
+
+            <h3>Adding a New WebGL Scope</h3>
+            <p>Add a GLSL fragment shader method and a JavaScript rendering function to <code>radiance_webgl.js</code>.
+                Wire the keyboard shortcut in <code>radiance_viewer.js</code>. No Python changes needed for display-only
+                scopes.</p>
+
+            <!-- 11. PERFORMANCE -->
+            <h2 id="performance"><span class="section-num">§11</span> Performance Characteristics</h2>
+            <table class="wiki-table">
+                <tr>
+                    <th>Operation</th>
+                    <th>Backend</th>
+                    <th>GPU Speedup</th>
+                    <th>Note</th>
+                </tr>
+                <tr>
+                    <td>Tone Mapping</td>
+                    <td>PyTorch GPU</td>
+                    <td>20–50×</td>
+                    <td>Fully vectorized over batch</td>
+                </tr>
+                <tr>
+                    <td>Log Curves</td>
+                    <td>PyTorch GPU</td>
+                    <td>20×</td>
+                    <td>Piecewise function via torch.where</td>
+                </tr>
+                <tr>
+                    <td>Grade (LGG)</td>
+                    <td>PyTorch GPU</td>
+                    <td>25×</td>
+                    <td>Fused into single tensor pass</td>
+                </tr>
+                <tr>
+                    <td>LUT Apply</td>
+                    <td>PyTorch GPU</td>
+                    <td>10×</td>
+                    <td>Trilinear, vectorized 8-corner gather</td>
+                </tr>
+                <tr>
+                    <td>Temporal Smooth</td>
+                    <td>PyTorch CPU</td>
+                    <td>—</td>
+                    <td>Loop is sequential by design (EMA)</td>
+                </tr>
+                <tr>
+                    <td>FalseColor (node)</td>
+                    <td>PyTorch GPU</td>
+                    <td>8×</td>
+                    <td>torch.where over zone thresholds</td>
+                </tr>
+                <tr>
+                    <td>FalseColor (viewer)</td>
+                    <td>GLSL</td>
+                    <td>&gt;100×</td>
+                    <td>GPU fragment shader</td>
+                </tr>
+                <tr>
+                    <td>GPU Histogram</td>
+                    <td>GLSL</td>
+                    <td>&gt;50×</td>
+                    <td>256-bin accumulate pass</td>
+                </tr>
+                <tr>
+                    <td>Frame Upload (LRU hit)</td>
+                    <td>WebGL</td>
+                    <td>∞</td>
+                    <td>Zero re-upload from cache</td>
+                </tr>
+                <tr>
+                    <td>Grade Matching (LAB)</td>
+                    <td>PyTorch CPU</td>
+                    <td>—</td>
+                    <td>Statistics-only, not per-pixel</td>
+                </tr>
+            </table>
+
+            <div class="callout callout-info">
+                <div class="callout-label">GPU Support</div>
+                <p>All PyTorch operations respect the tensor's current device. If ComfyUI is configured with CUDA or
+                    Apple MPS, tensors are processed on-device automatically. The viewer's WebGL renderer runs entirely
+                    on the client GPU, independent of the server backend.</p>
+            </div>
+
+            <!-- REFERENCES -->
+            <h2 id="references">References</h2>
+            <ol class="ref-list">
+                <li>Reinhard, E., Ashikhmin, M., Gooch, B., Shirley, P. <em>Color Transfer between Images.</em> IEEE
+                    CGA, 2001.</li>
+                <li>Hable, J. <em>Filmic Tonemapping Operators.</em> GDC 2010.</li>
+                <li>Hill, S. <em>HDR Color in Call of Duty.</em> SIGGRAPH 2014.</li>
+                <li>Academy of Motion Picture Arts and Sciences. <em>ACES 2.0 Reference Rendering Transform.</em> 2024.
+                </li>
+                <li>Sobotka, T. <em>AgX: A Minimal Color Transform.</em> Blender Institute, 2023.</li>
+                <li>Magnor, M. et al. <em>Digital Video Processing for Engineers.</em> Morgan & Claypool, 2012.</li>
+                <li>OpenColorIO Contributors. <em>OpenColorIO v2 Architecture.</em> ASWF, 2023.</li>
+                <li>Colour-Science for Python. <em>https://www.colour-science.org/</em>. 2024.</li>
+                <li>Narkowicz, K. <em>ACES Filmic Tone Mapping Curve.</em> Blog, 2016.</li>
+                <li>ITU-R BT.1203. <em>Subjective Picture Quality Assessment for Digital Cable Television Systems.</em>
+                    ITU, 1994.</li>
+            </ol>
+
+        </main>
+    </div>
+
+    <footer class="wiki-footer">
+        <div style="display:flex; gap:1.5rem; justify-content:center; flex-wrap:wrap; margin-bottom:1rem; opacity:0.8;">
+            <a href="https://fxtd.org/" target="_blank" rel="noopener">Website</a>
+            <a href="https://github.com/fxtdstudios/radiance" target="_blank" rel="noopener">GitHub</a>
+            <a href="https://linkedin.com/company/fxtdstudios" target="_blank" rel="noopener">LinkedIn</a>
+            <a href="https://instagram.com/fxtdstudios" target="_blank" rel="noopener">Instagram</a>
+            <a href="https://vimeo.com/fxtdstudios" target="_blank" rel="noopener">Vimeo</a>
+            <a href="https://discord.gg/m82sRer7mf" target="_blank" rel="noopener">Discord</a>
+            <a href="https://facebook.com/fxtdstudios" target="_blank" rel="noopener">Facebook</a>
+        </div>
+        <p><strong>Radiance v2.3</strong> · © FXTD Studios</p>
+    </footer>
+
+    
+<script src="radiance_docs.js"></script>`r`n</body>
+
+</html>
