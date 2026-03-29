@@ -1,5 +1,5 @@
 """
-Radiance QC Node v2.2.1
+Radiance QC Node v2.3
 Production-Grade Quality Control and Error Detection
 Author: FXTD Studios Pipeline Team
 """

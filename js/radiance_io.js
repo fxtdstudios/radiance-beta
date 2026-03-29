@@ -1,7 +1,7 @@
 import { app } from "../../../scripts/app.js";
 
 /**
- * Radiance Universal I/O Widget Management (v2.2.1)
+ * Radiance Universal I/O Widget Management (v2.3)
  * Handles dynamic visibility for Digital Cinema Read and Write nodes.
  *
  * Fixes applied:

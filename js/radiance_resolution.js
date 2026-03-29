@@ -3,7 +3,7 @@ import { app } from "../../../scripts/app.js";
 // need three ../ to reach ComfyUI's scripts/ directory.
 
 /**
- * Radiance Resolution — Widget Management (v2.2.1)
+ * Radiance Resolution — Widget Management (v2.3)
  *
  * FIX 5: Import path corrected (see above).
  * FIX 6: Switched from nodeCreated hook + nested setTimeout to beforeRegisterNodeDef

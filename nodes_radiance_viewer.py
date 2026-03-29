@@ -1,6 +1,6 @@
 """
 ═════════════════════════════════════════════════════════════════════════════
-                     RADIANCE VIEWER NODE v2.2.1
+                     RADIANCE VIEWER NODE v2.3
               VFX Industry-Standard Image Viewer for ComfyUI
                          Radiance © 2024-2026
 
@@ -24,7 +24,7 @@ Professional viewer node providing:
 
 VERSION HISTORY:
 
-v2.2.1 — Industry & Performance Upgrade (March 2026)
+v2.3 — Industry & Performance Upgrade (March 2026)
 ──────────────────────────────────────
   #1  EXR always-on as primary float sidecar (cv2/imageio)
   #3  HALF_FLOAT WebGL verified with OES_texture_half_float

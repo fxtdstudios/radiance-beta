@@ -2,6 +2,18 @@
 
 All notable changes to FXTD Radiance will be documented in this file.
 
+## [2.3] - 2026-03-29
+
+### Changed
+- Major version increment to 2.3 for the professional VFX production suite.
+- Synchronized all 21 core Python and JS node modules to match the package versioning.
+
+## [2.2.2] - 2026-03-29
+
+### Fixed
+- **Comfy Registry Metadata**: Removed restrictive `Environment :: GPU :: NVIDIA CUDA` classifier from `pyproject.toml` to allow installation on CPU and macOS (MPS) systems.
+- **Registry Icon**: Renamed `RADIANCE_ICON.png` to `flogo.png` and updated `pyproject.toml` to ensure the logo appears correctly in the Comfy Registry.
+
 ## [2.2.1] - 2026-03-28
 
 ### Fixed

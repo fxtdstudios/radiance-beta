@@ -1,9 +1,9 @@
 """
-RADIANCE - LOADER NODES v2.2.1
+RADIANCE - LOADER NODES v2.3
 -----------------------------------
 Universal model loader for any diffusion architecture.
 
-v2.2.1 — Industry Upgrade (March 2026):
+v2.3 — Industry Upgrade (March 2026):
 - NEW: Auto-detect architecture from safetensors key-heuristics
 - NEW: mtime + size based cache keys (no stale hits after file edits)
 - NEW: Named CLIP slots — clip_l, clip_g, t5xxl, llm_encoder

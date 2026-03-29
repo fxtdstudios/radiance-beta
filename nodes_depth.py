@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-    Radiance Depth Map v2.2.1 — Monocular Depth Estimation for ComfyUI
+    Radiance Depth Map v2.3 — Monocular Depth Estimation for ComfyUI
                         Radiance © 2024-2026 FXTD STUDIOS
 
 Uses Depth Anything V2:
