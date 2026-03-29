@@ -1,13 +1,12 @@
 [project]
 name = "radiance"
 description = "Radiance is a 32-bit color space collection of nodes for ComfyUI."
-version = "2.2.1"
+version = "2.3"
 license = {file = "LICENSE"} 
 requires-python = ">=3.9"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
-    "Environment :: GPU :: NVIDIA CUDA",
     "Topic :: Scientific/Engineering :: Image Processing",
     "Framework :: ComfyUI"
 ]
@@ -22,6 +21,6 @@ Documentation = "https://radiance.fxtd.org/index.html"
 [tool.comfy]
 PublisherId = "fxtdstudios"
 DisplayName = "radiance"
-Icon = "RADIANCE_ICON.png"
+Icon = "flogo.png"
 requires-comfyui = ">=0.2.2"
 

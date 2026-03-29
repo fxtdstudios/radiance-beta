@@ -3,7 +3,7 @@ import { app } from "../../../scripts/app.js";
 // need three ../ to reach ComfyUI's scripts/ directory.
 
 /**
- * Radiance Sampler Pro — Widget Management (v2.2.1)
+ * Radiance Sampler Pro — Widget Management (v2.3)
  *
  * FIX 1: Node name corrected to "RadianceSamplerPro" (matches NODE_CLASS_MAPPINGS
  *         in nodes_sampler.py). Was "FXTD_Radiance_Sampler_Pro" — extension was dead.

@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-                    RADIANCE GRADE NODE v2.2.1
+                    RADIANCE GRADE NODE v2.3
               Professional Color Grading for ComfyUI
                        Radiance © 2024-2026
 

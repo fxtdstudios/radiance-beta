@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-    Radiance Nuke Bridge v2.2.1 — Direct Viewer Connection
+    Radiance Nuke Bridge v2.3 — Direct Viewer Connection
                     Radiance © 2024-2026 FXTD STUDIOS
 
 Place this at: radiance/nodes_nuke.py

@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-                    RADIANCE — UNIVERSAL DIGITAL CINEMA IO v2.2.1
+                    RADIANCE — UNIVERSAL DIGITAL CINEMA IO v2.3
 ═══════════════════════════════════════════════════════════════════════════════
 Industry-standard readers/writers for Video, Image Sequences, and Images.
 Consolidated into Universal "Digital Cinema" nodes for a streamlined workflow.
@@ -386,7 +386,7 @@ class RadianceWrite:
 
         # Build Metadata
         meta = {
-            "software": "Radiance v2.2.1",
+            "software": "Radiance v2.3",
             "created": datetime.datetime.now().isoformat(),
             "colorspace": output_color_space,
         }

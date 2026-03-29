@@ -14,12 +14,12 @@ logger = logging.getLogger("◎ Radiance.dna")
 try:
     from . import __version__ as RADIANCE_VERSION
 except ImportError:
-    RADIANCE_VERSION = "2.2.1"
+    RADIANCE_VERSION = "2.3"
 
 
 class RadianceDigitalDNA:
     """
-    Core engine for Radiance Digital DNA (Signature Architecture) v2.2.1.
+    Core engine for Radiance Digital DNA (Signature Architecture) v2.3.
     Embeds invisible, lossless metadata into 32-bit floating point images.
 
     v2.1 Fixes:
@@ -33,7 +33,7 @@ class RadianceDigitalDNA:
     # Magic header to identify Radiance DNA (32 bits)
     # "FXTD" in ASCII binary: 01000110 01011000 01010100 01000100
     MAGIC_HEADER = "01000110010110000101010001000100"
-    VERSION = "2.2.1"
+    VERSION = "2.3"
 
     # ── Bit-level helpers ─────────────────────────────────────────────
 
