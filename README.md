@@ -1,9 +1,9 @@
 <div align="center">
 <img src="RADIANCE.png" width="800" alt="Radiance Logo">
 
-◎ Radiance v2.3 — Professional VFX & HDR Suite for ComfyUI
+◎ Radiance v2.3.1 — Professional VFX & HDR Suite for ComfyUI
 
-[![Version](https://img.shields.io/badge/version-2.3-00a8ff?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
+[![Version](https://img.shields.io/badge/version-2.3.1-00a8ff?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
 [![Nodes](https://img.shields.io/badge/Nodes-78-blue?style=for-the-badge&logo=comfyui)](https://github.com/fxtdstudios/radiance#node-reference)
 [![Comfy](https://img.shields.io/badge/Comfy--Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
@@ -16,7 +16,7 @@
 
 ---
 
-## ◎ What's New - v2.3
+## ◎ What's New - v2.3.1
 
 > [!IMPORTANT]
 > **Native 32-Bit Scene-Linear Engine**  

@@ -165,12 +165,17 @@ class RadianceWebGLRenderer {
         // Default: 'f32' on WebGL2 (matches Nuke / Flame / Baselight pipeline precision).
         // Falls back to 'u8' if WebGL2 or EXT_color_buffer_float is unavailable.
         this.pipelinePrecision = 'f32';
-        this.curveData = new Uint8Array(256 * 4);
+        // v4.2 FIX: Identity LUT must be Float32Array so the RGBA32F upload path
+        // is taken on the very first render (before the curve editor fires notifyChange).
+        // The old Uint8Array(1024) forced the 8-bit RGBA/UNSIGNED_BYTE fallback,
+        // silently quantizing a 32-bit HDR image on first display.
+        this.curveData = new Float32Array(256 * 4);
         for (let i = 0; i < 256; i++) {
-            this.curveData[i * 4 + 0] = i;
-            this.curveData[i * 4 + 1] = i;
-            this.curveData[i * 4 + 2] = i;
-            this.curveData[i * 4 + 3] = 255;
+            const v = i / 255;
+            this.curveData[i * 4 + 0] = v;
+            this.curveData[i * 4 + 1] = v;
+            this.curveData[i * 4 + 2] = v;
+            this.curveData[i * 4 + 3] = 1.0;
         }
 
         this.qualifierEnabled = false;
@@ -1803,7 +1808,9 @@ class RadianceWebGLRenderer {
             // FIX 5: Slope of the curve at the highlight end (lut[255]-lut[254])*255.
             // Used for physically correct HDR extrapolation above 1.0 instead of
             // a linear pass-through that bypasses the user's curve shape entirely.
-            uniform vec3 u_curveSlope;
+            // u_curveSlope removed (v4.2): ratio-based HDR extrapolation via topVal
+            // sampling (FIX 6) fully replaced slope-based extrapolation. Slope is
+            // still computed on the JS side for backward compat but never uploaded.
             
             // v3.4: Secondary Curves (Hue vs X)
             uniform sampler2D u_secondaryCurveLut;
@@ -1979,11 +1986,10 @@ class RadianceWebGLRenderer {
                 // This is continuous at the boundary (1.0 * topVal == topVal)
                 // and preserves relative differences between HDR values the same
                 // way exposure (multiplicative) does.
-                vec3 topVal = vec3(
-                    texture(u_curveLut, vec2(1.0, 0.5)).r,
-                    texture(u_curveLut, vec2(1.0, 0.5)).g,
-                    texture(u_curveLut, vec2(1.0, 0.5)).b
-                );
+                // Ratio-preserving HDR extrapolation (FIX 6 / v4.2):
+                // A single texture fetch returns all 4 channels; use .rgb swizzle
+                // instead of three separate fetches at the same coordinate.
+                vec3 topVal = texture(u_curveLut, vec2(1.0, 0.5)).rgb;
                 curved = mix(curved, color * max(topVal, vec3(0.0)), step(vec3(1.0), color));
                 
                 return mix(color, curved, u_curveMix);
@@ -3825,9 +3831,6 @@ vec3 getDenoiseColor(vec2 uv) {
 
         // Curves (Texture unit 3)
         this._uf1(program, 'u_curveMix', this.curveMix);
-        // FIX 5: Upload highlight slope for proper HDR curve extrapolation
-        const slope = this.curveSlope || [1.0, 1.0, 1.0];
-        gl.uniform3f(this.getUniform(program, 'u_curveSlope'), slope[0], slope[1], slope[2]);
         gl.activeTexture(gl.TEXTURE3);
         if (this.curveLutTexture) {
             gl.bindTexture(gl.TEXTURE_2D, this.curveLutTexture);

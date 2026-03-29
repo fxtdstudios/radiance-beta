@@ -513,7 +513,7 @@ class RadianceNukeBridge:
             try:
                 # Route through safe_join for security
                 base_output = folder_paths.get_output_directory()
-                bridge_dir = get_safe_output_dir(base_output, clean_path)
+                bridge_dir = get_safe_output_dir(base_output, clean_path, allow_absolute=True)
             except ValueError as e:
                 return (images, f"ERROR: Invalid output_path: {e}")
         else:

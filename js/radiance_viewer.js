@@ -16,7 +16,7 @@
 
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { RadianceWebGLRenderer } from "./radiance_webgl.js?v=2.3";
+import { RadianceWebGLRenderer } from "./radiance_webgl.js?v=2.3.1";
 import { RadianceNeuralMonitor } from "./radiance_neural.js";
 
 
@@ -3960,12 +3960,7 @@ else:
             menu.appendChild(opt);
         };
 
-        const imgData = (this.lastResult || []).find(d => d.frame === this.currentFrame && !d.is_compare && !d.is_zdepth);
-        const hasEXR = !!(imgData && imgData.exr_filename);
-
         addOption('Save PNG (Result)', '◎', () => this.exportSnapshot('png'));
-        addOption('Save EXR (Source)', '◎', () => this.exportSnapshot('exr'), !hasEXR);
-        addOption('Save EXR 32-bit (Graded)', '◎', () => this.exportSnapshot('exr32'), !this.useWebGL || !this.renderer);
 
         addOption('Export CDL (Grade)', '◎', () => this._exportCDL());
         addOption('Import CDL (Grade)', '◎', () => this._importCDL());
@@ -4149,11 +4144,23 @@ else:
         if (format === 'exr') {
             const imgData = (this.lastResult || []).find(d => d.frame === this.currentFrame && !d.is_compare && !d.is_zdepth);
             if (imgData && imgData.exr_filename) {
-                const url = api.apiURL(`/view?filename=${encodeURIComponent(imgData.exr_filename)}&subfolder=${encodeURIComponent(imgData.subfolder || '')}&type=${encodeURIComponent(imgData.type || 'temp')}`);
+                // Use dedicated EXR location metadata when available.
+                // Falls back to the PNG thumbnail's subfolder/type so older
+                // backend versions (pre-exr_subfolder) continue to work.
+                const sub  = imgData.exr_subfolder  ?? imgData.subfolder ?? '';
+                const type = imgData.exr_type        ?? imgData.type      ?? 'temp';
+                const url  = api.apiURL(
+                    `/view?filename=${encodeURIComponent(imgData.exr_filename)}`
+                    + `&subfolder=${encodeURIComponent(sub)}`
+                    + `&type=${encodeURIComponent(type)}`
+                );
                 const link = document.createElement('a');
                 link.href = url;
                 link.download = imgData.exr_filename;
                 link.click();
+                this._termLog?.('success', `[Export] Saved Source EXR: ${imgData.exr_filename}`);
+            } else {
+                this._termLog?.('warn', '[Export] Source EXR not available for this frame. Re-run the node to generate it.');
             }
             return;
         }
@@ -8823,11 +8830,9 @@ else:
             this.curveEditor = new RadianceCurveEditor(280, 280, this.theme, (data, secData) => {
                 if (this.renderer) {
                     this.renderer.updateCurveLut(data);
-
-                    const sR = Math.max(0, Math.min(4, (data[255 * 4 + 0] - data[254 * 4 + 0]) * 255));
-                    const sG = Math.max(0, Math.min(4, (data[255 * 4 + 1] - data[254 * 4 + 1]) * 255));
-                    const sB = Math.max(0, Math.min(4, (data[255 * 4 + 2] - data[254 * 4 + 2]) * 255));
-                    this.renderer.setCurveSlope(sR, sG, sB);
+                    // Note: setCurveSlope() removed (v4.2) — u_curveSlope was a dead
+                    // uniform after FIX 6 replaced slope-based with ratio-based HDR
+                    // extrapolation. The topVal sample at uv=(1,0.5) handles it fully.
 
                     if (secData) {
                         this.renderer.updateSecondaryCurveLut(secData);
@@ -12855,6 +12860,8 @@ app.registerExtension({
                 img.crossOrigin = 'anonymous';
                 // Store metadata on image object for fallback access
                 img.exr_filename = imgData.exr_filename;
+                img.exr_subfolder = imgData.exr_subfolder ?? imgData.subfolder ?? '';
+                img.exr_type     = imgData.exr_type      ?? imgData.type      ?? 'temp';
                 img.subfolder = imgData.subfolder;
                 img.type = imgData.type;
 
@@ -12898,6 +12905,8 @@ app.registerExtension({
 
                                 // Propagate metadata
                                 npy.exr_filename = imgData.exr_filename;
+                                npy.exr_subfolder = imgData.exr_subfolder ?? imgData.subfolder ?? '';
+                                npy.exr_type     = imgData.exr_type      ?? imgData.type      ?? 'temp';
                                 npy.subfolder = imgData.subfolder;
                                 npy.type = imgData.type;
 
@@ -13926,7 +13935,12 @@ class RadianceCurveEditor {
         const hvsCurve = this.evaluateCurve(this.curves['HueVsSat']);
         const hvlCurve = this.evaluateCurve(this.curves['HueVsLuma']);
 
-        // Levels remapping
+        // Levels remapping — operates on a [0, 255] integer grid (8-bit input domain).
+        // This is by design: the LUT is 256 entries wide so the levels walk matches
+        // it 1-to-1 for SDR. For HDR images, values above 1.0 bypass the levels
+        // remap entirely and fall through to the ratio-based HDR extrapolation in
+        // the shader (color * topVal). The inBlack/inWhite sliders are therefore
+        // SDR-range controls only — they do not affect super-white HDR highlights.
         const inBlack = this.levels.inBlack / 255;
         const inWhite = this.levels.inWhite / 255;
         const inRange = Math.max(0.001, inWhite - inBlack);

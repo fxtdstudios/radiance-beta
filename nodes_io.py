@@ -203,7 +203,7 @@ class RadianceDigitalCinemaRead:
     CATEGORY = "FXTD Studios/Radiance/IO"
 
     def read(self, source_path, start_frame, frame_limit, input_colorspace, fps_override=0.0):
-        source_path = get_safe_input_path(folder_paths.get_input_directory(), source_path)
+        source_path = get_safe_input_path(folder_paths.get_input_directory(), source_path, allow_absolute=True)
         
         is_video = source_path.lower().endswith((".mp4", ".mov", ".gif", ".webp", ".avi", ".mkv", ".webm"))
         
@@ -379,7 +379,7 @@ class RadianceWrite:
         
         if image is None: raise ValueError("No image/video data")
 
-        full_out = get_safe_output_dir(folder_paths.get_output_directory(), output_path)
+        full_out = get_safe_output_dir(folder_paths.get_output_directory(), output_path, allow_absolute=True)
         images_out = apply_output_transform(image, output_color_space, broadcast_safe)
         images_np = images_out.cpu().numpy()
         ts = int(time.time())
@@ -408,32 +408,100 @@ class RadianceWrite:
 
     def _write_video(self, images_np, prefix, fmt, fps, quality, color_space, output_dir, ts, audio, broadcast_safe):
         import imageio.v3 as iio
-        # FIX: Scale factors must match the actual bit depth of each pixel format.
-        # Previous code used * 65535 (uint16 max) for both H.265 and ProRes 4444,
-        # but the pixel formats are 10-bit and 12-bit respectively:
-        #   yuv420p10le  → max value 1023  (2^10 - 1)
-        #   yuv444p12le  → max value 4095  (2^12 - 1)
-        # imageio received uint16 data with values up to 65535 but the format
-        # only encodes 10/12 bits — it silently dropped the low bits and fired:
-        #   "Lossy conversion from uint16 to uint8. Losing 8 bits of resolution."
-        if "H.264" in fmt:
-            ext, codec, pix = "mp4", "libx264", "yuv420p"
-            data = (np.clip(images_np, 0, 1) * 255).astype(np.uint8)
-        elif "H.265" in fmt:
-            # 10-bit YUV: scale to [0, 1023] not [0, 65535]
-            ext, codec, pix = "mp4", "libx265", "yuv420p10le"
-            data = (np.clip(images_np, 0, 1) * 1023).astype(np.uint16)
-        elif "ProRes 4444" in fmt:
-            # 12-bit YUV: scale to [0, 4095] not [0, 65535]
-            ext, codec, pix = "mov", "prores_ks", "yuv444p12le"
-            data = (np.clip(images_np, 0, 1) * 4095).astype(np.uint16)
-        else:
-            ext, codec, pix = "mp4", "libx264", "yuv420p"
-            data = (np.clip(images_np, 0, 1) * 255).astype(np.uint8)
 
-        fpath = os.path.join(output_dir, f"{prefix}_{ts}.{ext}")
-        iio.imwrite(fpath, data, fps=fps, codec=codec, pixelformat=pix, macro_block_size=1)
-        if audio: self._mux_audio(fpath, audio)
+        fpath_mp4 = os.path.join(output_dir, f"{prefix}_{ts}.mp4")
+        fpath_mov = os.path.join(output_dir, f"{prefix}_{ts}.mov")
+
+        if "H.264" in fmt:
+            # ── H.264 / AVC — 8-bit, imageio path ──────────────────────────────
+            data = (np.clip(images_np, 0, 1) * 255).astype(np.uint8)
+            iio.imwrite(
+                fpath_mp4, data,
+                fps=fps, codec="libx264", pixelformat="yuv420p",
+                macro_block_size=1,
+            )
+            fpath = fpath_mp4
+
+        elif "H.265" in fmt:
+            # ── H.265 / HEVC — true 10-bit, ffmpeg subprocess ─────────────────
+            # imageio.v3 cannot convert uint16 RGB to yuv420p10le natively.
+            # What it actually does: uint16 → uint8 (fires "Lossy conversion"
+            # warning), then passes 8-bit frames to ffmpeg with pixelformat
+            # yuv420p10le. ffmpeg interprets uint8 values (0-255) as 10-bit
+            # samples (0-1023), so 255 looks like ~25% brightness → BLACK video.
+            #
+            # Correct approach: pipe raw uint8 RGB24 frames to ffmpeg stdin and
+            # let ffmpeg do the RGB24→yuv420p10le conversion internally.
+            # CRF range for H.265: 0 (lossless) – 51 (worst). quality 0-100 → CRF.
+            crf_h265 = max(0, min(51, int((1.0 - quality / 100.0) * 51)))
+            frames_u8 = (np.clip(images_np, 0, 1) * 255).astype(np.uint8)
+            h, w = frames_u8.shape[1], frames_u8.shape[2]
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "rawvideo", "-vcodec", "rawvideo",
+                "-s", f"{w}x{h}", "-pix_fmt", "rgb24",
+                "-r", str(fps),
+                "-i", "pipe:0",
+                "-vcodec", "libx265",
+                "-pix_fmt", "yuv420p10le",   # true 10-bit output
+                "-crf", str(crf_h265),
+                "-preset", "slow",
+                "-tag:v", "hvc1",            # Apple/QuickTime compatibility
+                "-movflags", "+faststart",
+                fpath_mp4,
+            ]
+            raw = frames_u8.tobytes()
+            result = subprocess.run(cmd, input=raw, capture_output=True, timeout=600)  # nosec B603
+            if result.returncode != 0:
+                logger.error(
+                    f"[RadianceWrite] H.265 encode failed:\n"
+                    f"{result.stderr.decode(errors='replace')}"
+                )
+                raise RuntimeError("ffmpeg H.265 encode failed — see log for details")
+            fpath = fpath_mp4
+
+        elif "ProRes 4444" in fmt:
+            # ── ProRes 4444 — true 12-bit, ffmpeg subprocess ──────────────────
+            # Same imageio limitation: it cannot handle uint16 → yuv444p12le.
+            # Fix: pipe uint16 RGB48LE frames to ffmpeg stdin; ffmpeg converts
+            # to yuv444p12le internally for true ProRes 4444 12-bit encode.
+            frames_u16 = (np.clip(images_np, 0, 1) * 65535).astype(np.uint16)
+            h, w = frames_u16.shape[1], frames_u16.shape[2]
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "rawvideo", "-vcodec", "rawvideo",
+                "-s", f"{w}x{h}", "-pix_fmt", "rgb48le",
+                "-r", str(fps),
+                "-i", "pipe:0",
+                "-vcodec", "prores_ks",
+                "-profile:v", "4",           # ProRes 4444 profile
+                "-pix_fmt", "yuv444p12le",   # true 12-bit 4:4:4
+                "-vendor", "apl0",
+                "-bits_per_mb", "8000",
+                fpath_mov,
+            ]
+            raw = frames_u16.tobytes()
+            result = subprocess.run(cmd, input=raw, capture_output=True, timeout=600)  # nosec B603
+            if result.returncode != 0:
+                logger.error(
+                    f"[RadianceWrite] ProRes encode failed:\n"
+                    f"{result.stderr.decode(errors='replace')}"
+                )
+                raise RuntimeError("ffmpeg ProRes encode failed — see log for details")
+            fpath = fpath_mov
+
+        else:
+            # ── Fallback — H.264 8-bit ──────────────────────────────────────────
+            data = (np.clip(images_np, 0, 1) * 255).astype(np.uint8)
+            iio.imwrite(
+                fpath_mp4, data,
+                fps=fps, codec="libx264", pixelformat="yuv420p",
+                macro_block_size=1,
+            )
+            fpath = fpath_mp4
+
+        if audio:
+            self._mux_audio(fpath, audio)
         return fpath
 
     def _write_sequence(self, images_np, prefix, fmt, quality, output_dir, ts, start, padding, use_ts, bdepth, comp, meta, alpha_mode, is_single_image=False):

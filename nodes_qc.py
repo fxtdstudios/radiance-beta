@@ -1,5 +1,5 @@
 """
-Radiance QC Node v2.3
+Radiance QC Node v2.3.1
 Production-Grade Quality Control and Error Detection
 Author: FXTD Studios Pipeline Team
 """
@@ -151,7 +151,7 @@ class RadianceQC:
             }
 
             text_report_lines = ["╔═══════════════════════════════════════════╗"]
-            text_report_lines.append("║     RADIANCE QC REPORT v2.1              ║")
+            text_report_lines.append("║     RADIANCE QC REPORT v2.3.1            ║")
             text_report_lines.append("╚═══════════════════════════════════════════╝")
             text_report_lines.append(f"Image: {B} frame(s), {W}x{H}, {C} channel(s)")
             text_report_lines.append("")
@@ -401,7 +401,7 @@ class RadianceQCExport:
 
             # Security: validate output path via safe_join
             try:
-                output_dir = Path(get_safe_output_dir(_OUTPUT_DIR, output_path))
+                output_dir = Path(get_safe_output_dir(_OUTPUT_DIR, output_path, allow_absolute=True))
             except ValueError as e:
                 return (f"✗ Export failed: Invalid output path — {e}",)
 

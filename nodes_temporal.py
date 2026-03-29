@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-                 RADIANCE TEMPORAL NODES v2.3
+                 RADIANCE TEMPORAL NODES v2.3.1
           Temporal Video Processing for ComfyUI Pipelines
                       Radiance © 2024-2026
 

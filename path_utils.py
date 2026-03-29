@@ -44,7 +44,7 @@ def safe_join(base: str, *paths: str) -> str:
     return full_path
 
 
-def validate_output_path(base_dir: str, subfolder: str, filename: str) -> str:
+def validate_output_path(base_dir: str, subfolder: str, filename: str, allow_absolute: bool = False) -> str:
     """
     Validate and construct a safe output file path.
 
@@ -52,6 +52,10 @@ def validate_output_path(base_dir: str, subfolder: str, filename: str) -> str:
         base_dir: The base output directory
         subfolder: Optional subfolder (can be empty string)
         filename: The filename to write
+        allow_absolute: If True, absolute paths are returned as-is (no containment
+                         check). Use only for VFX workflows that explicitly require
+                         writing to arbitrary filesystem locations (network drives,
+                         project roots, etc.). Default False.
 
     Returns:
         Safe absolute path for the output file
@@ -61,6 +65,8 @@ def validate_output_path(base_dir: str, subfolder: str, filename: str) -> str:
     """
     # Reject absolute paths in subfolder - force relative to base
     if subfolder and os.path.isabs(subfolder):
+        if allow_absolute:
+            return os.path.normpath(os.path.join(subfolder, filename))
         raise ValueError(
             f"Absolute subfolder paths not allowed for security: '{subfolder}'. "
             f"Use relative paths only."
@@ -73,19 +79,23 @@ def validate_output_path(base_dir: str, subfolder: str, filename: str) -> str:
         return safe_join(base_dir, filename)
 
 
-def get_safe_output_dir(base_dir: str, subfolder: str = "") -> str:
+def get_safe_output_dir(base_dir: str, subfolder: str = "", allow_absolute: bool = False) -> str:
     """
     Get a validated output directory, creating it if necessary.
 
     Args:
         base_dir: The base output directory
         subfolder: Optional subfolder within base_dir (must be relative)
+        allow_absolute: If True, absolute paths are returned as-is (no containment
+                         check). Use only for VFX workflows that explicitly require
+                         writing to arbitrary filesystem locations (network drives,
+                         project roots, etc.). Default False.
 
     Returns:
         Safe absolute path to the output directory
 
     Raises:
-        ValueError: If subfolder is absolute or would escape base_dir
+        ValueError: If subfolder is absolute (unless allow_absolute=True) or would escape base_dir
 
     FIX 1: Previous implementation accepted absolute subfolder paths and returned
     them directly via `os.path.normpath(subfolder)` — completely bypassing
@@ -95,6 +105,10 @@ def get_safe_output_dir(base_dir: str, subfolder: str = "") -> str:
     ValueError, consistent with validate_output_path.
     """
     if subfolder and os.path.isabs(subfolder):
+        if allow_absolute:
+            output_dir = os.path.normpath(subfolder)
+            os.makedirs(output_dir, exist_ok=True)
+            return output_dir
         raise ValueError(
             f"Absolute subfolder paths not allowed for security: '{subfolder}'. "
             f"Use relative paths only."

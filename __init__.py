@@ -152,7 +152,7 @@ for module in modules:
         logger.error(f"FAILED to load {module.__name__}: {e}")
 
 # Package info
-__version__ = "2.3"
+__version__ = "2.3.1"
 __author__ = "Radiance"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
 

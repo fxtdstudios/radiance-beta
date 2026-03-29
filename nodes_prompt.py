@@ -1,5 +1,5 @@
 """
-RADIANCE - PROMPT ENGINEERING NODES v2.3
+RADIANCE - PROMPT ENGINEERING NODES v2.3.1
 --------------------------------------
 Professional tools for constructing cinematic, high-fidelity prompts for Flux and other diffusion models.
 Includes the "Cinematic Encoder" node for direct CLIP conditioning with architecture-aware prompt building.

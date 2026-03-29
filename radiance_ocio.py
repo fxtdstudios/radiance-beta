@@ -1,6 +1,6 @@
 """
 ═════════════════════════════════════════════════════════════════════════════
-                     RADIANCE OCIO ENGINE v2.3
+                     RADIANCE OCIO ENGINE v2.3.1
               OpenColorIO Integration for Radiance Viewer
                          Radiance © 2024-2026
 

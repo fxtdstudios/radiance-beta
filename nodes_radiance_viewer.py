@@ -1,6 +1,6 @@
 """
 ═════════════════════════════════════════════════════════════════════════════
-                     RADIANCE VIEWER NODE v2.3
+                     RADIANCE VIEWER NODE v2.3.1
               VFX Industry-Standard Image Viewer for ComfyUI
                          Radiance © 2024-2026
 
@@ -24,7 +24,7 @@ Professional viewer node providing:
 
 VERSION HISTORY:
 
-v2.3 — Industry & Performance Upgrade (March 2026)
+v2.3.1 — Industry & Performance Upgrade (March 2026)
 ──────────────────────────────────────
   #1  EXR always-on as primary float sidecar (cv2/imageio)
   #3  HALF_FLOAT WebGL verified with OES_texture_half_float
@@ -1636,11 +1636,18 @@ class RadianceViewer:
         if write_exr_robust:
             try:
                 exr_filepath = safe_join(output_dir, exr_filename)
-                # write_exr_robust handles R/B swap and fallback backends internally
-                # It expects RGB (ComfyUI standard)
+                # write_exr_robust expects a 3-channel RGB array (ComfyUI standard).
+                # frame_to_save may be RGBA (4-channel) if the input was RGB and was
+                # padded with alpha=1.0 for WebGL/OpenCV driver compatibility.
+                # Passing the 4-channel array causes write_exr_robust to either fail
+                # silently (returning False) or write an ABGR-channel-ordered EXR that
+                # external viewers decode as black / swapped channels.
+                # Fix: always slice to [:, :, :3] before the call so the writer
+                # receives the canonical RGB triplet regardless of padding state.
+                frame_for_exr = frame_to_save[..., :3]  # RGBA → RGB  (no-op if already 3-ch)
                 success = write_exr_robust(
-                    exr_filepath, 
-                    frame_to_save, 
+                    exr_filepath,
+                    frame_for_exr,
                     bit_depth="32-bit Float",
                     compression="ZIP"
                 )
@@ -1708,6 +1715,10 @@ class RadianceViewer:
             "has_hdr": has_hdr,
             "hdr_filename": rhdr_filename if rhdr_saved else None,
             "exr_filename": exr_filename if exr_filename else None,
+            # Explicit EXR location metadata — avoids inheriting PNG thumbnail's
+            # subfolder/type if the two files are ever stored separately.
+            "exr_subfolder": "" if exr_filename else None,
+            "exr_type": "temp" if exr_filename else None,
         }
 
         if rhdr_saved:
