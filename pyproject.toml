@@ -15,13 +15,13 @@ classifiers = [
 dependencies = ["opencv-python", "imageio", "Pillow", "OpenEXR", "Imath", "opencolorio", "colour-science", "transformers", "scipy", "defusedxml", "imageio-ffmpeg"]
 
 [project.urls]
-repository = "https://github.com/fxtdstudios/radiance"
+Repository = "https://github.com/fxtdstudios/radiance"
 Documentation = "https://radiance.fxtd.org/index.html"
 "Bug Tracker" = "https://radiance.fxtd.org/faq.html"
 
 [tool.comfy]
 PublisherId = "fxtdstudios"
 DisplayName = "radiance"
-Icon = "docs/FLOGO.png"
+Icon = "RADIANCE_ICON.png"
 requires-comfyui = ">=0.2.2"
 
