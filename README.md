@@ -186,7 +186,6 @@ Radiance is designed for a keyboard-driven VFX workflow. Use these shortcuts to 
 Radiance is backed by a professional team of VFX Technical Directors. Engage with us through our official channels:
 
 ### ◎ Official Discord Server
-Join over 2,000+ artists and developers in the **FXTD Studios Discord**.
 - **Production Workflows:** Access exclusive `.rad` templates and cinema-grade JSON presets.
 - **Direct Engineer Support:** Real-time troubleshooting and feature requests.
 - **Showcase:** share your work and get feedback from industry veterans.
