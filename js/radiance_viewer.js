@@ -1,22 +1,6 @@
-/**
- * ═══════════════════════════════════════════════════════════════════════════════
- *                         FXTD RADIANCE VIEWER
- *                  VFX Industry-Standard Image Viewer
- *                        FXTD Studios © 2024-2026
- * 
- * Full Feature Set:
- * - Fullscreen (native browser), keyboard shortcuts
- * - Pixel probe with float values + copy to clipboard
- * - A/B comparison (wipe, side-by-side, difference)
- * - Professional scopes (Histogram, Waveform, Vectorscope) + overlay mode
- * - Grid overlay (rule of thirds, center)
- * - Export snapshot, reset controls
- * ═══════════════════════════════════════════════════════════════════════════════
- */
-
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { RadianceWebGLRenderer } from "./radiance_webgl.js?v=2.3.1";
+import { RadianceWebGLRenderer } from "./radiance_webgl.js?v=2.3.2";
 import { RadianceNeuralMonitor } from "./radiance_neural.js";
 
 
@@ -623,8 +607,8 @@ class RadianceViewer {
     /** Human-readable label for a precision mode. */
     _precisionLabel(mode) {
         return mode === 'f32' ? 'FLOAT 32-bit (IEEE 754)' :
-               mode === 'f16' ? 'FLOAT 16-bit (Half Float)' :
-                                'INT 8-bit (SDR)';
+            mode === 'f16' ? 'FLOAT 16-bit (Half Float)' :
+                'INT 8-bit (SDR)';
     }
 
     /**
@@ -664,14 +648,14 @@ class RadianceViewer {
             } else if (mode === 'f16') {
                 pipeLabel = '·  RGBA16F'; pipeColor = '#60a5fa';  // blue
             } else {
-                pipeLabel = '·  RGBA8';   pipeColor = this.theme.textDim;
+                pipeLabel = '·  RGBA8'; pipeColor = this.theme.textDim;
             }
         }
 
         // Badge: "FP32 · RGBA32F"
         const dominantColor = (inputLabel === 'FP32' || (this.renderer && this.renderer.pipelinePrecision === 'f32'))
             ? '#4ade80' : (inputLabel === 'FP16' || (this.renderer && this.renderer.pipelinePrecision === 'f16'))
-            ? '#60a5fa' : this.theme.textDim;
+                ? '#60a5fa' : this.theme.textDim;
 
         this.bitDepthInfo.textContent = `${inputLabel}  ${pipeLabel}`;
         this.bitDepthInfo.style.color = dominantColor;
@@ -1331,7 +1315,7 @@ class RadianceViewer {
         // ── VFX Delivery Area (Phase 5) ──────────────────────────────────
         const dvContainer = document.createElement('div');
         dvContainer.style.cssText = `flex: 1; display: none; flex-direction: column; background: #0b0e14; padding: 12px; overflow-y: auto;`;
-        
+
         const dvTitle = document.createElement('div');
         dvTitle.textContent = '◎ RENDER SETTINGS — EXPORT GRADED MASTER';
         dvTitle.style.cssText = `font-size: 10px; font-weight: 800; color: #777; letter-spacing: 0.15em; margin-bottom: 12px; border-bottom: 1px solid #222; padding-bottom: 5px;`;
@@ -1340,7 +1324,7 @@ class RadianceViewer {
         const dvForm = document.createElement('div');
         dvForm.style.cssText = `display: grid; grid-template-columns: 100px 1fr 100px 1fr; gap: 10px; align-items: center;`;
 
-        const addRow = (label, el, span=1) => {
+        const addRow = (label, el, span = 1) => {
             const lbl = document.createElement('label');
             lbl.textContent = label;
             lbl.style.cssText = `font-size: 9px; color: #555; text-transform: uppercase; font-weight: bold;`;
@@ -1418,8 +1402,8 @@ class RadianceViewer {
         // Apex Options Section
         const dvApexSection = document.createElement('div');
         dvApexSection.style.cssText = `grid-column: span 4; margin-top: 15px; border-top: 1px solid #222; padding-top: 10px; display: flex; flex-wrap: wrap; gap: 15px;`;
-        
-        const createCheck = (label, id, def=false) => {
+
+        const createCheck = (label, id, def = false) => {
             const wrap = document.createElement('label');
             wrap.style.cssText = `display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 9px; color: #aaa; font-weight: 600; text-transform: uppercase;`;
             const cb = document.createElement('input');
@@ -1452,7 +1436,7 @@ class RadianceViewer {
         dvApexSection.appendChild(wBurnFrame);
         dvApexSection.appendChild(wBurnLUT);
         dvForm.appendChild(dvApexSection);
-        
+
         const customTextWrap = document.createElement('div');
         customTextWrap.style.cssText = `grid-column: span 4; display: flex; align-items: center; gap: 10px; margin-top: 5px;`;
         const customTextLbl = document.createElement('div');
@@ -1469,29 +1453,29 @@ class RadianceViewer {
 
         const dvSubmitRow = document.createElement('div');
         dvSubmitRow.style.cssText = `margin-top: 20px; display: flex; gap: 10px; border-top: 1px solid #222; padding-top: 15px;`;
-        
+
         const dvRenderBtn = document.createElement('button');
         dvRenderBtn.textContent = '◎ ADD TO RENDER QUEUE & START EXPORT';
         dvRenderBtn.style.cssText = `background: #00a8ff; color: #fff; border: none; font-size: 10px; font-weight: 900; letter-spacing: 0.1em; border-radius: 3px; padding: 8px 20px; cursor: pointer; transition: 0.2s; box-shadow: 0 4px 15px rgba(0, 168, 255, 0.3);`;
         dvRenderBtn.onmouseenter = () => dvRenderBtn.style.background = '#33beff';
         dvRenderBtn.onmouseleave = () => dvRenderBtn.style.background = '#00a8ff';
-        
+
         dvSubmitRow.appendChild(dvRenderBtn);
 
         // Progress Tracking UI
         const dvProgressContainer = document.createElement('div');
         dvProgressContainer.style.cssText = `margin-top: 15px; display: none; flex-direction: column; gap: 5px;`;
-        
+
         const dvProgressLabel = document.createElement('div');
         dvProgressLabel.style.cssText = `font-size: 9px; color: #00a8ff; font-weight: bold; text-transform: uppercase;`;
         dvProgressLabel.textContent = 'READY TO EXPORT';
-        
+
         const dvProgressTrack = document.createElement('div');
         dvProgressTrack.style.cssText = `width: 100%; height: 2px; background: #1a1e24; border-radius: 1px; overflow: hidden;`;
-        
+
         const dvProgressBar = document.createElement('div');
         dvProgressBar.style.cssText = `width: 0%; height: 100%; background: #00a8ff; transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1); box-shadow: 0 0 10px rgba(0, 168, 255, 0.5);`;
-        
+
         dvProgressTrack.appendChild(dvProgressBar);
         dvProgressContainer.appendChild(dvProgressLabel);
         dvProgressContainer.appendChild(dvProgressTrack);
@@ -1510,14 +1494,14 @@ class RadianceViewer {
         const addHistoryItem = (path, name, qc) => {
             const item = document.createElement('div');
             item.style.cssText = `background: #111; border: 1px solid #222; padding: 6px 10px; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; font-size: 10px;`;
-            
+
             const info = document.createElement('div');
             info.innerHTML = `
                 <div style="color: #eee; font-weight: bold;">${name}</div>
                 <div style="color: #555; font-size: 9px; margin-top: 2px;">${path}</div>
                 <div style="color: ${qc.includes('[QC PASS]') ? '#00ff88' : '#ff4444'}; font-size: 8px; margin-top: 2px;">${qc}</div>
             `;
-            
+
             const openBtn = document.createElement('button');
             openBtn.textContent = '◎';
             openBtn.title = 'Open Path';
@@ -1526,10 +1510,10 @@ class RadianceViewer {
                 // Try to open folder if supported by backend bridge, otherwise just log
                 this._termLog('system', `Opening: ${path}`);
             };
-            
+
             item.appendChild(info);
             item.appendChild(openBtn);
-            
+
             if (dvHistoryList.firstChild) dvHistoryList.insertBefore(item, dvHistoryList.firstChild);
             else dvHistoryList.appendChild(item);
         };
@@ -1615,9 +1599,9 @@ class RadianceViewer {
                             exposure: this.exposure,
                             // Full per-channel arrays — NOT [0] only. Avoids silently
                             // dropping teal/orange and other per-channel grade decisions.
-                            gamma:  Array.isArray(this.gamma)  ? [...this.gamma]  : [this.gamma  || 1.0, this.gamma  || 1.0, this.gamma  || 1.0],
-                            gain:   Array.isArray(this.gain)   ? [...this.gain]   : [this.gain   || 1.0, this.gain   || 1.0, this.gain   || 1.0],
-                            lift:   Array.isArray(this.lift)   ? [...this.lift]   : [this.lift   || 0.0, this.lift   || 0.0, this.lift   || 0.0],
+                            gamma: Array.isArray(this.gamma) ? [...this.gamma] : [this.gamma || 1.0, this.gamma || 1.0, this.gamma || 1.0],
+                            gain: Array.isArray(this.gain) ? [...this.gain] : [this.gain || 1.0, this.gain || 1.0, this.gain || 1.0],
+                            lift: Array.isArray(this.lift) ? [...this.lift] : [this.lift || 0.0, this.lift || 0.0, this.lift || 0.0],
                             offset: Array.isArray(this.offset) ? [...this.offset] : [this.offset || 0.0, this.offset || 0.0, this.offset || 0.0],
                             contrast: this.contrast,
                             pivot: this.pivot,
@@ -1659,7 +1643,7 @@ class RadianceViewer {
 
                 const result = await response.json();
                 clearInterval(progressInterval);
-                
+
                 if (result.status === 'success') {
                     dvProgressBar.style.width = '100%';
                     dvProgressLabel.textContent = '◎ EXPORT COMPLETE';
@@ -1669,9 +1653,9 @@ class RadianceViewer {
                         this._termLog('system', `<span style="color: ${qcColor}">${result.qc}</span>`);
                     }
                     this._termLog('system', ` Saved to: ${result.path}`);
-                    
+
                     addHistoryItem(result.path, dvFilename.value, result.qc || 'QC N/A');
-                    
+
                     setTimeout(() => {
                         dvProgressContainer.style.display = 'none';
                     }, 3000);
@@ -1908,10 +1892,10 @@ class RadianceViewer {
             document.removeEventListener('mouseup', endDrag);
         };
         resizeHandle.addEventListener('mousedown', startDrag);
-        header.addEventListener('mousedown', (e) => { 
+        header.addEventListener('mousedown', (e) => {
             // Allow dragging from header background or tabs container (excluding buttons if any)
             if (e.target === header || tabsContainer.contains(e.target) || badge.contains(e.target)) {
-                startDrag(e); 
+                startDrag(e);
             }
         });
 
@@ -2035,7 +2019,7 @@ class RadianceViewer {
     _termLog(type, msg) {
         if (!this._termOutput) return;
         const line = document.createElement('div');
-        
+
         const colors = {
             system: '#3d6060',
             info: '#00a8ff',
@@ -2070,7 +2054,7 @@ class RadianceViewer {
         const highlighted = escaped.replace(/(\[[\w\s·\.]+\])/g, `<span style="color:${c};font-weight:600">$1</span>`);
 
         line.innerHTML = tsSpan + `<span style="color:${c};flex:1">${highlighted}</span>`;
-        
+
         // Add indicator for errors/warnings
         if (type === 'error' || type === 'warn') {
             line.style.borderLeftColor = c;
@@ -2285,7 +2269,7 @@ else:
                         ['GPU TEXTURE', this.useWebGL ? 'ACTIVE' : 'FALLBACK'],
                         ['MEMORY', `${((this.imageWidth * this.imageHeight * 4 * 4) / 1024 / 1024).toFixed(2)} MB (Est. 32-bit)`]
                     ];
-                    
+
                     this._termLog('system', '--- TENSOR INSPECTION [IMAGE] ---');
                     stats.forEach(([k, v]) => {
                         this._termLog('result', `${k.padEnd(12)} : ${v}`);
@@ -2515,15 +2499,15 @@ else:
                 if (!this.image) { this._termLog('warn', '[Info] No image loaded.'); break; }
                 this._termLog('result', `  Dimensions  : ${this.imageWidth}×${this.imageHeight}`);
                 this._termLog('result', `  Format      : ${this.hdrData ? (
-                    this.hdrData.format === 'rhdr'    ? 'RHDR fp16'     :
-                    this.hdrData.format === 'rhdr_f32'? 'RHDR fp32'     :
-                    this.hdrData.format === 'exr'     ? 'OpenEXR'       :
-                    this.hdrData.format === 'rgbe'    ? 'Radiance RGBE (.hdr)' :
-                    this.hdrData.format === 'tiff_f32'? 'TIFF float32'  :
-                    this.hdrData.format === 'tiff_u16'? 'TIFF 16-bit'   :
-                    this.hdrData.format === 'tiff_u8' ? 'TIFF 8-bit'    :
-                    this.hdrData.format === 'rf32'    ? 'RF32 float32'  :
-                    'Float32 HDR'
+                    this.hdrData.format === 'rhdr' ? 'RHDR fp16' :
+                        this.hdrData.format === 'rhdr_f32' ? 'RHDR fp32' :
+                            this.hdrData.format === 'exr' ? 'OpenEXR' :
+                                this.hdrData.format === 'rgbe' ? 'Radiance RGBE (.hdr)' :
+                                    this.hdrData.format === 'tiff_f32' ? 'TIFF float32' :
+                                        this.hdrData.format === 'tiff_u16' ? 'TIFF 16-bit' :
+                                            this.hdrData.format === 'tiff_u8' ? 'TIFF 8-bit' :
+                                                this.hdrData.format === 'rf32' ? 'RF32 float32' :
+                                                    'Float32 HDR'
                 ) : 'PNG 8-bit'}`);
                 this._termLog('result', `  Frame       : ${(this.currentFrame || 0) + 1} / ${(this.frameImages || []).length || 1}`);
                 this._termLog('result', `  Zoom        : ${((this.zoom || 1) * 100).toFixed(0)}%`);
@@ -3204,7 +3188,7 @@ else:
         this.addGrpLabel('VIEW', hud);
         this.addButton('Fit', () => this.fitToView(), 'Fit to view (F)', hud);
         this.addButton('1:1', () => this.setZoom(1.0), 'Actual pixels (1)', hud);
-        
+
         // LUT Select (Vertical adapted)
         const lutWrap = document.createElement('div');
         lutWrap.style.cssText = 'display:flex; flex-direction:column; gap:2px; align-items:center;';
@@ -3261,7 +3245,7 @@ else:
         this.frameDisplay.style.cssText = `color: ${this.theme.text}; font-size: 8px; text-align: center; font-weight: bold;`;
         hud.appendChild(this.frameDisplay);
         this.nextFrameBtn = this.addButton('▶', () => this.nextFrame(), 'Next Frame (→)', hud);
-        
+
         this.playBtn = this.addButton('◎', () => this.togglePlayback(), 'Play/Pause Sequence (Space)', hud);
         this.addSep(hud);
 
@@ -3272,24 +3256,24 @@ else:
 
         // ── GROUP: Analysis ──────────────────────────────────────────────────
         this.addGrpLabel('ANLYS', hud);
-        const fcBtn = this.addButton('FC', () => { 
-            this.falseColor = !this.falseColor; 
-            if (this.falseColor) { 
-                this.zebra = this.focusPeaking = this.showZdepth = this.gamutWarning = this.clippingMonitor = false; 
+        const fcBtn = this.addButton('FC', () => {
+            this.falseColor = !this.falseColor;
+            if (this.falseColor) {
+                this.zebra = this.focusPeaking = this.showZdepth = this.gamutWarning = this.clippingMonitor = false;
             }
-            syncAll(); this.render(); 
+            syncAll(); this.render();
         }, 'False Color (E)', hud);
 
-        const gwBtn = this.addButton('GW', () => { 
-            this.gamutWarning = !this.gamutWarning; 
+        const gwBtn = this.addButton('GW', () => {
+            this.gamutWarning = !this.gamutWarning;
             if (this.gamutWarning) { this.clippingMonitor = this.falseColor = false; }
-            syncAll(); this.render(); 
+            syncAll(); this.render();
         }, 'Gamut Warning', hud);
 
-        const clpBtn = this.addButton('CLP', () => { 
-            this.clippingMonitor = !this.clippingMonitor; 
+        const clpBtn = this.addButton('CLP', () => {
+            this.clippingMonitor = !this.clippingMonitor;
             if (this.clippingMonitor) { this.gamutWarning = this.falseColor = false; }
-            syncAll(); this.render(); 
+            syncAll(); this.render();
         }, 'Clipping Monitor', hud);
 
         // Sprint 4: Live Gamut Compression toggle (ACES RGC-style knee)
@@ -3303,27 +3287,27 @@ else:
             syncAll(); this.render();
         }, 'Gamut Compression (ACES RGC knee) — compresses out-of-gamut pixels', hud);
 
-        const zBtn = this.addButton('Z', () => { 
-            this.toggleZdepth(); 
-            syncAll(); 
+        const zBtn = this.addButton('Z', () => {
+            this.toggleZdepth();
+            syncAll();
         }, 'Z-Depth / Zebra (Z)', hud);
-        
-        this.focusPeakingBtn = this.addButton('FP', () => { 
-            this.focusPeaking = !this.focusPeaking; 
+
+        this.focusPeakingBtn = this.addButton('FP', () => {
+            this.focusPeaking = !this.focusPeaking;
             if (this.focusPeaking) { this.falseColor = this.zebra = this.showZdepth = false; }
-            syncAll(); this.render(); 
+            syncAll(); this.render();
         }, 'Focus Peaking (K)', hud);
 
-        this.gridBtn = this.addButton('▦', () => { 
-            this.cycleGridMode(); 
-            syncAll(); 
+        this.gridBtn = this.addButton('▦', () => {
+            this.cycleGridMode();
+            syncAll();
         }, 'Grid / Safe Areas (G)', hud);
 
-        const saBtn = this.addButton('◎', () => { 
-            this.cycleSafeAreas(); 
-            syncAll(); 
+        const saBtn = this.addButton('◎', () => {
+            this.cycleSafeAreas();
+            syncAll();
         }, 'Safe Areas (S)', hud);
-        
+
         this.loupeBtn = this.addButton('🔍', () => {
             this.showLoupe = !this.showLoupe;
             syncAll();
@@ -3501,9 +3485,9 @@ else:
 
     togglePlayback() {
         if (this.totalFrames <= 1) return;
-        
+
         this.isPlaying = !this.isPlaying;
-        
+
         if (this.isPlaying) {
             this.playBtn.textContent = '⏸';
             this.playBtn.classList.add('active');
@@ -3511,7 +3495,7 @@ else:
             this.playBtn.style.background = 'rgba(0, 168, 255, 0.15)';
             this.playBtn.style.borderColor = 'rgba(0, 168, 255, 0.5)';
             this.playBtn.style.boxShadow = '0 0 10px rgba(0, 168, 255, 0.2)';
-            
+
             // Loop at ~24fps (41ms)
             this.playbackInterval = setInterval(() => {
                 this.nextFrame();
@@ -3523,7 +3507,7 @@ else:
             this.playBtn.style.background = 'rgba(255,255,255,0.03)';
             this.playBtn.style.borderColor = 'rgba(255,255,255,0.08)';
             this.playBtn.style.boxShadow = 'none';
-            
+
             if (this.playbackInterval) {
                 clearInterval(this.playbackInterval);
                 this.playbackInterval = null;
@@ -4026,28 +4010,28 @@ else:
         const N = 17; // Grid size (17³ = 4913 points, standard for creative LUTs)
         const lines = [
             `# Radiance Viewer Grade LUT — exported ${new Date().toISOString()}`,
-            `# Gain: ${(this.gain||[1,1,1]).map(v=>v.toFixed(4)).join(' ')}`,
-            `# Gamma: ${(this.gamma||[1,1,1]).map(v=>v.toFixed(4)).join(' ')}`,
-            `# Lift: ${(this.lift||[0,0,0]).map(v=>v.toFixed(4)).join(' ')}`,
-            `# Saturation: ${(this.saturation||1).toFixed(4)}`,
-            `# Contrast: ${(this.contrast||1).toFixed(4)}  Pivot: ${(this.pivot||0.18).toFixed(4)}`,
+            `# Gain: ${(this.gain || [1, 1, 1]).map(v => v.toFixed(4)).join(' ')}`,
+            `# Gamma: ${(this.gamma || [1, 1, 1]).map(v => v.toFixed(4)).join(' ')}`,
+            `# Lift: ${(this.lift || [0, 0, 0]).map(v => v.toFixed(4)).join(' ')}`,
+            `# Saturation: ${(this.saturation || 1).toFixed(4)}`,
+            `# Contrast: ${(this.contrast || 1).toFixed(4)}  Pivot: ${(this.pivot || 0.18).toFixed(4)}`,
             'LUT_3D_SIZE 17',
             'DOMAIN_MIN 0.0 0.0 0.0',
             'DOMAIN_MAX 1.0 1.0 1.0',
             ''
         ];
 
-        const gain  = Array.isArray(this.gain)  ? this.gain  : [1,1,1];
-        const gamma = Array.isArray(this.gamma) ? this.gamma : [1,1,1];
-        const lift  = Array.isArray(this.lift)  ? this.lift  : [0,0,0];
-        const sat   = this.saturation || 1.0;
-        const con   = this.contrast   || 1.0;
-        const piv   = this.pivot      || 0.18;
+        const gain = Array.isArray(this.gain) ? this.gain : [1, 1, 1];
+        const gamma = Array.isArray(this.gamma) ? this.gamma : [1, 1, 1];
+        const lift = Array.isArray(this.lift) ? this.lift : [0, 0, 0];
+        const sat = this.saturation || 1.0;
+        const con = this.contrast || 1.0;
+        const piv = this.pivot || 0.18;
 
         // Apply grade inline (mirrors apply_grading Python logic)
         const applyGrade = (r, g, b) => {
             // Lift (luma-pivoted additive shadow shift)
-            const luma = 0.2126*r + 0.7152*g + 0.0722*b;
+            const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
             const lumaPivot = Math.max(0, 1 - luma);
             r += lift[0] * lumaPivot;
             g += lift[1] * lumaPivot;
@@ -4063,12 +4047,12 @@ else:
             g = (g - piv) * con + piv;
             b = (b - piv) * con + piv;
             // Saturation
-            const luma2 = 0.2126*r + 0.7152*g + 0.0722*b;
+            const luma2 = 0.2126 * r + 0.7152 * g + 0.0722 * b;
             r = luma2 + sat * (r - luma2);
             g = luma2 + sat * (g - luma2);
             b = luma2 + sat * (b - luma2);
             // Clamp to [0, 1] for LUT domain
-            return [Math.max(0,Math.min(1,r)), Math.max(0,Math.min(1,g)), Math.max(0,Math.min(1,b))];
+            return [Math.max(0, Math.min(1, r)), Math.max(0, Math.min(1, g)), Math.max(0, Math.min(1, b))];
         };
 
         // .CUBE Ordering: R varies fastest, then G, then B
@@ -4147,9 +4131,9 @@ else:
                 // Use dedicated EXR location metadata when available.
                 // Falls back to the PNG thumbnail's subfolder/type so older
                 // backend versions (pre-exr_subfolder) continue to work.
-                const sub  = imgData.exr_subfolder  ?? imgData.subfolder ?? '';
-                const type = imgData.exr_type        ?? imgData.type      ?? 'temp';
-                const url  = api.apiURL(
+                const sub = imgData.exr_subfolder ?? imgData.subfolder ?? '';
+                const type = imgData.exr_type ?? imgData.type ?? 'temp';
+                const url = api.apiURL(
                     `/view?filename=${encodeURIComponent(imgData.exr_filename)}`
                     + `&subfolder=${encodeURIComponent(sub)}`
                     + `&type=${encodeURIComponent(type)}`
@@ -4811,7 +4795,7 @@ else:
                 // Label
                 ctx.fillStyle = p.color || '#fff';
                 ctx.font = 'bold 9px monospace';
-                ctx.fillText(`P${idx+1} ${p.hex}`, cx + 7, cy + 4);
+                ctx.fillText(`P${idx + 1} ${p.hex}`, cx + 7, cy + 4);
                 ctx.restore();
             });
         }
@@ -5241,7 +5225,7 @@ else:
             if (this._probeMemory.length >= 4) this._probeMemory.shift(); // FIFO cap at 4
             this._probeMemory.push({ ...this._lastProbe, color: ['#f55', '#5f5', '#55f', '#ff5'][this._probeMemory.length] });
             this.renderOverlay(); // Re-draw to show new probe dot
-            this._termLog?.('info', `[Probe] Stored ${ this._probeMemory.length}/4: Disp ${this._lastProbe.dispStr}  |  Linear ${this._lastProbe.linStr}`);
+            this._termLog?.('info', `[Probe] Stored ${this._probeMemory.length}/4: Disp ${this._lastProbe.dispStr}  |  Linear ${this._lastProbe.linStr}`);
         });
 
         // Alt+drag annotation drawing (Sprint 4)
@@ -5852,16 +5836,16 @@ else:
 
         if (!parsed) throw new Error('Failed to parse HDR sidecar');
 
-        const height   = parsed.shape[0];
-        const width    = parsed.shape[1];
+        const height = parsed.shape[0];
+        const width = parsed.shape[1];
         const channels = parsed.shape[2] || 3;
 
         const hdrData = {
-            data:     parsed.data,        // Float32Array (CPU reads, scopes, probe)
+            data: parsed.data,        // Float32Array (CPU reads, scopes, probe)
             fp16data: parsed.fp16data,    // Uint16Array (GPU HALF_FLOAT, RHDR only)
             width, height, channels,
-            shape:    parsed.shape,
-            format:   parsed.format || 'npy',
+            shape: parsed.shape,
+            format: parsed.format || 'npy',
             isLinear: parsed.isLinear !== false  // true for all float/HDR formats
         };
 
@@ -5879,9 +5863,9 @@ else:
             }
         }
 
-        this.imageWidth  = width;
+        this.imageWidth = width;
         this.imageHeight = height;
-        this.hdrData     = hdrData;
+        this.hdrData = hdrData;
 
         console.log(`[Radiance] Loaded ${hdrData.format.toUpperCase()} ${width}×${height}×${channels}ch (isLinear=${hdrData.isLinear})`);
         this.createPlaceholderImage(width, height);
@@ -5915,7 +5899,7 @@ else:
                     shape: parsed.shape, format: parsed.format,
                     isLinear: parsed.isLinear !== false
                 };
-                this.imageWidth  = W;
+                this.imageWidth = W;
                 this.imageHeight = H;
 
                 if (this.renderer) {
@@ -5930,15 +5914,15 @@ else:
                 this.createPlaceholderImage(W, H);
                 this.fitToView(); this.render();
                 this.updateScopes && this.updateScopes();
-                this.updateInfo  && this.updateInfo();
+                this.updateInfo && this.updateInfo();
                 console.log(`[Radiance] Loaded dropped ${parsed.format.toUpperCase()} ${W}×${H}×${C}ch`);
 
             } else {
                 // Standard image (PNG, JPG, WebP) — use browser decode
                 const bitmap = await createImageBitmap(file);
                 this.hdrData = null;
-                this.image   = bitmap;
-                this.imageWidth  = bitmap.width;
+                this.image = bitmap;
+                this.imageWidth = bitmap.width;
                 this.imageHeight = bitmap.height;
                 if (this.renderer) this.renderer.loadImageTexture(bitmap);
                 this.fitToView(); this.render();
@@ -8077,14 +8061,14 @@ else:
         // ═════════════════════════════════════════════════════════════════════
         const scopesWrapper = document.createElement('div');
         scopesWrapper.style.cssText = 'border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 4px; margin-bottom: 8px;';
-        
+
         // Pass a sub-container to renderScopesTab so it doesn't affect the main layout
         const scopesInner = document.createElement('div');
         this.renderScopesTab(scopesInner);
         // Overwrite some container styles for integration
         scopesInner.style.padding = '0';
         scopesInner.style.gap = '4px';
-        
+
         scopesWrapper.appendChild(scopesInner);
         container.appendChild(scopesWrapper);
 
@@ -8418,7 +8402,7 @@ else:
         presets.style.cssText = 'display: flex; flex-wrap: wrap; gap: 6px;';
 
         const INACTIVE_PRESET = `background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);color:#888;padding:4px 8px;border-radius:4px;font-size:10px;cursor:pointer;transition:all 0.15s;`;
-        const ACTIVE_PRESET   = `background:rgba(0,168,255,0.12);border:1px solid rgba(0,168,255,0.45);color:#00a8ff;padding:4px 8px;border-radius:4px;font-size:10px;cursor:pointer;transition:all 0.15s;`;
+        const ACTIVE_PRESET = `background:rgba(0,168,255,0.12);border:1px solid rgba(0,168,255,0.45);color:#00a8ff;padding:4px 8px;border-radius:4px;font-size:10px;cursor:pointer;transition:all 0.15s;`;
 
         // Track which grain preset is active via a module-level label key
         if (!this._activeFilmPreset) this._activeFilmPreset = 'No Grain';
@@ -8894,9 +8878,9 @@ else:
         // Y / R / G / B channel buttons — DaVinci colored squares
         const channelMap = [
             { ch: 'RGB', label: 'Y', color: '#e0e0e0', bg: 'rgba(255,255,255,0.12)' },
-            { ch: 'R',   label: 'R', color: '#ff4444', bg: 'rgba(255,68,68,0.2)' },
-            { ch: 'G',   label: 'G', color: '#44cc44', bg: 'rgba(68,204,68,0.2)' },
-            { ch: 'B',   label: 'B', color: '#4488ff', bg: 'rgba(68,136,255,0.2)' }
+            { ch: 'R', label: 'R', color: '#ff4444', bg: 'rgba(255,68,68,0.2)' },
+            { ch: 'G', label: 'G', color: '#44cc44', bg: 'rgba(68,204,68,0.2)' },
+            { ch: 'B', label: 'B', color: '#4488ff', bg: 'rgba(68,136,255,0.2)' }
         ];
 
         const channelBtns = {};
@@ -9392,9 +9376,9 @@ else:
         precBtnRow.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 3px;';
 
         const precModes = [
-            { mode: 'u8',  label: 'INT 8',     color: '#707088' },
-            { mode: 'f16', label: 'FP 16',     color: '#60a5fa' },
-            { mode: 'f32', label: 'FP 32',     color: '#4ade80' }
+            { mode: 'u8', label: 'INT 8', color: '#707088' },
+            { mode: 'f16', label: 'FP 16', color: '#60a5fa' },
+            { mode: 'f32', label: 'FP 32', color: '#4ade80' }
         ];
 
         const getCurrentMode = () => this.renderer ? this.renderer.pipelinePrecision : (localStorage.getItem('radiance_pipeline_precision') || 'f32');
@@ -9516,10 +9500,10 @@ else:
             pickerBtn.style.color = '#00ffcc';
         }
         pickerBtn.onclick = () => {
-             this.activateEyedropper(update);
-             // Re-render to update pick button state
-             container.innerHTML = '';
-             this.renderMasksTab(container);
+            this.activateEyedropper(update);
+            // Re-render to update pick button state
+            container.innerHTML = '';
+            this.renderMasksTab(container);
         };
         topRow.appendChild(pickerBtn);
 
@@ -9574,7 +9558,7 @@ else:
         gridContainer.appendChild(createRow('HUE', 'h', '#ff6b6b'));
         gridContainer.appendChild(createRow('SAT', 's', '#4cd137'));
         gridContainer.appendChild(createRow('LUM', 'l', '#dcdde1'));
-        
+
         container.appendChild(gridContainer);
     }
 
@@ -9859,7 +9843,7 @@ else:
                 <div style="font-size: 8px; color: rgba(0, 255, 204, 0.4); font-family: monospace; letter-spacing: 1px;">CORE_DEEP_LINK_v2.0</div>
             </div>
         `;
-        
+
         const monitorContainer = document.createElement('div');
         monitorContainer.style.cssText = `
             background: #010409;
@@ -9870,7 +9854,7 @@ else:
             overflow: hidden;
             height: 250px;
         `;
-        
+
         // Add a scanline overlay in CSS if not present
         if (!document.getElementById('radiance-monitor-styles')) {
             const style = document.createElement('style');
@@ -9884,7 +9868,7 @@ else:
             `;
             document.head.appendChild(style);
         }
-        
+
         neuralGroup.appendChild(monitorContainer);
         container.appendChild(neuralGroup);
 
@@ -10875,7 +10859,7 @@ else:
     renderTerminalTab(container) {
         const t = this.theme;
         const STORAGE_SCRIPT = 'radiance_term_script';
-        const STORAGE_HIST   = 'radiance_term_history';
+        const STORAGE_HIST = 'radiance_term_history';
         const MAX_HIST = 50;
 
         // ── History ────────────────────────────────────────────────────────
@@ -10894,7 +10878,7 @@ else:
             const b = document.createElement('div');
             b.textContent = label;
             b.title = title;
-            b.style.cssText = `font-size:10px;font-weight:700;letter-spacing:0.5px;padding:4px 12px;border-radius:4px;cursor:pointer;border:1px solid rgba(255,255,255,0.1);color:${color||'#ccc'};background:rgba(255,255,255,0.04);transition:all 0.2s;user-select:none;`;
+            b.style.cssText = `font-size:10px;font-weight:700;letter-spacing:0.5px;padding:4px 12px;border-radius:4px;cursor:pointer;border:1px solid rgba(255,255,255,0.1);color:${color || '#ccc'};background:rgba(255,255,255,0.04);transition:all 0.2s;user-select:none;`;
             b.onmouseenter = () => {
                 b.style.background = 'rgba(255,255,255,0.1)';
                 b.style.borderColor = color ? color + '88' : 'rgba(255,255,255,0.3)';
@@ -10906,7 +10890,7 @@ else:
             return b;
         };
 
-        const runBtn   = mkBtn('▶ RUN', 'Run script  (Ctrl+Enter)', t.accent);
+        const runBtn = mkBtn('▶ RUN', 'Run script  (Ctrl+Enter)', t.accent);
         const clearBtn = mkBtn('⌫ CLEAR', 'Clear output  (Ctrl+L)', '#888');
         const resetBtn = mkBtn('↺ RESET', 'Reset Python namespace', '#e87');
 
@@ -10961,7 +10945,7 @@ else:
 
         const updateLineNums = () => {
             const lines = editor.value.split('\n').length;
-            lineNums.innerHTML = Array.from({length: lines}, (_, i) => i + 1).join('<br>');
+            lineNums.innerHTML = Array.from({ length: lines }, (_, i) => i + 1).join('<br>');
         };
         updateLineNums();
 
@@ -11067,9 +11051,9 @@ else:
 
         const setStatus = (msg, color) => {
             const el = statusBar.querySelector('#rad-term-status');
-            if (el) { 
-                el.textContent = msg.toUpperCase(); 
-                el.style.color = color || 'rgba(255,255,255,0.3)'; 
+            if (el) {
+                el.textContent = msg.toUpperCase();
+                el.style.color = color || 'rgba(255,255,255,0.3)';
             }
         };
 
@@ -11124,7 +11108,7 @@ else:
                 outputPanel.appendChild(msg);
                 outputPanel.scrollTop = outputPanel.scrollHeight;
                 setStatus('RESET OK', '#e87');
-            } catch(e) {
+            } catch (e) {
                 setStatus('RESET FAILED', '#ff7070');
             }
         };
@@ -11144,7 +11128,7 @@ else:
             if (e.ctrlKey && e.key === 'Enter') { e.preventDefault(); runScript(); return; }
             // Ctrl+L → Clear output
             if (e.ctrlKey && e.key === 'l') { e.preventDefault(); outputPanel.innerHTML = ''; setStatus('READY'); return; }
-            
+
             // Tab → 4 spaces
             if (e.key === 'Tab') {
                 e.preventDefault();
@@ -11163,7 +11147,7 @@ else:
                 const lastLine = lines[lines.length - 1];
                 const indentMatch = lastLine.match(/^\s*/);
                 const indent = indentMatch ? indentMatch[0] : '';
-                
+
                 // Allow a tiny delay so the actual newline is inserted by browser, then we add indent
                 setTimeout(() => {
                     const newPos = editor.selectionStart;
@@ -12070,7 +12054,7 @@ else:
         const b4 = new Uint8Array(buffer.slice(0, 4));
         const magic4 = String.fromCharCode(...b4);
         const magic2 = String.fromCharCode(b4[0], b4[1]);
-        const u32le  = new DataView(buffer).getUint32(0, true);
+        const u32le = new DataView(buffer).getUint32(0, true);
 
         // RHDR — proprietary zlib-compressed fp16 sidecar
         if (magic4 === 'RHDR') return await this._parseRHDR(buffer);
@@ -12112,8 +12096,8 @@ else:
     // Parse .rhdr: zlib-compressed float16 with 12-byte header
     async _parseRHDR(buffer) {
         const view = new DataView(buffer);
-        const width    = view.getUint16(4, true);
-        const height   = view.getUint16(6, true);
+        const width = view.getUint16(4, true);
+        const height = view.getUint16(6, true);
         const channels = view.getUint16(8, true);
         // v4.1: flags field (byte 10-11).
         //   flags = 0 → fp16 payload (legacy, HALF_FLOAT upload)
@@ -12142,10 +12126,10 @@ else:
             );
             console.log(`[Radiance] RHDR fp32 decoded: ${width}×${height}×${channels}ch (${(decompressed.byteLength / 1048576).toFixed(1)} MB)`);
             return {
-                data:     fp32,   // Float32Array for CPU reads (probe, scopes)
+                data: fp32,   // Float32Array for CPU reads (probe, scopes)
                 fp16data: null,   // null → viewer uses loadFloat32Texture
-                shape:    [height, width, channels],
-                format:   'rhdr_f32'
+                shape: [height, width, channels],
+                format: 'rhdr_f32'
             };
         }
 
@@ -12160,10 +12144,10 @@ else:
         }
 
         return {
-            data:     fp32,      // Float32Array for CPU reads
+            data: fp32,      // Float32Array for CPU reads
             fp16data: fp16Raw,   // Uint16Array for GPU HALF_FLOAT upload
-            shape:    [height, width, channels],
-            format:   'rhdr'
+            shape: [height, width, channels],
+            format: 'rhdr'
         };
     }
 
@@ -12198,7 +12182,7 @@ else:
     // Channels are re-ordered from EXR alphabetical (A,B,G,R) to RGBA output.
     async _parseEXR(buffer) {
         const bytes = new Uint8Array(buffer);
-        const view  = new DataView(buffer);
+        const view = new DataView(buffer);
 
         // Version flags — only single-part scanline supported
         const flags = view.getUint32(4, true) >> 8;
@@ -12213,20 +12197,22 @@ else:
 
         // ── Header ────────────────────────────────────────────────────────────
         let compression = 0;
-        let channels    = [];
-        let dw          = { xMin: 0, yMin: 0, xMax: 0, yMax: 0 };
+        let channels = [];
+        let dw = { xMin: 0, yMin: 0, xMax: 0, yMax: 0 };
 
-        for (;;) {
+        for (; ;) {
             const name = readNullStr(); if (!name) break;
             const type = readNullStr();                   // attribute type string
             const size = view.getInt32(p, true); p += 4;
-            const end  = p + size;
+            const end = p + size;
 
             if (name === 'compression') {
                 compression = bytes[p];
             } else if (name === 'dataWindow') {
-                dw = { xMin: view.getInt32(p,   true), yMin: view.getInt32(p+4,  true),
-                       xMax: view.getInt32(p+8, true), yMax: view.getInt32(p+12, true) };
+                dw = {
+                    xMin: view.getInt32(p, true), yMin: view.getInt32(p + 4, true),
+                    xMax: view.getInt32(p + 8, true), yMax: view.getInt32(p + 12, true)
+                };
             } else if (name === 'channels') {
                 let cp = p;
                 while (cp < end) {
@@ -12234,9 +12220,11 @@ else:
                     const chName = new TextDecoder('ascii').decode(bytes.subarray(cp, ce));
                     if (!chName) break;
                     cp = ce + 1;
-                    channels.push({ name: chName, pixelType: view.getInt32(cp, true),
-                                    xSampling: view.getInt32(cp+8, true),
-                                    ySampling: view.getInt32(cp+12, true) });
+                    channels.push({
+                        name: chName, pixelType: view.getInt32(cp, true),
+                        xSampling: view.getInt32(cp + 8, true),
+                        ySampling: view.getInt32(cp + 12, true)
+                    });
                     cp += 16;
                 }
             }
@@ -12251,11 +12239,11 @@ else:
 
         const W = dw.xMax - dw.xMin + 1;
         const H = dw.yMax - dw.yMin + 1;
-        const nCh           = channels.length;
-        const pixelType     = channels[0].pixelType;   // 1=HALF, 2=FLOAT (assume homogeneous)
-        const bytesPerVal   = pixelType === 2 ? 4 : 2;
+        const nCh = channels.length;
+        const pixelType = channels[0].pixelType;   // 1=HALF, 2=FLOAT (assume homogeneous)
+        const bytesPerVal = pixelType === 2 ? 4 : 2;
         const linesPerBlock = compression === 3 ? 16 : 1;
-        const nBlocks       = Math.ceil(H / linesPerBlock);
+        const nBlocks = Math.ceil(H / linesPerBlock);
 
         // ── Offset table ──────────────────────────────────────────────────────
         // B-10 FIX: OpenEXR spec uses uint64 offsets. Previously only the low 32
@@ -12271,7 +12259,7 @@ else:
 
         // ── Channel → RGBA slot ───────────────────────────────────────────────
         // EXR stores channels in alphabetical order: A,B,G,R for RGBA; B,G,R for RGB
-        const SLOT  = { R: 0, G: 1, B: 2, A: 3 };
+        const SLOT = { R: 0, G: 1, B: 2, A: 3 };
         const outCh = Math.min(nCh, 4);
         const chSlots = channels.map(ch => {
             const k = ch.name.toUpperCase();
@@ -12284,10 +12272,10 @@ else:
         let blockDatas = null;
         if (compression !== 0) {
             blockDatas = await Promise.all(offsets.map(async (bOff, b) => {
-                const bSize      = view.getUint32(bOff + 4, true);
+                const bSize = view.getUint32(bOff + 4, true);
                 const linesInBlk = Math.min(linesPerBlock, H - b * linesPerBlock);
                 const uncompSize = linesInBlk * nCh * W * bytesPerVal;
-                const compData   = bytes.subarray(bOff + 8, bOff + 8 + bSize);
+                const compData = bytes.subarray(bOff + 8, bOff + 8 + bSize);
 
                 const inflated = await this._zlibInflateAsync(compData, uncompSize);
                 if (!inflated) return null;
@@ -12297,7 +12285,7 @@ else:
                     inflated[i] = (inflated[i] + inflated[i - 1]) & 0xff;
 
                 // EXR reinterleave: [firstHalf | secondHalf] → interleaved bytes
-                const half        = (uncompSize + 1) >> 1;
+                const half = (uncompSize + 1) >> 1;
                 const interleaved = new Uint8Array(uncompSize);
                 let k = 0, k1 = 0, k2 = 0;
                 while (k < uncompSize) {
@@ -12310,19 +12298,19 @@ else:
 
         // ── Decode scanlines ──────────────────────────────────────────────────
         for (let b = 0; b < nBlocks; b++) {
-            const bOff      = offsets[b];
-            const bY        = view.getInt32(bOff, true);
-            const bSize     = view.getUint32(bOff + 4, true);
+            const bOff = offsets[b];
+            const bY = view.getInt32(bOff, true);
+            const bSize = view.getUint32(bOff + 4, true);
             const linesInBlk = Math.min(linesPerBlock, H - b * linesPerBlock);
 
             let bBytes, bView;
             if (compression === 0) {
                 bBytes = bytes.subarray(bOff + 8, bOff + 8 + bSize);
-                bView  = new DataView(bBytes.buffer, bBytes.byteOffset, bBytes.byteLength);
+                bView = new DataView(bBytes.buffer, bBytes.byteOffset, bBytes.byteLength);
             } else {
                 if (!blockDatas[b]) continue;
                 bBytes = blockDatas[b];
-                bView  = new DataView(bBytes.buffer, bBytes.byteOffset, bBytes.byteLength);
+                bView = new DataView(bBytes.buffer, bBytes.byteOffset, bBytes.byteLength);
             }
 
             const lineStride = nCh * W * bytesPerVal;
@@ -12332,12 +12320,12 @@ else:
                 if (scanY < 0 || scanY >= H) continue;
 
                 for (let ci = 0; ci < nCh; ci++) {
-                    const slot   = chSlots[ci];
+                    const slot = chSlots[ci];
                     if (slot >= outCh) continue;
                     const chBase = li * lineStride + ci * W * bytesPerVal;
 
                     for (let x = 0; x < W; x++) {
-                        const vo  = chBase + x * bytesPerVal;
+                        const vo = chBase + x * bytesPerVal;
                         const val = pixelType === 2
                             ? bView.getFloat32(vo, true)
                             : this._halfToFloat(bView.getUint16(vo, true));
@@ -12347,7 +12335,7 @@ else:
             }
         }
 
-        console.log(`[Radiance EXR] Decoded ${W}×${H}×${outCh}ch, comp=${compression}, type=${pixelType===2?'FLOAT':'HALF'}`);
+        console.log(`[Radiance EXR] Decoded ${W}×${H}×${outCh}ch, comp=${compression}, type=${pixelType === 2 ? 'FLOAT' : 'HALF'}`);
         return { data: out, shape: [H, W, outCh], format: 'exr', isLinear: true };
     }
 
@@ -12389,7 +12377,7 @@ else:
         const decodeRGBE = (r, g, b, e, outIdx) => {
             if (e === 0) return;
             const scale = Math.pow(2, e - 128 - 8);
-            out[outIdx    ] = r * scale;
+            out[outIdx] = r * scale;
             out[outIdx + 1] = g * scale;
             out[outIdx + 2] = b * scale;
         };
@@ -12423,7 +12411,7 @@ else:
 
                 for (let x = 0; x < width; x++)
                     decodeRGBE(scanline[x], scanline[width + x], scanline[2 * width + x],
-                               scanline[3 * width + x], (y * width + x) * 3);
+                        scanline[3 * width + x], (y * width + x) * 3);
 
             } else {
                 // ── Uncompressed / old RLE ────────────────────────────────────
@@ -12432,17 +12420,17 @@ else:
                     // Old RLE repeat token: R==G==B==1 means repeat E times
                     if (bytes[p] === 1 && bytes[p + 1] === 1 && bytes[p + 2] === 1) {
                         const count = bytes[p + 3]; p += 4;
-                        const prev  = (y * width + x - 1) * 3;
+                        const prev = (y * width + x - 1) * 3;
                         const pr = out[prev], pg = out[prev + 1], pb = out[prev + 2];
                         for (let i = 0; i < count && x < width; i++, x++) {
-                            out[(y * width + x) * 3    ] = pr;
+                            out[(y * width + x) * 3] = pr;
                             out[(y * width + x) * 3 + 1] = pg;
                             out[(y * width + x) * 3 + 2] = pb;
                         }
                         x--;  // outer loop increments
                     } else {
                         decodeRGBE(bytes[p], bytes[p + 1], bytes[p + 2], bytes[p + 3],
-                                   (y * width + x) * 3);
+                            (y * width + x) * 3);
                         p += 4;
                     }
                 }
@@ -12458,21 +12446,21 @@ else:
     // 8-bit uint, 16-bit uint, 32-bit uint, and 32-bit float samples.
     // Multi-sample (RGB/RGBA) interleaved or planar (PlanarConfiguration 1/2).
     _parseTIFF(buffer) {
-        const view  = new DataView(buffer);
+        const view = new DataView(buffer);
         const bytes = new Uint8Array(buffer);
         const order = view.getUint16(0);
-        const le    = (order === 0x4949);  // II = little-endian
+        const le = (order === 0x4949);  // II = little-endian
 
-        const g8  = (o) => bytes[o];
+        const g8 = (o) => bytes[o];
         const g16 = (o) => view.getUint16(o, le);
         const g32 = (o) => view.getUint32(o, le);
         const gF32 = (o) => view.getFloat32(o, le);
 
         if (g16(2) !== 42) { console.warn('[Radiance TIFF] Not a valid TIFF.'); return null; }
 
-        const ifdOff  = g32(4);
-        const nEntry  = g16(ifdOff);
-        const tags    = {};
+        const ifdOff = g32(4);
+        const nEntry = g16(ifdOff);
+        const tags = {};
 
         // Type byte-sizes: BYTE=1, ASCII=1, SHORT=2, LONG=4, RATIONAL=8
         const tSz = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8];
@@ -12484,11 +12472,11 @@ else:
         };
 
         for (let i = 0; i < nEntry; i++) {
-            const eOff  = ifdOff + 2 + i * 12;
-            const tag   = g16(eOff);
-            const type  = g16(eOff + 2);
+            const eOff = ifdOff + 2 + i * 12;
+            const tag = g16(eOff);
+            const type = g16(eOff + 2);
             const count = g32(eOff + 4);
-            const sz    = tSz[type] || 1;
+            const sz = tSz[type] || 1;
             const dataOff = (count * sz > 4) ? g32(eOff + 8) : (eOff + 8);
 
             if (count === 1) {
@@ -12500,14 +12488,14 @@ else:
             }
         }
 
-        const width   = tags[256];
-        const height  = tags[257];
-        const bps     = Array.isArray(tags[258]) ? tags[258][0] : (tags[258] || 8);
-        const comp    = tags[259] || 1;
-        const spp     = tags[277] || 3;  // SamplesPerPixel
-        const sfmt    = Array.isArray(tags[339]) ? tags[339][0] : (tags[339] || 1); // SampleFormat
-        const planar  = tags[284] || 1;  // 1=interleaved, 2=planar
-        const rps     = tags[278] || height;
+        const width = tags[256];
+        const height = tags[257];
+        const bps = Array.isArray(tags[258]) ? tags[258][0] : (tags[258] || 8);
+        const comp = tags[259] || 1;
+        const spp = tags[277] || 3;  // SamplesPerPixel
+        const sfmt = Array.isArray(tags[339]) ? tags[339][0] : (tags[339] || 1); // SampleFormat
+        const planar = tags[284] || 1;  // 1=interleaved, 2=planar
+        const rps = tags[278] || height;
 
         if (!width || !height) return null;
         if (comp !== 1) {
@@ -12515,16 +12503,16 @@ else:
             return null;
         }
 
-        const stripOffsets    = Array.isArray(tags[273]) ? tags[273] : [tags[273]];
+        const stripOffsets = Array.isArray(tags[273]) ? tags[273] : [tags[273]];
         const stripByteCounts = Array.isArray(tags[279]) ? tags[279] : [tags[279]];
-        const bytesPerSample  = bps / 8;
-        const isFloat32TIFF   = (bps === 32 && sfmt === 3);
-        const outCh           = Math.min(spp, 4);
-        const out             = new Float32Array(width * height * outCh);
+        const bytesPerSample = bps / 8;
+        const isFloat32TIFF = (bps === 32 && sfmt === 3);
+        const outCh = Math.min(spp, 4);
+        const out = new Float32Array(width * height * outCh);
 
         let globalRow = 0;
         for (let s = 0; s < stripOffsets.length; s++) {
-            const sOff  = stripOffsets[s];
+            const sOff = stripOffsets[s];
             const nRows = Math.min(rps, height - globalRow);
 
             if (planar === 1) {
@@ -12535,10 +12523,10 @@ else:
                         for (let ch = 0; ch < outCh; ch++) {
                             const cOff = pxOff + ch * bytesPerSample;
                             let val;
-                            if      (bps === 32 && sfmt === 3) val = gF32(cOff);
-                            else if (bps === 32)               val = g32(cOff) / 4294967295.0;
-                            else if (bps === 16)               val = g16(cOff) / 65535.0;
-                            else                               val = g8(cOff)  / 255.0;
+                            if (bps === 32 && sfmt === 3) val = gF32(cOff);
+                            else if (bps === 32) val = g32(cOff) / 4294967295.0;
+                            else if (bps === 16) val = g16(cOff) / 65535.0;
+                            else val = g8(cOff) / 255.0;
                             out[((globalRow + r) * width + x) * outCh + ch] = val;
                         }
                     }
@@ -12553,10 +12541,10 @@ else:
                         for (let x = 0; x < width; x++) {
                             const cOff = chSoff + (r * width + x) * bytesPerSample;
                             let val;
-                            if      (bps === 32 && sfmt === 3) val = gF32(cOff);
-                            else if (bps === 32)               val = g32(cOff) / 4294967295.0;
-                            else if (bps === 16)               val = g16(cOff) / 65535.0;
-                            else                               val = g8(cOff)  / 255.0;
+                            if (bps === 32 && sfmt === 3) val = gF32(cOff);
+                            else if (bps === 32) val = g32(cOff) / 4294967295.0;
+                            else if (bps === 16) val = g16(cOff) / 65535.0;
+                            else val = g8(cOff) / 255.0;
                             out[((globalRow + r) * width + x) * outCh + ch] = val;
                         }
                     }
@@ -12567,8 +12555,10 @@ else:
 
         const fmt = isFloat32TIFF ? 'tiff_f32' : (bps === 16 ? 'tiff_u16' : 'tiff_u8');
         console.log(`[Radiance TIFF] Decoded ${width}×${height}×${outCh}ch ${bps}-bit (${fmt})`);
-        return { data: out, shape: [height, width, outCh], format: fmt,
-                 isLinear: isFloat32TIFF };
+        return {
+            data: out, shape: [height, width, outCh], format: fmt,
+            isLinear: isFloat32TIFF
+        };
     }
 
     // ── v3.5: RF32 raw float32 binary parser ─────────────────────────────────
@@ -12584,8 +12574,8 @@ else:
         const magic = String.fromCharCode(...new Uint8Array(buffer.slice(0, 4)));
         if (magic !== 'RF32') return null;
 
-        const width    = view.getUint32(4,  true);
-        const height   = view.getUint32(8,  true);
+        const width = view.getUint32(4, true);
+        const height = view.getUint32(8, true);
         const channels = view.getUint32(12, true);
         const expected = width * height * channels * 4;
 
@@ -12719,7 +12709,7 @@ else:
                 const nodeId = e.detail;
                 const node = app.graph.getNodeById(nodeId);
                 const type = node?.type?.toLowerCase() || '';
-                
+
                 if (type.includes('sampling') || type.includes('sampler')) {
                     this.neuralMonitor.setPhase('sampling');
                 } else if (type.includes('vae') || type.includes('decode')) {
@@ -12861,7 +12851,7 @@ app.registerExtension({
                 // Store metadata on image object for fallback access
                 img.exr_filename = imgData.exr_filename;
                 img.exr_subfolder = imgData.exr_subfolder ?? imgData.subfolder ?? '';
-                img.exr_type     = imgData.exr_type      ?? imgData.type      ?? 'temp';
+                img.exr_type = imgData.exr_type ?? imgData.type ?? 'temp';
                 img.subfolder = imgData.subfolder;
                 img.type = imgData.type;
 
@@ -12906,7 +12896,7 @@ app.registerExtension({
                                 // Propagate metadata
                                 npy.exr_filename = imgData.exr_filename;
                                 npy.exr_subfolder = imgData.exr_subfolder ?? imgData.subfolder ?? '';
-                                npy.exr_type     = imgData.exr_type      ?? imgData.type      ?? 'temp';
+                                npy.exr_type = imgData.exr_type ?? imgData.type ?? 'temp';
                                 npy.subfolder = imgData.subfolder;
                                 npy.type = imgData.type;
 
@@ -13062,11 +13052,11 @@ class RadianceCurveEditor {
         // Curve data — endpoints pinned at x=0 and x=1
         this.curves = {
             'RGB': [{ x: 0, y: 0 }, { x: 1, y: 1 }],
-            'R':   [{ x: 0, y: 0 }, { x: 1, y: 1 }],
-            'G':   [{ x: 0, y: 0 }, { x: 1, y: 1 }],
-            'B':   [{ x: 0, y: 0 }, { x: 1, y: 1 }],
-            'HueVsHue':  [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }],
-            'HueVsSat':  [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }],
+            'R': [{ x: 0, y: 0 }, { x: 1, y: 1 }],
+            'G': [{ x: 0, y: 0 }, { x: 1, y: 1 }],
+            'B': [{ x: 0, y: 0 }, { x: 1, y: 1 }],
+            'HueVsHue': [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }],
+            'HueVsSat': [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }],
             'HueVsLuma': [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }]
         };
 
@@ -13078,11 +13068,11 @@ class RadianceCurveEditor {
 
         this.channelColors = {
             'RGB': '#e0e0e0',
-            'R':   '#ff4444',
-            'G':   '#44cc44',
-            'B':   '#4488ff',
-            'HueVsHue':  '#ffaaaa',
-            'HueVsSat':  '#fff144',
+            'R': '#ff4444',
+            'G': '#44cc44',
+            'B': '#4488ff',
+            'HueVsHue': '#ffaaaa',
+            'HueVsSat': '#fff144',
             'HueVsLuma': '#44ffaa'
         };
 
@@ -13518,7 +13508,7 @@ class RadianceCurveEditor {
         cvs.addEventListener('keydown', (e) => {
             if (this.selectedPoints.length === 0) return;
 
-            const step = e.shiftKey ? 10/255 : 1/255;
+            const step = e.shiftKey ? 10 / 255 : 1 / 255;
             let dx = 0, dy = 0;
 
             const key = e.key.toLowerCase();
@@ -13563,7 +13553,7 @@ class RadianceCurveEditor {
 
     _clampView() {
         const margin = 0.5 / this.view.zoomX;
-        this.view.offsetX = Math.max(-margin, Math.min(1.0 + margin - 1/this.view.zoomX, this.view.offsetX));
+        this.view.offsetX = Math.max(-margin, Math.min(1.0 + margin - 1 / this.view.zoomX, this.view.offsetX));
         this.view.offsetY = Math.max(-margin * this.rangeY, Math.min(this.rangeY + margin * this.rangeY - this.rangeY / this.view.zoomY, this.view.offsetY));
     }
 
@@ -13633,7 +13623,7 @@ class RadianceCurveEditor {
                 m[i + 1] = 0;
             } else {
                 const alpha = m[i] / delta[i];
-                const beta = m[i+1] / delta[i];
+                const beta = m[i + 1] / delta[i];
                 const tau = alpha * alpha + beta * beta;
                 if (tau > 9) {
                     const s = 3.0 / Math.sqrt(tau);
@@ -13732,9 +13722,9 @@ class RadianceCurveEditor {
             const r0 = this.normToCanvas(0, 0).cx;
             const r1 = this.normToCanvas(1, 0).cx;
             const stops = [
-                { pos: 0, col: '#ff0000' }, { pos: 1/6, col: '#ffff00' },
-                { pos: 2/6, col: '#00ff00' }, { pos: 3/6, col: '#00ffff' },
-                { pos: 4/6, col: '#0000ff' }, { pos: 5/6, col: '#ff00ff' },
+                { pos: 0, col: '#ff0000' }, { pos: 1 / 6, col: '#ffff00' },
+                { pos: 2 / 6, col: '#00ff00' }, { pos: 3 / 6, col: '#00ffff' },
+                { pos: 4 / 6, col: '#0000ff' }, { pos: 5 / 6, col: '#ff00ff' },
                 { pos: 1, col: '#ff0000' }
             ];
             ctx.globalAlpha = 0.08;

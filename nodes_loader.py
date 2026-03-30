@@ -1,27 +1,3 @@
-"""
-RADIANCE - LOADER NODES v2.3
------------------------------------
-Universal model loader for any diffusion architecture.
-
-v2.3 — Industry Upgrade (March 2026):
-- NEW: Auto-detect architecture from safetensors key-heuristics
-- NEW: mtime + size based cache keys (no stale hits after file edits)
-- NEW: Named CLIP slots — clip_l, clip_g, t5xxl, llm_encoder
-- NEW: model_meta JSON output — structured metadata for downstream QC
-- NEW: latent_format STRING output — "4ch" or "16ch"
-- NEW: offload_mode — none / cpu_offload / sequential
-- NEW: LORA_STACK chainable I/O — chain loaders or standalone stack node
-- NEW: RadianceLoraStack node — compose up to 5 LoRAs independently
-- FIX: Removed device param (folded into offload_mode)
-
-v2.1.0 — Previous features kept:
-- LRU model cache with configurable size
-- VRAM estimation (UNET + CLIP separately)
-- Expanded presets (Flux, SD3.x, SDXL, SD1.5, video models)
-- ControlNet with strength/start/end
-- 3 built-in LoRA slots with separate model/clip strengths
-"""
-
 import json
 import logging
 import math

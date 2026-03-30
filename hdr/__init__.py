@@ -14,7 +14,8 @@ from .color import (
 
 from .tonemap import HDRExpandDynamicRange, HDRToneMap
 
-# from .io import LoadImageEXR, LoadImageEXRSequence, SaveImage16bit, RadianceSaveEXR
+
+from .io import RadianceSaveEXR
 
 from .analysis import HDRHistogram
 
@@ -41,10 +42,7 @@ NODE_CLASS_MAPPINGS = {
     "HDRExpandDynamicRange": HDRExpandDynamicRange,
     "HDRToneMap": HDRToneMap,
     # Legacy I/O nodes removed in favor of Digital Cinema Universal I/O
-    # "LoadImageEXR": LoadImageEXR,
-    # "LoadImageEXRSequence": LoadImageEXRSequence,
-    # "SaveImage16bit": SaveImage16bit,
-    # "RadianceSaveEXR": RadianceSaveEXR,
+    "RadianceSaveEXR": RadianceSaveEXR,
     "HDRHistogram": HDRHistogram,
     "HDRExposureBlend": HDRExposureBlend,
     "HDRShadowHighlightRecovery": HDRShadowHighlightRecovery,
@@ -65,10 +63,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ACES2OutputTransform": "◎ Radiance ACES 2.0 Output Transform",
     "HDRExpandDynamicRange": "◎ Radiance Expand Dynamic Range",
     "HDRToneMap": "◎ Radiance HDR Tone Map",
-    # "LoadImageEXR": "◎ Load Image EXR",
-    # "LoadImageEXRSequence": "◎ Load Image EXR Sequence",
-    # "SaveImage16bit": "◎ Save Image 16-bit",
-    # "RadianceSaveEXR": "◎ Save Image EXR",
+    "RadianceSaveEXR": "◎ Radiance Save EXR",
     "HDRHistogram": "◎ Radiance HDR Histogram",
     "HDRExposureBlend": "◎ Radiance HDR Exposure Blend",
     "HDRShadowHighlightRecovery": "◎ Radiance HDR Shadow/Highlight Recovery",

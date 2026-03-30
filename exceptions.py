@@ -1,11 +1,3 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-                         RADIANCE EXCEPTION UTILITIES
-                    Unified error handling for all Radiance nodes
-                        Radiance © 2024-2026
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
 import logging
 import functools
 from typing import Any, Callable, TypeVar, Optional, Union

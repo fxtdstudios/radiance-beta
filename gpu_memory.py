@@ -1,11 +1,3 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-                         RADIANCE GPU MEMORY UTILITIES
-                    Safe GPU memory management for PyTorch
-                        Radiance © 2024-2026
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
 import torch
 import logging
 from typing import TypeVar, Callable

@@ -423,22 +423,40 @@ class RadiancePromptPanel(nukescripts.PythonPanel):
         ]
 
         self.presets = [
-            "SDXL Square (1:1)",
-            "SDXL Portrait (3:4)",
-            "SDXL Landscape (4:3)",
-            "SDXL Wide (16:9)",
-            "FLUX 1MP Square",
-            "FLUX 1MP Wide (16:9)",
-            "FLUX 1MP Portrait (9:16)",
-            "FLUX 2K Square (1:1)",
-            "FLUX 2K Wide (16:9)",
-            "FLUX 2K DCI (1.90:1)",
-            "1080p Full HD (16:9)",
-            "4K UHD (16:9)",
-            "4K DCI (1.90:1)",
-            "2K DCI Scope (2.39:1)",
-            "Instagram Portrait (4:5)",
-            "Instagram Story/Reel (9:16)",
+            "SDXL Square (1024×1024)",
+            "SDXL 16:9 (1216×832)",
+            "SDXL 9:16 (832×1216)",
+            "SDXL 4:3 (1152×896)",
+            "SDXL 3:4 (896×1152)",
+            "Flux Square (1024×1024)",
+            "Flux 16:9 (1360×768)",
+            "Flux 9:16 (768×1360)",
+            "Flux 3:2 (1256×832)",
+            "Flux 2:3 (832×1256)",
+            "Flux 21:9 (1536×656)",
+            "Flux 4:3 (1184×888)",
+            "Flux 2.39:1 (1568×656)",
+            "HD 1080p (1920×1080)",
+            "HD 720p (1280×720)",
+            "4K UHD (3840×2160)",
+            "4K DCI (4096×2160)",
+            "2K DCI (2048×1080)",
+            "Instagram Square (1080×1080)",
+            "Instagram Story (1080×1920)",
+            "TikTok (1080×1920)",
+        ]
+
+        self.sampler_modes = [
+            "Standard",
+            "Phase-Shift (Euler→DPM)",
+            "Phase-Shift (Euler→SGM)",
+            "CFG++ (Perpendicular)",
+        ]
+
+        self.vaes = [
+            "ae.safetensors",
+            "vae-ft-mse-840000-ema-pruned.safetensors",
+            "sdxl_vae.safetensors",
         ]
 
         self.samplers = [
@@ -525,8 +543,30 @@ class RadiancePromptPanel(nukescripts.PythonPanel):
         )
         self.addKnob(self.scheduler_knob)
 
+        self.sampler_mode_knob = nuke.Enumeration_Knob(
+            "sampler_mode", "Mode", self.sampler_modes
+        )
+        self.addKnob(self.sampler_mode_knob)
+
+        self.guidance_knob = nuke.Double_Knob("guidance", "Guidance (Distilled)")
+        self.guidance_knob.setRange(0.0, 10.0)
+        self.guidance_knob.setValue(3.5)
+        self.addKnob(self.guidance_knob)
+
+        self.mu_knob = nuke.Double_Knob("mu", "Mu (Flux Shift)")
+        self.mu_knob.setRange(0.0, 10.0)
+        self.mu_knob.setValue(1.0)
+        self.addKnob(self.mu_knob)
+
         self.div4 = nuke.Text_Knob("div4", "")
         self.addKnob(self.div4)
+
+        # Section: VAE
+        self.vae_knob = nuke.Enumeration_Knob("vae", "VAE", self.vaes)
+        self.addKnob(self.vae_knob)
+
+        self.div_vae = nuke.Text_Knob("div_vae", "")
+        self.addKnob(self.div_vae)
 
         # Section: Depth (New)
         self.depth_label = nuke.Text_Knob("depth_label", "<b>Depth Generation</b>")
@@ -656,9 +696,26 @@ class RadiancePromptPanel(nukescripts.PythonPanel):
             schname = sinputs.get("scheduler")
             if schname in self.schedulers:
                 self.scheduler_knob.setValue(schname)
+            
+            smode = sinputs.get("sampler_mode", "Standard")
+            if smode in self.sampler_modes:
+                self.sampler_mode_knob.setValue(smode)
+            
+            self.guidance_knob.setValue(sinputs.get("flux_guidance", 3.5))
+            self.mu_knob.setValue(sinputs.get("flux_shift", 1.0))
+
             print(f"Synced with Sampler Node {sid}")
 
-        # 4. Sync Depth Node
+        # 4. Sync Loader / VAE
+        lid, ldata = find_node_by_class(graph, "RadianceUnifiedLoader")
+        if lid:
+            linputs = ldata.get("inputs", {})
+            vname = linputs.get("vae_name")
+            if vname in self.vaes:
+                self.vae_knob.setValue(vname)
+            print(f"Synced with Loader Node {lid}")
+
+        # 5. Sync Depth Node
         did, ddata = find_node_by_class(graph, "RadianceDepthMapGenerator")
         self.depth_node_id = did
         if did:
@@ -710,6 +767,15 @@ class RadiancePromptPanel(nukescripts.PythonPanel):
             s_inputs["denoise"] = self.denoise_knob.value()
             s_inputs["sampler"] = self.sampler_knob.value()
             s_inputs["scheduler"] = self.scheduler_knob.value()
+            s_inputs["sampler_mode"] = self.sampler_mode_knob.value()
+            s_inputs["flux_guidance"] = self.guidance_knob.value()
+            s_inputs["flux_shift"] = self.mu_knob.value()
+
+        # Update VAE in Loader
+        lid, ldata = find_node_by_class(self.last_graph, "RadianceUnifiedLoader")
+        if lid:
+            l_inputs = self.last_graph[lid]["inputs"]
+            l_inputs["vae_name"] = self.vae_knob.value()
 
         # Update Depth
         if self.depth_node_id:

@@ -1,12 +1,3 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-                    RADIANCE — UNIVERSAL DIGITAL CINEMA IO v2.3
-═══════════════════════════════════════════════════════════════════════════════
-Industry-standard readers/writers for Video, Image Sequences, and Images.
-Consolidated into Universal "Digital Cinema" nodes for a streamlined workflow.
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
 import os
 import glob
 import json
@@ -202,6 +193,43 @@ class RadianceDigitalCinemaRead:
     FUNCTION = "read"
     CATEGORY = "FXTD Studios/Radiance/IO"
 
+    def _load_single_exr(self, file_path: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+        """Robust EXR loader with multiple backends for high-bitrate cinema workflows."""
+        img, alpha_img, depth_img = None, None, None
+        try:
+            import OpenEXR, Imath
+            exr_file = OpenEXR.InputFile(file_path)
+            header = exr_file.header()
+            dw = header["dataWindow"]
+            width, height = dw.max.x - dw.min.x + 1, dw.max.y - dw.min.y + 1
+            channels = list(header["channels"].keys())
+            pt = Imath.PixelType(Imath.PixelType.FLOAT)
+            if "R" in channels and "G" in channels and "B" in channels:
+                r = np.frombuffer(exr_file.channel("R", pt), dtype=np.float32).copy().reshape(height, width)
+                g = np.frombuffer(exr_file.channel("G", pt), dtype=np.float32).copy().reshape(height, width)
+                b = np.frombuffer(exr_file.channel("B", pt), dtype=np.float32).copy().reshape(height, width)
+                alpha_img = np.frombuffer(exr_file.channel("A", pt), dtype=np.float32).copy().reshape(height, width) if "A" in channels else np.ones((height, width), dtype=np.float32)
+                img = np.stack([r, g, b], axis=-1)
+            elif "Y" in channels:
+                y = np.frombuffer(exr_file.channel("Y", pt), dtype=np.float32).copy().reshape(height, width)
+                img = np.stack([y, y, y], axis=-1)
+                alpha_img = np.frombuffer(exr_file.channel("A", pt), dtype=np.float32).copy().reshape(height, width) if "A" in channels else np.ones((height, width), dtype=np.float32)
+            
+            for dname in ["Z", "Depth", "depth", "z"]:
+                if dname in channels:
+                    depth_img = np.frombuffer(exr_file.channel(dname, pt), dtype=np.float32).copy().reshape(height, width)
+                    break
+            exr_file.close()
+            return img, alpha_img, depth_img
+        except: pass
+
+        try:
+            import imageio.v3 as iio
+            img = iio.imread(file_path)
+            return np.asarray(img, dtype=np.float32), None, None
+        except: pass
+        return None, None, None
+
     def read(self, source_path, start_frame, frame_limit, input_colorspace, fps_override=0.0):
         source_path = get_safe_input_path(folder_paths.get_input_directory(), source_path, allow_absolute=True)
         
@@ -260,10 +288,9 @@ class RadianceDigitalCinemaRead:
                 ext = os.path.splitext(fpath)[1].lower()
                 img = None
                 mask_np = None
-                if ext in [".exr", ".hdr"] and write_exr_robust:
+                if ext in [".exr", ".hdr"]:
                     try:
-                        from .hdr.io import LoadImageEXRSequence
-                        rgb_np, alpha_np, _ = LoadImageEXRSequence()._load_single_exr(fpath)
+                        rgb_np, alpha_np, _ = self._load_single_exr(fpath)
                         if rgb_np is not None:
                              img = rgb_np
                              mask_np = alpha_np if alpha_np is not None else np.ones(img.shape[:2], dtype=np.float32)

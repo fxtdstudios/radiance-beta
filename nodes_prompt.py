@@ -1,50 +1,9 @@
-"""
-RADIANCE - PROMPT ENGINEERING NODES v2.3.1
---------------------------------------
-Professional tools for constructing cinematic, high-fidelity prompts for Flux and other diffusion models.
-Includes the "Cinematic Encoder" node for direct CLIP conditioning with architecture-aware prompt building.
-
-Features:
-- Industry-standard cinematic terminology
-- One-click style presets (Film Noir, Cyberpunk, Nolan, Villeneuve, etc.)
-- Direct CLIP encoding with clip skip support
-- Architecture-aware format: prose for Flux/T5/SD3, structured for SD1.5/SDXL
-- Smart auto-negative generation per style and architecture
-- A/B prompt mode for rapid iteration
-- Scene mood vocabulary injection
-- Real token count from CLIP tokenizer
-
-v2.1 Fixes:
-- All preset configs validated against dataset lists (no orphaned values)
-- Expanded datasets to cover director-style presets (Nolan, Villeneuve, etc.)
-- Fixed year_era hardcoded comparison
-- Improved BREAK token insertion (no longer splits on abbreviations)
-- Added missing NODE_CLASS_MAPPINGS for encoder node
-- Added preset validation at import time
-- Fixed Over-The-Shoulder case mismatch
-
-v2.2 Fixes:
-- BUG-1: NeuralGrammar.scientificize no longer lowercases entire prompt
-- BUG-2: NeuralGrammar applied to raw subject before framing assembly
-- BUG-3: encode_from_tokens_scheduled falls back to encode_from_tokens for older ComfyUI
-- BUG-5: _real_token_count now counts actual non-pad tokens from CLIP list-of-tuples
-
-Example Usage (Cinematic Encoder):
-    Connect CLIP model → Set base prompt → Select style preset or customize →
-    Connect positive/negative outputs directly to sampler
-"""
-
 import logging
 import re
 import torch
 from typing import Optional
 
 logger = logging.getLogger("◎ Radiance.prompt")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#                         SHARED CINEMATIC DATASETS
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 class CinematicDatasets:

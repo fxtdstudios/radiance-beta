@@ -2,11 +2,20 @@
 
 All notable changes to FXTD Radiance will be documented in this file.
 
+## [2.3.2] - 2026-03-30
+
+### Added
+- **Smart Overwrite Protection**: `Radiance Write` and `EXR Save` now feature automated index detection to prevent accidental file destruction.
+- **Universal Digital Cinema I/O**: Consolidated Video, Image Sequence, and Single Image handling into a high-performance unified pipeline.
+- **Terminal HUD & Live REPL**: Nuke-style Python interaction directly inside the viewer for real-time data inspection.
+- **Interactive Mask Editor**: Non-destructive brush masking in `◎ Radiance Load Image`.
+
+### Fixed
+- **Robust Pipeline Validation**: Enhanced null-safety and input checking for high-load production environments.
+- **◎ Radiance Grade Match**: Optimized shot-to-shot color statistics transfer using CIE L*a*b* mean/std math.
+
 ## [2.3] - 2026-03-29
 
-### Changed
-- Major version increment to 2.3 for the professional VFX production suite.
-- Synchronized all 21 core Python and JS node modules to match the package versioning.
 
 ## [2.2.2] - 2026-03-29
 

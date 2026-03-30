@@ -1,9 +1,3 @@
-"""
-Radiance QC Node v2.3.1
-Production-Grade Quality Control and Error Detection
-Author: FXTD Studios Pipeline Team
-"""
-
 import torch
 import json
 import os
@@ -151,7 +145,7 @@ class RadianceQC:
             }
 
             text_report_lines = ["╔═══════════════════════════════════════════╗"]
-            text_report_lines.append("║     RADIANCE QC REPORT v2.3.1            ║")
+            text_report_lines.append("║     RADIANCE QC REPORT v2.3.2            ║")
             text_report_lines.append("╚═══════════════════════════════════════════╝")
             text_report_lines.append(f"Image: {B} frame(s), {W}x{H}, {C} channel(s)")
             text_report_lines.append("")
