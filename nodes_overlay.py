@@ -1,7 +1,3 @@
-# ═══════════════════════════════════════════════════════════════════════════════
-# RADIANCE: Professional HDR & VFX Suite
-# Version: v2.3
-# ═══════════════════════════════════════════════════════════════════════════════
 import torch
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont

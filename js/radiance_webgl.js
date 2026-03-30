@@ -1,53 +1,3 @@
-/**
- * ═══════════════════════════════════════════════════════════════════════════════
- *                       RADIANCE WEBGL RENDERER v2.3
- *                    GPU-Accelerated Viewer Enhancement
- * ═══════════════════════════════════════════════════════════════════════════════
- *
- * v2.1 — PRODUCTION RELEASE (Hardened)
- * ─────────────────────────────────────────────────────────────────────────────
- * Phase 8  — GPU Waveform Monitor
- *            • renderWaveform(canvas, parade) — public helper, renders Luma or
- *              RGB Parade scatter scope to any target canvas
- *            • Improved point density (512×512 scatter buffer)
- *            • Additive blending for true luminance accumulation
- *
- * Phase 9  — Localized Grading (Power Windows)
- *            • Radial + Box mask fully wired in composite shader
- *            • setMask() API with center/scale/feather/rotation/invert
- *            • showMaskOverlay flag dims background for precise positioning
- *            • Aspect-ratio-correct masking (no oval circles)
- *
- * Phase 10 — Comparison Bridge & Reference Shelf
- *            • initWipeDragging(canvas) — attaches mouse/touch events for
- *              real-time draggable wipe divider directly on the GL canvas
- *            • grabReferenceStill() — snapshots current graded frame into
- *              the active shelf slot as a WebGL texture
- *            • referenceShelf[0..7] — stores up to 8 grabbed stills
- *            • swapReferenceShelf(index) — activates a shelf slot for comparison
- *            • clearReferenceShelf() — releases all GPU textures
- *
- * Phase 11 — Cinematic Optical Effects
- *            • Brown-Conrady full k1+k2 barrel/pincushion distortion
- *            • setLensDistortionK2(v) — adds quartic term for wider coverage
- *            • Anamorphic Lens Streaks — horizontal highlight bloom pass
- *              (setAnamorphicStreaks, setStreakThreshold, setStreakLength)
- *            • Streak tinted cyan-blue (authentic anamorphic characteristic)
- *
- * Phase 12 — GPU Bilateral Filter (Edge-Preserving Denoise)
- *            • Replaces naive 5-tap box blur with 7×7 bilateral kernel
- *            • setBilateralSigma(sigmaD, sigmaR) — spatial + range control
- *            • Preserves hard edges (skin/hair/object boundaries) at all
- *              denoise strengths; prevents watercolour smearing
- *
- * v3.0 — Industry & Performance Upgrade
- *            • OES_texture_half_float enabled for correct HALF_FLOAT WebGL path
- *            • renderHistogram() — 256-bin GPU histogram HUD
- *            • linearFalseColor flag — false color + zebra run pre-OETF (scene-linear)
- *            • initDisplayP3() — Display-P3/HDR monitor detection + canvas colorSpace
- *            • LRU GPU frame cache — 8-frame zero-re-upload scrubbing
- */
-
 // WebGL Context Manager
 class RadianceWebGLRenderer {
     constructor(canvas) {
@@ -622,7 +572,7 @@ class RadianceWebGLRenderer {
         if (!this._bloomFBOs || !this._bloomFBOs.length) return null;
 
         const progDown = this.programs.bloomDown;
-        const progUp   = this.programs.bloomUp;
+        const progUp = this.programs.bloomUp;
         if (!progDown || !progUp) return null;
 
         // ── Pass 1: Threshold + Downsample into level 0 ──────────────────────
@@ -637,8 +587,8 @@ class RadianceWebGLRenderer {
         gl.uniform2f(this.getUniform(progDown, 'u_srcTexelSize'), 1.0 / imgW, 1.0 / imgH);
         gl.uniform1i(this.getUniform(progDown, 'u_applyThreshold'), 1);
         // Adaptive threshold: scene-linear HDR needs higher threshold than sRGB
-        const threshLo = this.isLinearTexture ? 1.0  : 0.82;
-        const threshHi = this.isLinearTexture ? 4.0  : 1.4;
+        const threshLo = this.isLinearTexture ? 1.0 : 0.82;
+        const threshHi = this.isLinearTexture ? 4.0 : 1.4;
         gl.uniform1f(this.getUniform(progDown, 'u_thresholdLo'), threshLo);
         gl.uniform1f(this.getUniform(progDown, 'u_thresholdHi'), threshHi);
         gl.uniform1f(this.getUniform(progDown, 'u_exposure'), this.exposure);
@@ -872,11 +822,11 @@ class RadianceWebGLRenderer {
         }
 
         return {
-            input:   inputPrecision,
+            input: inputPrecision,
             grading: fmt.label,
             display: this.isWebGL2 ? 'sRGB 8-bit Canvas' : 'WebGL1 8-bit',
-            label:   fmt.label,
-            mode:    this.pipelinePrecision
+            label: fmt.label,
+            mode: this.pipelinePrecision
         };
     }
 
@@ -993,7 +943,7 @@ class RadianceWebGLRenderer {
             const entry = this._frameCache.get(frameId);
             entry.lastUsed = now;
             this.textures.image = entry.tex;
-            this.imageWidth  = width;
+            this.imageWidth = width;
             this.imageHeight = height;
             this.isLinearTexture = true;
             return entry.tex;
@@ -3558,7 +3508,7 @@ vec3 getDenoiseColor(vec2 uv) {
         const gl = this.gl;
         if (!this.isWebGL2 || !this.textures.image) return null;
 
-        const w = width  || this.imageWidth  || this.canvas.width;
+        const w = width || this.imageWidth || this.canvas.width;
         const h = height || this.imageHeight || this.canvas.height;
 
         // Create temporary RGBA32F FBO at target resolution

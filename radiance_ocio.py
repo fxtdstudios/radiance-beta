@@ -1,34 +1,3 @@
-"""
-═════════════════════════════════════════════════════════════════════════════
-                     RADIANCE OCIO ENGINE v2.3.1
-              OpenColorIO Integration for Radiance Viewer
-                         Radiance © 2024-2026
-
-Professional OCIO support providing:
-- Config auto-discovery ($OCIO env, aces_1.2, studio configs)
-- Color space enumeration (scene, display, view transforms)
-- Real-time 3D LUT baking (OCIO processor → 33³/65³ float32 cube)
-- Display/View transform pairing (matching Nuke/Resolve conventions)
-- Baked LUT caching (avoids re-baking on every frame)
-- HTTP API endpoints for frontend integration
-- Fallback to built-in analytical LUTs when OCIO unavailable
-
-Architecture:
-  Python (this file) bakes OCIO transforms into 3D LUTs.
-  The baked LUT is served as a raw float32 binary blob.
-  The JS frontend uploads it to WebGL via the existing loadLUT() → sampler3D
-  pipeline, giving real-time GPU-accelerated color management.
-
-  This is the same approach used by Nuke, RV, Blender, and mrViewer.
-
-Usage in ComfyUI:
-  1. Set $OCIO env var to your config path (or let auto-discovery find it)
-  2. The Radiance Viewer HUD will show OCIO color spaces in the LUT dropdown
-  3. Select a display/view transform — the baked 3D LUT uploads to GPU instantly
-
-═════════════════════════════════════════════════════════════════════════════
-"""
-
 import os
 import logging
 import hashlib
@@ -97,10 +66,11 @@ def _find_file(directory: str, filename: str) -> Optional[str]:
 
 
 def _download_default_config() -> Optional[str]:
-    """Download the official ACES 1.3 CG Config if none is found."""
+    """Download the official ACES 2.0 CG Config if none is found."""
     import urllib.request
     try:
-        url = "https://raw.githubusercontent.com/AcademySoftwareFoundation/OpenColorIO-Config-ACES/main/cg-config-v1.0.0_aces-v1.3_ocio-v2.1.1.ocio"
+        # Modern stable URL for ACES 2.0 CG Config (OCIO v2.5)
+        url = "https://raw.githubusercontent.com/AcademySoftwareFoundation/OpenColorIO-Config-ACES/main/src/opencolorio_config_aces/config/aces/2.0/cg-config-v4.0.0_aces-v2.0_ocio-v2.5.ocio"
         
         current_dir = os.path.dirname(os.path.realpath(__file__))
         aces_dir = os.path.join(current_dir, "ACES")
@@ -113,7 +83,7 @@ def _download_default_config() -> Optional[str]:
         if os.path.isfile(target_path):
             return target_path
             
-        logger.info("[Radiance OCIO] No config detected. Auto-downloading standard ACES CG config (OCIO v2) (~100KB)...")
+        logger.info("[Radiance OCIO] No config detected. Auto-downloading standard ACES 2.0 CG config...")
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req) as response:
             with open(target_path, 'wb') as f:

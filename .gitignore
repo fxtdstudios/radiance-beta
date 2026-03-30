@@ -79,3 +79,4 @@ secrets.json
 *.pem
 *.key
 \
+docs/

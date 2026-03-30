@@ -1,11 +1,11 @@
 <div align="center">
 <img src="RADIANCE.png" width="800" alt="Radiance Logo">
 
-◎ Radiance v2.3.1 — Professional VFX & HDR Suite for ComfyUI
+◎ Radiance v2.3.2 — Professional VFX & HDR Suite for ComfyUI
 
-[![Version](https://img.shields.io/badge/version-2.3.1-00a8ff?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
+[![Version](https://img.shields.io/badge/version-2.3.2-00a8ff?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
-[![Nodes](https://img.shields.io/badge/Nodes-78-blue?style=for-the-badge&logo=comfyui)](https://github.com/fxtdstudios/radiance#node-reference)
+[![Nodes](https://img.shields.io/badge/Nodes-79-blue?style=for-the-badge&logo=comfyui)](https://github.com/fxtdstudios/radiance#node-reference)
 [![Comfy](https://img.shields.io/badge/Comfy--Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
 
 **Radiance** is a professional, VFX-grade 32-bit float color science suite for ComfyUI. Built for film colorists and VFX artists who require absolute precision in their AI-assisted workflows.
@@ -16,7 +16,7 @@
 
 ---
 
-## ◎ What's New - v2.3.1
+## ◎ What's New - v2.3.2
 
 > [!IMPORTANT]
 > **Native 32-Bit Scene-Linear Engine**  
@@ -43,7 +43,7 @@ The **Radiance Workspace** node is the command center for your production. It ha
 
 ---
 
-## <a name="node-reference"></a>◎ Node Reference (78 Professional Nodes)
+## <a name="node-reference"></a>◎ Node Reference (79 Professional Nodes)
 
 The suite is organized into **11 specialized production zones** to mirror industry-standard VFX software topology.
 
@@ -147,7 +147,7 @@ pip install -r requirements_windows.txt  # Or linux/mac_silicon
 ## <a name="viewer-shortcuts"></a>◎ Professional Keyboard Shortcuts
 
 ![Radiance Pro Viewer](viewer.png)  
-![Radiance Shortcuts](Viewer_shorcut.png)
+![Radiance Shortcuts](Viewer_shortcut.png)
 
 Radiance is designed for a keyboard-driven VFX workflow. Use these shortcuts to monitor, grade, and navigate your shots with industry-standard precision.
 
@@ -209,6 +209,18 @@ Join over 2,000+ artists and developers in the **FXTD Studios Discord**.
 - **Authors:** Created by the FXTD Studios team.
 - **Technology:** Built on **OpenColorIO v2.2**, **OpenEXR**, and **Colour-Science**.
 - **Special Thanks:** The ComfyUI community for pushing the boundaries of AI generation.
+
+### ◎ References
+- Reinhard, E., Ashikhmin, M., Gooch, B., Shirley, P. **Color Transfer between Images**. IEEE CGA, 2001.
+- Hable, J. **Filmic Tonemapping Operators**. GDC 2010.
+- Hill, S. **HDR Color in Call of Duty**. SIGGRAPH 2014.
+- Academy of Motion Picture Arts and Sciences. **ACES 2.0 Reference Rendering Transform**. 2024.
+- Sobotka, T. **AgX: A Minimal Color Transform**. Blender Institute, 2023.
+- Magnor, M. et al. **Digital Video Processing for Engineers**. Morgan & Claypool, 2012.
+- OpenColorIO Contributors. **OpenColorIO v2 Architecture**. ASWF, 2023.
+- **Colour-Science for Python**. https://www.colour-science.org/. 2024.
+- Narkowicz, K. **ACES Filmic Tone Mapping Curve**. Blog, 2016.
+- **ITU-R BT.1203**. Subjective Picture Quality Assessment for Digital Cable Television Systems. ITU, 1994.
 
 ---
 [↑ Back to top](#radiance)

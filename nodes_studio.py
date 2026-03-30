@@ -1,10 +1,3 @@
-"""
-Radiance Manager Node
----------------------------
-Generate authentic cinematic prompts using real-world camera and lens profiles.
-"""
-
-
 try:
     from .film.camera_profiles import (
         CAMERAS,

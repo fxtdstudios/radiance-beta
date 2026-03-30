@@ -1,32 +1,3 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-                    RADIANCE LAYOUT NODES  v2.3.0
-              Advanced Reroute & Workflow Organization
-                       Radiance © 2024-2026 FXTD STUDIOS
-═══════════════════════════════════════════════════════════════════════════════
-
-Nodes:
-  RadianceReroute        — Lightweight named pass-through (backward compat)
-  RadianceAdvancedReroute — Full-featured reroute: color, icon, style, group,
-                            description, type introspection, type_info output
-  RadianceMux            — Select one of up to 4 inputs by index (A/B/C/D)
-  RadianceGate           — Boolean pass-through gate (open/closed)
-  RadianceNote           — Documentation sticky note (no connections)
-  RadianceDebugProbe     — Non-destructive pass-through with tensor/string logging
-
-v2.3.0:
-  + RadianceMux: A/B/C/D switcher for rapid comparison workflows
-  + RadianceGate: boolean pass/block for optional branches
-  + RadianceNote: workflow documentation anchor with rich text
-  + RadianceDebugProbe: log tensor stats without breaking the graph
-
-v2.4.0:
-  + RadianceReroute: added optional label (backward compatible)
-  + RadianceAdvancedReroute: icon, style, group, description, show_type,
-    type_info STRING output, ui dict for JS companion styling
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
 import math
 import logging
 from typing import Any, Tuple

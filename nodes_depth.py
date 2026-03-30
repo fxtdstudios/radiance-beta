@@ -1,26 +1,3 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-    Radiance Depth Map v2.3 — Monocular Depth Estimation for ComfyUI
-                        Radiance © 2024-2026 FXTD STUDIOS
-
-Uses Depth Anything V2:
- - 97.1% accuracy (δ₁=0.946 on KITTI)
- - 213ms inference (vs Marigold 5.2s)
- - Handles transparent/reflective surfaces
- - Auto-downloads from HuggingFace
-
-v1.1 vs v1.0:
- - FIX: MPS (Apple Silicon) support — was falling back to CPU silently
- - FIX: Model cache device race condition — cache on CPU, .to(device) per call
- - FIX: depth.squeeze() without dim args — unsafe when H or W is 1
- - FIX: _blur_depth zero-padding → reflect-padding (no dark edge halos)
- - FIX: Duplicate logger.info lines removed
- - FIX: Reinhard tonemap crash on negative pixel values
- - NEW: Video-safe per-frame processing with batch-wide normalization
- - NEW: Progress logging for video batches
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
 import torch
 import numpy as np
 import threading

@@ -1,15 +1,3 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-                 RADIANCE TEMPORAL NODES v2.3.1
-          Temporal Video Processing for ComfyUI Pipelines
-                      Radiance © 2024-2026
-
- Nodes:
-   RadianceTemporalSmooth — Per-pixel EMA across batch frames (flicker/noise reduction)
-   RadianceFlickerAnalyze — Frame-to-frame luma consistency metric + QC output
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
 import logging
 from typing import Tuple, List
 

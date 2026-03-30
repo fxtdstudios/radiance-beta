@@ -1,8 +1,3 @@
-"""
-Radiance - Visual Analysis Scopes
-Professional Waveform and Vectorscope monitors for color grading.
-"""
-
 import torch
 import numpy as np
 import cv2

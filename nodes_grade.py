@@ -1,18 +1,3 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-                    RADIANCE GRADE NODE v2.3
-              Professional Color Grading for ComfyUI
-                       Radiance © 2024-2026
-
- v2.0 — Grade Matching & Automation
-   - NEW: reference_image + match_strength → LAB mean/std match grade
-   - NEW: preset_file → load presets from external JSON
-   - NEW: grade_info is now a full JSON dump of grade parameters
-   - NEW: ApplyGradeInfo node — apply grade_info JSON to any image
-   - NEW: RadianceGradeMatch — dedicated match-grading node
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
 import json
 import os
 import logging

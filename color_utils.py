@@ -1,13 +1,3 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-                    Radiance - Shared Color Utilities
-                    Professional Color Space Conversions
-═══════════════════════════════════════════════════════════════════════════════
-
-Centralized color space conversion functions used across Radiance nodes.
-All functions operate on numpy float32 arrays and torch tensors.
-"""
-
 import numpy as np
 import torch
 

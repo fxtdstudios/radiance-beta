@@ -2,7 +2,7 @@ import torch
 import time
 import math
 import logging
-import gc                                                              
+import gc  # ALBABIT FIX: Added garbage collection import for pre-flight cleanup
 from typing import Tuple, Dict, Any, Optional, List
 from dataclasses import dataclass, field
 
@@ -200,14 +200,6 @@ class SamplerMode:
 logger = logging.getLogger("radiance.sampler")
 
 class SigmaCache:
-    """Thread-safe bounded LRU cache for computed sigma schedules.
-
-    FIX: Upgraded from plain dict (FIFO eviction, no LRU) to OrderedDict with
-    move-to-end on hit. With MAX_ENTRIES=32, LRU vs FIFO rarely matters in
-    practice, but OrderedDict is no more expensive and gives correct LRU
-    semantics: frequently-used schedulers stay cached across long sessions.
-    """
-
     MAX_ENTRIES = 32
 
     def __init__(self):
@@ -236,7 +228,7 @@ class SigmaCache:
     def get(self, model, scheduler: str, total_steps: int) -> Optional[torch.Tensor]:
         key = self._make_key(model, scheduler, total_steps)
         if key in self._cache:
-            self._cache.move_to_end(key)   # LRU: mark as recently used
+            self._cache.move_to_end(key)   
             return self._cache[key]
         return None
 
@@ -246,7 +238,7 @@ class SigmaCache:
             self._cache.move_to_end(key)
         else:
             if len(self._cache) >= self.MAX_ENTRIES:
-                evicted = next(iter(self._cache))  # LRU: evict least-recently-used
+                evicted = next(iter(self._cache))  
                 del self._cache[evicted]
                 logger.debug(f"SigmaCache: evicted LRU entry, {len(self._cache)} remaining")
         self._cache[key] = sigmas
@@ -1809,6 +1801,11 @@ class RadianceSamplerPro:
         audio_normalization_factors: str = "1,1,0.25,1,1,0.25,1,1",
     ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, str, str]:
 
+        # ALBABIT-FIX: Console alert for sigmas_override
+        if sigmas_override is not None:
+            print("\033[93m[Radiance] sigmas_override connected. UI parameters for Steps, Denoise, Scheduler, and Shift will be IGNORED. The sampler will strictly follow the external sigmas schedule.\033[0m")
+            logger.warning("[Radiance] sigmas_override is active and will take precedence.")
+
         t_start = time.time()
         timings: Dict[str, float] = {}
 
@@ -1820,7 +1817,7 @@ class RadianceSamplerPro:
                 is_ltx_av = True
                 ltxav_obj = inner_model
                 logger.info(
-
+                    "[Radiance] LTX-AV detected. Volume adjustment will be applied at the end of the phase."
                 )
         except Exception:
             pass                                      
@@ -1840,24 +1837,8 @@ class RadianceSamplerPro:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        if preset != "None (Custom)" and preset in PRESET_CONFIGS:
-            config = PRESET_CONFIGS[preset]
-            steps = config.get("steps", steps)
-            cfg = config.get("cfg", cfg)
-            sampler = config.get("sampler", sampler)
-            scheduler = config.get("scheduler", scheduler)
-            denoise = config.get("denoise", denoise)
-            flux_shift = config.get("flux_shift", flux_shift)
-            flux_guidance = config.get("flux_guidance", flux_guidance)
-
-            ays_schedule = config.get("ays_schedule", ays_schedule)
-            sampler_mode = config.get("sampler_mode", sampler_mode)
-
-            force_full_denoise_steps = config.get("force_full_denoise_steps", force_full_denoise_steps)
-            force_exact_steps        = config.get("force_exact_steps", force_exact_steps)
-            if "model_type" in config:
-                model_type = config["model_type"]
-            logger.info(f"Loaded Preset: {preset}")
+        if preset != "None (Custom)":
+            logger.info(f"[Radiance] Preset '{preset}' active but relying strictly on UI parameters.")
 
         flux_shift = max(0.01, flux_shift)
 
@@ -1909,44 +1890,38 @@ class RadianceSamplerPro:
 
             if scheduler == "karras":
                 logger.warning(
-
+                    "[Radiance] Karras scheduler is designed for classic diffusion models (SD1.5/SDXL). LTX 2.3 uses Flow Matching which requires linear or beta distributions. Karras may cause artifacts or washed-out results."
                 )
             elif scheduler == "exponential":
                 logger.warning(
-
+                    "[Radiance] Exponential scheduler concentrates steps at the end of the generation. With LTX 2.3, this often leads to blurry or temporally unstable video results."
                 )
             if sampler == "uni_pc" and scheduler in ("sgm_uniform", "ddim_uniform"):
                 logger.warning(
                     f"[Radiance] LTX 2.3: uni_pc + {scheduler} can cause severe structural "
-
+                    f"instability or 'melting' artifacts in motion. Proceed with caution."
                 )
             if sampler == "euler_cfg_pp" and force_full_denoise_steps:
                 logger.warning(
-
+                    "[Radiance] 'euler_cfg_pp' sampler is extremely aggressive when 'force_full_denoise_steps' is True. It is highly recommended to disable 'force_full_denoise_steps' or use 'euler' instead."
                 )
-
-            if pag_scale > 0:
-                logger.warning(
-
-                )
-                pag_scale = 0.0
 
             if noise_type.lower() not in ("gaussian", "uniform"):
                 logger.warning(
                     f"[Radiance] LTX 2.3: '{noise_type}' noise type produces abstract "
-
+                    f"results. Forcing to Gaussian."
                 )
                 noise_type = "Gaussian"
 
             if tile_mode:
                 logger.warning(
-
+                    "[Radiance] Tile Sampling is incompatible with Video models. Forcing to False."
                 )
                 tile_mode = False
 
             if preview_method != "None":
                 logger.warning(
-
+                    "[Radiance] Preview Method is incompatible with Video models. Forcing to None."
                 )
                 preview_method = "None"
 
@@ -2070,9 +2045,7 @@ class RadianceSamplerPro:
         log_tensor("Sigmas", sigmas)
 
         if len(sigmas) <= 1:
-            logger.warning(
-
-            )
+            logger.warning("[Radiance] Sigma schedule is trivial, returning input unchanged")
             report = build_sigma_report(
                 detected_type,
                 steps,
@@ -2091,13 +2064,19 @@ class RadianceSamplerPro:
         work_latent = latent_samples.to(device)
         log_tensor("Work Latent (Start)", work_latent)
 
+        # ALBABIT-FIX: Sync total_steps to sigmas_override if provided to prevent indexer mismatch
+        if sigmas_override is not None:
+            total_steps = max(1, len(sigmas) - 1)
+        else:
+            total_steps = max(1, steps)
+
         if multi_cond_mode != "Off" and positive_2 is not None:
             positive = merge_conditionings(
                 positive, positive_2,
                 mode=multi_cond_mode,
                 weight_b=cond_weight_b,
-                split_step=int(steps * phase_split),
-                total_steps=steps,
+                split_step=int(total_steps * phase_split),
+                total_steps=total_steps,
             )
             logger.info(f"[v4.0] Conditionings merged (mode={multi_cond_mode}, weight_b={cond_weight_b:.2f})")
 
@@ -2111,8 +2090,6 @@ class RadianceSamplerPro:
         secondary_scheduler: Optional[str] = None
         split_step = -1
 
-        total_steps = max(1, steps)
-
         effective_end = end_step if end_step > 0 else total_steps
         effective_end = min(effective_end, total_steps)
         effective_start = min(start_step, effective_end)
@@ -2125,8 +2102,7 @@ class RadianceSamplerPro:
 
             if detected_type == "flux" and cfg <= 1.05:
                 logger.warning(
-                    f"CFG++ enabled but CFG is {cfg}. For Flux, CFG++ requires CFG > 1.0 "
-
+                    f"CFG++ enabled but CFG is {cfg}. For Flux, CFG++ requires CFG > 1.0"
                 )
 
         if pag_scale > 0:
@@ -2269,7 +2245,7 @@ class RadianceSamplerPro:
                     from comfy.taesd.taesd import TAESDDecoder              
                 except (ImportError, AttributeError):
                     logger.warning(
-
+                        "[Radiance] TAESD unavailable, fallback to Latent2RGB"
                     )
                     preview_method = "Latent2RGB"
 
@@ -2306,6 +2282,9 @@ class RadianceSamplerPro:
             logger.debug(f"Pre-seed cache skipped: {_e}")
 
         def _get_base_sigmas(mdl, sched: str = scheduler) -> torch.Tensor:
+            # ALBABIT-FIX: Directly return the overridden sigmas to ensure SigmaIndexer matches sizes
+            if sigmas_override is not None and sched == scheduler and mdl is model:
+                return sigmas
             return compute_base_sigmas(
                 mdl, sched, total_steps, scheduler, flux_shift, denoise, _sigma_cache
             )
@@ -2363,9 +2342,6 @@ class RadianceSamplerPro:
         try:
             if tile_mode and latent_samples.ndim == 4:
                 # FIX: tile_mode runs INSTEAD of the staged denoising loop.
-                # Previously tile_sample was called AFTER the loop using work_latent
-                # (original input), silently discarding all denoised output.
-                # Now: skip the stage loop and run tile_sample as the sole path.
                 logger.info(
                     f"[v4.0] Tile sampling: size={tile_size}, "
                     f"overlap={tile_overlap}, blend={tile_blend}"
@@ -2386,7 +2362,12 @@ class RadianceSamplerPro:
                     tile_blend=tile_blend,
                     noise_mask=noise_mask,
                 )
-                samples = current_latent.cpu() if current_latent.is_cuda else current_latent
+                # ALBABIT-FIX: Prevent AttributeError on NestedTensor which lacks 'is_cuda'
+                if hasattr(current_latent, "is_cuda"):
+                    samples = current_latent.cpu() if current_latent.is_cuda else current_latent
+                else:
+                    samples = current_latent
+                
                 timings["tile_sampling"] = time.time() - t_tile
                 timings["sampling"] = timings["tile_sampling"]
                 logger.info(
@@ -2512,7 +2493,6 @@ class RadianceSamplerPro:
                         except Exception as _ne:
                             logger.warning(
                                 f"[Radiance] LTX-AV NestedTensor noise rebuild failed: {_ne}. "
-
                             )
 
                     comfy.model_management.load_model_gpu(current_model)
@@ -2565,8 +2545,9 @@ class RadianceSamplerPro:
                     logger.error(f"Error in Stage {i+1}: {e}")
                     raise
 
-            if current_latent.is_cuda:
-                samples = current_latent.cpu()
+            # ALBABIT-FIX: Prevent AttributeError on NestedTensor which lacks 'is_cuda'
+            if hasattr(current_latent, "is_cuda"):
+                samples = current_latent.cpu() if current_latent.is_cuda else current_latent
             else:
                 samples = current_latent
 
@@ -2575,7 +2556,7 @@ class RadianceSamplerPro:
             # FIX: tile_mode 4D now handled earlier in the stage loop.
             if tile_mode and latent_samples.ndim == 5:
                 logger.warning(
-
+                    "[Radiance] Tile sampling ignored for 5D video latents."
                 )
 
         finally:
@@ -2625,7 +2606,6 @@ class RadianceSamplerPro:
             except Exception as _av_err:
                 logger.warning(
                     f"[Radiance] LTX-AV recombination failed: {_av_err}. "
-
                 )
 
         t0 = time.time()

@@ -1,62 +1,3 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-    Radiance Nuke Bridge v2.3 — Direct Viewer Connection
-                    Radiance © 2024-2026 FXTD STUDIOS
-
-Place this at: radiance/nodes_nuke.py
-
-Architecture:
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  ComfyUI (Radiance)                                             │
-  │                                                                  │
-  │  IMAGE ──▶ Write EXR ──▶ stream.####.exr ──TCP──▶ Nuke Viewer  │
-  │  (B,H,W,C)  (Radiance IO)  (temp / shared)  cmd    (Read node) │
-  │                                                                  │
-  │  Full float32 · RGBA + Depth · Color space metadata             │
-  └──────────────────────────────────────────────────────────────────┘
-
-EXR is written using the SAME Radiance IO writer chain as RadianceSaveEXR:
-  OpenEXR → SimpleEXRWriter → OpenCV → imageio (with channel-aware fallbacks)
-
-All channels preserved at every fallback level:
-  - OpenEXR:         R, G, B, A, Z  ✓
-  - SimpleEXRWriter: R, G, B, A, Z  ✓ (pure Python, always available)
-  - OpenCV:          R, G, B, A     ✓ (Z not supported by cv2.imwrite)
-  - imageio:         R, G, B        ✓ (alpha/depth not supported)
-
-v3.0 — 23 bugs fixed from v1.0:
-
- CRITICAL:
-  - FIX: sync_image() → load_exr() (method actually exists now)
-  - FIX: Batch support — writes numbered EXR sequence for ALL frames
-  - FIX: Alpha channel preserved from 4-channel RGBA images
-  - FIX: Depth channel works through ALL writer backends (not just OpenEXR)
-  - FIX: Consistent channel handling — no RGB/BGR mismatch between writers
-
- DATA INTEGRITY:
-  - FIX: Color space metadata in EXR header + Nuke Read node colorspace knob
-  - FIX: Bit depth control (float32 / float16)
-  - FIX: Compression control (ZIP, PIZ, DWAA, etc.)
-  - FIX: Frame range set on Nuke Read node (first/last/origfirst/origlast)
-
- INFRASTRUCTURE:
-  - FIX: ComfyUI temp directory (not module dir)
-  - FIX: Old temp file cleanup (300s TTL)
-  - FIX: logger instead of print() (16 print → 0 print)
-  - FIX: Ping before send (connection status check)
-  - FIX: On Change mode actually detects changes (perceptual hash)
-  - FIX: hidden unique_id for execution tracking
-
- NEW:
-  - Nuke-side listener script (scripts/start_nuke_server.py)
-  - RadianceNukeInfo node — query Nuke version/project/format
-  - Custom output path for shared drives (NFS/SMB)
-  - Frame numbering: stream.0001.exr (Nuke #### convention)
-  - Viewer auto-connect (Read → Viewer1 input 0)
-  - Raw mode bypass for Nuke's color management
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
 import torch
 import numpy as np
 import os
@@ -630,11 +571,15 @@ class RadianceNukeBridge:
         # Ping first — fast connection check
         alive, ping_msg = connector.ping()
         if not alive:
+            # Generate absolute, forward-slashed path for Nuke copy-paste (avoid \r in \radiance)
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            script_path = os.path.join(current_dir, "scripts", "start_nuke_server.py").replace("\\", "/")
+            
             status = (
                 f"Nuke not responding at {host}:{port}. "
-                f"EXR saved: {len(frame_paths)} frame(s) → {bridge_dir}. "
-                f"Start the listener in Nuke: "
-                f"exec(open('scripts/start_nuke_server.py').read())"
+                f"EXR saved: {len(frame_paths)} frame(s). "
+                f"Run in Nuke Script Editor: "
+                f"exec(open('{script_path}').read())"
             )
             logger.warning(f"[NukeBridge] {status}")
             return (images, status)

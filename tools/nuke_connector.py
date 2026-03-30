@@ -147,10 +147,18 @@ class NukeConnector:
             return (True, response)
 
         except ConnectionRefusedError:
+            # Generate absolute, forward-slashed path for Nuke copy-paste
+            try:
+                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                script_path = os.path.join(base_dir, "scripts", "start_nuke_server.py").replace("\\", "/")
+                cmd = f"exec(open('{script_path}').read())"
+            except Exception:
+                cmd = "exec(open('scripts/start_nuke_server.py').read())"
+
             msg = (
                 f"Nuke not reachable at {self.host}:{self.port}. "
                 "Ensure the Radiance listener is running in Nuke:\n"
-                "  Script Editor → run scripts/start_nuke_server.py"
+                f"  Script Editor → run: {cmd}"
             )
             self._last_error = msg
             logger.warning(msg)

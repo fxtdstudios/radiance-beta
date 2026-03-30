@@ -1,12 +1,5 @@
 import { app } from "../../scripts/app.js";
 
-/**
- * ═══════════════════════════════════════════════════════════════════════════════
- *                         RADIANCE UI THEME
- *                    Premium Styling for Custom Nodes
- * ═══════════════════════════════════════════════════════════════════════════════
- */
-
 // Elegant Color Palette
 const COLORS = {
     HEADER: "#232330",       // Dark Slate Blue
@@ -17,14 +10,6 @@ const COLORS = {
     ACCENT: "#00a8ff"        // Radiance Blue
 };
 
-// ── Fix: NODE_DEFAULT_SHAPE property shim ────────────────────────────────────
-// colorPaletteService (ComfyUI core) calls `loadLiteGraphColorPalette` which
-// reads and re-sets LiteGraph.NODE_DEFAULT_SHAPE.  LiteGraph itself only
-// accepts the magic numbers 1 / 2 / 4 (BOX / ROUND / CARD).  Some installed
-// extensions — or color palettes — write strings like "box" instead, causing a
-// console warning every load.  This property shim runs SYNCHRONOUSLY at module
-// load time (before colorPaletteService fires) and transparently coerces any
-// string or out-of-range value to the correct integer so the warning never fires.
 (function patchLiteGraphShape() {
     if (!window.LiteGraph) return; // LiteGraph not yet loaded; skip
     if (Object.getOwnPropertyDescriptor(LiteGraph, '_shape')) return; // already patched
@@ -32,10 +17,10 @@ const COLORS = {
     const _mapShape = (v) => {
         if (typeof v === 'number' && [1, 2, 4].includes(v)) return v;
         const s = String(v).toLowerCase();
-        if (s === 'box')    return 1; // LiteGraph.BOX_SHAPE
-        if (s === 'round')  return 2; // LiteGraph.ROUND_SHAPE
+        if (s === 'box') return 1; // LiteGraph.BOX_SHAPE
+        if (s === 'round') return 2; // LiteGraph.ROUND_SHAPE
         if (s === 'circle') return 2;
-        if (s === 'card')   return 4; // LiteGraph.CARD_SHAPE
+        if (s === 'card') return 4; // LiteGraph.CARD_SHAPE
         return typeof v === 'number' ? Math.max(1, v) : 2; // fallback: ROUND
     };
 
