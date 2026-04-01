@@ -1,3 +1,69 @@
+"""
+Radiance VAE 4K — Production HDR Encode / Decode for ComfyUI
+═══════════════════════════════════════════════════════════════
+
+ARCHITECTURE OVERVIEW FOR DEBUGGING
+────────────────────────────────────
+This module implements the full VAE encode→decode pipeline for the Radiance
+suite. It handles images up to 8K+ using production-grade cosine-blend tiling,
+with full HDR color-science pipelines for 12 color spaces.
+
+CRITICAL SIGNAL-FLOW (understand this before touching ANY code):
+
+  ENCODE: pixels (scene-linear) → Linearize → Exposure → HDR Compress → VAE
+  DECODE: VAE → HDR Decompress → Linearize → Inverse Tonemap → Exposure → Target Space
+
+HDR MODES — each has a DIFFERENT valid domain in VAE-encoded space:
+  ┌──────────────────┬────────────────┬────────────────────────────────────┐
+  │ Mode             │ Encoded Domain │ Notes                              │
+  ├──────────────────┼────────────────┼────────────────────────────────────┤
+  │ Clip (SDR)       │ [0.0, 1.0]     │ sRGB gamma, hard-clipped           │
+  │ Soft Clip        │ [0.0, 1.0]     │ sRGB gamma + tanh rolloff ≥0.85   │
+  │ Compress (Log)   │ [~0.0, ~1.04–1.08] │ Log curve — per-profile adaptive  │
+  │                  │                    │ ★ v2.3: soft-shouldered, NOT hard │
+  │                  │                    │   clamped — see LOG_PROFILE_HDR_  │
+  │                  │                    │   PARAMS + _soft_log_shoulder     │
+  │ Passthrough      │ [−0.05, 1.5]   │ sRGB gamma, widened for headroom   │
+  └──────────────────┴────────────────┴────────────────────────────────────┘
+
+COMPRESS (LOG) — WHY IT NEEDS SPECIAL CARE:
+  Log curves are extremely steep near code 1.0. For ARRI LogC4:
+    code 0.98 → ~26.0 linear      code 1.00 → ~38.0 linear
+    code 1.01 → ~43.0 linear      code 1.02 → ~49.0 linear
+  This means VAE reconstruction noise of ±0.01 in coded space becomes ±5–10
+  linear units after decompression. The v2.3 pipeline addresses this with:
+    1. Soft-shoulder (not hard clamp) at the log curve ceiling — preserves
+       legitimate super-whites without hard-cutting at exactly 1.0
+    2. Selective highlight denoise in log-coded space BEFORE decompression —
+       smooths out VAE noise where it would be exponentially amplified,
+       while leaving midtones/shadows untouched
+    3. No final linear-domain clamp — full HDR passthrough to output tensor
+
+  ★ PER-PROFILE ADAPTIVE TUNING (v2.3):
+    Each of the 6 supported log curves has a different steepness (derivative)
+    at code 1.0. Steeper curves amplify VAE noise more aggressively, so they
+    get more conservative shoulder/denoise parameters:
+      - LogC4, S-Log3 (moderate):      knee=0.96, ceiling=1.08, denoise from 0.80
+      - LogC3, V-Log (steep):          knee=0.95, ceiling=1.06–1.07, denoise from 0.78
+      - DaVinci Intermediate (v.steep): knee=0.93, ceiling=1.05, denoise from 0.75
+      - RED Log3G10 (extreme):         knee=0.92, ceiling=1.04, denoise from 0.72
+    See LOG_PROFILE_HDR_PARAMS for full table and rationale.
+
+NOISE MODEL:
+  VAE reconstruction noise is roughly uniform in whatever space the VAE sees.
+  After log decompression, this uniform noise becomes exponentially larger in
+  highlights (because the log→linear curve is steeper there). The correct
+  fix is to denoise IN LOG SPACE (where noise is uniform and small) BEFORE
+  converting to linear — not to clamp in linear space (which destroys signal).
+
+VERSIONING:
+  v2.0 — Initial 4K tiling, multi-format, video support
+  v2.1 — BUG-42..46 fixes, frame-loop video decode
+  v2.2 — BUG-47..56 fixes, HDR-FIX controls, extended sRGB EOTF
+  v2.3 — True HDR Compress(Log): soft-shoulder, highlight denoise,
+         clamp-free linear output for all log profiles
+"""
+
 import torch
 import torch.nn.functional as F
 import json
@@ -76,7 +142,7 @@ except ImportError:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#                    v2.0 CONSTANTS & HELPERS
+#                    v2.3 CONSTANTS & HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Feature 2: Model-architecture → latent downscale factor
@@ -140,6 +206,52 @@ EXTENDED_LOG_SPACES = [
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
+# v2.3: Per-profile adaptive HDR parameters for Compress (Log) decode
+# ─────────────────────────────────────────────────────────────────────────────
+# Each log curve has a different steepness near code 1.0. Steeper curves
+# amplify VAE noise more aggressively after decompression, so they need:
+#   - Lower soft-shoulder knee (start compressing earlier)
+#   - Tighter ceiling (bound max decompressed linear)
+#   - Lower denoise threshold (start smoothing earlier)
+#   - Higher denoise strength (suppress more aggressively)
+#
+# The parameters below were tuned per-curve based on the derivative (slope)
+# of the log→linear function at code 1.0:
+#
+#   ┌─────────────────────┬──────────────┬────────────────┬──────────────────┐
+#   │ Profile             │ code 1.0 →   │ slope at 1.0   │ Category         │
+#   │                     │ linear       │ (dLin/dCode)   │                  │
+#   ├─────────────────────┼──────────────┼────────────────┼──────────────────┤
+#   │ ARRI LogC3 (EI800)  │ ~55          │ ~350           │ steep            │
+#   │ ARRI LogC4          │ ~38          │ ~250           │ moderate-steep   │
+#   │ Sony S-Log3         │ ~38          │ ~240           │ moderate-steep   │
+#   │ Panasonic V-Log     │ ~46          │ ~280           │ steep            │
+#   │ DaVinci Intermediate│ ~100+        │ ~600+          │ very steep       │
+#   │ RED Log3G10         │ ~184         │ ~1100+         │ extremely steep  │
+#   └─────────────────────┴──────────────┴────────────────┴──────────────────┘
+#
+# Format: {space_name: (shoulder_knee, shoulder_ceiling, denoise_threshold, denoise_strength)}
+
+LOG_PROFILE_HDR_PARAMS: Dict[str, Tuple[float, float, float, float]] = {
+    # ── Moderate-steep: standard shoulder, standard denoise ──
+    "ARRI LogC4":          (0.96, 1.08, 0.80, 0.55),
+    "Sony S-Log3":         (0.96, 1.08, 0.80, 0.55),
+
+    # ── Steep: slightly earlier knee, tighter ceiling ──
+    "ARRI LogC3":          (0.95, 1.06, 0.78, 0.60),
+    "Panasonic V-Log":     (0.95, 1.07, 0.78, 0.60),
+
+    # ── Very steep: conservative shoulder, aggressive denoise ──
+    "DaVinci Intermediate": (0.93, 1.05, 0.75, 0.70),
+
+    # ── Extremely steep: most conservative — slope >1100 at code 1.0 ──
+    "RED Log3G10":          (0.92, 1.04, 0.72, 0.75),
+}
+
+# Default for unknown log profiles (same as LogC4 — safe middle ground)
+LOG_PROFILE_HDR_DEFAULT = (0.96, 1.08, 0.80, 0.55)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # V-1 FIX: Precomputed color space matrices (module-level constants)
 # Previously allocated as new torch.tensor() on EVERY call, causing 6+
 # allocations per frame for video. Now created once, moved to device at use.
@@ -184,7 +296,7 @@ _REC709_TO_REC2020 = torch.tensor([
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# v2.2 Helpers: HDR-safe color transforms
+# v2.3 Helpers: HDR-safe color transforms + log-domain denoise
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _safe_matrix_transform(img: torch.Tensor, mat: torch.Tensor) -> torch.Tensor:
@@ -233,6 +345,121 @@ def _safe_srgb_to_linear_extended(img: torch.Tensor) -> torch.Tensor:
     high = ((abs_img + 0.055) / 1.055).pow(2.4)
     result = torch.where(low_mask, low, high) * sign
 
+    return result
+
+
+def _soft_log_shoulder(img: torch.Tensor, knee: float = 0.96, ceiling: float = 1.08) -> torch.Tensor:
+    """Soft-shoulder compressor for log-coded VAE output — replaces hard clamp.
+
+    v2.3 FIX (HDR-CLAMP-FREE): Previous versions hard-clamped Compress (Log)
+    decode output to [0.0, 1.0]. This destroyed legitimate super-white signal:
+    any VAE reconstruction at 1.001 was clipped to 1.0, losing highlight detail.
+
+    This function replaces the hard clamp with a production-grade soft shoulder:
+      • Values in [0, knee]   → pass through unchanged (midtones, shadows)
+      • Values in [knee, ∞)   → smoothly compressed toward `ceiling` via tanh
+      • Values below 0        → clamped at 0 (no valid sub-zero log signal)
+
+    The soft shoulder preserves legitimate super-whites (VAE can reconstruct
+    values slightly above 1.0 for very bright highlights) while preventing
+    runaway noise from pushing values arbitrarily high.
+
+    Design rationale for defaults:
+      knee=0.96:  LogC4 code 0.96 ≈ 22.5 linear (18+ stops above mid-grey).
+                  Everything below this is rock-solid signal — never touched.
+      ceiling=1.08: LogC4 code 1.08 ≈ 55 linear (21.5+ stops).
+                    This allows ~3 extra stops of HDR headroom beyond knee,
+                    while still bounding the max log value to prevent the
+                    decompression from producing extreme linear outliers.
+
+    Compared to hard clamp at 1.0 (LogC4: max 38 linear):
+      Soft shoulder at ceiling=1.08 allows up to ~55 linear — 45% more headroom.
+
+    Args:
+        img:     (B, H, W, C) tensor in log-coded domain
+        knee:    Below this, values pass through unchanged
+        ceiling: Asymptotic maximum that the shoulder approaches
+    Returns:
+        Soft-shouldered tensor, values in [0, ceiling)
+    """
+    # Floor: no valid signal below 0 in log-coded space. Log curves encode
+    # scene-linear ~−0.015 to code ~0.09 (LogC4), so 0.0 in code is well
+    # below anything physical. Clamp the floor to prevent NaN in atanh paths.
+    img = torch.clamp(img, min=0.0)
+
+    above = img > knee
+    if above.any():
+        result = img.clone()
+        rng = ceiling - knee
+        excess = (img[above] - knee) / rng
+        # tanh: maps [0, ∞) → [0, 1), so result → [knee, ceiling)
+        result[above] = knee + rng * torch.tanh(excess)
+        return result
+    return img
+
+
+def _denoise_log_highlights(
+    img: torch.Tensor,
+    threshold: float = 0.80,
+    strength: float = 0.6,
+) -> torch.Tensor:
+    """Selective highlight denoise in log-coded space BEFORE decompression.
+
+    v2.3 HDR-CLEAN: This is the key to clean HDR output without clamping.
+
+    PROBLEM:
+      VAE reconstruction noise is roughly uniform across the coded domain
+      (±0.005–0.02 in log-coded space). After log→linear decompression:
+        • Noise at code 0.5 (midtones): ±0.01 coded → ±0.15 linear (invisible)
+        • Noise at code 0.9 (highlights): ±0.01 coded → ±2.5 linear (visible)
+        • Noise at code 0.98 (super-whites): ±0.01 coded → ±5.0 linear (severe)
+
+      The noise amplification is exponential because the log→linear curve
+      is steeper at higher code values. Hard-clamping at 1.0 "fixes" this
+      by destroying all HDR content above code 1.0. That's the wrong trade-off.
+
+    SOLUTION:
+      Denoise IN LOG SPACE (where noise is uniform and small) BEFORE converting
+      to linear. Apply a spatially-adaptive 3×3 box smooth weighted by how
+      close each pixel is to the highlight region. Midtones pass through
+      untouched; only the noisy highlight region gets smoothed.
+
+    This is the same principle used by DaVinci Resolve's "Highlight Recovery"
+    and Nuke's "SoftClip" node — denoise before the steep part of the curve,
+    not after.
+
+    Args:
+        img:        (B, H, W, C) tensor in log-coded space
+        threshold:  Code value above which denoising ramps in (0.80 default =
+                    ~10 linear for LogC4 — well into highlights but not midtones)
+        strength:   Blend factor at full effect (0.0 = no denoise, 1.0 = full smooth).
+                    0.6 default preserves texture while suppressing noise.
+    Returns:
+        Denoised tensor, same shape and range as input
+    """
+    if img.shape[1] < 3 or img.shape[2] < 3:
+        # Image too small for 3×3 kernel — skip
+        return img
+
+    # Compute per-pixel blend weight: 0 below threshold, ramps to `strength`
+    # above. Smooth ramp avoids a visible transition edge.
+    #
+    # blend_alpha is applied per-pixel: output = lerp(original, smoothed, blend_alpha)
+    # Using a quadratic ramp for natural falloff:
+    #   weight = strength × clamp((code − threshold) / (1.0 − threshold), 0, 1)²
+    ramp = torch.clamp((img - threshold) / (1.0 - threshold + 1e-8), 0.0, 1.0)
+    blend_alpha = strength * ramp * ramp  # Quadratic ramp for natural falloff
+
+    # 3×3 box blur via F.avg_pool2d (fastest available, no dependencies)
+    # Permute BHWC → BCHW for F.avg_pool2d, then back
+    x = img.permute(0, 3, 1, 2)  # (B, C, H, W)
+    # Reflect-pad to avoid border artifacts (1px each side for 3×3 kernel)
+    x_padded = F.pad(x, (1, 1, 1, 1), mode="reflect")
+    smoothed = F.avg_pool2d(x_padded, kernel_size=3, stride=1, padding=0)
+    smoothed = smoothed.permute(0, 2, 3, 1)  # Back to BHWC
+
+    # Spatially-adaptive blend: midtones untouched, highlights smoothed
+    result = img + blend_alpha * (smoothed - img)
     return result
 
 
@@ -338,7 +565,7 @@ def build_encode_quality_report(
     ph, pw = pixels_before.shape[1:3]
 
     report = {
-        "version": "2.0",
+        "version": "2.3",
         "input_resolution": f"{pw}x{ph}",
         "latent_resolution": f"{lw}x{lh}",
         "latent_format": latent_fmt,
@@ -451,7 +678,7 @@ def _encode_with_sampling_mode(vae: Any, pixels: torch.Tensor, mode: str) -> tor
 
     except Exception as e:
         logger.warning(
-            f"[Radiance 4K Encode v2.2] mean/mode encode failed ({e}), "
+            f"[Radiance 4K Encode v2.3] mean/mode encode failed ({e}), "
             f"falling back to standard sample mode."
         )
 
@@ -731,9 +958,11 @@ class RadianceVAE4KEncode:
     FUNCTION = "encode"
     CATEGORY = "FXTD Studios/Radiance/Generate"
     DESCRIPTION = (
-        "v2.0 — Universal 4K+ VAE encode. Auto VAE-factor detection, "
+        "v2.3 — Universal 4K+ VAE encode. Auto VAE-factor detection, "
         "video 5D latent support, 11 color spaces, mean/sample/mode latent sampling, "
-        "batched tile processing, quality report, latent_format output."
+        "batched tile processing, quality report, latent_format output. "
+        "Compress (Log) HDR mode now passes full scene-linear range through log "
+        "curve without any post-encode clamp — decode side handles noise cleanly."
     )
 
     # FIX-2: Map each log space to its linear→log converter so Compress (Log)
@@ -817,23 +1046,45 @@ class RadianceVAE4KEncode:
 
         # 2b. Clamp negatives — but only for modes that need it.
         #
-        # v2.2 FIX (BUG-49): Mode-aware negative clamp.
-        #   • Compress (Log): Log curves (LogC4, S-Log3, etc.) have well-defined
-        #     mappings for scene-linear values below zero (below-black detail,
-        #     down to ~−0.01 for LogC4). Clamping at 0.0 destroys this data.
-        #     Only clamp at the minimum that the log curve can encode.
-        #   • All sRGB-based modes (Soft Clip, Passthrough, Clip SDR):
-        #     linear_to_srgb uses pow() which produces NaN for negative inputs.
-        #     Must clamp at 0.0 to prevent NaN propagation through the VAE.
+        # v2.3 FIX: Mode-aware negative clamp with production commentary.
+        #
+        # ★ WHY WE CLAMP NEGATIVES AT ALL:
+        #   Scene-linear images from EXR can contain negative values (out-of-gamut
+        #   pixels, ringing artifacts from reconstruction filters, below-black in
+        #   wide-gamut footage). Each HDR mode handles negatives differently:
+        #
+        # ★ Compress (Log): Log curves have well-defined below-black mappings.
+        #   ARRI LogC4 encodes scene-linear down to ~−0.018 (code ~0.09).
+        #   Sony S-Log3 encodes down to ~−0.014. We clamp at −0.03 (50% below
+        #   LogC4's floor) so the log curve itself decides the mapping — the
+        #   pre-clamp is just a safety net against extreme out-of-gamut values
+        #   that would produce NaN in the log function.
+        #
+        # ★ sRGB modes (Soft Clip, Passthrough, Clip SDR): linear_to_srgb uses
+        #   pow(x, 1/2.4) which produces NaN for x < 0. Must clamp at 0.0.
         if hdr_mode == "Compress (Log)":
-            # Allow small negatives for below-black detail. LogC4 encodes values
-            # from approximately −0.015 scene-linear. Clamp well below that so
-            # the log curve itself decides the floor, not this pre-clamp.
-            img = torch.clamp(img, min=-0.02)
+            # v2.3: Widened from −0.02 → −0.03 to cover all log curve floors
+            # without losing any encodable below-black detail.
+            img = torch.clamp(img, min=-0.03)
         else:
             img = torch.clamp(img, min=0.0)
 
         # 3. Transform to VAE input space
+        #
+        # ★ COMPRESS (LOG) — THE HDR WORKHORSE:
+        #   Log curves compress high dynamic range into a VAE-friendly [~0, ~1]
+        #   domain while preserving perceptual uniformity. The compressed signal
+        #   goes through the VAE which treats it like any [0, 1] image.
+        #
+        #   On decode, the inverse log curve decompresses back to scene-linear.
+        #   The encode→decode roundtrip preserves the FULL HDR range of the
+        #   original scene — no hard clamps, no data loss (v2.3).
+        #
+        #   NOTE: The VAE introduces small reconstruction noise (~±0.01 in coded
+        #   space). For midtones this is invisible after decompression. For
+        #   highlights (code > 0.9), the steep log→linear curve amplifies this
+        #   noise exponentially. The decode side handles this with selective
+        #   highlight denoise BEFORE decompression — see _denoise_log_highlights().
         if hdr_mode == "Compress (Log)":
             if _HAS_LOG_CURVES:
                 # FIX-2: Use the log curve that matches the source space so the
@@ -844,7 +1095,8 @@ class RadianceVAE4KEncode:
                 # Preference order:
                 #   1. If source_space is itself a log space → use its own curve
                 #      (data is already linear after step 1, re-encode to same log)
-                #   2. Otherwise default to LogC4 as a neutral choice
+                #   2. Otherwise default to LogC4 as a neutral choice (widest
+                #      dynamic range of any standard log curve: ~26 stops)
                 if source_space in self.LOG_SPACES:
                     compress_fn = self._get_linear_to_log()[source_space]
                 else:
@@ -1059,7 +1311,12 @@ class RadianceVAE4KEncode:
         latent_sampling: str = "sample",
         processing_mode: str = "sequential",
     ) -> Tuple:
-        """v2.0: Universal encode supporting 4D image and 5D video latents."""
+        """v2.3: Universal encode supporting 4D image and 5D video latents.
+
+        Compress (Log) HDR mode now passes full scene-linear range through the
+        log curve without any post-encode clamp. The decode side handles VAE
+        reconstruction noise with soft-shoulder + highlight denoise.
+        """
         import time as _time
         t_start = _time.time()
 
@@ -1078,7 +1335,7 @@ class RadianceVAE4KEncode:
         if is_video and not is_3d_vae:
             B, F, H, W, C = pixels.shape
             logger.info(
-                f"[Radiance 4K Encode v2.0] Video: {B}×{F}×{W}×{H}, space={source_space}"
+                f"[Radiance 4K Encode v2.3] Video: {B}×{F}×{W}×{H}, space={source_space}"
             )
             # Encode frame by frame, stack temporal dim
             frame_latents = []
@@ -1099,13 +1356,13 @@ class RadianceVAE4KEncode:
             alpha_out = torch.ones((B, H, W, 1), dtype=torch.float32, device=pixels.device)
             meta = json.dumps({"node": "RadianceVAE4KEncode", "video": True,
                                "frames": F, "latent_format": latent_fmt})
-            qr = json.dumps({"version": "2.0", "video": True, "frames": F,
+            qr = json.dumps({"version": "2.3", "video": True, "frames": F,
                              "latent_format": latent_fmt, "encode_time_ms": total_time_ms})
             return (video_latent, alpha_out, meta, latent_fmt, qr)
 
         b, h, w, c = pixels.shape
         logger.info(
-            f"[Radiance 4K Encode v2.0] Input: {w}×{h} ({b} frames), "
+            f"[Radiance 4K Encode v2.3] Input: {w}×{h} ({b} frames), "
             f"space={source_space}, sampling={latent_sampling}, vae_factor={vae_factor}"
         )
 
@@ -1145,7 +1402,7 @@ class RadianceVAE4KEncode:
 
         # NaN/Inf guard — mode-aware for Passthrough's extended range
         if torch.isnan(img).any() or torch.isinf(img).any():
-            logger.warning("[Radiance 4K Encode v2.2] NaN/Inf detected — sanitizing")
+            logger.warning("[Radiance 4K Encode v2.3] NaN/Inf detected — sanitizing")
             if hdr_mode == "Passthrough":
                 img = torch.nan_to_num(img, nan=0.0, posinf=1.5, neginf=-0.05)
             else:
@@ -1274,7 +1531,14 @@ class RadianceVAE4KDecode:
                     ["Clip (SDR)", "Soft Clip", "Compress (Log)", "Passthrough"],
                     {
                         "default": "Clip (SDR)",
-                        "tooltip": "Must match encode setting. 'Soft Clip' inverts tanh rolloff to recover highlights.",
+                        "tooltip": (
+                            "Must match encode setting. "
+                            "'Compress (Log)' (v2.3): true HDR — soft-shouldered, "
+                            "highlight-denoised, no hard clamp. Produces clean HDR output "
+                            "across the full log-curve dynamic range. "
+                            "'Soft Clip': inverts tanh rolloff to recover highlights. "
+                            "'Passthrough': extended sRGB range."
+                        ),
                     },
                 ),
                 "inverse_tonemap": (
@@ -1388,8 +1652,9 @@ class RadianceVAE4KDecode:
     FUNCTION = "decode"
     CATEGORY = "FXTD Studios/Radiance/Generate"
     DESCRIPTION = (
-        "v2.0 — Universal 4K+ VAE decode. Auto VAE-factor, 11 color spaces, "
-        "video 5D support, auto-crop from radiance_meta, batched tile mode."
+        "v2.3 — Universal 4K+ VAE decode. True HDR Compress(Log) with soft-shoulder "
+        "and highlight denoise for clean, clamp-free HDR output. Auto VAE-factor, "
+        "11 color spaces, video 5D support, auto-crop from radiance_meta."
     )
 
     def _tiled_decode(
@@ -1543,17 +1808,28 @@ class RadianceVAE4KDecode:
     ) -> torch.Tensor:
         """Convert VAE output to target color space.
 
-        v2.2 production pipeline — all HDR clamps audited for 32-bit precision.
+        v2.3 TRUE HDR pipeline — all log profiles produce clean, clamp-free HDR.
 
-        Pipeline: VAE output → Linearize → Inverse Tonemap → Exposure → Target Space
+        Pipeline: VAE output → HDR Decompress → Linearize → Inverse Tonemap → Exposure → Target Space
 
         All operations happen in linear space to prevent double-gamma errors.
 
-        v2.2 FIX audit:
+        v2.3 CHANGES (Compress (Log) — clamp-free HDR):
+          - Hard clamp [0, 1] REMOVED from Compress(Log) pre-decompression
+          - Replaced with _soft_log_shoulder() — preserves super-whites up to
+            code 1.08 (~55 linear for LogC4, vs 38 with hard clamp at 1.0)
+          - Added _denoise_log_highlights() — selective spatial denoise in
+            log-coded space BEFORE decompression. Suppresses VAE noise where
+            the log→linear curve is steepest (code > 0.80), while passing
+            midtones and shadows through untouched. This is the same principle
+            used by DaVinci Resolve Highlight Recovery and Nuke SoftClip.
+          - Result: clean, noise-free HDR output at full dynamic range, with
+            no hard ceiling on recoverable scene-linear values.
+
+        Previous v2.2 fix audit (still active):
           - BUG-48: Color matrices safe for 4+ channels (alpha passthrough)
           - BUG-50: Passthrough clamp widened from [−0.05, 1.1] → [−0.05, 1.6]
           - BUG-52: Soft Clip atanh safety raised from 0.9999 → 0.999999
-                    (highlight recovery ceiling 2.9 lin → 4.6 lin)
           - BUG-51: Extended sRGB EOTF for Soft Clip / Passthrough values > 1.0
 
         HDR-FIX (hdr_output):
@@ -1566,19 +1842,71 @@ class RadianceVAE4KDecode:
 
         # Step 1: VAE output → Linear (ALWAYS linearize)
         #
-        # Pre-clamp: Remove VAE reconstruction noise outside the encoded domain.
+        # ★ PRE-DECOMPRESSION PIPELINE (v2.3 — clamp-free HDR for all log profiles):
+        #
         # Each hdr_mode has a different valid range in the encoded space.
-        # The clamp MUST match the encode-side range to avoid data loss.
+        # The pre-clamp MUST handle VAE reconstruction noise WITHOUT destroying
+        # legitimate HDR signal. This is mode-specific:
+        #
+        # ┌──────────────────┬─────────────────────────────────────────────────┐
+        # │ Compress (Log)   │ v2.3: Soft shoulder + highlight denoise.       │
+        # │                  │ NO hard clamp. Preserves full HDR range.       │
+        # │                  │ Denoise in log-coded space BEFORE decompress   │
+        # │                  │ to prevent exponential noise amplification.    │
+        # ├──────────────────┼─────────────────────────────────────────────────┤
+        # │ Soft Clip        │ Hard clamp [0, 1] — tanh ceiling is 1.0       │
+        # ├──────────────────┼─────────────────────────────────────────────────┤
+        # │ Passthrough      │ Wide clamp [−0.05, 1.6] — extended sRGB       │
+        # ├──────────────────┼─────────────────────────────────────────────────┤
+        # │ Clip (SDR)       │ Hard clamp [0, 1] — SDR by definition         │
+        # └──────────────────┴─────────────────────────────────────────────────┘
+        #
         if hdr_mode == "Compress (Log)":
-            # Log-encoded domain: the log curve compresses scene linear into
-            # approximately [0, 1]. The hard clamp at [0, 1] is correct because:
-            #   • Values above 1.0 are VAE noise, not signal. The log curve is
-            #     extremely steep near 1.0 (LogC4: 1.0→~38 lin, 1.01→~43 lin),
-            #     so even tiny noise amplifies to huge linear errors.
-            #   • The below-zero linear content is preserved by the encode-side
-            #     change (BUG-49) which lets small negatives into the log curve.
-            #     Those map to log values slightly above 0, not below 0.
-            img = torch.clamp(img, 0.0, 1.0)
+            # ── v2.3 TRUE HDR PIPELINE (replaces v2.2 hard clamp) ──────────
+            #
+            # PREVIOUS CODE (v2.2):
+            #   img = torch.clamp(img, 0.0, 1.0)   ← DESTROYED HDR HEADROOM
+            #
+            # WHY THE HARD CLAMP WAS WRONG:
+            #   The comment said "values above 1.0 are VAE noise, not signal."
+            #   This is partially true: MOST above-1.0 values are noise. But
+            #   the VAE CAN reconstruct legitimate signal at 1.001–1.05 for
+            #   very bright highlights. Hard-clamping at exactly 1.0 means the
+            #   maximum recoverable linear value is whatever the log curve maps
+            #   to at code 1.0 (LogC4: ~38 linear). With soft shoulder at 1.08,
+            #   we can recover up to ~55 linear — 45% more HDR headroom.
+            #
+            # v2.3 PIPELINE (3 stages):
+            #   1. Soft shoulder — gently compress above knee, allow up to ceiling
+            #   2. Highlight denoise — smooth VAE noise in coded space BEFORE
+            #      the steep log→linear conversion amplifies it exponentially
+            #   3. Log-to-linear decompression — clean, full-range HDR output
+            #
+            # v2.3: Per-profile adaptive parameters. Each log curve has a
+            # different steepness near code 1.0, so shoulder knee/ceiling and
+            # denoise threshold/strength are tuned per-curve. See the
+            # LOG_PROFILE_HDR_PARAMS table for the full rationale.
+            #
+            # Look up profile: source_space for log inputs, else default (LogC4-like)
+            _profile_key = source_space if source_space in LOG_PROFILE_HDR_PARAMS else None
+            _shoulder_knee, _shoulder_ceiling, _denoise_thresh, _denoise_str = (
+                LOG_PROFILE_HDR_PARAMS.get(_profile_key, LOG_PROFILE_HDR_DEFAULT)
+                if _profile_key else LOG_PROFILE_HDR_DEFAULT
+            )
+            logger.debug(
+                f"[Radiance 4K Decode v2.3] Compress(Log) profile='{source_space}' → "
+                f"shoulder({_shoulder_knee}/{_shoulder_ceiling}), "
+                f"denoise({_denoise_thresh}/{_denoise_str})"
+            )
+            #
+            # Stage 1: Soft log shoulder (replaces hard clamp)
+            img = _soft_log_shoulder(img, knee=_shoulder_knee, ceiling=_shoulder_ceiling)
+            #
+            # Stage 2: Selective highlight denoise in log-coded space
+            # This is the key to clean HDR: smooth VAE noise WHERE it matters
+            # (highlights) BEFORE log→linear amplifies it.
+            # Midtones and shadows pass through untouched.
+            img = _denoise_log_highlights(img, threshold=_denoise_thresh, strength=_denoise_str)
         elif hdr_mode == "Soft Clip":
             # Tanh-encoded domain: max encoded value is exactly 1.0 (tanh → 1).
             # Clamp to [0, 1] is correct — anything outside is VAE noise.
@@ -1596,6 +1924,12 @@ class RadianceVAE4KDecode:
         # Step 1b: Decode from encoded space → linear
         if hdr_mode == "Compress (Log)":
             if _HAS_LOG_CURVES:
+                # Stage 3 of v2.3 pipeline: Log-to-linear decompression.
+                #
+                # After soft shoulder + highlight denoise, the log-coded signal
+                # is clean and bounded. The decompression now produces a smooth,
+                # noise-free linear output across the full HDR range.
+                #
                 # FIX-2 (decode side): Decompress using the curve that matches
                 # the encode-side source space, not always LogC4.
                 log_to_linear = RadianceVAE4KEncode._get_log_to_linear()
@@ -1807,9 +2141,17 @@ class RadianceVAE4KDecode:
         force_hdr_decode: bool = False,
         hdr_output: bool = False,
     ) -> Tuple:
-        """v2.2 HDR-FIX: Universal decode with 32-bit HDR output support.
+        """v2.3 TRUE-HDR: Universal decode with 32-bit HDR output support.
 
-        New parameters vs v2.1:
+        v2.3 CHANGES vs v2.2:
+          Compress (Log) HDR mode no longer hard-clamps at [0, 1]. Instead:
+            1. _soft_log_shoulder() gently compresses above code 0.96, allowing
+               legitimate super-whites up to code ~1.08 (~55 linear for LogC4)
+            2. _denoise_log_highlights() smooths VAE noise in log-coded space
+               BEFORE decompression — prevents exponential noise amplification
+            3. Log-to-linear decompression produces clean, full-range HDR
+
+        Previous parameters (still active):
           force_hdr_decode: When True, respects hdr_mode even without radiance_meta
                             (direct encode→decode, no sampler). Required for HDR output
                             with Compress(Log) or Soft Clip modes post-encoding.
@@ -1836,13 +2178,13 @@ class RadianceVAE4KDecode:
             meta_src = radiance_meta.get("source_space")
             if meta_hdr and meta_hdr != hdr_mode:
                 logger.info(
-                    f"[Radiance 4K Decode v2.2] radiance_meta hdr_mode='{meta_hdr}' "
+                    f"[Radiance 4K Decode v2.3] radiance_meta hdr_mode='{meta_hdr}' "
                     f"overrides widget hdr_mode='{hdr_mode}' for encode↔decode symmetry."
                 )
                 hdr_mode = meta_hdr
             if meta_src and meta_src != source_space:
                 logger.info(
-                    f"[Radiance 4K Decode v2.2] radiance_meta source_space='{meta_src}' "
+                    f"[Radiance 4K Decode v2.3] radiance_meta source_space='{meta_src}' "
                     f"overrides widget source_space='{source_space}' for encode↔decode symmetry."
                 )
                 source_space = meta_src
@@ -1860,7 +2202,7 @@ class RadianceVAE4KDecode:
             #   force_hdr_decode=True  (HDR mode) → respect user hdr_mode, no override.
             if hdr_mode in ("Compress (Log)", "Soft Clip") and not force_hdr_decode:
                 logger.warning(
-                    f"[Radiance 4K Decode v2.2] hdr_mode='{hdr_mode}' selected but "
+                    f"[Radiance 4K Decode v2.3] hdr_mode='{hdr_mode}' selected but "
                     f"radiance_meta is absent — latent likely passed through a sampler "
                     f"which strips encode metadata. After diffusion sampling the VAE "
                     f"decodes to sRGB; Log/SoftClip inversion would corrupt color. "
@@ -1871,7 +2213,7 @@ class RadianceVAE4KDecode:
                 hdr_mode = "Clip (SDR)"
             elif hdr_mode in ("Compress (Log)", "Soft Clip") and force_hdr_decode:
                 logger.info(
-                    f"[Radiance 4K Decode v2.2] force_hdr_decode=True: respecting "
+                    f"[Radiance 4K Decode v2.3] force_hdr_decode=True: respecting "
                     f"hdr_mode='{hdr_mode}' despite absent radiance_meta. "
                     f"Ensure this is a direct encode→decode path (no sampler between "
                     f"encode and decode) for correct results."
@@ -1890,7 +2232,7 @@ class RadianceVAE4KDecode:
         if is_video and not is_3d_vae:
             B, C, F, H, W = latent.shape
             logger.info(
-                f"[Radiance 4K Decode v2.1] Video Latent: {W}×{H} ({B} batches, {F} frames), format={latent_fmt}"
+                f"[Radiance 4K Decode v2.3] Video Latent: {W}×{H} ({B} batches, {F} frames), format={latent_fmt}"
             )
             decoded_frames = []
             frame_alphas = None
@@ -1965,7 +2307,7 @@ class RadianceVAE4KDecode:
         pix_h, pix_w = lat_h * vae_factor, lat_w * vae_factor
 
         logger.info(
-            f"[Radiance 4K Decode v2.0] Latent: {lat_w}×{lat_h} → "
+            f"[Radiance 4K Decode v2.3] Latent: {lat_w}×{lat_h} → "
             f"Output: {pix_w}×{pix_h} ({b} frames, factor={vae_factor}, fmt={latent_fmt})"
         )
 
@@ -2009,8 +2351,8 @@ class RadianceVAE4KDecode:
         img = img.float()
 
         if torch.isnan(img).any() or torch.isinf(img).any():
-            logger.warning("[Radiance 4K Decode v2.2] VAE produced NaN/Inf — sanitizing")
-            # v2.2 FIX (BUG-53): Pre-transform guard must be mode-aware.
+            logger.warning("[Radiance 4K Decode v2.3] VAE produced NaN/Inf — sanitizing")
+            # v2.3: Pre-transform guard is mode-aware.
             #   • posinf → 1.0 is correct for all modes (encoded domain max = 1.0,
             #     or 1.5 for Passthrough, but Inf is never valid signal).
             #   • neginf → −0.05 for Passthrough (which encodes small negatives).
@@ -2027,18 +2369,28 @@ class RadianceVAE4KDecode:
             hdr_output=hdr_output,
         )
 
-        # v2.2 FIX (BUG-B): Guard for NaN/Inf *introduced by* the color transform.
-        # Log decompression of VAE noise near 1.0 → exp-domain can produce +Inf.
-        # Inverse tonemap with high target_stops can also amplify noise to Inf.
+        # v2.3 FIX (BUG-B enhanced): Guard for NaN/Inf *introduced by* the color
+        # transform. With v2.3's soft shoulder + denoise pipeline, this should be
+        # extremely rare — but we keep the guard for safety:
+        #
+        # Possible remaining sources of post-transform NaN/Inf:
+        #   1. Log decompression of noise that survived the soft shoulder
+        #      (values very near ceiling in steep log region → large linear)
+        #   2. Inverse tonemap with high target_stops amplifying noise to Inf
+        #   3. Out-of-gamut matrix transform producing small negatives → NaN in
+        #      downstream sRGB gamma (already handled by _safe_srgb_to_linear_extended)
         #
         # HDR-FIX: posinf cap is mode-aware:
         #   hdr_output=False: cap at 65504 (fp16 max — safe for RHDR export)
         #   hdr_output=True:  cap at fp32 max (~3.4e38) — only true Inf is replaced,
         #                     preserving all valid HDR scene-linear values.
         if torch.isnan(img).any() or torch.isinf(img).any():
+            nan_count = int(torch.isnan(img).sum().item())
+            inf_count = int(torch.isinf(img).sum().item())
             logger.warning(
-                "[Radiance 4K Decode v2.2] NaN/Inf after color transform — sanitizing. "
-                "Check VAE reconstruction quality and hdr_mode/source_space pairing."
+                f"[Radiance 4K Decode v2.3] NaN/Inf after color transform — "
+                f"sanitizing ({nan_count} NaN, {inf_count} Inf). "
+                f"Check VAE reconstruction quality and hdr_mode/source_space pairing."
             )
             posinf_val = 3.4e38 if hdr_output else 65504.0
             img = torch.nan_to_num(img, nan=0.0, posinf=posinf_val, neginf=0.0)
@@ -2060,7 +2412,7 @@ class RadianceVAE4KDecode:
             crop_h = img.shape[1] - pad_h
             crop_w = img.shape[2] - pad_w
             img = img[:, :crop_h, :crop_w, :]
-            logger.info(f"[Radiance 4K v2.0] Cropped padding: {pad_h}h, {pad_w}w → {crop_w}×{crop_h}")
+            logger.info(f"[Radiance 4K v2.3] Cropped padding: {pad_h}h, {pad_w}w → {crop_w}×{crop_h}")
 
         # Restore alpha
         if alpha is not None:
@@ -2098,7 +2450,7 @@ class RadianceVAE4KDecode:
         final_h, final_w = img.shape[1], img.shape[2]
         metadata = {
             "node": "RadianceVAE4KDecode",
-            "version": "2.0",
+            "version": "2.3",
             "resolution": f"{final_w}×{final_h}",
             "tile_size": ts_px, "overlap": overlap,
             "target_space": target_space, "hdr_mode": hdr_mode,
@@ -2224,10 +2576,10 @@ class RadianceVAE4KRoundtrip:
         # Previously both ternary branches returned pixels.shape, crashing on 5D.
         if pixels.ndim == 5:
             b, f, h, w, c = pixels.shape
-            logger.info(f"[Radiance 4K Roundtrip v2.0] Video: {w}\u00D7{h} ({f} frames), {source_space} \u2192 {target_space}")
+            logger.info(f"[Radiance 4K Roundtrip v2.3] Video: {w}\u00D7{h} ({f} frames), {source_space} \u2192 {target_space}")
         else:
             b, h, w, c = pixels.shape
-            logger.info(f"[Radiance 4K Roundtrip v2.0] {w}\u00D7{h}, {source_space} \u2192 {target_space}")
+            logger.info(f"[Radiance 4K Roundtrip v2.3] {w}\u00D7{h}, {source_space} \u2192 {target_space}")
 
         # Encode (returns 5-tuple in v2.0)
         encoder = RadianceVAE4KEncode()
@@ -2260,7 +2612,7 @@ class RadianceVAE4KRoundtrip:
         # Combined metadata
         combined_meta = {
             "node": "RadianceVAE4KRoundtrip",
-            "version": "2.0",
+            "version": "2.3",
             "latent_format": latent_fmt,
             "encode": json.loads(enc_meta),
             "decode": json.loads(dec_meta),

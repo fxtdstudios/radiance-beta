@@ -36,7 +36,7 @@ class RadianceViewer {
         this.neuralMonitor = null;
         this._setupComfyListeners();
 
-        // v2.1: Cinema Scope Fonts
+        // v2.3.3: Cinema Scope Fonts
         // B-13 FIX: Removed external Google Fonts dependency (fails in air-gapped studios).
         // Uses a system font stack that provides equivalent aesthetics on all platforms.
         // If you bundle Inter/JetBrains Mono WOFF2 locally, add @font-face rules here.
@@ -283,7 +283,8 @@ class RadianceViewer {
         this.progressHistory = [];
 
         // Color Space / LUT
-        this.displayLut = 'None';
+        this.displayLut = localStorage.getItem('radiance_hud_display_lut') || 'None';
+        this.inputSpace = localStorage.getItem('radiance_hud_input_space') || 'None';
         this.lutOptions = [
             "None",
             "sRGB (Display)",
@@ -311,6 +312,19 @@ class RadianceViewer {
             "IDT: BMD Gen5 → Linear",
             "IDT: N-Log → Linear",
             "False Color (Exposure)"
+        ];
+
+        this.inputSpaceOptions = [
+            "None",
+            "IDT: LogC3 → Linear",
+            "IDT: LogC4 → Linear",
+            "IDT: V-Log → Linear",
+            "IDT: Log3G10 → Linear",
+            "IDT: DaVinci → Linear",
+            "IDT: BMD Gen5 → Linear",
+            "IDT: N-Log → Linear",
+            "IDT: F-Log2 → Linear",
+            "IDT: C-Log3 → Linear"
         ];
         this.denoise = 0.0;
         this.grain = 0.0;
@@ -705,6 +719,7 @@ class RadianceViewer {
             gain: [1, 1, 1],
             offset: [0, 0, 0],
             colorScience: 0,
+            inputSpace: 'None',
             denoise: 0.0,
             grain: 0.0,
             maskState: {
@@ -740,6 +755,7 @@ class RadianceViewer {
         this.gain = [...g.gain];
         this.offset = [...g.offset];
         this.colorScience = g.colorScience;
+        this.inputSpace = g.inputSpace || 'None';
         this.denoise = g.denoise;
         this.grain = g.grain;
         this.maskState = JSON.parse(JSON.stringify(g.maskState));
@@ -761,6 +777,7 @@ class RadianceViewer {
         g.gain = [...this.gain];
         g.offset = [...this.offset];
         g.colorScience = this.colorScience;
+        g.inputSpace = this.inputSpace || 'None';
         g.denoise = this.denoise;
         g.grain = this.grain;
         g.maskState = JSON.parse(JSON.stringify(this.maskState));
@@ -1084,10 +1101,8 @@ class RadianceViewer {
         this.createTerminal();
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    //                        PROFESSIONAL TERMINAL  v3.4
-    // ═══════════════════════════════════════════════════════════════════════════
     createTerminal() {
+        // v2.3.3: Professional Terminal
         const t = this.theme;
 
         // ── Resize handle ────────────────────────────────────────────────────
@@ -1174,7 +1189,7 @@ class RadianceViewer {
         // Session counter badge
         const badge = document.createElement('span');
         badge.style.cssText = `font-size: 8px; color: #555;`;
-        badge.textContent = 'v2.1 · FXTD STUDIOS';
+        badge.textContent = 'v2.3.3 · FXTD STUDIOS';
         header.appendChild(badge);
 
         // Clear button
@@ -1763,11 +1778,9 @@ class RadianceViewer {
 
                     // 1. Force EXR Format
                     if (extWidget) {
-                        if (node.type === 'RadianceSaveEXR') {
+                        if (node.type.includes('Radiance')) {
                             extWidget.value = 'EXR';
                             if (depthWidget) depthWidget.value = '32-bit Float';
-                        } else if (node.type.includes('Radiance')) {
-                            extWidget.value = 'exr';
                         } else {
                             extWidget.value = 'exr (32-bit)';
                             if (extWidget.options?.values?.includes('exr')) extWidget.value = 'exr';
@@ -1999,7 +2012,7 @@ class RadianceViewer {
 
         // ── Boot message ─────────────────────────────────────────────────────
         this._termLog('system', '=============================================');
-        this._termLog('system', '  FXTD STUDIOS RADIANCE TERMINAL · v2.1');
+        this._termLog('system', '  FXTD STUDIOS RADIANCE TERMINAL · v2.3.3');
         this._termLog('system', '  Type "help" for available commands');
         this._termLog('system', '=============================================');
 
@@ -3218,9 +3231,39 @@ else:
             lutSel.appendChild(el);
         });
         lutSel.value = this.displayLut;
-        lutSel.onchange = (e) => { this.displayLut = e.target.value; this.render(); };
+        lutSel.onchange = (e) => { 
+            this.displayLut = e.target.value; 
+            localStorage.setItem('radiance_hud_display_lut', this.displayLut);
+            this.render(); 
+        };
         lutWrap.appendChild(lutSel);
         hud.appendChild(lutWrap);
+
+        // Input Space Select
+        const inWrap = document.createElement('div');
+        inWrap.style.cssText = 'display:flex; flex-direction:column; gap:2px; align-items:center;';
+        const inLbl = document.createElement('span');
+        inLbl.textContent = 'IN';
+        inLbl.style.cssText = 'font-size:7px; color:rgba(255,255,255,0.2); font-weight:bold;';
+        inWrap.appendChild(inLbl);
+
+        const inSel = document.createElement('select');
+        inSel.className = 'radiance-ocio-select';
+        inSel.style.cssText = lutSel.style.cssText;
+        this.inputSpaceOptions.forEach(opt => {
+            const el = document.createElement('option');
+            el.value = opt; el.textContent = opt;
+            inSel.appendChild(el);
+        });
+        inSel.value = this.inputSpace;
+        inSel.onchange = (e) => { 
+            this.inputSpace = e.target.value; 
+            localStorage.setItem('radiance_hud_input_space', this.inputSpace);
+            this.render(); 
+        };
+        inWrap.appendChild(inSel);
+        hud.appendChild(inWrap);
+
         this.addSep(hud);
 
         // ── GROUP: Channels ──────────────────────────────────────────────────
@@ -3251,7 +3294,7 @@ else:
 
         // ── GROUP: Compare ──────────────────────────────────────────────────
         this.addGrpLabel('COMP', hud);
-        this.addButton('A|B', () => this.cycleCompareMode(), 'Compare (A)', hud);
+        this._compareBtnEl = this.addButton('A|B', () => this.cycleCompareMode(), 'A/B Split Compare — click to grab reference & enable wipe', hud);
         this.addSep(hud);
 
         // ── GROUP: Analysis ──────────────────────────────────────────────────
@@ -4676,11 +4719,114 @@ else:
     }
 
     cycleCompareMode() {
-        const hasSource = this.compareImage || (this.frameImages && this.frameImages[this.currentFrame]) || this.videoEl || this.image;
-        if (!hasSource) { this.compareMode = 'none'; return; }
-        const modes = ['none', 'wipe', 'sidebyside', 'difference'];
-        this.compareMode = modes[(modes.indexOf(this.compareMode) + 1) % modes.length];
+        if (!this.image && !this.renderer) { this.compareMode = 'none'; return; }
+
+        const wasOff = this.compareMode === 'none';
+        this.compareMode = wasOff ? 'wipe' : 'none';
+
+        if (this.compareMode === 'wipe') {
+            // Auto-grab the current rendered frame as the B (reference) side.
+            // Then we switch to wipe mode — any subsequent grading changes
+            // show on the RIGHT (A=live) vs LEFT (B=reference).
+            if (this.renderer && this.renderer.grabReferenceStill) {
+                this.renderer.grabReferenceStill(0);
+                // Activate ref slot 0 — sets wipeRefEnabled = true internally
+                this.renderer.swapReferenceShelf(0);
+            }
+            this.wipePosition = 0.5;
+            if (this.renderer) this.renderer.setWipe(this.wipePosition, true);
+        } else {
+            // Disable wipe on both paths
+            if (this.renderer) this.renderer.setWipe(0.5, false);
+            if (this.renderer && this.renderer.clearReferenceShelf) this.renderer.clearReferenceShelf();
+        }
+
+        this._updateCompareBtn();
         this.render();
+    }
+
+    /** Sync the A|B toolbar button appearance to the current compare state. */
+    _updateCompareBtn() {
+        if (!this._compareBtnEl) return;
+        const on = this.compareMode === 'wipe';
+        this._compareBtnEl.style.borderColor  = on ? '#00a8ff' : 'rgba(255,255,255,0.15)';
+        this._compareBtnEl.style.background   = on ? 'rgba(0,168,255,0.15)' : 'rgba(255,255,255,0.05)';
+        this._compareBtnEl.style.color        = on ? '#00a8ff' : '#ccc';
+    }
+
+    /** Draw the wipe split-line, A/B labels and drag handle on top of the rendered canvas. */
+    _drawWipeSplitOverlay(ctx, w, h) {
+        if (this.compareMode !== 'wipe') return;
+
+        const wipeX = Math.round(w * this.wipePosition);
+
+        // Crisp anti-alias-off line
+        ctx.save();
+        ctx.globalAlpha = 1.0;
+
+        // Drop-shadow glow for depth
+        ctx.shadowColor  = 'rgba(0,0,0,0.8)';
+        ctx.shadowBlur   = 4;
+
+        // Outer white line
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth   = 2;
+        ctx.beginPath();
+        ctx.moveTo(wipeX, 0);
+        ctx.lineTo(wipeX, h);
+        ctx.stroke();
+
+        ctx.shadowBlur = 0;
+
+        // ── Labels ──────────────────────────────────────────────────────────
+        const PAD = 8, LBL_H = 22, LBL_W = 32;
+        const labelY = Math.max(10, Math.min(h - LBL_H - 10, h * 0.08));
+        ctx.font = 'bold 11px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        // B label (left / reference side)
+        const bX = Math.max(LBL_W / 2 + PAD, wipeX - PAD - LBL_W / 2);
+        ctx.fillStyle = 'rgba(0,0,0,0.65)';
+        ctx.beginPath();
+        ctx.roundRect(bX - LBL_W / 2, labelY, LBL_W, LBL_H, 4);
+        ctx.fill();
+        ctx.fillStyle = '#aad4ff';
+        ctx.fillText('B', bX, labelY + LBL_H / 2);
+
+        // A label (right / live/graded side)
+        const aX = Math.min(w - LBL_W / 2 - PAD, wipeX + PAD + LBL_W / 2);
+        ctx.fillStyle = 'rgba(0,0,0,0.65)';
+        ctx.beginPath();
+        ctx.roundRect(aX - LBL_W / 2, labelY, LBL_W, LBL_H, 4);
+        ctx.fill();
+        ctx.fillStyle = '#a0ffb0';
+        ctx.fillText('A', aX, labelY + LBL_H / 2);
+
+        // ── Drag Handle ──────────────────────────────────────────────────────
+        const cy = h / 2;
+        const R_OUTER = 12, R_INNER = 5;
+
+        // Outer disc
+        ctx.fillStyle = 'rgba(20,24,36,0.85)';
+        ctx.beginPath();
+        ctx.arc(wipeX, cy, R_OUTER, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(wipeX, cy, R_OUTER, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Left/Right arrows
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 10px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('⇔', wipeX, cy);
+
+        ctx.restore();
     }
 
     updateScopes() {
@@ -5078,8 +5224,10 @@ else:
             const x = (mx - this.panX) / this.zoom;
             const y = (my - this.panY) / this.zoom;
 
-            if (this.compareMode === 'wipe' && Math.abs(mx - this.canvas.width * this.wipePosition) < 10) {
-                this.isDraggingWipe = true; return;
+            if (this.compareMode === 'wipe' && e.button === 0 && Math.abs(mx - this.canvas.width * this.wipePosition) < 20) {
+                this.isDraggingWipe = true;
+                this.canvas.style.cursor = 'col-resize';
+                return;
             }
 
             // Check Mask UI Handles
@@ -5108,10 +5256,27 @@ else:
             const rect = this._lastCanvasRect;
             const mx = (e.clientX - rect.left) * (this._canvasScaleX || 1);
             const my = (e.clientY - rect.top) * (this._canvasScaleY || 1);
+            // Track mouse X for wipe drag hit-test in the WebGL path
+            this._lastMouseX = mx;
 
             if (this.isDraggingWipe) {
+                // Safety: check if left button is still pressed. e.buttons & 1 is the left button.
+                // This handles cases where mouseup might have been swallowed by other UI elements.
+                if (e.buttons !== undefined && !(e.buttons & 1)) {
+                    this.isDraggingWipe = false;
+                    this.updateCursor(e);
+                    return;
+                }
                 this.wipePosition = Math.max(0.02, Math.min(0.98, mx / this.canvas.width));
-                this.render(); return;
+                if (this.renderer) this.renderer.setWipe(this.wipePosition, true);
+                this.render();
+                return;
+            }
+
+            // Cursor feedback: show col-resize only when hovering near the split line
+            if (this.compareMode === 'wipe') {
+                const wipeX = this.canvas.width * this.wipePosition;
+                this.canvas.style.cursor = Math.abs(mx - wipeX) < 20 ? 'col-resize' : 'crosshair';
             }
 
             if (this.maskDragMode) {
@@ -5153,6 +5318,11 @@ else:
             }
 
             if (this.isPanning) {
+                if (e.buttons !== undefined && !(e.buttons & 1) && !(e.buttons & 4)) {
+                    this.isPanning = false;
+                    this.canvas.style.cursor = 'crosshair';
+                    return;
+                }
                 // Panning strictly relies on clientX delta, scaling isn't necessary for delta-drag
                 this.panX += e.clientX - this.lastMouseX;
                 this.panY += e.clientY - this.lastMouseY;
@@ -5169,9 +5339,17 @@ else:
         // Click-to-Focus for DoF
 
         window.addEventListener('mouseup', (e) => {
-
             this.isPanning = false;
-            this.isDraggingWipe = false;
+            if (this.isDraggingWipe) {
+                this.isDraggingWipe = false;
+                // Restore cursor based on current hover position
+                if (this.compareMode === 'wipe') {
+                    const wipeX = this.canvas.width * this.wipePosition;
+                    this.canvas.style.cursor = Math.abs((this._lastMouseX || -999) - wipeX) < 20 ? 'col-resize' : 'crosshair';
+                } else {
+                    this.canvas.style.cursor = 'crosshair';
+                }
+            }
 
             if (this.maskDragMode) {
                 this.maskDragMode = null;
@@ -5181,7 +5359,9 @@ else:
                 }
             }
 
-            if (!this.isAnnotating && !this.maskDragMode) this.canvas.style.cursor = 'crosshair';
+            if (!this.isAnnotating && !this.maskDragMode && this.compareMode !== 'wipe') {
+                this.canvas.style.cursor = 'crosshair';
+            }
         });
 
         this.canvas.addEventListener('click', (e) => {
@@ -6440,9 +6620,30 @@ else:
                 'Blackmagic Gen5': 15,
                 'Linear to Log': 6,
                 'Reinhard Tonemap': 8,
-                'ACES Filmic': 9
+                'ACES Filmic': 9,
+                'LogC3 (ARRI EI800)': 4,
+                'LogC4 (ARRI Alexa 35)': 11,
+                'F-Log2 (Fujifilm)': 14,
+                'C-Log3 (Canon)': 12,
+                'Log3G10 (RED IPP2)': 19,
+                'DaVinci Intermediate': 20,
+                'BMD Film Gen5': 15,
+                'V-Log (Panasonic)': 13,
+                'RED Log3G10': 19,
+                'N-Log (Nikon)': 21,
+                'Linear to Log (Generic)': 6,
+                'IDT: LogC3 → Linear': 29, 
+                'IDT: LogC4 → Linear': 22,
+                'IDT: V-Log → Linear': 30, 
+                'IDT: Log3G10 → Linear': 25,
+                'IDT: DaVinci → Linear': 26,
+                'IDT: BMD Gen5 → Linear': 27,
+                'IDT: N-Log → Linear': 28,
+                'IDT: F-Log2 → Linear': 24,
+                'IDT: C-Log3 → Linear': 23
             };
             this.renderer.setDisplayLutMode(lutMap[this.displayLut] || 0);
+            this.renderer.setInputLutMode(lutMap[this.inputSpace] || 0);
 
             // v2.3: Denoise & Depth Eval
             this.renderer.setDenoise(this.denoise || 0.0);
@@ -6487,6 +6688,13 @@ else:
                 this.renderer.setDoFEnabled(false);
             }
 
+            // ── A/B Wipe: pass position to GPU shader every frame ──────────
+            if (this.compareMode === 'wipe') {
+                this.renderer.setWipe(this.wipePosition, true);
+            } else {
+                this.renderer.setWipe(0.5, false);
+            }
+
             // Render to WebGL canvas (GPU)
             const lutStrength = this.lutIntensity !== undefined ? this.lutIntensity : 1.0;
             this.renderer.render(lutStrength);
@@ -6506,6 +6714,9 @@ else:
             ctx.drawImage(this.glCanvas, 0, 0);
 
             ctx.restore();
+
+            // Overlay the crisp split-line + labels on top of the GL output
+            this._drawWipeSplitOverlay(ctx, w, h);
 
             this.updateBottomBar();
             this.renderOverlay();
@@ -6550,7 +6761,10 @@ else:
             this.renderImage(ctx, this.image);
             ctx.restore();
 
-            if (this.compareMode === 'wipe' && cmpImg) this.renderWipe(ctx, w, h, cmpImg);
+            // Canvas fallback wipe: for non-WebGL mode, draw the split overlay only.
+            // The actual pixel split is handled by the GPU path above; in SDR canvas
+            // mode there is no graded B frame so we just show the overlay.
+            if (this.compareMode === 'wipe') this._drawWipeSplitOverlay(ctx, w, h);
         }
 
         this.updateBottomBar();
@@ -6630,24 +6844,9 @@ else:
         }
     }
 
-    renderWipe(ctx, w, h, cmpImg) {
-        const wipeX = w * this.wipePosition;
-        ctx.save();
-        ctx.beginPath(); ctx.rect(wipeX, 0, w - wipeX, h); ctx.clip();
-        ctx.translate(this.panX, this.panY); ctx.scale(this.zoom, this.zoom); // Zoom needs adjustment for half width? No, keep relative
-        // Actually for SxS usually we behave as two separate viewports or just cropped
-        // Let's implement cropped view for better comparison
-        ctx.drawImage(cmpImg, 0, 0); ctx.restore();
-
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)'; ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(wipeX, 0); ctx.lineTo(wipeX, h); ctx.stroke();
-
-        // Handle
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
-        ctx.beginPath(); ctx.arc(wipeX, h / 2, 10, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = '#fff';
-        ctx.beginPath(); ctx.arc(wipeX, h / 2, 4, 0, Math.PI * 2); ctx.fill();
-    }
+    // renderWipe: deprecated — wipe is now handled entirely by the WebGL shader
+    // and _drawWipeSplitOverlay(). Kept as a no-op to avoid call-site errors.
+    renderWipe(ctx, w, h, cmpImg) {}
 
     renderSideBySide(ctx, w, h, cmpImg) {
         const hw = w / 2;

@@ -2,6 +2,7 @@ import torch
 import json
 import os
 import logging
+from datetime import datetime
 from typing import Dict, Tuple
 from .image import defects
 
@@ -128,9 +129,7 @@ class RadianceQC:
             # ═══════════════════════════════════════════════════════
 
             report_data = {
-                "timestamp": (
-                    torch.cuda.Event().record() if torch.cuda.is_available() else None
-                ),
+                "timestamp": datetime.now().isoformat(),
                 "image_info": {
                     "shape": [B, H, W, C],
                     "dtype": str(image.dtype),
@@ -145,7 +144,7 @@ class RadianceQC:
             }
 
             text_report_lines = ["╔═══════════════════════════════════════════╗"]
-            text_report_lines.append("║     RADIANCE QC REPORT v2.3.2            ║")
+            text_report_lines.append("║     RADIANCE QC REPORT v2.3.3            ║")
             text_report_lines.append("╚═══════════════════════════════════════════╝")
             text_report_lines.append(f"Image: {B} frame(s), {W}x{H}, {C} channel(s)")
             text_report_lines.append("")
@@ -367,7 +366,7 @@ class RadianceQCExport:
         return {
             "required": {
                 "qc_report_json": ("STRING", {"forceInput": True}),
-                "output_path": ("STRING", {"default": "C:/Projects/qc_reports"}),
+                "output_path": ("STRING", {"default": "", "tooltip": "Output directory for reports. Leave empty to use ComfyUI's default output folder."}),
                 "filename_prefix": ("STRING", {"default": "qc_report"}),
                 "export_format": (["json", "csv", "html", "all"], {"default": "json"}),
             }
@@ -460,8 +459,7 @@ table { border-collapse: collapse; width: 100%; margin-top: 20px; }
 th, td { border: 1px solid #444; padding: 8px; text-align: left; }
 th { background: #2a2a2a; }
 </style></head><body>
-<h1>RADIANCE QC REPORT</h1>
-"""
+<h1>RADIANCE QC REPORT</h1>\n"""
 
         overall = report.get("overall_status", "UNKNOWN")
         html += f"<h2 class=\"{'pass' if overall == 'PASS' else 'fail'}\">Overall: {overall}</h2>"
@@ -486,7 +484,7 @@ th { background: #2a2a2a; }
             )
             html += f"<td>{checks.get('banding', {}).get('risk_pct', 0):.2f}%</td></tr>"
 
-        html += "</table></body></html>"
+        html += "</table>\n</body></html>"
         return html
 
 

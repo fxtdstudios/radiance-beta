@@ -2,6 +2,13 @@
 
 All notable changes to FXTD Radiance will be documented in this file.
 
+## [2.3.3] - 2026-04-01
+
+### Fixed
+- **A/B Split-Wipe Fix**: Repaired the broken A/B comparison functionality in the Radiance Viewer. The wipe mode now correctly uses the GPU shader and features a draggable split-line with A/B labels.
+- **Node Cleanup**: Removed the redundant `RadianceSaveEXR` node in favor of the new `◎ Radiance Write` node.
+- **Package Hardening**: Resolved JSON serialization errors in QC reports and standardized environment variables.
+
 ## [2.3.2] - 2026-03-30
 
 ### Added

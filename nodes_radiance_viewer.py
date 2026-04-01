@@ -230,7 +230,7 @@ def build_cdl_xml(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#                        BUILT-IN LUT ENGINE v2.1
+#                        BUILT-IN LUT ENGINE v2.3.3
 #
 #  Analytical LUTs — no file dependencies.
 #  Each LUT is a function: float32 linear [0..1+] → float32 [0..1]
@@ -1197,7 +1197,7 @@ def save_16bit_png(filepath: str, img_uint16: np.ndarray) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#                     RADIANCE VIEWER NODE v2.1
+#                     RADIANCE VIEWER NODE v2.3.3
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -1261,12 +1261,12 @@ class RadianceViewer:
             },
         }
 
-    # v2.1: IMAGE passthrough + metadata outputs
+    # v2.3.3: IMAGE passthrough + metadata outputs
     RETURN_TYPES = ()
     FUNCTION = "view"
     CATEGORY = "FXTD Studios/Radiance/Views"
     OUTPUT_NODE = True
-    DESCRIPTION = """VFX Industry-Standard Viewer v3.2 — Pro Evolution:
+    DESCRIPTION = """VFX Industry-Standard Viewer v2.3.3 — Pro Evolution:
 • GPU Waveform / RGB Parade / Vectorscope / Histogram scopes
 • Power Windows masking (Radial + Box, feather, rotation)
 • Comparison Bridge — mouse-draggable wipe + reference shelf (8 stills)
@@ -1488,7 +1488,7 @@ class RadianceViewer:
         d_min, d_max, has_hdr = compute_data_range(frame)
 
         # ── Apply grading + LUT for viewer display ──
-        # FIX v2.1: Do NOT apply grading to the preview image saved to disk.
+        # FIX v2.3.3: Do NOT apply grading to the preview image saved to disk.
         # The frontend viewer applies grading in real-time via WebGL.
         # If we bake it here, it gets applied twice.
 

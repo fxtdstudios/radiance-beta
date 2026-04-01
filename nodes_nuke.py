@@ -40,7 +40,7 @@ def _get_allowed_hosts() -> set:
     RADIANCE_NUKE_ALLOWED_HOSTS environment variable (comma-separated).
     """
     allowed = set(_DEFAULT_ALLOWED_HOSTS)
-    env_hosts = os.environ.get("◎ Radiance_NUKE_ALLOWED_HOSTS", "")
+    env_hosts = os.environ.get("RADIANCE_NUKE_ALLOWED_HOSTS", "")
     if env_hosts:
         for h in env_hosts.split(","):
             h = h.strip()
@@ -293,10 +293,11 @@ class RadianceNukeBridge:
                 "stream_name": (
                     "STRING",
                     {
-                        "default": "◎ RadianceStream",
+                        "default": "RadianceStream",
                         "tooltip": (
                             "Nuke Read node name. Reused across updates — "
-                            "no duplicate nodes created."
+                            "no duplicate nodes created. "
+                            "Letters, digits, underscore, and hyphen only."
                         ),
                     },
                 ),

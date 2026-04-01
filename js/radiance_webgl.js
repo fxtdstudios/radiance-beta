@@ -93,6 +93,7 @@ class RadianceWebGLRenderer {
         this.focusPeaking = false;
         this.focusPeakingThreshold = 120.0;
         this.displayLutMode = 0;
+        this.inputLutMode = 0;
         this.lutIsDisplayTransform = false;
 
         this.denoise = 0.0;
@@ -1214,9 +1215,9 @@ class RadianceWebGLRenderer {
             this.extColorHalfFloatLinear = gl.getExtension('OES_texture_half_float_linear');
             this.extColorBufferFloat = gl.getExtension('EXT_color_buffer_float');
             if (this.extHalfFloat) {
-                console.log('[Radiance v2.1] OES_texture_half_float available — HALF_FLOAT path active');
+                console.log('[Radiance v2.3.3] OES_texture_half_float available — HALF_FLOAT path active');
             } else {
-                console.warn('[Radiance v2.1] OES_texture_half_float unavailable — falling back to FLOAT');
+                console.warn('[Radiance v2.3.3] OES_texture_half_float unavailable — falling back to FLOAT');
             }
         } else {
             this.extColorFloatLinear = null;
@@ -1734,6 +1735,7 @@ class RadianceWebGLRenderer {
             uniform bool u_focusPeaking;
             uniform float u_focusPeakThreshold;
             uniform int u_displayLutMode;
+            uniform int u_inputLutMode;
             uniform float u_displayLutStrength;
 
             // v2.2 Pro Comparison
@@ -2413,6 +2415,24 @@ const float GOLDEN_ANGLE = 2.39996323;
                     vec3 logBranch  = exp((c - nl_d) / nl_c);
                     return max(mix(cbrtBranch, logBranch, vec3(greaterThanEqual(c, vec3(nl_cut_cv)))), vec3(0.0));
                 }
+                
+                case 29: { // IDT LogC3 → Linear
+                    const float lc3_cut=0.010591, lc3_a=5.555556, lc3_b=0.052272;
+                    const float lc3_c=0.247190,   lc3_d=0.385537;
+                    const float lc3_e=5.367655,   lc3_f=0.092809;
+                    float lc3_cut_cv = lc3_e * lc3_cut + lc3_f;
+                    vec3 logBranch = (pow(vec3(10.0), (c - lc3_d) / lc3_c) - lc3_b) / lc3_a;
+                    vec3 linBranch = (c - lc3_f) / lc3_e;
+                    return mix(linBranch, logBranch, vec3(greaterThan(c, vec3(lc3_cut_cv))));
+                }
+
+                case 30: { // IDT V-Log → Linear
+                    const float vl_b=0.00873, vl_c=0.241514, vl_d=0.598206;
+                    float vl_cut_cv = 5.625 * 0.01 + 0.125; // 0.18125
+                    vec3 logBranch = pow(vec3(10.0), (c - vl_d) / vl_c) - vl_b;
+                    vec3 linBranch = (c - 0.125) / 5.625;
+                    return mix(linBranch, logBranch, vec3(greaterThanEqual(c, vec3(vl_cut_cv))));
+                }
 
                 default:
                     return c;
@@ -2769,6 +2789,11 @@ vec3 getDenoiseColor(vec2 uv) {
         // 1b. Linearize
         if (!u_isLinear) {
             color = sRGBToLinear(color);
+        }
+
+        // 1c. Input LUT (IDT) - Applied after linearization but before grading
+        if (u_inputLutMode > 0) {
+            color = applyDisplayLUT(color, u_inputLutMode);
         }
 
         // SAVE PRE-GRADE (Source for Keying)
@@ -3144,26 +3169,23 @@ vec3 getDenoiseColor(vec2 uv) {
         }
 
         // 8. Wipe Comparison (A/B)
+        // LEFT  (x < wipeLine) = B side: reference / frozen snapshot
+        // RIGHT (x >= wipeLine) = A side: current live/graded frame
         if (u_wipeEnabled) {
             float wipeLine = u_wipe;
-            // Cross-over horizontal wipe
             if (v_texcoord.x < wipeLine) {
-                // Side A: Original / Reference
+                // Side B: Reference image (grabbed still)
                 if (u_wipeRefEnabled) {
                     color = texture(u_referenceImage, v_texcoord).rgb;
                 } else {
-                    // Raw original (linearized or not depending on texture)
+                    // Fallback: show raw un-graded source
                     vec3 raw = texture(u_image, v_texcoord).rgb;
                     if (!u_isLinear) raw = sRGBToLinear(raw);
-                    // Apply OETF to original so it's comparable to graded output
                     color = linearToSRGB(raw);
                 }
             }
-            
-            // Draw a thin dividing line
-            if (abs(v_texcoord.x - wipeLine) < 0.002) {
-                color = vec3(0.1, 0.3, 1.0); // Blue divider
-            }
+            // Note: divider line is drawn by the canvas overlay (_drawWipeSplitOverlay)
+            // so we intentionally DO NOT draw a GLSL line here to avoid double-line artifacts.
         }
 
         // 9. Grids & Overlays
@@ -3912,6 +3934,7 @@ vec3 getDenoiseColor(vec2 uv) {
         this._ui1(program, 'u_focusPeaking', this.focusPeaking ? 1 : 0);
         this._uf1(program, 'u_focusPeakThreshold', this.focusPeakingThreshold);
         this._ui1(program, 'u_displayLutMode', this.displayLutMode);
+        this._ui1(program, 'u_inputLutMode', this.inputLutMode);
         this._uf1(program, 'u_displayLutStrength', this.displayLutStrength);
         this._ui1(program, 'u_lutIsDisplayTransform', this.lutIsDisplayTransform ? 1 : 0);
 
@@ -4068,6 +4091,18 @@ vec3 getDenoiseColor(vec2 uv) {
 
     setDisplayLutMode(mode) {
         this.displayLutMode = mode;
+    }
+
+    setInputLutMode(mode) {
+        this.inputLutMode = mode;
+    }
+
+    setInputLutMode(mode) {
+        this.inputLutMode = mode;
+    }
+
+    setInputLutMode(mode) {
+        this.inputLutMode = mode;
     }
 
     // OCIO-FIX: When the 3D LUT is a full display transform (OCIO bake with OETF

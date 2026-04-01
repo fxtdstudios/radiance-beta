@@ -1,11 +1,11 @@
 <div align="center">
 <img src="RADIANCE.png" width="800" alt="Radiance Logo">
 
-◎ Radiance v2.3.2 — Professional VFX & HDR Suite for ComfyUI
+◎ Radiance v2.3.3 — Professional VFX & HDR Suite for ComfyUI
 
-[![Version](https://img.shields.io/badge/version-2.3.2-00a8ff?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
+[![Version](https://img.shields.io/badge/version-2.3.3-00a8ff?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
-[![Nodes](https://img.shields.io/badge/Nodes-79-blue?style=for-the-badge&logo=comfyui)](https://github.com/fxtdstudios/radiance#node-reference)
+[![Nodes](https://img.shields.io/badge/Nodes-81-blue?style=for-the-badge&logo=comfyui)](https://github.com/fxtdstudios/radiance#node-reference)
 [![Comfy](https://img.shields.io/badge/Comfy--Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
 
 **Radiance** is a professional, VFX-grade 32-bit float color science suite for ComfyUI. Built for film colorists and VFX artists who require absolute precision in their AI-assisted workflows.
@@ -16,7 +16,7 @@
 
 ---
 
-## ◎ What's New - v2.3.2
+## ◎ What's New - v2.3.3
 
 > [!IMPORTANT]
 > **Native 32-Bit Scene-Linear Engine**  

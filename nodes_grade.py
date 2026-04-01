@@ -324,7 +324,7 @@ class RadianceGrade:
                 "offset_b":   ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001, "tooltip": "Blue channel global offset."}),
                 # Contrast / Saturation
                 "contrast":   ("FLOAT", {"default": 1.0, "min": 0.0,  "max": 3.0, "step": 0.01, "tooltip": "Contrast multiplier around pivot."}),
-                "pivot":      ("FLOAT", {"default": 0.5, "min": 0.0,  "max": 1.0, "step": 0.01, "tooltip": "Contrast pivot point (v2.1: fixed to 0.18 for scene-linear correctness)."}),
+                "pivot":      ("FLOAT", {"default": 0.5, "min": 0.0,  "max": 1.0, "step": 0.01, "tooltip": "Contrast pivot point (v2.3.3: fixed to 0.18 for scene-linear correctness)."}),
                 "saturation": ("FLOAT", {"default": 1.0, "min": 0.0,  "max": 3.0, "step": 0.01, "tooltip": "Luminance-preserving saturation."}),
             },
         }

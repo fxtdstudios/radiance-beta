@@ -78,5 +78,5 @@ db.sqlite3
 secrets.json
 *.pem
 *.key
-\
+# EOF
 docs/
