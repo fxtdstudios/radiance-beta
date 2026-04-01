@@ -106,30 +106,60 @@ def _ensure_model_exists(name: str, folder_type: str, auto_download: bool = Fals
 
 # Keys sampled from the first N keys of the state dict.
 # Order matters — more specific patterns must come first.
+#
+# v3.1 FIX (BUG-DETECT-1): LTX heuristic (`patch_embedding.weight`) was at
+# position 4, BEFORE the Wan heuristic at position 6. Since Wan 2.1 also has
+# `patch_embedding.weight`, ALL Wan models were silently misdetected as LTX.
+# Fix: Move Wan before LTX, and make LTX use `patchify_proj` (unique to LTX
+# architecture) as the primary key instead of the generic `patch_embedding`.
+#
+# v3.1 ADD: LTX-Video 2.3 detection via `patchify_proj` and `scale_shift_table`
+# keys specific to the LTXV 0.9.5+ architecture.
 _ARCH_HEURISTICS = [
+    # ── High-confidence unique keys (order doesn't matter among these) ──
+
     # Flux: unique double-stream block naming
     (lambda ks: any("double_blocks" in k for k in ks),             "flux"),
     # SD3 / SD3.5: joint transformer blocks
     (lambda ks: any("joint_blocks" in k for k in ks),              "sd3"),
     # HunyuanVideo: image input projection
     (lambda ks: any("img_in" in k and "proj" in k for k in ks),    "hunyuan_video"),
-    # LTX: patch embedding
-    (lambda ks: any("patch_embedding.weight" in k for k in ks),    "ltx"),
     # Lumina / Z-Image: unique caption projection key
     (lambda ks: any("cap_v_projection.weight" in k for k in ks),   "lumina2"),
-    # Wan 2.1: patch_embedding + time_embedding combination unique to Wan
-    # FIX 5: Previous heuristic checked for "wan" literal in first 5 key names
-    # which fails for all Wan 2.1 checkpoints (keys start with
-    # "model.diffusion_model.patch_embedding..." — no "wan" substring).
-    (lambda ks: any("patch_embedding.weight" in k for k in ks)
-              and any("time_embedding" in k for k in ks)
-              and not any("joint_blocks" in k for k in ks),         "wan"),
-    # PixArt: adaln single
-    (lambda ks: any("adaln_single" in k for k in ks),              "pixart"),
     # Kolors: Chatglm style conditioning
     (lambda ks: any("chatglm" in k.lower() for k in ks),           "kolors"),
     # AuraFlow: unique prefix
     (lambda ks: any("auraflow" in k.lower() for k in ks),          "aura_flow"),
+
+    # ── Requires ordering: these share overlapping keys ──────────────
+
+    # Wan 2.1: patch_embedding + time_embedding (no joint_blocks).
+    # MUST come before LTX — both can have patch_embedding, but only Wan
+    # has time_embedding in the first 200 keys.
+    # FIX 5: Previous heuristic checked for "wan" literal in first 5 key names
+    # which fails for all Wan 2.1 checkpoints (keys start with
+    # "model.diffusion_model.patch_embedding..." — no "wan" substring).
+    (lambda ks: any("patch_embedding" in k for k in ks)
+              and any("time_embedding" in k for k in ks)
+              and not any("joint_blocks" in k for k in ks),         "wan"),
+
+    # LTX-Video (all versions including 2.3): patchify_proj is unique to LTXV
+    # architecture and NOT present in Wan, SD3, Flux, or PixArt models.
+    # v3.1: Primary key is `patchify_proj`; fallback checks for `patch_embedding`
+    # + `adaln_single` + NO `time_embedding` (excludes Wan).
+    (lambda ks: any("patchify_proj" in k for k in ks),             "ltx"),
+    # LTX fallback: older LTXV checkpoints that use patch_embedding naming
+    (lambda ks: any("patch_embedding" in k for k in ks)
+              and any("adaln_single" in k for k in ks)
+              and not any("time_embedding" in k for k in ks),       "ltx"),
+
+    # PixArt: adaln_single WITHOUT patchify_proj (LTX also has adaln_single)
+    # v3.1 FIX: Added exclusion of `patchify_proj` to prevent PixArt matching LTX
+    (lambda ks: any("adaln_single" in k for k in ks)
+              and not any("patchify_proj" in k for k in ks),        "pixart"),
+
+    # ── UNet-based models (least specific — always last) ─────────────
+
     # SDXL: has both UNet input_blocks AND add_embedding (refiner clue)
     (lambda ks: any("down_blocks.0" in k for k in ks)
               and any("add_embedding" in k for k in ks),            "sdxl"),
@@ -139,7 +169,10 @@ _ARCH_HEURISTICS = [
     (lambda ks: any("down_blocks.0" in k for k in ks),             "sdxl"),
 ]
 
-_SAFETENSORS_PEEK = 80   # how many keys to read for heuristics
+# v3.1: Increased from 80 → 200. Some model architectures (especially Wan 2.1
+# and LTX 2.3) have their differentiating keys beyond the first 80 entries.
+# The extra scan time (~1ms) is negligible compared to the multi-second model load.
+_SAFETENSORS_PEEK = 200
 
 
 def _detect_model_type(unet_path: str) -> str | None:
@@ -194,8 +227,33 @@ LATENT_CHANNELS = {
 
 
 def _latent_format(arch: str) -> str:
-    ch = LATENT_CHANNELS.get(arch, 4)
-    return f"{ch}ch"
+    """Return a latent format label compatible with Radiance Sampler Pro.
+
+    v3.1 FIX (BUG-FORMAT-1): Previously returned bare channel count like "16ch"
+    which didn't match the format labels in vae.py's LATENT_FORMAT_MAP (e.g.
+    "flux_16ch", "sd_4ch"). This caused format mismatches when the Sampler Pro
+    tried to look up the format from the loader's output string.
+
+    Now returns architecture-prefixed labels: "flux_16ch", "ltx_16ch", "sd_4ch", etc.
+    """
+    # Architecture → format label mapping
+    # Must match the labels that vae.py and nodes_sampler.py expect.
+    _FORMAT_MAP = {
+        "flux":           "flux_16ch",
+        "sd3":            "sd3_16ch",
+        "sd3.5":          "sd3_16ch",
+        "ltx":            "ltx_16ch",
+        "hunyuan_video":  "hunyuan_16ch",
+        "wan":            "wan_16ch",
+        "lumina2":        "lumina_16ch",
+        "z_image":        "z_image_16ch",
+        "sdxl":           "sd_4ch",
+        "sd1.5":          "sd_4ch",
+        "pixart":         "sd_4ch",
+        "aura_flow":      "sd_4ch",
+        "kolors":         "sd_4ch",
+    }
+    return _FORMAT_MAP.get(arch, f"{arch}_{LATENT_CHANNELS.get(arch, 4)}ch")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -353,6 +411,30 @@ CHECKPOINT_PRESETS = {
         "clip_slots":    {"t5xxl": True},
         "vram_gb":       12,
     },
+    "→ LTX Video 2.3": {
+        "model_type":    "ltx",
+        "weight_dtype":  "bf16",
+        "clip_dtype":    "fp16",
+        "offload_mode":  "none",
+        "clip_slots":    {"t5xxl": True},
+        "vram_gb":       14,
+    },
+    "→ LTX Video 2.3 (Low VRAM)": {
+        "model_type":    "ltx",
+        "weight_dtype":  "fp8_e4m3fn",
+        "clip_dtype":    "fp8_e4m3fn",
+        "offload_mode":  "cpu_offload",
+        "clip_slots":    {"t5xxl": True},
+        "vram_gb":       8,
+    },
+    "→ LTX Video 13B": {
+        "model_type":    "ltx",
+        "weight_dtype":  "fp8_e4m3fn",
+        "clip_dtype":    "fp16",
+        "offload_mode":  "none",
+        "clip_slots":    {"t5xxl": True},
+        "vram_gb":       18,
+    },
     # ── Other Image Models ──
     "→ PixArt Sigma": {
         "model_type":    "pixart",
@@ -411,8 +493,9 @@ def estimate_vram_usage(
     base_vram = {
         "flux": 12.0, "sd3": 10.0, "sd3.5": 12.0,
         "sdxl": 6.5, "sd1.5": 3.5,
-        "hunyuan_video": 20.0, "wan": 14.0, "ltx": 10.0,
+        "hunyuan_video": 20.0, "wan": 14.0, "ltx": 11.0,
         "pixart": 6.0, "aura_flow": 8.0, "kolors": 8.0,
+        "lumina2": 12.0, "z_image": 14.0,
     }.get(model_type, 8.0)
 
     unet_mult = {
@@ -423,8 +506,9 @@ def estimate_vram_usage(
     clip_vram = {
         "flux": 4.5, "sd3": 3.0, "sd3.5": 3.5,
         "sdxl": 1.5, "sd1.5": 0.8,
-        "hunyuan_video": 4.5, "wan": 3.0, "ltx": 2.0,
+        "hunyuan_video": 4.5, "wan": 3.0, "ltx": 2.5,
         "pixart": 2.0, "aura_flow": 2.0, "kolors": 3.0,
+        "lumina2": 3.0, "z_image": 3.0,
     }.get(model_type, 2.0)
 
     clip_mult = {
@@ -465,6 +549,13 @@ def get_total_vram() -> float:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def get_clip_type_enum(model_type: str):
+    """Resolve ComfyUI CLIPType enum for a given model architecture.
+
+    v3.1 FIX (BUG-CLIP-1): The variant search for "ltx" tried "LTX", "LTX",
+    "Ltx" — none of which match ComfyUI's actual enum name "LTX_VIDEO" or
+    "LTXV". Fixed by adding explicit composite name variants for models whose
+    CLIPType name doesn't match a simple uppercase of the model_type string.
+    """
     mapping = {
         "flux":   comfy.sd.CLIPType.FLUX,
         "sd3":    comfy.sd.CLIPType.SD3,
@@ -473,9 +564,24 @@ def get_clip_type_enum(model_type: str):
         "sd1.5":  comfy.sd.CLIPType.STABLE_DIFFUSION,
     }
 
+    # v3.1: Extended variant list per model — handles cases where the ComfyUI
+    # CLIPType enum name doesn't match a simple uppercase of the model_type.
+    # E.g. model_type "ltx" → CLIPType.LTX_VIDEO (not CLIPType.LTX)
+    _EXTRA_VARIANTS = {
+        "ltx":            ["LTX_VIDEO", "LTXV", "LTX"],
+        "hunyuan_video":  ["HUNYUAN_VIDEO", "HUNYUANVIDEO"],
+        "wan":            ["WAN", "WAN2", "WAN_VIDEO"],
+        "aura_flow":      ["AURA_FLOW", "AURAFLOW"],
+    }
+
     for name in ("hunyuan_video", "wan", "ltx", "pixart", "aura_flow", "kolors", "lumina2", "z_image"):
+        # Build variant list: explicit extras first, then the auto-generated names
         enum_name = name.upper().replace(".", "_")
-        for variant in (enum_name, name.upper(), name.title().replace("_", "")):
+        auto_variants = [enum_name, name.upper(), name.title().replace("_", "")]
+        extra = _EXTRA_VARIANTS.get(name, [])
+        all_variants = extra + [v for v in auto_variants if v not in extra]
+
+        for variant in all_variants:
             if hasattr(comfy.sd.CLIPType, variant):
                 mapping[name] = getattr(comfy.sd.CLIPType, variant)
                 break
@@ -658,11 +764,14 @@ OFFLOAD_MODES = ["none", "cpu_offload", "sequential"]
 
 class RadianceUnifiedLoader:
     """
-    Universal diffusion model loader v2.1.0.
+    Universal diffusion model loader v3.1.
 
     Outputs: MODEL, CLIP, VAE, CONTROL_NET, LORA_STACK,
-             load_info (human string), latent_format ("4ch"/"16ch"),
+             load_info (human string), latent_format ("flux_16ch"/"sd_4ch"/etc.),
              model_meta (JSON string with full metadata dict).
+
+    v3.1 fixes: LTX/Wan auto-detect ordering, CLIPType resolution for LTX_VIDEO,
+    architecture-prefixed latent_format labels, LTX 2.3 presets.
     """
 
     @classmethod
@@ -772,7 +881,8 @@ class RadianceUnifiedLoader:
     FUNCTION      = "load_radiance_stack"
     CATEGORY      = "FXTD Studios/Radiance/Generate"
     DESCRIPTION   = (
-        "Universal loader v2.1.0 — auto-detects architecture, named CLIP slots, "
+        "Universal loader v3.1 — auto-detects architecture (Flux, SD3, SDXL, "
+        "Wan, LTX 2.3, HunyuanVideo, PixArt, Lumina2, etc.), named CLIP slots, "
         "chainable LORA_STACK, model_meta JSON, latent_format, offload mode. "
         "ZERO stale cache hits (mtime + size fingerprinting)."
     )

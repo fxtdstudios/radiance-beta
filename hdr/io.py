@@ -15,7 +15,6 @@ from .utils import numpy_to_tensor_float32
 
 # Imports
 __all__ = [
-    "RadianceSaveEXR",
     "write_exr_robust",
     "write_exr_openexr",
     "write_exr_cv2",
@@ -231,67 +230,4 @@ def write_exr_robust(filepath: str, image: np.ndarray, bit_depth: str = "32-bit 
         return True
     except: return False
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#                           COMFYUI NODE: SAVE EXR
-# ═══════════════════════════════════════════════════════════════════════════════
 
-class RadianceSaveEXR:
-    def __init__(self):
-        self.output_dir = folder_paths.get_output_directory()
-        self.type = "output"
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "images": ("IMAGE",),
-                "filename_prefix": ("STRING", {"default": "Radiance"}),
-                "format": (["EXR", "HDR"], {"default": "EXR"}),
-                "bit_depth": (["16-bit Half Float", "32-bit Float"],),
-                "compression": (["ZIP", "ZIPS", "PIZ", "RLE", "None", "PXR24", "B44", "B44A", "DWAA", "DWAB"],),
-            },
-            "optional": {
-                "input_color_space": (["Linear (sRGB)", "sRGB (Gamma)", "ACEScg", "Raw"],),
-                "output_color_space": (["Linear (sRGB)", "Linear (ACEScg)", "sRGB (Display)", "ARRI LogC3 (AWG3)", "ARRI LogC4 (AWG4)", "Sony S-Log3 (S-Gamut3)", "Same as Input"],),
-                "alpha_mode": (["None", "From Image", "Solid White", "Solid Black"],),
-                "premultiply_alpha": ("BOOLEAN", {"default": False}),
-                "output_path": ("STRING", {"default": ""}),
-                "start_frame": ("INT", {"default": 1, "min": 0}),
-                "frame_padding": ("INT", {"default": 4}),
-                "add_metadata": ("BOOLEAN", {"default": True}),
-                "custom_metadata": ("STRING", {"default": "", "multiline": True}),
-                "channel_format": (["RGB", "RGBA", "ACEScg"],),
-            }
-        }
-
-    RETURN_TYPES = ("STRING", "STRING", "INT")
-    RETURN_NAMES = ("file_paths", "folder_path", "frame_count")
-    FUNCTION = "save_exr"
-    OUTPUT_NODE = True
-    CATEGORY = "FXTD Studios/Radiance/IO"
-
-    def save_exr(self, images, filename_prefix, format="EXR", bit_depth="32-bit Float", compression="ZIP", **kwargs):
-        output_dir = get_safe_output_dir(self.output_dir, kwargs.get("output_path", ""))
-        os.makedirs(output_dir, exist_ok=True)
-        
-        batch_size = images.shape[0] if images.dim() == 4 else 1
-        start_frame = kwargs.get("start_frame", 1)
-        if start_frame <= 0:
-            start_frame = get_next_index(output_dir, filename_prefix, ".exr" if format=="EXR" else ".hdr", kwargs.get("frame_padding", 4))
-        
-        saved = []
-        for i in range(batch_size):
-            img = images[i].cpu().numpy() if images.dim()==4 else images.cpu().numpy()
-            # Minimal color space logic for brevity in this refactor (expand as needed from color_utils)
-            img_out = img[..., :3]
-            
-            frame_num = start_frame + i
-            ext = ".hdr" if format == "HDR" else ".exr"
-            filepath = os.path.join(output_dir, f"{filename_prefix}_{str(frame_num).zfill(kwargs.get('frame_padding', 4))}{ext}")
-            
-            if format == "HDR":
-                if write_hdr_rgbe(filepath, img_out): saved.append(filepath)
-            else:
-                if write_exr_robust(filepath, img_out, bit_depth, compression): saved.append(filepath)
-        
-        return {"ui": {"file_paths": []}, "result": (",".join(saved), str(output_dir), len(saved))}

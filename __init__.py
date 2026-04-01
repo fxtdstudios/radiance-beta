@@ -9,7 +9,6 @@ GPU-accelerated nodes for HDR, color grading, film effects, and upscaling.
 """
 
 import os
-import glob
 import importlib
 import logging
 
@@ -152,7 +151,7 @@ for module in modules:
         logger.error(f"FAILED to load {module.__name__}: {e}")
 
 # Package info
-__version__ = "2.3.2"
+__version__ = "2.3.3"
 __author__ = "Radiance"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
 

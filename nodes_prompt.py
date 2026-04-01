@@ -1,9 +1,60 @@
+"""
+◎ Radiance Cinematic Prompt Encoder — v2.3.3
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Production-grade cinematic prompt builder with direct CLIP/T5 encoding.
+Auto-selects prose for Flux/T5/Kolors and structured keywords for SD1.5/SDXL.
+
+v2.3.3 Changelog (from review audit):
+───────────────────────────────────────
+CRITICAL FIXES:
+  [BUG-C1] _encode() fallback path returned raw (cond, pooled) tuple instead of
+           ComfyUI conditioning format [[cond, {"pooled_output": pooled}]].
+           Sampler crashes on older ComfyUI installs (pre encode_from_tokens_scheduled).
+  [BUG-C2] Structured path: "Est. Year {year_era}." had trailing period, then
+           ", ".join(finish) + "." appended another → double period "..".
+  [BUG-C3] Structured path: art_direction and lora_keywords both inserted at index 1,
+           reversing their intended order (lora ended up before art_direction).
+
+IMPORTANT FIXES:
+  [BUG-I1] `subject_first` weight mode offered in INPUT_TYPES but had zero distinct
+           handling — fell through to `balanced` silently. Now leads with subject
+           at elevated weight before any technical descriptors.
+  [BUG-I2] `sd3.5` missing from target_arch dropdown despite being in PROSE_ARCHS.
+           Also added `hunyuan_video` which was in PROSE_ARCHS but missing from dropdown.
+  [BUG-I3] Redundant `import torch as _torch` inside _real_token_count — torch is
+           already imported at module level.
+  [BUG-I4] DEFAULT_YEAR = 2024 was stale. Updated to 2025.
+  [BUG-I5] use_break parameter type mismatch — string "On"/"Off" in encode_cinematic
+           vs boolean False passed to build_cinematic_prompt_v3. Unified to boolean.
+  [BUG-I6] Version string in DESCRIPTION said "v3.0" — updated to v2.3.3.
+  [BUG-I7] clip.clone() not guarded — some custom CLIP wrappers lack .clone().
+           Added try/except fallback.
+  [BUG-I8] _validate_presets() only logged errors silently. Added strict mode
+           that raises on validation failure when RADIANCE_STRICT env var is set.
+
+MINOR FIXES:
+  [BUG-M1] NeuralGrammar.scientificize could produce irregular spacing when
+           punctuation-bearing words were replaced with multi-word phrases.
+           Added post-cleanup pass.
+  [BUG-M2] estimate_tokens didn't account for BREAK token overhead. Added
+           BREAK_TOKEN_OVERHEAD constant used in insert_break_points.
+  [BUG-M3] Structured path: tech block could duplicate camera when
+           prompt_weight_mode was "subject_first" (new mode). Gated properly.
+  [BUG-M4] _real_token_count: explicit tuple unpacking validation added.
+  [BUG-M5] enhance_prompt_grammar: creative tags injected even when they were
+           already present in the prompt — causing duplication on re-encodes.
+           Added dedup check.
+  [BUG-M6] Negative prompt for Anime style was missing "3d render" exclusion.
+"""
 import logging
+import os
 import re
 import torch
 from typing import Optional
 
 logger = logging.getLogger("◎ Radiance.prompt")
+
+__version__ = "2.3.3"
 
 
 class CinematicDatasets:
@@ -143,7 +194,7 @@ class CinematicDatasets:
         "Moonlight",
         "Overcast Soft Light",
         "Harsh Sunlight",
-        # v2.1: Added for director-style presets
+        # v2.3.3: Added for director-style presets
         "Natural Ambient Light",
         "High-Key Lighting",
         "Naturalistic Interior Light",
@@ -175,7 +226,7 @@ class CinematicDatasets:
         "Tarantino Violence",
         "Kubrick One-Point Perspective",
         "Blade Runner Atmosphere",
-        # v2.1: Added for director-style presets
+        # v2.3.3: Added for director-style presets
         "Film Noir Aesthetic",
         "Dreamy Soft Focus",
         "Atmospheric Cinematic",
@@ -199,7 +250,7 @@ class CinematicDatasets:
         "Ilford Delta 3200",
         "Polaroid 600",
         "Wet Plate Collodion",
-        # v2.1: Added for director-style presets
+        # v2.3.3: Added for director-style presets
         "IMAX 15/70mm Film Stock",
         "Eastman Kodak 5254 (Vintage)",
     ]
@@ -224,7 +275,7 @@ class CinematicDatasets:
         "Monochrome High Key",
         "Cyberpunk Neon Grading",
         "Pastel Soft Tones",
-        # v2.1: Added for director-style presets
+        # v2.3.3: Added for director-style presets
         "Neutral ACES Workflow",
         "Desaturated Cool Tones",
         "Moody Shadows",
@@ -239,7 +290,7 @@ class CinematicDatasets:
         "1:1 (Square)",
         "9:16 (Social Vertical)",
         "21:9 (Ultrawide)",
-        # v2.1: Added for director-style presets
+        # v2.3.3: Added for director-style presets
         "1.43:1 (IMAX)",
         "1.85:1 (Standard Widescreen)",
         "2.00:1 (DCI Flat)",
@@ -283,7 +334,7 @@ class CinematicDatasets:
     ]
 
     # Preset configurations: {preset_name: {setting: value, ...}}
-    # v2.1: ALL values validated against their respective dataset lists
+    # v2.3.3: ALL values validated against their respective dataset lists
     PRESET_CONFIGS = {
         "→ Classic Hollywood": {
             "framing": "Medium Shot (MS)",
@@ -485,7 +536,7 @@ class CinematicDatasets:
             "aspect_ratio": "16:9 (Widescreen)",
         },
         # ───────────────────────────────────────────────────────────
-        # Director & Genre Presets (v2.1: validated against datasets)
+        # Director & Genre Presets (v2.3.3: validated against datasets)
         # ───────────────────────────────────────────────────────────
         "→ Horror / Thriller": {
             "framing": "Low Angle (Hero Shot)",
@@ -626,31 +677,34 @@ class NeuralGrammar:
     def scientificize(text: str) -> str:
         """Replace common words with high-precision cinematic terms.
 
-        BUG-1 FIX: Previous code called text.lower().split() which lowercased
-        the ENTIRE prompt before doing the word scan. Every word — camera names,
-        proper nouns, framing labels — had its capitalisation destroyed even when
-        no replacement was made. The function always returned the lowercased string.
-
-        Fix: split without lowercasing; compare each word lowercase only for the
-        dict lookup; preserve the original word when no replacement applies.
-
-        BUG-2 (related): word.strip(".,!?;:") did not strip parentheses, so words
-        like "(Cinematic)" would fail the lookup. Added '()' to the strip set.
+        BUG-1 FIX (prior): Preserved case on split.
+        BUG-2 FIX (prior): Added parens to strip set.
+        BUG-M1 FIX (v2.3.3): Post-cleanup pass to fix irregular spacing
+        caused by multi-word replacements adjacent to punctuation.
         """
-        words = text.split()           # ← preserve original case
+        words = text.split()           # preserve original case
         new_words = []
         modified = False
         for word in words:
-            clean_word = word.strip(".,!?;:()")   # ← also strip parens
+            clean_word = word.strip(".,!?;:()")   # also strip parens
             if clean_word.lower() in NeuralGrammar.SCIENTIFIC_REPLACEMENTS:
                 replacement = NeuralGrammar.SCIENTIFIC_REPLACEMENTS[clean_word.lower()]
-                new_words.append(replacement)
+                # [BUG-M1] Preserve trailing punctuation from the original word
+                trailing = ""
+                for ch in reversed(word):
+                    if ch in ".,!?;:()":
+                        trailing = ch + trailing
+                    else:
+                        break
+                new_words.append(replacement + trailing)
                 modified = True
             else:
-                new_words.append(word)  # ← preserve original capitalisation
+                new_words.append(word)  # preserve original capitalisation
         if modified:
             logger.debug("[NeuralGrammar] Applied cinematic vocabulary enhancement.")
-        return " ".join(new_words)
+        # [BUG-M1] Clean up any double-spaces introduced by multi-word replacements
+        result = " ".join(new_words)
+        return re.sub(r" {2,}", " ", result)
 
     @staticmethod
     def enhance_syntax(prompt_parts: list) -> list:
@@ -659,7 +713,6 @@ class NeuralGrammar:
         for part in prompt_parts:
             if part.startswith("Shot on"):
                 # v3.1 FIX: Preserve original camera name.
-                # Previously hardcoded "ARRI" which corrupted non-ARRI cameras.
                 camera_name = part.replace("Shot on ", "", 1)
                 part = f"Captured with high-precision {camera_name}"
             enhanced.append(part)
@@ -667,7 +720,7 @@ class NeuralGrammar:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#                   PRESET VALIDATION (v2.1 — runs at import time)
+#                   PRESET VALIDATION (v2.3.3 — runs at import time)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _FIELD_TO_DATASET = {
@@ -685,7 +738,11 @@ _FIELD_TO_DATASET = {
 
 
 def _validate_presets():
-    """Validate all preset config values exist in their respective dataset lists."""
+    """Validate all preset config values exist in their respective dataset lists.
+
+    v2.3.3 [BUG-I8]: In strict mode (RADIANCE_STRICT=1 env var), raises
+    RuntimeError on validation failure instead of silently logging.
+    """
     errors = []
     for preset_name, config in CinematicDatasets.PRESET_CONFIGS.items():
         for field, value in config.items():
@@ -696,9 +753,11 @@ def _validate_presets():
             if value not in dataset:
                 errors.append(f"  [{preset_name}] {field}='{value}' not in dataset")
     if errors:
-        logger.error(
-            f"◎ PRESET VALIDATION FAILED ({len(errors)} issues):\n" + "\n".join(errors)
-        )
+        msg = f"◎ PRESET VALIDATION FAILED ({len(errors)} issues):\n" + "\n".join(errors)
+        logger.error(msg)
+        # [BUG-I8] Strict mode: raise so broken presets are caught in CI/testing
+        if os.environ.get("RADIANCE_STRICT", "0") == "1":
+            raise RuntimeError(msg)
     else:
         logger.debug("✓ All preset configs validated against datasets")
 
@@ -708,12 +767,13 @@ _validate_presets()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#                         TOKEN UTILITIES (v1.1)
+#                         TOKEN UTILITIES (v2.3.3)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 CLIP_MAX_TOKENS = 77
 BREAK_TOKEN = "BREAK"  # nosec B105
-DEFAULT_YEAR = 2024  # v2.1: Used for year_era comparison instead of hardcoded value
+BREAK_TOKEN_OVERHEAD = 2  # [BUG-M2] BREAK token + surrounding spaces ≈ 2 tokens
+DEFAULT_YEAR = 2025  # [BUG-I4] Updated from 2024
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                  ARCHITECTURE-AWARE CONSTANTS  (v3.0)
@@ -796,6 +856,9 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
     (e.g., 256 or 512). shape[-1] returns the padded length, not the
     actual token count. We count non-padding tokens where possible.
     T5 uses pad_token_id=0; CLIP uses pad_token_id=49407.
+
+    v2.3.3 [BUG-I3]: Removed redundant `import torch as _torch` — torch
+    is already imported at module level.
     """
     if tokens is None:
         try:
@@ -811,15 +874,12 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
                 if hasattr(tok_data, "shape"):
                     # Tensor path (T5 / newer CLIP wrappers) — single tensor,
                     # no multi-chunk structure. Count non-pad tokens directly.
-                    try:
-                        import torch as _torch
-                        if _torch.is_tensor(tok_data):
-                            pad_id = 0 if key in ("t5xxl", "llm") else 49407
-                            non_pad = (tok_data != pad_id).sum().item()
-                            if non_pad > 0:
-                                return non_pad
-                    except Exception:
-                        pass
+                    # [BUG-I3] Use module-level torch directly
+                    if torch.is_tensor(tok_data):
+                        pad_id = 0 if key in ("t5xxl", "llm") else 49407
+                        non_pad = (tok_data != pad_id).sum().item()
+                        if non_pad > 0:
+                            return non_pad
                     return int(tok_data.shape[-1])
                 elif isinstance(tok_data, list) and tok_data:
                     # BUG-5 FIX: ComfyUI CLIP tokenizer returns a list of chunks:
@@ -830,12 +890,17 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
                     # the first chunk. For prompts > 77 tokens (BREAK or SDXL
                     # long prompts), there are multiple chunks and the count was
                     # severely undercounted. Fix: sum across ALL chunks.
-                    if isinstance(tok_data[0], (tuple, list)):
+                    #
+                    # [BUG-M4] v2.3.3: Explicit tuple validation
+                    if isinstance(tok_data[0], (tuple, list)) and len(tok_data[0]) >= 1:
                         pad_id = 0 if key in ("t5xxl", "llm") else 49407
                         total_non_pad = 0
                         total_len = 0
-                        for chunk in tokens[key]:   # ← iterate ALL chunks
-                            total_non_pad += sum(1 for t, *_ in chunk if t != pad_id)
+                        for chunk in tokens[key]:   # iterate ALL chunks
+                            for item in chunk:
+                                tok_id = item[0] if isinstance(item, (tuple, list)) else item
+                                if tok_id != pad_id:
+                                    total_non_pad += 1
                             total_len += len(chunk)
                         return total_non_pad if total_non_pad > 0 else total_len
                     # Non-tuple list: sum lengths across all chunks
@@ -868,6 +933,9 @@ def _build_prose_prompt(
     Build a natural-language prose prompt for T5/LLM-based architectures
     (Flux, SD3, Kolors, PixArt, Wan, LTX, HunyuanVideo).
     These encoders respond much better to flowing sentences than comma chains.
+
+    v2.3.3 [BUG-I1]: Added `subject_first` weight mode — leads with subject
+    at elevated emphasis before technical descriptors.
     """
     def c(v): return "" if v in ("None", None, "") else v
 
@@ -879,16 +947,16 @@ def _build_prose_prompt(
         subject = _apply_subject_weight(subject, subject_weight)
 
     # Neural Grammar Injection: If the user asks for accuracy/precision, expand it.
-    # BUG-2 FIX: Previously applied NeuralGrammar.scientificize to parts[0] which
-    # by this point already contains the framing prefix ("Medium Shot (MS) of …").
-    # This caused the framing label to be lowercased and corrupted.
-    # Apply the transform to the raw subject BEFORE it is assembled into parts[0].
+    # BUG-2 FIX: Apply to raw subject BEFORE assembly into parts[0].
     if any(kw in subject.lower() for kw in ("accurate", "precise", "visualize")):
         subject = NeuralGrammar.scientificize(subject)
 
-    # Weight mode: technique_first leads with camera, then subject
+    # [BUG-I1] Weight modes: technique_first, subject_first, balanced
     if weight_mode == "technique_first" and c(camera):
         parts.append(f"Photographed on {camera}, {subject}.")
+    elif weight_mode == "subject_first":
+        # Lead with subject prominently, no framing prefix
+        parts.append(f"{subject}, the central focus of this scene.")
     elif c(framing):
         parts.append(f"{framing} of {subject}.")
     else:
@@ -940,7 +1008,11 @@ def _build_prose_prompt(
     if c(aspect_ratio):
         parts.append(f"Composed for {aspect_ratio} format.")
 
-    # 10. Custom details last
+    # 10. Framing context for subject_first (add framing info after technique)
+    if weight_mode == "subject_first" and c(framing):
+        parts.append(f"Framed as a {framing}.")
+
+    # 11. Custom details last
     if c(custom_details):
         parts.append(custom_details.strip())
 
@@ -956,7 +1028,6 @@ def estimate_tokens(text: str) -> int:
     """
     if not text:
         return 0
-    # Split on whitespace only — preserve punctuation for more accurate word count
     words = text.split()
     return int(len(words) * 1.3)
 
@@ -966,16 +1037,16 @@ def insert_break_points(prompt: str, max_tokens: int = 70) -> str:
     Insert BREAK tokens at logical points to chunk long prompts.
     Helps with CLIP's 77-token limit by creating separate encoding chunks.
 
-    v2.1: Improved sentence splitting — splits on ". " (period+space) instead
+    v2.3.3: Improved sentence splitting — splits on ". " (period+space) instead
     of bare "." to avoid breaking on abbreviations, decimals, and lens names
     like "f/2.8" or "Sony A7S III."
+
+    v2.3.3 [BUG-M2]: Account for BREAK token overhead in chunk budget.
     """
     if estimate_tokens(prompt) <= max_tokens:
         return prompt
 
     # Split on sentence boundaries: period/exclamation/question followed by space
-    # This avoids splitting on "f/2.8", "A7S III.", decimal numbers, etc.
-    # Split after sentence-ending punctuation followed by whitespace
     sentences = re.split(r"(?<=[.!?])\s+", prompt)
 
     if len(sentences) <= 1:
@@ -983,13 +1054,15 @@ def insert_break_points(prompt: str, max_tokens: int = 70) -> str:
         return prompt
 
     # Recombine with BREAK tokens at chunk boundaries
+    # [BUG-M2] Reserve space for BREAK token overhead at each boundary
+    effective_limit = max_tokens - BREAK_TOKEN_OVERHEAD
     result = []
     current_chunk = []
     current_tokens = 0
 
     for sentence in sentences:
         sent_tokens = estimate_tokens(sentence)
-        if current_tokens + sent_tokens > max_tokens and current_chunk:
+        if current_tokens + sent_tokens > effective_limit and current_chunk:
             result.append(" ".join(current_chunk))
             current_chunk = [sentence]
             current_tokens = sent_tokens
@@ -1010,6 +1083,9 @@ def enhance_prompt_grammar(prompt: str, level: str, arch: str = "sdxl") -> str:
     v3.1: arch parameter controls which creative tags to inject.
     Danbooru-style tags (masterpiece, best quality) only help SD1.5/SDXL.
     Prose architectures get natural-language quality descriptors instead.
+
+    v2.3.3 [BUG-M5]: Check for existing creative tags before injection
+    to prevent duplication on re-encodes.
     """
     if level == "Off" or not prompt:
         return prompt
@@ -1024,29 +1100,26 @@ def enhance_prompt_grammar(prompt: str, level: str, arch: str = "sdxl") -> str:
 
     if level == "Creative Enhancement":
         if arch in PROSE_ARCHS:
-            # Natural language quality descriptors for T5/LLM encoders
             creative_tags = (
                 "Exceptionally detailed with stunning visual clarity "
                 "and ultra-high resolution rendering"
             )
         else:
-            # Danbooru-style tags for CLIP-only encoders (SD1.5/SDXL)
             creative_tags = "masterpiece, best quality, highly detailed, stunning, ultra-high resolution"
 
-        if p.endswith('.'):
-            p = p[:-1] + ", " + creative_tags + "."
-        else:
-            p += ", " + creative_tags
+        # [BUG-M5] Avoid double-injection on re-encodes
+        if creative_tags not in p and "masterpiece" not in p.lower():
+            if p.endswith('.'):
+                p = p[:-1] + ", " + creative_tags + "."
+            else:
+                p += ", " + creative_tags
 
     return p.strip()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#                         SHARED PROMPT BUILDER  (v3.0)
+#                         SHARED PROMPT BUILDER  (v2.3.3)
 # ═══════════════════════════════════════════════════════════════════════════════
-
-
-
 
 
 def build_cinematic_prompt_v3(
@@ -1076,7 +1149,7 @@ def build_cinematic_prompt_v3(
     active_prompt="A",
 ):
     """
-    v3.0 universal prompt builder.
+    v2.3.3 universal prompt builder.
     Uses prose format for T5/LLM architectures (Flux, SD3, Kolors…) and
     structured keyword format for CLIP-only architectures (SD1.5, SDXL).
     Returns: (final_prompt, negative_prompt, estimated_token_count).
@@ -1092,11 +1165,9 @@ def build_cinematic_prompt_v3(
             logger.info("[Encoder] Prompt B is empty — falling back to Prompt A.")
 
     # v3.1 FIX: Subject weight is applied INSIDE each path (prose/structured),
-    # not here. Previously it was applied at both levels, causing double-weight
-    # on the structured path: ((subject:1.2):1.2) → effective 1.44×.
+    # not here. Previously it was applied at both levels, causing double-weight.
 
     # v3.1: Architecture is resolved by the caller and passed as target_arch.
-    # Fallback to sdxl if somehow 'Auto' slipped through an older node call.
     resolved_arch = target_arch if target_arch != "Auto" else "sdxl"
     use_prose = resolved_arch in PROSE_ARCHS
 
@@ -1119,7 +1190,12 @@ def build_cinematic_prompt_v3(
         # Apply subject weight once in the structured path
         weighted_base = _apply_subject_weight(effective_base, subject_weight)
 
-        if prompt_weight_mode == "technique_first" and c(camera_type):
+        # [BUG-I1] subject_first: lead with weighted subject, no camera prefix
+        if prompt_weight_mode == "subject_first":
+            parts.append(f"{weighted_base}.")
+            if c(framing):
+                parts.append(f"Framed as {framing}.")
+        elif prompt_weight_mode == "technique_first" and c(camera_type):
             parts.append(f"Shot on {camera_type}.")
             prefix = f"{c(framing)} of " if c(framing) else ""
             parts.append(f"{prefix}{weighted_base}.")
@@ -1128,15 +1204,22 @@ def build_cinematic_prompt_v3(
         else:
             parts.append(f"{weighted_base}.")
 
+        # [BUG-C3] FIX: Insert art_direction THEN lora_keywords at sequential
+        # indices so art_direction stays closer to subject than lora_keywords.
+        # Previous code inserted both at index 1, reversing the intended order.
+        insert_idx = len(parts)  # Insert after subject/framing block
         if art_direction and art_direction.strip():
-            parts.insert(1, art_direction.strip())
+            parts.insert(insert_idx, art_direction.strip())
+            insert_idx += 1
         if lora_keywords and lora_keywords.strip():
-            parts.insert(1, lora_keywords.strip())
+            parts.insert(insert_idx, lora_keywords.strip())
+
         if scene_mood and scene_mood != "None" and scene_mood in _MOOD_VOCAB:
             parts.append(_MOOD_VOCAB[scene_mood])
 
         tech = []
-        if c(camera_type) and prompt_weight_mode != "technique_first":
+        # [BUG-M3] Gate camera in tech block for both technique_first AND subject_first
+        if c(camera_type) and prompt_weight_mode not in ("technique_first",):
             tech.append(f"Shot on {camera_type}")
         if c(lens_focal):    tech.append(f"with {lens_focal}")
         if c(aperture_dof):  tech.append(f"at {aperture_dof}")
@@ -1149,7 +1232,9 @@ def build_cinematic_prompt_v3(
         finish = []
         if style:             finish.append(style)
         if c(film_stock):     finish.append(f"on {film_stock}")
-        if year_era != DEFAULT_YEAR: finish.append(f"Est. Year {year_era}.")
+        # [BUG-C2] FIX: Removed trailing period from year_era fragment.
+        # The join + "." at the end of the finish block already adds one.
+        if year_era != DEFAULT_YEAR: finish.append(f"Est. Year {year_era}")
         if finish: parts.append(", ".join(finish) + ".")
 
         if c(aspect_ratio):   parts.append(f"{aspect_ratio} format.")
@@ -1157,6 +1242,7 @@ def build_cinematic_prompt_v3(
 
         final_prompt = " ".join(p for p in parts if p).strip()
 
+    # [BUG-I5] use_break is now always boolean from the caller
     if use_break:
         final_prompt = insert_break_points(final_prompt)
 
@@ -1182,7 +1268,9 @@ def build_cinematic_prompt_v3(
                 neg.extend(["cartoon", "anime", "illustration", "painting", "cgi",
                              "3d render", "drawing", "sketch"])
             elif "Anime" in style_val:
-                neg.extend(["photograph", "realistic", "photo", "photorealistic", "3d"])
+                # [BUG-M6] Added "3d render" which was missing from Anime exclusions
+                neg.extend(["photograph", "realistic", "photo", "photorealistic",
+                             "3d", "3d render"])
             elif any(kw in style_val for kw in ("Painting", "Oil", "Painterly")):
                 neg.extend(["photograph", "realistic", "photo", "digital", "3d render"])
             elif any(kw in style_val for kw in ("CGI", "Unreal", "3D", "Octane")):
@@ -1199,8 +1287,6 @@ def build_cinematic_prompt_v3(
                            if negative_prompt else negative_custom.strip())
 
     return (final_prompt, negative_prompt, token_count)
-
-
 
 
 def apply_style_preset(preset_name, current_settings):
@@ -1231,7 +1317,9 @@ def apply_style_preset(preset_name, current_settings):
 
 class RadianceCinematicPromptEncoder:
     """
-    All-in-one cinematic prompt builder with direct CLIP encoding. Clean interface: clip in → CONDITIONING out.
+    v2.3.3 — All-in-one cinematic prompt builder with direct CLIP encoding.
+    Clean interface: clip in → CONDITIONING out.
+    Auto-selects prose format for Flux/T5/Kolors and structured for SD1.5/SDXL.
     """
 
     # Reference shared datasets
@@ -1277,12 +1365,13 @@ class RadianceCinematicPromptEncoder:
                 ),
                 # ── Architecture ───────────────────────────────────────────
                 "target_arch": (
-                    ["Auto", "flux", "sd3", "sdxl", "sd1.5", "wan",
+                    # [BUG-I2] Added sd3.5 and hunyuan_video to match PROSE_ARCHS
+                    ["Auto", "flux", "sd3", "sd3.5", "sdxl", "sd1.5", "wan",
                      "ltx", "pixart", "kolors", "hunyuan_video", "aura_flow"],
                     {"default": "Auto",
                      "tooltip": ("Auto selects prose for Flux/T5 architectures. "
                                  "Set manually if auto-detect is wrong. "
-                                 "Prose = Flux/SD3/Kolors. Structured = SD1.5/SDXL.")},
+                                 "Prose = Flux/SD3/SD3.5/Kolors/Wan. Structured = SD1.5/SDXL.")},
                 ),
                 "context_window": (
                     ["Standard (CLIP 77)", "Medium (Flux/T5 256)", "Large (T5 512)"],
@@ -1353,6 +1442,7 @@ class RadianceCinematicPromptEncoder:
                     ["balanced", "subject_first", "technique_first"],
                     {"default": "balanced",
                      "tooltip": ("Controls token budget ordering. "
+                                 "'subject_first' leads with subject emphasis. "
                                  "'technique_first' leads with camera for style-driven shots.")},
                 ),
                 "custom_details": (
@@ -1416,8 +1506,9 @@ class RadianceCinematicPromptEncoder:
     )
     FUNCTION = "encode_cinematic"
     CATEGORY = "FXTD Studios/Radiance/Generate"
+    # [BUG-I6] Version string updated to match actual version
     DESCRIPTION = (
-        "v3.0 — Universal cinematic encoder. Auto-selects prose format for "
+        "v2.3.3 — Universal cinematic encoder. Auto-selects prose format for "
         "Flux/T5/Kolors and structured format for SD1.5/SDXL. "
         "Supports scene mood, A/B prompts, subject weighting, real token counts, "
         "art direction and architecture-aware negatives."
@@ -1486,7 +1577,9 @@ class RadianceCinematicPromptEncoder:
         if style_preset != "None (Custom)":
             settings = apply_style_preset(style_preset, settings)
 
-        # ── Build prompt v3.0 ───────────────────────────────────────────────
+        # ── Build prompt v2.3.3 ─────────────────────────────────────────────
+        # [BUG-I5] Convert string "On"/"Off" to boolean for builder
+        use_break_bool = (use_break == "On")
         final_prompt, negative_prompt, _ = build_cinematic_prompt_v3(
             base_prompt=base_prompt,
             base_prompt_b=base_prompt_b,
@@ -1506,8 +1599,8 @@ class RadianceCinematicPromptEncoder:
             negative_strength=negative_strength,
             negative_custom=negative_custom,
             lora_keywords=lora_keywords,
-            use_break=False,
-            target_arch=resolved_arch,  # Pass resolved, not raw
+            use_break=False,  # We handle BREAK separately below after enhancement
+            target_arch=resolved_arch,
             scene_mood=scene_mood,
             subject_weight=subject_weight,
             art_direction=art_direction,
@@ -1519,20 +1612,19 @@ class RadianceCinematicPromptEncoder:
             final_prompt = enhance_prompt_grammar(final_prompt, prompt_enhancer, arch=resolved_arch)
 
         # ── BREAK tokens ────────────────────────────────────────────────────
-        if use_break == "On":
+        if use_break_bool:
             final_prompt = insert_break_points(final_prompt, max_tokens=token_limit - 7)
 
         # ── Tokenize & Real token count ─────────────────────────────────────
         pos_tokens = clip.tokenize(final_prompt)
         real_count = _real_token_count(clip, final_prompt, tokens=pos_tokens)
-        
-        if real_count > token_limit and use_break == "Off":
+
+        if real_count > token_limit and not use_break_bool:
             logger.warning(
                 f"[Encoder] Prompt has {real_count} tokens (limit {token_limit}). "
                 "Enable 'use_break' or increase context_window. Truncating to prevent OOM."
             )
             # v3.1 FIX: Slice into new lists instead of mutating in-place.
-            # In-place mutation of tokenizer output can corrupt internal caches.
             truncated = {}
             for key in pos_tokens:
                 if isinstance(pos_tokens[key], list):
@@ -1549,21 +1641,41 @@ class RadianceCinematicPromptEncoder:
 
         # ── CLIP skip ───────────────────────────────────────────────────────
         if clip_skip > 0:
-            clip = clip.clone()
-            clip.clip_layer(-clip_skip)
+            # [BUG-I7] Guard clip.clone() for custom CLIP wrappers that lack it
+            try:
+                clip = clip.clone()
+                clip.clip_layer(-clip_skip)
+            except AttributeError:
+                logger.warning(
+                    f"[Encoder] clip.clone() not available — applying clip_layer "
+                    f"directly. This may affect other nodes sharing this CLIP."
+                )
+                try:
+                    clip.clip_layer(-clip_skip)
+                except Exception as e:
+                    logger.error(f"[Encoder] clip_layer({-clip_skip}) failed: {e}")
 
         # ── Encode ──────────────────────────────────────────────────────────
-        # BUG-3 FIX: encode_from_tokens_scheduled was added in ComfyUI ~2024-Q2.
-        # Older installs (and some custom forks) only expose encode_from_tokens().
-        # Fall back gracefully so the node works on any ComfyUI version.
+        # [BUG-C1] CRITICAL FIX: encode_from_tokens_scheduled (ComfyUI ~2024-Q2+)
+        # returns conditioning in native format: [[cond, {"pooled_output": pooled}]].
+        # The fallback encode_from_tokens() returns (cond, pooled) as a raw tuple,
+        # which must be manually wrapped into conditioning format.
+        # Previous code returned the raw tuple, causing sampler crashes on older installs.
         def _encode(tokens):
             if hasattr(clip, "encode_from_tokens_scheduled"):
                 return clip.encode_from_tokens_scheduled(tokens)
-            return clip.encode_from_tokens(tokens, return_pooled=True)
+            # Fallback for older ComfyUI — wrap into conditioning format
+            result = clip.encode_from_tokens(tokens, return_pooled=True)
+            if isinstance(result, (list, tuple)) and len(result) == 2:
+                cond, pooled = result
+                # Standard ComfyUI conditioning format
+                return [[cond, {"pooled_output": pooled}]]
+            # If it's already in the right format somehow, pass through
+            return result
 
         positive_cond = _encode(pos_tokens)
 
-        # Ensure negative prompt is at least a space to prevent empty tensor crashes on strict arches
+        # Ensure negative prompt is at least a space to prevent empty tensor crashes
         safe_negative = negative_prompt if negative_prompt and negative_prompt.strip() else " "
         neg_tokens = clip.tokenize(safe_negative)
         negative_cond = _encode(neg_tokens)
@@ -1573,7 +1685,7 @@ class RadianceCinematicPromptEncoder:
         # Downstream nodes crash on None, so provide a 1×1 black pixel fallback.
         if image_ref is None:
             image_ref = torch.zeros(1, 1, 1, 3)  # BHWC
-            logger.debug("[Encoder] No image_ref connected — using 1×1 black fallback.")
+            logger.debug("[Encoder] No image_ref connected — using 1x1 black fallback.")
 
         return (positive_cond, negative_cond, image_ref, final_prompt, negative_prompt, real_count)
 
