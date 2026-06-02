@@ -12,6 +12,7 @@ logger = logging.getLogger("radiance.color.lut")
 
 @dataclass
 class LUTData:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Color"
     """Container for parsed LUT information with metadata."""
 
     lut_tensor: torch.Tensor
@@ -86,6 +87,7 @@ class LUTCache:
 
 
 class RadianceLUTApply:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Color"
     """
     Apply a 3D LUT (.cube) to an image with professional-grade color transformation.
     """
@@ -130,7 +132,7 @@ class RadianceLUTApply:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "apply_lut"
-    CATEGORY = "FXTD Studios/Radiance/Color"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Color"
     DESCRIPTION = "Apply a 3D LUT (.cube) with trilinear or tetrahedral interpolation. Supports log-space input and HDR (unclamped) output."
 
     @staticmethod
@@ -395,8 +397,8 @@ class RadianceLUTApply:
         self,
         image,
         lut_file,
-        strength,
-        log_space,
+        strength=1.0,
+        log_space=False,
         log_encoding="Log10",
         clamp_output=False,
         interpolation="Trilinear",
@@ -404,16 +406,24 @@ class RadianceLUTApply:
         if strength == 0.0:
             return (image,)
 
-        try:
-            import folder_paths
-
-            lut_path = folder_paths.get_full_path("luts", lut_file)
-        except Exception as e:
-            logger.error(f"Failed to resolve LUT path for '{lut_file}': {e}")
+        if not lut_file:
             return (image,)
+
+        lut_path = None
+        if os.path.isabs(lut_file):
+            lut_path = lut_file
+            if not os.path.exists(lut_path):
+                raise FileNotFoundError(f"LUT file not found: {lut_path}")
+        else:
+            try:
+                import folder_paths
+                lut_path = folder_paths.get_full_path("luts", lut_file)
+            except Exception as e:
+                logger.error(f"Failed to resolve LUT path for '{lut_file}': {e}")
+                return (image,)
 
         if not lut_path or not os.path.exists(lut_path):
-            return (image,)
+            raise FileNotFoundError(f"LUT file not found: {lut_file}")
 
         # Cache lookup
         lut_data = LUTCache.get(lut_path)
@@ -466,6 +476,7 @@ class RadianceLUTApply:
 
 
 class RadianceLUTBlend:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Color"
     """
     Blend two LUTs together with various blend modes. Allows creative combination
     of color grades and seamless transitions between different looks.
@@ -523,7 +534,7 @@ class RadianceLUTBlend:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "blend_luts"
-    CATEGORY = "FXTD Studios/Radiance/Color"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Color"
     DESCRIPTION = "Blend two LUTs with various blend modes for creative color grading."
 
     def blend_luts(

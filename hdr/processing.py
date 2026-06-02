@@ -1,7 +1,8 @@
 import torch
+import torch.nn.functional as F
 import numpy as np
 import logging
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, List, Optional
 
 # Local imports
 from .utils import tensor_to_numpy_float32, numpy_to_tensor_float32
@@ -11,7 +12,10 @@ logger = logging.getLogger("radiance.hdr.processing")
 # FIX #3: scipy imported at module scope (was imported inside method bodies x3,
 # re-executing on every call through the GPU fallback and CPU paths).
 try:
-    from scipy.ndimage import gaussian_filter as _scipy_gaussian_filter
+    from scipy.ndimage import (
+        gaussian_filter as _scipy_gaussian_filter,
+        laplace as _scipy_laplace,
+    )
 
     SCIPY_AVAILABLE = True
 except ImportError:
@@ -36,6 +40,8 @@ class HDRExposureBlend:
     """
     Blend multiple exposures (bracketing) for extended dynamic range. Takes highlights from low exposure and shadows from high exposure for optimal color grading.
     """
+
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
 
     BLEND_METHODS = [
         "Mertens Fusion",
@@ -87,14 +93,16 @@ class HDRExposureBlend:
                         "to the same scale before fusion.",
                     },
                 ),
-                "ghost_removal": ("BOOLEAN", {"default": False}),
+                "ghost_removal": ("BOOLEAN", {"default": False,
+                    "tooltip": "Detect and remove ghosting artifacts in HDR merges caused by moving objects between frames.",
+                }),
             },
         }
 
     RETURN_TYPES = ("IMAGE", "IMAGE", "STRING")
     RETURN_NAMES = ("blended_hdr", "blend_mask", "blend_info")
     FUNCTION = "blend_exposures"
-    CATEGORY = "FXTD Studios/Radiance/Color"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = "Blend multiple exposures (bracketing) for extended dynamic range. Takes highlights from low exposure and shadows from high exposure for optimal color grading."
 
     def _calculate_luminance(self, img: np.ndarray) -> np.ndarray:
@@ -109,12 +117,15 @@ class HDRExposureBlend:
         exposure_weight: float = 1.0,
     ) -> np.ndarray:
         """Calculate Mertens exposure fusion weights."""
-        # Contrast measure (Laplacian)
         gray = self._calculate_luminance(img)
-        laplacian = np.abs(
-            np.gradient(np.gradient(gray, axis=0), axis=0)
-            + np.gradient(np.gradient(gray, axis=1), axis=1)
-        )
+        if SCIPY_AVAILABLE:
+            laplacian = np.abs(_scipy_laplace(gray))
+        else:
+            # Fallback to approximate if scipy is missing
+            laplacian = np.abs(
+                np.gradient(np.gradient(gray, axis=0), axis=0)
+                + np.gradient(np.gradient(gray, axis=1), axis=1)
+            )
         contrast = laplacian**contrast_weight
 
         # Saturation measure
@@ -130,6 +141,190 @@ class HDRExposureBlend:
         # Combined weight
         weight = contrast * saturation * exposedness + 1e-10
         return weight
+
+    # ── Ghost Removal ─────────────────────────────────────────────────────────
+
+    def _phase_correlation_shift(
+        self, ref: np.ndarray, src: np.ndarray
+    ) -> Tuple[float, float]:
+        """
+        Estimate the global (dy, dx) translation between ref and src using
+        phase-correlation in the frequency domain.
+
+        Algorithm (Kuglin & Hines 1975):
+          1. Compute FFT of both images (luma channel only)
+          2. Compute normalised cross-power spectrum: R = F·conj(G) / |F·conj(G)|
+          3. Inverse FFT → cross-correlation surface
+          4. Peak location == sub-pixel shift via parabolic interpolation
+
+        Returns:
+            (dy, dx) in pixels. Sub-pixel accurate to ~0.25px.
+        """
+        luma_ref = (0.2126 * ref[..., 0] + 0.7152 * ref[..., 1] + 0.0722 * ref[..., 2]).astype(np.float32)
+        luma_src = (0.2126 * src[..., 0] + 0.7152 * src[..., 1] + 0.0722 * src[..., 2]).astype(np.float32)
+
+        # Hann window reduces spectral leakage at image edges
+        H, W = luma_ref.shape
+        hann_y = np.hanning(H).reshape(-1, 1).astype(np.float32)
+        hann_x = np.hanning(W).reshape(1, -1).astype(np.float32)
+        window = hann_y * hann_x
+
+        F_ref = np.fft.fft2(luma_ref * window)
+        F_src = np.fft.fft2(luma_src * window)
+
+        cross_power = F_ref * np.conj(F_src)
+        denom = np.abs(cross_power) + 1e-10
+        r = np.fft.ifft2(cross_power / denom).real
+
+        # Peak in the correlation surface
+        peak_idx = np.unravel_index(np.argmax(r), r.shape)
+        py, px = int(peak_idx[0]), int(peak_idx[1])
+
+        # Parabolic sub-pixel refinement around the peak
+        def _parabolic_refinement(arr, idx, size):
+            if 1 <= idx < size - 1:
+                y0, y1, y2 = arr[idx - 1], arr[idx], arr[idx + 1]
+                denom_p = 2.0 * y1 - y0 - y2
+                if abs(denom_p) > 1e-8:
+                    return idx + 0.5 * (y0 - y2) / denom_p
+            return float(idx)
+
+        sub_y = _parabolic_refinement(r[:, px], py, H)
+        sub_x = _parabolic_refinement(r[py, :], px, W)
+
+        # Wrap: shifts > half the image are negative (other direction)
+        dy = sub_y if sub_y <= H / 2 else sub_y - H
+        dx = sub_x if sub_x <= W / 2 else sub_x - W
+
+        # Clamp to reasonable alignment range (±64px) — larger shifts indicate
+        # a completely different framing, which ghost removal cannot fix
+        dy = max(-64, min(64, dy))
+        dx = max(-64, min(64, dx))
+
+        return float(dy), float(dx)
+
+    def _warp_translation(
+        self, img: np.ndarray, dy: float, dx: float
+    ) -> np.ndarray:
+        """
+        Apply a sub-pixel translation to img using bilinear interpolation.
+        Uses torch F.grid_sample for quality and speed.
+
+        Args:
+            img: (H, W, C) float32
+            dy, dx: shift in pixels (positive = shift image down/right)
+
+        Returns:
+            (H, W, C) warped image, edge pixels filled with nearest-border value.
+        """
+        H, W, C = img.shape
+        t = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).float()  # (1, C, H, W)
+
+        # Normalised shift: grid_sample uses coordinates in [-1, 1]
+        norm_dy = 2.0 * dy / H
+        norm_dx = 2.0 * dx / W
+
+        # Identity grid
+        theta = torch.tensor(
+            [[1.0, 0.0, -norm_dx],
+             [0.0, 1.0, -norm_dy]],
+            dtype=torch.float32
+        ).unsqueeze(0)  # (1, 2, 3)
+
+        grid = F.affine_grid(theta, t.shape, align_corners=False)
+        warped = F.grid_sample(t, grid, mode="bilinear", padding_mode="border", align_corners=False)
+        return warped.squeeze(0).permute(1, 2, 0).numpy()  # (H, W, C)
+
+    def _ghost_weight_mask(
+        self,
+        images: List[np.ndarray],
+        sigma: float = 0.1,
+    ) -> List[np.ndarray]:
+        """
+        Compute per-pixel ghost confidence weights for a list of aligned images.
+
+        Method:
+          1. Compute the per-pixel median across all brackets.
+          2. For each bracket, measure the absolute deviation from the median.
+          3. Convert deviation to a confidence weight via a Gaussian:
+               w = exp(-0.5 * (deviation / sigma)²)
+          4. Where deviation is small (consistent across brackets) → weight ≈ 1
+             Where deviation is large (ghost/motion) → weight → 0
+
+        Args:
+            images: List of (H, W, C) aligned float32 arrays
+            sigma:  Gaussian width for deviation → confidence mapping.
+                    0.1 = strict (only very consistent pixels get full weight)
+                    0.2 = lenient (tolerates minor inter-frame differences)
+
+        Returns:
+            List of (H, W) float32 ghost masks, one per input image.
+        """
+        if len(images) < 2:
+            return [np.ones(images[0].shape[:2], dtype=np.float32)]
+
+        # Convert to luma for deviation measurement
+        lumas = [
+            (0.2126 * im[..., 0] + 0.7152 * im[..., 1] + 0.0722 * im[..., 2])
+            for im in images
+        ]
+        stack = np.stack(lumas, axis=0)  # (N, H, W)
+        median = np.median(stack, axis=0)  # (H, W)
+
+        masks = []
+        for luma in lumas:
+            deviation = np.abs(luma - median)
+            # Gaussian confidence: low deviation = high confidence
+            confidence = np.exp(-0.5 * (deviation / (sigma + 1e-8)) ** 2)
+            masks.append(confidence.astype(np.float32))
+
+        return masks
+
+    def _align_and_deghost(
+        self,
+        images: List[np.ndarray],
+        ref_idx: int = -1,
+        ghost_sigma: float = 0.12,
+    ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+        """
+        Align all exposure brackets to one reference and compute ghost masks.
+
+        Args:
+            images:      List of (H, W, 3) float32 exposure brackets
+            ref_idx:     Index of reference frame (-1 = auto: median luminance)
+            ghost_sigma: Ghost deviation threshold (smaller = stricter)
+
+        Returns:
+            (aligned_images, ghost_masks)
+            aligned_images: List of (H, W, 3) warped to reference frame
+            ghost_masks:    List of (H, W) confidence weights in [0, 1]
+        """
+        # Auto reference selection: use the bracket whose mean luminance is
+        # closest to the median of all bracket mean-luminances
+        if ref_idx < 0:
+            means = [img.mean() for img in images]
+            median_mean = np.median(means)
+            ref_idx = int(np.argmin([abs(m - median_mean) for m in means]))
+
+        ref = images[ref_idx]
+        aligned = []
+
+        for i, img in enumerate(images):
+            if i == ref_idx:
+                aligned.append(img)
+                continue
+            dy, dx = self._phase_correlation_shift(ref, img)
+            if abs(dy) > 0.25 or abs(dx) > 0.25:  # Only warp if shift is significant
+                warped = self._warp_translation(img, dy, dx)
+                logger.debug(
+                    f"[HDR Ghost Removal] Bracket {i}: aligned shift dy={dy:.2f}px dx={dx:.2f}px"
+                )
+            else:
+                warped = img
+            aligned.append(warped)
+
+        ghost_masks = self._ghost_weight_mask(aligned, sigma=ghost_sigma)
+        return aligned, ghost_masks
 
     def _mertens_fusion(self, images: list, weights: list = None) -> np.ndarray:
         """Mertens exposure fusion algorithm."""
@@ -154,15 +349,15 @@ class HDRExposureBlend:
         """Luminance-weighted blending for natural HDR merge."""
         # Calculate luminance of both images
         lum_low = self._calculate_luminance(low_exp)
-        self._calculate_luminance(high_exp)
+        lum_high = self._calculate_luminance(high_exp)
 
         # Create smooth transition mask based on luminance
-        # Low exposure: prefer it for bright areas (highlights preserved)
-        # High exposure: prefer it for dark areas (shadows preserved)
+        # We use the average luminance for a more balanced cross-fade
+        lum_avg = (lum_low + lum_high) / 2.0
 
         # Sigmoid-based transition
         mid_point = 0.5
-        x = (lum_low - mid_point) / transition
+        x = (lum_avg - mid_point) / transition
         low_weight = 1.0 / (1.0 + np.exp(-x))  # High weight for bright areas
         high_weight = 1.0 - low_weight
 
@@ -335,6 +530,13 @@ class HDRExposureBlend:
         low_np = tensor_to_numpy_float32(low_exposure)
         high_np = tensor_to_numpy_float32(high_exposure)
 
+        if ghost_removal:
+            brackets_count = 2 if mid_exposure is None else 3
+            logger.info(
+                "[HDR Ghost Removal] Running phase-correlation alignment + ghost masking "
+                f"on {brackets_count} brackets."
+            )
+
         # Handle batch dimension
         if low_np.ndim == 4:
             low_np = low_np[0]
@@ -343,6 +545,9 @@ class HDRExposureBlend:
         # Apply exposure compensation to bring to common scale
         low_np = low_np * (2.0 ** (-exposure_offset_low))  # Brighten low exposure
         high_np = high_np * (2.0 ** (-exposure_offset_high))  # Darken high exposure
+
+        # ── Ghost Removal ──────────────────────────────────────────────────────
+        ghost_masks = None  # populated below when ghost_removal=True
 
         # Perform blending based on method
         if blend_method == "Mertens Fusion":
@@ -356,28 +561,37 @@ class HDRExposureBlend:
                 # Previously mid_np was inserted raw with no offset applied.
                 mid_np = mid_np * (2.0 ** (-exposure_offset_mid))
                 images.insert(1, mid_np)
-            result = self._mertens_fusion(images)
+
+            if ghost_removal:
+                images, ghost_masks = self._align_and_deghost(images)
+
+            # Build Mertens weights; multiply by ghost confidence if available
+            mertens_weights = [self._mertens_weights(img) for img in images]
+            if ghost_masks is not None:
+                mertens_weights = [w * gm for w, gm in zip(mertens_weights, ghost_masks)]
+
+            result = self._mertens_fusion(images, weights=mertens_weights)
             mask = np.ones_like(result) * 0.5
 
         elif blend_method == "Luminance Weighted":
+            if ghost_removal:
+                [low_np, high_np], _ = self._align_and_deghost([low_np, high_np])
             result, mask = self._luminance_weighted_blend(
                 low_np, high_np, transition_smoothness
             )
 
         elif blend_method == "Shadow/Highlight Mask":
+            if ghost_removal:
+                [low_np, high_np], _ = self._align_and_deghost([low_np, high_np])
             result, mask = self._shadow_highlight_blend(
                 low_np, high_np, shadow_weight, highlight_weight, transition_smoothness
             )
 
-        elif blend_method == "Exposure Weighted":
-            # Simple weighted average based on exposure settings
-            total_range = abs(exposure_offset_high - exposure_offset_low)
-            low_weight = abs(exposure_offset_high) / total_range
-            high_weight = abs(exposure_offset_low) / total_range
-            result = low_np * low_weight + high_np * high_weight
-            mask = np.ones_like(result) * low_weight
+
 
         elif blend_method == "Laplacian Pyramid":
+            if ghost_removal:
+                [low_np, high_np], _ = self._align_and_deghost([low_np, high_np])
             result, mask = self._laplacian_pyramid_blend(low_np, high_np)
         else:
             result = (low_np + high_np) / 2
@@ -385,6 +599,7 @@ class HDRExposureBlend:
 
         # Ensure valid range for 32-bit HDR
         result = np.maximum(result, 0.0)
+
 
         # Calculate blend statistics
         dynamic_range = np.log2(
@@ -405,6 +620,8 @@ class HDRShadowHighlightRecovery:
     """
     Recover shadow and highlight detail from a single HDR image for better color grading flexibility.
     """
+
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -443,7 +660,7 @@ class HDRShadowHighlightRecovery:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("recovered_image",)
     FUNCTION = "recover"
-    CATEGORY = "FXTD Studios/Radiance/Color"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = "Recover shadow and highlight detail from a single HDR image for better color grading flexibility."
 
     def recover(
@@ -554,14 +771,16 @@ class GPUTensorOps:
                     "FLOAT",
                     {"default": 0.0, "min": -10.0, "max": 10.0, "step": 0.1},
                 ),
-                "force_gpu": ("BOOLEAN", {"default": True}),
+                "force_gpu": ("BOOLEAN", {"default": True,
+                    "tooltip": "Force GPU processing even when image fits in CPU memory. Useful for batch throughput.",
+                }),
             },
         }
 
     RETURN_TYPES = ("IMAGE", "STRING")
     RETURN_NAMES = ("processed_image", "performance_info")
     FUNCTION = "process"
-    CATEGORY = "FXTD Studios/Radiance/Color"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = (
         "GPU-accelerated HDR operations. Fast exposure, gamma, and normalization."
     )
@@ -635,13 +854,13 @@ class GPUTensorOps:
 # =============================================================================
 
 NODE_CLASS_MAPPINGS = {
-    "HDRExposureBlend": HDRExposureBlend,
-    "HDRShadowHighlightRecovery": HDRShadowHighlightRecovery,
-    "GPUTensorOps": GPUTensorOps,
+    "RadianceHDRExposureBlend": HDRExposureBlend,
+    "RadianceHDRShadowHighlight": HDRShadowHighlightRecovery,
+    "RadianceGPUTensorOps": GPUTensorOps,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "HDRExposureBlend": "◎ HDR Exposure Blend",
-    "HDRShadowHighlightRecovery": "◎ HDR Shadow/Highlight Recovery",
-    "GPUTensorOps": "◎ GPU Tensor Ops",
+    "RadianceHDRExposureBlend": "◎ HDR Exposure Blend",
+    "RadianceHDRShadowHighlight": "◎ HDR Shadow/Highlight Recovery",
+    "RadianceGPUTensorOps": "◎ GPU Tensor Ops",
 }

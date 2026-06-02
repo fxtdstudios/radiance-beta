@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>◎ Radiance v3.1.0 — Technical Documentation Portal</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <!-- Local Stylesheet -->
+    <link rel="stylesheet" href="docs.css">
+</head>
+<body>
+    <!-- Background grid styling -->
+    <div class="glow-bg"></div>
+    <div class="grid-overlay"></div>
+
+    <!-- Layout Container -->
+    <div class="app-container">
+        
+        <!-- Header -->
+        <header class="app-header">
+            <div class="header-logo">
+                <span class="logo-symbol">◎</span>
+                <div class="logo-text">
+                    <h1>Radiance</h1>
+                    <span class="version-badge">v3.1.0</span>
+                </div>
+            </div>
+            
+            <div class="header-center">
+                <div class="search-wrapper">
+                    <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                    <input type="text" id="global-search" placeholder="Search full manual, nodes, recipes... (Press '/' or 'Ctrl+K')">
+                    <span class="kbd-hint">/</span>
+                </div>
+            </div>
+
+            <div class="header-right">
+                <nav class="nav-tabs">
+                    <button class="tab-btn active" data-tab="docs">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+                        Documentation
+                    </button>
+                    <button class="tab-btn highlight" data-tab="playground">
+                        <span class="pulse-dot"></span>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+                        Color Playground
+                    </button>
+                </nav>
+            </div>
+        </header>
+
+        <!-- Main Body -->
+        <div class="app-body">
+            
+            <!-- Sidebar -->
+            <aside class="app-sidebar" id="sidebar-nav">
+                <div class="sidebar-scroll">
+                    <!-- Populated dynamically via JS to support nested directories -->
+                    <div class="sidebar-section" id="sidebar-chapters">
+                        <!-- Loaded dynamically via JS -->
+                    </div>
+                </div>
+                <div class="sidebar-footer">
+                    <div class="connection-status">
+                        <span class="status-indicator online"></span>
+                        <span>Radiance Offline Server: Online</span>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Main Content Area -->
+            <main class="app-content" id="main-content">
+                
+                <!-- DOCUMENTATION SYSTEM TAB -->
+                <section id="tab-docs" class="tab-pane active">
+                    <div class="docs-viewport">
+                        <article class="markdown-body" id="docs-content-area">
+                            <!-- Populated dynamically based on sidebar selection -->
+                        </article>
+                    </div>
+                </section>
+
+                <!-- PLAYGROUND TAB (WOW FACTOR) -->
+                <section id="tab-playground" class="tab-pane">
+                    <div class="section-header">
+                        <h2>◎ Real-Time Color Science Simulator</h2>
+                        <p>Interact with our custom pixel-shader simulation engine. Adjust exposure and ASC CDL parameters below to immediately see how raw linear colors are mapped to display space, monitored via a real-time reactive Waveform Parade!</p>
+                    </div>
+
+                    <div class="playground-panel">
+                        
+                        <!-- Screen split -->
+                        <div class="sim-screens">
+                            <div class="screen-box">
+                                <span class="badge-screen">GRADIENT MONITOR</span>
+                                <canvas id="canvas-gradient" width="360" height="240"></canvas>
+                            </div>
+                            <div class="screen-box">
+                                <span class="badge-screen">WAVEFORM PARADE</span>
+                                <canvas id="canvas-waveform" width="360" height="240"></canvas>
+                            </div>
+                        </div>
+
+                        <!-- Controls Panel -->
+                        <div class="sim-controls">
+                            <h3>◎ ASC CDL Console & Exposure</h3>
+                            <div class="control-row">
+                                <div class="slider-group">
+                                    <label>
+                                        <span>Exposure Offset (EV)</span>
+                                        <span class="value" id="val-exposure">0.00 EV</span>
+                                    </label>
+                                    <input type="range" id="slide-exposure" min="-3.0" max="3.0" step="0.05" value="0.0">
+                                </div>
+                                <div class="slider-group">
+                                    <label>
+                                        <span>Slope (Gain / Highlights)</span>
+                                        <span class="value" id="val-slope">1.00</span>
+                                    </label>
+                                    <input type="range" id="slide-slope" min="0.1" max="2.5" step="0.02" value="1.0">
+                                </div>
+                            </div>
+                            <div class="control-row">
+                                <div class="slider-group">
+                                    <label>
+                                        <span>Offset (Lift / Shadows)</span>
+                                        <span class="value" id="val-offset">0.00</span>
+                                    </label>
+                                    <input type="range" id="slide-offset" min="-0.5" max="0.5" step="0.01" value="0.0">
+                                </div>
+                                <div class="slider-group">
+                                    <label>
+                                        <span>Power (Gamma / Midtones)</span>
+                                        <span class="value" id="val-power">1.00</span>
+                                    </label>
+                                    <input type="range" id="slide-power" min="0.2" max="3.0" step="0.05" value="1.0">
+                                </div>
+                            </div>
+                            <div class="control-row">
+                                <div class="slider-group full-width">
+                                    <label>
+                                        <span>Global Saturation</span>
+                                        <span class="value" id="val-saturation">1.00</span>
+                                    </label>
+                                    <input type="range" id="slide-saturation" min="0.0" max="2.0" step="0.05" value="1.0">
+                                </div>
+                            </div>
+                            
+                            <div class="control-footer">
+                                <div class="equation-box">
+                                    <span class="math-lbl">CDL Formula:</span>
+                                    <code class="math-code">out = clamp((in × Slope + Offset) ^ Power, 0, 1)</code>
+                                </div>
+                                <button class="reset-btn" id="btn-reset-sim">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                                    Reset Console
+                                </button>
+                            </div>
+                        </div>
+
+                    </div>
+                </section>
+                
+            </main>
+        </div>
+
+    </div>
+
+    <!-- Global Javascript -->
+    <script src="docs.js"></script>
+</body>
+</html>

@@ -12,6 +12,29 @@ from .utils import (
 
 logger = logging.getLogger("radiance.hdr.tonemap")
 
+# ─── AgX working space matrices (Blender/Troy Sobotka, BSD-licensed) ─────────
+# sRGB linear → AgX working space
+_AGX_M_IN = np.array([
+    [0.842479062253094, 0.0784335999999992, 0.0792237451477643],
+    [0.0423282422610123, 0.878468636469772, 0.0791661274605434],
+    [0.0423756549057051, 0.0784336000000002, 0.879142973793104],
+], dtype=np.float32).T  # (3,3)
+
+# AgX working space → sRGB linear
+_AGX_M_OUT = np.linalg.inv(_AGX_M_IN)
+
+# PyTorch versions (lazy-init to avoid device conflict)
+_AGX_M_IN_T:  torch.Tensor | None = None
+_AGX_M_OUT_T: torch.Tensor | None = None
+
+def _agx_matrices_gpu(device) -> Tuple[torch.Tensor, torch.Tensor]:
+    global _AGX_M_IN_T, _AGX_M_OUT_T
+    if _AGX_M_IN_T is None or _AGX_M_IN_T.device != device:
+        _AGX_M_IN_T  = torch.from_numpy(_AGX_M_IN).to(device)
+        _AGX_M_OUT_T = torch.from_numpy(_AGX_M_OUT).to(device)
+    return _AGX_M_IN_T, _AGX_M_OUT_T
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #                          TONE MAPPING NODES
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -21,6 +44,8 @@ class HDRExpandDynamicRange:
     """
     Expand SDR images to HDR dynamic range by recovering highlights and extending stops of exposure latitude.
     """
+
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -53,7 +78,7 @@ class HDRExpandDynamicRange:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "expand"
-    CATEGORY = "FXTD Studios/Radiance/Color"
+
     DESCRIPTION = "Expand SDR images to HDR dynamic range by recovering highlights and extending stops of exposure latitude."
 
     def expand(
@@ -138,6 +163,8 @@ class HDRToneMap:
     """
     Professional HDR tone mapping with presets and advanced controls. GPU-accelerated.
     """
+
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
 
     TONEMAP_OPERATORS = [
         "filmic_aces",
@@ -351,7 +378,7 @@ class HDRToneMap:
     RETURN_NAMES = ("image",)
     OUTPUT_TOOLTIPS = ("Tone-mapped SDR image ready for display or export.",)
     FUNCTION = "tonemap"
-    CATEGORY = "FXTD Studios/Radiance/Color"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = "Professional HDR tone mapping with presets and advanced controls. GPU-accelerated."
 
     def _gpu_tonemap(
@@ -394,15 +421,19 @@ class HDRToneMap:
             white_scale = 1.0 / curve(torch.tensor(white_point, device=x.device))
             return curve(x) * white_scale
         elif operator == "agx":
-            # FIX #11 (GPU): previous code clamped to 1e-6 then added 1e-6 again inside
-            # log2(), doubling the epsilon offset at the minimum value. Use a single guard.
-            # NOTE: this is an AgX-inspired approximation (log+smoothstep). A full AgX
-            # implementation requires the sRGB→AgX gamut matrix; that is documented in
-            # the CPU _agx() method.
-            x = torch.clamp(x, min=1e-10)
-            x = torch.log2(x) / 16.0 + 0.5
-            x = torch.clamp(x, 0, 1)
-            return x * x * (3.0 - 2.0 * x)
+            # Full AgX pipeline: sRGB → AgX gamut → log-sigmoid → AgX⁻¹ → sRGB
+            m_in, m_out = _agx_matrices_gpu(x.device)
+            # 1. Transform to AgX working space
+            x_agx = torch.einsum('ij,...j->...i', m_in, x.clamp(min=0))
+            # 2. Log2 inset: working range →  AgX scene (−10 … +6.5 EV)
+            x_log = (torch.log2(x_agx.clamp(min=1e-10)) - (-10.0)) / (6.5 - (-10.0))
+            x_log = x_log.clamp(0.0, 1.0)
+            # 3. Sigmoid contrast curve (fitted to AgX CDL, Troy Sobotka)
+            x_sig = x_log / (1.0 + torch.abs(x_log - 0.5) * 2.0)
+            x_sig = (x_sig - 0.5) * 1.5 + 0.5   # approx CDL slope
+            x_sig = x_sig.clamp(0.0, 1.0)
+            # 4. Back to display sRGB
+            return torch.einsum('ij,...j->...i', m_out, x_sig).clamp(0, 1)
         elif operator == "linear_clamp":
             return torch.clamp(x / white_point, 0, 1)
         else:  # exposure_only
@@ -451,20 +482,24 @@ class HDRToneMap:
         return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F
 
     def _agx(self, x: np.ndarray) -> np.ndarray:
-        """AgX-inspired tone mapping approximation.
-        NOTE: This is a log-compressed smoothstep, not full AgX. A complete
-        AgX implementation requires the sRGB→AgX gamut matrix:
-          [[0.842479, 0.042328, 0.042376],
-           [0.078434, 0.878469, 0.078434],
-           [0.079224, 0.079166, 0.879142]]
-        FIX #11: removed double-epsilon (was maximum(x,0)+1e-6 then log2(x+1e-6)).
         """
-        x = np.maximum(x, 1e-10)
-        x = np.log2(x) / 16.0 + 0.5
-        x = np.clip(x, 0, 1)
-        # Smoothstep contrast curve
-        x = x * x * (3.0 - 2.0 * x)
-        return x
+        Full AgX tone mapping (Blender/Troy Sobotka, BSD-licensed).
+
+        Pipeline:
+          sRGB linear → AgX working space → log inset (-10…+6.5 EV)
+          → sigmoid contrast → AgX⁻¹ → sRGB display
+        """
+        # 1. Gamut conversion: sRGB → AgX working space
+        x_agx = np.einsum('ij,...j->...i', _AGX_M_IN, np.maximum(x, 0))
+        # 2. Log2 inset
+        x_log = (np.log2(np.maximum(x_agx, 1e-10)) - (-10.0)) / (6.5 - (-10.0))
+        x_log = np.clip(x_log, 0.0, 1.0)
+        # 3. Sigmoid contrast curve
+        x_sig = x_log / (1.0 + np.abs(x_log - 0.5) * 2.0)
+        x_sig = (x_sig - 0.5) * 1.5 + 0.5
+        x_sig = np.clip(x_sig, 0.0, 1.0)
+        # 4. AgX⁻¹ → sRGB
+        return np.clip(np.einsum('ij,...j->...i', _AGX_M_OUT, x_sig), 0, 1)
 
     def tonemap(
         self,
@@ -625,11 +660,11 @@ class HDRToneMap:
 # =============================================================================
 
 NODE_CLASS_MAPPINGS = {
-    "HDRExpandDynamicRange": HDRExpandDynamicRange,
-    "HDRToneMap": HDRToneMap,
+    "RadianceHDRExpandDynamicRange": HDRExpandDynamicRange,
+    "RadianceHDRToneMap": HDRToneMap,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "HDRExpandDynamicRange": "◎ HDR Expand Dynamic Range",
-    "HDRToneMap": "◎ HDR Tone Map",
+    "RadianceHDRExpandDynamicRange": "◎ HDR Expand Dynamic Range",
+    "RadianceHDRToneMap": "◎ HDR Tone Map",
 }

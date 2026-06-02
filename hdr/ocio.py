@@ -196,6 +196,7 @@ def _format_colorspaces(config, config_path: str = "") -> str:
 
 
 class OCIOColorTransform:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     """
     Apply an OCIO colorspace transform to an image.
 
@@ -314,7 +315,7 @@ class OCIOColorTransform:
     RETURN_TYPES = ("IMAGE", "STRING")
     RETURN_NAMES = ("image", "metadata")
     FUNCTION = "apply_transform"
-    CATEGORY = "FXTD Studios/Radiance/Color"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = (
         "Apply an OCIO colorspace transform to an image. "
         "Supports any source/target pair in the active OCIO config, "
@@ -466,7 +467,7 @@ class OCIOColorTransform:
 
         metadata = json.dumps(
             {
-                "node": "OCIOColorTransform",
+                "node": "RadianceHDROCIOTransform",
                 "config": config_name,
                 "source_colorspace": source_colorspace,
                 "target_colorspace": target_colorspace,
@@ -492,6 +493,7 @@ class OCIOColorTransform:
 
 
 class ACESConfigManager:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     """
     Detect, download, and manage ACES OCIO configurations for professional color workflows.
     """
@@ -551,7 +553,7 @@ class ACESConfigManager:
     RETURN_TYPES = ("STRING", "STRING", "STRING")
     RETURN_NAMES = ("config_path", "colorspaces_list", "status_info")
     FUNCTION = "manage_config"
-    CATEGORY = "FXTD Studios/Radiance/Color"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = "Detect, download, and manage ACES OCIO configurations."
     OUTPUT_NODE = True
 
@@ -762,7 +764,7 @@ class OCIOListColorspaces:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("colorspaces_list",)
     FUNCTION = "list_spaces"
-    CATEGORY = "FXTD Studios/Radiance/Color"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = "List all colorspaces available in an OCIO configuration file."
     OUTPUT_NODE = True
 
@@ -814,13 +816,16 @@ class OCIOListColorspaces:
 # ===============================================================================
 
 NODE_CLASS_MAPPINGS = {
-    "OCIOColorTransform": OCIOColorTransform,
-    "ACESConfigManager": ACESConfigManager,
-    "OCIOListColorspaces": OCIOListColorspaces,
+    # Key renamed to RadianceHDROCIOTransform to avoid collision with
+    # color/transform.py which also registers RadianceOCIOColorTransform.
+    # hdr/__init__.py re-exports this class under RadianceHDROCIOTransform.
+    "RadianceHDROCIOTransform": OCIOColorTransform,
+    "RadianceACESConfigManager": ACESConfigManager,
+    "RadianceOCIOListColorspaces": OCIOListColorspaces,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "OCIOColorTransform": "◎ OCIO Color Transform",
-    "ACESConfigManager": "◎ ACES Config Manager",
-    "OCIOListColorspaces": "◎ List OCIO Colorspaces",
+    "RadianceHDROCIOTransform": "◎ Radiance OCIO Transform (HDR)",
+    "RadianceACESConfigManager": "◎ Radiance ACES Config Manager",
+    "RadianceOCIOListColorspaces": "◎ Radiance OCIO List Colorspaces",
 }

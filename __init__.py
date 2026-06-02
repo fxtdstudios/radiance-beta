@@ -1,161 +1,60 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-                    RADIANCE
-              Professional HDR Image Processing Suite
-                     Radiance © 2024-2026
-
-GPU-accelerated nodes for HDR, color grading, film effects, and upscaling.
-═══════════════════════════════════════════════════════════════════════════════
-"""
+"""Radiance — HDR/VFX/Color pipeline for ComfyUI."""
+from __future__ import annotations
 
 import os
-import importlib
-import logging
-
-# Configure module logger
-logger = logging.getLogger("radiance")
-
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-# Enable OpenEXR support in OpenCV
-os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#                       DEPENDENCY VALIDATION
-# ═══════════════════════════════════════════════════════════════════════════════
+import sys
 
 
-def check_dependencies():
-    """Check for optional dependencies and print helpful messages."""
-    missing = []
+def _bootstrap_package_context() -> None:
+    """Make relative imports reliable when ComfyUI loads this file directly."""
 
-    # Core dependencies (should always be available)
-    try:
-        import torch  # pylint: disable=unused-import
-        import numpy  # pylint: disable=unused-import
-        from PIL import Image  # pylint: disable=unused-import
-    except ImportError as e:
-        logger.error(f"CRITICAL: Missing core dependency: {e}")
-        return
+    global __package__, __path__
 
-    # Optional: OpenEXR for EXR I/O
-    try:
-        import OpenEXR  # pylint: disable=unused-import
-    except ImportError:
-        missing.append(("OpenEXR", "EXR file support", "pip install OpenEXR"))
+    if not __package__:
+        __package__ = "radiance"
+        __path__ = [os.path.dirname(os.path.abspath(__file__))]
 
-    # Optional: transformers for Depth Anything V2
-    try:
-        import transformers  # pylint: disable=unused-import
-    except ImportError:
-        missing.append(
-            ("transformers", "Depth Map Generator", "pip install transformers")
-        )
-
-    # Optional: colour-science for advanced color
-    try:
-        import colour  # pylint: disable=unused-import
-    except ImportError:
-        missing.append(
-            ("colour-science", "Advanced OCIO/color", "pip install colour-science")
-        )
-
-    # Optional: defusedxml for secure XML parsing
-    try:
-        import defusedxml  # pylint: disable=unused-import
-    except ImportError:
-        missing.append(
-            ("defusedxml", "Secure XML parsing (CDL)", "pip install defusedxml")
-        )
-
-    # Print optional dependency status
-    if missing:
-        logger.info("Optional dependencies not installed:")
-        for name, feature, cmd in missing:
-            logger.info(f"  • {name}: {feature} (Install: {cmd})")
-    else:
-        logger.debug("All optional dependencies available")
+    sys.modules.setdefault("radiance", sys.modules.get(__name__, type(sys)(__name__)))
 
 
-check_dependencies()
+_bootstrap_package_context()
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#                       DYNAMIC NODE LOADING
-# ═══════════════════════════════════════════════════════════════════════════════
+from .config.constants import AUTHOR, VERSION, WEB_DIRECTORY
+from .config.dependencies import validate_runtime_dependencies
+from .config.env import configure_runtime_environment
+from .core.logging import setup_radiance_logging
+from .nodes.registry import NodeModuleSpec, load_node_mappings
 
-from . import (
-    nodes_denoise,
-    nodes_depth,
-    nodes_dna,
-    nodes_grade,
-    nodes_io,
-    nodes_layout,
-    nodes_loader,
-    nodes_nuke,
-    nodes_overlay,
-    nodes_prompt,
-    nodes_qc,
-    nodes_resolution,
-    nodes_radiance_mask,
-    nodes_radiance_viewer,
-    nodes_sampler,
-    nodes_scopes,
-    nodes_studio,
-    nodes_temporal,
-    nodes_text,
-    nodes_workspace,
-    color,
-    film,
-    image,
-    hdr
-)
+logger = setup_radiance_logging()
 
-NODE_CLASS_MAPPINGS = {}
-NODE_DISPLAY_NAME_MAPPINGS = {}
-WEB_DIRECTORY = "./js"
 
-modules = [
-    color,
-    film,
-    image,
-    hdr,
-    nodes_denoise,
-    nodes_depth,
-    nodes_dna,
-    nodes_grade,
-    nodes_io,
-    nodes_layout,
-    nodes_loader,
-    nodes_nuke,
-    nodes_overlay,
-    nodes_prompt,
-    nodes_qc,
-    nodes_resolution,
-    nodes_radiance_mask,
-    nodes_radiance_viewer,
-    nodes_sampler,
-    nodes_scopes,
-    nodes_studio,
-    nodes_temporal,
-    nodes_text,
-    nodes_workspace
-]
+def _load_comfyui_nodes() -> tuple[dict, dict]:
+    """Load the organized node catalog and optional viewer extension."""
 
-for module in modules:
-    try:
-        if hasattr(module, "NODE_CLASS_MAPPINGS"):
-            NODE_CLASS_MAPPINGS.update(module.NODE_CLASS_MAPPINGS)
-        if hasattr(module, "NODE_DISPLAY_NAME_MAPPINGS"):
-            NODE_DISPLAY_NAME_MAPPINGS.update(module.NODE_DISPLAY_NAME_MAPPINGS)
-        logger.debug(f"Loaded {module.__name__}")
-    except Exception as e:
-        logger.error(f"FAILED to load {module.__name__}: {e}")
+    entrypoint_modules = (
+        NodeModuleSpec(".nodes", package=__name__, required=True),
+        NodeModuleSpec(".nodes_radiance_viewer", package=__name__),
+    )
+    load_result = load_node_mappings(
+        entrypoint_modules,
+        logger=logger,
+        context="Radiance entry point",
+    )
+    return load_result.class_mappings, load_result.display_name_mappings
 
-# Package info
-__version__ = "2.3.3"
-__author__ = "Radiance"
+
+configure_runtime_environment()
+validate_runtime_dependencies(logger)
+
+NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS = _load_comfyui_nodes()
+
+__version__ = VERSION
+__author__ = AUTHOR
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
 
 logger.info(
-    f"Radiance: Successfully loaded {len(NODE_CLASS_MAPPINGS)} nodes (v{__version__})"
+    "Radiance: successfully loaded %d nodes (v%s)",
+    len(NODE_CLASS_MAPPINGS),
+    __version__,
 )
 logger.debug("Radiance Viewer JavaScript extension enabled")

@@ -1,0 +1,46 @@
+# Development-only files excluded from Comfy Registry packages.
+.git/
+.github/
+.hypothesis/
+.pytest_cache/
+__pycache__/
+build/
+dist/
+*.egg-info/
+*.log
+*.map
+*.tmp
+*.temp
+node_modules/
+scratch/
+MagicMock/
+rudra/
+js/docs/
+core/*.db
+workflows/.versions/
+workflows/GENERAL/dashboard_*.rad
+workflows/GENERAL/test_*_v*.rad
+
+# Tests and local validation assets stay on GitHub, not in the registry archive.
+tests/
+tools/check_mojibake.py
+tools/check_release_ready.py
+tools/validate_hdr_pipeline.py
+ADR-*.md
+DEBUG-*.md
+SESSION_LOG.md
+RADIANCE_v*_RELEASE_NOTES.md
+*_audit.docx
+*.docx
+*.bak
+
+# Source maps / package-manager state are not needed by ComfyUI at runtime.
+package-lock.json
+package.json
+
+# Internal engineering reports & dev artifacts (kept on GitHub, excluded from registry)
+artifacts/
+PRE_RELEASE_REVIEW.md
+CLEANUP_REPORT.md
+radiance_hdr_vae_decode_report.md
+*.svg

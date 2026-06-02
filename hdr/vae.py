@@ -62,6 +62,32 @@ VERSIONING:
   v2.2 — BUG-47..56 fixes, HDR-FIX controls, extended sRGB EOTF
   v2.3 — True HDR Compress(Log): soft-shoulder, highlight denoise,
          clamp-free linear output for all log profiles
+  v2.3.5 — BUG-OVEREXPOSE: Fixed overexposed output when target_space="Linear"
+           Root cause: missing linear→sRGB re-encode in the SDR display path.
+           target_space="Linear" + hdr_output=False now re-encodes to sRGB
+           for ComfyUI IMAGE compatibility (same as target_space="sRGB").
+           Set hdr_output=True for true scene-linear VFX output.
+           Default target_space changed from "Linear" to "sRGB".
+           Final clamp extended to cover "Linear"+"Raw" in SDR mode (was sRGB-only).
+  v2.3.8 — display_tonemap decoupled from hdr_output.
+           display_tonemap is now the SOLE control for tonemapping — fires even
+           when hdr_output=True. hdr_output only controls final clamping and
+           sRGB re-encode. display_tonemap="None" = guaranteed raw HDR passthrough
+           (always overexposed in ComfyUI, intended for OCIO-aware viewers only).
+  v2.3.9 — BUG-OVEREXPOSE-INCOMPLETE: Fixed overexposed output for
+           target_space="ACEScg" / "ACES 2065-1" / "Rec.2020 Linear" + hdr_output=False.
+           v2.3.5 extended the final [0,1] clamp only to target_space="Linear";
+           the three scene-referred linear spaces were missed — they passed float
+           values > 1.0 to ComfyUI's IMAGE socket, causing blown-out output.
+           Fix: clamp ALL target spaces when hdr_output=False (not just display-referred).
+           hdr_output=True is unchanged — values > 1.0 preserved for VFX pipelines.
+           Added WARNING log when scene-referred target_space is used with hdr_output=False.
+  v2.4   — decode_noise_scale: per-profile lerp noise injection into the latent
+           before VAE decode. Breaks up coherent decoder grid artifacts in flat
+           highlight regions that would be exponentially amplified by log→linear
+           decompression. Default 0.0 (disabled). Per-profile recommended values
+           in DECODE_NOISE_SCALE_PER_PROFILE (LogC3=0.025 matches LTX default).
+           Inspired by LTX LumiVid (arxiv 2604.11788).
 """
 
 import torch
@@ -79,66 +105,29 @@ import comfy.model_management
 import comfy.utils
 import folder_paths
 
-logger = logging.getLogger("Radiance")
+logger = logging.getLogger("radiance")
 
 # Local imports
 from .utils import tensor_srgb_to_linear, tensor_linear_to_srgb
 
-# Log curve imports (optional)
-_HAS_LOG_CURVES = False
-try:
-    from ..color_utils import (
-        tensor_logc4_to_linear,
-        tensor_linear_to_logc4,
-        tensor_slog3_to_linear,
-        tensor_linear_to_slog3,
-        tensor_vlog_to_linear,
-        tensor_linear_to_vlog,
-        tensor_davinci_intermediate_to_linear,
-        tensor_linear_to_davinci_intermediate,
-        tensor_log3g10_to_linear,
-        tensor_linear_to_log3g10,
-    )
+# Log curve imports from canonical color package
+_HAS_LOG_CURVES = True
+_HAS_LOGC3 = True
 
-    # ARRI LogC3 — Alexa Classic / Mini / SXT / LF (LogC3 mode).
-    # Imported separately so absence does not disable the other log curves.
-    _HAS_LOGC3 = False
-    try:
-        from ..color_utils import tensor_logc3_to_linear, tensor_linear_to_logc3
-        _HAS_LOGC3 = True
-    except ImportError:
-        # Provide passthrough stubs so the converter dicts always have a value;
-        # the warning below fires once at encode/decode time when actually used.
-        def tensor_logc3_to_linear(t):  # noqa: E301
-            logger.warning(
-                "[Radiance VAE 4K] tensor_logc3_to_linear not found in color_utils — "
-                "ARRI LogC3 input will NOT be linearized. Add LogC3 to color_utils.py."
-            )
-            return t
-
-        def tensor_linear_to_logc3(t):  # noqa: E301
-            logger.warning(
-                "[Radiance VAE 4K] tensor_linear_to_logc3 not found in color_utils — "
-                "ARRI LogC3 output will be LINEAR data. Add LogC3 to color_utils.py."
-            )
-            return t
-
-    _HAS_LOG_CURVES = True
-except ImportError:
-    # FIX-1: Emit a visible warning at module load time so operators immediately
-    # know that log encode/decode will NOT work. Previously this was silent and
-    # log-space nodes would appear to succeed while producing wrong output.
-    logger.warning(
-        "[Radiance VAE 4K] color_utils not found — log curve encode/decode is DISABLED. "
-        "Log input spaces (LogC3, LogC4, S-Log3, V-Log, DaVinci Intermediate, Log3G10) will pass "
-        "through without linearization, and log output spaces will emit linear data. "
-        "Install color_utils.py alongside this package to enable log support."
-    )
-    _HAS_LOGC3 = False
-
-    # Passthrough stubs so converter dicts are always populated.
-    def tensor_logc3_to_linear(t): return t  # noqa: E704
-    def tensor_linear_to_logc3(t): return t  # noqa: E704
+from radiance.color.transfer import (
+    tensor_logc4_to_linear,
+    tensor_linear_to_logc4,
+    tensor_slog3_to_linear,
+    tensor_linear_to_slog3,
+    tensor_vlog_to_linear,
+    tensor_linear_to_vlog,
+    tensor_davinci_intermediate_to_linear,
+    tensor_linear_to_davinci_intermediate,
+    tensor_log3g10_to_linear,
+    tensor_linear_to_log3g10,
+    tensor_logc3_to_linear,
+    tensor_linear_to_logc3,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -151,6 +140,11 @@ VAE_FACTOR_MAP: Dict[str, int] = {
     # Video models that may use non-8 factors
     "StableCascadeStageC": 42,
     "StableCascadeStageB": 4,
+    "Wan": 8,
+    "CogVideo": 8,
+    "StepVideo": 8,
+    "Cosmos": 8,
+    "HunyuanVideo": 8,
     # Most modern image models: 8
 }
 
@@ -250,6 +244,46 @@ LOG_PROFILE_HDR_PARAMS: Dict[str, Tuple[float, float, float, float]] = {
 
 # Default for unknown log profiles (same as LogC4 — safe middle ground)
 LOG_PROFILE_HDR_DEFAULT = (0.96, 1.08, 0.80, 0.55)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v2.4: Per-profile decode_noise_scale defaults
+# ─────────────────────────────────────────────────────────────────────────────
+# Based on LTX LumiVid (arxiv 2604.11788): injecting a small amount of noise
+# into the latent BEFORE VAE decode breaks up coherent grid artifacts that the
+# VAE's convolutional decoder can introduce in flat highlight regions.  The
+# effect is most important for Compress (Log) mode because the subsequent
+# log→linear decompression amplifies any residual artifact exponentially in
+# the highlight region (slope > 200 at code 1.0 for LogC3/V-Log).
+#
+# Tuning rationale: steeper log curves amplify latent artifacts more after
+# decompression, so they benefit from slightly more noise at the latent level:
+#
+#   ┌─────────────────────┬─────────────────────────────────────────────────┐
+#   │ Profile             │ Recommended scale │ Rationale                   │
+#   ├─────────────────────┼───────────────────┼─────────────────────────────┤
+#   │ ARRI LogC4          │ 0.018             │ moderate slope ~250         │
+#   │ Sony S-Log3         │ 0.018             │ moderate slope ~240         │
+#   │ ARRI LogC3          │ 0.025             │ steep ~350; matches LTX     │
+#   │ Panasonic V-Log     │ 0.022             │ steep ~280                  │
+#   │ DaVinci Intermediate│ 0.030             │ very steep ~600+            │
+#   │ RED Log3G10         │ 0.035             │ extreme slope ~1100+        │
+#   └─────────────────────┴───────────────────┴─────────────────────────────┘
+#
+# Formula (lerp, same as LTX):
+#   noised_latent = (1 - scale) * latent + scale * randn_like(latent)
+#
+# At scale=0.025 the latent moves only 2.5% toward pure noise — perceptually
+# transparent but enough to de-correlate VAE decoder grid patterns.
+# scale=0.0 disables the feature entirely (safe default for existing workflows).
+
+DECODE_NOISE_SCALE_PER_PROFILE: Dict[str, float] = {
+    "ARRI LogC4":            0.018,
+    "Sony S-Log3":           0.018,
+    "ARRI LogC3":            0.025,   # matches LTX default for LogC3
+    "Panasonic V-Log":       0.022,
+    "DaVinci Intermediate":  0.030,
+    "RED Log3G10":           0.035,
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # V-1 FIX: Precomputed color space matrices (module-level constants)
@@ -391,7 +425,11 @@ def _soft_log_shoulder(img: torch.Tensor, knee: float = 0.96, ceiling: float = 1
     if above.any():
         result = img.clone()
         rng = ceiling - knee
-        excess = (img[above] - knee) / rng
+        # v2.3.1 FIX (V-B1): guard against caller-supplied tuples where
+        # ceiling <= knee (misconfigured profile). Without the +1e-8 the
+        # division becomes NaN/Inf and contaminates the whole tensor —
+        # matches the same guard in fast_vae._apply_soft_shoulder.
+        excess = (img[above] - knee) / (rng + 1e-8)
         # tanh: maps [0, ∞) → [0, 1), so result → [knee, ceiling)
         result[above] = knee + rng * torch.tanh(excess)
         return result
@@ -505,7 +543,7 @@ def detect_vae_factor(vae: Any) -> int:
 def detect_latent_format(vae: Any) -> str:
     """
     v2.0: Return a format string e.g. 'flux_16ch' based on VAE latent channels.
-    Compatible with the Sampler Pro v4.0 latent_format input socket.
+    Compatible with the Radiance Sampler latent_format input socket.
     """
     # Try to get channel count from VAE
     channels = None
@@ -561,11 +599,17 @@ def build_encode_quality_report(
     clip_pct = round(n_clipped / max(1, n_total) * 100, 3)
     nan_count = int(torch.isnan(latent).sum().item() + torch.isinf(latent).sum().item())
 
-    b, c_lat, lh, lw = latent.shape
+    # v2.3.1 FIX (V-B7): 3D-native VAEs (Wan / Cosmos / HunyuanVideo) return
+    # 5D latents (B, C, F, H, W) even for single-image encode paths. The
+    # original 4-tuple unpack crashed for those VAEs.
+    if latent.ndim == 5:
+        b, c_lat, _frames, lh, lw = latent.shape
+    else:
+        b, c_lat, lh, lw = latent.shape
     ph, pw = pixels_before.shape[1:3]
 
     report = {
-        "version": "2.3",
+        "version": "3.0",
         "input_resolution": f"{pw}x{ph}",
         "latent_resolution": f"{lw}x{lh}",
         "latent_format": latent_fmt,
@@ -628,8 +672,15 @@ def _encode_with_sampling_mode(vae: Any, pixels: torch.Tensor, mode: str) -> tor
                     return posterior.mode()
                 if isinstance(posterior, torch.Tensor):
                     return posterior
-            except Exception:
-                pass
+            except Exception as e:
+                # v2.3.1 FIX (V-B-EXC): log-but-continue. Previously this
+                # swallowed every exception silently, hiding programming
+                # mistakes (TypeError, AttributeError) that would never be
+                # "fixed" by falling through to Strategy 2.
+                logger.debug(
+                    f"[Radiance VAE] {method_name} raised "
+                    f"{type(e).__name__}: {e}; trying next strategy."
+                )
 
     # Strategy 2: Access the raw first_stage_model with correct preprocessing.
     # ComfyUI's vae.encode() internally does:
@@ -696,6 +747,7 @@ def _encode_with_sampling_mode(vae: Any, pixels: torch.Tensor, mode: str) -> tor
 
 
 class TileEngine:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     """
     Production-grade tiling engine with cosine blend weights.
     Handles arbitrary image sizes, pad-to-multiple, and VRAM-aware sizing.
@@ -949,14 +1001,14 @@ class RadianceVAE4KEncode:
     RETURN_TYPES = ("LATENT", "IMAGE", "STRING", "STRING", "STRING")
     RETURN_NAMES = ("samples", "alpha", "metadata", "latent_format", "quality_report")
     OUTPUT_TOOLTIPS = (
-        "Encoded latent — wire to Sampler Pro or save node.",
+        "Encoded latent — wire to Radiance Sampler or save node.",
         "Alpha channel tensor — wire to Radiance VAE 4K Decode alpha input.",
         "Encode metadata JSON — wire to Decode crop_padding for auto-crop.",
-        "Latent format string (e.g. 'flux_16ch') — wire to Sampler Pro latent_format input.",
+        "Latent format string (e.g. 'flux_16ch') — wire to Radiance Sampler latent_format input.",
         "Quality metrics JSON: clipping %, NaN count, latent range, tile info.",
     )
     FUNCTION = "encode"
-    CATEGORY = "FXTD Studios/Radiance/Generate"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = (
         "v2.3 — Universal 4K+ VAE encode. Auto VAE-factor detection, "
         "video 5D latent support, 11 color spaces, mean/sample/mode latent sampling, "
@@ -1333,13 +1385,19 @@ class RadianceVAE4KEncode:
             is_3d_vae = True
             
         if is_video and not is_3d_vae:
-            B, F, H, W, C = pixels.shape
+            # v2.3.1 FIX (V-B16): renamed the frame-count local from `F` to
+            # `num_frames`. `F` is the module-level alias for torch.nn.functional
+            # imported at the top of the file; re-binding it in function scope
+            # turned any later `F.pad` / `F.interpolate` call in this function
+            # into an AttributeError. Only the early-return in this branch
+            # hid the landmine — harmless today, broken after the next refactor.
+            B, num_frames, H, W, C = pixels.shape
             logger.info(
-                f"[Radiance 4K Encode v2.3] Video: {B}×{F}×{W}×{H}, space={source_space}"
+                f"[Radiance 4K Encode v2.3] Video: {B}×{num_frames}×{W}×{H}, space={source_space}"
             )
             # Encode frame by frame, stack temporal dim
             frame_latents = []
-            for fi in range(F):
+            for fi in range(num_frames):
                 frame = pixels[:, fi, ...]  # (B, H, W, C)
                 latent_frame, _, _, _, _ = self.encode(
                     frame, vae, source_space, tile_size, overlap, exposure,
@@ -1348,15 +1406,30 @@ class RadianceVAE4KEncode:
                 frame_latents.append(latent_frame["samples"])
             # Stack: (B, C, F, latH, latW)
             all_frames = torch.stack(frame_latents, dim=2)
-            video_latent = {"samples": all_frames, "latent_format": latent_fmt}
+            # v2.3.1 FIX (V-B23): include radiance_meta on the video latent
+            # dict so decode() can auto-recover hdr_mode / source_space /
+            # vae_factor on the other side. Previously the key was missing,
+            # so a Compress(Log) video roundtrip lost its HDR mode and decode
+            # either fell back to Clip(SDR) or required force_hdr_decode=True.
+            video_latent = {
+                "samples": all_frames,
+                "latent_format": latent_fmt,
+                "radiance_meta": {
+                    "pad_h": 0, "pad_w": 0,
+                    "vae_factor": vae_factor,
+                    "latent_format": latent_fmt,
+                    "source_space": source_space,
+                    "hdr_mode": hdr_mode,
+                },
+            }
             # Build a minimal quality/meta output for video
             total_time_ms = int((_time.time() - t_start) * 1000)
             # Match device of input pixels so downstream nodes don't hit a device
             # mismatch when alpha is moved to GPU alongside the image tensor.
             alpha_out = torch.ones((B, H, W, 1), dtype=torch.float32, device=pixels.device)
             meta = json.dumps({"node": "RadianceVAE4KEncode", "video": True,
-                               "frames": F, "latent_format": latent_fmt})
-            qr = json.dumps({"version": "2.3", "video": True, "frames": F,
+                               "frames": num_frames, "latent_format": latent_fmt})
+            qr = json.dumps({"version": "3.0", "video": True, "frames": num_frames,
                              "latent_format": latent_fmt, "encode_time_ms": total_time_ms})
             return (video_latent, alpha_out, meta, latent_fmt, qr)
 
@@ -1438,6 +1511,10 @@ class RadianceVAE4KEncode:
             "source_space": source_space, "hdr_mode": hdr_mode,
         }
         latent["radiance_meta"] = radiance_meta
+        # v2.3.1 FIX (V-B11): mirror the top-level "latent_format" key that the
+        # video encode path sets, so downstream consumers that inspect
+        # latent["latent_format"] get a consistent shape from both paths.
+        latent["latent_format"] = latent_fmt
 
         # Standard metadata JSON (backward compat wire via crop_padding)
         metadata = {
@@ -1492,7 +1569,20 @@ class RadianceVAE4KDecode:
                 "vae": ("VAE",),
                 "target_space": (
                     cls.TARGET_SPACES,
-                    {"default": "Linear", "tooltip": "Output color space."},
+                    {
+                        "default": "sRGB",
+                        "tooltip": (
+                            "Output color space. "
+                            "'sRGB' (default): correct for SaveImage, PreviewImage, and all standard "
+                            "ComfyUI nodes — output is display-ready [0,1] sRGB. "
+                            "'Linear': scene-linear for VFX pipelines (Nuke, Resolve, Houdini). "
+                            "Requires hdr_output=True for true linear passthrough; "
+                            "with hdr_output=False the image is re-encoded to sRGB for "
+                            "ComfyUI compatibility. "
+                            "Log/ACEScg/Rec.2020 spaces are scene-referred — connect to a "
+                            "tonemap node before SaveImage."
+                        ),
+                    },
                 ),
             },
             "optional": {
@@ -1538,6 +1628,24 @@ class RadianceVAE4KDecode:
                             "across the full log-curve dynamic range. "
                             "'Soft Clip': inverts tanh rolloff to recover highlights. "
                             "'Passthrough': extended sRGB range."
+                        ),
+                    },
+                ),
+                "display_tonemap": (
+                    ["Reinhard", "ACES Filmic", "None"],
+                    {
+                        "default": "ACES Filmic",
+                        "tooltip": (
+                            "v2.3.8: display_tonemap is NOW THE SOLE TONEMAP CONTROL — "
+                            "independent of hdr_output. "
+                            "'Reinhard' or 'ACES Filmic': tonemap ALWAYS fires for "
+                            "Compress(Log), even when hdr_output=True. "
+                            "Reinhard → smooth rolloff [0,∞)→[0,1), hue-preserving. "
+                            "ACES Filmic → filmic contrast, clips cleanly above ~10 lin. "
+                            "'None': NO tonemap regardless of hdr_output. Scene-linear "
+                            "values far above 1.0 pass through — GUARANTEED OVEREXPOSURE in "
+                            "ComfyUI preview. Use only with an OCIO-aware downstream viewer. "
+                            "Ignored for all non-Compress(Log) hdr_modes."
                         ),
                     },
                 ),
@@ -1593,8 +1701,16 @@ class RadianceVAE4KDecode:
                     {
                         "default": "Linear",
                         "tooltip": (
-                            "Source space used during encode. Required when hdr_mode is "
-                            "'Compress (Log)' to invert the exact same log curve."
+                            "Source color space used during encode. "
+                            "⚠ CRITICAL for hdr_mode='Compress (Log)': must exactly match the "
+                            "log curve selected at encode time. Wrong value = wrong decompression "
+                            "curve = incorrect colors even if exposure looks OK. "
+                            "Valid log spaces: ARRI LogC4, ARRI LogC3, Sony S-Log3, "
+                            "Panasonic V-Log, DaVinci Intermediate, RED Log3G10. "
+                            "If source_space is set to a non-log value (Linear, sRGB, ACEScg) "
+                            "with Compress(Log), a WARNING is logged and LogC4 fallback is used. "
+                            "For diffusion model output (SDXL/FLUX/SD1.5), use Clip(SDR) or "
+                            "Soft Clip instead — those models output sRGB, not log."
                         ),
                     },
                 ),
@@ -1638,6 +1754,34 @@ class RadianceVAE4KDecode:
                         ),
                     },
                 ),
+                # v2.4: Decode-time noise injection (LTX LumiVid / arxiv 2604.11788)
+                "decode_noise_scale": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 0.1,
+                        "step": 0.001,
+                        "tooltip": (
+                            "v2.4 — Decode-time noise injection. "
+                            "Mixes a small amount of Gaussian noise into the latent BEFORE "
+                            "VAE decode using lerp: noised = (1-scale)*latent + scale*noise. "
+                            "Breaks up coherent VAE decoder grid artifacts in flat highlight "
+                            "regions. Effect is most valuable for Compress (Log) mode where "
+                            "the log→linear decompression exponentially amplifies any residual "
+                            "decoder artifact in the highlight band. "
+                            "0.0 = disabled (default — safe for existing workflows). "
+                            "Per-profile recommended starting points:\n"
+                            "  ARRI LogC4:           0.018\n"
+                            "  Sony S-Log3:          0.018\n"
+                            "  ARRI LogC3:           0.025  (matches LTX default)\n"
+                            "  Panasonic V-Log:      0.022\n"
+                            "  DaVinci Intermediate: 0.030\n"
+                            "  RED Log3G10:          0.035\n"
+                            "Ignored for non-Compress(Log) hdr_modes."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -1650,11 +1794,12 @@ class RadianceVAE4KDecode:
         "Latent format detected from VAE (e.g. 'flux_16ch').",
     )
     FUNCTION = "decode"
-    CATEGORY = "FXTD Studios/Radiance/Generate"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = (
-        "v2.3 — Universal 4K+ VAE decode. True HDR Compress(Log) with soft-shoulder "
-        "and highlight denoise for clean, clamp-free HDR output. Auto VAE-factor, "
-        "11 color spaces, video 5D support, auto-crop from radiance_meta."
+        "v2.4 — Universal 4K+ VAE decode. True HDR Compress(Log) with soft-shoulder, "
+        "highlight denoise, and per-profile decode_noise_scale for clean, clamp-free "
+        "HDR output. Auto VAE-factor, 11 color spaces, video 5D support, "
+        "auto-crop from radiance_meta."
     )
 
     def _tiled_decode(
@@ -1665,6 +1810,7 @@ class RadianceVAE4KDecode:
         overlap_px: int,
         pbar: Any = None,
         vae_factor: int = 8,
+        turbo_decoder: torch.nn.Module = None,
     ) -> torch.Tensor:
         """
         Decode full latent in overlapping tiles with cosine blend.
@@ -1732,7 +1878,26 @@ class RadianceVAE4KDecode:
                 # Decode on GPU — defensive no_grad: idempotent if caller has it,
                 # protective if _tiled_decode is ever invoked standalone.
                 with torch.no_grad():
-                    tile_decoded = vae.decode(tile_lat).float().cpu()
+                    if turbo_decoder is not None:
+                        if next(turbo_decoder.parameters()).device != tile_lat.device:
+                            turbo_decoder.to(tile_lat.device)
+                        
+                        _tlat = tile_lat
+                        if _tlat.ndim == 5:
+                            _B, _C, _F, _H, _W = _tlat.shape
+                            _tlat = _tlat.permute(0, 2, 1, 3, 4).reshape(_B * _F, _C, _H, _W).contiguous()
+                            if _tile_video_frames is None:
+                                _tile_video_frames = _F
+                        
+                        # Process in chunks to prevent cuDNN/VRAM hard-crashes on large batches
+                        _chunk_size = 4
+                        _tile_outputs = []
+                        for i in range(0, _tlat.shape[0], _chunk_size):
+                            _chunk = _tlat[i:i+_chunk_size]
+                            _tile_outputs.append(turbo_decoder(_chunk).float().cpu())
+                        tile_decoded = torch.cat(_tile_outputs, dim=0)
+                    else:
+                        tile_decoded = vae.decode(tile_lat).float().cpu()
 
                 # FIX-4: 3D (temporal) VAEs return (B, F, H, W, C) — a 5D tensor.
                 # Reshape to (B*F, H, W, C) so all downstream accumulation logic
@@ -1744,6 +1909,12 @@ class RadianceVAE4KDecode:
                     tile_decoded = tile_decoded.reshape(_B5 * _F5, _H5, _W5, _C5)
                     # Also update b so the accumulator is sized for all frames
                     b = tile_decoded.shape[0]
+
+                # Special case: Turbo decoder output is (B, C, H, W).
+                # Main VAE output is (B, H, W, C).
+                # Radiance tiling engine expects (B, H, W, C).
+                if turbo_decoder is not None and tile_decoded.shape[1] == 3:
+                   tile_decoded = tile_decoded.permute(0, 2, 3, 1)
 
                 # Pixel coordinates
                 px1 = lx1 * scale
@@ -1805,6 +1976,7 @@ class RadianceVAE4KDecode:
         target_stops: float,
         source_space: str = "Linear",
         hdr_output: bool = False,
+        display_tonemap: str = "ACES Filmic",
     ) -> torch.Tensor:
         """Convert VAE output to target color space.
 
@@ -2013,8 +2185,158 @@ class RadianceVAE4KDecode:
                 img = img * (2.0**exposure)
 
         # Step 4: Linear → target space
+        #
+        # v2.3.7 FINAL FIX (BUG-COMPRESS-LOG-ACEScg-OVEREXPOSE):
+        #
+        # ROOT CAUSE (confirmed from user screenshot):
+        #   Settings: hdr_mode=Compress(Log), target_space=ACEScg, hdr_output=True,
+        #             display_tonemap=ACES Filmic, source_space=sRGB
+        #
+        #   The v2.3.6 auto-tonemap block fired ONLY for display-referred spaces:
+        #     _display_referred_space = target_space in ("sRGB","Raw") or
+        #                               (target_space=="Linear" and not hdr_output)
+        #   ACEScg is NOT in that set → display_tonemap="ACES Filmic" was silently
+        #   ignored for ALL scene-referred and log target spaces.
+        #   Log decompression produced scene-linear [0..55+].
+        #   ACEScg matrix applied to [0..55+] = ACEScg [0..55+].
+        #   hdr_output=True skipped all clamping.
+        #   ComfyUI preview treats tensor as sRGB [0,1] → massively overexposed.
+        #
+        # THE FIX — two parts:
+        #
+        #   Part A: Tonemap fires for ALL target spaces when hdr_output=False.
+        #     Old guard: hdr_mode==Compress(Log) AND _display_referred AND not hdr_output
+        #     New guard: hdr_mode==Compress(Log) AND not hdr_output
+        #     Tonemap runs BEFORE the target_space conversion, so ACEScg/Log/Rec2020
+        #     matrix ops all receive properly-ranged [0,1] display-linear data.
+        #
+        #   Part B: hdr_output=True logs an explicit WARNING so the user knows
+        #     their ComfyUI preview will always look overexposed in this mode.
+        #     This is CORRECT for VFX pipelines (Nuke/Resolve) but confusing in
+        #     ComfyUI's display.
+        #
+        # CORRECT SETTINGS GUIDE:
+        #   Preview / SaveImage  → hdr_output=False,  target_space=sRGB
+        #   Nuke / Resolve VFX   → hdr_output=True,   target_space=ACEScg/Linear
+        #   Log delivery (EXR)   → hdr_output=True,   target_space=ARRI LogC4 etc.
+
+        # ── v2.3.8 FINAL DESIGN: display_tonemap is the ONLY tonemap control ────
+        #
+        # PREVIOUS DESIGN (v2.3.7) — WRONG:
+        #   Tonemap fired: hdr_mode==Compress(Log) AND not hdr_output
+        #   Effect: hdr_output=True silently overrode display_tonemap=Reinhard.
+        #   If user set display_tonemap=Reinhard but hdr_output=True (for VFX
+        #   pipeline), the tonemap was skipped → overexposed output regardless.
+        #   Also: display_tonemap=None was meaningless with hdr_output=False since
+        #   the tonemap block ran anyway and "None" just fell through.
+        #
+        # NEW DESIGN (v2.3.8):
+        #   display_tonemap is the SOLE control for tonemapping.
+        #   hdr_output controls ONLY the final clamp and sRGB re-encode.
+        #
+        #   display_tonemap = "Reinhard"    → tonemap always (even hdr_output=True)
+        #   display_tonemap = "ACES Filmic" → tonemap always
+        #   display_tonemap = "None"        → raw scene-linear [0..55+], ALWAYS blown
+        #                                     in ComfyUI preview regardless of hdr_output.
+        #                                     Use ONLY when feeding a proper OCIO viewer.
+        #
+        #   hdr_output = False → after tonemap+target_space: clamp [0,1] + sRGB encode
+        #   hdr_output = True  → after tonemap+target_space: NO clamp, raw float tensor
+        #
+        # CORRECT SETTINGS:
+        # ┌─────────────────────┬──────────────────┬────────────┬─────────────────┐
+        # │ Use case            │ display_tonemap  │ hdr_output │ target_space    │
+        # ├─────────────────────┼──────────────────┼────────────┼─────────────────┤
+        # │ Preview / SaveImage │ Reinhard / ACES  │ False      │ sRGB            │
+        # │ Nuke (tonemapped)   │ Reinhard / ACES  │ True       │ ACEScg / Linear │
+        # │ Nuke (raw HDR)      │ None             │ True       │ ACEScg / Linear │
+        # │ Log delivery EXR    │ None             │ True       │ ARRI LogC4 etc  │
+        # └─────────────────────┴──────────────────┴────────────┴─────────────────┘
+
+        # Part B: warn when display_tonemap=None with Compress(Log) → blown output
+        if hdr_mode == "Compress (Log)" and display_tonemap == "None":
+            logger.warning(
+                "[Radiance 4K Decode v2.3.8] display_tonemap='None' + Compress(Log): "
+                "scene-linear values far above 1.0 pass through without tonemapping. "
+                "ComfyUI preview/SaveImage will look overexposed. "
+                "Set display_tonemap='ACES Filmic' for filmic contrast, or 'Reinhard' "
+                "for a softer technical preview. Use 'None' only when feeding an OCIO-aware viewer."
+            )
+
+        # v2.3.9 FIX: Warn when a scene-referred target space is used with
+        # hdr_output=False. In that case we now clamp to [0,1] (see final clamp
+        # block below), which produces a valid but DISPLAY-REFERRED result — not
+        # the wide-gamut / HDR tensor the user might expect from "ACEScg" output.
+        # This warning steers them toward the correct settings.
+        _SCENE_REFERRED_SPACES = {"ACEScg", "ACES 2065-1", "Rec.2020 Linear"} | set(EXTENDED_LOG_SPACES)
+        if target_space in _SCENE_REFERRED_SPACES and not hdr_output:
+            logger.warning(
+                f"[Radiance 4K Decode v2.3.9] target_space='{target_space}' + hdr_output=False: "
+                f"output will be clamped to [0,1] for ComfyUI display compatibility. "
+                f"Values above 1.0 in '{target_space}' are discarded. "
+                f"For true scene-referred / HDR output set hdr_output=True. "
+                f"For log delivery (EXR) also set display_tonemap='None'."
+            )
+
+        # BUG 1 FIX: Capture scene-linear BEFORE display_tonemap fires.
+        # RHDR sidecar must contain raw scene-linear float data so the Radiance
+        # Viewer can apply its own display transform via WebGL shaders.
+        # Capturing here (after log decompress + exposure, before tonemap+target_space)
+        # gives the correct scene-linear Rec.709 tensor for the RHDR sidecar.
+        # This is stored on self so decode() can retrieve it after this call.
+        if hdr_mode == "Compress (Log)":
+            self._scene_linear_for_rhdr = img.detach().clone()
+
+        # Part A: apply display_tonemap (independent of hdr_output)
+        # Fires for ALL target spaces when hdr_mode=Compress(Log) and tonemap != None.
+        # Runs BEFORE target_space conversion so ACEScg/Log/Rec2020 ops get [0,1] data.
+        if hdr_mode == "Compress (Log)" and display_tonemap != "None":
+            if display_tonemap == "Reinhard":
+                # BUG 3 FIX: Luma-preserving Reinhard (replaces per-channel).
+                # Per-channel Reinhard compresses R, G, B independently, shifting
+                # the R:G:B ratio at high luminance — up to 33%+ hue drift for
+                # saturated highlights (e.g. warm street lamps, fire).
+                # Luma-based Reinhard compresses the overall luminance signal and
+                # scales all channels by the same ratio, preserving chromaticity.
+                # Result: correct hue at all luminances, proper desaturation rolloff.
+                _luma = (
+                    0.2126 * img[..., 0:1].clamp(min=0.0)
+                    + 0.7152 * img[..., 1:2].clamp(min=0.0)
+                    + 0.0722 * img[..., 2:3].clamp(min=0.0)
+                )
+                _luma_tm = _luma / (_luma + 1.0)          # compressed luma
+                _ratio   = _luma_tm / (_luma + 1e-6)      # scale factor
+                img = (img * _ratio).clamp(min=0.0)        # apply to all channels
+            elif display_tonemap == "ACES Filmic":
+                # Narkowicz ACES fit — filmic contrast, clips above ~10 lin
+                v = img.clamp(min=0.0)
+                img = (v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14)
+                img = img.clamp(0.0, 1.0)
+            logger.debug(
+                f"[Radiance 4K Decode v2.3.8] Compress(Log) tonemap='{display_tonemap}' "
+                f"applied before '{target_space}' (hdr_output={hdr_output})."
+            )
+        # v2.3.9 FIX (BUG-OVEREXPOSE-INCOMPLETE):
+        #
+        # v2.3.5 fixed overexposure for target_space="Linear" + hdr_output=False
+        # by adding tensor_linear_to_srgb re-encode + [0,1] clamp. But the same
+        # fix was never applied to "ACEScg", "ACES 2065-1", and "Rec.2020 Linear".
+        # With hdr_output=False those paths:
+        #   1. Applied the Rec.709→AP1/AP0/Rec2020 matrix (leaving values
+        #      potentially > 1.0 for Passthrough/SoftClip content or when
+        #      display_tonemap="None" passes scene-linear [0..38+] through)
+        #   2. Fell through with _display_referred_space=False → NO final clamp
+        #   3. Emitted float values > 1.0 to the ComfyUI IMAGE socket
+        #   → PreviewImage / SaveImage treat > 1.0 as blown white →
+        #     massively overexposed output.
+        #
+        # Fix: when hdr_output=False, clamp ALL target spaces to [0,1] after
+        # the target-space conversion. "Linear" still gets sRGB re-encode first
+        # (v2.3.5 behaviour). For HDR delivery set hdr_output=True — that path
+        # intentionally skips the clamp to preserve values > 1.0 for VFX tools.
         if target_space == "Linear":
-            pass  # Already linear
+            if not hdr_output:
+                img = tensor_linear_to_srgb(img)
         elif target_space == "sRGB":
             img = tensor_linear_to_srgb(img)
         elif target_space == "ACEScg":
@@ -2032,23 +2354,18 @@ class RadianceVAE4KDecode:
         elif target_space in self.LOG_SPACES and not _HAS_LOG_CURVES:
             logger.warning(
                 f"[Radiance 4K Decode] Target space '{target_space}' is a log format "
-                f"but color_utils is not installed — outputting LINEAR data instead. "
-                f"Install color_utils.py to enable log output."
+                f"but color_utils is not installed — outputting LINEAR data instead."
             )
         elif target_space == "Raw":
             pass
 
-        # HDR-FIX: When hdr_output=False (default/SDR mode), clamp to [0,1] so
-        # downstream SDR nodes (preview, PNG export, etc.) receive valid data.
-        # When hdr_output=True, skip this clamp — the caller explicitly wants the
-        # full 32-bit scene-linear range preserved in the output tensor.
+        # Final clamp — hdr_output=False only.
+        # Clamps every target space to [0,1] so ComfyUI nodes (PreviewImage,
+        # SaveImage, downstream samplers) always receive valid display-referred
+        # data. hdr_output=True intentionally skips this so scene-linear /
+        # wide-gamut / log values > 1.0 are preserved for VFX pipelines.
         if not hdr_output:
-            # Only clamp for display-referred target spaces.
-            # Linear/ACEScg/Rec.2020/Log spaces are scene-referred; clamping them
-            # destroys HDR content even in SDR mode (they need a tonemap first).
-            # Safe to clamp only sRGB and Raw which are already display-referred.
-            if target_space in ("sRGB",):
-                img = torch.clamp(img, 0.0, 1.0)
+            img = torch.clamp(img, 0.0, 1.0)
 
         # BUG-C FIX: Guarantee fp32 output regardless of which path was taken.
         return img.float()
@@ -2125,12 +2442,13 @@ class RadianceVAE4KDecode:
         self,
         samples: Dict[str, Any],
         vae: Any,
-        target_space: str = "Linear",
+        target_space: str = "sRGB",
         tile_size: str = "Auto",
         overlap: int = 128,
         exposure_adjust: float = 0.0,
         alpha: torch.Tensor = None,
         hdr_mode: str = "Clip (SDR)",
+        display_tonemap: str = "ACES Filmic",
         inverse_tonemap: bool = False,
         target_stops: float = 12.0,
         crop_padding: str = "",
@@ -2140,8 +2458,23 @@ class RadianceVAE4KDecode:
         processing_mode: str = "sequential",
         force_hdr_decode: bool = False,
         hdr_output: bool = False,
+        turbo_decoder: torch.nn.Module = None,
+        decode_noise_scale: float = 0.0,
     ) -> Tuple:
-        """v2.3 TRUE-HDR: Universal decode with 32-bit HDR output support.
+        """v2.3.5 TRUE-HDR: Universal decode with 32-bit HDR output support.
+
+        v2.3.5 FIX (BUG-OVEREXPOSE):
+          Root cause of overexposed output diagnosed and fixed.
+          When target_space="Linear" (the previous default) + hdr_output=False:
+            - _vae_output_to_target() applied sRGB→linear at step 1b (correct)
+            - Then returned the scene-linear tensor as a ComfyUI IMAGE (wrong)
+            - ComfyUI IMAGE convention is sRGB [0,1]; displaying linear [0,1]
+              without gamma makes every value appear 1.1–1.5× brighter than correct.
+              Result: overexposed image with hyper-saturated colors.
+          Fix: target_space="Linear" + hdr_output=False now re-encodes to sRGB
+          (identical result to target_space="sRGB"). hdr_output=True preserves
+          true scene-linear output for VFX pipelines.
+          Default target_space changed from "Linear" → "sRGB".
 
         v2.3 CHANGES vs v2.2:
           Compress (Log) HDR mode no longer hard-clamps at [0, 1]. Instead:
@@ -2151,13 +2484,15 @@ class RadianceVAE4KDecode:
                BEFORE decompression — prevents exponential noise amplification
             3. Log-to-linear decompression produces clean, full-range HDR
 
-        Previous parameters (still active):
+        Parameters (still active):
           force_hdr_decode: When True, respects hdr_mode even without radiance_meta
                             (direct encode→decode, no sampler). Required for HDR output
                             with Compress(Log) or Soft Clip modes post-encoding.
-          hdr_output:       When True, disables the final [0,1] normalization clamp so
+          hdr_output:       When True, disables ALL final encoding and clamping so
                             the output tensor carries full 32-bit scene-linear values.
                             Combine with target_space="Linear" or "ACEScg" for HDR VFX.
+                            When False (default), output is always re-encoded to sRGB
+                            and clamped to [0,1] for ComfyUI IMAGE compatibility.
         """
 
         # v2.0 Feature 2: Auto-detect VAE factor
@@ -2220,7 +2555,26 @@ class RadianceVAE4KDecode:
                 )
 
         latent = samples["samples"]
-        
+
+        # v2.3.7 FIX — Caveat 1: Validate source_space when hdr_mode=Compress(Log).
+        # Compress(Log) inverts a specific log decompression curve selected by
+        # source_space. If source_space is not a known log encoding (e.g. "Linear",
+        # "sRGB", "ACEScg") the code silently falls back to LogC4 decompression,
+        # producing wrong colors with no visible error.
+        # Valid source spaces for Compress(Log): the 6 camera log formats.
+        if hdr_mode == "Compress (Log)":
+            _valid_log_source = set(LOG_PROFILE_HDR_PARAMS.keys())
+            if source_space not in _valid_log_source:
+                logger.warning(
+                    f"[Radiance 4K Decode v2.3.7] hdr_mode='Compress (Log)' but "
+                    f"source_space='{source_space}' is not a log-encoded space. "
+                    f"Valid options: {sorted(_valid_log_source)}. "
+                    f"Falling back to ARRI LogC4 decompression — output colors will "
+                    f"be WRONG unless source material was actually LogC4-encoded. "
+                    f"For standard diffusion model output (SDXL/FLUX/SD1.5), "
+                    f"use hdr_mode='Clip (SDR)' or 'Soft Clip' instead."
+                )
+
         # v2.1 Video Support: Check for 5D video latent (B, C, F, H, W)
         is_video = latent.ndim == 5
         
@@ -2230,23 +2584,35 @@ class RadianceVAE4KDecode:
             is_3d_vae = True
             
         if is_video and not is_3d_vae:
-            B, C, F, H, W = latent.shape
+            # v2.3.1 FIX (V-B15): renamed frame-count local from `F` to
+            # `num_frames`. `F` is torch.nn.functional at module scope; the
+            # in-function re-bind shadowed it for every later call in this
+            # function (e.g. `F.interpolate` in the alpha-resize branch).
+            # Harmless today because the branch early-returns, but a silent
+            # time-bomb for any future refactor that removes the early return.
+            B, C, num_frames, H, W = latent.shape
             logger.info(
-                f"[Radiance 4K Decode v2.3] Video Latent: {W}×{H} ({B} batches, {F} frames), format={latent_fmt}"
+                f"[Radiance 4K Decode v2.3] Video Latent: {W}×{H} "
+                f"({B} batches, {num_frames} frames), format={latent_fmt}"
             )
             decoded_frames = []
+            # BUG 1 FIX (video path): collect scene-linear per frame for RHDR.
+            # Each recursive self.decode() sets self._scene_linear_for_rhdr BEFORE
+            # its tonemap fires. Harvest it immediately after each frame completes,
+            # before the next frame overwrites it.
+            _scene_linear_frames = []
             frame_alphas = None
             if alpha is not None:
-                if alpha.shape[0] == B * F:
-                    frame_alphas = alpha.chunk(F, dim=0)
+                if alpha.shape[0] == B * num_frames:
+                    frame_alphas = alpha.chunk(num_frames, dim=0)
                 else:
-                    frame_alphas = [alpha] * F
+                    frame_alphas = [alpha] * num_frames
 
-            for fi in range(F):
+            for fi in range(num_frames):
                 frame_latent = latent[:, :, fi, ...]
                 frame_samples = dict(samples)
                 frame_samples["samples"] = frame_latent
-                
+
                 frame_alpha = frame_alphas[fi] if frame_alphas else None
 
                 decoded_frame, meta_str, fmt = self.decode(
@@ -2258,6 +2624,7 @@ class RadianceVAE4KDecode:
                     exposure_adjust=exposure_adjust,
                     alpha=frame_alpha,
                     hdr_mode=hdr_mode,
+                    display_tonemap=display_tonemap,
                     inverse_tonemap=inverse_tonemap,
                     target_stops=target_stops,
                     crop_padding=crop_padding,
@@ -2267,8 +2634,15 @@ class RadianceVAE4KDecode:
                     processing_mode=processing_mode,
                     force_hdr_decode=force_hdr_decode,
                     hdr_output=hdr_output,
+                    turbo_decoder=turbo_decoder,
+                    decode_noise_scale=decode_noise_scale,
                 )
                 decoded_frames.append(decoded_frame)
+                # Collect scene-linear for this frame (set by _vae_output_to_target)
+                _sl = getattr(self, '_scene_linear_for_rhdr', None)
+                if _sl is not None:
+                    _scene_linear_frames.append(_sl)
+                    self._scene_linear_for_rhdr = None  # clear immediately
 
             all_frames = torch.cat(decoded_frames, dim=0)
 
@@ -2277,16 +2651,26 @@ class RadianceVAE4KDecode:
             except (json.JSONDecodeError, TypeError, ValueError):
                 meta_json = {}
             meta_json["video"] = True
-            meta_json["frames"] = F
+            meta_json["frames"] = num_frames
 
-            # v2.1 FIX (BUG-46): Export RHDR sidecars for video frames.
-            # Previously skipped because per-frame decode passed export_rhdr=False.
-            # Now runs on the concatenated output after all frames are decoded.
+            # v2.1 FIX (BUG-46) + BUG 1 FIX (video):
+            # RHDR sidecars for video. For Compress(Log) + active tonemap,
+            # use the collected scene-linear frames (pre-tonemap) for RHDR.
+            # For all other modes, all_frames (post-processed) is correct.
             rhdr_filenames = []
             if export_rhdr:
                 output_dir = folder_paths.get_temp_directory()
-                for fi in range(all_frames.shape[0]):
-                    frame_np = all_frames[fi, ..., :3].cpu().numpy()
+                _use_scene_linear = (
+                    hdr_mode == "Compress (Log)"
+                    and display_tonemap != "None"
+                    and len(_scene_linear_frames) == num_frames
+                )
+                _rhdr_src = (
+                    torch.cat(_scene_linear_frames, dim=0)
+                    if _use_scene_linear else all_frames
+                )
+                for fi in range(_rhdr_src.shape[0]):
+                    frame_np = _rhdr_src[fi, ..., :3].cpu().numpy()
                     while frame_np.ndim > 3:
                         frame_np = frame_np[0]
                     fname = self._save_rhdr(
@@ -2317,6 +2701,30 @@ class RadianceVAE4KDecode:
             samples = dict(samples)
             samples["samples"] = latent
 
+        # v2.4: Decode-time noise injection (LTX LumiVid, arxiv 2604.11788)
+        # ─────────────────────────────────────────────────────────────────────
+        # A small lerp toward Gaussian noise breaks up coherent VAE decoder
+        # grid artifacts in flat highlight areas.  Only active for Compress(Log)
+        # where the subsequent log→linear step would exponentially amplify any
+        # correlated decoder artifact in the highlight band.
+        #
+        # Formula: noised = (1 - scale) * latent + scale * randn_like(latent)
+        # At scale=0.025 the latent moves 2.5% toward pure noise — perceptually
+        # invisible but sufficient to de-correlate decoder grid patterns.
+        #
+        # User-supplied decode_noise_scale takes precedence.  If 0.0 (the default)
+        # the feature is off entirely, preserving existing workflow behaviour.
+        _effective_noise_scale = decode_noise_scale
+        if _effective_noise_scale > 0.0 and hdr_mode == "Compress (Log)":
+            noise = torch.randn_like(latent)
+            latent = (1.0 - _effective_noise_scale) * latent + _effective_noise_scale * noise
+            samples = dict(samples)
+            samples["samples"] = latent
+            logger.debug(
+                f"[Radiance 4K Decode v2.4] decode_noise_scale={_effective_noise_scale:.4f} "
+                f"applied to latent (profile='{source_space}')."
+            )
+
         pad_multiple = max(vae_factor, 8)
 
         # Tile size in pixel space (must be aligned to vae_factor)
@@ -2335,7 +2743,28 @@ class RadianceVAE4KDecode:
         decoded_video_frames = None  # Set when 3D VAE returns 5D output
         with torch.no_grad():
             if pix_h <= ts_px and pix_w <= ts_px:
-                img = vae.decode(latent).float()
+                if turbo_decoder is not None:
+                    if next(turbo_decoder.parameters()).device != latent.device:
+                        turbo_decoder.to(latent.device)
+                    
+                    _lat = latent
+                    if _lat.ndim == 5:
+                        _B, _C, _F, _H, _W = _lat.shape
+                        _lat = _lat.permute(0, 2, 1, 3, 4).reshape(_B * _F, _C, _H, _W).contiguous()
+                        decoded_video_frames = _F
+                    
+                    # Process in chunks to prevent cuDNN/VRAM hard-crashes on large batches
+                    _chunk_size = 4
+                    _outputs = []
+                    for i in range(0, _lat.shape[0], _chunk_size):
+                        _chunk = _lat[i:i+_chunk_size]
+                        _outputs.append(turbo_decoder(_chunk).float())
+                    img = torch.cat(_outputs, dim=0)
+                    
+                    if img.shape[1] == 3:
+                        img = img.permute(0, 2, 3, 1)
+                else:
+                    img = vae.decode(latent).float()
                 # FIX-4: 3D (temporal) VAEs return (B, F, H, W, C) — reshape to
                 # (B*F, H, W, C) so downstream code handles it as a frame batch.
                 if img.ndim == 5:
@@ -2344,19 +2773,49 @@ class RadianceVAE4KDecode:
                     img = img.reshape(_B5 * _F5, _H5, _W5, _C5)
                 pbar.update_absolute(100, 100)
             else:
-                img, _tiled_video_frames = self._tiled_decode(samples, vae, ts_px, overlap, pbar, vae_factor=vae_factor)
+                img, _tiled_video_frames = self._tiled_decode(
+                    samples, vae, ts_px, overlap, pbar, 
+                    vae_factor=vae_factor, turbo_decoder=turbo_decoder
+                )
                 if _tiled_video_frames is not None:
                     decoded_video_frames = _tiled_video_frames
 
         img = img.float()
 
+        # v4.5: source_space auto-detect from tensor statistics
+        # Most diffusion VAEs decode to sRGB-like [0,1]. If the user left
+        # source_space="Linear" but the tensor looks sRGB (p50 luma ~0.35–0.55
+        # after diffusion), applying log→linear transforms will be wrong.
+        # Auto-detect runs only when source_space=="Linear" AND hdr_mode is
+        # NOT Compress(Log) (log mode requires explicit source_space to invert
+        # the right curve). We suggest a warning; we do NOT silently override
+        # because for encode→decode pipelines "Linear" may be correct.
+        if source_space == "Linear" and hdr_mode not in ("Compress (Log)",):
+            try:
+                _sample_px = img[0].reshape(-1, img.shape[-1]) if img.ndim == 4 else img.reshape(-1, img.shape[-1])
+                _step = max(1, _sample_px.shape[0] // 50_000)
+                _luma = (0.2126*_sample_px[::_step, 0] + 0.7152*_sample_px[::_step, 1] + 0.0722*_sample_px[::_step, 2])
+                _p50 = float(_luma.float().cpu().median())
+                # Heuristic: scene-linear midgrey (0.18) → p50 ≈ 0.10–0.25
+                #             sRGB midgrey (0.46)          → p50 ≈ 0.35–0.60
+                #             Very dark diffusion output   → p50 < 0.10 (inconclusive)
+                if 0.30 <= _p50 <= 0.70:
+                    logger.warning(
+                        f"[Radiance 4K Decode v4.5] source_space='Linear' but tensor "
+                        f"p50 luma={_p50:.3f} suggests sRGB-encoded output (typical for "
+                        f"diffusion models: SDXL/FLUX/SD1.5). "
+                        f"If the decode looks too bright, change source_space to 'sRGB'. "
+                        f"This warning is suppressed when hdr_mode='Compress (Log)'."
+                    )
+            except Exception:
+                pass
+
+        # v2.3: Pre-transform NaN/Inf guard — mode-aware, unconditional.
+        # Previously gated on source_space == "Linear", which let NaN values
+        # from non-Linear VAE outputs (e.g. sRGB, LogC4) reach _vae_output_to_target
+        # unguarded, where log/gamma functions produce further NaN explosions.
         if torch.isnan(img).any() or torch.isinf(img).any():
             logger.warning("[Radiance 4K Decode v2.3] VAE produced NaN/Inf — sanitizing")
-            # v2.3: Pre-transform guard is mode-aware.
-            #   • posinf → 1.0 is correct for all modes (encoded domain max = 1.0,
-            #     or 1.5 for Passthrough, but Inf is never valid signal).
-            #   • neginf → −0.05 for Passthrough (which encodes small negatives).
-            #     neginf → 0.0 for all other modes (log/sRGB domain floor = 0).
             if hdr_mode == "Passthrough":
                 img = torch.nan_to_num(img, nan=0.0, posinf=1.5, neginf=-0.05)
             else:
@@ -2367,6 +2826,7 @@ class RadianceVAE4KDecode:
             exposure_adjust, inverse_tonemap, target_stops,
             source_space=source_space,
             hdr_output=hdr_output,
+            display_tonemap=display_tonemap,
         )
 
         # v2.3 FIX (BUG-B enhanced): Guard for NaN/Inf *introduced by* the color
@@ -2428,16 +2888,43 @@ class RadianceVAE4KDecode:
                 ).permute(0, 2, 3, 1)
             if alpha_ch.shape[0] != img.shape[0]:
                 alpha_ch = alpha_ch.expand(img.shape[0], -1, -1, -1)
+            # Ensure alpha is on the same device as img (GPU for turbo, usually CPU for VAE)
+            if alpha_ch.device != img.device:
+                alpha_ch = alpha_ch.to(img.device)
             img = torch.cat([img, alpha_ch], dim=-1)
 
-        # Export .rhdr if requested — one sidecar per frame for video, single file for stills
+        # Export .rhdr — one sidecar per frame for video, single file for stills
+        # BUG 1 FIX: RHDR must be scene-linear float data (Radiance Viewer uses it
+        # for proper HDR display via WebGL shaders). Previously saved from the
+        # post-processed img (after tonemap + target_space), which gave wrong data
+        # when display_tonemap=Reinhard: the viewer would load tonemapped sRGB and
+        # apply another display transform on top → double-tonemapped output.
+        # Fix: use self._scene_linear_for_rhdr (captured in _vae_output_to_target
+        # right before the tonemap step) when Compress(Log) + tonemap was active.
+        # For non-Compress(Log) modes and display_tonemap=None, the scene-linear
+        # capture is not needed (img is already in the correct state for RHDR).
         rhdr_filenames = []
         if export_rhdr:
             output_dir = folder_paths.get_temp_directory()
-            num_frames = img.shape[0]
+            # Select correct source for RHDR:
+            # - Compress(Log) + tonemap fired → use scene_linear_for_rhdr (pre-tonemap)
+            # - All other cases → use img (either scene-linear or display-referred as appropriate)
+            _rhdr_source = img
+            _scene_lin = getattr(self, '_scene_linear_for_rhdr', None)
+            if (
+                hdr_mode == "Compress (Log)"
+                and display_tonemap != "None"
+                and _scene_lin is not None
+                and _scene_lin.shape[:3] == img.shape[:3]
+            ):
+                _rhdr_source = _scene_lin
+                logger.debug(
+                    "[Radiance 4K Decode v2.3.8] RHDR saved from scene-linear "
+                    "(pre-tonemap) — ensures Radiance Viewer receives correct HDR data."
+                )
+            num_frames = _rhdr_source.shape[0]
             for fi in range(num_frames):
-                frame_np = img[fi, ..., :3].cpu().numpy()
-                # FIX-4: Guard against any residual extra dims
+                frame_np = _rhdr_source[fi, ..., :3].cpu().numpy()
                 while frame_np.ndim > 3:
                     frame_np = frame_np[0]
                 prefix = f"radiance_4k_f{fi:04d}" if num_frames > 1 else "radiance_4k"
@@ -2446,14 +2933,24 @@ class RadianceVAE4KDecode:
                 )
                 if fname:
                     rhdr_filenames.append(fname)
+            # Clear the cache after use to avoid stale data on next call
+            self._scene_linear_for_rhdr = None
 
         final_h, final_w = img.shape[1], img.shape[2]
+        # BUG 2 FIX: report actual output colorspace in metadata.
+        # When target_space=Linear + hdr_output=False, the code re-encodes to sRGB
+        # for ComfyUI IMAGE compatibility. Metadata must reflect the actual tensor
+        # colorspace — downstream tools (Nuke, Resolve) read this for color management.
+        _reported_space = target_space
+        if target_space == "Linear" and not hdr_output:
+            _reported_space = "sRGB (re-encoded from Linear)"
         metadata = {
             "node": "RadianceVAE4KDecode",
-            "version": "2.3",
+            "version": "3.0.0",
             "resolution": f"{final_w}×{final_h}",
             "tile_size": ts_px, "overlap": overlap,
-            "target_space": target_space, "hdr_mode": hdr_mode,
+            "target_space": _reported_space, "hdr_mode": hdr_mode,
+            "display_tonemap": display_tonemap if hdr_mode == "Compress (Log)" else "N/A",
             "exposure_adjust": exposure_adjust,
             "inverse_tonemap": inverse_tonemap,
             "target_stops": target_stops if inverse_tonemap else "N/A",
@@ -2473,7 +2970,9 @@ class RadianceVAE4KDecode:
             metadata["rhdr_export"] = rhdr_filenames[0] if len(rhdr_filenames) == 1 else rhdr_filenames
             metadata["rhdr_precision"] = rhdr_precision
 
-        return (img, json.dumps(metadata, indent=2), latent_fmt)
+        # ComfyUI and most downstream nodes expect image tensors on CPU.
+        # VAE.decode usually handles this, but our turbo_decoder path stays on GPU.
+        return (img.cpu(), json.dumps(metadata, indent=2), latent_fmt)
 
 
 
@@ -2510,7 +3009,9 @@ class RadianceVAE4KRoundtrip:
                     ["Auto", "512", "768", "1024", "1280", "1536"],
                     {"default": "Auto"},
                 ),
-                "overlap": ("INT", {"default": 128, "min": 32, "max": 256, "step": 16}),
+                "overlap": ("INT", {"default": 128, "min": 32, "max": 256, "step": 16,
+                    "tooltip": "Overlap in pixels between tiles during VAE tiling. Larger overlap reduces seam artifacts.",
+                }),
                 "exposure": (
                     "FLOAT",
                     {"default": 0.0, "min": -10.0, "max": 10.0, "step": 0.1},
@@ -2518,6 +3019,18 @@ class RadianceVAE4KRoundtrip:
                 "hdr_mode": (
                     ["Clip (SDR)", "Soft Clip", "Compress (Log)", "Passthrough"],
                     {"default": "Soft Clip"},
+                ),
+                "display_tonemap": (
+                    ["Reinhard", "ACES Filmic", "None"],
+                    {
+                        "default": "ACES Filmic",
+                        "tooltip": (
+                            "Tonemap for Compress(Log) + display output. "
+                            "Independent of hdr_output. "
+                            "'Reinhard': smooth rolloff. 'ACES Filmic': filmic contrast. "
+                            "'None': raw scene-linear HDR, overexposed in normal preview."
+                        ),
+                    },
                 ),
                 "export_rhdr": (
                     "BOOLEAN",
@@ -2539,12 +3052,14 @@ class RadianceVAE4KRoundtrip:
                 "hdr_output": (
                     "BOOLEAN",
                     {
-                        "default": True,
+                        "default": False,
                         "tooltip": (
                             "32-BIT HDR OUTPUT — preserves full scene-linear range "
                             "(values >1.0 and <0.0) in the output tensor. "
-                            "Default True for Roundtrip since there is no sampler. "
-                            "Disable only when feeding SDR-only downstream nodes."
+                            "Default False — matches decode node and works correctly "
+                            "with SaveImage/PreviewImage. "
+                            "Set True only when feeding VFX pipelines that expect "
+                            "scene-linear tensors."
                         ),
                     },
                 ),
@@ -2554,7 +3069,7 @@ class RadianceVAE4KRoundtrip:
     RETURN_TYPES = ("IMAGE", "LATENT", "STRING")
     RETURN_NAMES = ("image", "latent", "metadata")
     FUNCTION = "roundtrip"
-    CATEGORY = "FXTD Studios/Radiance/Generate"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = "4K VAE roundtrip in one node: encode → decode with tiling. Test reconstruction or apply color transforms."
 
     def roundtrip(
@@ -2567,9 +3082,10 @@ class RadianceVAE4KRoundtrip:
         overlap: int = 128,
         exposure: float = 0.0,
         hdr_mode: str = "Soft Clip",
+        display_tonemap: str = "ACES Filmic",
         export_rhdr: bool = True,
         rhdr_precision: str = "f16",
-        hdr_output: bool = True,
+        hdr_output: bool = False,
     ) -> Tuple[torch.Tensor, Dict[str, Any], str]:
 
         # V-4 FIX: Handle both 4D images (B,H,W,C) and 5D video (B,F,H,W,C).
@@ -2601,6 +3117,7 @@ class RadianceVAE4KRoundtrip:
             latent, vae, target_space, tile_size, overlap,
             exposure_adjust=-exposure, alpha=alpha,
             hdr_mode=decode_hdr,
+            display_tonemap=display_tonemap,
             crop_padding=enc_meta,
             export_rhdr=export_rhdr,
             rhdr_precision=rhdr_precision,
@@ -2612,7 +3129,7 @@ class RadianceVAE4KRoundtrip:
         # Combined metadata
         combined_meta = {
             "node": "RadianceVAE4KRoundtrip",
-            "version": "2.3",
+            "version": "3.0",
             "latent_format": latent_fmt,
             "encode": json.loads(enc_meta),
             "decode": json.loads(dec_meta),
@@ -2621,18 +3138,4 @@ class RadianceVAE4KRoundtrip:
         return (img, latent, json.dumps(combined_meta, indent=2))
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#                          NODE REGISTRATION
-# ═══════════════════════════════════════════════════════════════════════════════
 
-NODE_CLASS_MAPPINGS = {
-    "RadianceVAE4KEncode": RadianceVAE4KEncode,
-    "RadianceVAE4KDecode": RadianceVAE4KDecode,
-    "RadianceVAE4KRoundtrip": RadianceVAE4KRoundtrip,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceVAE4KEncode": "◎ Radiance VAE 4K Encode",
-    "RadianceVAE4KDecode": "◎ Radiance VAE 4K Decode",
-    "RadianceVAE4KRoundtrip": "◎ Radiance VAE 4K Roundtrip",
-}

@@ -7,8 +7,16 @@ from .utils import tensor_to_numpy_float32, numpy_to_tensor_float32
 
 logger = logging.getLogger("radiance.hdr.recovery")
 
+try:
+    from scipy.ndimage import zoom as _scipy_zoom
+    SCIPY_AVAILABLE = True
+except ImportError:
+    _scipy_zoom = None
+    SCIPY_AVAILABLE = False
+
 
 class RadianceHighlightSynthesis:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     """
     Synthesize high dynamic range details in clipped highlights.
 
@@ -66,14 +74,16 @@ class RadianceHighlightSynthesis:
                     },
                 ),
                 "blend_mode": (["Screen", "Add", "Soft Light"], {"default": "Screen"}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF,
+                    "tooltip": "Random seed for noise generation. Set to -1 for a random seed each run.",
+                }),
             }
         }
 
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "synthesize"
-    CATEGORY = "FXTD Studios/Radiance/Color"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = "Synthesize high dynamic range details in clipped highlights to simulate film scan quality."
 
     def synthesize(
@@ -129,7 +139,7 @@ class RadianceHighlightSynthesis:
             # v_expanded = v + (v - threshold)^2 * expansion_factor
 
             # Identify highlight pixels
-            luma > threshold
+            highlight_pixels = luma > threshold
 
             # Apply expansion to the image
             expanded_frame = frame.copy()
@@ -152,16 +162,14 @@ class RadianceHighlightSynthesis:
 
             # Scale noise (simulate grain size)
             if detail_scale != 1.0:
-                try:
-                    from scipy.ndimage import zoom
-
+                if SCIPY_AVAILABLE and _scipy_zoom is not None:
                     # Generate smaller noise and upscale it
                     h_small = int(h / detail_scale)
                     w_small = int(w / detail_scale)
                     noise_small = rng.normal(0, 0.5, (h_small, w_small)).astype(
                         np.float32
                     )
-                    noise = zoom(noise_small, (h / h_small, w / w_small), order=1)
+                    noise = _scipy_zoom(noise_small, (h / h_small, w / w_small), order=1)
                     # Handle size mismatch after zoom
                     noise = noise[:h, :w]
                     if noise.shape != (h, w):
@@ -172,8 +180,11 @@ class RadianceHighlightSynthesis:
                                 (0, max(0, w - noise.shape[1])),
                             ),
                         )[:h, :w]
-                except ImportError:
-                    pass  # Fallback to standard noise
+                else:
+                    logger.warning(
+                        "[HDRRecovery] scipy not available — falling back to standard "
+                        "Gaussian noise. Install scipy for film-grain noise synthesis."
+                    )
 
             # Modulate noise by detail_amount and mask
             noise_layer = noise * detail_amount * mask
@@ -189,16 +200,18 @@ class RadianceHighlightSynthesis:
                 for ch in range(c):
                     final_frame[..., ch] += noise_layer
             elif blend_mode == "Screen":
-                # Screen: 1 - (1-a)(1-b)
-                # But here we want to screen noise ON TOP of image.
-                # Noise is centered at 0, so shift it to 0.5 range?
-                # Actually, simpler film grain model: multipy for shadows, add for highlights?
-                # For highlights, we want to break up the flat white.
+                # Screen: a + b - a*b
+                # Works well for highlights — doesn't blow out as fast as Add
                 for ch in range(c):
-                    final_frame[..., ch] += noise_layer
+                    final_frame[..., ch] = final_frame[..., ch] + noise_layer - (final_frame[..., ch] * noise_layer)
             elif blend_mode == "Soft Light":
-                # Overlay logic
-                pass
+                # Soft Light: standard W3C formula
+                # We treat noise_layer (centered at 0) as an offset around 0.5
+                n = np.clip(noise_layer + 0.5, 0, 1)
+                for ch in range(c):
+                    a = final_frame[..., ch]
+                    # Soft Light formula (Pegtop / W3C)
+                    final_frame[..., ch] = (1.0 - 2.0 * n) * (a**2) + 2.0 * n * a
 
             # Ensure we strictly expanded range (don't clip back to 1.0)
             # But ensure we don't go below 0

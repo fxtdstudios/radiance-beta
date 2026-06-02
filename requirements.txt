@@ -1,6 +1,7 @@
 opencv-python>=4.8.0
 imageio>=2.31.0
 Pillow>=10.0.0
+numpy>=1.22
 OpenEXR>=3.2.0
 Imath>=3.1.0
 opencolorio>=2.3.0
@@ -8,4 +9,8 @@ colour-science>=0.4.4
 transformers>=4.36.0
 scipy>=1.10.0
 defusedxml>=0.7.1
-imageio-ffmpeg>=0.4.9
+imageio-ffmpeg>=0.4.9
+tqdm>=4.66.0
+aiohttp>=3.8.0
+einops>=0.7.0
+torchsde>=0.3.8

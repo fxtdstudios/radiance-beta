@@ -1,7 +1,9 @@
-// WebGL Context Manager
-class RadianceWebGLRenderer {
+// WebGL Context Manager — extends abstract RadianceRenderer base class
+import { RadianceRenderer } from "./radiance_renderer.js";
+
+class RadianceWebGLRenderer extends RadianceRenderer {
     constructor(canvas) {
-        this.canvas = canvas;
+        super(canvas);
         this.gl = null;
         this.programs = {};
         this.textures = {};
@@ -9,118 +11,18 @@ class RadianceWebGLRenderer {
         this._uniformCache = new Map();
         this._attribCache = new Map();
         this._uniformValueCache = new Map();
-        // B-11 FIX: Numeric ID counter for shader programs.
-        // Used as cache key prefix in dirty-flag uniform helpers to avoid
-        // collisions when WebGLProgram objects stringify to identical strings.
         this._nextProgId = 0;
         this.lutTexture = null;
         this.depthTexture = null;
         this.lutSize = 33;
 
-        // Exposure/Gamma controls
-        this.exposure = 0.0;
-        this.gamma = 2.2;
-        this.saturation = 1.0;
-
-        // DoF controls
-        this.dofEnabled = false;
-        this.focusDistance = 0.5;
-
-        this.aperture = 0.0;
-        this.apertureBlades = 0;
-        this.apertureRotation = 0.0;
-        this.apertureAnamorphic = 1.0;
-
-        // Optical Filters
-        this.lensDistortion = 0.0;
-        this.lensFringe = 0.0;
-        this.vignetteIntensity = 0.0;
-        this.vignetteFalloff = 0.5;
-
-        // v3.1: Extended Grain & Lens Effects
-        this.grainSize = 1.0;
-        this.grainColor = 0.0;
-        this.grainAnimate = false;  // static grain by default — only true for video
-        this.bloom = 0.0;
-        this.halation = 0.0;
-        this.diffusion = 0.0;
-
-        // Advanced Grading (initialized to identity)
-        this.lift = [0.0, 0.0, 0.0];
-        this.gradingGamma = [1.0, 1.0, 1.0];
-        this.gain = [1.0, 1.0, 1.0];
-        this.temperature = 0.0;
-        this.tint = 0.0;
-        this.contrast = 1.0;
-        this.pivot = 0.5;
-        this.offset = [0.0, 0.0, 0.0];
-
-        // v3.0: Resolve-style Controls
-        this.colorBoost = 0.0;
-        this.shadows = 0.0;
-        this.highlights = 0.0;
-        this.midDetail = 0.0;
-        this.hueShift = 0.0;
-        this.lumaMix = 1.0;
-
-        // v3.3: Log Wheels
-        this.logShadow = [0.0, 0.0, 0.0];
-        this.logMidtone = [0.0, 0.0, 0.0];
-        this.logHighlight = [0.0, 0.0, 0.0];
-
-        // Color Science mode: 0 = Linear/sRGB, 1 = ACEScct
-        this.colorScience = 0;
-
-        // v3.4: Printer Lights (per-channel integer offsets, -50..+50)
-        this.printerLightsR = 0;
-        this.printerLightsG = 0;
-        this.printerLightsB = 0;
-
-        // v3.4: Soft Clip highlight rolloff (0 = disabled)
-        this.softClip = 0.0;
-
-        // Analytics
-        this.falseColor = false;
-        this.zebra = false;
-        this.zebraThreshold = 0.98;
-        // v3.0 #9: false color and zebra operate in scene-linear space (pre-OETF) when true
+        // WebGL-only state
         this.linearFalseColor = true;
-
-        // HDR pipeline state
-        this.isLinearTexture = false;
-
-        this.channelMode = 0;
-        this.focusPeaking = false;
-        this.focusPeakingThreshold = 120.0;
-        this.displayLutMode = 0;
-        this.inputLutMode = 0;
-        this.lutIsDisplayTransform = false;
-
-        this.denoise = 0.0;
-        this.showDepth = false;
-
-        this.curveMix = 0.0;
+        this.curveData = new Float32Array(256 * 4);
+        this._scopePixels = new Uint8Array(512 * 512 * 4);
         this.curveLutTexture = null;
         this.secondaryCurveLutTexture = null;
-        // v3.4: Start at 0 — only activate when secondary curves have been explicitly edited.
-        // This prevents a grayscale flash on first render before the neutral LUT is uploaded.
-        this.secondaryCurveMix = 0.0;
-        // FIX 5: Highlight slope for curve extrapolation above 1.0 (identity = 1.0 per channel)
-        this.curveSlope = [1.0, 1.0, 1.0];
 
-        // ── v4.1: Pipeline Precision Mode ─────────────────────────────────────
-        // Controls internal FBO, scope buffer, and curve LUT bit depth.
-        //   'u8'  — RGBA/UNSIGNED_BYTE   (8-bit  per channel, legacy SDR)
-        //   'f16' — RGBA16F/HALF_FLOAT   (16-bit per channel, half-float HDR)
-        //   'f32' — RGBA32F/FLOAT        (32-bit per channel, full float, industry standard)
-        // Default: 'f32' on WebGL2 (matches Nuke / Flame / Baselight pipeline precision).
-        // Falls back to 'u8' if WebGL2 or EXT_color_buffer_float is unavailable.
-        this.pipelinePrecision = 'f32';
-        // v4.2 FIX: Identity LUT must be Float32Array so the RGBA32F upload path
-        // is taken on the very first render (before the curve editor fires notifyChange).
-        // The old Uint8Array(1024) forced the 8-bit RGBA/UNSIGNED_BYTE fallback,
-        // silently quantizing a 32-bit HDR image on first display.
-        this.curveData = new Float32Array(256 * 4);
         for (let i = 0; i < 256; i++) {
             const v = i / 255;
             this.curveData[i * 4 + 0] = v;
@@ -128,27 +30,6 @@ class RadianceWebGLRenderer {
             this.curveData[i * 4 + 2] = v;
             this.curveData[i * 4 + 3] = 1.0;
         }
-
-        this.qualifierEnabled = false;
-        this.qualifierShowMask = false;
-        this.qualifier = {
-            h: 0.0, hW: 0.1, hS: 0.05,
-            s: 0.5, sW: 0.5, sS: 0.1,
-            l: 0.5, lW: 0.5, lS: 0.1
-        };
-
-        this.mask = {
-            type: 0,
-            center: [0.5, 0.5],
-            scale: [0.3, 0.3],
-            feather: 0.2,
-            rotation: 0.0,
-            invert: false,
-            showOverlay: false
-        };
-
-        this.referenceShelf = [];
-        this.activeShelfIndex = 0;
 
         this.lensDistortionK2 = 0.0;
         this.anamorphicStreaks = 0.0;
@@ -161,16 +42,9 @@ class RadianceWebGLRenderer {
         this._bilateralFBO = null;
         this._bilateralProgram = null;
 
-        // v3.0 #8: LRU GPU frame texture cache (max 8 frames)
-        this._frameCache = new Map();       // key=frameId → { tex, lastUsed }
-        this._frameCacheMaxSize = 8;
-
-        this.displayLutStrength = 1.0;
-        this.wipe = 0.5;
-        this.wipeEnabled = false;
-        this.wipeRefEnabled = false;
-        this.gridMode = 0;
-        this.gridColor = [1.0, 1.0, 1.0, 0.3];
+        this._frameCache = new Map();
+        const _devMem = (typeof navigator !== 'undefined' && navigator.deviceMemory) || 4;
+        this._frameCacheMaxSize = _devMem >= 16 ? 24 : _devMem >= 8 ? 16 : _devMem >= 4 ? 8 : 4;
 
         this.init();
     }
@@ -296,10 +170,18 @@ class RadianceWebGLRenderer {
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
 
+        // v3.2: Initialize programs if they don't exist
+        if (!this.programs.chromaticity) {
+            this.programs.chromaticity = this.createProgram(
+                this.getScopePointVertexShader('chromaticity'),
+                this.getScopePointFragmentShader()
+            );
+        }
+
         gl.useProgram(program);
         gl.uniform1i(this.getUniform(program, 'u_image'), 0);
         gl.uniform1i(this.getUniform(program, 'u_isLinear'), isLinear ? 1 : 0);
-        gl.uniform1f(this.getUniform(program, 'u_intensity'), mode === 'vectorscope' ? 0.02 : 0.03);
+        gl.uniform1f(this.getUniform(program, 'u_intensity'), mode === 'waveform' ? 0.04 : 0.02);
 
         // v3.1: Waveform Parade control
         if (mode === 'waveform') {
@@ -316,15 +198,13 @@ class RadianceWebGLRenderer {
         gl.drawArrays(gl.POINTS, 0, this.scopePointCount);
         gl.disable(gl.BLEND);
 
-        // Read pixels directly from FBO — avoids clobbering the main viewport
-        const pixels = new Uint8Array(size * size * 4);
+        // Read pixels — reuse pre-allocated buffer to avoid GC pressure (v3.1 PERF)
+        const pixels = this._scopePixels;
         gl.readPixels(0, 0, size, size, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-
-        // Restore default framebuffer and main viewport
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.viewport(0, 0, this.canvas.width, this.canvas.height);
 
-        // Copy to target 2D canvas, flipping Y (WebGL is bottom-up, canvas is top-down)
+        // Copy to target 2D canvas
         const ctx = targetCanvas.getContext('2d');
         const tw = targetCanvas.width;
         const th = targetCanvas.height;
@@ -332,17 +212,50 @@ class RadianceWebGLRenderer {
 
         const imgData = new ImageData(size, size);
         for (let y = 0; y < size; y++) {
-            const srcRow = (size - 1 - y) * size * 4; // flip Y
+            const srcRow = (size - 1 - y) * size * 4;
             const dstRow = y * size * 4;
             imgData.data.set(pixels.subarray(srcRow, srcRow + size * 4), dstRow);
         }
 
-        // Draw at target canvas size (scaled)
         const tmpCanvas = document.createElement('canvas');
         tmpCanvas.width = size;
         tmpCanvas.height = size;
         tmpCanvas.getContext('2d').putImageData(imgData, 0, 0);
         ctx.drawImage(tmpCanvas, 0, 0, tw, th);
+
+        // ── v3.2: HDR Graticules & Labels ────────────────────────────────────
+        ctx.font = '10px "Inter", sans-serif';
+        ctx.textAlign = 'right';
+
+        if (mode === 'waveform') {
+            // Draws PQ-based nit scale lines
+            const nits = [100, 400, 1000, 4000];
+            const colors = ['#666', '#555', '#bb4444', '#ccaa44'];
+
+            nits.forEach((n, i) => {
+                // PQ formula approx for labels
+                const L = n / 10000;
+                const m1 = 2610 / 4096 * (1/4);
+                const m2 = 2523 / 4096 * 128;
+                const c1 = 3424 / 4096;
+                const c2 = 2413 / 4096 * 32;
+                const c3 = 2392 / 4096 * 32;
+                const y_pq = Math.pow((c1 + c2 * Math.pow(L, m1)) / (1 + c3 * Math.pow(L, m1)), m2);
+                const py = th - (y_pq * th);
+
+                ctx.strokeStyle = colors[i];
+                ctx.globalAlpha = 0.5;
+                ctx.beginPath();
+                ctx.moveTo(0, py);
+                ctx.lineTo(tw, py);
+                ctx.stroke();
+
+                ctx.fillStyle = colors[i];
+                ctx.globalAlpha = 1.0;
+                ctx.fillText(n + (n>=1000 ? ' nit' : ''), tw - 5, py - 2);
+            });
+        }
+        ctx.globalAlpha = 1.0;
     }
 
     setOffset(r, g, b) { this.offset = (g === undefined) ? [r, r, r] : [r, g, b]; }
@@ -587,9 +500,12 @@ class RadianceWebGLRenderer {
         gl.uniform1i(this.getUniform(progDown, 'u_src'), 0);
         gl.uniform2f(this.getUniform(progDown, 'u_srcTexelSize'), 1.0 / imgW, 1.0 / imgH);
         gl.uniform1i(this.getUniform(progDown, 'u_applyThreshold'), 1);
-        // Adaptive threshold: scene-linear HDR needs higher threshold than sRGB
-        const threshLo = this.isLinearTexture ? 1.0 : 0.82;
-        const threshHi = this.isLinearTexture ? 4.0 : 1.4;
+        // v4.3: Threshold accounts for current exposure offset so bloom fires on
+        // the graded-equivalent luminance, not raw texture values.
+        // Exposure shift: a +1EV grade doubles scene-linear values → halve threshold.
+        const expScale = Math.pow(2.0, this.exposure || 0);
+        const threshLo = (this.isLinearTexture ? 1.0 : 0.82) / expScale;
+        const threshHi = (this.isLinearTexture ? 4.0 : 1.4)  / expScale;
         gl.uniform1f(this.getUniform(progDown, 'u_thresholdLo'), threshLo);
         gl.uniform1f(this.getUniform(progDown, 'u_thresholdHi'), threshHi);
         gl.uniform1f(this.getUniform(progDown, 'u_exposure'), this.exposure);
@@ -885,21 +801,15 @@ class RadianceWebGLRenderer {
     // ── v3.0 #8: LRU GPU Frame Texture Cache ─────────────────────────────────
     /**
      * Upload a float16 frame and cache it by frameId.
-     * If frameId is already in cache, skip re-upload and reuse the GPU texture.
-     * Evicts the least-recently-used frame when cache exceeds _frameCacheMaxSize.
-     *
-     * @param {string|number}  frameId   – unique identifier for the frame
-     * @param {Uint16Array}    fp16data  – raw float16 pixel data
-     * @param {number}         width     – texture width
-     * @param {number}         height    – texture height
-     * @param {number}         channels  – 3 or 4
-     * @returns {WebGLTexture|null}
+     * LRU eviction is O(1) using Map insertion-order: the first key in the Map
+     * is always the least-recently-used entry (delete-on-access + re-insert).
      */
     loadFloat16TextureCached(frameId, fp16data, width, height, channels) {
-        const now = Date.now();
         if (this._frameCache.has(frameId)) {
+            // Promote to MRU: delete then re-insert at tail
             const entry = this._frameCache.get(frameId);
-            entry.lastUsed = now;
+            this._frameCache.delete(frameId);
+            this._frameCache.set(frameId, entry);
             this.textures.image = entry.tex;
             this.imageWidth = width;
             this.imageHeight = height;
@@ -907,42 +817,28 @@ class RadianceWebGLRenderer {
             return entry.tex;
         }
 
-        // Evict LRU entry if at capacity
+        // Evict LRU (first entry) if at capacity
         if (this._frameCache.size >= this._frameCacheMaxSize) {
-            let oldest = null, oldestTime = Infinity;
-            for (const [id, entry] of this._frameCache) {
-                if (entry.lastUsed < oldestTime) { oldestTime = entry.lastUsed; oldest = id; }
-            }
-            if (oldest !== null) {
-                const ev = this._frameCache.get(oldest);
-                if (ev && this.gl) this.gl.deleteTexture(ev.tex);
-                this._frameCache.delete(oldest);
-            }
+            const lruId = this._frameCache.keys().next().value;
+            const lruEntry = this._frameCache.get(lruId);
+            if (lruEntry && this.gl) this.gl.deleteTexture(lruEntry.tex);
+            this._frameCache.delete(lruId);
         }
 
         const tex = this.loadFloat16Texture(fp16data, width, height, channels);
-        if (tex) this._frameCache.set(frameId, { tex, lastUsed: now });
+        if (tex) this._frameCache.set(frameId, { tex });
         return tex;
     }
 
     /**
      * Upload a float32 frame and cache it by frameId.
-     * Mirror of loadFloat16TextureCached for full-precision float32 data
-     * (EXR FLOAT, TIFF float32, RF32 binary, RGBE decoded).
-     * Evicts the LRU entry when the 8-frame cache is full.
-     *
-     * @param {string|number}  frameId   – unique identifier for the frame
-     * @param {Float32Array}   data      – raw float32 pixel data
-     * @param {number}         width
-     * @param {number}         height
-     * @param {number}         channels  – 3 or 4
-     * @returns {WebGLTexture|null}
+     * O(1) LRU eviction via Map insertion-order (same as float16 variant).
      */
     loadFloat32TextureCached(frameId, data, width, height, channels) {
-        const now = Date.now();
         if (this._frameCache.has(frameId)) {
             const entry = this._frameCache.get(frameId);
-            entry.lastUsed = now;
+            this._frameCache.delete(frameId);
+            this._frameCache.set(frameId, entry);
             this.textures.image = entry.tex;
             this.imageWidth = width;
             this.imageHeight = height;
@@ -950,31 +846,17 @@ class RadianceWebGLRenderer {
             return entry.tex;
         }
 
-        // Evict LRU when at capacity
+        // Evict LRU (first entry) if at capacity
         if (this._frameCache.size >= this._frameCacheMaxSize) {
-            let oldest = null, oldestTime = Infinity;
-            for (const [id, entry] of this._frameCache) {
-                if (entry.lastUsed < oldestTime) { oldestTime = entry.lastUsed; oldest = id; }
-            }
-            if (oldest !== null) {
-                const ev = this._frameCache.get(oldest);
-                if (ev && this.gl) this.gl.deleteTexture(ev.tex);
-                this._frameCache.delete(oldest);
-            }
+            const lruId = this._frameCache.keys().next().value;
+            const lruEntry = this._frameCache.get(lruId);
+            if (lruEntry && this.gl) this.gl.deleteTexture(lruEntry.tex);
+            this._frameCache.delete(lruId);
         }
 
         const tex = this.loadFloat32Texture(data, width, height, channels);
-        if (tex) this._frameCache.set(frameId, { tex, lastUsed: now });
+        if (tex) this._frameCache.set(frameId, { tex });
         return tex;
-    }
-
-    /** Clear the entire LRU frame texture cache and release GPU memory. */
-    clearFrameCache() {
-        const gl = this.gl;
-        for (const [, entry] of this._frameCache) {
-            if (entry.tex && gl) gl.deleteTexture(entry.tex);
-        }
-        this._frameCache.clear();
     }
 
     // ── v3.0 #10: Display-P3 / ICC Detection ─────────────────────────────────
@@ -1215,9 +1097,9 @@ class RadianceWebGLRenderer {
             this.extColorHalfFloatLinear = gl.getExtension('OES_texture_half_float_linear');
             this.extColorBufferFloat = gl.getExtension('EXT_color_buffer_float');
             if (this.extHalfFloat) {
-                console.log('[Radiance v2.3.3] OES_texture_half_float available — HALF_FLOAT path active');
+                console.log('[Radiance v2.4.2] OES_texture_half_float available — HALF_FLOAT path active');
             } else {
-                console.warn('[Radiance v2.3.3] OES_texture_half_float unavailable — falling back to FLOAT');
+                console.warn('[Radiance v2.4.2] OES_texture_half_float unavailable — falling back to FLOAT');
             }
         } else {
             this.extColorFloatLinear = null;
@@ -1348,7 +1230,7 @@ class RadianceWebGLRenderer {
         if (!gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS)) {
             const log = gl.getShaderInfoLog(vertexShader);
             console.error('[Radiance] Vertex shader compilation failed:', log);
-            // B-14 FIX: Removed blocking alert() — professional tools log silently
+            // B-14 FIX: Removed blocking browser alert; professional tools log silently
             return null;
         }
 
@@ -1360,7 +1242,7 @@ class RadianceWebGLRenderer {
             const log = gl.getShaderInfoLog(fragmentShader);
             console.error('[Radiance] Fragment shader compilation failed:', log);
             console.error('[Radiance] Fragment shader source:', fragmentSource);
-            // B-14 FIX: Removed blocking alert()
+            // B-14 FIX: Removed blocking browser alert
             return null;
         }
 
@@ -1372,7 +1254,7 @@ class RadianceWebGLRenderer {
         if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
             const log = gl.getProgramInfoLog(program);
             console.error('[Radiance] Shader program linking failed:', log);
-            // B-14 FIX: Removed blocking alert()
+            // B-14 FIX: Removed blocking browser alert
             return null;
         }
 
@@ -1581,7 +1463,7 @@ class RadianceWebGLRenderer {
             ${inOut} vec2 a_position;
             ${inOut} vec2 a_texcoord;
             ${outVar} vec2 v_texcoord;
-            
+
             void main() {
                 gl_Position = vec4(a_position, 0.0, 1.0);
                 v_texcoord = a_texcoord;
@@ -1601,13 +1483,13 @@ class RadianceWebGLRenderer {
             precision highp float;
             ${inVar} vec2 v_texcoord;
             ${outColor}
-            
+
             uniform sampler2D u_image;
             uniform float u_exposure;
             uniform float u_gamma;
             uniform float u_saturation;
             uniform bool u_isLinear;
-            
+
             // sRGB OETF (linear → display)
             vec3 linearToSRGB(vec3 linear) {
                 bvec3 cutoff = lessThan(linear, vec3(0.0031308));
@@ -1623,30 +1505,30 @@ class RadianceWebGLRenderer {
                 vec3 lower = srgb / vec3(12.92);
                 return mix(higher, lower, vec3(cutoff));
             }
-            
+
             void main() {
                 vec3 color = ${texture2D}(u_image, v_texcoord).rgb;
-                
+
                 // Linearize sRGB PNG input; float textures are already linear
                 if (!u_isLinear) {
                     color = sRGBToLinear(color);
                 }
-                
+
                 // Exposure (linear space)
                 color *= pow(2.0, u_exposure);
-                
+
                 // Saturation (linear space)
                 float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
                 color = mix(vec3(luma), color, u_saturation);
-                
+
                 // Gamma (artistic control)
                 if (u_gamma != 1.0) {
                     color = pow(max(color, vec3(0.0)), vec3(1.0 / u_gamma));
                 }
-                
+
                 // Display transform (sRGB OETF)
                 color = linearToSRGB(max(color, vec3(0.0)));
-                
+
                 ${fragColor} = vec4(color, 1.0);
             }
         `;
@@ -1660,19 +1542,19 @@ class RadianceWebGLRenderer {
             precision highp int;
             precision highp sampler2D;
             precision highp sampler3D;
-            
+
             in vec2 v_texcoord;
             out vec4 fragColor;
-            
+
             uniform sampler2D u_image;
             uniform sampler2D u_depth;
             uniform sampler3D u_lut;
-            
+
             uniform float u_lutSize;
             uniform float u_lutStrength;
             uniform bool u_lutEnabled;
             uniform bool u_lutIsDisplayTransform; // true = LUT is a full display transform (already has OETF baked in)
-            
+
             uniform float u_exposure;
             uniform vec3 u_lift;
             uniform vec3 u_gamma;
@@ -1680,12 +1562,12 @@ class RadianceWebGLRenderer {
             uniform vec3 u_offset; // v3.0
 
             uniform int u_colorScience; // 0=Linear/sRGB (default), 1=ACEScct
-            
+
             uniform float u_temperature;
             uniform float u_tint;
             uniform float u_contrast;
             uniform float u_pivot;
-            
+
             uniform float u_saturation;
             uniform float u_grainAmount;
             uniform int u_frame;
@@ -1707,12 +1589,12 @@ class RadianceWebGLRenderer {
             uniform float u_midDetail;
             uniform float u_hueShift;
             uniform float u_lumaMix;
-            
+
             // v3.3: Log Wheels
             uniform vec3 u_logShadow;
             uniform vec3 u_logMidtone;
             uniform vec3 u_logHighlight;
-            
+
             uniform bool u_dofEnabled;
             uniform float u_focusDist;
             uniform float u_aperture;
@@ -1721,7 +1603,7 @@ class RadianceWebGLRenderer {
             uniform bool u_falseColor;
             uniform bool u_zebra;
             uniform float u_zebraThreshold;
-            
+
             // v2.3 Analytics
             uniform bool u_gamutWarning;
             uniform bool u_clippingMonitor;
@@ -1747,7 +1629,7 @@ class RadianceWebGLRenderer {
             // v2.2 Pro Grids
             uniform int u_gridMode;
             uniform vec4 u_gridColor;
-            
+
             // v2.3: Denoise & Depth Eval
             uniform float u_denoise;
             uniform bool u_showDepth;
@@ -1755,7 +1637,7 @@ class RadianceWebGLRenderer {
             // v2.4: Custom Curves (1D LUT)
             // 256x1 texture where R=RedCurve, G=GreenCurve, B=BlueCurve
             // Alpha channel is unused (or could be Luma curve master)
-            uniform sampler2D u_curveLut; 
+            uniform sampler2D u_curveLut;
             uniform float u_curveMix; // 0.0 = disabled, 1.0 = full effect
             // FIX 5: Slope of the curve at the highlight end (lut[255]-lut[254])*255.
             // Used for physically correct HDR extrapolation above 1.0 instead of
@@ -1763,31 +1645,31 @@ class RadianceWebGLRenderer {
             // u_curveSlope removed (v4.2): ratio-based HDR extrapolation via topVal
             // sampling (FIX 6) fully replaced slope-based extrapolation. Slope is
             // still computed on the JS side for backward compat but never uploaded.
-            
+
             // v3.4: Secondary Curves (Hue vs X)
             uniform sampler2D u_secondaryCurveLut;
             uniform float u_secondaryCurveMix;
 
-            
+
             // v2.5: Qualifiers (HSL)
             uniform bool u_qualifierEnabled;
             uniform bool u_qualifierShowMask;
-            
+
             // Hue (0..1)
             uniform float u_qualifierHue;
             uniform float u_qualifierHueWidth;
             uniform float u_qualifierHueSoft;
-            
+
             // Saturation (0..1)
             uniform float u_qualifierSat;
             uniform float u_qualifierSatWidth;
             uniform float u_qualifierSatSoft;
-            
+
             // Luma (0..1)
             uniform float u_qualifierLuma;
             uniform float u_qualifierLumaWidth;
             uniform float u_qualifierLumaSoft;
-            
+
             // v2.6: Lens & Optical Effects
             uniform int u_apertureBlades;
             uniform float u_apertureRotation;
@@ -1799,12 +1681,12 @@ class RadianceWebGLRenderer {
 
             uniform float u_vignetteIntensity;
             uniform float u_vignetteFalloff;
-            
+
             // v2.6.1: Realistic Bokeh Physics
             uniform float u_bokehHighlightBias;
             uniform float u_bokehSoapBubble;
             uniform float u_bokehOpticalVig;
-            
+
             // v3.1: Extended Grain & Lens
             uniform float u_grainSize;
             uniform float u_grainColor;
@@ -1873,9 +1755,9 @@ class RadianceWebGLRenderer {
                 float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
                 float maxRGB = max(color.r, max(color.g, color.b));
                 float sat = maxRGB - min(color.r, min(color.g, color.b)); // Simple saturation estimate
-                
+
                 // Vibrance logic: Boosts low-sat pixels more than high-sat
-                float boostFactor = (1.0 - sat * 0.8) * boost; 
+                float boostFactor = (1.0 - sat * 0.8) * boost;
                 vec3 boosted = mix(vec3(luma), color, 1.0 + boostFactor);
                 return max(boosted, 0.0);
             }
@@ -1887,28 +1769,28 @@ class RadianceWebGLRenderer {
 
             float calculateMask(vec2 uv) {
                 if (u_maskType == 0) return 1.0;
-                
+
                 vec2 p = uv - u_maskCenter;
-                
+
                 // Aspect Ratio Compensation: If u_texSize is available, we use it to keep masks round
                 float aspect = u_texSize.x / u_texSize.y;
                 p.x *= aspect;
-                
+
                 // Apply rotation
                 float s = sin(-u_maskRotation);
                 float c = cos(-u_maskRotation);
                 p = vec2(p.x * c - p.y * s, p.x * s + p.y * c);
-                
+
                 // Apply scaling (Inverse of scale factor)
                 p /= max(vec2(0.001), u_maskScale);
-                
+
                 float dist = 0.0;
                 if (u_maskType == 1) { // Circle
                     dist = length(p);
                 } else if (u_maskType == 2) { // Box
                     dist = max(abs(p.x), abs(p.y));
                 }
-                
+
                 float mask = 1.0 - smoothstep(1.0 - u_maskFeather, 1.0, dist);
                 return u_maskInvert ? 1.0 - mask : mask;
             }
@@ -1916,18 +1798,18 @@ class RadianceWebGLRenderer {
             // ----------------------------------------------------------------
             // Curves
             // ----------------------------------------------------------------
-            
+
             vec3 applyCurves(vec3 color) {
                 if (u_curveMix <= 0.0) return color;
-                
+
                 // Sample only the 0..1 range from the LUT
                 vec3 c = clamp(color, 0.0, 1.0);
-                
+
                 float r = texture(u_curveLut, vec2(c.r, 0.5)).r;
                 float g = texture(u_curveLut, vec2(c.g, 0.5)).g;
                 float b = texture(u_curveLut, vec2(c.b, 0.5)).b;
                 vec3 curved = vec3(r, g, b);
-                
+
                 // FIX 6: Ratio-preserving HDR extrapolation for values > 1.0.
                 // Old slope-based method failed on highlight roll-off curves:
                 // when the curve flattens at the top (slope → 0), ALL HDR values
@@ -1943,7 +1825,7 @@ class RadianceWebGLRenderer {
                 // instead of three separate fetches at the same coordinate.
                 vec3 topVal = texture(u_curveLut, vec2(1.0, 0.5)).rgb;
                 curved = mix(curved, color * max(topVal, vec3(0.0)), step(vec3(1.0), color));
-                
+
                 return mix(color, curved, u_curveMix);
             }
 
@@ -1952,22 +1834,22 @@ class RadianceWebGLRenderer {
             // ----------------------------------------------------------------
             vec3 applySecondaryCurves(vec3 color) {
                 if (u_secondaryCurveMix <= 0.0) return color;
-                
+
                 vec3 hsv = rgb2hsv(color);
-                
+
                 // Texture lookup based on Hue (x coordinate)
                 // R = HueVsHue, G = HueVsSat, B = HueVsLuma
                 vec3 lookup = texture(u_secondaryCurveLut, vec2(hsv.x, 0.5)).rgb;
-                
+
                 // R: HueVsHue — 0.5 = no change. Range: +/-0.5 = +/-180 deg hue rotation.
                 // fract() wraps the hue into [0.0, 1.0) and correctly handles
                 // negative arguments in GLSL (fract(-0.1) = 0.9).
                 // FIX 2: removed dead 'if (hsv.x < 0.0)' guard — fract() makes it unreachable.
                 float hueShift = (lookup.r - 0.5);
                 hsv.x = fract(hsv.x + hueShift);
-                
+
                 // G: HueVsSat — 0.5 = 1× sat. 0.0 = 0× sat. 1.0 = 2× sat.
-                float satMult = lookup.g * 2.0; 
+                float satMult = lookup.g * 2.0;
                 hsv.y = clamp(hsv.y * satMult, 0.0, 1.0);
 
                 // B: HueVsLuma — 0.5 = no change. <0.5 darken, >0.5 lift.
@@ -1978,7 +1860,7 @@ class RadianceWebGLRenderer {
                 // RGB after hsv2rgb(). For HDR linear we keep the wide ceiling.
                 float maxLuma = u_isLinear ? 65504.0 : 1.0;
                 hsv.z = clamp(hsv.z + lumaShift * 0.5, 0.0, maxLuma);
-                
+
                 vec3 curved = hsv2rgb(hsv);
                 return mix(color, curved, u_secondaryCurveMix);
             }
@@ -1987,8 +1869,9 @@ class RadianceWebGLRenderer {
 // DoF / Bokeh
 // ----------------------------------------------------------------
 
-const int SAMPLE_COUNT = 64; 
+const int SAMPLE_COUNT = 64;
 const float PI = 3.14159265;
+const float TWO_PI = 6.28318530;
 const float GOLDEN_ANGLE = 2.39996323;
 
             // Pseudo-random jitter for smoother bokeh texture
@@ -2004,6 +1887,33 @@ const float GOLDEN_ANGLE = 2.39996323;
                 f = f * f * (3.0 - 2.0 * f);
                 return mix(mix(hash12(i + vec2(0.0, 0.0)), hash12(i + vec2(1.0, 0.0)), f.x),
                            mix(hash12(i + vec2(0.0, 1.0)), hash12(i + vec2(1.0, 1.0)), f.x), f.y);
+            }
+
+            float luminance(vec3 c) {
+                return dot(c, vec3(0.2126, 0.7152, 0.0722));
+            }
+
+            vec2 safeNormalize(vec2 v) {
+                float len2 = dot(v, v);
+                return len2 > 1e-6 ? v * inversesqrt(len2) : vec2(0.0, 0.0);
+            }
+
+            vec2 rotate2(vec2 v, float a) {
+                float s = sin(a);
+                float c = cos(a);
+                return vec2(v.x * c - v.y * s, v.x * s + v.y * c);
+            }
+
+            float apertureBoundary(float theta, float blades) {
+                if (blades < 3.0) return 1.0;
+                float bladeAngle = TWO_PI / max(blades, 3.0);
+                float local = mod(theta + bladeAngle * 0.5, bladeAngle) - bladeAngle * 0.5;
+                return clamp(cos(bladeAngle * 0.5) / max(cos(local), 0.08), 0.0, 1.0);
+            }
+
+            float circleOfConfusion(float depth) {
+                float focusDelta = max(abs(depth - u_focusDist) - 0.0035, 0.0);
+                return clamp(focusDelta * u_aperture * 118.0, 0.0, 20.0);
             }
 
             // Brown-Conrady Distortion — full k1 + k2 model
@@ -2024,102 +1934,112 @@ const float GOLDEN_ANGLE = 2.39996323;
                 if (radius < 1.0 && u_lensFringe == 0.0) {
                     return texture(u_image, uv).rgb;
                 }
-                
-                vec3 acc = vec3(0.0);
-                float weight = 0.0;
 
                 vec2 pixelSize = 1.0 / u_texSize;
-                float anamorphic = u_apertureAnamorphic;
+                float anamorphic = max(u_apertureAnamorphic, 0.25);
+                float anaStretch = sqrt(anamorphic);
+                float apertureRot = radians(u_apertureRotation);
+                float blades = float(u_apertureBlades);
+                float centerDepth = u_dofEnabled ? texture(u_depth, uv).r : u_focusDist;
 
                 // Optical Vignetting (Cat's Eye Bokeh)
                 // Squish the bokeh shape radially depending on distance from center
                 vec2 centerDist = uv - 0.5;
                 float distLength = length(centerDist);
                 // directional squish vector pointing away from center
-                vec2 opticalSquishDir = normalize(centerDist); 
-                float opticalVigFactor = 1.0 - (u_bokehOpticalVig * clamp(distLength * 1.5, 0.0, 1.0));
-                
+                vec2 opticalSquishDir = safeNormalize(centerDist);
+                float opticalVigFactor = clamp(1.0 - (u_bokehOpticalVig * clamp(distLength * 1.65, 0.0, 1.0)), 0.28, 1.0);
+
                 // Chromatic Aberration offsets (Red/Blue shift)
                 vec2 caOffset = centerDist * u_lensFringe * 0.02 * anamorphic;
 
                 // Center sample
                 vec3 c_center = vec3(texture(u_image, uv - caOffset).r, texture(u_image, uv).g, texture(u_image, uv + caOffset).b);
-                
-                float c_luma = dot(c_center, vec3(0.2126, 0.7152, 0.0722));
-                float c_boost = 1.0 + pow(max(c_luma, 0.0), 2.0) * u_bokehHighlightBias;
-                
-                acc += c_center * c_boost;
-                weight += c_boost;
-                
-                if (radius < 1.0) return acc / weight;
+
+                float c_luma = luminance(c_center);
+                float c_boost = 1.0 + min(pow(max(c_luma, 0.0), 1.5) * u_bokehHighlightBias, 8.0);
+
+                if (radius < 1.0) return c_center;
+
+                float centerNear = 1.0 - step(u_focusDist, centerDepth);
+                float centerFar = 1.0 - centerNear;
+                float centerBlur = smoothstep(0.8, 5.0, radius);
+                vec3 nearAcc = c_center * c_boost * centerNear * 0.35;
+                vec3 farAcc = c_center * c_boost * centerFar * 0.35;
+                float nearWeight = centerNear * 0.35;
+                float farWeight = centerFar * 0.35;
+                float nearCoverage = 0.0;
 
                 // Noise-based rotation to break up concentric artifacts
-                float noise = hash12(uv * 10.0 + fract(float(u_frame) * 0.1));
-                float noiseRot = noise * 6.283185;
-                float sinR = sin(noiseRot), cosR = cos(noiseRot);
-                mat2 rotMat = mat2(cosR, -sinR, sinR, cosR);
-
-                // Polygon Shape Logic
-                float blades = float(u_apertureBlades);
-                float bladeRad = radians(360.0 / blades);
-                float rot = radians(u_apertureRotation);
+                float noiseRot = hash12(uv * u_texSize + vec2(float(u_frame) * 0.37, 11.7)) * TWO_PI;
 
                 for (int i = 1; i <= SAMPLE_COUNT; i++) {
-                    // Jittered Golden Angle distribution
-                    float r = sqrt(float(i) / float(SAMPLE_COUNT));
-                    float theta = float(i) * GOLDEN_ANGLE;
+                    float fi = float(i) - 0.5;
+                    float r = sqrt(fi / float(SAMPLE_COUNT));
+                    float theta = fi * GOLDEN_ANGLE + noiseRot;
+                    vec2 offsetRaw = vec2(cos(theta), sin(theta)) * r * apertureBoundary(theta, blades);
 
-                    // Map circle to polygon if needed
-                    float polygonScale = 1.0;
-                    if (blades >= 3.0) {
-                        float phi = theta + rot;
-                        float sector = floor(phi / bladeRad + 0.5);
-                        float phi_local = phi - sector * bladeRad;
-                        polygonScale = cos(bladeRad * 0.5) / cos(phi_local);
-                    }
-                    
-                    // Anamorphic stretch + Noise rotation
-                    vec2 offsetRaw = vec2(cos(theta), sin(theta)) * rotMat;
-                    
+                    // Shape transform: anamorphic ratio is area-preserving, rotation affects oval and polygon bokeh.
+                    offsetRaw = vec2(offsetRaw.x * anaStretch, offsetRaw.y / anaStretch);
+                    offsetRaw = rotate2(offsetRaw, apertureRot);
+
                     // Optical Vignetting
                     float dotDir = dot(offsetRaw, opticalSquishDir);
                     vec2 offsetVig = offsetRaw - opticalSquishDir * dotDir * (1.0 - opticalVigFactor);
-                    
-                    vec2 offset = offsetVig * r * radius * pixelSize;
-                    
-                    // Apply polygon shape
-                    if (blades >= 3.0) offset *= polygonScale;
 
-                    // Apply Anamorphic Ratio (Stretch X)
-                    offset.x *= anamorphic;
+                    vec2 offset = offsetVig * radius * pixelSize;
 
-                    vec2 sampleUV = uv + offset;
+                    vec2 sampleUV = clamp(uv + offset, vec2(0.0), vec2(1.0));
 
                     vec3 sam;
                     sam.r = texture(u_image, sampleUV - caOffset).r;
                     sam.g = texture(u_image, sampleUV).g;
-                    sam.b = texture(u_image, sampleUV + caOffset).b; 
+                    sam.b = texture(u_image, sampleUV + caOffset).b;
 
-                    float luma = dot(sam, vec3(0.2126, 0.7152, 0.0722));
-                    // Highlight Bias (Energy)
-                    float boost = 1.0 + pow(max(luma, 0.0), 2.0) * u_bokehHighlightBias;
-                    
+                    float nearLayerWeight = 1.0;
+                    float farLayerWeight = 1.0;
+                    if (u_dofEnabled) {
+                        float sampleDepth = texture(u_depth, sampleUV).r;
+                        float sampleCoc = circleOfConfusion(sampleDepth);
+                        float sampleDistance = length(offsetVig) * radius;
+                        float cocCoversTarget = smoothstep(sampleDistance - 1.25, sampleDistance + 1.25, sampleCoc);
+                        float sampleBlur = smoothstep(0.8, 3.0, sampleCoc);
+                        float sampleNear = 1.0 - step(u_focusDist, sampleDepth);
+                        float sampleFar = 1.0 - sampleNear;
+
+                        // Reverse gather: a sample contributes when its own CoC covers this pixel.
+                        // Same-layer gather keeps broad defocus smooth, while cross-layer bleed stays suppressed.
+                        nearLayerWeight = sampleNear * max(cocCoversTarget * sampleBlur, centerNear * sampleNear * 0.55);
+                        farLayerWeight = sampleFar * max(cocCoversTarget * sampleBlur, centerFar * sampleFar * 0.45);
+                        nearCoverage = max(nearCoverage, nearLayerWeight);
+                    }
+
+                    float luma = luminance(sam);
+                    float boost = 1.0 + min(pow(max(luma, 0.0), 1.5) * u_bokehHighlightBias, 8.0);
+
                     // Soap Bubble Effect (Edge brightening)
                     // r ranges from 0 to 1
-                    float rim = pow(r, 4.0) * u_bokehSoapBubble; 
-                    float sampleWeight = boost + rim;
+                    float rim = pow(r, 4.0) * u_bokehSoapBubble;
+                    float lensWeight = 1.0 + rim * 0.35;
+                    vec3 bokehSample = sam * boost * (1.0 + rim * 0.6);
 
-                    acc += sam * sampleWeight;
-                    weight += sampleWeight;
+                    nearAcc += bokehSample * nearLayerWeight * lensWeight;
+                    farAcc += bokehSample * farLayerWeight * lensWeight;
+                    nearWeight += nearLayerWeight * lensWeight;
+                    farWeight += farLayerWeight * lensWeight;
                 }
 
-                return acc / weight;
+                vec3 farColor = farWeight > 0.001 ? farAcc / farWeight : c_center;
+                vec3 nearColor = nearWeight > 0.001 ? nearAcc / nearWeight : c_center;
+                float farAlpha = centerFar * centerBlur;
+                float nearAlpha = max(centerNear * centerBlur, smoothstep(0.04, 0.35, nearCoverage));
+                return mix(mix(c_center, farColor, farAlpha), nearColor, clamp(nearAlpha, 0.0, 1.0));
             }
 
             // ----------------------------------------------------------------
             // Color Ops
             // ----------------------------------------------------------------
-            
+
             vec3 applyLUT(vec3 color, sampler3D lut, float size) {
                 float scale = (size - 1.0) / size;
                 float offset = 0.5 / size;
@@ -2141,7 +2061,7 @@ const float GOLDEN_ANGLE = 2.39996323;
                 if (v >= 0.02) return vec3(v);                   // Deep Grey
                 return vec3(0.6, 0.0, 0.8);                      // Purple (Clipped Black)
             }
-            
+
             // ACES Tone Mapping (Approx)
             vec3 toneMapACES(vec3 color) {
                 const float a = 2.51;
@@ -2415,7 +2335,7 @@ const float GOLDEN_ANGLE = 2.39996323;
                     vec3 logBranch  = exp((c - nl_d) / nl_c);
                     return max(mix(cbrtBranch, logBranch, vec3(greaterThanEqual(c, vec3(nl_cut_cv)))), vec3(0.0));
                 }
-                
+
                 case 29: { // IDT LogC3 → Linear
                     const float lc3_cut=0.010591, lc3_a=5.555556, lc3_b=0.052272;
                     const float lc3_c=0.247190,   lc3_d=0.385537;
@@ -2432,6 +2352,77 @@ const float GOLDEN_ANGLE = 2.39996323;
                     vec3 logBranch = pow(vec3(10.0), (c - vl_d) / vl_c) - vl_b;
                     vec3 linBranch = (c - 0.125) / 5.625;
                     return mix(linBranch, logBranch, vec3(greaterThanEqual(c, vec3(vl_cut_cv))));
+                }
+
+                case 34: { // IDT Rec.709 → Linear
+                    bvec3 lo = lessThan(c, vec3(0.081));
+                    vec3 low = c / 4.5;
+                    vec3 high = pow((c + vec3(0.099)) / vec3(1.099), vec3(1.0 / 0.45));
+                    return mix(high, low, vec3(lo));
+                }
+
+                case 35: { // IDT sRGB → Linear
+                    return sRGBToLinear(c);
+                }
+
+                // ── v4.3: Previously missing forward + IDT cases ─────────────
+
+                case 13: { // V-Log (Panasonic) — Linear → V-Log
+                    // Source: Panasonic V-Log/V-Gamut Spec (2014), colour-science verified
+                    // 18% grey → 0.423946  |  cut1=0.01, cut2=0.181
+                    // Note: log10(x) = log(x) / L10  (GLSL ES has no log10 built-in)
+                    const float vl_fwd_b=0.00873, vl_fwd_c=0.241514, vl_fwd_d=0.598206;
+                    const float vl_fwd_cut=0.01;
+                    vec3 logV = vl_fwd_c * (log(max(c + vl_fwd_b, vec3(1e-10))) / L10) + vl_fwd_d;
+                    vec3 linV = 5.6 * c + 0.125;
+                    return mix(linV, logV, vec3(greaterThan(c, vec3(vl_fwd_cut))));
+                }
+
+                case 16: { // Sony S-Log3 — Linear → S-Log3
+                    // Source: colour-science log_encoding_SLog3 (Sony Specification 2014)
+                    // Formula: (420 + log10((x+0.01)/0.19) * 261.5) / 1023
+                    // Verified: 18% grey → 0.410557  |  cut=0.01125 (scene-linear)
+                    // Lin slope: (171.2102946929-95) / 0.01125 = 6774.2484
+                    const float sl3_cut = 0.01125;
+                    vec3 logV = (420.0 + log(max(c + 0.01, vec3(1e-10)) / 0.19) / log(10.0) * 261.5) / 1023.0;
+                    vec3 linV = (c * 6774.2484 + 95.0) / 1023.0;
+                    return mix(linV, logV, vec3(greaterThanEqual(c, vec3(sl3_cut))));
+                }
+
+                case 31: { // IDT S-Log3 → Linear
+                    // Exact inverse of case 16. Source: Sony S-Log3 Specification (2014)
+                    // log_out = 10^((v*1023-420)/261.5) * 0.19 - 0.01
+                    // lin_out = (v*1023-95) * 0.01125 / (171.2102946929-95)
+                    // CUT_CV  = (95/1023) ≈ 0.09285... wait, cut is at lin_break encoded value:
+                    // cut_cv = (0.01125*(171.2102946929-95)/0.01125 + 95)/1023 = 171.2102946929/1023 ≈ 0.16736
+                    const float sl3_cut_cv = 0.167361;
+                    vec3 logBranch = pow(vec3(10.0), (c * 1023.0 - 420.0) / 261.5) * 0.19 - 0.01;
+                    vec3 linBranch = (c * 1023.0 - 95.0) * 0.01125 / (171.2102946929 - 95.0);
+                    return max(mix(linBranch, logBranch, vec3(greaterThanEqual(c, vec3(sl3_cut_cv)))), vec3(0.0));
+                }
+
+                case 32: { // Output: ACEScg (AP1 scene-linear)
+                    // Linear sRGB (D65) → ACEScg (AP1, D60 adapted)
+                    // Matrix: Bradford D65→D60 + Rec.709→AP1 primaries
+                    // Source: ACES v1.3 CTL reference transforms
+                    mat3 M = mat3(
+                        0.59719, 0.07600, 0.02840,   // col 0 (R out)
+                        0.35458, 0.90834, 0.13383,   // col 1 (G out)
+                        0.04823, 0.01566, 0.83777    // col 2 (B out)
+                    );
+                    return M * c;
+                }
+
+                case 33: { // Output: ACES2065-1 (AP0 scene-linear)
+                    // Linear sRGB (D65) → ACES2065-1 (AP0, D60 adapted)
+                    // Covers full spectral locus — archive-grade interchange
+                    // Source: ACES v1.3, S-2014-004
+                    mat3 M = mat3(
+                        0.43963, 0.08978, 0.01754,   // col 0
+                        0.38298, 0.81380, 0.11170,   // col 1
+                        0.17739, 0.09642, 0.87076    // col 2
+                    );
+                    return M * c;
                 }
 
                 default:
@@ -2480,11 +2471,11 @@ const float GOLDEN_ANGLE = 2.39996323;
                 if (any(is_inf)) safe = clamp(c, 0.0, 65504.0);
                 return safe;
             }
-            
+
             // ----------------------------------------------------------------
             // Advanced Grading Ops
             // ----------------------------------------------------------------
-            
+
             vec3 applyTempTint(vec3 color, float temp, float tint) {
                 vec3 shift = vec3(0.0);
                 // Temp: Warm (Orange) / Cool (Blue)
@@ -2542,10 +2533,10 @@ const float GOLDEN_ANGLE = 2.39996323;
 
             vec3 applyGrading(vec3 color, vec3 lift, vec3 gamma, vec3 gain, vec3 offset) {
                 // Resolve-Style Grading
-                
+
                 // 1. Offset (Global Add)
                 color += offset;
-                
+
                 // 2. Lift (Shadows - Pivoted at White)
                 // Lift adds to blacks, but has 0 effect at 1.0
                 // Simple formula: color + lift * (1.0 - luma)
@@ -2554,22 +2545,22 @@ const float GOLDEN_ANGLE = 2.39996323;
                 // Clamp luma to 0..1 for pivot
                 float pivot = clamp(1.0 - luma, 0.0, 1.0);
                 color += lift * pivot;
-                
+
                 // 3. Gain (Slope - Pivoted at Black)
                 color *= gain;
-                
+
                 // 4. Gamma (Power - Mids)
-                // Safe pow 
+                // Safe pow
                 color = max(color, 0.0);
                 if (any(notEqual(gamma, vec3(1.0)))) {
                      color.r = pow(color.r, 1.0 / max(0.01, gamma.r));
                      color.g = pow(color.g, 1.0 / max(0.01, gamma.g));
                      color.b = pow(color.b, 1.0 / max(0.01, gamma.b));
                 }
-                
+
                 return color;
             }
-            
+
             vec3 applyContrast(vec3 color, float contrast, float pivot) {
                 // v3.2: Clamping to prevent extreme separation
                 float c = clamp(contrast, 0.0, 5.0);
@@ -2582,24 +2573,24 @@ const float GOLDEN_ANGLE = 2.39996323;
                 // Quadratic weights for smoother roll-off
                 float sWeight = pow(1.0 - smoothstep(0.0, 0.5, luma), 2.0);
                 float hWeight = pow(smoothstep(0.5, 1.0, luma), 2.0);
-                
+
                 // shadows in [-1,1], lift(pos) or crush(neg)
                 color *= (1.0 + shadows * sWeight * 0.5);
                 // highlights in [-1,1], expand(pos) or compress(neg)
                 color *= (1.0 + highlights * hWeight * 0.5);
-                
+
                 return max(color, 0.0);
             }
 
             // v3.3: 3-Way Log Wheels (Shadow/Midtone/Highlight targeting)
             vec3 applyLogWheels(vec3 color, vec3 shadow, vec3 midtone, vec3 highlight) {
                 float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-                
+
                 // Smooth weight distribution based on luminance
                 float sWeight = 1.0 - smoothstep(0.0, 0.45, luma);
                 float hWeight = smoothstep(0.55, 1.0, luma);
                 float mWeight = 1.0 - sWeight - hWeight;
-                
+
                 // Log wheels are applied multiplicatively (similar to localized exposure)
                 color *= (1.0 + shadow * sWeight + midtone * mWeight + highlight * hWeight);
                 return max(color, 0.0);
@@ -2701,7 +2692,7 @@ vec3 getDenoiseColor(vec2 uv) {
     // ----------------------------------------------------------------
     // HSL Qualifier
     // ----------------------------------------------------------------
-    
+
     vec3 applyMidDetail(vec3 color, vec2 uv, float amount) {
         if (amount == 0.0) return color;
         vec3 blurred = getDenoiseColor(uv); // Reuse existing blur
@@ -2729,27 +2720,27 @@ vec3 getDenoiseColor(vec2 uv) {
         if (!u_qualifierEnabled) return 1.0;
 
         vec3 hsl = rgb2hsl(color);
-        
+
         // Hue (Circular distance)
         float hDist = abs(hsl.x - u_qualifierHue);
         if (hDist > 0.5) hDist = 1.0 - hDist;
         float hMask = 1.0 - smoothstep(u_qualifierHueWidth, u_qualifierHueWidth + u_qualifierHueSoft, hDist);
-        
+
         // Saturation
         float sDist = abs(hsl.y - u_qualifierSat);
         float sMask = 1.0 - smoothstep(u_qualifierSatWidth, u_qualifierSatWidth + u_qualifierSatSoft, sDist);
-        
+
         // Luma
         float lDist = abs(hsl.z - u_qualifierLuma);
         float lMask = 1.0 - smoothstep(u_qualifierLumaWidth, u_qualifierLumaWidth + u_qualifierLumaSoft, lDist);
-        
+
         return hMask * sMask * lMask;
     }
 
     void main() {
         // 0. Lens Distortion
         vec2 uv = distortUV(v_texcoord);
-        
+
         // Black out of bounds if distorted
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
             fragColor = vec4(0.0, 0.0, 0.0, 1.0);
@@ -2767,8 +2758,7 @@ vec3 getDenoiseColor(vec2 uv) {
         vec3 color;
         if (u_dofEnabled) {
             float depth = texture(u_depth, uv).r;
-            float coc = abs(depth - u_focusDist) * u_aperture * 100.0;
-            coc = clamp(coc, 0.0, 20.0);
+            float coc = circleOfConfusion(depth);
             color = getBokehColor(uv, coc);
         } else {
             // Apply CA even if DoF off? Yes, getBokehColor handles it if radius < 1.0
@@ -2779,7 +2769,7 @@ vec3 getDenoiseColor(vec2 uv) {
                 color = texture(u_image, uv).rgb;
             }
         }
-        
+
         // 1a. Denoise
         if (u_denoise > 0.0) {
             vec3 smoothColor = getDenoiseColor(uv);
@@ -2808,7 +2798,7 @@ vec3 getDenoiseColor(vec2 uv) {
         if (u_temperature != 0.0 || u_tint != 0.0) {
             color = applyTempTint(color, u_temperature, u_tint);
         }
-        
+
         // 4. Grading (Resolve Style)
         if (u_colorScience == 1) {
             // ACEScct Pipeline
@@ -2821,7 +2811,7 @@ vec3 getDenoiseColor(vec2 uv) {
             // Standard Linear Processing
             color = applyGrading(color, u_lift, u_gamma, u_gain, u_offset);
         }
-        
+
         // 5. Contrast
         if (u_contrast != 1.0) {
             color = applyContrast(color, u_contrast, u_pivot);
@@ -2855,12 +2845,12 @@ vec3 getDenoiseColor(vec2 uv) {
         // 6. Saturation
         float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
         color = mix(vec3(luma), color, u_saturation);
-        
+
         // v3.0: Hue Shift
         if (u_hueShift != 0.0) {
             color = applyHueShift(color, u_hueShift);
         }
-        
+
         // v3.0: Luma Mix
         if (u_lumaMix != 1.0) {
             float currentLuma = dot(color, vec3(0.2126, 0.7152, 0.0722));
@@ -2869,10 +2859,10 @@ vec3 getDenoiseColor(vec2 uv) {
             // 0% means Luma is independent? actually usually it controls how much Y channel is affected.
             // Simplified: Mix between current result and (OriginalLuma + ColorDiff)
             // Or just mix luma channel back to pre-graded luma.
-            // Let's stick to standard mix: 
+            // Let's stick to standard mix:
             // If Luma Mix is 0, we output color but with original luma.
             // If Luma Mix is 1, we output color as is.
-            
+
             // Re-calculate original luma from preGrade (linearized input)
             // Pre-grade is 'preGrade' variable
             float origLuma = dot(preGrade, vec3(0.2126, 0.7152, 0.0722));
@@ -2888,7 +2878,7 @@ vec3 getDenoiseColor(vec2 uv) {
         if (u_maskType > 0) {
             finalMatte *= calculateMask(v_texcoord);
         }
-        
+
         if (u_maskType > 0 && u_maskShowOverlay) {
              // Show mask as grayscale overlay for positioning
              float m = calculateMask(v_texcoord);
@@ -3119,7 +3109,7 @@ vec3 getDenoiseColor(vec2 uv) {
                 color = blendOverlay(color, vec3(grainStrength) + 0.5);
             }
         }
-        
+
         // 7d. Vignette
         if (u_vignetteIntensity > 0.0) {
             float d = distance(uv, vec2(0.5));
@@ -3260,7 +3250,7 @@ vec3 getDenoiseColor(vec2 uv) {
             void main() {
                 vec4 pixel = texture(u_image, a_uv);
                 vec3 color = pixel.rgb;
-                
+
                 // Linearize if sRGB
                 if (!u_isLinear) {
                     bvec3 cutoff = lessThan(color, vec3(0.04045));
@@ -3268,7 +3258,7 @@ vec3 getDenoiseColor(vec2 uv) {
                     vec3 lower = color / vec3(12.92);
                     color = mix(higher, lower, vec3(cutoff));
                 }
-                
+
                 float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
 
                 if (${mode === 'vectorscope' ? 'true' : 'false'}) {
@@ -3279,31 +3269,56 @@ vec3 getDenoiseColor(vec2 uv) {
                     gl_Position = vec4(u * 2.0, v * 2.0, 0.0, 1.0);
                 } else if (${mode === 'waveform' ? 'true' : 'false'}) {
                     // Waveform (X/Luma) or RGB Parade
+
+                    // HDR: Use ST.2084 (PQ) non-linear mapping for the Y axis
+                    // This allows seeing values from 0.001 to 10000 nits
+                    float L = luma;
+                    float m1 = 2610.0 / 4096.0 / 4.0;
+                    float m2 = 2523.0 / 4096.0 * 128.0;
+                    float c1 = 3424.0 / 4096.0;
+                    float c2 = 2413.0 / 4096.0 * 32.0;
+                    float c3 = 2392.0 / 4096.0 * 32.0;
+                    float y_pq = pow((c1 + c2 * pow(max(L, 1e-7), m1)) / (1.0 + c3 * pow(max(L, 1e-7), m1)), m2);
+
                     if (u_parade) {
-                        // RGB Parade: [R][G][B] side by side
-                        float x_norm = a_uv.x; 
-                        
-                        // Use cyclic channel assignment based on Y coordinate to balance samples
-                        float chanIdx = floor(a_uv.y * 3.0); 
+                        float chanIdx = floor(a_uv.y * 3.0);
                         float val = (chanIdx < 1.0) ? color.r : (chanIdx < 2.0 ? color.g : color.b);
+
+                        // Apply PQ to channel value too
+                        float val_pq = pow((c1 + c2 * pow(max(val, 1e-7), m1)) / (1.0 + c3 * pow(max(val, 1e-7), m1)), m2);
+
                         vec3 chanCol = (chanIdx < 1.0) ? vec3(1.0, 0.1, 0.1) : (chanIdx < 2.0 ? vec3(0.1, 1.0, 0.1) : vec3(0.1, 0.4, 1.0));
-                        
                         float x_base = -1.0 + chanIdx * (2.0/3.0);
-                        float x_local = x_norm * (2.0/3.0);
-                        
-                        gl_Position = vec4(x_base + x_local, clamp(val, 0.0, 1.0) * 1.94 - 0.97, 0.0, 1.0);
-                        v_color = vec4(chanCol, u_intensity * 3.0); // Boost for density
+                        float x_local = a_uv.x * (2.0/3.0);
+
+                        gl_Position = vec4(x_base + x_local, val_pq * 1.96 - 0.98, 0.0, 1.0);
+                        v_color = vec4(chanCol, u_intensity * 3.0);
                     } else {
-                        // Luma Waveform
-                        float x = a_uv.x * 1.96 - 0.98;
-                        float y = clamp(luma, 0.0, 1.0) * 1.96 - 0.98;
+                        gl_Position = vec4(a_uv.x * 1.96 - 0.98, y_pq * 1.96 - 0.98, 0.0, 1.0);
                         v_color = vec4(vec3(0.6, 1.0, 0.6), u_intensity * 1.5);
-                        gl_Position = vec4(x, y, 0.0, 1.0);
+                    }
+                } else if (${mode === 'chromaticity' ? 'true' : 'false'}) {
+                    // CIE 1931 xy Chromaticity
+                    mat3 m = mat3(
+                        0.4124, 0.2126, 0.0193,
+                        0.3576, 0.7152, 0.1192,
+                        0.1805, 0.0722, 0.9505
+                    );
+                    vec3 xyz = m * color;
+                    float sum = xyz.x + xyz.y + xyz.z;
+                    if (sum > 1e-6) {
+                        float x = xyz.x / sum;
+                        float y = xyz.y / sum;
+                        // Map x [0, 0.8] -> [-1, 1], y [0, 0.9] -> [-1, 1]
+                        gl_Position = vec4((x / 0.8) * 2.0 - 1.0, (y / 0.9) * 2.0 - 1.0, 0.0, 1.0);
+                        v_color = vec4(color, u_intensity * 3.0);
+                    } else {
+                        gl_Position = vec4(-2.0, -2.0, 0.0, 1.0); // Discard blacks
                     }
                 } else {
                     // Histogram (Luma)
                     float x = clamp(luma, 0.0, 1.0) * 1.96 - 0.98;
-                    float y = (a_uv.y * 2.0 - 1.0) * 0.8; 
+                    float y = (a_uv.y * 2.0 - 1.0) * 0.8;
                     v_color = vec4(vec3(0.8), u_intensity);
                     gl_Position = vec4(x, y, 0.0, 1.0);
                 }
@@ -3465,7 +3480,7 @@ vec3 getDenoiseColor(vec2 uv) {
         if (channels === 1) {
             internalFormat = gl.R16F;
             format = gl.RED;
-            // Swizzle not strictly required if shader handles single channel, 
+            // Swizzle not strictly required if shader handles single channel,
             // but for safety we'll rely on shader logic to read .r
         } else {
             internalFormat = channels === 4 ? gl.RGBA16F : gl.RGB16F;
@@ -3896,7 +3911,7 @@ vec3 getDenoiseColor(vec2 uv) {
             this._uf1(program, 'u_lutStrength', lutStrength);
         } else {
             this._ui1(program, 'u_lutEnabled', 0);
-            // Bind dummy or null to unit 1 to prevent warning? 
+            // Bind dummy or null to unit 1 to prevent warning?
             // WebGL is okay if we don't sample from it, but some drivers complain if unit is missing.
             // Best practice: Bind null or a dummy texture if logic skips sampling.
             gl.activeTexture(gl.TEXTURE1);
@@ -4097,14 +4112,6 @@ vec3 getDenoiseColor(vec2 uv) {
         this.inputLutMode = mode;
     }
 
-    setInputLutMode(mode) {
-        this.inputLutMode = mode;
-    }
-
-    setInputLutMode(mode) {
-        this.inputLutMode = mode;
-    }
-
     // OCIO-FIX: When the 3D LUT is a full display transform (OCIO bake with OETF
     // already inside), skip the final linearToSRGB to prevent double-gamma.
     setLutIsDisplayTransform(v) {
@@ -4122,23 +4129,44 @@ vec3 getDenoiseColor(vec2 uv) {
     destroy() {
         const gl = this.gl;
 
-        // Clean up bilateral FBO
+        // Bilateral FBO
         this._destroyBilateralFBO();
 
-        // Clean up textures
+        // v4.3: Bloom FBO chain (6-level Kawase) — was never freed
+        this._destroyBloomFBOs();
+
+        // v4.3: Scope offscreen FBO + texture — was never freed
+        if (this.scopeFBO)  { gl.deleteFramebuffer(this.scopeFBO);  this.scopeFBO  = null; }
+        if (this.scopeTex)  { gl.deleteTexture(this.scopeTex);      this.scopeTex  = null; }
+
+        // v4.3: Reference shelf GPU textures — was never freed
+        if (this.referenceShelf && this.referenceShelf.length) {
+            this.referenceShelf.forEach(tex => { if (tex) gl.deleteTexture(tex); });
+            this.referenceShelf = [];
+        }
+
+        // v4.3: LRU frame texture cache
+        this.clearFrameCache();
+
+        // Main texture map (image, reference, lut3d, depth, etc.)
         for (const tex of Object.values(this.textures)) {
             if (tex) gl.deleteTexture(tex);
         }
 
-        // Clean up programs
+        // Shader programs
         for (const prog of Object.values(this.programs)) {
             if (prog) gl.deleteProgram(prog);
         }
 
-        // Clean up buffers
-        if (this.quadBuffer) gl.deleteBuffer(this.quadBuffer);
+        // Vertex buffers
+        if (this.quadBuffer)  { gl.deleteBuffer(this.quadBuffer);  this.quadBuffer  = null; }
+        if (this.scopeBuffer) { gl.deleteBuffer(this.scopeBuffer); this.scopeBuffer = null; }
 
-        console.log('[Radiance] WebGL renderer destroyed');
+        // Clear uniform caches
+        this._uniformCache.clear();
+        this._uniformValueCache.clear();
+
+        console.log('[Radiance] WebGL renderer destroyed — all GPU resources released');
     }
 }
 
@@ -4231,23 +4259,32 @@ class RadianceSequencePlayer {
         if (this.frames.length === 0) return;
 
         this.isPlaying = true;
+
+        // v3.1 PERF: requestAnimationFrame replaces setInterval — syncs to vsync,
+        // eliminates double-fire and skipped frames that caused uneven playback.
+        // Time-delta gate enforces the target FPS without blocking the display thread.
         const interval = 1000 / this.fps;
+        let lastTime = 0;
 
-        this.playInterval = setInterval(() => {
-            let nextFrame = this.currentFrame + 1;
-
-            if (nextFrame >= this.frames.length) {
-                if (this.loop) {
-                    nextFrame = 0;
-                } else {
-                    this.pause();
-                    return;
+        const tick = (timestamp) => {
+            if (!this.isPlaying) return;
+            if (timestamp - lastTime >= interval) {
+                lastTime = timestamp;
+                let nextFrame = this.currentFrame + 1;
+                if (nextFrame >= this.frames.length) {
+                    if (this.loop) {
+                        nextFrame = 0;
+                    } else {
+                        this.pause();
+                        return;
+                    }
                 }
+                this.displayFrame(nextFrame);
             }
+            this.playInterval = requestAnimationFrame(tick);
+        };
 
-            this.displayFrame(nextFrame);
-        }, interval);
-
+        this.playInterval = requestAnimationFrame(tick);
         console.log(`[Radiance] Playing at ${this.fps} fps`);
     }
 
@@ -4256,7 +4293,7 @@ class RadianceSequencePlayer {
 
         this.isPlaying = false;
         if (this.playInterval) {
-            clearInterval(this.playInterval);
+            cancelAnimationFrame(this.playInterval);
             this.playInterval = null;
         }
 
@@ -4434,10 +4471,34 @@ class RadianceRGBParade {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//                      HDR COLOR PICKER  (v3.2 Fix 4)
+//  RHDR BINARY FORMAT SPECIFICATION  (Radiance v3.1)
+// ───────────────────────────────────────────────────────────────────────────────
+//  .rhdr is a lightweight sidecar format that carries scene-linear float pixel
+//  data alongside the tone-mapped PNG that ComfyUI displays.  It enables the
+//  HDR color picker to report true pre-display values in linear light.
 //
-//  Reads the .rhdr float16 sidecar that the Python backend saves alongside
-//  every image and returns the true scene-linear float value at any UV.
+//  File layout
+//  ───────────
+//  Bytes    Type         Endian  Field
+//  ───────  ───────────  ──────  ──────────────────────────────────────────────
+//  0–3      char[4]      n/a     Magic: ASCII "RHDR"
+//  4–5      uint16       LE      Image width  (pixels, max 65535)
+//  6–7      uint16       LE      Image height (pixels, max 65535)
+//  8–9      uint16       LE      Channel count (typically 3 = RGB or 4 = RGBA)
+//  10–11    uint16       LE      Flags:  0 = fp16 payload, 1 = fp32 payload
+//  12–EOF   uint8[]      n/a     zlib-deflate compressed pixel data
+//
+//  Pixel data (after decompression)
+//  ─────────────────────────────────
+//  flags = 0  →  float16 (IEEE 754 half precision) row-major, interleaved RGBRGB…
+//  flags = 1  →  float32 (IEEE 754 single precision) row-major, interleaved RGBRGB…
+//  Stride = width × channels × bytes_per_element
+//  Pixel order: top-left origin, left-to-right, top-to-bottom (same as PNG).
+//
+//  Design constraints
+//  ──────────────────
+//  • uint16 width/height limits: max 65535×65535 (validated on write in Python).
+//  • 50 MB decompressed safety cap to prevent decompression-bomb attacks.
 //
 //  This is equivalent to Nuke's "info" toolbar pixel inspector or RV's
 //  color picker — values are in raw linear light, not display-encoded.
@@ -4493,6 +4554,7 @@ class RadianceHDRPicker {
         this.width = view.getUint16(4, true);
         this.height = view.getUint16(6, true);
         this.channels = view.getUint16(8, true);
+        const flags = view.getUint16(10, true);
         const HEADER_SIZE = 12;
 
         // ── Zlib decompress ──────────────────────────────────────────────────
@@ -4529,11 +4591,21 @@ class RadianceHDRPicker {
         }
 
         // ── fp16 → float32 ───────────────────────────────────────────────────
-        const fp16 = new Uint16Array(decompressed.buffer);
-        this.data = new Float32Array(fp16.length);
+        let fp16 = [];
+        if (flags === 1) {
+            if (decompressed.byteOffset % 4 === 0) {
+                this.data = new Float32Array(decompressed.buffer, decompressed.byteOffset, decompressed.length / 4);
+            } else {
+                const copied = new Uint8Array(decompressed);
+                this.data = new Float32Array(copied.buffer);
+            }
+        } else {
+            fp16 = new Uint16Array(decompressed.buffer);
+            this.data = new Float32Array(fp16.length);
 
-        for (let i = 0; i < fp16.length; i++) {
-            this.data[i] = RadianceHDRPicker._fp16ToFloat32(fp16[i]);
+            for (let i = 0; i < fp16.length; i++) {
+                this.data[i] = RadianceHDRPicker._fp16ToFloat32(fp16[i]);
+            }
         }
 
         this.loaded = true;
@@ -4592,7 +4664,9 @@ class RadianceHDRPicker {
             }
         }
         if (!n) return null;
-        return this.sample(u, v) && { ...this.sample(u, v), r: rs / n, g: gs / n, b: bs / n };
+        const centerSample = this.sample(u, v);
+        if (!centerSample) return null;
+        return { ...centerSample, r: rs / n, g: gs / n, b: bs / n };
     }
 
     // ── Canvas Event Helpers ────────────────────────────────────────────────

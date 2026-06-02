@@ -1,0 +1,10 @@
+{
+  "name": "SDXL_Standard",
+  "keys": [
+    "model",
+    "clip",
+    "vae",
+    "latent",
+    "image"
+  ]
+}

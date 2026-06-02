@@ -3,7 +3,10 @@ import numpy as np
 import os
 import json
 import logging
-import folder_paths
+try:
+    import folder_paths
+except ImportError:
+    folder_paths = None
 import datetime
 import struct
 import zlib
@@ -22,47 +25,46 @@ __all__ = [
     "check_openexr_available",
     "SimpleEXRWriter",
     "write_hdr_rgbe",
+    "build_radiance_hdr_metadata",
 ]
 
 try:
-    from ..color_utils import (
+    from radiance.color.transfer import (
         linear_to_logc3,
         linear_to_logc4,
         linear_to_slog3,
         srgb_to_linear,
         linear_to_srgb,
+    )
+    from radiance.color.matrices import (
         apply_matrix_transform,
         AWG3_TO_ACESCG,
         AWG4_TO_ACESCG,
         SGAMUT3_CINE_TO_ACESCG,
         ACESCG_TO_SRGB,
     )
-    from ..path_utils import (
-        safe_join,
-        get_safe_output_dir,
-        get_safe_input_path,
-        get_next_index,
-    )
+
+    _HAS_COLOR_UTILS = True
 except ImportError:
+    _HAS_COLOR_UTILS = False
+
+if not _HAS_COLOR_UTILS:
     try:
-        from radiance.color_utils import (
+        from radiance.color.transfer import (
             linear_to_logc3,
             linear_to_logc4,
             linear_to_slog3,
             srgb_to_linear,
             linear_to_srgb,
+        )
+        from radiance.color.matrices import (
             apply_matrix_transform,
             AWG3_TO_ACESCG,
             AWG4_TO_ACESCG,
             SGAMUT3_CINE_TO_ACESCG,
             ACESCG_TO_SRGB,
         )
-        from radiance.path_utils import (
-            safe_join,
-            get_safe_output_dir,
-            get_safe_input_path,
-            get_next_index,
-        )
+        _HAS_COLOR_UTILS = True
     except ImportError:
         pass
 
@@ -103,6 +105,20 @@ def float32_to_bytes(arr: np.ndarray) -> bytes:
 def float16_to_bytes(arr: np.ndarray) -> bytes:
     return arr.astype(np.float16).tobytes()
 
+def parse_timecode(tc_str: str, fps: float = 24.0) -> Optional[Any]:
+    """Convert HH:MM:SS:FF or HH:MM:SS;FF string to Imath.TimeCode."""
+    try:
+        import Imath
+        parts = tc_str.replace(";", ":").split(":")
+        if len(parts) != 4:
+            return None
+        h, m, s, f = map(int, parts)
+        # Drop frame detection (simplified: if ; is used or if FPS is 29.97/59.94)
+        is_drop = ";" in tc_str or abs(fps - 29.97) < 0.01 or abs(fps - 59.94) < 0.01
+        return Imath.TimeCode(h, m, s, f, rate=int(round(fps)), dropFrame=is_drop)
+    except:
+        return None
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #                           EXR WRITERS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -135,13 +151,23 @@ def write_exr_openexr(filepath: str, channels: Dict[str, np.ndarray], compressio
     ptype = Imath.PixelType(Imath.PixelType.HALF if pixel_type == "HALF" else Imath.PixelType.FLOAT)
     header["channels"] = {n: Imath.Channel(ptype) for n in sorted(channels.keys())}
     if metadata:
+        # Standard OpenEXR attributes and their Imath types
         for k, v in metadata.items():
-            if isinstance(v, (str, int, float)): header[k] = v
+            if k == "timeCode":
+                tc = parse_timecode(str(v))
+                if tc: header["timeCode"] = tc
+            elif k in ["reelName", "capDate", "software", "comments", "owner"]:
+                header[k] = v
+            elif isinstance(v, (str, int, float)):
+                # Prefix Radiance-specific metadata to avoid collisions unless it is standard or Cryptomatte
+                key = k if (k.startswith("cryptomatte") or k.startswith("rad_")) else f"rad_{k}"
+                header[key] = v
     out = OpenEXR.OutputFile(filepath, header)
     out.writePixels({n: d.astype(np.float16 if pixel_type == "HALF" else np.float32).tobytes() for n, d in channels.items()})
     out.close()
 
 class SimpleEXRWriter:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     def write(self, filepath: str, channels: Dict[str, np.ndarray], compression: str = "ZIP", pixel_type: str = "HALF", metadata: Optional[Dict[str, Any]] = None):
         height, width = list(channels.values())[0].shape[:2]
         ch_list = sorted(channels.keys())
@@ -173,7 +199,7 @@ class SimpleEXRWriter:
             offsets = []
             for y in range(height):
                 offsets.append(f.tell())
-                f.write(struct.pack("<iI", y, 0)) # Placeholder
+                f.write(struct.pack("<iI", y, 0))  # scan-line y + data size (patched below)
                 line = b"".join([channels[n][y].astype(np.float16 if pixel_type == "HALF" else np.float32).tobytes() for n in ch_list])
                 if compression in ["ZIP", "ZIPS"]: line = zlib.compress(line)
                 pos = f.tell()
@@ -231,3 +257,247 @@ def write_exr_robust(filepath: str, image: np.ndarray, bit_depth: str = "32-bit 
     except: return False
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#               HDR METADATA BUILDER  (v2.4)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_RADIANCE_VERSION = "Radiance v3.0.0"
+
+# Map of log-space names to a brief human-readable curve description embedded
+# in the color_pipeline summary and the rad_hdr_curve attribute.
+_LOG_CURVE_DESC: Dict[str, str] = {
+    "ARRI LogC3":            "ARRI LogC3 (AWG3, ~800% EI, γ≈0.25)",
+    "ARRI LogC4":            "ARRI LogC4 (AWG4, ~4500%)",
+    "Sony S-Log3":           "Sony S-Log3 (S-Gamut3.Cine)",
+    "Panasonic V-Log":       "Panasonic V-Log (V-Gamut)",
+    "DaVinci Intermediate":  "DaVinci Intermediate",
+    "RED Log3G10":           "RED Log3G10 (REDWideGamutRGB)",
+    "Linear":                "Scene-Linear",
+    "sRGB":                  "sRGB (display-referred)",
+    "ACEScg":                "ACEScg (AP1 linear)",
+    "ACES 2065-1":           "ACES 2065-1 (AP0 linear)",
+    "Rec.2020 Linear":       "Rec.2020 Scene-Linear",
+    "Raw":                   "Raw passthrough (no transform)",
+}
+
+
+def build_radiance_hdr_metadata(
+    source_space: str = "Linear",
+    hdr_mode: str = "Passthrough",
+    decode_noise_scale: float = 0.0,
+    exposure: float = 0.0,
+    target_space: str = "sRGB",
+    display_tonemap: str = "None",
+    lora_name: str = "",
+    lora_type: str = "IC-LoRA",
+) -> Dict[str, Any]:
+    """
+    Build a standardised EXR attribute dictionary capturing the full HDR
+    generation pipeline used by Radiance to produce this image.
+
+    All Radiance-specific keys are prefixed with ``rad_`` to avoid collisions
+    with standard OpenEXR attributes.  The two standard attributes
+    ``software`` and ``comments`` are also set to give generic viewers a
+    human-readable summary without any special tooling.
+
+    Args:
+        source_space:        Log/linear input space fed into the VAE encoder
+                             (e.g. "ARRI LogC3", "Linear").
+        hdr_mode:            Encode HDR mode ("Compress (Log)", "Passthrough",
+                             "Clip", "Soft Clip").
+        decode_noise_scale:  Latent noise injection scale used at decode time
+                             (0 = disabled).
+        exposure:            EV exposure shift applied before encoding.
+        target_space:        Output color space from the decoder
+                             (e.g. "ACEScg", "ARRI LogC4", "sRGB").
+        display_tonemap:     Display tonemap operator applied ("Reinhard",
+                             "ACES", "Filmic", "None").
+        lora_name:           Name of the IC-LoRA / LoRA model used for
+                             generation (empty string if none).
+        lora_type:           LoRA variant type ("IC-LoRA", "LoRA", etc.).
+
+    Returns:
+        Dict mapping EXR attribute name → string value, ready to pass as the
+        ``metadata`` argument to ``write_exr_openexr`` / ``write_exr_robust``.
+    """
+    curve_desc = _LOG_CURVE_DESC.get(source_space, source_space)
+
+    # Build a compact human-readable pipeline summary
+    pipeline_steps = [curve_desc]
+    if hdr_mode != "Passthrough":
+        pipeline_steps.append(f"HDR-{hdr_mode}")
+    if decode_noise_scale > 0.0:
+        pipeline_steps.append(f"noise={decode_noise_scale:.4f}")
+    if exposure != 0.0:
+        pipeline_steps.append(f"EV{exposure:+.2f}")
+    pipeline_steps.append(f"→ {target_space}")
+    if display_tonemap and display_tonemap.lower() not in ("none", ""):
+        pipeline_steps.append(f"[TM:{display_tonemap}]")
+    color_pipeline = " | ".join(pipeline_steps)
+
+    now_iso = datetime.datetime.now().isoformat(timespec="seconds")
+
+    meta: Dict[str, Any] = {
+        # ── Standard OpenEXR attributes (readable by any viewer) ─────────────
+        "software": _RADIANCE_VERSION,
+        "comments": f"Generated by {_RADIANCE_VERSION}. Pipeline: {color_pipeline}",
+        # ── Radiance-specific attributes (rad_ prefix) ────────────────────────
+        "rad_generator":         _RADIANCE_VERSION,
+        "rad_created":           now_iso,
+        "rad_hdr_source_space":  source_space,
+        "rad_hdr_mode":          hdr_mode,
+        "rad_hdr_exposure":      f"{exposure:+.4f}",
+        "rad_hdr_noise_scale":   f"{decode_noise_scale:.6f}",
+        "rad_hdr_target_space":  target_space,
+        "rad_hdr_tonemap":       display_tonemap if display_tonemap else "None",
+        "rad_color_pipeline":    color_pipeline,
+        "rad_hdr_curve":         curve_desc,
+    }
+
+    if lora_name:
+        meta["rad_lora_name"] = lora_name
+        meta["rad_lora_type"] = lora_type
+
+    return meta
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#                    EXR MULTI-PART WRITER (v2.4 Phase 5.4)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def write_exr_multipart(
+    filepath: str,
+    parts: Dict[str, np.ndarray],
+    bit_depth: str = "16-bit Half Float",
+    compression: str = "ZIP",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """
+    Write a multi-part EXR v2 file with named layers.
+
+    Each entry in `parts` is written as a separate named part:
+      • "beauty"  → channels R, G, B (or R, G, B, A if 4-channel)
+      • "depth"   → channel Z
+      • "normal"  → channels NX, NY, NZ
+      • "albedo"  → channels albedo.R, albedo.G, albedo.B
+      • any key   → written with layered channel names (key.R, key.G, ...)
+
+    Standard single-channel parts (keys starting with "depth" or "z") are written
+    as a single Z channel.
+
+    Compatibility:
+      • Nuke 13+: connects automatically via ReadGeo / Read multi-part
+      • DaVinci Resolve: requires "Flatten Layers" mode
+      • Fusion: multi-part compatible natively
+
+    Args:
+        filepath: Output .exr path.
+        parts:    Dict of part_name → numpy array (H, W, C) float32.
+        bit_depth: "16-bit Half Float" or "32-bit Float".
+        compression: EXR compression (ZIP, PIZ, ZIPS, etc.).
+        metadata: Optional dict of string metadata embedded in each part header.
+
+    Returns:
+        True on success, False on failure.
+    """
+    if not parts:
+        logger.warning("[EXR MultiPart] No parts provided.")
+        return False
+
+    ptype_str = "HALF" if "16" in bit_depth else "FLOAT"
+
+    # ── Attempt via OpenEXR (most correct multi-part support) ─────────────────
+    if check_openexr_available():
+        try:
+            import OpenEXR, Imath
+
+            os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+            comp_code = {
+                "None": 0, "RLE": 1, "ZIPS": 2, "ZIP": 3, "PIZ": 4,
+                "PXR24": 5, "B44": 6, "B44A": 7, "DWAA": 8, "DWAB": 9
+            }.get(compression, 3)
+            ptype = Imath.PixelType(
+                Imath.PixelType.HALF if ptype_str == "HALF" else Imath.PixelType.FLOAT
+            )
+            np_dtype = np.float16 if ptype_str == "HALF" else np.float32
+
+            headers = []
+            for part_name, img in parts.items():
+                if img is None:
+                    continue
+                arr = np.asarray(img, dtype=np.float32)
+                h, w = arr.shape[:2]
+                n_ch = arr.shape[2] if arr.ndim == 3 else 1
+
+                header = OpenEXR.Header(w, h)
+                header["compression"] = Imath.Compression(comp_code)
+                header["name"] = part_name
+                header["type"] = b"scanlineimage"
+
+                # Build channel names
+                is_depth = part_name.lower() in ("depth", "z", "zdepth", "depth_z")
+                if is_depth or n_ch == 1:
+                    ch_names = ["Z"]
+                elif n_ch == 2:
+                    ch_names = ["R", "G"]
+                elif n_ch == 3:
+                    ch_names = ["R", "G", "B"] if part_name == "beauty" else \
+                               ["NX", "NY", "NZ"] if "normal" in part_name.lower() else \
+                               [f"{part_name}.R", f"{part_name}.G", f"{part_name}.B"]
+                elif n_ch >= 4:
+                    if part_name == "beauty":
+                        ch_names = ["R", "G", "B", "A"]
+                    else:
+                        ch_names = [f"{part_name}.R", f"{part_name}.G",
+                                    f"{part_name}.B", f"{part_name}.A"]
+                else:
+                    ch_names = [part_name]
+
+                header["channels"] = {n: Imath.Channel(ptype) for n in ch_names}
+
+                if metadata:
+                    for k, v in metadata.items():
+                        if k in ["timeCode", "reelName", "capDate", "software", "comments", "owner"]:
+                            header[k] = v
+                        elif isinstance(v, (str, int, float)):
+                            key = k if (k.startswith("cryptomatte") or k.startswith("rad_")) else f"rad_{k}"
+                            header[key] = v
+
+                headers.append((part_name, arr, ch_names, header))
+
+            out = OpenEXR.MultiPartOutputFile(filepath, [h for _, _, _, h in headers])
+            for i, (part_name, arr, ch_names, _) in enumerate(headers):
+                h, w = arr.shape[:2]
+                ch_data = {}
+                if arr.ndim == 2:
+                    arr = arr[..., np.newaxis]
+                for ci, cname in enumerate(ch_names):
+                    ch_slice = arr[..., ci] if ci < arr.shape[2] else arr[..., 0]
+                    ch_data[cname] = ch_slice.astype(np_dtype).tobytes()
+                out.writePixels(i, ch_data)
+            out.close()
+
+            logger.info(f"[EXR MultiPart] Written {len(headers)} parts → {filepath}")
+            return True
+
+        except Exception as e:
+            logger.warning(f"[EXR MultiPart] OpenEXR multi-part failed ({e}), falling back to per-layer files.")
+
+    # ── Fallback: write separate EXR files per part ───────────────────────────
+    base, _ = os.path.splitext(filepath)
+    success_count = 0
+    for part_name, img in parts.items():
+        if img is None:
+            continue
+        layer_path = f"{base}.{part_name}.exr"
+        arr = np.asarray(img, dtype=np.float32)
+        if write_exr_robust(layer_path, arr, bit_depth, compression, metadata):
+            success_count += 1
+            logger.info(f"[EXR MultiPart] Fallback→ wrote {layer_path}")
+
+    if success_count > 0:
+        logger.warning(
+            f"[EXR MultiPart] Wrote {success_count} separate EXR files instead of multi-part "
+            f"(OpenEXR multi-part unavailable). Load each file individually in Nuke."
+        )
+    return success_count > 0

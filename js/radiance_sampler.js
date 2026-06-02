@@ -1,4 +1,4 @@
-import { app } from "../../../scripts/app.js";
+import { app } from "../../scripts/app.js";
 
 const PRESET_CONFIGS = {
     "→ Flux txt2img": {
@@ -66,31 +66,31 @@ const PRESET_CONFIGS = {
         denoise: 1.0, flux_shift: 2.37, flux_guidance: 0.0,
         description: "LTX-V standard — shift=2.37 per spec.",
     },
-    "▶ LTX 2.3 LowRes (32 steps)": {
-        steps: 32, start_step: 0, end_step: 0, cfg: 3.0, sampler: "euler", 
-        sampler_mode: "Standard", phase_split: 0.0, scheduler: "beta", 
-        scheduler_mode: "Manual", denoise: 1.0, flux_shift: 3.0, 
-        flux_guidance: 0.0, flux_guidance_profile: "Static", add_noise: true, 
-        return_with_leftover_noise: false, seed: 0, control_after_generate: "fixed", 
-        pag_scale: 0.0, model_type: "ltxav", sigma_blend_steps: 0, ays_schedule: false, 
-        guidance_rescale_phi: 0.0, preview_method: "None", noise_type: "Gaussian", 
-        multi_cond_mode: "Off", cond_weight_b: 0.0, conditioning_clip_target: "Auto", 
-        tile_mode: false, refiner_start_step: 0, latent_format: "", 
-        force_full_denoise_steps: true, force_exact_steps: true, terminal_sigma: 0.0,
-        description: "LTX 2.3 LowRes.",
+    "▶ LTX 2.3 LowRes (20 steps)": {
+        steps: 20, start_step: 0, end_step: 0, cfg: 3.0, sampler: "euler",
+        sampler_mode: "Standard", phase_split: 0.0, scheduler: "beta",
+        scheduler_mode: "Manual", denoise: 1.0, flux_shift: 3.0,
+        flux_guidance: 0.0, flux_guidance_profile: "Static", add_noise: true,
+        return_with_leftover_noise: false, seed: 0, control_after_generate: "fixed",
+        pag_scale: 0.0, model_type: "ltxav", sigma_blend_steps: 0, ays_schedule: false,
+        guidance_rescale_phi: 0.0, preview_method: "None", noise_type: "Gaussian",
+        conditioning_clip_target: "Auto",
+        tile_mode: false, refiner_start_step: 0, latent_format: "",
+        terminal_sigma_to_zero: true, force_exact_steps: true,
+        description: "LTX 2.3 LowRes. Optimal settings for 720p base generation.",
     },
     "▶ LTX 2.3 HighRes (40 steps)": {
-        steps: 40, start_step: 0, end_step: 0, cfg: 3.0, sampler: "euler", 
-        sampler_mode: "Standard", phase_split: 0.0, scheduler: "beta", 
-        scheduler_mode: "Manual", denoise: 0.45, flux_shift: 6.0, 
-        flux_guidance: 0.0, flux_guidance_profile: "Static", add_noise: true, 
-        return_with_leftover_noise: false, seed: 0, control_after_generate: "fixed", 
-        pag_scale: 0.0, model_type: "ltxav", sigma_blend_steps: 0, ays_schedule: false, 
-        guidance_rescale_phi: 0.0, preview_method: "None", noise_type: "Gaussian", 
-        multi_cond_mode: "Off", cond_weight_b: 0.0, conditioning_clip_target: "Auto", 
-        tile_mode: false, refiner_start_step: 0, latent_format: "", 
-        force_full_denoise_steps: true, force_exact_steps: true, terminal_sigma: 0.0,
-        description: "High-Res upscale without LoRA. Uses Euler by default. If you're using a LoRA, you can plug in “sigmas_override” and adjust your settings accordingly.",
+        steps: 40, start_step: 0, end_step: 0, cfg: 3.0, sampler: "euler",
+        sampler_mode: "Standard", phase_split: 0.0, scheduler: "beta",
+        scheduler_mode: "Manual", denoise: 0.45, flux_shift: 6.0,
+        flux_guidance: 0.0, flux_guidance_profile: "Static", add_noise: true,
+        return_with_leftover_noise: false, seed: 0, control_after_generate: "fixed",
+        pag_scale: 0.0, model_type: "ltxav", sigma_blend_steps: 0, ays_schedule: false,
+        guidance_rescale_phi: 0.0, preview_method: "None", noise_type: "Gaussian",
+        conditioning_clip_target: "Auto",
+        tile_mode: false, refiner_start_step: 0, latent_format: "",
+        terminal_sigma_to_zero: true, force_exact_steps: true,
+        description: "High-Res upscale. Uses Euler by default. If using a LoRA, adjust denoise as needed.",
     },
     "▶ HunyuanVideo (30 steps)": {
         steps: 30, cfg: 6.0, sampler: "euler", scheduler: "simple",
@@ -135,7 +135,7 @@ const PRESET_CONFIGS = {
 };
 
 const LTX_PRESETS = [
-    "▶ LTX 2.3 LowRes (32 steps)",
+    "▶ LTX 2.3 LowRes (20 steps)",
     "▶ LTX 2.3 HighRes (40 steps)"
 ];
 
@@ -150,13 +150,173 @@ const LTX_INCOMPATIBLE_WIDGETS = [
     "tile_blend"
 ];
 
+// ── 1. Widget visibility helper (verbatim from standard radiance_io.js / radiance_upscale.js pattern) ──
+function setWidgetVisible(widget, visible, node) {
+    if (!widget) return;
+
+    if (!widget.options) widget.options = {};
+    widget.options.hidden = !visible;
+
+    widget.hidden = !visible;
+    if (visible) {
+        if (widget.type === "hidden") {
+            widget.type = widget._origType || "text";
+            delete widget.computeSize;
+            delete widget._origComputeSize;
+            if (widget._origDraw !== undefined) {
+                widget.draw = widget._origDraw;
+                delete widget._origDraw;
+            } else {
+                delete widget.draw;
+            }
+            if (widget.inputEl) widget.inputEl.style.display = "";
+            if (widget.element)  widget.element.style.display  = "";
+            if (widget._origComputedHeight !== undefined) {
+                widget.computedHeight = widget._origComputedHeight;
+                delete widget._origComputedHeight;
+            } else {
+                widget.computedHeight = 32;
+            }
+        }
+    } else {
+        if (widget.type !== "hidden") {
+            widget._origType        = widget.type;
+            widget._origComputeSize = widget.computeSize;
+            widget._origComputedHeight = widget.computedHeight;
+            widget.type = "hidden";
+            widget.computeSize = () => [0, -4];
+            if (widget.draw) widget._origDraw = widget.draw;
+            widget.draw = function() {};
+            if (widget.inputEl) widget.inputEl.style.display = "none";
+            if (widget.element)  widget.element.style.display  = "none";
+            widget.computedHeight = 4;
+        }
+    }
+    if (node?.widgets) node.widgets.splice(0, 0);
+}
+
+// ── 2. Resize and redraw helper (verbatim from standard radiance_upscale.js) ──
+function refreshNodeSize(node) {
+    if (node.computeSize) {
+        const sz = node.computeSize();
+        node.size[0] = Math.max(node.size[0], sz[0]);
+        node.size[1] = sz[1]; // Set height directly to let it shrink cleanly!
+        app.graph.setDirtyCanvas(true, true);
+    }
+}
+
+// ── 3. Dynamic folding logic ──
+function toggleFields(node) {
+    if (!node.widgets) return;
+
+    const find = (name) => node.widgets.find(w => w.name === name);
+
+    // Get key widget references
+    const presetW = find("preset");
+    const isNone = presetW && presetW.value === "None";
+
+    // Dummy compatibility absorbers that are always hidden
+    const dummyWidgets = ["_js_export_btn", "_js_import_btn", "_js_preset_info"];
+
+    if (isNone) {
+        // Hide all widgets EXCEPT the essential ones
+        const alwaysVisible = ["preset", "preset_info", "› Export Preset", "› Import Preset"];
+        node.widgets.forEach(w => {
+            if (alwaysVisible.includes(w.name)) {
+                setWidgetVisible(w, true, node);
+            } else {
+                setWidgetVisible(w, false, node);
+            }
+        });
+
+        // Hide ComfyUI auto-added control_after_generate widget
+        const controlAfterW = find("control_after_generate");
+        if (controlAfterW) {
+            setWidgetVisible(controlAfterW, false, node);
+        }
+
+        refreshNodeSize(node);
+        return;
+    }
+
+    // --- Custom or Preset mode: Show all widgets by default and apply dynamic folding ---
+    node.widgets.forEach(w => {
+        if (w.name === "preset_info" || dummyWidgets.includes(w.name)) {
+            setWidgetVisible(w, false, node);
+        } else {
+            setWidgetVisible(w, true, node);
+        }
+    });
+
+    // Restore control_after_generate if it exists
+    const controlAfterW = find("control_after_generate");
+    if (controlAfterW) {
+        setWidgetVisible(controlAfterW, true, node);
+    }
+
+    const tileModeW = find("tile_mode");
+    const restartCountW = find("restart_count");
+    const aysScheduleW = find("ays_schedule");
+    const modelTypeW = find("model_type");
+    const samplerModeW = find("sampler_mode");
+
+    // Check optional link states using node.inputs
+    const hasRefinerModel = node.inputs && node.inputs.some(i => i.name === "refiner_model" && i.link !== null);
+
+    const modelType = modelTypeW ? modelTypeW.value : "auto";
+    const samplerMode = samplerModeW ? samplerModeW.value : "Standard";
+
+    // 3.1. Refiner: visible if refiner_model input port is wired up
+    const refinerStartStepW = find("refiner_start_step");
+    setWidgetVisible(refinerStartStepW, hasRefinerModel, node);
+
+    // 3.2. Tiled latent sampling: visible if tile_mode is checked
+    const isTiled = tileModeW && tileModeW.value === true;
+    const tileSizeW = find("tile_size");
+    const tileOverlapW = find("tile_overlap");
+    const tileBlendW = find("tile_blend");
+    setWidgetVisible(tileSizeW, isTiled, node);
+    setWidgetVisible(tileOverlapW, isTiled, node);
+    setWidgetVisible(tileBlendW, isTiled, node);
+
+    // 3.3. Restart schedules: visible if restart_count > 0
+    const hasRestartCount = restartCountW && parseInt(restartCountW.value, 10) > 0;
+    const noiseAlphaStartW = find("noise_alpha_start");
+    const noiseAlphaEndW = find("noise_alpha_end");
+    setWidgetVisible(noiseAlphaStartW, hasRestartCount, node);
+    setWidgetVisible(noiseAlphaEndW, hasRestartCount, node);
+
+    // 3.4. Sigma blend steps: visible if phase_split sampler_mode OR ays_schedule is active
+    const isPhaseShift = samplerMode.includes("Phase-Shift");
+    const isAys = aysScheduleW && aysScheduleW.value === true;
+    const sigmaBlendStepsW = find("sigma_blend_steps");
+    setWidgetVisible(sigmaBlendStepsW, isPhaseShift || isAys, node);
+
+    // 3.5. Flux specific parameters: hide if model type is explicitly non-flux, unless in custom/flux preset
+    const isFlux = (modelType === "auto" || modelType === "flux") &&
+                   (presetW.value.includes("Flux") || presetW.value === "Custom" || presetW.value === "None");
+    const fluxShiftW = find("flux_shift");
+    const fluxGuidanceW = find("flux_guidance");
+    const fluxGuidanceProfileW = find("flux_guidance_profile");
+    setWidgetVisible(fluxShiftW, isFlux, node);
+    setWidgetVisible(fluxGuidanceW, isFlux, node);
+    setWidgetVisible(fluxGuidanceProfileW, isFlux, node);
+
+    // 3.6. Preset info text box: hide completely when in Custom mode, show in other presets
+    const presetInfoW = find("preset_info");
+    const isCustom = presetW && presetW.value === "Custom";
+    setWidgetVisible(presetInfoW, !isCustom, node);
+
+    refreshNodeSize(node);
+}
+
 function updateUILocks(node, presetName) {
     if (!node.widgets) return;
     const isLTX = LTX_PRESETS.includes(presetName);
-    const isCustom = presetName === "None (Custom)";
+    const isCustom = presetName === "None" || presetName === "Custom";
 
     node.widgets.forEach((widget) => {
-        if (widget.name === "preset" || widget.name === "preset_info" || widget.name === "cond_weight_b") return;
+        if (widget.name === "preset" || widget.name === "preset_info") return;
 
         const wName = widget.name ? widget.name.toLowerCase() : "";
         const isTargetWidget = LTX_INCOMPATIBLE_WIDGETS.some(t => t.toLowerCase() === wName);
@@ -180,16 +340,11 @@ function updateUILocks(node, presetName) {
         }
     });
 
-    const multiCondWidget = node.widgets.find(w => w.name === "multi_cond_mode");
-    if (multiCondWidget && multiCondWidget.callback) {
-        multiCondWidget.callback(multiCondWidget.value);
-    }
-
     node.setDirtyCanvas(true, true);
 }
 
 function applyPreset(node, presetName) {
-    if (presetName === "None (Custom)") return;
+    if (presetName === "None" || presetName === "Custom") return;
 
     const config = PRESET_CONFIGS[presetName];
     if (!config) return;
@@ -197,17 +352,34 @@ function applyPreset(node, presetName) {
     const widgets = node.widgets;
     if (!widgets) return;
 
+    // Apply values silently without triggering loops
     for (const widget of widgets) {
         if (config[widget.name] !== undefined) {
             widget.value = config[widget.name];
-            if (widget.callback) widget.callback(config[widget.name]);
         }
     }
 
     node.setDirtyCanvas(true);
 }
 
-function exportPreset(node) {
+// Safely extract tracking values
+function getTrackedState(node) {
+    const state = {};
+    if (!node.widgets) return state;
+    const trackedFields = [
+        "steps", "cfg", "sampler", "scheduler", "denoise",
+        "flux_shift", "flux_guidance", "force_exact_steps",
+        "terminal_sigma_to_zero"
+    ];
+    for (const w of node.widgets) {
+        if (trackedFields.includes(w.name)) {
+            state[w.name] = w.value;
+        }
+    }
+    return state;
+}
+
+async function exportPreset(node) {
     const widgets = node.widgets;
     if (!widgets) return;
 
@@ -219,7 +391,7 @@ function exportPreset(node) {
         }
     }
 
-    const presetName = prompt("Enter preset name:", "My Sampler Preset");
+    const presetName = await promptSamplerAction("Sampler Preset", "Enter a name for this sampler preset.", "My Sampler Preset", "Export");
     if (!presetName) return;
 
     const preset = {
@@ -242,6 +414,120 @@ function exportPreset(node) {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+function showSamplerToast(message, tone = "info") {
+    const toast = document.createElement("div");
+    const toneColor = tone === "error" ? "#ff6b6b" : tone === "success" ? "#4cd964" : "#00a8ff";
+    Object.assign(toast.style, {
+        position: "fixed",
+        left: "50%",
+        bottom: "24px",
+        zIndex: "10000",
+        transform: "translateX(-50%) translateY(12px)",
+        opacity: "0",
+        maxWidth: "420px",
+        padding: "10px 14px",
+        color: "#f5f5f7",
+        background: "rgba(18, 18, 24, 0.94)",
+        border: `1px solid ${toneColor}55`,
+        borderRadius: "8px",
+        boxShadow: "0 12px 36px rgba(0,0,0,0.45)",
+        fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+        fontSize: "12px",
+        lineHeight: "1.35",
+        pointerEvents: "none",
+        transition: "opacity 160ms ease, transform 160ms ease",
+    });
+    toast.textContent = message;
+    document.body.appendChild(toast);
+
+    requestAnimationFrame(() => {
+        toast.style.opacity = "1";
+        toast.style.transform = "translateX(-50%) translateY(0)";
+    });
+
+    setTimeout(() => {
+        toast.style.opacity = "0";
+        toast.style.transform = "translateX(-50%) translateY(12px)";
+        setTimeout(() => toast.remove(), 180);
+    }, 3200);
+}
+
+function promptSamplerAction(titleText, message, defaultValue = "", confirmLabel = "Continue") {
+    return new Promise((resolve) => {
+        const overlay = document.createElement("div");
+        Object.assign(overlay.style, {
+            position: "fixed",
+            inset: "0",
+            zIndex: "10001",
+            display: "grid",
+            placeItems: "center",
+            background: "rgba(0,0,0,0.55)",
+            backdropFilter: "blur(8px)",
+        });
+
+        const dialog = document.createElement("div");
+        Object.assign(dialog.style, {
+            width: "min(420px, calc(100vw - 32px))",
+            padding: "18px",
+            color: "#f5f5f7",
+            background: "rgba(18,18,24,0.96)",
+            border: "1px solid rgba(255,255,255,0.1)",
+            borderRadius: "8px",
+            boxShadow: "0 18px 60px rgba(0,0,0,0.65)",
+            fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+            fontSize: "13px",
+        });
+
+        const title = document.createElement("div");
+        title.textContent = titleText;
+        title.style.cssText = "font-weight:700;font-size:15px;margin-bottom:8px;";
+
+        const copy = document.createElement("div");
+        copy.textContent = message;
+        copy.style.cssText = "color:#b8c0cc;margin-bottom:12px;line-height:1.45;";
+
+        const input = document.createElement("input");
+        input.type = "text";
+        input.value = defaultValue;
+        input.style.cssText = "width:100%;box-sizing:border-box;height:36px;margin-bottom:16px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.06);color:#f5f5f7;padding:0 10px;outline:none;";
+
+        const actions = document.createElement("div");
+        actions.style.cssText = "display:flex;gap:10px;justify-content:flex-end;";
+
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.textContent = "Cancel";
+        cancel.style.cssText = "height:32px;padding:0 12px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#f5f5f7;cursor:pointer;";
+
+        const confirm = document.createElement("button");
+        confirm.type = "button";
+        confirm.textContent = confirmLabel;
+        confirm.style.cssText = "height:32px;padding:0 12px;border-radius:6px;border:1px solid rgba(0,168,255,0.45);background:rgba(0,168,255,0.16);color:#9fdcff;cursor:pointer;font-weight:700;";
+
+        const close = (value) => {
+            overlay.remove();
+            resolve(value);
+        };
+
+        cancel.addEventListener("click", () => close(null));
+        confirm.addEventListener("click", () => close(input.value.trim()));
+        input.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") close(input.value.trim());
+            if (event.key === "Escape") close(null);
+        });
+        overlay.addEventListener("click", (event) => {
+            if (event.target === overlay) close(null);
+        });
+
+        actions.append(cancel, confirm);
+        dialog.append(title, copy, input, actions);
+        overlay.appendChild(dialog);
+        document.body.appendChild(overlay);
+        input.focus();
+        input.select();
+    });
+}
+
 function importPreset(node) {
     const fileInput = document.createElement("input");
     fileInput.type = "file";
@@ -261,7 +547,7 @@ function importPreset(node) {
                 const preset = JSON.parse(event.target.result);
 
                 if (!preset.settings || typeof preset.settings !== "object") {
-                    alert("Invalid preset file: Missing settings object");
+                    showSamplerToast("Invalid preset file: missing settings object.", "error");
                     return;
                 }
 
@@ -277,16 +563,16 @@ function importPreset(node) {
 
                 const presetWidget = widgets.find(w => w.name === "preset");
                 if (presetWidget) {
-                    presetWidget.value = "None (Custom)";
-                    updateUILocks(node, "None (Custom)");
+                    presetWidget.value = "Custom";
+                    updateUILocks(node, "Custom");
                 }
 
                 node.setDirtyCanvas(true);
-                alert(`Preset "${preset.name || "Unnamed"}" imported!\n${appliedCount} settings applied.`);
+                showSamplerToast(`Preset "${preset.name || "Unnamed"}" imported. ${appliedCount} settings applied.`, "success");
 
             } catch (error) {
                 console.error("[Radiance Sampler] Failed to import preset:", error);
-                alert("Failed to import preset: " + error.message);
+                showSamplerToast(`Failed to import preset: ${error.message}`, "error");
             }
         };
 
@@ -302,49 +588,24 @@ app.registerExtension({
         if (nodeData.name !== "RadianceSamplerPro") return;
 
         const onNodeCreated = nodeType.prototype.onNodeCreated;
+        const onPropertyChanged = nodeType.prototype.onPropertyChanged;
 
         nodeType.prototype.onNodeCreated = function () {
             if (onNodeCreated) onNodeCreated.apply(this, arguments);
 
-            this.addWidget("button", "› Export Preset", null, () => exportPreset(this));
-            this.addWidget("button", "› Import Preset", null, () => importPreset(this));
+            const self = this;
+
+            this.addWidget("button", "› Export Preset", null, () => exportPreset(this), { serialize: false });
+            this.addWidget("button", "› Import Preset", null, () => importPreset(this), { serialize: false });
 
             const presetWidget = this.widgets?.find(w => w.name === "preset");
             if (!presetWidget) return;
 
-            const multiCondWidget = this.widgets?.find(w => w.name === "multi_cond_mode");
-            const weightBWidget = this.widgets?.find(w => w.name === "cond_weight_b");
-
-            if (multiCondWidget && weightBWidget) {
-                const origMultiCb = multiCondWidget.callback;
-                multiCondWidget.callback = function(val) {
-                    if (origMultiCb) origMultiCb.apply(this, arguments);
-                    
-                    const disableWeight = (val === "Off");
-                    weightBWidget.disabled = disableWeight;
-                    
-                    if (weightBWidget.inputEl) {
-                        weightBWidget.inputEl.disabled = disableWeight;
-                        weightBWidget.inputEl.style.opacity = disableWeight ? "0.4" : "1.0";
-                        weightBWidget.inputEl.style.pointerEvents = disableWeight ? "none" : "auto";
-                    }
-
-                    if (disableWeight) {
-                        if (window.app && !window.app.configuringGraph) weightBWidget.value = 0.0;
-                    } else {
-                        if (window.app && !window.app.configuringGraph && weightBWidget.value === 0.0) weightBWidget.value = 0.5;
-                    }
-                };
-                setTimeout(() => multiCondWidget.callback(multiCondWidget.value), 150);
-            }
-
-            // ALBABIT-FIX: Replaced the floating div logic with a native embedded text widget
-            // Added serialize: false to stop the bug where it gets duplicated on workflow reload
             let descWidget = this.widgets?.find(w => w.name === "preset_info");
             if (!descWidget) {
                 descWidget = this.addWidget("text", "preset_info", "", () => { }, {
                     multiline: true,
-                    serialize: false 
+                    serialize: false
                 });
             }
 
@@ -361,7 +622,12 @@ app.registerExtension({
 
             const updateDescription = (presetName) => {
                 const config = PRESET_CONFIGS[presetName];
-                const text = (config && config.description) ? config.description : "Manual / Custom Mode. All widgets are unlocked.";
+                let text = "Manual / Custom Mode. All widgets are unlocked.";
+                if (presetName === "None") {
+                    text = "Default simple mode. Parameters are hidden and use standard defaults. Select 'Custom' to manually tweak settings.";
+                } else if (config && config.description) {
+                    text = config.description;
+                }
 
                 if (descWidget) {
                     descWidget.value = text;
@@ -371,32 +637,93 @@ app.registerExtension({
                 }
             };
 
+            let lastPresetValue = presetWidget.value;
+
+            // Handle Preset changes explicitly
             const originalCallback = presetWidget.callback;
             presetWidget.callback = (value) => {
                 if (originalCallback) originalCallback.call(presetWidget, value);
-                
-                if (window.app && window.app.configuringGraph) {
-                    updateUILocks(this, value);
-                    updateDescription(value);
-                    return;
-                }
 
-                setTimeout(() => {
+                if (window.app && window.app.configuringGraph) return;
+
+                if (value !== lastPresetValue && value !== "None" && value !== "Custom") {
+                    lastPresetValue = value;
                     applyPreset(this, value);
                     updateUILocks(this, value);
                     updateDescription(value);
-                }, 10);
+                    toggleFields(this);
+                } else if (value !== lastPresetValue) {
+                    lastPresetValue = value;
+                    updateUILocks(this, value);
+                    updateDescription(value);
+                    toggleFields(this);
+                }
             };
 
+            // Hook manual widget changes to toggle Custom and refresh fields
+            this.onPropertyChanged = function (property, value, prevValue) {
+                if (onPropertyChanged) onPropertyChanged.apply(this, arguments);
+
+                // Ignore backend-only or system properties
+                if (window.app && window.app.configuringGraph) return;
+
+                const pWidget = this.widgets?.find(wd => wd.name === "preset");
+                if (!pWidget || pWidget.value === "Custom" || pWidget.value === "None") return;
+
+                // If it's a property managed by the preset, verify if it diverges
+                const currentPreset = PRESET_CONFIGS[pWidget.value];
+                if (currentPreset && currentPreset[property] !== undefined) {
+                    if (currentPreset[property] != value) {
+                        console.log(`[Radiance Sampler] Manual override detected on '${property}'. Switching to Custom.`);
+                        pWidget.value = "Custom";
+                        lastPresetValue = "Custom";
+                        updateUILocks(this, "Custom");
+                        updateDescription("Custom");
+                        toggleFields(this);
+                        this.setDirtyCanvas(true);
+                    }
+                }
+            };
+
+            // Wire up callbacks for dynamic folding on change
+            const foldTriggers = ["preset", "tile_mode", "restart_count", "ays_schedule", "model_type", "sampler_mode"];
+            foldTriggers.forEach(name => {
+                const w = self.widgets?.find(x => x.name === name);
+                if (w) {
+                    const origCallback = w.callback;
+                    w.callback = function(...args) {
+                        const res = origCallback ? origCallback.apply(this, args) : undefined;
+                        toggleFields(self);
+                        return res;
+                    };
+                }
+            });
+
+            // Hook connection change events (optional ports linked/unlinked)
+            const origConnect = this.onConnectionsChange;
+            this.onConnectionsChange = function (...args) {
+                if (origConnect) origConnect.apply(this, args);
+                toggleFields(this);
+            };
+
+            // Initialize UI immediately (for drag-and-drop / instant start)
+            const val = presetWidget.value;
+            if (val) {
+                lastPresetValue = val;
+                updateUILocks(this, val);
+                updateDescription(val);
+            }
+            toggleFields(this);
+
+            // Re-run in a short timeout to handle post-construction/layout changes (e.g. loaded workflows)
             setTimeout(() => {
                 const val = presetWidget.value;
                 if (val) {
-                    if (val !== "None (Custom)" && !(window.app && window.app.configuringGraph)) {
-                        applyPreset(this, val);
-                    }
+                    lastPresetValue = val;
                     updateUILocks(this, val);
                     updateDescription(val);
                 }
+                toggleFields(this);
             }, 100);
         };
     }

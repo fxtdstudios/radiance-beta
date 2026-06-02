@@ -41,6 +41,63 @@ def get_device(use_gpu: bool = True) -> torch.device:
     return torch.device("cpu")
 
 
+def _make_bokeh_kernel(shape: str, radius: int) -> torch.Tensor:
+    """
+    Build a normalised 2-D bokeh kernel for the requested aperture shape.
+
+    shape : "Circle" | "Hexagon" | "Octagon" | "Anamorphic Oval"
+    radius: half-size of the kernel in pixels (kernel will be 2*radius+1 square)
+    """
+    import numpy as np
+    size = 2 * radius + 1
+    cx = cy = radius
+    y, x = np.mgrid[0:size, 0:size]
+    dx = x - cx
+    dy = y - cy
+
+    if shape == "Hexagon":
+        # Flat-top hexagon: |x| <= r and |x| + |y|*sqrt(3)/3 * 2 <= r * 4/3
+        r = radius
+        mask = (np.abs(dx) <= r) & (np.abs(dx) + np.abs(dy) * (2.0 / np.sqrt(3)) <= r * 4.0 / 3.0)
+    elif shape == "Octagon":
+        # Regular octagon: clipped square — max of Chebyshev and offset L1
+        r = radius
+        mask = (np.abs(dx) <= r) & (np.abs(dy) <= r) & (np.abs(dx) + np.abs(dy) <= r * 1.41)
+    elif shape == "Anamorphic Oval":
+        # Wide ellipse: 2:1 aspect ratio (wide x, compressed y)
+        mask = ((dx / max(radius, 1)) ** 2 + (dy / max(radius * 0.5, 1)) ** 2) <= 1.0
+    else:  # Circle (default)
+        mask = (dx ** 2 + dy ** 2) <= radius ** 2
+
+    kernel_np = mask.astype(np.float32)
+    total = kernel_np.sum()
+    if total > 0:
+        kernel_np /= total
+    return torch.from_numpy(kernel_np)
+
+
+def _apply_bokeh_kernel(tensor: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+    """Apply a 2-D bokeh kernel to a BHWC tensor via grouped conv2d."""
+    was_bhwc = tensor.dim() == 4 and tensor.shape[-1] in [1, 3, 4]
+    if was_bhwc:
+        tensor = tensor.permute(0, 3, 1, 2)  # BHWC → BCHW
+
+    b, c, h, w = tensor.shape
+    k = kernel.shape[0]
+    pad = k // 2
+
+    # Expand kernel to (C, 1, k, k) for grouped conv
+    k2d = kernel.to(tensor.device, tensor.dtype).view(1, 1, k, k).expand(c, 1, k, k)
+
+    mode = "reflect" if pad < min(h, w) else "replicate"
+    t_padded = torch.nn.functional.pad(tensor, (pad, pad, pad, pad), mode=mode)
+    out = torch.nn.functional.conv2d(t_padded, k2d, groups=c)
+
+    if was_bhwc:
+        out = out.permute(0, 2, 3, 1)  # BCHW → BHWC
+    return out
+
+
 def gpu_gaussian_blur(
     tensor: torch.Tensor, sigma: float, kernel_size: int = None
 ) -> torch.Tensor:
@@ -137,139 +194,7 @@ def kelvin_to_rgb(kelvin: float) -> Tuple[float, float, float]:
 # =============================================================================
 
 
-class RadianceWhiteBalance:
-    """
-    Adjust white balance using color temperature (Kelvin) and tint.
-    """
-
-    WHITE_BALANCE_PRESETS = {
-        "Custom": (5500, 0),
-        "Daylight (5500K)": (5500, 0),
-        "Cloudy (6500K)": (6500, 5),
-        "Shade (7500K)": (7500, 5),
-        "Tungsten (3200K)": (3200, 0),
-        "Fluorescent (4000K)": (4000, 10),
-        "Flash (5500K)": (5500, 0),
-        "Candlelight (1850K)": (1850, 0),
-        "Sunrise/Sunset (3000K)": (3000, 5),
-        "Blue Hour (9000K)": (9000, -10),
-        "Moonlight (4100K)": (4100, -5),
-    }
-
-    def __init__(self):
-        pass
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        preset_list = list(cls.WHITE_BALANCE_PRESETS.keys())
-        return {
-            "required": {
-                "image": ("IMAGE",),
-                "preset": (preset_list, {"default": "Daylight (5500K)"}),
-                "temperature": (
-                    "INT",
-                    {
-                        "default": 5500,
-                        "min": 1000,
-                        "max": 15000,
-                        "step": 100,
-                        "display": "slider",
-                    },
-                ),
-                "tint": (
-                    "FLOAT",
-                    {
-                        "default": 0.0,
-                        "min": -100.0,
-                        "max": 100.0,
-                        "step": 1.0,
-                        "display": "slider",
-                    },
-                ),
-            },
-            "optional": {
-                "source_temperature": (
-                    "INT",
-                    {"default": 5500, "min": 1000, "max": 15000, "step": 100},
-                ),
-                "intensity": (
-                    "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05},
-                ),
-                "use_gpu": ("BOOLEAN", {"default": True}),
-            },
-        }
-
-    RETURN_TYPES = ("IMAGE",)
-    FUNCTION = "apply_white_balance"
-    CATEGORY = "FXTD Studios/Radiance/Color"
-    DESCRIPTION = "Adjust white balance using color temperature (Kelvin) and tint."
-
-    @torch.no_grad()
-    def apply_white_balance(
-        self,
-        image: torch.Tensor,
-        preset: str,
-        temperature: int,
-        tint: float,
-        source_temperature: int = 5500,
-        intensity: float = 1.0,
-        use_gpu: bool = True,
-    ):
-
-        # Use preset values if not Custom
-        if preset != "Custom":
-            temp_preset, tint_preset = self.WHITE_BALANCE_PRESETS[preset]
-            temperature = temp_preset
-            tint = tint_preset
-
-        device = get_device(use_gpu)
-
-        try:
-            img = image.to(device).float()
-
-            # Get RGB multipliers for source and target temperatures
-            src_rgb = kelvin_to_rgb(source_temperature)
-            tgt_rgb = kelvin_to_rgb(temperature)
-
-            # Calculate correction multipliers
-            r_mult = tgt_rgb[0] / (src_rgb[0] + 1e-6)
-            g_mult = tgt_rgb[1] / (src_rgb[1] + 1e-6)
-            b_mult = tgt_rgb[2] / (src_rgb[2] + 1e-6)
-
-            # Normalize to maintain overall brightness
-            avg_mult = (r_mult + g_mult + b_mult) / 3
-            r_mult /= avg_mult
-            g_mult /= avg_mult
-            b_mult /= avg_mult
-
-            # Apply tint (green-magenta shift)
-            tint_factor = tint / 100.0
-            g_mult *= 1.0 + tint_factor * 0.3
-
-            # Apply intensity
-            r_mult = 1.0 + (r_mult - 1.0) * intensity
-            g_mult = 1.0 + (g_mult - 1.0) * intensity
-            b_mult = 1.0 + (b_mult - 1.0) * intensity
-
-            # Apply multipliers
-            output = img.clone()
-            output[..., 0] *= r_mult
-            output[..., 1] *= g_mult
-            output[..., 2] *= b_mult
-
-            # HDR: Preserve super-white values, only clamp negatives
-            output = torch.clamp(output, min=0)
-            return (output.cpu(),)
-
-        except RuntimeError:
-            if use_gpu:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                return self.apply_white_balance(
-                    image, preset, temperature, tint, source_temperature, intensity, False
-                )
-            raise
+# RadianceWhiteBalance moved to nodes_colorscience.py for v2.5.1
 
 
 # =============================================================================
@@ -278,6 +203,7 @@ class RadianceWhiteBalance:
 
 
 class RadianceDepthOfField:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
     """
     Apply cinematic depth of field blur with optional depth map input.
     """
@@ -323,22 +249,25 @@ class RadianceDepthOfField:
                     cls.BOKEH_SHAPES,
                     {
                         "default": "Circle",
-                        # TODO: Hexagon / Octagon / Anamorphic Oval kernel shapes not yet
-                        # implemented — all shapes currently produce identical Gaussian blur.
+                        "tooltip": "Aperture shape. Non-circular shapes use a convolution kernel for physically accurate bokeh.",
                     },
                 ),
                 "highlight_boost": (
                     "FLOAT",
                     {"default": 1.0, "min": 1.0, "max": 3.0, "step": 0.1},
                 ),
-                "foreground_blur": ("BOOLEAN", {"default": True}),
-                "use_gpu": ("BOOLEAN", {"default": True}),
+                "foreground_blur": ("BOOLEAN", {"default": True,
+                    "tooltip": "Apply additional blur to near-clipping (foreground) objects for realistic lens bokeh.",
+                }),
+                "use_gpu": ("BOOLEAN", {"default": True,
+                    "tooltip": "Run the effect on GPU via CUDA/MPS. Falls back to CPU if unavailable.",
+                }),
             },
         }
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "apply_dof"
-    CATEGORY = "FXTD Studios/Radiance/Filter"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
     DESCRIPTION = "Apply cinematic depth of field blur with optional depth map input."
 
     @torch.no_grad()
@@ -420,11 +349,17 @@ class RadianceDepthOfField:
             # in/out over 1/num_levels of the blur range, giving continuous bokeh.
             output = img.clone()
             num_levels = 5
+            use_shaped = bokeh_shape != "Circle"
             for level in range(1, num_levels + 1):
                 level_sigma = blur_amount * level / num_levels
                 level_threshold = (level - 1) / num_levels
 
-                blurred = gpu_gaussian_blur(img, level_sigma)
+                if use_shaped:
+                    radius = max(1, int(level_sigma))
+                    kern = _make_bokeh_kernel(bokeh_shape, radius)
+                    blurred = _apply_bokeh_kernel(img, kern)
+                else:
+                    blurred = gpu_gaussian_blur(img, level_sigma)
 
                 # Smooth blend weight: 0→1 over one level width
                 level_mask = torch.clamp(
@@ -471,6 +406,7 @@ class RadianceDepthOfField:
 
 
 class RadianceMotionBlur:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
     """
     Apply motion blur (directional, radial, or zoom) to simulate camera movement.
     """
@@ -510,14 +446,18 @@ class RadianceMotionBlur:
                     "FLOAT",
                     {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01},
                 ),
-                "samples": ("INT", {"default": 16, "min": 4, "max": 64, "step": 4}),
-                "use_gpu": ("BOOLEAN", {"default": True}),
+                "samples": ("INT", {"default": 16, "min": 4, "max": 64, "step": 4,
+                    "tooltip": "Number of samples for stochastic effects (motion blur, bokeh). Higher = smoother but slower.",
+                }),
+                "use_gpu": ("BOOLEAN", {"default": True,
+                    "tooltip": "Run the effect on GPU via CUDA/MPS. Falls back to CPU if unavailable.",
+                }),
             },
         }
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "apply_motion_blur"
-    CATEGORY = "FXTD Studios/Radiance/Filter"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
     DESCRIPTION = (
         "Apply motion blur (directional, radial, or zoom) to simulate camera movement."
     )
@@ -634,6 +574,7 @@ class RadianceMotionBlur:
 
 
 class RadianceRollingShutter:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
     """
     Simulate rolling shutter artifacts (skew, wobble, flash banding).
     """
@@ -677,13 +618,15 @@ class RadianceRollingShutter:
                     "FLOAT",
                     {"default": 0.1, "min": 0.01, "max": 0.5, "step": 0.01},
                 ),
-                "use_gpu": ("BOOLEAN", {"default": True}),
+                "use_gpu": ("BOOLEAN", {"default": True,
+                    "tooltip": "Run the effect on GPU via CUDA/MPS. Falls back to CPU if unavailable.",
+                }),
             },
         }
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "apply_rolling_shutter"
-    CATEGORY = "FXTD Studios/Radiance/Filter"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
     DESCRIPTION = "Simulate rolling shutter artifacts (skew, wobble, flash banding)."
 
     @torch.no_grad()
@@ -814,6 +757,7 @@ class RadianceRollingShutter:
 
 
 class RadianceCompressionArtifacts:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
     """
     Add compression artifacts (JPEG blocking, color banding).
     """
@@ -841,8 +785,12 @@ class RadianceCompressionArtifacts:
                 ),
             },
             "optional": {
-                "block_size": ("INT", {"default": 8, "min": 4, "max": 32, "step": 4}),
-                "color_subsampling": ("BOOLEAN", {"default": True}),
+                "block_size": ("INT", {"default": 8, "min": 4, "max": 32, "step": 4,
+                    "tooltip": "Block size for DCT/frequency-domain processing. Larger blocks capture more structure.",
+                }),
+                "color_subsampling": ("BOOLEAN", {"default": True,
+                    "tooltip": "Apply chroma subsampling (4:2:0) to simulate video codec color compression.",
+                }),
                 "banding_levels": (
                     "INT",
                     {"default": 32, "min": 4, "max": 256, "step": 4},
@@ -865,7 +813,7 @@ class RadianceCompressionArtifacts:
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "apply_artifacts"
-    CATEGORY = "FXTD Studios/Radiance/Filter"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
     DESCRIPTION = "Add compression artifacts (JPEG blocking, color banding)."
 
     @torch.no_grad()
@@ -967,7 +915,6 @@ class RadianceCompressionArtifacts:
 # =============================================================================
 
 NODE_CLASS_MAPPINGS = {
-    "RadianceWhiteBalance": RadianceWhiteBalance,
     "RadianceDepthOfField": RadianceDepthOfField,
     "RadianceMotionBlur": RadianceMotionBlur,
     "RadianceRollingShutter": RadianceRollingShutter,
@@ -975,7 +922,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceWhiteBalance": "◎ Radiance White Balance",
     "RadianceDepthOfField": "◎ Radiance Depth of Field",
     "RadianceMotionBlur": "◎ Radiance Motion Blur",
     "RadianceRollingShutter": "◎ Radiance Rolling Shutter",

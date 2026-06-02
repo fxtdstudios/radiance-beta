@@ -1,225 +1,176 @@
 <div align="center">
 <img src="RADIANCE.png" width="800" alt="Radiance Logo">
 
-◎ Radiance v2.3.3 — Professional VFX & HDR Suite for ComfyUI
+# ◎ Radiance
 
-[![Version](https://img.shields.io/badge/version-2.3.3-00a8ff?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
+Professional VFX, HDR color science, review, and DCC handoff nodes for ComfyUI.
+
+[![Version](https://img.shields.io/badge/version-3.1.0-00a8ff?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
-[![Nodes](https://img.shields.io/badge/Nodes-81-blue?style=for-the-badge&logo=comfyui)](https://github.com/fxtdstudios/radiance#node-reference)
-[![Comfy](https://img.shields.io/badge/Comfy--Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
+[![Nodes](https://img.shields.io/badge/nodes-100%2B-blue?style=for-the-badge)](#node-map)
+[![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
 
-**Radiance** is a professional, VFX-grade 32-bit float color science suite for ComfyUI. Built for film colorists and VFX artists who require absolute precision in their AI-assisted workflows.
+**Radiance** is a production-oriented ComfyUI node pack for 32-bit image pipelines, HDR/ACES color management, VFX plate prep, video workflows, review tools, and Nuke/Resolve studio handoff.
 
-[Installation](#installation) · [Getting Started](#getting-started) · [Node Reference](#node-reference) · [Quick Start](#quick-start) · [Viewer Shortcuts](#viewer-shortcuts) · [Documentation](https://radiance.fxtd.org) · [Support](https://github.com/fxtdstudios/radiance/issues)
+[Install](#install) · [Documentation](docs/index.html) · [Node Map](#node-map) · [DCC Handoff](#dcc-handoff) · [Release Status](#release-status) · [Support](#support)
 
 </div>
 
 ---
 
-## ◎ What's New - v2.3.3
+## Highlights
 
-> [!IMPORTANT]
-> **Native 32-Bit Scene-Linear Engine**  
-> Unlike standard ComfyUI nodes that clamp to 8-bit, Radiance preserves full IEEE 754 floating-point precision across the entire chain. Zero banding. Zero data loss.
+- 32-bit float image and EXR workflows for VFX and finishing.
+- ACES, OCIO, log curves, LUTs, CDL, scopes, QC, and grade transfer tools.
+- VFX utilities for plate prep, masks, roto, depth, camera/optics, motion, multipass, and relighting.
+- Video and temporal workflow nodes for loading, routing, conditioning, sampling, and delivery.
+- Radiance Pro Viewer with scopes, frame review, shortcuts, and optional local developer tools.
+- DCC handoff for Nuke and DaVinci Resolve, with secure-by-default bridge behavior.
 
-- **Smart Overwrite Protection** — `Radiance Write` and `EXR Save` now feature automated index detection to prevent accidental file destruction.
-- **Universal Digital Cinema I/O** — Consolidated Video, Image Sequence, and Single Image handling into a high-performance unified pipeline.
-- **Robust Pipeline Validation** — Enhanced null-safety and input checking for high-load production environments.
-- **Terminal HUD & Live REPL** — Nuke-style Python interaction directly inside the viewer for real-time data inspection.
-- **Interactive Mask Editor** — Non-destructive brush masking in `◎ Radiance Load Image`.
-- **◎ Radiance Grade Match** — Shot-to-shot color statistics transfer using CIE L\*a\*b\* mean/std math.
+## Documentation
 
----
+The documentation website starts at [docs/index.html](docs/index.html), with source Markdown in [docs/index.md](docs/index.md). It includes quickstart setup, production concepts, workflow recipes, a full node reference, troubleshooting, developer notes, and a coverage ledger for the registered node catalog.
 
-## <a name="getting-started"></a>◎ Getting Started
+## Install
 
-![Radiance Workspace](radiance_workspace.png)
+### ComfyUI Manager / Comfy Registry
 
-The **Radiance Workspace** node is the command center for your production. It handles project paths, versioning, and state management, ensuring that all 32-bit data is tracked correctly across your workflow.
+Search for **Radiance** in ComfyUI Manager or install from the Comfy Registry when published.
 
-1. **Add the Workspace Node**: Right-click > Radiance > Project > Radiance Workspace.
-2. **Set your Project Path**: Point it to your production directory.
-3. **Connect to Viewer**: Link the `workspace` output to the Radiance Viewer to enable live telemetry and Python REPL.
+### Manual Git Install
 
----
-
-## <a name="node-reference"></a>◎ Node Reference (79 Professional Nodes)
-
-The suite is organized into **11 specialized production zones** to mirror industry-standard VFX software topology.
-
-<details>
-<summary><b>◎ Project, Metadata & DNA (8 Nodes)</b></summary>
-
-| Node | Description |
-| :--- | :--- |
-| **Radiance Workspace** | Local Project, Shot & Version management with secure .rad v2 containers |
-| **Radiance Manager** | Cinematic Prompt Studio with 30+ Camera/Lens profiles |
-| **Radiance DNA Reader/Writer** | Extraction and injection of cinematic metadata |
-| **Radiance DNA Validator** | SHA256 integrity and version checking for workflow files |
-| **Radiance Metadata Overlay** | Custom burned-in metadata (Project, Shot, Resolution) |
-
-</details>
-
-<details>
-<summary><b>◎ Production I/O & Loaders (10 Nodes)</b></summary>
-
-| Node | Description |
-| :--- | :--- |
-| **Radiance Read / Write** | Universal 32-bit I/O with auto-increment and high-bitrate support (H.265 10-bit, ProRes) |
-| **Radiance Unified Loader** | Smart model loader (Flux/SDXL) with precision auto-detection |
-| **Radiance LoRA Stack** | Multi-layer LoRA management in a single node |
-| **Radiance CLIP Slot** | Specialized CLIP conditioning slots for multi-prompt chains |
-| **Radiance Image & Mask** | Professional loader with non-destructive mask layering |
-
-</details>
-
-<details>
-<summary><b>◎ HDR Imaging & Color Science (23 Nodes)</b></summary>
-
-| Node | Description |
-| :--- | :--- |
-| **OCIO Color Transform** | Industry-standard OpenColorIO v2.2 integration |
-| **ACES 2.0 Output** | Professional ACES 2.0 Display/View transforms |
-| **Log Curve Decode/Encode** | Precise curves for LogC3/C4, S-Log3, REDLog, etc. |
-| **HDR Tone Map / Expand** | Advanced dynamic range recovery and tonemapping |
-| **Radiance VAE Encode/Decode** | 16-bit precision VAE processing for high-fidelity latents |
-| **Radiance LUT Apply/Blend** | GPU-accelerated 33³ LUT processing with smooth blending |
-| **Wide Gamut Utilities** | DaVinci and ARRI Wide Gamut color space primitives |
-
-</details>
-
-<details>
-<summary><b>◎ VFX Grading & Analysis (15 Nodes)</b></summary>
-
-| Node | Description |
-| :--- | :--- |
-| **Radiance Grade** | 32-bit Lift/Gamma/Gain/Offset with cinematic presets |
-| **Radiance Grade Match** | CIE L\*a\*b\* mean/std statistics transfer for shot matching |
-| **Apply Grade Info** | Replay saved grade JSON strings onto new shots with strength control |
-| **Radiance Waveform** | GPU-accelerated RGB Parade / Luma / Overlay |
-| **Radiance Vectorscope** | Phase-accurate hue/sat monitoring with Skin Tone line |
-| **Radiance False Color** | IRE-calibrated 7-zone exposure mapping |
-| **Radiance QC Pro** | Automated technical QC (Gamut, Clip, Banding) |
-
-</details>
-
-<details>
-<summary><b>◎ AI Vision & Temporal (15 Nodes)</b></summary>
-
-| Node | Description |
-| :--- | :--- |
-| **Radiance Sampler Pro** | High-end sampling (Flux/WAN) with AYS and Dynamic Guidance |
-| **Radiance Resolution** | Advanced resolution selection with 8-pixel alignment |
-| **Depth Anything V2** | Professional monocular depth estimation |
-| **Radiance Temporal Smooth**| Motion-aware EMA flicker reduction for AI video |
-| **Radiance Pro Upscale** | Vectorized kernel upscaling (Lanczos/Mitchell/Catmull-Rom) |
-
-</details>
-
----
-
-## <a name="quick-start"></a>◎ Quick Start Workflows
-
-![Basic Radiance Workflow](basic_workflow.png)
-
----
-
-## <a name="installation"></a>◎ Installation
-
-### Option 1: ComfyUI Manager
-1. Open **ComfyUI Manager**
-2. Search for **Radiance**
-3. Click **Install**
-
-### Option 2: Manual (Git)
 ```bash
 cd ComfyUI/custom_nodes
 git clone https://github.com/fxtdstudios/radiance.git
 cd radiance
-pip install -r requirements_windows.txt  # Or linux/mac_silicon
+pip install -r requirements.txt
 ```
 
-> [!TIP]
-> **Linux/macOS Users**: Ensure you have `libopenexr-dev` installed via your package manager before running the requirements install.
+Windows users can use `requirements_windows.txt`; Apple Silicon users can use `requirements_mac_silicon.txt`.
 
----
+> Radiance assumes ComfyUI already provides `torch`. Install Radiance inside the same Python environment used by ComfyUI.
 
-## <a name="viewer-shortcuts"></a>◎ Professional Keyboard Shortcuts
+## Node Map
 
-![Radiance Pro Viewer](viewer.png)  
+Radiance is organized under:
+
+```text
+FXTD STUDIOS/Radiance
+├─ Core
+├─ Load & Save
+├─ Generate
+├─ Color
+├─ HDR
+├─ VFX
+├─ Video
+├─ Upscale
+├─ Review
+├─ Pipeline
+└─ Developer
+```
+
+The source currently exposes **100+ node classes**. Runtime availability depends on installed optional dependencies and ComfyUI environment support.
+
+### Core Groups
+
+| Group | Examples |
+| :--- | :--- |
+| Core | Radiance Manager, Resolution, workspace utilities |
+| Load & Save | Radiance Read, Radiance Write, image/mask loading, EXR and sequence export |
+| Generate | Read Models, Sampler Pro, prompt tools, LoRA stack, regional prompts |
+| Color | Grade, Grade Match, CDL, LUTs, Curves, White Balance, Color Space Convert |
+| HDR | ACES, OCIO, HDR VAE, tone mapping, HDR encode/decode, QC |
+| VFX | Plate prep, masks, roto, SAM, depth, optics, motion, multipass, relight |
+| Video | Video loader, prompt builder, sampler, T2V/I2V, routing, export |
+| Upscale | Image/video upscale, tiling, face restoration |
+| Review | Viewer, scopes, contact sheets, preview server, policy guard |
+| Pipeline | Project Manager, MCP Bridge, Nuke Send, DaVinci Resolve folder handoff |
+
+## DCC Handoff
+
+### Nuke
+
+Radiance can export EXR frames and push them to a running Nuke session through the Radiance TCP listener.
+
+Inside Nuke, run:
+
+```python
+exec(open("/path/to/ComfyUI/custom_nodes/radiance/scripts/start_nuke_server.py").read())
+```
+
+Then use **◎ Radiance Send to Nuke** or **◎ Radiance MCP Bridge** from ComfyUI.
+
+Security defaults:
+
+- Listener binds to `127.0.0.1` by default.
+- Structured actions are enabled for normal production operations.
+- Raw dynamic Python execution is disabled unless `RADIANCE_DEV=1`.
+- Optional token auth uses `RADIANCE_DCC_AUTH_TOKEN`.
+
+### DaVinci Resolve
+
+Radiance currently supports Resolve as a **folder handoff/manual import** workflow through **◎ Radiance Send to DaVinci Resolve**. It exports PNG, TIFF, or EXR media into a Resolve-accessible folder.
+
+The experimental `scripts/resolve_bridge.py` helper must be run inside DaVinci Resolve Studio when using Resolve scripting APIs.
+
+## Release Status
+
+| Area | Status |
+| :--- | :--- |
+| GitHub source layout | Ready |
+| Comfy Registry metadata | Ready after publisher/token setup |
+| Runtime dependency list | Ready |
+| `.comfyignore` package cleanup | Ready |
+| Node branding/menu taxonomy | Ready |
+| Nuke bridge smoke test | Passed |
+| MCP bridge smoke test | Passed |
+| DaVinci Resolve live API push | Not included; folder handoff only |
+| Local full pytest run | Not run in this shell because `pytest` is not installed |
+| Full ComfyUI import test | Must be run inside the target ComfyUI environment before tagging |
+
+## Publish Checklist
+
+1. Confirm `pyproject.toml` has the final version.
+2. Confirm your Comfy Registry publisher id is `fxtdstudios`.
+3. Add the GitHub secret `REGISTRY_ACCESS_TOKEN`.
+4. Run the lightweight local release check:
+
+```bash
+python tools/check_release_ready.py
+```
+
+5. Run CI on GitHub.
+6. Tag the release:
+
+```bash
+git tag v3.1.0
+git push origin v3.1.0
+```
+
+The publish workflow will publish to Comfy Registry and create a GitHub Release after the publish gate passes.
+
+## Viewer Shortcuts
+
+![Radiance Pro Viewer](viewer.png)
 ![Radiance Shortcuts](Viewer_shortcut.png)
 
-Radiance is designed for a keyboard-driven VFX workflow. Use these shortcuts to monitor, grade, and navigate your shots with industry-standard precision.
-
-### ◎ Navigation & Playback
 | Key | Action |
 | :--- | :--- |
-| **Space** | Toggle Playback |
-| **← / →** | Previous / Next Frame |
-| **F** | Fit to View |
-| **1** | 1:1 Pixel Zoom |
-| **Shift + Drag** | Pan Image |
-| **Esc** | Exit Fullscreen / Close Panels |
+| Space | Toggle playback |
+| Left / Right | Previous / next frame |
+| F | Fit to view |
+| 1 | 1:1 pixel zoom |
+| C / R / G / B / L | Color, red, green, blue, luma channels |
+| W | Toggle waveform |
+| V | Toggle vectorscope |
+| A | Cycle A/B compare modes |
 
-### ◎ Channel Monitoring
-| Key | Action |
-| :--- | :--- |
-| **C** | RGB (Color) View |
-| **R** | Red Channel |
-| **G** | Green Channel |
-| **B** | Blue Channel |
-| **L** | Luma Channel |
-| **Shift + A** | Alpha Channel |
+## Support
 
-### ◎ Analysis & Scopes
-| Key | Action |
-| :--- | :--- |
-| **W** | Toggle Waveform (HDR-Aware) |
-| **M** | Toggle Waveform Parade Mode |
-| **V** | Toggle Vectorscope (w/ Skin Tone Line) |
-| **S** | Cycle Safe Area Overlays |
-| **Shift + G** | Cycle Grid Modes |
-| **A** | Cycle A\|B Compare Modes |
+- Issues: [GitHub Issues](https://github.com/fxtdstudios/radiance/issues)
+- Documentation: [radiance.fxtd.org](https://radiance.fxtd.org)
+- Studio: [fxtd.org](https://fxtd.org)
 
-## ◎ Community & Support
+## License
 
-Radiance is backed by a professional team of VFX Technical Directors. Engage with us through our official channels:
-
-### ◎ Official Discord Server
-- **Production Workflows:** Access exclusive `.rad` templates and cinema-grade JSON presets.
-- **Direct Engineer Support:** Real-time troubleshooting and feature requests.
-- **Showcase:** share your work and get feedback from industry veterans.
-- **Beta Access:** Test experimental HDR and temporal nodes before public release.
-
-[**Join the FXTD Studios Discord**](https://discord.gg/WU3xUQXgp)
-
----
-
-### ◎ Technical Resources
-- **Documentation:** [radiance.fxtd.org](https://radiance.fxtd.org)
-- **Issue Tracker:** [GitHub Issues](https://github.com/fxtdstudios/radiance/issues)
-- **Official Site:** [fxtd.org](https://fxtd.org)
-
----
-
-## ◎ License & Credits
-
-- **License:** GPL-3.0
-- **Authors:** Created by the FXTD Studios team.
-- **Technology:** Built on **OpenColorIO v2.2**, **OpenEXR**, and **Colour-Science**.
-- **Special Thanks:** The ComfyUI community for pushing the boundaries of AI generation.
-
-### ◎ References
-- Reinhard, E., Ashikhmin, M., Gooch, B., Shirley, P. **Color Transfer between Images**. IEEE CGA, 2001.
-- Hable, J. **Filmic Tonemapping Operators**. GDC 2010.
-- Hill, S. **HDR Color in Call of Duty**. SIGGRAPH 2014.
-- Academy of Motion Picture Arts and Sciences. **ACES 2.0 Reference Rendering Transform**. 2024.
-- Sobotka, T. **AgX: A Minimal Color Transform**. Blender Institute, 2023.
-- Magnor, M. et al. **Digital Video Processing for Engineers**. Morgan & Claypool, 2012.
-- OpenColorIO Contributors. **OpenColorIO v2 Architecture**. ASWF, 2023.
-- **Colour-Science for Python**. https://www.colour-science.org/. 2024.
-- Narkowicz, K. **ACES Filmic Tone Mapping Curve**. Blog, 2016.
-- **ITU-R BT.1203**. Subjective Picture Quality Assessment for Digital Cable Television Systems. ITU, 1994.
-
----
-[↑ Back to top](#radiance)
+Radiance is released under the [GPL-3.0 license](LICENSE).

@@ -6,53 +6,32 @@ from typing import Tuple, Dict, Any
 # Local imports
 from .utils import tensor_to_numpy_float32, numpy_to_tensor_float32, linear_to_srgb
 
-# Parent imports (from radiance root)
-try:
-    from ..color_utils import (
-        # Matrices
-        SRGB_TO_ACESCG,
-        ACESCG_TO_SRGB,
-        ACES_AP0_TO_AP1,
-        ACESCG_TO_REC2020,
-        ACESCG_TO_P3D65,
-        # Log curves (numpy)
-        linear_to_logc3,
-        logc3_to_linear,
-        linear_to_logc4,
-        logc4_to_linear,
-        linear_to_slog3,
-        slog3_to_linear,
-        linear_to_vlog,
-        vlog_to_linear,
-        linear_to_canonlog3,
-        canonlog3_to_linear,
-        linear_to_acescct,
-        acescct_to_linear,
-        linear_to_davinci_intermediate,
-        davinci_intermediate_to_linear,
-        # HDR transfer functions
-        linear_to_pq,
-        pq_to_linear,
-        linear_to_hlg,
-        hlg_to_linear,
-        # Color space conversions
-        linear_srgb_to_acescg,
-        acescg_to_linear_srgb,
-        # Tensor log curves (GPU)
-        tensor_linear_to_logc4,
-        tensor_logc4_to_linear,
-        tensor_linear_to_slog3,
-        tensor_slog3_to_linear,
-        tensor_linear_to_log3g10,
-        tensor_log3g10_to_linear,
-        tensor_linear_to_vlog,
-        tensor_vlog_to_linear,
-        tensor_linear_to_davinci_intermediate,
-        tensor_davinci_intermediate_to_linear,
-    )
-except ImportError:
-    # Fallback if imported from elsewhere (though structure dictates ..color_utils)
-    pass
+# Import from canonical color package (replaces deprecated ..color_utils)
+from radiance.color.matrices import (
+    SRGB_TO_ACESCG,
+    ACESCG_TO_SRGB,
+    ACES_AP0_TO_AP1,
+    ACESCG_TO_REC2020,
+    ACESCG_TO_P3D65,
+    linear_srgb_to_acescg,
+    acescg_to_linear_srgb,
+)
+from radiance.color.transfer import (
+    linear_to_logc3, logc3_to_linear,
+    linear_to_logc4, logc4_to_linear,
+    linear_to_slog3, slog3_to_linear,
+    linear_to_vlog, vlog_to_linear,
+    linear_to_canonlog3, canonlog3_to_linear,
+    linear_to_acescct, acescct_to_linear,
+    linear_to_davinci_intermediate, davinci_intermediate_to_linear,
+    linear_to_pq, pq_to_linear,
+    linear_to_hlg, hlg_to_linear,
+    tensor_linear_to_logc4, tensor_logc4_to_linear,
+    tensor_linear_to_slog3, tensor_slog3_to_linear,
+    tensor_linear_to_log3g10, tensor_log3g10_to_linear,
+    tensor_linear_to_vlog, tensor_vlog_to_linear,
+    tensor_linear_to_davinci_intermediate, tensor_davinci_intermediate_to_linear,
+)
 
 logger = logging.getLogger("radiance.hdr.color")
 
@@ -93,6 +72,7 @@ def _sign_pow_np(x: np.ndarray, exp: float) -> np.ndarray:
 
 
 class ImageToFloat32:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     """
     Convert images to 32-bit float precision for HDR processing.
     Preserves full dynamic range without clamping.
@@ -132,7 +112,7 @@ class ImageToFloat32:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "convert"
-    CATEGORY = "FXTD Studios/Radiance/Color"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = "Convert images to 32-bit float precision for HDR processing. Preserves full dynamic range without clamping."
 
     def convert(
@@ -158,6 +138,7 @@ class ImageToFloat32:
 
 
 class Float32ColorCorrect:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     """
     Professional 32-bit color correction with exposure, contrast, saturation,
     gamma, and per-channel lift/gain controls.
@@ -317,7 +298,7 @@ class Float32ColorCorrect:
     RETURN_NAMES = ("image",)
     OUTPUT_TOOLTIPS = ("Color corrected image in 32-bit float.",)
     FUNCTION = "correct"
-    CATEGORY = "FXTD Studios/Radiance/Color"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = "Professional 32-bit color correction with exposure, contrast, saturation, gamma, and per-channel lift/gain controls."
 
     def correct(
@@ -427,6 +408,7 @@ class Float32ColorCorrect:
 
 
 class ColorSpaceConvert:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     """
     GPU-accelerated color space conversion (sRGB, ACEScg, ACEScct, Rec.2020, DCI-P3).
     Uses industry-standard matrices.
@@ -571,14 +553,16 @@ class ColorSpaceConvert:
                     cls.CHROMATIC_ADAPTATIONS,
                     {"default": "Bradford"},
                 ),
-                "use_gpu": ("BOOLEAN", {"default": True}),
+                "use_gpu": ("BOOLEAN", {"default": True,
+                    "tooltip": "Run the effect on GPU via CUDA/MPS. Falls back to CPU if unavailable.",
+                }),
             },
         }
 
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "convert"
-    CATEGORY = "FXTD Studios/Radiance/Color"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = "GPU-accelerated color space conversion (sRGB, ACEScg, ACEScct, Rec.2020, DCI-P3). Uses industry-standard matrices."
 
     # Color space primaries (xy chromaticity)
@@ -789,6 +773,8 @@ class ColorSpaceConvert:
                     key = f"{inp}_to_Rec709"
                 if key in self.FAST_MATRICES:
                     rgb = self._apply_matrix(rgb, self.FAST_MATRICES[key])
+                else:
+                    logger.warning(f"[Radiance] Gamut conversion hub '{key}' not found in FAST_MATRICES. Data may be incorrect.")
 
             if outp != "Rec709":
                 if outp == "AP1":
@@ -797,6 +783,8 @@ class ColorSpaceConvert:
                     key = f"Rec709_to_{outp}"
                 if key in self.FAST_MATRICES:
                     rgb = self._apply_matrix(rgb, self.FAST_MATRICES[key])
+                else:
+                    logger.warning(f"[Radiance] Gamut conversion hub '{key}' not found in FAST_MATRICES. Data may be incorrect.")
 
             # Apply output transfer function
             if target_space == "ACEScct":
@@ -824,7 +812,11 @@ _SRGB_TO_XYZ = np.array(
     dtype=np.float32,
 )
 
-_XYZ_TO_SRGB = np.linalg.inv(_SRGB_TO_XYZ).astype(np.float32)
+try:
+    _XYZ_TO_SRGB = np.linalg.inv(_SRGB_TO_XYZ).astype(np.float32)
+except np.linalg.LinAlgError:
+    logger.warning("Failed to invert SRGB_TO_XYZ matrix in color.py. Fallback to identity.")
+    _XYZ_TO_SRGB = np.eye(3, dtype=np.float32)
 
 _XYZ_TO_AP1 = np.array(
     [[1.6410, -0.3249, -0.2365], [-0.6636, 1.6153, 0.0168], [0.0117, -0.0084, 0.9884]],
@@ -863,7 +855,7 @@ class DaVinciWideGamut:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "convert"
-    CATEGORY = "FXTD Studios/Radiance/Color"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = "Convert to/from DaVinci Wide Gamut and DaVinci Intermediate."
 
     # DaVinci Wide Gamut to/from XYZ (D65)
@@ -918,37 +910,45 @@ class DaVinciWideGamut:
         ).astype(np.float32)
 
     def convert(self, image: torch.Tensor, transform: str) -> Tuple[torch.Tensor]:
-        img = tensor_to_numpy_float32(image)
-        if img.ndim == 4:
-            img = img[0]
+        img_full = tensor_to_numpy_float32(image)
+        # v2.5.1 FIX: Support batch processing (BUG-008)
+        if img_full.ndim == 3:
+            img_full = img_full[np.newaxis, ...]
+        
+        batch, h, w, c = img_full.shape
+        result_batch = np.zeros_like(img_full)
 
-        if transform == "Linear to DaVinci WG":
-            xyz = img @ self.SRGB_TO_XYZ.T
-            result = xyz @ self.XYZ_TO_DWG.T
+        for b in range(batch):
+            img = img_full[b]
+            if transform == "Linear to DaVinci WG":
+                xyz = img @ self.SRGB_TO_XYZ.T
+                result = xyz @ self.XYZ_TO_DWG.T
 
-        elif transform == "DaVinci WG to Linear":
-            xyz = img @ self.DWG_TO_XYZ.T
-            result = xyz @ self.XYZ_TO_SRGB.T
+            elif transform == "DaVinci WG to Linear":
+                xyz = img @ self.DWG_TO_XYZ.T
+                result = xyz @ self.XYZ_TO_SRGB.T
 
-        elif transform == "Linear to DaVinci Intermediate":
-            xyz = img @ self.SRGB_TO_XYZ.T
-            dwg = xyz @ self.XYZ_TO_DWG.T
-            result = self._davinci_intermediate_encode(dwg)
+            elif transform == "Linear to DaVinci Intermediate":
+                xyz = img @ self.SRGB_TO_XYZ.T
+                dwg = xyz @ self.XYZ_TO_DWG.T
+                result = self._davinci_intermediate_encode(dwg)
 
-        elif transform == "DaVinci Intermediate to Linear":
-            dwg = self._davinci_intermediate_decode(img)
-            xyz = dwg @ self.DWG_TO_XYZ.T
-            result = xyz @ self.XYZ_TO_SRGB.T
+            elif transform == "DaVinci Intermediate to Linear":
+                dwg = self._davinci_intermediate_decode(img)
+                xyz = dwg @ self.DWG_TO_XYZ.T
+                result = xyz @ self.XYZ_TO_SRGB.T
 
-        elif transform == "DaVinci WG to ACEScg":
-            xyz = img @ self.DWG_TO_XYZ.T
-            result = xyz @ _XYZ_TO_AP1.T
+            elif transform == "DaVinci WG to ACEScg":
+                xyz = img @ self.DWG_TO_XYZ.T
+                result = xyz @ _XYZ_TO_AP1.T
 
-        else:  # ACEScg to DaVinci WG
-            xyz = img @ _AP1_TO_XYZ.T
-            result = xyz @ self.XYZ_TO_DWG.T
+            else:  # ACEScg to DaVinci WG
+                xyz = img @ _AP1_TO_XYZ.T
+                result = xyz @ self.XYZ_TO_DWG.T
+            
+            result_batch[b] = result
 
-        return (numpy_to_tensor_float32(result),)
+        return (numpy_to_tensor_float32(result_batch),)
 
 
 class ARRIWideGamut4:
@@ -976,7 +976,7 @@ class ARRIWideGamut4:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "convert"
-    CATEGORY = "FXTD Studios/Radiance/Color"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = "Convert to/from ARRI Wide Gamut 4 (AWG4) for Alexa 35."
 
     # ARRI Wide Gamut 4 to XYZ (D65)
@@ -1007,30 +1007,39 @@ class ARRIWideGamut4:
     AP1_TO_XYZ = _AP1_TO_XYZ
 
     def convert(self, image: torch.Tensor, direction: str) -> Tuple[torch.Tensor]:
-        img = tensor_to_numpy_float32(image)
-        if img.ndim == 4:
-            img = img[0]
+        img_full = tensor_to_numpy_float32(image)
+        # v2.5.1 FIX: Support batch processing (BUG-008)
+        if img_full.ndim == 3:
+            img_full = img_full[np.newaxis, ...]
+        
+        batch, h, w, c = img_full.shape
+        result_batch = np.zeros_like(img_full)
 
-        if direction == "AWG4 to ACEScg":
-            xyz = img @ self.AWG4_TO_XYZ.T
-            result = xyz @ self.XYZ_TO_AP1.T
+        for b in range(batch):
+            img = img_full[b]
+            if direction == "AWG4 to ACEScg":
+                xyz = img @ self.AWG4_TO_XYZ.T
+                result = xyz @ self.XYZ_TO_AP1.T
 
-        elif direction == "ACEScg to AWG4":
-            xyz = img @ self.AP1_TO_XYZ.T
-            result = xyz @ self.XYZ_TO_AWG4.T
+            elif direction == "ACEScg to AWG4":
+                xyz = img @ self.AP1_TO_XYZ.T
+                result = xyz @ self.XYZ_TO_AWG4.T
 
-        elif direction == "AWG4 to Linear sRGB":
-            xyz = img @ self.AWG4_TO_XYZ.T
-            result = xyz @ self.XYZ_TO_SRGB.T
+            elif direction == "AWG4 to Linear sRGB":
+                xyz = img @ self.AWG4_TO_XYZ.T
+                result = xyz @ self.XYZ_TO_SRGB.T
 
-        else:  # Linear sRGB to AWG4
-            xyz = img @ self.SRGB_TO_XYZ.T
-            result = xyz @ self.XYZ_TO_AWG4.T
+            else:  # Linear sRGB to AWG4
+                xyz = img @ self.SRGB_TO_XYZ.T
+                result = xyz @ self.XYZ_TO_AWG4.T
+            
+            result_batch[b] = result
 
-        return (numpy_to_tensor_float32(result),)
+        return (numpy_to_tensor_float32(result_batch),)
 
 
 class ACES2OutputTransform:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     """
     Apply ACES 2.0 Output Transform with proper gamut mapping
     for SDR, HDR, or Cinema output.
@@ -1127,7 +1136,7 @@ class ACES2OutputTransform:
     RETURN_TYPES = ("IMAGE", "STRING")
     RETURN_NAMES = ("output_image", "transform_info")
     FUNCTION = "apply_transform"
-    CATEGORY = "FXTD Studios/Radiance/Color"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = "Apply ACES 2.0 Output Transform with proper gamut mapping for SDR, HDR, or Cinema output."
 
     # === Color Space Matrices ===

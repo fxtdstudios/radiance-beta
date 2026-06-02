@@ -3,6 +3,7 @@ import socket
 import struct
 import json
 import logging
+import os
 from typing import Dict, Any, Tuple
 
 logger = logging.getLogger("radiance.nuke.connector")
@@ -74,6 +75,7 @@ def validate_nuke_identifier(name: str, context: str = "identifier") -> str:
 
 
 class NukeConnector:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Pipeline"
     """
     TCP client that sends Python commands to Nuke's Radiance listener.
 
@@ -88,9 +90,9 @@ class NukeConnector:
             conn.load_exr("/renders/stream.0001.exr", "RadianceStream")
     """
 
-    def __init__(self, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
-        self.host = host
-        self.port = port
+    def __init__(self, host: str = None, port: int = None):
+        self.host = host if host is not None else os.environ.get("RADIANCE_NUKE_HOST", DEFAULT_HOST)
+        self.port = port if port is not None else int(os.environ.get("RADIANCE_NUKE_PORT", str(DEFAULT_PORT)))
         self._last_error = ""
 
     @property
@@ -117,9 +119,19 @@ class NukeConnector:
             sock.connect((self.host, self.port))
             sock.settimeout(timeout)
 
-            # Wire frame: MAGIC(4) + VERSION(1) + LENGTH(4 LE) + PAYLOAD
+            # Check if token is configured for protocol version 2.
+            token = os.environ.get("RADIANCE_DCC_AUTH_TOKEN", "")
+
             payload = command.encode("utf-8")
-            header = HEADER_MAGIC + struct.pack("<BI", HEADER_VERSION, len(payload))
+            if token:
+                # Protocol Version 2: MAGIC(4) + VERSION(1) + SIGNATURE(32) + LENGTH(4 LE) + PAYLOAD
+                import hashlib
+                sig = hashlib.sha256((token + command).encode("utf-8")).digest()
+                header = HEADER_MAGIC + struct.pack("<B", 2) + sig + struct.pack("<I", len(payload))
+            else:
+                # Protocol Version 1: MAGIC(4) + VERSION(1) + LENGTH(4 LE) + PAYLOAD
+                header = HEADER_MAGIC + struct.pack("<BI", 1, len(payload))
+
             sock.sendall(header + payload)
 
             # Read response chunks until END_MARKER or disconnect
@@ -183,13 +195,28 @@ class NukeConnector:
                 except Exception:  # nosec B110
                     pass
 
+    def send_action(
+        self,
+        action: str,
+        payload: Dict[str, Any] | None = None,
+        timeout: float = READ_TIMEOUT,
+    ) -> Tuple[bool, str]:
+        """Send a structured command understood by the Radiance Nuke bridge.
+
+        Structured commands avoid arbitrary Python execution on the Nuke side and
+        keep production bridge operations available while RADIANCE_DEV is off.
+        """
+
+        body = {"action": action, **(payload or {})}
+        return self.send_command(json.dumps(body), timeout=timeout)
+
     # ═════════════════════════════════════════════════════════════════════
     #  HIGH-LEVEL: Nuke operations
     # ═════════════════════════════════════════════════════════════════════
 
     def ping(self) -> Tuple[bool, str]:
-        """Check if Nuke listener is alive. Fast 3-second timeout."""
-        ok, result = self.send_command("'RADIANCE_PONG'", timeout=3.0)
+        """Check if a compatible Nuke listener is alive. Fast 3-second timeout."""
+        ok, result = self.send_action("ping", timeout=3.0)
         return (ok and "PONG" in result, result)
 
     def load_exr(
@@ -229,71 +256,25 @@ class NukeConnector:
         last_frame = int(last_frame)
         current_frame = int(current_frame)
 
-        # Build the Nuke Python script
-        cmd_lines = [
-            "import nuke",
-            "",
-            "# Find existing Read or create new",
-            f"node = nuke.toNode('{safe_node_name}')",
-            "if node is None or node.Class() != 'Read':",
-            "    node = nuke.createNode('Read', inpanel=False)",
-            f"    node.setName('{safe_node_name}')",
-            "",
-            "# Set file path and frame range",
-            f"node['file'].setValue('{safe_path}')",
-            f"node['first'].setValue({first_frame})",
-            f"node['last'].setValue({last_frame})",
-            f"node['origfirst'].setValue({first_frame})",
-            f"node['origlast'].setValue({last_frame})",
-            f"node['raw'].setValue({raw})",
-        ]
-
-        if not raw:
-            cmd_lines.append(f"node['colorspace'].setValue('{safe_color_space}')")
-
-        cmd_lines += [
-            "",
-            "# Force reload — clears Nuke's internal cache for this node",
-            "node['reload'].execute()",
-        ]
-
-        if connect_viewer:
-            cmd_lines += [
-                "",
-                "# Connect to Viewer",
-                "viewer = nuke.toNode('Viewer1')",
-                "if viewer is None:",
-                "    viewer = nuke.createNode('Viewer', inpanel=False)",
-                "",
-                "viewer.setInput(0, node)",
-                f"nuke.frame({current_frame})",
-            ]
-
-        cmd_lines.append(
-            f"\n'{safe_node_name}: loaded {safe_path} [{first_frame}-{last_frame}]'"
-        )
-
-        return self.send_command("\n".join(cmd_lines))
+        return self.send_action("load_exr", {
+            "filepath": safe_path,
+            "node_name": safe_node_name,
+            "first_frame": first_frame,
+            "last_frame": last_frame,
+            "current_frame": current_frame,
+            "color_space": safe_color_space,
+            "connect_viewer": bool(connect_viewer),
+            "raw": bool(raw),
+        })
 
     def set_frame(self, frame: int) -> Tuple[bool, str]:
         """Set Nuke's current frame."""
         frame = int(frame)  # Ensure integer — no injection
-        return self.send_command(f"import nuke; nuke.frame({frame}); 'frame={frame}'")
+        return self.send_action("set_frame", {"frame": frame})
 
     def get_info(self) -> Tuple[bool, Dict[str, Any]]:
         """Query Nuke for version, project, format, frame range, fps."""
-        ok, result = self.send_command(
-            "import nuke, json; json.dumps({"
-            "'version': nuke.NUKE_VERSION_STRING, "
-            "'project': nuke.root().name(), "
-            "'fps': nuke.root()['fps'].value(), "
-            "'first': int(nuke.root()['first_frame'].value()), "
-            "'last': int(nuke.root()['last_frame'].value()), "
-            "'format': str(nuke.root().format().name()), "
-            "'width': nuke.root().format().width(), "
-            "'height': nuke.root().format().height(), "
-            "})"
-        )
+        ok, result = self.send_action("get_info")
         if ok:
             try:
                 return (True, json.loads(result))
