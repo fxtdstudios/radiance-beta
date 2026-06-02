@@ -1,91 +1,825 @@
+"""
+═══════════════════════════════════════════════════════════════════════════════
+                    RADIANCE SAMPLER PRO v3.4
+         Professional Flux-Optimized Sampling Engine
+                   Radiance © 2024-2026
+                   
+ Features:
+ - Native Flux sigma shifting for high-resolution detail
+ - Integrated guidance control (bypasses CFG for Flux)
+ - PAG (Perturbed Attention Guidance) via attention hooking (v3.0, fixed v3.2)
+ - CFG++ with perpendicular scheduling for better saturation control (v3.0)
+ - Multi-Model Support: Auto-detect Flux/SD3/SDXL with optimal defaults (v3.1)
+ - Sigma Blend: Smooth phase transitions for phase-shift mode (v3.1)
+ - Live Preview: TAESD/Latent2RGB preview during sampling (v3.1)
+ - Sigma Report: Diagnostic string output for debugging (v3.2)
+ - Per-Stage Timing: Breakdown per sampling stage (v3.2)
+ - Workflow presets (txt2img, img2img, inpaint, high-res, turbo)
+ - Full step control with timing diagnostics
+ - SIGMAS output for advanced chaining
+ - Professional error handling and logging
+
+ Example:
+     Model → Sampler Pro → VAE Decode → Image
+     
+ Flux Tips:
+     - CFG = 1.0 (Flux uses guidance instead)
+     - flux_guidance = 3.5 (default, higher = more prompt adherence)
+     - flux_shift = 1.0 (increase to 3.0 for high-res detail boost)
+     - pag_scale = 1.5 (optional, improves prompt adherence via attention perturbation)
+
+ VERSION HISTORY:
+
+ v3.4 - Noise & Quality Fix (February 2026)
+ - FIX: CRITICAL — Double noise in stage 1: code added noise*σ to latent,
+   then sample_custom added noise*σ AGAIN internally → 2× noise (BUG-15)
+ - FIX: CRITICAL — Extra noise in continuation stages: sample_custom always
+   adds noise*σ_start to latent, corrupting partially-denoised results from
+   previous stages. Now passes zeros for continuation (BUG-16)
+ - FIX: Dynamic guidance late-stage drop: guidance fell to 60% at 90-100%
+   of steps, destroying fine detail coherence. Now tapers to 85% (BUG-17)
+ - FIX: Phase-Shift default sigma_blend_steps=0 caused hard sigma
+   discontinuity. Auto-enables 3 blend steps when phase-shift active (BUG-18)
+ - FIX: Sigma blend first sigma now exactly matches phase transition
+   point instead of ~85% approximation (BUG-19)
+
+ v3.1 - Multi-Model & Preview (2025)
+ - NEW: Auto-detect Flux/SD3/SDXL with optimal defaults
+ - NEW: Sigma Blend for smooth phase transitions
+ - NEW: Live Preview via TAESD/Latent2RGB
+
+ v3.0 - Next Generation (2025)
+ - NEW: PAG (Perturbed Attention Guidance) support
+ - NEW: CFG++ mode with perpendicular scheduling
+ - NEW: Turbo presets for distilled models (Schnell, SD3.5 Turbo)
+ - FIX #1-15: All previous production fixes retained
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
 import torch
 import time
 import math
+import copy
 import logging
-import gc
+import weakref
 from typing import Tuple, Dict, Any, Optional, List
-from dataclasses import dataclass, field
 
 import comfy.samplers
 import comfy.sample
 import comfy.model_management
 import comfy.utils
-try:
-    from .tensor_contract import ensure_4d, ensure_5d
-except (ImportError, ValueError):
-    from tensor_contract import ensure_4d, ensure_5d
 
 
-try:
-    from comfy.nested_tensor import NestedTensor as _NestedTensor
-    _HAS_NESTED_TENSOR = True
-except ImportError:
-    _NestedTensor = None
-    _HAS_NESTED_TENSOR = False
+# ═══════════════════════════════════════════════════════════════════════════════
+#                         CONFIGURATION CONSTANTS
+# ═══════════════════════════════════════════════════════════════════════════════
 
-try:
-    from .sampler_utils import (
-        DYNAMIC_GUIDANCE_EARLY_MULTIPLIER, DYNAMIC_GUIDANCE_LATE_MULTIPLIER, 
-        DYNAMIC_GUIDANCE_EARLY_THRESHOLD, DYNAMIC_GUIDANCE_LATE_THRESHOLD, 
-        DYNAMIC_GUIDANCE_RAMP_WIDTH, GUIDANCE_RESCALE_PHI, 
-        SIGMA_DISCONTINUITY_THRESHOLD, PAG_DEFAULT_SCALE, PAG_LAYER_NAMES, 
-        CFG_PLUS_PLUS_DEFAULT_SCALE, CFG_GUIDANCE_MODELS, 
-        DYNAMIC_CFG_EARLY_MULTIPLIER, DYNAMIC_CFG_LATE_MULTIPLIER, 
-        DYNAMIC_CFG_EARLY_THRESHOLD, DYNAMIC_CFG_LATE_THRESHOLD, MODEL_TYPES, 
-        VIDEO_MODEL_TYPES, GUIDANCE_EMBED_MODELS, CFG_GUIDED_MODELS, 
-        PREVIEW_METHODS, NOISE_TYPES, CLIP_TARGETS, MULTI_COND_MODES, 
-        TILE_BLEND_MODES, SamplerMode, SigmaCache, _sigma_cache, 
-        RadianceModelRegistry, detect_by_config, detect_by_architecture, 
-        detect_by_sampling, detect_model_type, get_model_defaults, 
-        gradual_sigma_blend, log_tensor, SigmaIndexer, SamplingStage, 
-        apply_flux_guidance, compute_dynamic_guidance, compute_dynamic_cfg, 
-        compute_base_sigmas, WORKFLOW_PRESETS, flux_shift_sigmas, get_flux_sigmas, 
-        validate_step_range, apply_pag_to_model, AYS_ANCHORS, get_ays_sigmas, 
-        guidance_rescale_cfg, correct_sigma_end, apply_cfg_plus_plus, 
-        build_sigma_report, _temporally_correlate, _perlin_noise, _perlin_noise_2d, 
-        _spectral_noise, _get_freq_grid, _spectral_noise_2d, _brownian_noise, 
-        _simplex_noise, _voronoi_noise, _curl_noise, generate_noise, 
-        merge_conditionings, route_conditioning, tile_sample, _build_latent_meta, 
-        MODEL_DEFAULTS, PRESET_CONFIGS, 
-    )
-except (ImportError, ValueError):
-    from sampler_utils import (
-        DYNAMIC_GUIDANCE_EARLY_MULTIPLIER, DYNAMIC_GUIDANCE_LATE_MULTIPLIER, 
-        DYNAMIC_GUIDANCE_EARLY_THRESHOLD, DYNAMIC_GUIDANCE_LATE_THRESHOLD, 
-        DYNAMIC_GUIDANCE_RAMP_WIDTH, GUIDANCE_RESCALE_PHI, 
-        SIGMA_DISCONTINUITY_THRESHOLD, PAG_DEFAULT_SCALE, PAG_LAYER_NAMES, 
-        CFG_PLUS_PLUS_DEFAULT_SCALE, CFG_GUIDANCE_MODELS, 
-        DYNAMIC_CFG_EARLY_MULTIPLIER, DYNAMIC_CFG_LATE_MULTIPLIER, 
-        DYNAMIC_CFG_EARLY_THRESHOLD, DYNAMIC_CFG_LATE_THRESHOLD, MODEL_TYPES, 
-        VIDEO_MODEL_TYPES, GUIDANCE_EMBED_MODELS, CFG_GUIDED_MODELS, 
-        PREVIEW_METHODS, NOISE_TYPES, CLIP_TARGETS, MULTI_COND_MODES, 
-        TILE_BLEND_MODES, SamplerMode, SigmaCache, _sigma_cache, 
-        RadianceModelRegistry, detect_by_config, detect_by_architecture, 
-        detect_by_sampling, detect_model_type, get_model_defaults, 
-        gradual_sigma_blend, log_tensor, SigmaIndexer, SamplingStage, 
-        apply_flux_guidance, compute_dynamic_guidance, compute_dynamic_cfg, 
-        compute_base_sigmas, WORKFLOW_PRESETS, flux_shift_sigmas, get_flux_sigmas, 
-        validate_step_range, apply_pag_to_model, AYS_ANCHORS, get_ays_sigmas, 
-        guidance_rescale_cfg, correct_sigma_end, apply_cfg_plus_plus, 
-        build_sigma_report, _temporally_correlate, _perlin_noise, _perlin_noise_2d, 
-        _spectral_noise, _get_freq_grid, _spectral_noise_2d, _brownian_noise, 
-        _simplex_noise, _voronoi_noise, _curl_noise, generate_noise, 
-        merge_conditionings, route_conditioning, tile_sample, _build_latent_meta, 
-        MODEL_DEFAULTS, PRESET_CONFIGS, 
-    )
+# Dynamic guidance curve parameters
+DYNAMIC_GUIDANCE_LOW_MULTIPLIER = 0.6  # g_low = base * 0.6
+DYNAMIC_GUIDANCE_EARLY_THRESHOLD = 0.2  # First 20% uses low guidance
+DYNAMIC_GUIDANCE_LATE_THRESHOLD = 0.9   # Last 10% uses low guidance
 
+# Sigma validation
+SIGMA_DISCONTINUITY_THRESHOLD = 0.01
+
+# PAG (Perturbed Attention Guidance) configuration
+PAG_DEFAULT_SCALE = 0.0  # Disabled by default
+PAG_LAYER_NAMES = ["middle_block"]  # Attention layers to perturb
+
+# CFG++ configuration
+CFG_PLUS_PLUS_DEFAULT_SCALE = 1.6  # Recommended CFG++ scale
+
+# v3.1: Model type detection and defaults
+# v3.3: Extended with video and modern model types (S-BUG-10)
+MODEL_TYPES = [
+    "auto", "flux", "sd3", "sd35", "sdxl", "sd15",
+    "wan", "ltxv", "hunyuan_video", "lumina2", "z_image", "chroma",
+]
+
+# v3.3: Extended model defaults with sampler, shift, and denoise range
+MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "flux": {
+        "cfg": 1.0, "scheduler": "simple", "guidance": 3.5,
+        "shift": 1.0, "sampler": "euler", "denoise_range": (0.3, 1.0),
+    },
+    "sd3": {
+        "cfg": 4.5, "scheduler": "sgm_uniform", "guidance": 0.0,
+        "shift": 1.0, "sampler": "dpmpp_2m", "denoise_range": (0.2, 1.0),
+    },
+    "sd35": {
+        "cfg": 4.5, "scheduler": "sgm_uniform", "guidance": 0.0,
+        "shift": 1.0, "sampler": "dpmpp_2m", "denoise_range": (0.2, 1.0),
+    },
+    "sdxl": {
+        "cfg": 7.0, "scheduler": "karras", "guidance": 0.0,
+        "shift": 1.0, "sampler": "euler_ancestral", "denoise_range": (0.3, 1.0),
+    },
+    "sd15": {
+        "cfg": 7.0, "scheduler": "normal", "guidance": 0.0,
+        "shift": 1.0, "sampler": "euler_ancestral", "denoise_range": (0.3, 1.0),
+    },
+    # v3.3: Video & modern models (S-BUG-10)
+    "wan": {
+        "cfg": 1.0, "scheduler": "simple", "guidance": 0.0,
+        "shift": 8.0, "sampler": "euler", "denoise_range": (0.3, 1.0),
+    },
+    "ltxv": {
+        "cfg": 1.0, "scheduler": "simple", "guidance": 0.0,
+        "shift": 2.37, "sampler": "euler", "denoise_range": (0.3, 1.0),
+    },
+    "hunyuan_video": {
+        "cfg": 1.0, "scheduler": "simple", "guidance": 0.0,
+        "shift": 7.0, "sampler": "euler", "denoise_range": (0.3, 1.0),
+    },
+    "lumina2": {
+        "cfg": 1.0, "scheduler": "simple", "guidance": 0.0,
+        "shift": 6.0, "sampler": "euler", "denoise_range": (0.3, 1.0),
+    },
+    "z_image": {
+        "cfg": 1.0, "scheduler": "simple", "guidance": 0.0,
+        "shift": 3.0, "sampler": "euler", "denoise_range": (0.3, 1.0),
+    },
+    "chroma": {
+        "cfg": 1.0, "scheduler": "simple", "guidance": 0.0,
+        "shift": 1.0, "sampler": "euler", "denoise_range": (0.3, 1.0),
+    },
+}
+
+# v3.1: Preview callback methods
+PREVIEW_METHODS = ["None", "TAESD", "Latent2RGB"]
+
+# v3.2: Type-safe sampler mode constants
+class SamplerMode:
+    """Sampler mode constants — eliminates fragile string matching."""
+    STANDARD = "Standard"
+    PHASE_SHIFT_DPM = "Phase-Shift (Euler→DPM)"
+    PHASE_SHIFT_SGM = "Phase-Shift (Euler→SGM)"
+    CFG_PLUS_PLUS = "CFG++ (Perpendicular)"
+    
+    ALL = [STANDARD, PHASE_SHIFT_DPM, PHASE_SHIFT_SGM, CFG_PLUS_PLUS]
+    
+    @classmethod
+    def is_phase_shift(cls, mode: str) -> bool:
+        return mode in (cls.PHASE_SHIFT_DPM, cls.PHASE_SHIFT_SGM)
+    
+    @classmethod
+    def is_cfg_plus_plus(cls, mode: str) -> bool:
+        return mode == cls.CFG_PLUS_PLUS
+
+# Module logger
 logger = logging.getLogger("radiance.sampler")
+
+# v3.2: Module-level sigma cache for performance across batch runs (BUG-14)
+# Key: (model_id, scheduler_name) -> (weak_model_ref, sigmas_tensor)
+_sigma_cache = {}
+
+def _clean_sigma_cache():
+    """v3.3 (S-BUG-6): Remove entries with dead weakrefs to prevent unbounded growth."""
+    dead = [k for k, (ref, _) in _sigma_cache.items() if ref() is None]
+    for k in dead:
+        del _sigma_cache[k]
+    if dead:
+        logger.debug(f"Cleaned {len(dead)} stale sigma cache entries")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#                         MODEL TYPE DETECTION (v3.1, fixed v3.2)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def detect_model_type(model) -> str:
+    """
+    Auto-detect model architecture type from model object.
+    
+    v3.3 (S-BUG-2): Extended to detect modern models:
+      flux, sd3, sd35, sdxl, sd15, wan, ltxv, hunyuan_video,
+      lumina2, z_image, chroma
+    
+    Detection strategy:
+      1. Check diffusion_model class name (most reliable)
+      2. Check model_config class name
+      3. Fall back to sigma/attribute heuristics
+    """
+    try:
+        # ── Strategy 1: Check diffusion model class name ──
+        diffusion_model = model.get_model_object("diffusion_model")
+        if diffusion_model is not None:
+            model_cls = type(diffusion_model).__name__.lower()
+            model_module = type(diffusion_model).__module__.lower() if hasattr(type(diffusion_model), '__module__') else ""
+            full_path = f"{model_module}.{model_cls}"
+            
+            # Video models (check first — most specific)
+            if "wan" in model_cls or "wan" in model_module:
+                return "wan"
+            if "ltxv" in model_cls or "ltxav" in model_cls or "lightricks" in model_module:
+                return "ltxv"
+            if "hunyuan" in model_cls and ("video" in model_cls or "video" in model_module):
+                return "hunyuan_video"
+            
+            # Modern image models
+            if "lumina" in full_path:
+                # z-image uses a Lumina2 base with larger dim
+                if hasattr(diffusion_model, 'hidden_size') and diffusion_model.hidden_size >= 3840:
+                    return "z_image"
+                return "lumina2"
+            if "chroma" in full_path:
+                return "chroma"
+            
+            # SD3/SD3.5 detection - MMDiT architecture
+            if "mmdit" in model_cls or "sd3" in model_cls:
+                try:
+                    if hasattr(diffusion_model, "in_channels") and diffusion_model.in_channels >= 16:
+                        return "sd35"
+                except (AttributeError, RuntimeError):
+                    pass
+                return "sd3"
+            
+            # SDXL detection
+            if "sdxl" in model_cls or hasattr(diffusion_model, "label_emb"):
+                return "sdxl"
+        
+        # ── Strategy 2: Check model_config class name ──
+        try:
+            model_config = model.model.model_config if hasattr(model, 'model') else None
+            if model_config is not None:
+                config_cls = type(model_config).__name__
+                config_map = {
+                    "WAN21": "wan", "WAN22": "wan",
+                    "LTXV": "ltxv", "LTXAV": "ltxv",
+                    "HunyuanVideo": "hunyuan_video",
+                    "Lumina2": "lumina2", "ZImage": "z_image",
+                    "Chroma": "chroma", "ChromaRadiance": "chroma",
+                    "Flux": "flux", "FluxSchnell": "flux", "FluxInpaint": "flux",
+                    "Flux2": "flux",
+                }
+                for pattern, model_type in config_map.items():
+                    if pattern in config_cls:
+                        return model_type
+        except (AttributeError, RuntimeError):
+            pass
+        
+        # ── Strategy 3: Sigma/attribute heuristics (legacy) ──
+        model_sampling = model.get_model_object("model_sampling")
+        has_flux_attrs = (
+            hasattr(model_sampling, "shift") or 
+            hasattr(model_sampling, "flux_shift")
+        )
+        
+        if has_flux_attrs:
+            try:
+                sigma_max = model_sampling.sigma_max.item() if hasattr(model_sampling, "sigma_max") else 1.0
+                if sigma_max <= 1.5:
+                    return "flux"
+            except (AttributeError, RuntimeError):
+                return "flux"
+        
+        return "sd15"
+        
+    except (AttributeError, RuntimeError) as e:
+        logger.warning(f"Model type detection failed: {e}, defaulting to sd15")
+        return "sd15"
+
+
+def get_model_defaults(model_type: str) -> Dict[str, Any]:
+    """Get optimal default settings for detected model type."""
+    return MODEL_DEFAULTS.get(model_type, MODEL_DEFAULTS["sd15"])
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#                         GRADUAL SIGMA BLEND (v3.1, fixed v3.2)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def gradual_sigma_blend(
+    sigmas_a: torch.Tensor, 
+    sigmas_b: torch.Tensor, 
+    blend_steps: int = 3
+) -> torch.Tensor:
+    """
+    Smoothly interpolate between sigma schedules at transition point.
+    
+    Uses cosine interpolation for smooth phase transitions, eliminating
+    the sigma discontinuity warnings in phase-shift sampling.
+    
+    v3.2 FIX: Now clones sigmas_b internally — callers no longer need
+    to pre-clone. The input tensor is never mutated.
+    
+    v3.4 FIX (BUG-19): First blended sigma now EXACTLY matches last_sigma_a.
+    Previously, i=0 got ~85% weight from A (cosine at t=0.25), so the model
+    saw a slightly wrong noise level at the transition. Now uses i+1 range
+    starting from 0% blend (100% A) to full blend.
+    
+    Args:
+        sigmas_a: Ending sigma schedule from first phase
+        sigmas_b: Starting sigma schedule for second phase  
+        blend_steps: Number of steps to blend over (0 = no blend)
+        
+    Returns:
+        New tensor with smooth transition (sigmas_b is not modified)
+    """
+    if blend_steps <= 0 or len(sigmas_a) == 0 or len(sigmas_b) == 0:
+        return sigmas_b
+    
+    # v3.2 FIX: Defensive clone — never mutate the input
+    result = sigmas_b.clone()
+    
+    # Get the last sigma from phase A
+    last_sigma_a = sigmas_a[-1].item()
+    
+    # Clamp blend_steps to available sigmas
+    blend_steps = min(blend_steps, len(result) - 1)
+    
+    # v3.4 FIX: Force first sigma to exactly match phase A's ending sigma.
+    # Then blend subsequent steps with cosine interpolation toward phase B.
+    result[0] = last_sigma_a
+    
+    for i in range(1, blend_steps):
+        # t goes from ~0 to ~1 over the remaining blend steps
+        t = i / blend_steps
+        # Cosine ease-in-out
+        blend_factor = 0.5 * (1.0 - math.cos(math.pi * t))
+        # Blend from last_sigma_a towards original sigmas_b[i]
+        result[i] = last_sigma_a * (1.0 - blend_factor) + sigmas_b[i].item() * blend_factor
+    
+    logger.debug(
+        f"Sigma blend: {blend_steps} steps, "
+        f"transition {last_sigma_a:.4f} → {sigmas_b[blend_steps-1].item():.4f}"
+    )
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#                         DEBUG UTILITIES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def log_tensor(name: str, tensor: Optional[torch.Tensor]) -> None:
+    """Log tensor statistics for debugging."""
+    if tensor is None:
+        logger.debug(f"{name}: None")
+        return
+    try:
+        t = tensor.float()
+        logger.debug(
+            f"{name}: Shape={list(t.shape)} | "
+            f"Range=[{t.min().item():.3f}, {t.max().item():.3f}] | "
+            f"Mean={t.mean().item():.3f} | Std={t.std().item():.3f}"
+        )
+    except (RuntimeError, ValueError) as e:
+        logger.warning(f"{name}: Error logging stats ({e})")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#                         WORKFLOW PRESETS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+WORKFLOW_PRESETS = [
+    "None (Custom)",
+    "→ Flux txt2img",
+    "→ Flux img2img",
+    "→ Flux Inpaint",
+    "→ Flux High-Res Fix",
+    "→ Flux Fast (12 steps)",
+    "→ Flux Quality (28 steps)",
+    "→ Flux Cinematic (30 steps)",
+    # Turbo / Distilled model presets
+    "→ Flux Schnell (4 steps)",
+    "→ SD3.5 Turbo (4 steps)",
+    "→ Flux Ultra Fast (8 steps)",
+]
+
+PRESET_CONFIGS: Dict[str, Dict[str, Any]] = {
+    "→ Flux txt2img": {
+        "steps": 25,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 1.0,
+        "flux_guidance": 3.5,
+    },
+    "→ Flux img2img": {
+        "steps": 20,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 0.75,
+        "flux_shift": 1.0,
+        "flux_guidance": 3.5,
+    },
+    "→ Flux Inpaint": {
+        "steps": 25,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 1.0,
+        "flux_guidance": 4.0,
+    },
+    "→ Flux High-Res Fix": {
+        "steps": 20,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 0.5,
+        "flux_shift": 3.0,
+        "flux_guidance": 3.5,
+    },
+    "→ Flux Fast (12 steps)": {
+        "steps": 12,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 1.0,
+        "flux_guidance": 3.5,
+    },
+    "→ Flux Quality (28 steps)": {
+        "steps": 28,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 1.0,
+        "flux_guidance": 4.0,
+    },
+    "→ Flux Cinematic (30 steps)": {
+        "steps": 30,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 1.0,
+        "flux_guidance": 4.0,
+    },
+    # Turbo / Distilled model presets
+    "→ Flux Schnell (4 steps)": {
+        "steps": 4,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 1.0,
+        "flux_guidance": 0.0,  # Schnell ignores guidance
+    },
+    "→ SD3.5 Turbo (4 steps)": {
+        "steps": 4,
+        "cfg": 1.6,
+        "sampler": "euler",
+        "scheduler": "sgm_uniform",
+        "denoise": 1.0,
+        "flux_shift": 1.0,
+        "flux_guidance": 0.0,
+    },
+    "→ Flux Ultra Fast (8 steps)": {
+        "steps": 8,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 1.0,
+        "flux_guidance": 2.0,
+    },
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#                         SIGMA UTILITIES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def flux_shift_sigmas(sigmas: torch.Tensor, shift: float) -> torch.Tensor:
+    """
+    Apply Flux-specific sigma shifting.
+    
+    The shift parameter controls how the noise schedule is transformed.
+    Higher shift values push more denoising into later steps, which
+    can improve high-frequency details at high resolutions.
+    
+    Formula: shifted = shift * sigma / (1 + (shift - 1) * sigma)
+    
+    Args:
+        sigmas: Original sigma schedule
+        shift: Shift factor (1.0 = no change, 3.0 = typical for high-res)
+    
+    Returns:
+        Shifted sigma schedule
+    
+    Raises:
+        ValueError: If shift <= 0
+    """
+    if shift <= 0:
+        raise ValueError(f"flux_shift must be > 0, got {shift}")
+    
+    if shift == 1.0:
+        return sigmas
+    
+    # FIX: Prevent division by zero for sigma values near 1/(1-shift)
+    denominator = 1.0 + (shift - 1.0) * sigmas
+    # Clamp denominator to avoid division issues
+    denominator = torch.clamp(denominator, min=1e-6)
+    
+    shifted = shift * sigmas / denominator
+    return shifted
+
+
+def get_flux_sigmas(
+    model, 
+    scheduler: str, 
+    steps: int, 
+    denoise: float, 
+    shift: float = 1.0
+) -> torch.Tensor:
+    """
+    Calculate sigma schedule optimized for Flux models.
+    
+    Args:
+        model: The model wrapper
+        scheduler: Scheduler name (recommended: "simple" for Flux)
+        steps: Number of sampling steps (must be >= 1)
+        denoise: Denoise strength (1.0 = full, <1.0 = img2img)
+        shift: Flux shift parameter (must be > 0)
+    
+    Returns:
+        Sigma schedule tensor
+        
+    Raises:
+        ValueError: If steps < 1 or denoise/shift out of valid range
+    """
+    # FIX #9: Validate inputs
+    if steps < 1:
+        raise ValueError(f"steps must be >= 1, got {steps}")
+    
+    if denoise < 0.0 or denoise > 1.0:
+        raise ValueError(f"denoise must be in [0.0, 1.0], got {denoise}")
+    
+    # FIX #13: Handle denoise=0 early (no denoising needed)
+    if denoise <= 0.0:
+        return torch.tensor([0.0])  # Return minimal sigma schedule
+    
+    # Get the model's sampling configuration
+    model_sampling = model.get_model_object("model_sampling")
+    
+    # Calculate base sigmas using the scheduler
+    sigmas = comfy.samplers.calculate_sigmas(model_sampling, scheduler, steps)
+    
+    # Apply Flux shift if specified
+    if shift != 1.0:
+        sigmas = flux_shift_sigmas(sigmas, shift)
+    
+    # Apply denoise (trim sigmas for img2img)
+    if denoise < 1.0:
+        total_steps = len(sigmas) - 1
+        if total_steps <= 0:
+            return sigmas  # Can't trim further
+        
+        start_step = max(0, int(total_steps * (1.0 - denoise)))
+        sigmas = sigmas[start_step:]
+    
+    return sigmas
+
+
+def validate_step_range(
+    start_step: int, 
+    end_step: int, 
+    steps: int,
+    context: str = ""
+) -> Tuple[int, int]:
+    """
+    Validate and clamp step range to valid bounds.
+    
+    Args:
+        start_step: Requested start step
+        end_step: Requested end step
+        steps: Total number of steps
+        context: Context string for logging
+        
+    Returns:
+        Tuple of (validated_start, validated_end)
+    """
+    original = (start_step, end_step)
+    
+    # Clamp to valid range
+    start = max(0, min(start_step, steps))
+    end = max(0, min(end_step, steps))
+    
+    # Ensure start <= end
+    if start > end:
+        logger.warning(
+            f"{context}start_step ({start}) > end_step ({end}), swapping"
+        )
+        start, end = end, start
+    
+    if original != (start, end):
+        logger.debug(f"{context}Step range adjusted: {original} → ({start}, {end})")
+    
+    return start, end
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#                   PAG (PERTURBED ATTENTION GUIDANCE) — v3.2 Rewrite
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def apply_pag_to_model(model, pag_scale: float):
+    """
+    Apply Perturbed Attention Guidance to model via attention hooking.
+    
+    PAG works by replacing the unconditional attention pass with an
+    identity attention map (each token attends only to itself). The
+    difference between normal and perturbed predictions is then scaled
+    by pag_scale and added to the conditional output — similar to how
+    CFG works but targeting attention structure instead of text conditioning.
+    
+    v3.2 REWRITE: Previous implementation only stored pag_scale in
+    model_options without any attention hook — it was a complete no-op.
+    Now uses ComfyUI's set_model_attn1_patch to actually perturb attention.
+    
+    Args:
+        model: ComfyUI model wrapper
+        pag_scale: Perturbation strength (0.0 = disabled, 1.0-3.0 typical)
+        
+    Returns:
+        Modified model with PAG applied, or original if scale is 0
+    """
+    if pag_scale <= 0:
+        return model
+    
+    try:
+        # Clone model to avoid modifying original
+        model_pag = model.clone()
+        
+        # Store PAG scale in model options for reference
+        if hasattr(model_pag, 'model_options'):
+            model_pag.model_options = model_pag.model_options.copy()
+            model_pag.model_options['pag_scale'] = pag_scale
+        
+        # v3.2: Hook into attention layers to create actual perturbation.
+        # For the unconditional pass, replace self-attention with identity
+        # attention (each token only attends to itself).
+        def pag_attention_patch(q, k, v, extra_options):
+            """
+            v3.3 (S-BUG-5): PAG attention patch rewrite.
+            
+            Only modifies the unconditional pass on middle blocks.
+            Returns (q, k, v) tuple — ComfyUI's attn1_patch expects
+            transformed inputs, NOT pre-computed attention output.
+            
+            For uncond middle blocks: replaces k/v with repeat of q
+            so each token attends only to itself (identity attention).
+            For all other cases: returns inputs unchanged.
+            """
+            cond_or_uncond = extra_options.get("cond_or_uncond", [0])
+            block_type = extra_options.get("block_type", "unknown")
+            
+            # Only modify unconditional pass on middle blocks
+            if 1 not in cond_or_uncond or block_type != "middle":
+                return q, k, v
+            
+            # Clone k,v to avoid mutating shared tensors
+            k_out = k.clone()
+            v_out = v.clone()
+            
+            num_cond = len(cond_or_uncond)
+            batch_size = q.shape[0]
+            chunk_size = batch_size // num_cond if num_cond > 0 else batch_size
+            
+            for idx, cond_type in enumerate(cond_or_uncond):
+                if cond_type == 1:  # Unconditional
+                    start = idx * chunk_size
+                    end = min(start + chunk_size, batch_size)
+                    # Replace k and v with q — this makes the attention
+                    # matrix become identity (q @ q^T after softmax),
+                    # effectively making each token attend only to itself
+                    k_out[start:end] = q[start:end]
+                    v_out[start:end] = q[start:end]
+            
+            return q, k_out, v_out
+        
+        # Apply the attention patch to middle block layers
+        model_pag.set_model_attn1_patch(pag_attention_patch)
+        
+        logger.info(f"PAG applied with scale {pag_scale} (attention hook active)")
+        return model_pag
+        
+    except (AttributeError, RuntimeError, TypeError) as e:
+        # v3.2 FIX: Catch specific exceptions, not bare Exception.
+        # This prevents swallowing MemoryError or other critical failures.
+        logger.warning(f"Failed to apply PAG: {e}, using original model")
+        return model
+
+
+def apply_cfg_plus_plus(
+    cfg: float, 
+    sigma: torch.Tensor, 
+    sigma_max: float
+) -> float:
+    """
+    Apply CFG++ perpendicular scheduling.
+    
+    Uses cosine scheduling to dynamically adjust CFG scale over the
+    sampling process, preventing oversaturation at high guidance values.
+    CFG is highest at the start (sigma_max) and reduces toward sigma_min.
+    
+    Formula: cfg_effective = cfg * cos_factor + 1.0 * (1 - cos_factor)
+    
+    Args:
+        cfg: Base CFG value
+        sigma: Current sigma value
+        sigma_max: Maximum sigma in schedule
+        
+    Returns:
+        Adjusted CFG value for current sigma
+    """
+    if sigma_max <= 0:
+        return cfg
+    
+    # Get sigma as float (handle tensor case)
+    if isinstance(sigma, torch.Tensor):
+        sigma_val = sigma.item() if sigma.numel() == 1 else sigma[0].item()
+    else:
+        sigma_val = float(sigma)
+    
+    # Calculate progress (0.0 at start, 1.0 at end)
+    progress = 1.0 - (sigma_val / sigma_max)
+    progress = max(0.0, min(1.0, progress))
+    
+    # Cosine schedule: high CFG at start, gradually reduces
+    cos_factor = (1.0 + math.cos(math.pi * progress)) / 2.0
+    
+    # Interpolate between cfg and 1.0 (no guidance)
+    effective_cfg = cfg * cos_factor + 1.0 * (1.0 - cos_factor)
+    
+    return effective_cfg
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#                         SIGMA REPORT (v3.2)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def build_sigma_report(
+    detected_type: str,
+    steps: int,
+    scheduler: str,
+    flux_shift: float,
+    denoise: float,
+    sigmas: torch.Tensor,
+    sampler_mode: str,
+    sorted_splits: List[int],
+    stage_timings: List[Tuple[int, int, int, str, float]],
+    total_time: float,
+) -> str:
+    """
+    Build a human-readable sigma schedule report for diagnostics.
+    
+    Args:
+        detected_type: Detected model type string
+        steps: Total steps
+        scheduler: Scheduler name
+        flux_shift: Applied shift value
+        denoise: Denoise strength
+        sigmas: Final sigma schedule tensor
+        sampler_mode: Active sampler mode
+        sorted_splits: Stage split points
+        stage_timings: List of (stage_num, start, end, sampler, time_sec)
+        total_time: Total wall-clock time
+        
+    Returns:
+        Formatted report string
+    """
+    lines = [
+        f"═══ Radiance Sampler Pro v3.4 ═══",
+        f"Model: {detected_type} | Steps: {steps} | Scheduler: {scheduler}",
+        f"Shift: {flux_shift} | Denoise: {denoise} | Mode: {sampler_mode}",
+    ]
+    
+    if len(sigmas) > 0:
+        lines.append(
+            f"Sigma range: [{sigmas[0].item():.4f} → {sigmas[-1].item():.4f}] "
+            f"({len(sigmas)} values)"
+        )
+    
+    lines.append(f"Stages: {max(0, len(sorted_splits) - 1)}")
+    
+    if stage_timings:
+        lines.append("─── Per-Stage Timing ───")
+        for stage_num, s_start, s_end, samp, t in stage_timings:
+            lines.append(f"  Stage {stage_num}: steps {s_start}→{s_end} [{samp}] = {t:.3f}s")
+    
+    lines.append(f"Total: {total_time:.2f}s")
+    
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#                         RADIANCE SAMPLER PRO v3.4
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class RadianceSamplerPro:
     """
-    Universal diffusion sampler (v3.0.0) — Flux, SD3, SDXL, WAN, LTX,
-    HunyuanVideo, Lumina2, Chroma.  Supports phase-shift sampling, AYS
-    schedules, PAG, tiled sampling, multi-conditioning, noise types,
-    refiner chaining, and restart (IRES) sampling.
+    Professional Flux-optimized sampler with presets, timing report, 
+    and full parameter control.
+    
+    v3.4: Fixed double-noise bug (root cause of noisy output), corrected
+    continuation stage noise handling, improved dynamic guidance late-stage
+    quality, and auto-enabled sigma blending for phase-shift modes.
     """
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ Generate"
-    DESCRIPTION = "Universal diffusion sampler with phase-shift, PAG, AYS, tiling, restart, and multi-model support."
-
+    
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
@@ -94,548 +828,61 @@ class RadianceSamplerPro:
                 "positive": ("CONDITIONING",),
                 "negative": ("CONDITIONING",),
                 "latent_image": ("LATENT",),
-                "preset": (WORKFLOW_PRESETS, {"default": "None"}),
-                "steps": ("INT", {"default": 20, "min": 1, "max": 200, "step": 1,
-                    "tooltip": "Total denoising steps. More steps = higher quality but slower. 20–30 is typical for most samplers."
-                }),
-                "start_step": (
-                    "INT",
-                    {
-                        "default": 0,
-                        "min": 0,
-                        "max": 200,
-                        "step": 1,
-                        "tooltip": "Start step (0 = beginning)",
-                    },
-                ),
-                "end_step": (
-                    "INT",
-                    {
-                        "default": 0,
-                        "min": 0,
-                        "max": 200,
-                        "step": 1,
-                        "tooltip": "End step (0 = use total steps)",
-                    },
-                ),
-                "cfg": (
-                    "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 20.0, "step": 0.1},
-                ),
+                
+                "preset": (WORKFLOW_PRESETS, {"default": "None (Custom)"}),
+                
+                "steps": ("INT", {"default": 20, "min": 1, "max": 200, "step": 1}),
+                "start_step": ("INT", {"default": 0, "min": 0, "max": 200, "step": 1,
+                               "tooltip": "Start step (0 = beginning)"}),
+                "end_step": ("INT", {"default": 0, "min": 0, "max": 200, "step": 1,
+                             "tooltip": "End step (0 = use total steps)"}),
+                "cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 20.0, "step": 0.1}),
+                
                 "sampler": (comfy.samplers.KSampler.SAMPLERS,),
                 "sampler_mode": (SamplerMode.ALL, {"default": SamplerMode.STANDARD}),
-                "phase_split": (
-                    "FLOAT",
-                    {"default": 0.40, "min": 0.0, "max": 1.0, "step": 0.05},
-                ),
+                "phase_split": ("FLOAT", {"default": 0.40, "min": 0.0, "max": 1.0, "step": 0.05}),
+                
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
-                "scheduler_mode": (
-                    ["Manual", "Auto (Match Steps)"],
-                    {"default": "Manual"},
-                ),
-                "denoise": (
-                    "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
-                ),
-                "flux_shift": (
-                    "FLOAT",
-                    {"default": 1.0, "min": 0.01, "max": 10.0, "step": 0.1},
-                ),
-                "flux_guidance": (
-                    "FLOAT",
-                    {"default": 3.5, "min": 0.0, "max": 20.0, "step": 0.1},
-                ),
-                "flux_guidance_profile": (
-                    ["Static", "Dynamic (Creative Start/End)"],
-                    {"default": "Static"},
-                ),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF,
-                    "tooltip": "Random seed for reproducible results. -1 = random each run."
-                }),
-
-                "pag_scale": (
-                    "FLOAT",
-                    {
-                        "default": 0.0,
-                        "min": 0.0,
-                        "max": 5.0,
-                        "step": 0.1,
-                        "tooltip": "PAG strength (0=off). Perturbs attention for better prompt adherence.",
-                    },
-                ),
-
+                "scheduler_mode": (["Manual", "Auto (Match Steps)"], {"default": "Manual"}),
+                "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                
+                "flux_shift": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 10.0, "step": 0.1}),
+                "flux_guidance": ("FLOAT", {"default": 3.5, "min": 0.0, "max": 20.0, "step": 0.1}),
+                "flux_guidance_profile": (["Static", "Dynamic (Creative Start/End)"], {"default": "Static"}),
+                
+                "add_noise": ("BOOLEAN", {"default": True}),
+                "return_with_leftover_noise": ("BOOLEAN", {"default": False}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                
+                # v3.0: PAG (Perturbed Attention Guidance)
+                "pag_scale": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 5.0, "step": 0.1,
+                              "tooltip": "PAG strength (0=off). Perturbs attention for better prompt adherence."}),
+                
+                # v3.1: Multi-Model Support
                 "model_type": (MODEL_TYPES, {"default": "auto"}),
-                "sigma_blend_steps": (
-                    "INT",
-                    {
-                        "default": 0,
-                        "min": 0,
-                        "max": 10,
-                        "step": 1,
-                        "tooltip": "Smooth sigma transition steps at phase-shift boundary",
-                    },
-                ),
-
-                "guidance_rescale_phi": (
-                    "FLOAT",
-                    {
-                        "default": 0.0,
-                        "min": 0.0,
-                        "max": 1.0,
-                        "step": 0.05,
-                        "tooltip": "Guidance rescale (Imagen). 0=off, 0.7=recommended for SDXL. Prevents oversaturation at high CFG.",
-                    },
-                ),
-
+                "sigma_blend_steps": ("INT", {"default": 0, "min": 0, "max": 10, "step": 1,
+                                     "tooltip": "Smooth sigma transition steps at phase-shift boundary"}),
+                
+                # v3.1: Live Preview
                 "preview_method": (PREVIEW_METHODS, {"default": "None"}),
-
-                "noise_type": (
-                    NOISE_TYPES,
-                    {"default": "Gaussian",
-                     "tooltip": ("Noise generation algorithm. Perlin=coherent structure, "
-                                 "Spectral=pink/1f noise, Brownian=video-correlated, Uniform=flat distribution.")},
-                ),
-
-                "conditioning_clip_target": (
-                    CLIP_TARGETS,
-                    {"default": "Auto",
-                     "tooltip": "Route conditioning to a specific encoder slot (clip_l, clip_g, t5xxl). Auto = no routing."},
-                ),
-
-                "add_noise": ("BOOLEAN", {"default": True,
-                    "tooltip": "Inject fresh noise at the start of sampling. Disable for img2img-style passes that should preserve structure."
-                }),
-                "return_with_leftover_noise": ("BOOLEAN", {"default": False,
-                    "tooltip": "Return the latent with residual noise un-removed. Useful for multi-pass workflows."
-                }),
-                "ays_schedule": (
-                    "BOOLEAN",
-                    {
-                        "default": False,
-                        "tooltip": "Use AYS (Align Your Steps) research-optimized sigma schedule. Best at 8-15 steps.",
-                    },
-                ),
-
-                "tile_mode": (
-                    "BOOLEAN",
-                    {"default": False,
-                     "tooltip": "Enable tiled sampling for memory-efficient high-resolution generation."},
-                ),
-                "tile_size": (
-                    "INT",
-                    {"default": 128, "min": 32, "max": 1024, "step": 32,
-                     "tooltip": "Tile size in latent pixels (128 latent ≈ 1024px output with VAE factor 8)."},
-                ),
-                "tile_overlap": (
-                    "INT",
-                    {"default": 16, "min": 0, "max": 256, "step": 8,
-                     "tooltip": "Overlap between adjacent tiles to reduce seam artifacts."},
-                ),
-                "tile_blend": (
-                    TILE_BLEND_MODES,
-                    {"default": "feather",
-                     "tooltip": "Seam blending method. feather=cosine fade, gaussian=bell curve, average=uniform."},
-                ),
-
-                "terminal_sigma_to_zero": (
-                    "BOOLEAN",
-                    {"default": False,
-                     "tooltip": "Ensure terminal step reaches zero noise even on truncated image-to-image runs. Vital for Flow Matching models."},
-                ),
-                "force_exact_steps": (
-                    "BOOLEAN",
-                    {"default": False,
-                     "tooltip": "Ensure precise step count in image-to-image runs, adjusting calculations rather than purely truncating stages."},
-                ),
-
-                # ALBABIT-FIX: Removed UI normalization factors entirely. Native LTX handles recombination cleanly.
             },
             "optional": {
                 "refiner_model": ("MODEL",),
-                "refiner_start_step": (
-                    "INT",
-                    {"default": 20, "min": 0, "max": 200, "step": 1},
-                ),
+                "refiner_start_step": ("INT", {"default": 20, "min": 0, "max": 200, "step": 1}),
                 "noise_override": ("LATENT",),
-
-                "sigmas_override": (
-                    "SIGMAS",
-                    {"tooltip": "Inject a pre-computed sigma schedule. Bypasses all internal sigma computation."},
-                ),
-
-                # ── Workflow-compat absorbers (positions 38/39/40 in old saves) ─
-                # Old workflow JSONs serialised two JS button widgets (null, null)
-                # and the preset_info text widget at these positions. Registering
-                # them as STRING optional inputs absorbs those values safely so
-                # the new feature inputs below land at positions 41/42/43 where
-                # they are absent from old JSON → ComfyUI uses their defaults.
-                # These three entries must stay here at widget positions 38/39/40.
-                # Old workflow JSON serialised two JS button widgets (null, null)
-                # and the preset_info text widget at these positions. The STRING
-                # type accepts null/any-string without a validation error, so the
-                # new feature inputs below fall at 41/42/43 where they are absent
-                # from the old JSON → ComfyUI falls back to their defaults.
-                "_js_export_btn": ("STRING", {"default": "", "multiline": False,
-                    "tooltip": "JS serialization placeholder (not user-editable)."}),
-                "_js_import_btn": ("STRING", {"default": "", "multiline": False,
-                    "tooltip": "JS serialization placeholder (not user-editable)."}),
-                "_js_preset_info": ("STRING", {"default": "", "multiline": False,
-                    "tooltip": "JS serialization placeholder (not user-editable)."}),
-
-                # ── Restart sampling ─────────────────────────────────────────
-                "restart_count": (
-                    "INT",
-                    {
-                        "default": 0,
-                        "min": 0,
-                        "max": 4,
-                        "step": 1,
-                        "tooltip": (
-                            "Number of restart iterations at each restart_schedule sigma. "
-                            "0 = disabled. 1–2 restarts add ~5% extra steps but measurably "
-                            "improve high-frequency detail on Flux and WAN."
-                        ),
-                    },
-                ),
-
-                # ── Noise alpha schedule ──────────────────────────────────────
-                "noise_alpha_start": (
-                    "FLOAT",
-                    {
-                        "default": 1.0,
-                        "min": 0.0,
-                        "max": 1.0,
-                        "step": 0.05,
-                        "tooltip": (
-                            "Blend weight of the selected noise_type at step 0. "
-                            "1.0 = pure noise_type. Cosine-interpolates to noise_alpha_end "
-                            "across the denoising trajectory. Set <1 to blend structured "
-                            "noise with Gaussian (e.g. 0.8 Perlin → 0.0 Gaussian for video)."
-                        ),
-                    },
-                ),
-                "noise_alpha_end": (
-                    "FLOAT",
-                    {
-                        "default": 1.0,
-                        "min": 0.0,
-                        "max": 1.0,
-                        "step": 0.05,
-                        "tooltip": (
-                            "Blend weight of the selected noise_type at the final step. "
-                            "Set lower than noise_alpha_start to fade structured noise "
-                            "into pure Gaussian in late denoising steps."
-                        ),
-                    },
-                ),
-
-                # ── Custom AYS anchors ────────────────────────────────────────
-                "custom_ays_anchors": (
-                    "SIGMAS",
-                    {
-                        "tooltip": (
-                            "Optional model-specific AYS anchor schedule. "
-                            "Overrides the built-in AYS tables when ays_schedule=True. "
-                            "Must be a monotonically decreasing tensor ending at 0."
-                        ),
-                    },
-                ),
-
-                # ── Restart sigma schedule (socket-only — link a SIGMAS node) ──
-                "restart_schedule": (
-                    "SIGMAS",
-                    {
-                        "tooltip": (
-                            "Optional list of sigma levels at which to re-inject noise "
-                            "and re-denoise (Restart / IRES style). Improves fine detail "
-                            "at fixed step count. Requires restart_count > 0."
-                        ),
-                    },
-                ),
-                # ── SDR conditioning ─────────────────────────
-                "sdr_reference": ("IMAGE",),
-                "sdr_vae": ("VAE",),
-                "sdr_blend": (
-                    "FLOAT",
-                    {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.05},
-                ),
-                "sdr_inject_steps": (
-                    "INT",
-                    {"default": 6, "min": 0, "max": 100, "step": 1},
-                ),
-                "sdr_decay": (
-                    "FLOAT",
-                    {"default": 0.65, "min": 0.0, "max": 1.0, "step": 0.05},
-                ),
-            },
+            }
         }
 
-    RETURN_TYPES = ("LATENT", "SIGMAS", "SIGMAS", "IMAGE")
-    RETURN_NAMES = ("latent", "sigmas", "sigmas_remaining", "sigma_plot")
-    OUTPUT_TOOLTIPS = (
-        "Denoised latent ready for VAE decode.",
-        "The full sigma schedule used — chain to another sampler or inspect.",
-        "Unused tail of the sigma schedule after end_step. Chain directly to a refiner or upscaler sampler.",
-        "Auto-detected model architecture string (flux, wan, sdxl, etc.). Use in conditional routing.",
-        "Human-readable timing and schedule report.",
-        "JSON telemetry: arch, steps, scheduler, noise_type, tile_mode, seed, time_ms, etc.",
-        "Visual plot of the sigma schedule as an IMAGE. Blank if matplotlib is unavailable.",
-    )
+    # v3.2: Added sigma_report STRING output
+    RETURN_TYPES = ("LATENT", "SIGMAS", "STRING")
+    RETURN_NAMES = ("latent", "sigmas", "sigma_report")
     FUNCTION = "sample"
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ Generate"
+    CATEGORY = "FXTD Studios/Radiance/Generate"
     DESCRIPTION = (
-        "v3.0.0 — Universal diffusion sampler. Auto-detects model type (Flux, SD3, SDXL, "
-        "WAN, LTX, HunyuanVideo, Lumina2, Chroma). Phase-shift sampling, AYS schedules, "
-        "PAG, dynamic guidance, tiled sampling, multi-conditioning, noise types, refiner chain. "
-        "Restart sampling (IRES style), noise alpha schedule, sigma plot output, "
-        "custom AYS anchors, sigmas_remaining for multi-node chains. "
-        "AVControl-style SDR reference conditioning: encode an SDR reference through the VAE "
-        "and blend it into the initial latent + per-step post-CFG anchor for HDR structure preservation."
+        "Professional Flux-optimized sampler with workflow presets, Flux Shift, "
+        "dynamic guidance, PAG (attention-hooked), CFG++, multi-model auto-detect, "
+        "sigma blending, live preview, and per-stage timing diagnostics."
     )
-
-    def _apply_presets(self, preset, **kwargs):
-        if preset in ("None", "Custom"):
-            return kwargs
-        
-        conf = PRESET_CONFIGS.get(preset, {})
-        if not conf:
-            logger.warning(f"[Radiance] Preset '{preset}' not found.")
-            return kwargs
-
-        # Override kwargs with preset values
-        for k, v in conf.items():
-            if k in kwargs:
-                kwargs[k] = v
-        
-        logger.info(f"[Radiance] Applied preset '{preset}' parameters.")
-        return kwargs
-
-    def _configure_model_and_defaults(self, model, model_type, preset, **kwargs):
-        detected_type = detect_model_type(model) if model_type == "auto" else model_type
-        
-        if preset in ("None", "Custom") and model_type == "auto":
-            defaults = get_model_defaults(detected_type)
-            
-            # Apply defaults if user has them at "default" values
-            if kwargs.get('cfg') == 1.0 and detected_type != "flux":
-                kwargs['cfg'] = defaults.get("cfg", kwargs['cfg'])
-
-            if kwargs.get('flux_guidance') == 3.5 and detected_type != "flux":
-                model_default_guidance = defaults.get("guidance", kwargs['flux_guidance'])
-                if model_default_guidance > 0 or defaults.get("guidance_type") != "embedding":
-                    kwargs['flux_guidance'] = model_default_guidance
-
-            default_shift = defaults.get("shift", 1.0)
-            if kwargs.get('flux_shift') == 1.0 and default_shift != 1.0:
-                kwargs['flux_shift'] = default_shift
-                logger.info(f"Auto-applied shift={kwargs['flux_shift']} for {detected_type}")
-
-            default_sampler = defaults.get("sampler", kwargs['sampler'])
-            if kwargs.get('sampler') == "euler" and default_sampler != "euler":
-                kwargs['sampler'] = default_sampler
-                logger.info(f"Auto-applied sampler={kwargs['sampler']} for {detected_type}")
-
-        # Auto-match scheduler
-        if kwargs.get('scheduler_mode') == "Auto (Match Steps)":
-            defaults = get_model_defaults(detected_type)
-            auto_scheduler = defaults.get("scheduler", kwargs['scheduler'])
-            if auto_scheduler != kwargs['scheduler']:
-                logger.info(f"Auto scheduler: {kwargs['scheduler']} → {auto_scheduler}")
-                kwargs['scheduler'] = auto_scheduler
-
-        return detected_type, kwargs
-
-    def _prepare_noise(self, latent_samples, seed, noise_type, noise_override, device, frames):
-        if noise_override is not None:
-            noise = noise_override["samples"]
-            if noise.shape != latent_samples.shape:
-                raise ValueError(f"noise_override shape {noise.shape} mismatch with latent {latent_samples.shape}")
-        else:
-            if noise_type == "Gaussian":
-                noise = comfy.sample.prepare_noise(latent_samples, seed, None)
-            else:
-                noise = generate_noise(latent_samples, seed, noise_type, frames=frames)
-        
-        return noise.to(device)
-
-    def _prepare_sigmas(self, model, detected_type, steps, denoise, flux_shift,
-                        scheduler, ays_schedule, terminal_sigma_to_zero,
-                        force_exact_steps, sigmas_override, device,
-                        custom_ays_anchors=None):
-        if sigmas_override is not None:
-            sigmas = sigmas_override.to(device)
-            sigmas = correct_sigma_end(sigmas)
-            target_steps = max(1, len(sigmas) - 1)
-            return sigmas, target_steps
-
-        try:
-            if ays_schedule:
-                # Custom AYS anchors take priority over the built-in tables
-                if custom_ays_anchors is not None:
-                    sigmas = custom_ays_anchors.to(device)
-                    logger.info(f"Using custom AYS anchors ({len(sigmas)} values)")
-                else:
-                    sigmas = get_ays_sigmas(detected_type, steps)
-
-                if sigmas is not None:
-                    if denoise < 1.0:
-                        total_s = len(sigmas) - 1
-                        if total_s > 0:
-                            start_s = max(0, int(total_s * (1.0 - denoise)))
-                            sigmas = sigmas[start_s:]
-                    if custom_ays_anchors is None:
-                        logger.info(f"Using AYS schedule for {detected_type} ({steps} steps)")
-                else:
-                    sigmas = get_flux_sigmas(
-                        model, scheduler, steps, denoise, flux_shift,
-                        force_full=terminal_sigma_to_zero, force_exact=force_exact_steps,
-                    )
-            else:
-                sigmas = get_flux_sigmas(
-                    model, scheduler, steps, denoise, flux_shift,
-                    force_full=terminal_sigma_to_zero, force_exact=force_exact_steps,
-                )
-
-            sigmas = correct_sigma_end(sigmas)
-            return sigmas, steps
-        except ValueError as e:
-            logger.error(f"Failed to calculate sigmas: {e}")
-            raise
-
-    # ── Sigma plot ────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _build_sigma_plot(sigmas: torch.Tensor, detected_type: str) -> torch.Tensor:
-        """Render sigma schedule as a small (256×128) IMAGE tensor (B,H,W,3).
-        Falls back to a blank IMAGE if matplotlib is unavailable."""
-        try:
-            import matplotlib
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-            import io
-            import numpy as np
-
-            vals = sigmas.cpu().float().numpy()
-            steps = list(range(len(vals)))
-
-            fig, ax = plt.subplots(figsize=(3.2, 1.6), dpi=80)
-            ax.plot(steps, vals, color="#3266ad", linewidth=1.5)
-            ax.fill_between(steps, vals, alpha=0.12, color="#3266ad")
-            ax.set_xlabel("step", fontsize=7)
-            ax.set_ylabel("sigma", fontsize=7)
-            ax.set_title(f"sigma schedule  [{detected_type}]", fontsize=7)
-            ax.tick_params(labelsize=6)
-            fig.tight_layout(pad=0.4)
-
-            buf = io.BytesIO()
-            fig.savefig(buf, format="png")
-            plt.close(fig)
-            buf.seek(0)
-
-            from PIL import Image as PILImage
-            img = PILImage.open(buf).convert("RGB")
-            arr = np.array(img).astype(np.float32) / 255.0
-            return torch.from_numpy(arr).unsqueeze(0)  # (1, H, W, 3)
-        except Exception as e:
-            logger.debug(f"sigma_plot: matplotlib unavailable or failed ({e}) — returning blank")
-            return torch.zeros(1, 64, 128, 3)
-
-    # ── Restart sampling ──────────────────────────────────────────────────────
-
-    @staticmethod
-    def _apply_restarts(
-        latent: torch.Tensor,
-        model,
-        positive,
-        negative,
-        sampler_obj,
-        sigmas: torch.Tensor,
-        restart_schedule: torch.Tensor,
-        restart_count: int,
-        cfg: float,
-        seed: int,
-        device: torch.device,
-    ) -> torch.Tensor:
-        """
-        IRES / Restart sampling: at each sigma level in restart_schedule,
-        re-inject noise scaled to that sigma and run restart_count extra
-        denoising steps from that level down to the next sigma in the
-        main schedule.
-        """
-        import comfy.sample as cs
-
-        if restart_count <= 0 or len(restart_schedule) == 0 or len(sigmas) < 2:
-            return latent
-
-        result = latent
-        s_vals = sigmas.to(device)
-
-        for r_sigma in restart_schedule.to(device):
-            r_val = float(r_sigma)
-            if r_val <= 0.0:
-                continue
-
-            # Find where this sigma sits in the main schedule
-            diffs = (s_vals - r_val).abs()
-            idx = int(diffs.argmin().item())
-            if idx >= len(s_vals) - 1:
-                continue
-
-            # Subsection of schedule from r_sigma down to the next waypoint
-            sub_sigmas = s_vals[idx:min(idx + restart_count + 2, len(s_vals))]
-            if len(sub_sigmas) < 2:
-                continue
-
-            for _ in range(restart_count):
-                # Re-inject noise at r_sigma level
-                noise = torch.randn_like(result) * r_val
-                noisy = result + noise
-                try:
-                    result = cs.sample_custom(
-                        model, noisy, cfg=cfg, sampler=sampler_obj,
-                        sigmas=sub_sigmas,
-                        positive=positive, negative=negative,
-                        latent_image=result,
-                        noise_mask=None, callback=None,
-                        disable_pbar=True, seed=seed,
-                    )
-                except Exception as e:
-                    logger.warning(f"Restart sampling failed at sigma={r_val:.4f}: {e}")
-                    break
-
-        return result
-
-    # ── AVControl — SDR Reference Conditioning ───────────────────────────────
-
-    def _encode_sdr_reference(self, ref, vae, work):
-        res = vae.encode(ref)
-        ref_latent = res["samples"]
-        B = work.shape[0]
-        if ref_latent.shape[0] == 1 and B > 1:
-            ref_latent = ref_latent.expand(B, -1, -1, -1)
-            
-        target_H, target_W = work.shape[-2], work.shape[-1]
-        if ref_latent.shape[-2] != target_H or ref_latent.shape[-1] != target_W:
-            import torch.nn.functional as F
-            ref_latent = F.interpolate(ref_latent, size=(target_H, target_W), mode="nearest")
-            
-        target_C = work.shape[1]
-        current_C = ref_latent.shape[1]
-        if current_C > target_C:
-            ref_latent = ref_latent[:, :target_C, :, :]
-        elif current_C < target_C:
-            import torch
-            pad = torch.zeros(ref_latent.shape[0], target_C - current_C, ref_latent.shape[2], ref_latent.shape[3],
-                              device=ref_latent.device, dtype=ref_latent.dtype)
-            ref_latent = torch.cat([ref_latent, pad], dim=1)
-            
-        if work.ndim == 5:
-            T = work.shape[2]
-            ref_latent = ref_latent.unsqueeze(2).expand(-1, -1, T, -1, -1)
-            
-        return ref_latent.to(dtype=work.dtype, device=work.device)
-
-
 
     def sample(
         self,
@@ -661,346 +908,229 @@ class RadianceSamplerPro:
         return_with_leftover_noise: bool,
         seed: int,
         pag_scale: float = 0.0,
+        # v3.1 parameters
         model_type: str = "auto",
         sigma_blend_steps: int = 0,
-        ays_schedule: bool = False,
-        guidance_rescale_phi: float = 0.0,
         preview_method: str = "None",
-        noise_type: str = "Gaussian",
-        conditioning_clip_target: str = "Auto",
-        tile_mode: bool = False,
-        tile_size: int = 128,
-        tile_overlap: int = 16,
-        tile_blend: str = "feather",
+        # Optional
         refiner_model=None,
         refiner_start_step: int = 20,
-        noise_override: Optional[Dict[str, torch.Tensor]] = None,
-        sigmas_override: Optional[torch.Tensor] = None,
-        latent_format: str = "",
-        terminal_sigma_to_zero: bool = False,
-        force_exact_steps: bool = False,
-        # ── Workflow-compat absorbers (swallow old JS-serialised widget values) ─
-        _js_export_btn=None,
-        _js_import_btn=None,
-        _js_preset_info=None,
-        # ── Custom AYS anchors, restart sampling, noise alpha schedule ─────────
-        custom_ays_anchors: Optional[torch.Tensor] = None,
-        restart_schedule: Optional[torch.Tensor] = None,
-        restart_count: int = 0,
-        noise_alpha_start: float = 1.0,
-        noise_alpha_end: float = 1.0,
-        sdr_reference: Optional[torch.Tensor] = None,
-        sdr_vae: Optional[Any] = None,
-        sdr_blend: float = 0.0,
-        sdr_inject_steps: int = 0,
-        sdr_decay: float = 0.65,
-    ) -> Tuple:
-
+        noise_override: Optional[Dict[str, torch.Tensor]] = None
+    ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, str]:
+        
         t_start = time.time()
         timings: Dict[str, float] = {}
-
-        # 1. Apply Presets
-        params = self._apply_presets(preset, 
-            steps=steps, cfg=cfg, sampler=sampler, scheduler=scheduler, 
-            denoise=denoise, flux_shift=flux_shift, flux_guidance=flux_guidance,
-            sampler_mode=sampler_mode, ays_schedule=ays_schedule, model_type=model_type)
         
-        # Unpack params
-        steps, cfg, sampler, scheduler = params['steps'], params['cfg'], params['sampler'], params['scheduler']
-        denoise, flux_shift, flux_guidance = params['denoise'], params['flux_shift'], params['flux_guidance']
-        sampler_mode, ays_schedule, model_type = params['sampler_mode'], params['ays_schedule'], params['model_type']
-
-        # 2. Model Detection & Default Calibration
-        detected_type, params = self._configure_model_and_defaults(model, model_type, preset, 
-            cfg=cfg, flux_guidance=flux_guidance, flux_shift=flux_shift, 
-            sampler=sampler, scheduler=scheduler, scheduler_mode=scheduler_mode)
+        # ─────────────────────────────────────────────────────────────────
+        # Apply Preset if Selected
+        # ─────────────────────────────────────────────────────────────────
+        if preset != "None (Custom)" and preset in PRESET_CONFIGS:
+            config = PRESET_CONFIGS[preset]
+            steps = config.get("steps", steps)
+            cfg = config.get("cfg", cfg)
+            sampler = config.get("sampler", sampler)
+            scheduler = config.get("scheduler", scheduler)
+            denoise = config.get("denoise", denoise)
+            flux_shift = config.get("flux_shift", flux_shift)
+            flux_guidance = config.get("flux_guidance", flux_guidance)
+            logger.info(f"Loaded Preset: {preset}")
         
-        cfg, flux_guidance, flux_shift = params['cfg'], params['flux_guidance'], params['flux_shift']
-        sampler, scheduler = params['sampler'], params['scheduler']
-
-        # 3. Latent Preparation
-        if not isinstance(latent_image, dict) or "samples" not in latent_image:
-            _got = type(latent_image).__name__
-            raise RuntimeError(
-                "This node needs a LATENT, but the input is an IMAGE.\n\n"
-                "Make sure you connect a VAE Encode or a Sampler node before this one."
-            )
-        t0 = time.time()
-        latent_samples = latent_image["samples"]
-        noise_mask = latent_image.get("noise_mask")  # Optional inpainting mask
+        # ─────────────────────────────────────────────────────────────────
+        # v3.2: Guard flux_shift for API callers bypassing widget min
+        # ─────────────────────────────────────────────────────────────────
+        flux_shift = max(0.01, flux_shift)
         
-        # Standardize to 5D for processing if it's a video model, otherwise keep 4D
-        is_video = detected_type in VIDEO_MODEL_TYPES
-        if is_video:
-            latent_samples = ensure_5d(latent_samples, "RadianceSamplerPro")
-            frames = latent_samples.shape[2]
+        # ─────────────────────────────────────────────────────────────────
+        # v3.1: Model Type Detection and Auto-Configuration
+        # ─────────────────────────────────────────────────────────────────
+        detected_type = detect_model_type(model) if model_type == "auto" else model_type
+        
+        # Apply model-specific defaults if preset is custom
+        if preset == "None (Custom)" and model_type == "auto":
+            defaults = get_model_defaults(detected_type)
+            # Only override if using default values
+            if cfg == 1.0 and detected_type != "flux":
+                cfg = defaults.get("cfg", cfg)
+            if flux_guidance == 3.5 and detected_type != "flux":
+                flux_guidance = defaults.get("guidance", flux_guidance)
+            
+            # v3.3 FIX (S-BUG-3): Do NOT override scheduler/sampler.
+            # The user's explicit widget choices should be respected.
+            # Only cfg and guidance are overridden when at default values.
+            
+            logger.info(f"Auto-detected model type: {detected_type} (CFG={cfg}, guidance={flux_guidance}, scheduler={scheduler})")
         else:
-            latent_samples = ensure_4d(latent_samples, "RadianceSamplerPro")
+            logger.info(f"Model type: {detected_type}")
+        
+        # BUG-7 FIX: Implement scheduler_mode Auto
+        if scheduler_mode == "Auto (Match Steps)":
+            defaults = get_model_defaults(detected_type)
+            auto_scheduler = defaults.get("scheduler", scheduler)
+            if auto_scheduler != scheduler:
+                logger.info(f"Auto scheduler: {scheduler} → {auto_scheduler} (optimal for {detected_type})")
+                scheduler = auto_scheduler
+        
+        # ─────────────────────────────────────────────────────────────────
+        # FIX #11: Validate Step Ranges
+        # ─────────────────────────────────────────────────────────────────
+        start_step, end_step = validate_step_range(start_step, end_step, steps, "[Radiance] ")
+        
+        # ─────────────────────────────────────────────────────────────────
+        # Setup
+        # ─────────────────────────────────────────────────────────────────
+        t0 = time.time()
+        latent = latent_image
+        latent_samples = latent["samples"]
+        # v3.3 (S-BUG-1): Handle both 4D (image) and 5D (video) latents
+        if latent_samples.ndim == 5:
+            batch_size, channels, frames, height, width = latent_samples.shape
+        else:
+            batch_size, channels, height, width = latent_samples.shape
             frames = None
-        timings["latent_prep"] = time.time() - t0
-
+        timings["latent_copy"] = time.time() - t0
+        
+        # ─────────────────────────────────────────────────────────────────
+        # Prepare Noise
+        # ─────────────────────────────────────────────────────────────────
+        t0 = time.time()
         device = comfy.model_management.get_torch_device()
-        work_latent = latent_samples.to(device)
-
-        # Blend SDR reference into initial latent if provided
-        sdr_latent = None
-        if sdr_reference is not None and sdr_vae is not None and sdr_blend > 0.0:
-            sdr_latent = self._encode_sdr_reference(sdr_reference, sdr_vae, work_latent)
-            work_latent = (1.0 - sdr_blend) * work_latent + sdr_blend * sdr_latent
-            logger.info(f"[SDR Conditioning] Blended SDR reference into initial latent with strength {sdr_blend:.2f}")
-
-        # 4. Noise & Sigmas Preparation
-        t0 = time.time()
-        noise = self._prepare_noise(latent_samples, seed, noise_type, noise_override, device, frames)
-
-        # FEAT-NOISE-ALPHA: blend structured noise with Gaussian across steps.
-        # noise_alpha=1.0 = pure noise_type; 0.0 = pure Gaussian.
-        # When both ends differ, blending is deferred per-step via a stored ramp.
-        # For noise injection we apply the start-alpha to the initial noise tensor.
-        _noise_alpha_ramp_active = (
-            abs(noise_alpha_start - 1.0) > 1e-4
-            or abs(noise_alpha_end - 1.0) > 1e-4
-            or abs(noise_alpha_start - noise_alpha_end) > 1e-4
-        ) and noise_type != "Gaussian"
-        if _noise_alpha_ramp_active and noise_alpha_start < 1.0 - 1e-4:
-            gaussian_noise = torch.randn_like(noise)
-            noise = noise * noise_alpha_start + gaussian_noise * (1.0 - noise_alpha_start)
-            logger.info(
-                f"Noise alpha schedule: {noise_type} × {noise_alpha_start:.2f} → "
-                f"Gaussian × {noise_alpha_end:.2f}"
-            )
-
+        noise_mask = latent.get("noise_mask", None)
+        
+        # FIX #14: Validate noise_override shape
+        if noise_override is not None:
+            noise = noise_override["samples"]
+            expected_shape = latent_samples.shape
+            if noise.shape != expected_shape:
+                raise ValueError(
+                    f"noise_override shape {noise.shape} does not match "
+                    f"latent shape {expected_shape}"
+                )
+        else:
+            noise = comfy.sample.prepare_noise(latent_samples, seed, None)
+        
+        noise = noise.to(device)
         timings["prepare_noise"] = time.time() - t0
-
+        
+        # ─────────────────────────────────────────────────────────────────
+        # v3.2: Seed handled by prepare_noise / sampler_object.
+        # Global manual_seed removed to prevent side effects (BUG-12)
+        # ─────────────────────────────────────────────────────────────────
+        # v3.3 (S-BUG-4): Global seed removed entirely.
+        # Seed is passed to prepare_noise() and sample_custom().
+        # Setting global CUDA seed caused side effects on other nodes.
+        
+        # ─────────────────────────────────────────────────────────────────
+        # Calculate Sigmas (with Flux Shift)
+        # ─────────────────────────────────────────────────────────────────
         t0 = time.time()
-        sigmas, target_total_steps = self._prepare_sigmas(
-            model, detected_type, steps, denoise,
-            flux_shift, scheduler, ays_schedule, terminal_sigma_to_zero,
-            force_exact_steps, sigmas_override, device,
-            custom_ays_anchors=custom_ays_anchors,
-        )
-        timings["prepare_sigmas"] = time.time() - t0
-
-        # 5. LTX-AV Detection (Specific logic for audio/video separation)
-        is_ltx_av = False
-        ltxav_obj = None
         try:
-            inner_model = model.get_model_object("diffusion_model")
-            if hasattr(inner_model, "separate_audio_and_video_latents") and \
-               hasattr(inner_model, "recombine_audio_and_video_latents"):
-                is_ltx_av = True
-                ltxav_obj = inner_model
-                logger.info("[Radiance] LTX-AV detected. Latents will be processed natively.")
-        except Exception as exc:
-            logger.warning("[nodes_sampler]: %s", exc)
-
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
+            sigmas = get_flux_sigmas(model, scheduler, steps, denoise, flux_shift)
+        except ValueError as e:
+            logger.error(f"Failed to calculate sigmas: {e}")
+            raise
+        timings["sigma_calc"] = time.time() - t0
+        
         log_tensor("Sigmas", sigmas)
-
+        
+        # FIX #13: Handle empty/trivial sigmas
         if len(sigmas) <= 1:
-            logger.warning("[Radiance] Sigma schedule is trivial, returning input unchanged")
+            logger.warning("Sigma schedule is trivial (denoise effectively 0), returning input unchanged")
             report = build_sigma_report(
-                detected_type,
-                steps,
-                scheduler,
-                flux_shift,
-                denoise,
-                sigmas,
-                sampler_mode,
-                [],
-                [],
-                0.0,
-                frames=frames,
+                detected_type, steps, scheduler, flux_shift, denoise,
+                sigmas, sampler_mode, [], [], 0.0
             )
-            blank_plot = torch.zeros(1, 64, 128, 3)
-            return (latent_image.copy(), sigmas, torch.tensor([0.0]), blank_plot)
+            return (latent_image.copy(), sigmas, report)
+        
+        # ─────────────────────────────────────────────────────────────────
+        # Guidance Helper (v3.2: uses copy.copy for safe dict duplication)
+        # ─────────────────────────────────────────────────────────────────
+        def apply_guidance(cond: List, guidance_value: float) -> List:
+            """
+            Apply Flux guidance to conditioning with deep copy.
+            
+            v3.3 FIX (S-BUG-11): Uses copy.deepcopy to fully isolate
+            nested mutable objects (gligen, control_net, model_conds).
+            Shallow copy via copy.copy still shared nested references.
+            """
+            return [
+                [c[0], {**copy.deepcopy(c[1]), "guidance": guidance_value}] 
+                for c in cond
+            ]
+
+        # ─────────────────────────────────────────────────────────────────
+        # FIX #4: Prepare starting latent WITHOUT pre-noising
+        # Let the sampling loop handle noise properly
+        # ─────────────────────────────────────────────────────────────────
+        work_latent = latent_samples.to(device)
         log_tensor("Work Latent (Start)", work_latent)
 
-
-
-        if conditioning_clip_target != "Auto":
-            positive = route_conditioning(positive, conditioning_clip_target)
-            logger.info(f"[v3.0.0] Conditioning routed to {conditioning_clip_target}")
-
+        # ─────────────────────────────────────────────────────────────────
+        # UNIFIED SAMPLING PIPELINE (Refiner + Phase-Shift + Dynamic)
+        # ─────────────────────────────────────────────────────────────────
+        
+        # 1. Setup Splits
+        # ────────────────────────────────────────
+        # FIX #3: Respect user's sampler choice - don't override it
         primary_sampler = sampler
         secondary_sampler: Optional[str] = None
-
+        # v3.2: Phase-Shift SGM now swaps scheduler, not sampler
         secondary_scheduler: Optional[str] = None
         split_step = -1
-
-        effective_end = end_step if end_step > 0 else target_total_steps
-        effective_end = min(effective_end, target_total_steps)
+        
+        # FIX #9: Guard against zero total_steps
+        total_steps = max(1, steps)
+        
+        # BUG-3 FIX: Use start_step/end_step to constrain sampling range.
+        # Previously these were validated then completely ignored.
+        # end_step=0 means "use total_steps" (backward compat with new default)
+        effective_end = end_step if end_step > 0 else total_steps
+        effective_end = min(effective_end, total_steps)
         effective_start = min(start_step, effective_end)
-
+        
         splits = {effective_start, effective_end}
-
+        
+        # v3.0: CFG++ mode flag (v3.2: uses SamplerMode constant)
         is_cfg_plus_plus = SamplerMode.is_cfg_plus_plus(sampler_mode)
         if is_cfg_plus_plus:
             logger.info(f"CFG++ (Perpendicular) mode active with base CFG {cfg}")
-
+            
+            # v3.2 FIX (BUG-9): Warn if CFG++ is used with default Flux CFG (1.0)
             if detected_type == "flux" and cfg <= 1.05:
-                logger.warning(
-                    f"CFG++ enabled but CFG is {cfg}. For Flux, CFG++ requires CFG > 1.0"
-                )
-
+                 logger.warning(
+                     f"CFG++ enabled but CFG is {cfg}. For Flux, CFG++ requires CFG > 1.0 "
+                     "to have an effect (try 2.0-4.0)."
+                 )
+        
+        # v3.0: Apply PAG to model if enabled (v3.2: now has real attention hook)
         if pag_scale > 0:
             model = apply_pag_to_model(model, pag_scale)
-
-        if guidance_rescale_phi > 0.0 and cfg > 1.0:
-            phi = guidance_rescale_phi
-            model = (
-                model.clone() if pag_scale <= 0 else model
-            )                                
-
-            def guidance_rescale_patch(args):
-
-                cond = args["cond_denoised"]
-                uncond = args["uncond_denoised"]
-                cfg_val = args["cond_scale"]
-
-                guided = uncond + cfg_val * (cond - uncond)
-
-                dims = list(range(1, guided.ndim))
-                guided_std = guided.std(dim=dims, keepdim=True).clamp(min=1e-6)
-                cond_std = cond.std(dim=dims, keepdim=True).clamp(min=1e-6)
-
-                rescaled = guided * (cond_std / guided_std)
-                return rescaled * phi + guided * (1.0 - phi)
-
-            model.set_model_sampler_cfg_function(guidance_rescale_patch)
-            logger.info(f"Guidance Rescale applied (phi={phi:.2f})")
-
-        if sdr_latent is not None and sdr_inject_steps > 0:
-            model = model.clone() if (pag_scale <= 0 and guidance_rescale_phi <= 0) else model
-            _step_counter = [0]
-            _sdr_ref_lat = sdr_latent.detach()
-            
-            # Retrieve existing cfg patch if any
-            existing_cfg_fn = getattr(model, "model_sampler_cfg_function", None)
-
-            def _sdr_post_cfg_patch(args):
-                denoised = existing_cfg_fn(args) if existing_cfg_fn is not None else args["denoised"]
-                step = _step_counter[0]
-                _step_counter[0] += 1
-                if step >= sdr_inject_steps:
-                    return denoised
-                blend = sdr_blend * (sdr_decay ** step)
-                if blend < 1e-5:
-                    return denoised
-                
-                ref = _sdr_ref_lat
-                if hasattr(ref, "to"):
-                    ref = ref.to(device=denoised.device, dtype=denoised.dtype)
-                
-                ref_shape = tuple(ref.shape)
-                denoised_shape = tuple(denoised.shape)
-                if ref_shape != denoised_shape:
-                    if ref.ndim == denoised.ndim:
-                        if ref_shape[0] == 1 and denoised_shape[0] > 1:
-                            ref = ref.expand_as(denoised)
-                        else:
-                            return denoised
-                    else:
-                        return denoised
-                return (1.0 - blend) * denoised + blend * ref
-
-            model.set_model_sampler_cfg_function(_sdr_post_cfg_patch)
-            logger.info(f"[SDR Conditioning] Registered post-CFG SDR anchor patch (steps={sdr_inject_steps}, blend={sdr_blend:.2f}, decay={sdr_decay:.2f})")
-
-        # ── Energy-Prioritized Sampling (EPS) Detection ──────────────────────
-        energy_mask = None
-        energy_priority = 1.0
-        if isinstance(positive, list):
-            for _, cond_dict in positive:
-                if isinstance(cond_dict, dict) and "radiance_energy_mask" in cond_dict:
-                    energy_mask = cond_dict["radiance_energy_mask"]
-                    energy_priority = cond_dict.get("radiance_energy_priority", 1.0)
-                    break
-
-        if energy_mask is not None:
-            model = model.clone() if (pag_scale <= 0 and guidance_rescale_phi <= 0 and sdr_reference is None) else model
-            _eps_mask = energy_mask.detach()
-            _eps_priority = float(energy_priority)
-            
-            # Retrieve existing CFG function (e.g., guidance_rescale or base)
-            existing_cfg_fn = getattr(model, "model_sampler_cfg_function", None)
-
-            def _energy_prioritized_cfg_patch(args):
-                import torch.nn.functional as F
-                cond = args["cond_denoised"]
-                uncond = args["uncond_denoised"]
-                cfg_val = args["cond_scale"]
-                
-                # Unify mask shape to (B, 1, H_l, W_l) to match the latent space
-                mask = _eps_mask.to(device=cond.device, dtype=cond.dtype)
-                if mask.ndim == 2:
-                    mask = mask.unsqueeze(0).unsqueeze(0)
-                elif mask.ndim == 3:
-                    mask = mask.unsqueeze(1)
-                
-                # Align batch size
-                B, C, H_l, W_l = cond.shape
-                if mask.shape[0] != B:
-                    mask = mask.expand(B, -1, -1, -1)
-                
-                # Align spatial resolution of the mask to match the latent space
-                if mask.shape[-2] != H_l or mask.shape[-1] != W_l:
-                    mask = F.interpolate(mask, size=(H_l, W_l), mode="bilinear", align_corners=False)
-                
-                # Apply energy-priority CFG scaling specifically in the mask regions
-                eps_modifier = 1.0 + _eps_priority * mask
-                
-                # Compute EPS-boosted positive conditioning projection
-                cond_eps = uncond + (cond - uncond) * eps_modifier
-                
-                # Update args dict so downstream CFG functions (e.g. rescale) inherit it
-                new_args = args.copy()
-                new_args["cond_denoised"] = cond_eps
-                new_args["denoised"] = uncond + cfg_val * (cond_eps - uncond)
-                
-                if existing_cfg_fn is not None:
-                    return existing_cfg_fn(new_args)
-                return new_args["denoised"]
-
-            model.set_model_sampler_cfg_function(_energy_prioritized_cfg_patch)
-            logger.info(f"[Energy Guidance] Registered Energy-Prioritized Sampling (EPS) patch (priority={_eps_priority:.2f})")
-        if SamplerMode.is_phase_shift(sampler_mode) and detected_type in VIDEO_MODEL_TYPES:
-            logger.warning(
-                f"[v3.0.0] Phase-Shift mode is not supported for video model '{detected_type}' — "
-                f"sampler switching mid-schedule causes temporal discontinuities. "
-                f"Falling back to Standard mode."
-            )
-            sampler_mode = SamplerMode.STANDARD
-
+        
+        # v3.2: Phase-Shift setup using SamplerMode constants
         if SamplerMode.is_phase_shift(sampler_mode):
-
+            # v3.4 FIX (BUG-18): Auto-enable sigma blending for phase-shift.
+            # Without blending, the sigma schedule has a hard discontinuity
+            # at the phase boundary, causing visible noise/artifacts.
+            # Default to 3 blend steps when user hasn't explicitly set it.
             if sigma_blend_steps == 0:
                 sigma_blend_steps = 3
                 logger.info("Phase-Shift: auto-enabled 3 sigma blend steps (was 0)")
-
+            
             if sampler_mode == SamplerMode.PHASE_SHIFT_DPM:
                 secondary_sampler = "dpmpp_2m"
-                secondary_scheduler = None                       
-
-                flow_match_types = GUIDANCE_EMBED_MODELS | {"wan", "hunyuan_video"}
-                if detected_type in flow_match_types:
-                    logger.warning(
-                        f"WARNING: DPM solvers are generally incompatible with {detected_type}'s "
-                        f"Flow Matching and may produce severe noise/grain. "
-                        f"Recommended to use Euler or Phase-Shift SGM."
-                    )
+                secondary_scheduler = None  # Keep same scheduler
             elif sampler_mode == SamplerMode.PHASE_SHIFT_SGM:
-
-                secondary_sampler = sampler                     
-                secondary_scheduler = "sgm_uniform"                              
+                # v3.2 FIX: SGM mode swaps the SCHEDULER, not the sampler.
+                # "sgm_uniform" is a scheduler name, not a sampler name.
+                # Passing it to sampler_object() would crash or fall back.
+                secondary_sampler = sampler  # Keep same sampler
+                secondary_scheduler = "sgm_uniform"  # Swap scheduler for phase 2
             else:
                 secondary_sampler = sampler
-
-            split_step = int(target_total_steps * max(0.0, min(1.0, phase_split)))
-
+            
+            # FIX: Handle edge cases for phase_split
+            split_step = int(total_steps * max(0.0, min(1.0, phase_split)))
+            
+            # Only add split if it falls within the effective sampling range
             if effective_start < split_step < effective_end:
                 splits.add(split_step)
                 phase2_label = secondary_sampler or sampler
@@ -1008,341 +1138,325 @@ class RadianceSamplerPro:
                     phase2_label = f"{phase2_label}+{secondary_scheduler}"
                 logger.info(
                     f"Phase-Shift: {primary_sampler} (0-{split_step}) → "
-                    f"{phase2_label} ({split_step}-{target_total_steps})"
+                    f"{phase2_label} ({split_step}-{total_steps})"
                 )
-
+                
+                # v3.1: Apply gradual sigma blend for smooth transition
                 if sigma_blend_steps > 0:
                     logger.info(f"Sigma blend: {sigma_blend_steps} steps at transition")
-
+            
         if refiner_model is not None:
-            refiner_step = max(0, min(refiner_start_step, target_total_steps))
+            refiner_step = max(0, min(refiner_start_step, total_steps))
             if effective_start < refiner_step < effective_end:
                 splits.add(refiner_step)
                 logger.info(f"Refiner starts at step {refiner_step}")
-
-        is_dynamic = "Dynamic" in flux_guidance_profile and detected_type in GUIDANCE_EMBED_MODELS
-
-        is_dynamic_cfg = "Dynamic" in flux_guidance_profile and detected_type in CFG_GUIDED_MODELS
-
+             
+        # Dynamic guidance split points
+        idx_20 = int(total_steps * DYNAMIC_GUIDANCE_EARLY_THRESHOLD)
+        idx_90 = int(total_steps * DYNAMIC_GUIDANCE_LATE_THRESHOLD)
+        
+        is_dynamic = "Dynamic" in flux_guidance_profile
         if is_dynamic:
-
-            denoising_steps = (
-                int(target_total_steps * denoise) if denoise < 1.0 else target_total_steps
-            )
-            denoising_start = target_total_steps - denoising_steps
-
-            idx_20 = denoising_start + int(
-                denoising_steps * DYNAMIC_GUIDANCE_EARLY_THRESHOLD
-            )
-            idx_90 = denoising_start + int(
-                denoising_steps * DYNAMIC_GUIDANCE_LATE_THRESHOLD
-            )
-
             if effective_start < idx_20 < effective_end:
                 splits.add(idx_20)
             if effective_start < idx_90 < effective_end:
                 splits.add(idx_90)
-            logger.info(
-                f"Dynamic Guidance Active (effective range: steps {denoising_start}-{target_total_steps}, "
-                f"early={idx_20}, late={idx_90})"
-            )
-
-        elif is_dynamic_cfg:
-
-            denoising_steps = (
-                int(target_total_steps * denoise) if denoise < 1.0 else target_total_steps
-            )
-            denoising_start = target_total_steps - denoising_steps
-
-            idx_15 = denoising_start + int(denoising_steps * DYNAMIC_CFG_EARLY_THRESHOLD)
-            idx_85 = denoising_start + int(denoising_steps * DYNAMIC_CFG_LATE_THRESHOLD)
-
-            if effective_start < idx_15 < effective_end:
-                splits.add(idx_15)
-            if effective_start < idx_85 < effective_end:
-                splits.add(idx_85)
-            logger.info(
-                f"Dynamic CFG Active for {detected_type} (effective range: steps "
-                f"{denoising_start}-{target_total_steps}, boost→{idx_15}, taper→{idx_85})"
-            )
-
-        sorted_splits = sorted(
-            s for s in splits if effective_start <= s <= effective_end
-        )
-
+            logger.info("Dynamic Guidance Active")
+             
+        # Sort and filter splits — constrain to effective sampling range
+        sorted_splits = sorted(s for s in splits if effective_start <= s <= effective_end)
+        
+        # ─────────────────────────────────────────────────────────────────
+        # Preview Callback (v3.2: with TAESD availability check)
+        # ─────────────────────────────────────────────────────────────────
+        preview_callback = None
         pbar_ref = None
-        use_custom_preview = False
         if preview_method != "None":
-
+            # v3.2: Verify TAESD decoder availability, fallback to Latent2RGB
             if preview_method == "TAESD":
                 try:
-
-                    from comfy.taesd.taesd import TAESDDecoder              
+                    # v3.3 (S-BUG-12): Correct TAESD module path
+                    from comfy.taesd.taesd import TAESDDecoder  # noqa: F401
                 except (ImportError, AttributeError):
-                    logger.warning(
-                        "[Radiance] TAESD unavailable, fallback to Latent2RGB"
-                    )
+                    logger.warning("TAESD decoder not available, falling back to Latent2RGB")
                     preview_method = "Latent2RGB"
-
+            
             try:
-                # ALBABIT-FIX: ProgressBar respects the actual iterations being run
-                actual_iterations = len(sigmas) - 1
-                pbar_ref = comfy.utils.ProgressBar(actual_iterations)
-                use_custom_preview = True
+                pbar_ref = comfy.utils.ProgressBar(total_steps)
                 logger.debug(f"Preview callback active: {preview_method}")
             except (AttributeError, TypeError) as e:
                 logger.warning(f"Failed to create preview callback: {e}")
+                pbar_ref = None
 
-                preview_method = "None"
-
+        # v3.2 FIX (BUG-13): Helper to create phase-aware callbacks
         def create_phase_callback(phase_start_step):
             def callback(step, x0, x1, total_steps):
-
+                # 'step' passed by sampler is relative to the current phase's sigmas.
+                # We add phase_start_step to get global step index.
                 global_step = step + phase_start_step
-
+                
                 if pbar_ref:
                     pbar_ref.update_absolute(global_step + 1, total_steps, (x0,))
-
             return callback
-
+        
+        # 2. Execution Loop
+        # ────────────────────────────────────────
         current_latent = work_latent
-        prev_stage_sigmas: Optional[torch.Tensor] = None                      
-
-        # RADIANCE-AUDIT v2.6.0 [IMPORTANT]: removed dead pre-seed cache
-        # block. It wrote under (primary_scheduler, target_total_steps)
-        # but the cache is only consulted for *secondary* schedulers via
-        # compute_base_sigmas, which uses a different calc_steps key when
-        # force_exact_steps is on. The write never produced a hit.
-
+        prev_stage_sigmas: Optional[torch.Tensor] = None  # For sigma blending
+        
+        # v3.2: Sigma cache with weakref safety to prevent stale hits.
+        # If a model is GC'd and a new one allocated at the same address,
+        # the weakref will be dead and we'll recompute correctly.
+        from comfy.samplers import calculate_sigmas
+        # _sigma_cache defined at module level (BUG-14)
+        
         def _get_base_sigmas(mdl, sched: str = scheduler) -> torch.Tensor:
-            if sched == scheduler and mdl is model:
-                return sigmas
-            return compute_base_sigmas(
-                mdl, sched, target_total_steps, scheduler, flux_shift, denoise, _sigma_cache,
-                force_full_denoise=terminal_sigma_to_zero,
-                force_exact_steps=force_exact_steps
-            )
-
-        t0 = time.time()
-
-        stage_timings: List[Tuple[int, int, int, str, float]] = []
-
-        planned_stages: List[SamplingStage] = []
-        for si in range(len(sorted_splits) - 1):
-            gs = sorted_splits[si]
-            ge = sorted_splits[si + 1]
-            if gs >= ge:
-                continue
-
-            stage_model = model
-            if refiner_model is not None and gs >= refiner_start_step:
-                stage_model = refiner_model
-
-            stage_sampler = primary_sampler
-            stage_scheduler = scheduler
-            is_shifted = False
-            is_blend = False
-
-            if SamplerMode.is_phase_shift(sampler_mode) and gs >= split_step:
-                is_shifted = True
-                if secondary_sampler:
-                    stage_sampler = secondary_sampler
-                if secondary_scheduler:
-                    stage_scheduler = secondary_scheduler
-                if gs == split_step and sigma_blend_steps > 0:
-                    is_blend = True
-
-            planned_stages.append(
-                SamplingStage(
-                    index=si,
-                    global_start=gs,
-                    global_end=ge,
-                    model=stage_model,
-                    sampler_name=stage_sampler,
-                    scheduler_name=stage_scheduler,
-                    is_phase_shifted=is_shifted,
-                    is_blend_point=is_blend,
-                )
-            )
-
-        for ps in planned_stages:
-            label = f"{ps.sampler_name}+{ps.scheduler_name}"
-            if ps.is_blend_point:
-                label += " [blend]"
+            """
+            Get base sigmas for a model, computing only once per unique model+scheduler.
             
-            # ALBABIT-FIX: Display logical 1-based steps for clarity in logs instead of 0-based
-            logger.info(
-                f"Plan Stage {ps.index + 1}: Steps {ps.global_start + 1}→{ps.global_end} [{label}]"
-            )
-
+            v3.3 (S-BUG-7): No longer applies flux_shift — the global sigmas
+            from get_flux_sigmas() already include shift. Re-applying here
+            caused double-shifted sigmas and stage boundary discontinuities.
+            
+            v3.3 (S-BUG-8): Pre-seeds cache with the already-computed global
+            sigmas to ensure stage indexing matches the split calculation.
+            """
+            cache_key = (id(mdl), sched)
+            if cache_key in _sigma_cache:
+                ref, cached_sigmas = _sigma_cache[cache_key]
+                if ref() is mdl:  # Verify it's actually the same object
+                    return cached_sigmas
+            
+            ms = mdl.get_model_object("model_sampling")
+            bs = calculate_sigmas(ms, sched, total_steps)
+            # v3.3 (S-BUG-7): Shift already applied in get_flux_sigmas().
+            # Only apply here for non-primary schedulers (Phase-Shift SGM)
+            # where a different scheduler is used than the global one.
+            if flux_shift != 1.0 and sched != scheduler:
+                bs = flux_shift_sigmas(bs, flux_shift)
+            if denoise < 1.0:
+                n = len(bs) - 1
+                if n > 0:
+                    bs = bs[max(0, int(n * (1.0 - denoise))):]
+            _sigma_cache[cache_key] = (weakref.ref(mdl), bs)
+            return bs
+        
+        # v3.3 (S-BUG-6): Clean stale cache entries before use
+        global _sigma_cache
+        _clean_sigma_cache()
+        
+        # v3.3 (S-BUG-8): Pre-seed cache with global sigmas so stage indexing
+        # is guaranteed to match the split points computed from total_steps
+        _sigma_cache[(id(model), scheduler)] = (weakref.ref(model), sigmas)
+        
+        # Start timing for sampling
+        t0 = time.time()
+        
+        # v3.2: Per-stage timing collection
+        stage_timings: List[Tuple[int, int, int, str, float]] = []
+        
+        # Wrap sampling loop in try/finally to ensure cleanup (FIX #10)
         try:
-            if tile_mode and latent_samples.ndim == 4:
-                logger.info(
-                    f"[v3.0.0] Tile sampling: size={tile_size}, "
-                    f"overlap={tile_overlap}, blend={tile_blend}"
-                )
-                t_tile = time.time()
-                _tile_sampler_obj = comfy.samplers.sampler_object(primary_sampler)
-                effective_cfg = cfg
-                if is_cfg_plus_plus:
-                    sigma_max = sigmas[0].item() if len(sigmas) > 0 else 1.0
-                    effective_cfg = apply_cfg_plus_plus(cfg, sigmas[0], sigma_max)
-
-                current_latent = tile_sample(
-                    model=model,
-                    noise=noise,
-                    latent_samples=work_latent,
-                    positive=positive,
-                    negative=negative,
-                    sigmas=sigmas,
-                    sampler_obj=_tile_sampler_obj,
-                    seed=seed,
-                    tile_size=tile_size,
-                    tile_overlap=tile_overlap,
-                    tile_blend=tile_blend,
-                    noise_mask=noise_mask,
-                    cfg=effective_cfg,
-                )
-                
-                timings["tile_sampling"] = time.time() - t_tile
-                timings["sampling"] = timings["tile_sampling"]
-                logger.info(
-                    f"[v3.0.0] Tile sampling done in {timings['tile_sampling']:.2f}s"
-                )
-
-            for plan_idx, stage in enumerate(planned_stages):
-                if tile_mode and latent_samples.ndim == 4:
-                    break  
+            for i in range(len(sorted_splits) - 1):
                 t_stage = time.time()
-                i = stage.index
-                s_start = stage.global_start
-                s_end = stage.global_end
-                current_model = stage.model
-                current_sampler = stage.sampler_name
-                current_scheduler = stage.scheduler_name
-
+            
+                s_start = sorted_splits[i]
+                s_end = sorted_splits[i + 1]
+            
+                if s_start >= s_end:
+                    continue
+            
+                # Determine config for this stage
+                current_model = model
+                if refiner_model is not None and s_start >= refiner_start_step:
+                    current_model = refiner_model
+                
+                current_sampler = primary_sampler
+                # v3.2: Determine scheduler for this stage (may differ in SGM mode)
+                current_scheduler = scheduler
+            
+                if SamplerMode.is_phase_shift(sampler_mode) and s_start >= split_step:
+                    if secondary_sampler:
+                        current_sampler = secondary_sampler
+                    if secondary_scheduler:
+                        current_scheduler = secondary_scheduler
+            
+                # ─────────────────────────────────────────────────────────────
+                # FIX #3: Dynamic Guidance with Cosine Interpolation
+                # ─────────────────────────────────────────────────────────────
                 stage_positive = positive
                 if is_dynamic:
-                    effective_guidance = compute_dynamic_guidance(
-                        flux_guidance, s_start, target_total_steps, denoise
-                    )
-                    stage_positive = apply_flux_guidance(positive, effective_guidance)
-                    logger.debug(
-                        f"Dynamic Guidance @ step {s_start}: {effective_guidance:.2f}"
-                    )
-
-                elif detected_type in GUIDANCE_EMBED_MODELS:
-
-                    stage_positive = apply_flux_guidance(positive, flux_guidance)
-
+                    g_low = flux_guidance * DYNAMIC_GUIDANCE_LOW_MULTIPLIER
+                    g_high = flux_guidance
+                
+                    # Calculate guidance based on stage START
+                    progress = s_start / total_steps
+                
+                    # Transition params (5% ramp)
+                    RAMP = 0.05
+                    EARLY_T = DYNAMIC_GUIDANCE_EARLY_THRESHOLD
+                    LATE_T = DYNAMIC_GUIDANCE_LATE_THRESHOLD
+                
+                    if progress < EARLY_T - RAMP:
+                        effective_guidance = g_low
+                    
+                    elif progress < EARLY_T + RAMP:
+                        # Ramp Up: Low -> High
+                        # Normalize t to 0..1 range over the ramp window
+                        t = (progress - (EARLY_T - RAMP)) / (2 * RAMP)
+                        blend = 0.5 * (1.0 - math.cos(math.pi * t))
+                        effective_guidance = g_low + (g_high - g_low) * blend
+                    
+                    elif progress < LATE_T - RAMP:
+                        effective_guidance = g_high
+                    
+                    elif progress < LATE_T + RAMP:
+                        # v3.4 FIX (BUG-17): Gentle taper instead of hard drop.
+                        # Previously dropped to g_low (60%) at the end, which
+                        # destroyed fine detail coherence in Flux models.
+                        # Now tapers to g_high * 0.85 — preserves creative benefit
+                        # while maintaining detail quality.
+                        g_late = g_high * 0.85
+                        t = (progress - (LATE_T - RAMP)) / (2 * RAMP)
+                        blend = 0.5 * (1.0 - math.cos(math.pi * t))
+                        effective_guidance = g_high + (g_late - g_high) * blend
+                    
+                    else:
+                        # v3.4 FIX: Final steps keep near-full guidance (85%)
+                        # instead of dropping to 60% which made output noisy
+                        effective_guidance = g_high * 0.85
+                
+                    # FIX #11: Only apply guidance updates for flux
+                    if detected_type == "flux":
+                        stage_positive = apply_guidance(positive, effective_guidance)
+                        logger.debug(f"Dynamic Guidance @ step {s_start} ({progress:.2f}): {effective_guidance:.2f}")
+                    else:
+                        logger.debug(f"Dynamic Guidance ignored (not Flux) @ step {s_start}")
+            
+                elif detected_type == "flux":
+                    # Static guidance - only for Flux
+                    stage_positive = apply_guidance(positive, flux_guidance)
+            
                 logger.info(
-                    f"Stage {i+1}: Steps {s_start + 1}-{s_end} | "
+                    f"Stage {i+1}: Steps {s_start}-{s_end} | "
                     f"Sampler: {current_sampler} | Scheduler: {current_scheduler}"
                 )
-
+            
+                # ─────────────────────────────────────────────────────────────
+                # Calculate stage sigmas with bounds checking
+                # ─────────────────────────────────────────────────────────────
                 try:
-
+                    # v3.2: Pass current_scheduler for correct sigma computation
+                    # (differs from primary scheduler in Phase-Shift SGM mode)
                     base_sigmas = _get_base_sigmas(current_model, current_scheduler)
-
-                    indexer = SigmaIndexer(target_total_steps, base_sigmas)
-                    stage_sigmas = indexer.get_stage_sigmas(s_start, s_end)
-
-                    if stage_sigmas is None:
-
+                
+                    # FIX #4: Correct sigma indexing when denoise < 1.0
+                    # base_sigmas is trimmed, so its index 0 corresponds to step (total_steps - len + 1)
+                    # We must offset s_start/s_end to match base_sigmas indices.
+                
+                    full_schedule_len = len(base_sigmas) # This is the TRIMMED length if denoise < 1.0
+                    # If denoise=1.0, full_schedule_len = total_steps + 1
+                
+                    # Calculate the step index where base_sigmas technically "starts" relative to full schedule
+                    # start_offset = total_steps - (full_schedule_len - 1)
+                    # But actually, s_start/s_end are 0-indexed on TOTAL steps.
+                    # If denoise < 1.0, base_sigmas starts at step X. Indices 0..N in base_sigmas map to steps X..Total.
+                    # So we need to map s_start (global step) to local index.
+                    # index = global_step - start_offset
+                
+                    bs_start_step = total_steps - (len(base_sigmas) - 1)
+                
+                    local_start = s_start - bs_start_step
+                    local_end = s_end - bs_start_step
+                
+                    # If the entire stage is before the start of the sigmas (due to low denoise), skip
+                    if local_end < 0:
+                         # logger.debug(f"Stage {i+1} skipped (before denoise start)")
+                         continue
+                
+                    # Clamp to valid range within base_sigmas
+                    safe_start = max(0, min(local_start, len(base_sigmas) - 1))
+                    safe_end = max(0, min(local_end + 1, len(base_sigmas))) # +1 for slicing inclusive of end sigma
+                
+                    if safe_start >= safe_end:
+                        # logger.warning(f"Stage {i+1}: Empty sigma range after offset, skipping")
                         continue
-
-                    if (
-                        stage.is_blend_point
-                        and prev_stage_sigmas is not None
-                    ):
+                    
+                    stage_sigmas = base_sigmas[safe_start:safe_end]
+                
+                    # v3.1: Apply gradual sigma blend at phase-shift transitions
+                    # v3.2: No longer needs .clone() from caller — function handles it
+                    if (sigma_blend_steps > 0 and prev_stage_sigmas is not None 
+                            and SamplerMode.is_phase_shift(sampler_mode) 
+                            and s_start == split_step):
                         stage_sigmas = gradual_sigma_blend(
                             prev_stage_sigmas, stage_sigmas, sigma_blend_steps
                         )
-
+                
                     if len(stage_sigmas) < 2:
-                        logger.warning(
-                            f"Stage {i+1}: Insufficient sigmas ({len(stage_sigmas)}), skipping"
-                        )
+                        logger.warning(f"Stage {i+1}: Insufficient sigmas ({len(stage_sigmas)}), skipping")
                         continue
-
-                    is_last_stage = plan_idx == len(planned_stages) - 1
-                    if (
-                        return_with_leftover_noise
-                        and is_last_stage
-                        and len(stage_sigmas) >= 3                                   
-                        and stage_sigmas[-1].item() == 0.0
-                    ):
+                
+                    # BUG-6 FIX: Implement return_with_leftover_noise
+                    # When True and this is the last stage, strip terminal sigma=0.0
+                    # so the sampler stops before full denoising (latent retains noise)
+                    is_last_stage = (i == len(sorted_splits) - 2)
+                    if (return_with_leftover_noise and is_last_stage 
+                            and len(stage_sigmas) >= 3  # need at least 3 to safely strip
+                            and stage_sigmas[-1].item() == 0.0):
                         stage_sigmas = stage_sigmas[:-1]
                         logger.debug("Stripped terminal sigma for leftover noise")
-
+                
+                    # Create sampler object
                     sampler_obj = comfy.samplers.sampler_object(current_sampler)
-
+                
+                    # v3.2 FIX: Only compute CFG++ when mode is active.
+                    # Previously stage_cfg was always computed then ignored via ternary.
                     if is_cfg_plus_plus and len(stage_sigmas) > 0:
-                        sigma_max = (
-                            base_sigmas[0].item() if len(base_sigmas) > 0 else 1.0
-                        )
-                        effective_cfg = apply_cfg_plus_plus(
-                            cfg, stage_sigmas[0], sigma_max
-                        )
-                        logger.debug(
-                            f"CFG++: {cfg:.2f} → {effective_cfg:.2f} at sigma {stage_sigmas[0].item():.4f}"
-                        )
-                    elif is_dynamic_cfg:
-
-                        effective_cfg = compute_dynamic_cfg(
-                            cfg, s_start, target_total_steps, denoise
-                        )
-                        logger.debug(
-                            f"Dynamic CFG @ step {s_start}: {cfg:.2f} → {effective_cfg:.2f}"
-                        )
+                        sigma_max = base_sigmas[0].item() if len(base_sigmas) > 0 else 1.0
+                        effective_cfg = apply_cfg_plus_plus(cfg, stage_sigmas[0], sigma_max)
+                        logger.debug(f"CFG++: {cfg:.2f} → {effective_cfg:.2f} at sigma {stage_sigmas[0].item():.4f}")
                     else:
                         effective_cfg = cfg
-
+                
+                    # ─────────────────────────────────────────────────────
+                    # v3.4 FIX (BUG-15/16): Correct noise handling.
+                    #
+                    # ComfyUI's KSAMPLER.sample() ALWAYS applies:
+                    #   x = noise * sigma[0] + latent_image
+                    #
+                    # Previously this code pre-added noise * sigma to the
+                    # latent (line 1404), then sample_custom added it AGAIN
+                    # inside the sampler → 2× noise in stage 1.
+                    #
+                    # For continuation stages (i > 0), the sampler would add
+                    # fresh noise * sigma_start to the already-denoised latent,
+                    # injecting extra noise that corrupts partial results.
+                    #
+                    # FIX:
+                    #  - Stage 1, add_noise=True:  pass raw noise + clean latent
+                    #    → sampler correctly does noise*σ + latent (1× noise)
+                    #  - Stage 1, add_noise=False: pass zeros + clean latent
+                    #    → sampler does 0*σ + latent = latent (no noise)
+                    #  - Stages 2+: ALWAYS pass zeros + previous output
+                    #    → sampler does 0*σ + result = result (no extra noise)
+                    # ─────────────────────────────────────────────────────
                     stage_latent = current_latent
 
-                    is_first_stage = plan_idx == 0
+                    is_first_stage = (i == 0 and effective_start == 0)
                     if is_first_stage and add_noise:
+                        # Pass unscaled noise — sampler handles scaling + addition
                         stage_noise = noise
                         logger.debug("Stage 1: sampler will add initial noise")
                     else:
+                        # Continuation or no-noise: pass zeros so sampler
+                        # does 0*σ + latent = latent (no extra noise)
                         stage_noise = torch.zeros_like(noise)
                         if is_first_stage:
                             logger.debug("Stage 1: add_noise=False, no noise")
                         else:
                             logger.debug(f"Stage {i+1}: continuation, no extra noise")
-
-                    # RADIANCE-AUDIT v2.6.0 [IMPORTANT]: this block used to
-                    # require noise_type != "gaussian", so a Gaussian
-                    # NestedTensor multi-stage path fed a plain Tensor as
-                    # stage_noise against a NestedTensor latent and
-                    # crashed inside sample_custom. Rebuild whenever the
-                    # latent is a NestedTensor, regardless of noise_type.
-                    if (
-                        _HAS_NESTED_TENSOR
-                        and isinstance(current_latent, _NestedTensor)
-                    ):
-                        try:
-                            new_noises = []
-                            for sub_t in current_latent.tensors:
-                                if is_first_stage and add_noise:
-                                    if noise_type.lower() == "gaussian":
-                                        sub_noise = torch.randn_like(sub_t)
-                                    else:
-                                        sub_noise = generate_noise(
-                                            sub_t, seed, noise_type, frames=frames
-                                        )
-                                else:
-                                    sub_noise = torch.zeros_like(sub_t)
-                                new_noises.append(sub_noise)
-                            stage_noise = _NestedTensor(tuple(new_noises))
-                        except Exception as _ne:
-                            logger.warning(
-                                f"[Radiance] LTX-AV NestedTensor noise rebuild failed: {_ne}. "
-                            )
-
-                    # RADIANCE-AUDIT v2.6.0 [IMPORTANT]: removed redundant
-                    # load_model_gpu() - comfy.sample.sample_custom
-                    # prepares and loads the model via prepare_sampling.
+                
                     result = comfy.sample.sample_custom(
                         current_model,
                         stage_noise,
@@ -1354,204 +1468,112 @@ class RadianceSamplerPro:
                         stage_latent,
                         noise_mask=noise_mask,
                         callback=create_phase_callback(s_start),
-                        disable_pbar=use_custom_preview,
-                        seed=seed,
+                        disable_pbar=(preview_method != "None"),
+                        seed=seed
                     )
                     current_latent = result
-
-                    prev_stage_sigmas = indexer.get_stage_sigmas(s_start, s_end)
+                    # v3.3 (S-BUG-9): Store pre-strip sigmas for blend source.
+                    # If return_with_leftover_noise stripped the terminal sigma,
+                    # the blend needs the original schedule's last sigma.
+                    prev_stage_sigmas = base_sigmas[safe_start:safe_end]
                     log_tensor(f"Stage {i+1} Output", current_latent)
-
-                    if plan_idx < len(planned_stages) - 1:
-                        next_stage = planned_stages[plan_idx + 1]
-                        next_base = _get_base_sigmas(
-                            next_stage.model, next_stage.scheduler_name
-                        )
-                        next_indexer = SigmaIndexer(target_total_steps, next_base)
-                        next_sigma = next_indexer.get_sigma_at(next_stage.global_start)
-
-                        if (
-                            next_sigma is not None
-                            and len(stage_sigmas) > 0
-                        ):
+                
+                    # FIX #8: Sigma continuity validation with correct next-scheduler checking
+                    if i < len(sorted_splits) - 2:
+                        next_stage_start = sorted_splits[i + 1]
+                    
+                        # Determine next stage's config to get correct base sigmas
+                        # (Logic duplicated from top of loop - could be refactored)
+                        next_scheduler = scheduler
+                        next_model_ref = model
+                        if SamplerMode.is_phase_shift(sampler_mode) and next_stage_start >= split_step:
+                             if secondary_scheduler:
+                                 next_scheduler = secondary_scheduler
+                    
+                        next_base_sigmas = _get_base_sigmas(next_model_ref, next_scheduler)
+                    
+                        # Calculate offset for next stage
+                        next_bs_start = total_steps - (len(next_base_sigmas) - 1)
+                        next_local_idx = next_stage_start - next_bs_start
+                    
+                        if 0 <= next_local_idx < len(next_base_sigmas) and len(stage_sigmas) > 0:
                             expected_sigma = stage_sigmas[-1].item()
+                            next_sigma = next_base_sigmas[next_local_idx].item()
+                        
                             sigma_diff = abs(expected_sigma - next_sigma)
                             if sigma_diff > SIGMA_DISCONTINUITY_THRESHOLD:
                                 logger.warning(
                                     f"Sigma discontinuity: {expected_sigma:.4f} → {next_sigma:.4f} "
                                     f"(Δ={sigma_diff:.4f})"
                                 )
-
+                
+                    # v3.2: Record per-stage timing
                     stage_time = time.time() - t_stage
-                    stage_timings.append(
-                        (i + 1, s_start, s_end, current_sampler, stage_time)
-                    )
-
+                    stage_timings.append((i + 1, s_start, s_end, current_sampler, stage_time))
+                
                 except (RuntimeError, ValueError) as e:
                     logger.error(f"Error in Stage {i+1}: {e}")
                     raise
-
-            if hasattr(current_latent, "is_cuda"):
-                samples = current_latent.cpu() if current_latent.is_cuda else current_latent
-            else:
-                samples = current_latent
-
-            if not (tile_mode and latent_samples.ndim == 4):
-                timings["sampling"] = time.time() - t0
-
-            if tile_mode and latent_samples.ndim == 5:
-                logger.warning(
-                    "[Radiance] Tile sampling ignored for 5D video latents."
-                )
-
         finally:
-
-            if "noise" in locals():
-                try: del noise
-                except UnboundLocalError: pass
-            if "work_latent" in locals():
-                try: del work_latent
-                except UnboundLocalError: pass
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-
-        if is_ltx_av and ltxav_obj is not None and _HAS_NESTED_TENSOR:
-            try:
-                final_t = samples["samples"] if isinstance(samples, dict) else samples
-
-                if isinstance(final_t, _NestedTensor):
-                    final_t_raw = final_t.tensors
-                else:
-                    final_t_raw = final_t
-
-                # ALBABIT-FIX: Removed internal normalization multipliers entirely. LTX natively recombines.
-                v_s, a_s = ltxav_obj.separate_audio_and_video_latents(final_t_raw, None)
-                v_s = v_s.detach()
-                a_s = a_s.detach()
-
-                recombined = _NestedTensor(
-                    ltxav_obj.recombine_audio_and_video_latents(v_s, a_s)
-                )
-                if isinstance(samples, dict):
-                    samples["samples"] = recombined
-                else:
-                    samples = recombined
-
-                del v_s, a_s, final_t_raw
-                logger.info("[Radiance] LTX-AV recombination applied (native scaling).")
-            except Exception as _av_err:
-                logger.warning(
-                    f"[Radiance] LTX-AV recombination failed: {_av_err}. "
-                )
-
+            # ─────────────────────────────────────────────────────────────────
+            # v3.2 FIX: Free GPU noise tensor to prevent VRAM leak (FIX #10)
+            # ─────────────────────────────────────────────────────────────────
+            if 'noise' in locals():
+                del noise
+            if 'work_latent' in locals():
+                del work_latent
+        
+        
+        # (noise deleted in finally block)
+        
+        # FIX #12: Ensure result is on CPU to prevent VRAM accumulation
+        if current_latent.is_cuda:
+            samples = current_latent.cpu()
+        else:
+            samples = current_latent
+            
+        timings["sampling"] = time.time() - t0
+        
+        # ─────────────────────────────────────────────────────────────────
+        # Prepare output
+        # ─────────────────────────────────────────────────────────────────
         t0 = time.time()
-        out = latent_image.copy()
+        out = latent.copy()
         out["samples"] = samples
         timings["output_prep"] = time.time() - t0
-
+        
         total_time = time.time() - t_start
-
+        
+        # ─────────────────────────────────────────────────────────────────
+        # Log timing report (v3.2: includes per-stage breakdown)
+        # ─────────────────────────────────────────────────────────────────
         logger.info(
-            f"Sampling complete: {target_total_steps} total target steps, {total_time:.2f}s total, "
+            f"Sampling complete: {steps} steps, {total_time:.2f}s total, "
             f"{timings['sampling']:.2f}s sampling"
         )
         for stage_num, s_start_t, s_end_t, samp, t in stage_timings:
-            logger.info(
-                f"  Stage {stage_num}: steps {s_start_t + 1}→{s_end_t} [{samp}] = {t:.3f}s"
-            )
-
-        # ── Restart sampling (IRES style) ─────────────────────────────────────
-        if restart_count > 0 and restart_schedule is not None and len(restart_schedule) > 0:
-            try:
-                _rs_sampler = comfy.samplers.sampler_object(primary_sampler)
-                raw_samples = out["samples"].to(device)
-                raw_samples = self._apply_restarts(
-                    raw_samples, model, positive, negative,
-                    _rs_sampler, sigmas, restart_schedule,
-                    restart_count, cfg, seed, device,
-                )
-                out["samples"] = raw_samples.cpu()
-                logger.info(
-                    f"Restart sampling applied: {restart_count} restart(s) at "
-                    f"{len(restart_schedule)} sigma level(s)"
-                )
-            except Exception as _rs_err:
-                logger.warning(f"Restart sampling failed: {_rs_err} — using unmodified output")
-
-        output_sigmas = (
-            sigmas if sigmas is not None and len(sigmas) > 0 else torch.tensor([0.0])
-        )
-
-        # ── sigmas_remaining: the unused schedule tail after effective_end ───
-        _eff_end_idx = min(effective_end, len(output_sigmas))
-        sigmas_remaining = output_sigmas[_eff_end_idx:] if _eff_end_idx < len(output_sigmas) else torch.tensor([0.0])
-
+            logger.info(f"  Stage {stage_num}: steps {s_start_t}→{s_end_t} [{samp}] = {t:.3f}s")
+        
+        # Ensure sigmas is a valid tensor
+        output_sigmas = sigmas if sigmas is not None and len(sigmas) > 0 else torch.tensor([0.0])
+        
+        # v3.2: Build sigma report string for diagnostics output
         sigma_report = build_sigma_report(
-            detected_type,
-            target_total_steps,
-            scheduler,
-            flux_shift,
-            denoise,
-            output_sigmas,
-            sampler_mode,
-            sorted_splits,
-            stage_timings,
-            total_time,
-            ays_active=ays_schedule,
-            frames=frames,
+            detected_type, steps, scheduler, flux_shift, denoise,
+            output_sigmas, sampler_mode, sorted_splits, stage_timings, total_time
         )
+        
+        return (out, output_sigmas, sigma_report)
 
-        latent_meta = _build_latent_meta(
-            detected_type=detected_type,
-            steps=target_total_steps,
-            scheduler=scheduler,
-            flux_shift=flux_shift,
-            denoise=denoise,
-            sigmas=output_sigmas,
-            ays_active=ays_schedule,
-            pag_active=(pag_scale > 0),
-            noise_type=noise_type,
-            tile_mode=tile_mode,
-            multi_cond_mode="Off",
-            clip_target=conditioning_clip_target,
-            seed=seed,
-            total_time_ms=int(total_time * 1000),
-            latent_format=latent_format,
-            frames=frames,
-            sdr_blend=sdr_blend,
-            sdr_inject_steps=sdr_inject_steps,
-            sdr_decay=sdr_decay,
-        )
 
-        # ── Non-finite guard ───────────────────────────────────────────────────
-        # CFG blowups, fp16/bf16 overflow, or a degenerate schedule can produce
-        # NaN/Inf in the sampled latent, which silently decode to black or garbage
-        # frames with no error. Detect, warn loudly, and sanitize so a bad run is
-        # visible in the log rather than shipped as a corrupt plate.
-        try:
-            _s = out.get("samples") if isinstance(out, dict) else None
-            if _s is not None and not torch.isfinite(_s).all():
-                _bad = int((~torch.isfinite(_s)).sum().item())
-                logger.warning(
-                    "[RadianceSamplerPro] %d non-finite value(s) (NaN/Inf) in sampled "
-                    "latent — sanitizing via nan_to_num. Check CFG, scheduler, and precision.",
-                    _bad,
-                )
-                out = {**out, "samples": torch.nan_to_num(_s, nan=0.0, posinf=0.0, neginf=0.0)}
-        except Exception as _nf_err:  # never let the guard itself break a valid run
-            logger.debug("[RadianceSamplerPro] finite-check skipped: %s", _nf_err)
-
-        # ── sigma_plot IMAGE ──────────────────────────────────────────────────
-        sigma_plot = self._build_sigma_plot(output_sigmas, detected_type)
-
-        return (out, output_sigmas, sigmas_remaining, sigma_plot)
+# ═══════════════════════════════════════════════════════════════════════════════
+#                         NODE REGISTRATION
+# ═══════════════════════════════════════════════════════════════════════════════
 
 NODE_CLASS_MAPPINGS = {
     "RadianceSamplerPro": RadianceSamplerPro,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceSamplerPro": "◎ Radiance Sampler",
+    "RadianceSamplerPro": "◎ Radiance Sampler Pro",
 }
