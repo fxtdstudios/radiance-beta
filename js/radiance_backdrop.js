@@ -28,6 +28,23 @@ const RADIANCE_PALETTE = {
 // Background glass fill
 const GLASS_FILL = "rgba(15, 15, 20, 0.45)";
 
+// Tinted glass: near-opaque dark base so the backdrop reads as a real panel
+// on the dark canvas (the old 0.45 fill was effectively invisible).
+const BASE_FILL = "rgba(18, 18, 24, 0.9)";
+// Strength of the category-colour wash bleeding down from the top edge.
+const WASH_ALPHA = 0.20;
+const WASH_HEIGHT = 130;
+
+// Convert "#rrggbb" -> "rgba(r,g,b,a)"; returns null for non-hex input.
+function hexToRgba(hex, a) {
+    if (typeof hex !== "string" || hex[0] !== "#" || hex.length < 7) return null;
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    if ([r, g, b].some(Number.isNaN)) return null;
+    return `rgba(${r}, ${g}, ${b}, ${a})`;
+}
+
 
 function promptBackdropTitle(defaultValue = "") {
     return new Promise((resolve) => {
@@ -335,9 +352,18 @@ app.registerExtension({
             ctx.quadraticCurveTo(x, y, x + r, y);
             ctx.closePath();
 
-            // Glass Translucent Fill
-            ctx.fillStyle = GLASS_FILL;
+            // Tinted glass: near-opaque dark base, then a soft top wash of the
+            // group's category colour (ties the fill to the border, keeps depth).
+            ctx.fillStyle = BASE_FILL;
             ctx.fill();
+            const washTop = hexToRgba(themeColor, WASH_ALPHA);
+            if (washTop) {
+                const washGrad = ctx.createLinearGradient(x, y, x, y + Math.min(h, WASH_HEIGHT));
+                washGrad.addColorStop(0, washTop);
+                washGrad.addColorStop(1, hexToRgba(themeColor, 0));
+                ctx.fillStyle = washGrad;
+                ctx.fill();
+            }
 
             // Glowing border
             ctx.strokeStyle = themeColor;
