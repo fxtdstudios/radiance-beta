@@ -2,6 +2,41 @@
 
 All notable changes to FXTD Radiance will be documented in this file.
 
+## [3.1.1] - 2026-06-02 ("Fidelity and Trust Release")
+
+Correctness, safety, and delivery-trust fixes for the 32-bit / HDR / EXR pipeline, plus real-AOV ingestion and hardened model loading. Closes the critical data-integrity and security findings from the pre-release engineering review.
+
+### Fixed
+
+- **HDR/EXR load no longer crushes scene-linear data.** The image-to-tensor path previously divided any array whose brightest pixel exceeded 2.0 by 255 (or 65535), silently darkening every real HDR/EXR plate ~255x. Normalization is now driven by the source format: integer formats normalize by their type max; float formats (EXR/HDR/float-TIFF) pass through untouched. Read -> Write of an EXR is now lossless.
+- **EXR writer can no longer write a silent 0-byte or downgraded file.** It raises a clear error when no EXR backend is available instead of reporting a phantom success.
+- **EXR writer preserves alpha and single-channel mattes** (1->RGB grayscale, 3->RGB, 4->RGBA), and no longer crashes on `(H,W)` matte input.
+- **`RadianceWrite` surfaces failures** by re-raising on write error (node turns red) instead of swallowing the exception.
+- **Sampler non-finite guard.** `RadianceSamplerPro` detects NaN/Inf in the sampled latent, warns, and sanitizes with `nan_to_num` so blown CFG/precision runs are visible instead of shipping black frames.
+- **HDR VAE Decode metadata output.** The node now emits its decode-settings JSON as a second `STRING` output (previously built and discarded).
+- Removed internal imports of deprecated shim paths, eliminating load-time `DeprecationWarning`s.
+
+### Security
+
+- **`torch.load` hardened.** All shippable checkpoint loads use `weights_only=True` (VAE, fast VAE, multipass depth/normal models, training data prep), preventing arbitrary-code-execution from malicious `.ckpt`/`.pth` files.
+- **Model downloads are atomic + integrity-checked.** The loader and multipass downloaders write to a temp file and atomically move into place, with optional SHA-256 verification and `RADIANCE_LOADER_OFFLINE` / `RADIANCE_UPSCALE_OFFLINE` switches for airgapped setups.
+
+### Added
+
+- **Multipass: AOV Reader.** Reads a real multilayer/AOV OpenEXR (Arnold, Redshift, Karma, Cycles, V-Ray) and splits its named layers into the same outputs as the Multipass Master extractor, so ground-truth render passes flow straight into the EXR-passes writer and relight/comp chain. Scene-linear values preserved; missing layers come through black.
+- **Alpha output on the EXR write node.** `RadianceWrite` gained an optional `mask` input, written as the EXR alpha channel (RGBA) for EXR formats.
+- **Upscaler HDR + color handling.** Image and video upscalers gained `hdr_mode` (Reinhard tonemap round-trip) and `color_encoding` (linear<->sRGB / linear<->LogC3 OETF round-trip).
+
+### Documentation
+
+- Website docs now render Mermaid workflow diagrams as themed graphs (previously shown as raw code) via `scripts/build_website_docs.py`.
+
+### Testing & CI
+
+- Full `pytest tests/` passes against real torch + OpenEXR + OpenColorIO + colour-science (1347 passed, 34 skipped).
+- CI installs real runtime dependencies and runs the whole suite; the publish gate runs the full suite. Removed a stale CI import of a non-existent module.
+- Added `tests/test_io_hdr_regression.py` covering the load/write/mask fixes.
+
 ## [3.1.0] - 2026-05-25 ("Temporal, Viewer, and Registry Release")
 
 ### Added

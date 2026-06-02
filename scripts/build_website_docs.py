@@ -68,6 +68,7 @@ def markdown_to_html(markdown: str) -> str:
     table: list[str] = []
     code: list[str] = []
     in_code = False
+    code_lang = ""
 
     def flush_paragraph() -> None:
         nonlocal paragraph
@@ -91,14 +92,20 @@ def markdown_to_html(markdown: str) -> str:
         line = raw.rstrip()
         if line.startswith("```"):
             if in_code:
-                out.append(f"<pre><code>{html.escape(chr(10).join(code))}</code></pre>")
+                body = html.escape(chr(10).join(code))
+                if code_lang == "mermaid":
+                    out.append(f'<div class="diagram"><pre class="mermaid">{body}</pre></div>')
+                else:
+                    out.append(f"<pre><code>{body}</code></pre>")
                 code = []
                 in_code = False
+                code_lang = ""
             else:
                 flush_paragraph()
                 flush_bullets()
                 flush_table()
                 in_code = True
+                code_lang = line[3:].strip().lower()
             continue
         if in_code:
             code.append(raw)
@@ -206,7 +213,7 @@ INDEX_HTML = """<!DOCTYPE html>
         <a href="#nodes" class="btn-ghost">Browse Nodes</a>
       </div>
       <div class="hero-meta">
-        <div><div class="hero-meta-val">103</div><div class="hero-meta-label">Registered Nodes</div></div>
+        <div><div class="hero-meta-val">104</div><div class="hero-meta-label">Registered Nodes</div></div>
         <div><div class="hero-meta-val">10</div><div class="hero-meta-label">Node Groups</div></div>
         <div><div class="hero-meta-val">EXR</div><div class="hero-meta-label">First Pipeline</div></div>
       </div>
@@ -230,6 +237,37 @@ INDEX_HTML = """<!DOCTYPE html>
     </article>
   </main>
 
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: 'strict',
+      theme: 'base',
+      fontFamily: "'Space Grotesk', sans-serif",
+      flowchart: { curve: 'basis', useMaxWidth: false, htmlLabels: true, padding: 22, nodeSpacing: 70, rankSpacing: 80 },
+      themeVariables: {
+        background: '#0f0f0f',
+        primaryColor: '#141414',
+        primaryBorderColor: '#c8a96e',
+        primaryTextColor: '#ffffff',
+        secondaryColor: '#151515',
+        tertiaryColor: '#0f0f0f',
+        lineColor: '#888888',
+        textColor: '#cfcfcf',
+        edgeLabelBackground: '#080808',
+        clusterBkg: '#0b0b0b',
+        clusterBorder: 'rgba(255,255,255,0.12)',
+        fontSize: '20px'
+      }
+    });
+    window.__renderMermaid = async () => {
+      const nodes = document.querySelectorAll('pre.mermaid:not([data-processed])');
+      if (!nodes.length) return;
+      try { await mermaid.run({ nodes: Array.from(nodes) }); }
+      catch (e) { console.error('mermaid render failed', e); }
+    };
+    window.__renderMermaid();
+  </script>
   <script src="app.js"></script>
 </body>
 </html>
@@ -426,6 +464,27 @@ blockquote {
 }
 mark { background: rgba(200,169,110,0.3); color: var(--text-primary); }
 .doc-link { color: var(--accent); }
+.diagram {
+  margin: 32px 0; padding: 32px 28px; width: 100%;
+  background: radial-gradient(120% 140% at 50% 0%, #101010 0%, var(--bg-card) 60%, #0b0b0b 100%);
+  border: 1px solid var(--border); border-radius: 14px;
+  overflow-x: auto; text-align: center;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 18px 40px -28px rgba(0,0,0,0.9);
+}
+.diagram::before {
+  content: "WORKFLOW"; display: block; margin-bottom: 16px;
+  font-family: var(--font-display); font-size: 10px; font-weight: 600;
+  letter-spacing: 0.22em; color: var(--accent); text-transform: uppercase; opacity: 0.7;
+}
+pre.mermaid {
+  background: transparent !important; border: 0; padding: 0; margin: 0;
+  display: inline-block; min-width: 0; line-height: normal;
+  font-family: var(--font-display);
+}
+pre.mermaid:not([data-processed]) { color: var(--text-muted); font-size: 12px; }
+.diagram svg { width: 100%; max-width: 960px; height: auto; }
+.diagram .nodeLabel, .diagram .edgeLabel, .diagram .label { font-size: 16px; }
+.diagram .edgeLabel { color: var(--text-secondary); }
 @media (max-width: 900px) {
   nav { padding: 0 20px; }
   .nav-right .nav-link { display: none; }
@@ -476,6 +535,7 @@ function renderPage() {
   if (location.hash.replace('#', '') !== page.id) {
     history.replaceState(null, '', `#${page.id}`);
   }
+  if (window.__renderMermaid) window.__renderMermaid();
 }
 
 renderNav();
