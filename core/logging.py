@@ -97,11 +97,12 @@ class TextTheme:
 
     def __init__(self, theme_name: str = "minimalist", use_unicode: bool = True, use_color: bool = True):
         self.theme_name = theme_name.lower().strip()
-        if self.theme_name not in ("classic", "cyberpunk", "minimalist", "matrix", "compact"):
-            self.theme_name = "minimalist"
+        if self.theme_name not in ("classic", "cyberpunk", "minimalist", "matrix", "compact", "pro"):
+            self.theme_name = "pro"
 
         self.use_unicode = use_unicode
         self.use_color = use_color
+        self.columnar = False
 
         # Base box character sets
         if use_unicode:
@@ -152,6 +153,8 @@ class TextTheme:
             self.setup_matrix_theme()
         elif self.theme_name == "compact":
             self.setup_compact_theme()
+        elif self.theme_name == "pro":
+            self.setup_pro_theme()
         else:  # classic
             self.setup_classic_theme()
 
@@ -280,6 +283,29 @@ class TextTheme:
         self.status_warn = "Missing"
         self.status_err = "Missing"
 
+    def setup_pro_theme(self):
+        # Clean, column-aligned studio theme. The brand is printed ONCE as a
+        # session header at startup, so the per-line logo is suppressed and each
+        # record is a scannable  time / LEVEL / channel / message  row.
+        self.columnar = True
+        self.logo = ""
+        self.arrow = ""
+        self.chan_prefix = ""
+        self.chan_suffix = ""
+        self.chan_color = "\033[38;5;102m"   # muted slate channel
+
+        # Fixed-width 5-char UPPERCASE level tags, one accent colour each
+        self.lbl_crit    = "\033[1;38;5;231;48;5;124mCRIT \033[0m"
+        self.lbl_err     = "\033[38;5;167mERROR\033[0m"
+        self.lbl_warn    = "\033[38;5;179mWARN \033[0m"
+        self.lbl_success = "\033[38;5;108mOK   \033[0m"
+        self.lbl_info    = "\033[38;5;110mINFO \033[0m"
+        self.lbl_debug   = "\033[38;5;240mDEBUG\033[0m"
+
+        self.status_ok = "ok"
+        self.status_warn = "missing"
+        self.status_err = "missing!"
+
 
 class RadianceConsoleFormatter(logging.Formatter):
     """Custom logging formatter that renders premium colored log records.
@@ -324,16 +350,22 @@ class RadianceConsoleFormatter(logging.Formatter):
             c_reset = "\033[0m"
             c_dim = "\033[90m"
 
-            # Construct channel segment
-            if channel:
-                chan_str = f"{theme.chan_prefix}{channel}{theme.chan_suffix}"
-                chan_part = f" {theme.arrow} {theme.chan_color}{chan_str}{c_reset}"
+            if getattr(theme, "columnar", False):
+                # Columnar studio layout: time  LEVEL  channel  message
+                chan_fixed = (channel or "core")[:8].ljust(8)
+                time_part = f"{c_dim}{t_str}{c_reset}"
+                prefix = f"{time_part}  {level_badge}  {theme.chan_color}{chan_fixed}{c_reset}"
             else:
-                chan_part = ""
+                # Construct channel segment
+                if channel:
+                    chan_str = f"{theme.chan_prefix}{channel}{theme.chan_suffix}"
+                    chan_part = f" {theme.arrow} {theme.chan_color}{chan_str}{c_reset}"
+                else:
+                    chan_part = ""
 
-            level_part = f" {theme.arrow} {level_badge}"
-            time_part = f"{c_dim}[{t_str}]{c_reset}"
-            prefix = f"{time_part} {theme.logo}{chan_part}{level_part}"
+                level_part = f" {theme.arrow} {level_badge}"
+                time_part = f"{c_dim}[{t_str}]{c_reset}"
+                prefix = f"{time_part} {theme.logo}{chan_part}{level_part}"
 
             msg = record.getMessage()
 
@@ -382,7 +414,7 @@ def setup_radiance_logging(level: int = logging.INFO) -> logging.Logger:
     init_windows_ansi()
     color_enabled = supports_color()
     unicode_enabled = supports_unicode()
-    theme_name = os.environ.get("RADIANCE_LOG_THEME", "minimalist")
+    theme_name = os.environ.get("RADIANCE_LOG_THEME", "pro")
 
     # Create stream handler
     stream_handler = logging.StreamHandler(sys.stdout)
@@ -396,6 +428,18 @@ def setup_radiance_logging(level: int = logging.INFO) -> logging.Logger:
     stream_handler.setLevel(level)
 
     logger.addHandler(stream_handler)
+
+    # Pro theme prints the brand once as a session header (keeps lines clean).
+    if theme_name == "pro" and color_enabled:
+        mark = "\u25ce" if unicode_enabled else "o"
+        rule = ("\u00b7" * 50) if unicode_enabled else ("." * 50)
+        # decode the unicode escapes we stored as literals above
+        mark = mark.encode().decode("unicode_escape") if mark.startswith("\\u") else mark
+        rule = rule.encode().decode("unicode_escape") if "\\u" in rule else rule
+        sess = time.strftime("%H:%M")
+        sys.stdout.write(f"\033[38;5;179m{mark} radiance\033[0m \033[38;5;240m{rule}\033[0m \033[38;5;102msession {sess}\033[0m\n")
+        sys.stdout.flush()
+
     return logger
 
 
@@ -414,7 +458,7 @@ def print_box(
         return
 
     unicode_enabled = supports_unicode()
-    theme_name = os.environ.get("RADIANCE_LOG_THEME", "minimalist")
+    theme_name = os.environ.get("RADIANCE_LOG_THEME", "pro")
     theme = TextTheme(theme_name, unicode_enabled, supports_color())
 
     # Calculate padding based on internal content length
@@ -467,7 +511,7 @@ def print_table(
         return
 
     unicode_enabled = supports_unicode()
-    theme_name = os.environ.get("RADIANCE_LOG_THEME", "minimalist")
+    theme_name = os.environ.get("RADIANCE_LOG_THEME", "pro")
     theme = TextTheme(theme_name, unicode_enabled, supports_color())
 
     num_cols = len(headers)
@@ -572,6 +616,13 @@ def print_premium_loader_hud(
     Features dynamic color VRAM usage bars, structured diagnostic grids, and auto-truncating table column mappings
     that scale perfectly inside a double-bordered container.
     """
+    if os.environ.get("RADIANCE_LOG_THEME", "pro") == "pro":
+        _print_loader_summary_pro(
+            preset, overrides, resolved_type, latent_fmt, est_vram, avail_vram,
+            total_vram, unet_name, unet_dtype, unet_time, clip_slots, clip_dtype,
+            clip_time, vae_name, vae_time, loras, total_time_ms, caching)
+        return
+
     from radiance.model.cache import _unet_cache, _clip_cache, _vae_cache
     use_color = supports_color()
     use_unicode = supports_unicode()
@@ -770,3 +821,62 @@ def print_premium_loader_hud(
     sys.stdout.flush()
 
 
+def _print_loader_summary_pro(preset, overrides, resolved_type, latent_fmt,
+                              est_vram, avail_vram, total_vram, unet_name, unet_dtype,
+                              unet_time, clip_slots, clip_dtype, clip_time, vae_name,
+                              vae_time, loras, total_time_ms, caching) -> None:
+    """Clean, column-aligned loader summary for the 'pro' theme.
+
+    Replaces the ornate double-bordered HUD with a calm card: aligned key/value
+    rows, a single block VRAM bar, no emoji, no heavy box art.
+    """
+    use_color = supports_color()
+    use_unicode = supports_unicode()
+    R     = "\033[0m"          if use_color else ""
+    DIM   = "\033[38;5;240m"   if use_color else ""
+    SLATE = "\033[38;5;102m"   if use_color else ""
+    GOLD  = "\033[38;5;179m"   if use_color else ""
+    GREEN = "\033[38;5;108m"   if use_color else ""
+    AMBER = "\033[38;5;179m"   if use_color else ""
+    VAL   = "\033[38;5;110m"   if use_color else ""
+
+    mark = "\u25ce" if use_unicode else "o"
+    rule = ("\u2500" * 46) if use_unicode else ("-" * 46)
+
+    used = max(total_vram - avail_vram, 0.0)
+    pct = (used / total_vram) if total_vram > 0 else 0.0
+    barw = 18
+    fill = max(0, min(barw, int(round(pct * barw))))
+    if use_unicode:
+        bar = ("\u2588" * fill) + ("\u2591" * (barw - fill))
+    else:
+        bar = ("#" * fill) + ("-" * (barw - fill))
+    tight = avail_vram > 0 and est_vram > avail_vram * 0.9
+    bar_color = AMBER if tight else GREEN
+
+    ovr = f" {DIM}(overrides: {', '.join(overrides)}){R}" if overrides else ""
+    cache_str = f"{GREEN}on{R}" if caching else f"{DIM}off{R}"
+
+    def row(label, name, dtype, t):
+        name = (name or "")[:34]
+        tcol = f"{DIM}{t:.1f}s{R}" if (t and t > 0) else f"{DIM}cached{R}"
+        dt = f"{DIM}{dtype}{R}" if dtype else ""
+        return f"  {label:<6} {name:<34} {dt}  {tcol}"
+
+    out = []
+    out.append(f"{GOLD}{mark} radiance loader{R}  {DIM}{resolved_type} \u00b7 {latent_fmt}{R}")
+    out.append(f"{DIM}{rule}{R}")
+    out.append(f"  preset   {VAL}{preset}{R}{ovr}")
+    out.append(f"  cache    {cache_str:<14} vram  {bar_color}{bar}{R} {VAL}{used:.1f}{R}/{total_vram:.0f} GB")
+    out.append(f"{DIM}{rule}{R}")
+    out.append(row("unet", unet_name, unet_dtype, unet_time))
+    out.append(row("clip", " + ".join(clip_slots) if clip_slots else "", clip_dtype, clip_time))
+    out.append(row("vae", vae_name, None, vae_time))
+    if loras:
+        for l in loras:
+            out.append(row("lora", l.get("name", "lora"), f"m={l.get('model_str','')} c={l.get('clip_str','')}", 0.0))
+    out.append(f"{DIM}{rule}{R}")
+    out.append(f"  {GREEN}ready{R} in {VAL}{total_time_ms / 1000:.1f}s{R}")
+
+    sys.stdout.write("\n" + "\n".join(out) + "\n\n")
+    sys.stdout.flush()
