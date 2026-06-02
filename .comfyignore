@@ -44,3 +44,4 @@ PRE_RELEASE_REVIEW.md
 CLEANUP_REPORT.md
 radiance_hdr_vae_decode_report.md
 *.svg
+RELEASE_NOTES_*.md

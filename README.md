@@ -80,7 +80,7 @@ The source currently exposes **100+ node classes**. Runtime availability depends
 | Generate | Read Models, Sampler Pro, prompt tools, LoRA stack, regional prompts |
 | Color | Grade, Grade Match, CDL, LUTs, Curves, White Balance, Color Space Convert |
 | HDR | ACES, OCIO, HDR VAE, tone mapping, HDR encode/decode, QC |
-| VFX | Plate prep, masks, roto, SAM, depth, optics, motion, multipass, relight |
+| VFX | Plate prep, masks, roto, SAM, depth, optics, motion, multipass, AOV reader (real EXR layers), relight |
 | Video | Video loader, prompt builder, sampler, T2V/I2V, routing, export |
 | Upscale | Image/video upscale, tiling, face restoration |
 | Review | Viewer, scopes, contact sheets, preview server, policy guard |
@@ -125,8 +125,16 @@ The experimental `scripts/resolve_bridge.py` helper must be run inside DaVinci R
 | Nuke bridge smoke test | Passed |
 | MCP bridge smoke test | Passed |
 | DaVinci Resolve live API push | Not included; folder handoff only |
-| Local full pytest run | Not run in this shell because `pytest` is not installed |
-| Full ComfyUI import test | Must be run inside the target ComfyUI environment before tagging |
+| Full pytest suite (real torch + OpenEXR) | Passed — 1347 passed, 34 skipped |
+| HDR/EXR I/O regression tests | Passed (scene-linear preserved; alpha round-trips; no 0-byte writes) |
+| Full ComfyUI import test | Run in the target ComfyUI environment before tagging |
+
+## Known Limitations (v3.1)
+
+- **RUDRA dynamic-range decoder not included.** The HDR VAE Decode node ships with the baseline decoder. The dynamic-range-conditioned ("dr_dim") RUDRA decoder is not part of this release; the `rudra_decoder` toggle falls back to baseline behavior.
+- **Estimated VFX passes are estimates.** The Multipass *Master* extractor derives passes (albedo, roughness, AO, segmentation ID, etc.) from a single beauty image — useful for AI/2D footage, but not physically-accurate render AOVs. For ground-truth passes, feed a multilayer EXR through the new **Multipass: AOV Reader**. The segmentation ID output is a clustered matte, not a spec-compliant Cryptomatte.
+- **Legacy import shims.** Root `nodes_*.py` modules remain as deprecation shims for backward-compatible imports; they register no nodes and will be removed in a future release.
+- **SR upscale color.** Super-resolution backends are display-referred; for scene-linear input use the upscaler's `hdr_mode` (Reinhard preserve) and `color_encoding` (OETF round-trip) options.
 
 ## Publish Checklist
 
