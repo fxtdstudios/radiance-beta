@@ -51,5 +51,5 @@ flowchart LR
 
 ## Node Coverage
 
-The main catalog currently documents 103 registered Radiance nodes across Color, HDR, IO, VFX, Pipeline, Review, Upscale, Video, AI, and Generate groups. User-generated gizmos are dynamic and are documented as a workflow pattern rather than as fixed node names.
+The main catalog currently documents 104 registered Radiance nodes across Color, HDR, IO, VFX, Pipeline, Review, Upscale, Video, AI, and Generate groups. User-generated gizmos are dynamic and are documented as a workflow pattern rather than as fixed node names.
 
