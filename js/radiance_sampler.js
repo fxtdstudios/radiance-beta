@@ -726,6 +726,24 @@ app.registerExtension({
                 toggleFields(this);
             }, 100);
         };
+
+        // Re-apply folding after a saved workflow restores this node. onNodeCreated
+        // runs BEFORE ComfyUI deserializes widget values, so the preset value isn't
+        // known at creation time; without this hook a node saved with a non-None
+        // preset (or in Custom mode) could load stuck-collapsed. toggleFields and
+        // updateUILocks are module-level, so they are safe to call here.
+        const onConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function (info) {
+            if (onConfigure) onConfigure.apply(this, arguments);
+            const self = this;
+            const reapply = () => {
+                const presetW = self.widgets?.find(w => w.name === "preset");
+                if (presetW) updateUILocks(self, presetW.value);
+                toggleFields(self);
+            };
+            requestAnimationFrame(reapply);  // after graph finishes configuring
+            setTimeout(reapply, 50);         // belt-and-suspenders
+        };
     }
 });
 
