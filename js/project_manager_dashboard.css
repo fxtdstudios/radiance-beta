@@ -5,12 +5,17 @@
     --rpm-border: rgba(255, 255, 255, 0.08); /* Satin micro-bevel edge */
     --rpm-text: #f5f5f7; /* High-contrast white */
     --rpm-text-secondary: #8e8e93; /* Apple dim gray */
-    --rpm-accent: #00bdff; /* Ocean Cyan */
-    --rpm-accent-soft: rgba(0, 189, 255, 0.12); /* Glowing cyan highlight */
+    --rpm-accent: #c8a96e; /* FXTD Gold */
+    --rpm-accent-soft: rgba(200, 169, 110, 0.12); /* FXTD gold highlight */
     --rpm-shadow: 0 16px 48px rgba(0, 0, 0, 0.65), inset 0 0 0 1px rgba(255, 255, 255, 0.03); /* macOS double shadow */
     --rpm-radius: 8px;
-    --rpm-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --rpm-font: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --rpm-font-display: 'Space Grotesk', 'Inter', sans-serif;
 }
+
+/* FXTD: headings/brand use the display typeface */
+.rpm-brand-title, .rpm-brand-mark, .rpm-page-title, .rpm-card-title,
+.rpm-work-title, .rpm-storage-title { font-family: var(--rpm-font-display); }
 
 * {
     box-sizing: border-box;
@@ -77,7 +82,7 @@ button {
     color: #000000;
     font-size: 17px;
     font-weight: 800;
-    box-shadow: 0 8px 24px rgba(0, 189, 255, 0.3);
+    box-shadow: 0 8px 24px rgba(200, 169, 110, 0.3);
 }
 
 .rpm-brand-title {
@@ -118,9 +123,9 @@ button {
 
 .rpm-nav-item.is-active {
     color: var(--rpm-accent) !important;
-    background: rgba(0, 189, 255, 0.12) !important;
+    background: rgba(200, 169, 110, 0.12) !important;
     font-weight: 600;
-    box-shadow: inset 0 0 0 1px rgba(0, 189, 255, 0.12) !important;
+    box-shadow: inset 0 0 0 1px rgba(200, 169, 110, 0.12) !important;
 }
 
 .rpm-nav-item:active {
@@ -173,7 +178,7 @@ button {
     width: var(--storage-used);
     height: 100%;
     background: var(--rpm-accent);
-    box-shadow: 0 0 10px rgba(0, 189, 255, 0.4);
+    box-shadow: 0 0 10px rgba(200, 169, 110, 0.4);
 }
 
 .rpm-main {
@@ -229,8 +234,8 @@ button {
 
 .rpm-search:focus {
     background: rgba(255, 255, 255, 0.07);
-    border-color: rgba(0, 189, 255, 0.58);
-    box-shadow: 0 0 12px rgba(0, 189, 255, 0.15);
+    border-color: rgba(200, 169, 110, 0.58);
+    box-shadow: 0 0 12px rgba(200, 169, 110, 0.15);
 }
 
 .rpm-icon-button {
@@ -272,7 +277,7 @@ button {
     background: var(--rpm-accent);
     border-radius: 50%;
     font-weight: 750;
-    box-shadow: 0 4px 12px rgba(0, 189, 255, 0.2);
+    box-shadow: 0 4px 12px rgba(200, 169, 110, 0.2);
 }
 
 .rpm-user-name {
@@ -349,7 +354,7 @@ button {
     min-height: 132px;
     border-radius: 8px;
     background:
-        linear-gradient(135deg, rgba(0, 189, 255, 0.16), transparent 52%),
+        linear-gradient(135deg, rgba(200, 169, 110, 0.16), transparent 52%),
         repeating-linear-gradient(90deg, rgba(255,255,255,0.015) 0 1px, transparent 1px 18px),
         repeating-linear-gradient(0deg, rgba(255,255,255,0.01) 0 1px, transparent 1px 18px),
         #08080c;
@@ -404,7 +409,7 @@ button {
     padding: 0 10px;
     color: var(--rpm-accent);
     background: var(--rpm-accent-soft);
-    border: 1px solid rgba(0, 189, 255, 0.25);
+    border: 1px solid rgba(200, 169, 110, 0.25);
     border-radius: 999px;
     font-size: 11px;
     font-weight: 650;
@@ -441,14 +446,14 @@ button {
     background: var(--rpm-accent);
     border-color: var(--rpm-accent);
     font-weight: 600;
-    box-shadow: 0 4px 12px rgba(0, 189, 255, 0.2), inset 0 1px 0 rgba(255,255,255,0.15);
+    box-shadow: 0 4px 12px rgba(200, 169, 110, 0.2), inset 0 1px 0 rgba(255,255,255,0.15);
 }
 
 .rpm-button-primary:hover {
-    background: #48b7ff;
-    border-color: #48b7ff;
+    background: #d8bd87;
+    border-color: #d8bd87;
     color: #000000;
-    box-shadow: 0 6px 16px rgba(0, 189, 255, 0.35), inset 0 1px 0 rgba(255,255,255,0.2);
+    box-shadow: 0 6px 16px rgba(200, 169, 110, 0.35), inset 0 1px 0 rgba(255,255,255,0.2);
 }
 
 .rpm-list {
@@ -530,7 +535,7 @@ button {
 }
 
 .rpm-favorite:hover {
-    background: rgba(0, 189, 255, 0.1);
+    background: rgba(200, 169, 110, 0.1);
 }
 
 .rpm-actions-grid {

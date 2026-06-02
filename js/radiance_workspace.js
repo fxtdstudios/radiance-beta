@@ -73,6 +73,113 @@ window.addEventListener("message", (event) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+//        IN-CANVAS DASHBOARD OVERLAY  (renders inside ComfyUI, not a new tab)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Opens a Radiance dashboard page (Project Manager / Workflow Library) as a modal
+// overlay layered on top of the ComfyUI canvas in the SAME tab. The page runs in
+// an <iframe>; it already posts load/save events to window.parent, which the
+// listener above handles — so "load into canvas" keeps working. Closeable via the
+// X button, the Esc key, or clicking the dimmed backdrop.
+if (!window.showRadianceDashboard) {
+    window.showRadianceDashboard = function (url, title = "Radiance") {
+        // If one is already open, just bring focus / replace its source.
+        const existing = document.getElementById("radiance-dashboard-overlay");
+        if (existing) {
+            const fr = existing.querySelector("iframe");
+            if (fr && url) fr.src = url;
+            return;
+        }
+
+        const overlay = document.createElement("div");
+        overlay.id = "radiance-dashboard-overlay";
+        Object.assign(overlay.style, {
+            position: "fixed", inset: "0", zIndex: "10000",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            background: "rgba(4,4,4,0.72)", backdropFilter: "blur(6px)",
+            WebkitBackdropFilter: "blur(6px)",
+        });
+
+        const panel = document.createElement("div");
+        Object.assign(panel.style, {
+            position: "relative",
+            width: "min(94vw, 1500px)", height: "min(92vh, 980px)",
+            display: "flex", flexDirection: "column",
+            background: "#0d0d0d",
+            border: "1px solid rgba(255,255,255,0.10)", borderRadius: "14px",
+            overflow: "hidden",
+            boxShadow: "0 40px 120px -40px rgba(0,0,0,0.9)",
+        });
+
+        const bar = document.createElement("div");
+        Object.assign(bar.style, {
+            display: "flex", alignItems: "center", gap: "10px",
+            padding: "12px 16px", flex: "0 0 auto",
+            borderBottom: "1px solid rgba(255,255,255,0.08)",
+            background: "linear-gradient(180deg,#121212,#0d0d0d)",
+            fontFamily: "'Space Grotesk','Inter',sans-serif",
+        });
+        const dot = document.createElement("span");
+        Object.assign(dot.style, {
+            width: "9px", height: "9px", borderRadius: "50%",
+            background: "#c8a96e", boxShadow: "0 0 10px rgba(200,169,110,0.8)",
+        });
+        const label = document.createElement("div");
+        label.textContent = title;
+        Object.assign(label.style, {
+            color: "#fff", fontSize: "13px", fontWeight: "600",
+            letterSpacing: "0.04em", flex: "1 1 auto",
+        });
+        const openTab = document.createElement("button");
+        openTab.textContent = "Open in tab \u2197";
+        Object.assign(openTab.style, {
+            background: "transparent", color: "#888",
+            border: "1px solid rgba(255,255,255,0.12)", borderRadius: "7px",
+            padding: "5px 10px", cursor: "pointer", fontSize: "11px",
+            fontFamily: "inherit", letterSpacing: "0.03em",
+        });
+        openTab.onmouseenter = () => { openTab.style.color = "#fff"; openTab.style.borderColor = "rgba(255,255,255,0.3)"; };
+        openTab.onmouseleave = () => { openTab.style.color = "#888"; openTab.style.borderColor = "rgba(255,255,255,0.12)"; };
+        openTab.onclick = () => window.open(url, "_blank");
+
+        const closeBtn = document.createElement("button");
+        closeBtn.textContent = "\u2715";
+        Object.assign(closeBtn.style, {
+            background: "transparent", color: "#bbb",
+            border: "1px solid rgba(255,255,255,0.12)", borderRadius: "7px",
+            width: "30px", height: "28px", cursor: "pointer",
+            fontSize: "14px", lineHeight: "1", fontFamily: "inherit",
+        });
+        closeBtn.onmouseenter = () => { closeBtn.style.color = "#fff"; closeBtn.style.background = "rgba(255,80,80,0.18)"; closeBtn.style.borderColor = "rgba(255,80,80,0.4)"; };
+        closeBtn.onmouseleave = () => { closeBtn.style.color = "#bbb"; closeBtn.style.background = "transparent"; closeBtn.style.borderColor = "rgba(255,255,255,0.12)"; };
+
+        const iframe = document.createElement("iframe");
+        iframe.src = url;
+        Object.assign(iframe.style, {
+            flex: "1 1 auto", width: "100%", border: "0", background: "#0d0d0d",
+        });
+
+        const close = () => {
+            window.removeEventListener("keydown", onKey);
+            overlay.remove();
+        };
+        const onKey = (e) => { if (e.key === "Escape") close(); };
+        closeBtn.onclick = close;
+        overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) close(); });
+        window.addEventListener("keydown", onKey);
+
+        bar.appendChild(dot);
+        bar.appendChild(label);
+        bar.appendChild(openTab);
+        bar.appendChild(closeBtn);
+        panel.appendChild(bar);
+        panel.appendChild(iframe);
+        overlay.appendChild(panel);
+        document.body.appendChild(overlay);
+    };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 //                           ENCODING HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -406,10 +513,10 @@ app.registerExtension({
 
             // Keep the Project Manager dashboard separate from the workflow library.
             this.addWidget("button", "◎ PROJECT MANAGER", "launch_project_manager", () => {
-                window.open("/extensions/radiance/project_manager_dashboard.html", "_blank");
+                window.showRadianceDashboard("/extensions/radiance/project_manager_dashboard.html", "Radiance Project Manager");
             });
             this.addWidget("button", "WORKFLOW LIBRARY", "launch_dashboard", () => {
-                window.open("/extensions/radiance/workspace_dashboard.html", "_blank");
+                window.showRadianceDashboard("/extensions/radiance/workspace_dashboard.html", "Radiance Workflow Library");
             });
             this.addWidget("button", "QUICK SAVE", "quick_save", () => this.saveToLibrary());
             this.addWidget("button", "INCREMENTAL SAVE", "inc_save", () => this.incrementalSave());
