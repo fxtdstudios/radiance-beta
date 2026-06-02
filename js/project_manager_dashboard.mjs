@@ -81,214 +81,198 @@ function escapeHtml(value) {
     })[char]);
 }
 
-function iconFor(label) {
-    const icons = {
-        Dashboard: "D",
-        Projects: "[]",
-        Shots: "::",
-        Workflows: "<>",
-        Versions: "=",
-        Review: "OK",
-        Assets: "#",
-        Settings: "*",
+const NAV = [
+    { key: "Dashboard", icon: "dashboard", active: true },
+    { key: "Projects", icon: "folders" },
+    { key: "Shots", icon: "shots" },
+    { key: "Assets", icon: "assets" },
+    { key: "Reviews", icon: "review", badge: "review" },
+    { key: "Renders", icon: "renders" },
+    { key: "Library", icon: "library" },
+];
+
+function svg(name) {
+    const paths = {
+        dashboard: '<rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>',
+        folders: '<path d="M3 7h5l2 2h9a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7z"/>',
+        shots: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18M8 5v14"/>',
+        assets: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z"/><path d="M12 12l8-4.5M12 12v9"/>',
+        review: '<circle cx="12" cy="12" r="3"/><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/>',
+        renders: '<rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/>',
+        library: '<rect x="3" y="5" width="3" height="14"/><rect x="8" y="5" width="3" height="14"/><path d="M14 6l4 13"/>',
+        search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/>',
+        play: '<path d="M8 5v14l11-7z"/>',
+        resume: '<path d="M9 14l-4-4 4-4"/><path d="M5 10h11a4 4 0 0 1 0 8h-1"/>',
+        save: '<path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h7V4M8 20v-6h8v6"/>',
     };
-    return icons[label] || "-";
+    const fill = name === "play" ? "currentColor" : "none";
+    return `<svg viewBox="0 0 24 24" fill="${fill}" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${paths[name] || ""}</svg>`;
 }
 
-function Sidebar(data) {
-    return `
-        <aside class="rpm-sidebar">
-            <div class="rpm-brand">
-                <img class="rpm-brand-mark" src="/extensions/radiance/r_icon.png" alt="Radiance" />
-                <div>
-                    <div class="rpm-brand-title">Radiance</div>
-                    <div class="rpm-brand-subtitle">Project Manager</div>
-                </div>
-            </div>
-            <nav class="rpm-nav" aria-label="Project Manager">
-                ${data.nav.map((item) => `
-                    <div class="rpm-nav-item ${item === "Dashboard" ? "is-active" : ""}">
-                        <span class="rpm-nav-icon">${iconFor(item)}</span>
-                        <span>${escapeHtml(item)}</span>
-                    </div>
-                `).join("")}
-            </nav>
-            <div class="rpm-sidebar-spacer"></div>
-            ${StorageMiniBar(data.storage)}
-        </aside>
-    `;
-}
-
-function StorageMiniBar(storage) {
-    return `
-        <section class="rpm-storage" style="--storage-used: ${storage.percent}%">
-            <div class="rpm-storage-row">
-                <span class="rpm-storage-title">Storage</span>
-                <span>${escapeHtml(storage.percent)}%</span>
-            </div>
-            <div class="rpm-storage-track" aria-hidden="true">
-                <div class="rpm-storage-fill"></div>
-            </div>
-            <div class="rpm-storage-row">
-                <span>${escapeHtml(storage.usedLabel)} used</span>
-                <span>${escapeHtml(storage.totalLabel)}</span>
-            </div>
-        </section>
-    `;
-}
-
-function TopBar(user) {
-    return `
-        <header class="rpm-topbar">
-            <h1 class="rpm-page-title">Dashboard</h1>
-            <div class="rpm-top-actions">
-                <input class="rpm-search" data-search type="search" placeholder="Search projects, shots, versions">
-                <button class="rpm-icon-button" type="button" title="Notifications" data-action="Notifications">!</button>
-                <div class="rpm-user">
-                    <div class="rpm-user-avatar">A</div>
-                    <div>
-                        <div class="rpm-user-name">${escapeHtml(user.name)}</div>
-                        <div class="rpm-user-role">${escapeHtml(user.role)}</div>
-                    </div>
-                </div>
-            </div>
-        </header>
-    `;
-}
-
-function Card(title, body, kicker = "") {
-    return `
-        <section class="rpm-card">
-            <div class="rpm-card-header">
-                <h2 class="rpm-card-title">${escapeHtml(title)}</h2>
-                ${kicker ? `<span class="rpm-card-kicker">${escapeHtml(kicker)}</span>` : ""}
-            </div>
-            <div class="rpm-card-body">${body}</div>
-        </section>
-    `;
-}
-
-function ContinueWorkingCard(item) {
-    return Card("Continue Working", `
-        <div class="rpm-continue">
-            <div class="rpm-thumbnail"></div>
-            <div>
-                <h3 class="rpm-work-title">${escapeHtml(item.workflow)}</h3>
-                <div class="rpm-meta-grid">
-                    ${MetaItem("Project", item.project)}
-                    ${MetaItem("Shot", item.shot)}
-                    ${MetaItem("Status", `<span class="rpm-status-pill">${escapeHtml(item.status)}</span>`, true)}
-                    ${MetaItem("Last Modified", item.lastModified)}
-                </div>
-                <button class="rpm-button rpm-button-primary" type="button" data-action="Open Workflow">Open Workflow</button>
-            </div>
-        </div>
-    `);
-}
-
-function MetaItem(label, value, raw = false) {
-    return `
-        <div>
-            <div class="rpm-meta-label">${escapeHtml(label)}</div>
-            <div class="rpm-meta-value">${raw ? value : escapeHtml(value)}</div>
-        </div>
-    `;
-}
-
-function RecentProjects(projects, source) {
-    return Card("Recent Projects", `
-        <div class="rpm-list" data-project-list>
-            ${projects.length ? projects.map(ProjectRow).join("") : EmptyState("No projects found. Save a .rad workflow to create one.")}
-        </div>
-    `, source);
-}
-
-function ProjectRow(project) {
-    return `
-        <div class="rpm-list-row rpm-project-row" data-searchable="${escapeHtml(project.name).toLowerCase()}" data-action="Select Project" data-project-id="${escapeHtml(project.id)}">
-            <div class="rpm-primary-text">${escapeHtml(project.name)}</div>
-            <div class="rpm-secondary-text">${project.shots} shots</div>
-            <div class="rpm-secondary-text">${project.workflows} workflows</div>
-            <div class="rpm-secondary-text">${escapeHtml(project.updated)}</div>
-            <button class="rpm-favorite" type="button" title="Favorite project" data-action="Toggle Favorite">${project.favorite ? "&#9733;" : "&#9734;"}</button>
-        </div>
-    `;
-}
-
-function RecentVersions(versions) {
-    return Card("Recent Versions", `
-        <div class="rpm-list">
-            ${versions.length ? versions.map((item) => `
-                <div class="rpm-list-row rpm-version-row">
-                    <div class="rpm-primary-text">${escapeHtml(item.version)}</div>
-                    <div class="rpm-secondary-text">${escapeHtml(item.status)}</div>
-                    <div class="rpm-secondary-text">${escapeHtml(item.shot)}</div>
-                </div>
-            `).join("") : EmptyState("No versions tracked for this project yet.")}
-        </div>
-    `);
-}
-
-function RecentOutputs(outputs) {
-    return Card("Recent Outputs", `
-        <div class="rpm-list">
-            ${outputs.length ? outputs.map((item) => `
-                <div class="rpm-list-row rpm-output-row">
-                    <div class="rpm-primary-text" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</div>
-                    <div class="rpm-secondary-text">${escapeHtml(item.type)}</div>
-                    <div class="rpm-secondary-text">${escapeHtml(item.size)}</div>
-                    <div class="rpm-secondary-text">${escapeHtml(item.date)}</div>
-                </div>
-            `).join("") : EmptyState("No matching render outputs found in the ComfyUI output folder.")}
-        </div>
-    `);
-}
-
-function ReviewNotes(notes) {
-    return Card("Review Notes", `
-        <div class="rpm-list">
-            ${notes.length ? notes.map((note) => `
-                <div class="rpm-list-row rpm-note-row">
-                    <div class="rpm-dot"></div>
-                    <div class="rpm-primary-text">${escapeHtml(note)}</div>
-                </div>
-            `).join("") : EmptyState("No review notes for this project.")}
-        </div>
-    `);
-}
-
-function QuickActions(actions) {
-    return Card("Quick Actions", `
-        <div class="rpm-actions-grid">
-            ${actions.map((action) => `
-                <button class="rpm-button" type="button" data-action="${escapeHtml(action)}">${escapeHtml(action)}</button>
-            `).join("")}
-        </div>
-    `);
+function statusMeta(status) {
+    const s = String(status || "").toLowerCase();
+    if (s.includes("approve")) return { cls: "is-approved", label: "APPROVED" };
+    if (s.includes("review")) return { cls: "is-review", label: "REVIEW" };
+    if (s.includes("retake") || s.includes("reject")) return { cls: "is-retake", label: "RETAKE" };
+    if (s.includes("final") || s.includes("deliver")) return { cls: "is-final", label: "FINAL" };
+    if (s.includes("wip") || s.includes("progress")) return { cls: "is-wip", label: "WIP" };
+    return { cls: "is-neutral", label: (status ? String(status) : "—").toUpperCase() };
 }
 
 function EmptyState(message) {
     return `<div class="rpm-empty">${escapeHtml(message)}</div>`;
 }
 
+function Sidebar(data) {
+    const versions = data.versions || [];
+    const reviewCount = versions.filter((v) => statusMeta(v.status).cls === "is-review").length;
+    const navHtml = NAV.map((n) => {
+        const badge = (n.badge === "review" && reviewCount) ? `<span class="rpm-nav-badge">${reviewCount}</span>` : "";
+        return `<button class="rpm-nav-item ${n.active ? "is-active" : ""}" type="button" data-action="Nav" data-nav="${escapeHtml(n.key)}">
+            <span class="rpm-nav-icon">${svg(n.icon)}</span><span>${escapeHtml(n.key)}</span>${badge}
+        </button>`;
+    }).join("");
+    const initials = String(data.user?.name || "?").slice(0, 2).toUpperCase();
+    return `
+        <aside class="rpm-sidebar">
+            <div class="rpm-brand">
+                <img class="rpm-brand-mark" src="/extensions/radiance/r_icon.png" alt="Radiance" />
+                <div class="rpm-brand-title">Radiance</div>
+            </div>
+            <nav class="rpm-nav" aria-label="Project Manager">${navHtml}</nav>
+            <div class="rpm-user">
+                <span class="rpm-user-avatar">${escapeHtml(initials)}</span>
+                <span class="rpm-user-meta">
+                    <span class="rpm-user-name">${escapeHtml(data.user?.name || "Artist")}</span>
+                    <span class="rpm-user-role">${escapeHtml(data.user?.role || "")}</span>
+                </span>
+            </div>
+        </aside>
+    `;
+}
+
+function TopBar(data) {
+    const proj = (data.projects || []).find((p) => p.id === data.activeProjectId) || (data.projects || [])[0];
+    const projName = proj?.name || "No project";
+    return `
+        <header class="rpm-topbar">
+            <button class="rpm-show" type="button" data-action="Pick Project">
+                <span class="rpm-nav-icon">${svg("folders")}</span><span>${escapeHtml(projName)}</span><span class="rpm-caret">&#9662;</span>
+            </button>
+            <label class="rpm-search">${svg("search")}<input data-search type="search" placeholder="Search shots, assets, versions…"></label>
+            <button class="rpm-button is-primary rpm-topbtn" type="button" data-action="Save Version">${svg("save")}Save version</button>
+            <span class="rpm-sync"><span class="rpm-sync-dot"></span>Synced</span>
+        </header>
+    `;
+}
+
+function Hero(item) {
+    const st = statusMeta(item.status);
+    const verMatch = String(item.workflow || "").match(/v\d{2,}/i);
+    const ver = (verMatch && verMatch[0]) || item.version || "";
+    return `
+        <section class="rpm-hero">
+            <div class="rpm-hero-thumb">
+                <span class="rpm-hero-range">1001–1142</span>
+                <span class="rpm-hero-play">${svg("play")}</span>
+                <span class="rpm-pill ${st.cls} rpm-hero-pill">${st.label}</span>
+            </div>
+            <div class="rpm-hero-info">
+                <div class="rpm-kicker">Continue working</div>
+                <div class="rpm-hero-title">${escapeHtml(item.shot || "—")} <span class="rpm-hero-sub">· ${escapeHtml(item.project || "")}</span></div>
+                <div class="rpm-hero-meta">${escapeHtml(item.workflow || "No workflow saved yet")}${ver ? ` · <span class="rpm-ver">${escapeHtml(ver)}</span>` : ""}${item.lastModified ? ` · ${escapeHtml(item.lastModified)}` : ""}</div>
+                <button class="rpm-button is-primary" type="button" data-action="Open Workflow">${svg("resume")}Resume session</button>
+            </div>
+        </section>
+    `;
+}
+
+function StorageCard(storage) {
+    const pct = Math.max(0, Math.min(100, Number(storage?.percent) || 0));
+    return `
+        <section class="rpm-storage-card">
+            <div class="rpm-storage-head"><span>Project storage</span><span class="rpm-storage-val">${escapeHtml(storage?.usedLabel || "")} / ${escapeHtml(storage?.totalLabel || "")}</span></div>
+            <div class="rpm-storage-track"><span class="rpm-storage-fill" style="width:${pct}%"></span></div>
+            <div class="rpm-storage-foot">${pct}% used</div>
+        </section>
+    `;
+}
+
+function Stats(data) {
+    const versions = data.versions || [];
+    const approved = versions.filter((v) => statusMeta(v.status).cls === "is-approved").length;
+    const inReview = versions.filter((v) => statusMeta(v.status).cls === "is-review").length;
+    const shots = (data.projects || []).reduce((a, p) => a + (Number(p.shots) || 0), 0) || versions.length;
+    const outputs = (data.outputs || []).length;
+    const cell = (label, val, cls = "") => `<div class="rpm-stat"><div class="rpm-stat-label">${label}</div><div class="rpm-stat-val ${cls}">${val}</div></div>`;
+    return `<div class="rpm-stats">${cell("Active shots", shots)}${cell("In review", inReview, "is-review-text")}${cell("Approved", approved, "is-approved-text")}${cell("Outputs", outputs)}</div>`;
+}
+
+function Legend() {
+    return `<div class="rpm-legend">
+        <span class="rpm-pill is-wip">WIP</span>
+        <span class="rpm-pill is-review">REVIEW</span>
+        <span class="rpm-pill is-approved">APPROVED</span>
+        <span class="rpm-pill is-retake">RETAKE</span>
+    </div>`;
+}
+
+function ShotsTable(versions) {
+    const list = versions || [];
+    const rows = list.length ? list.map((v) => {
+        const st = statusMeta(v.status);
+        return `<div class="rpm-tr" data-searchable="${escapeHtml(((v.shot || "") + " " + (v.version || "")).toLowerCase())}">
+            <span class="rpm-thumb-sm"></span>
+            <span class="rpm-shot dsp">${escapeHtml(v.shot || "—")}</span>
+            <span class="rpm-pill ${st.cls}">${st.label}</span>
+            <span class="rpm-ver">${escapeHtml(v.version || "")}</span>
+        </div>`;
+    }).join("") : EmptyState("No versions tracked yet. Save a .rad workflow to start.");
+    return `
+        <section>
+            <div class="rpm-section-head"><h2 class="rpm-section-title">Shots</h2>${Legend()}</div>
+            <div class="rpm-table">
+                <div class="rpm-tr rpm-thead"><span></span><span>Shot</span><span>Status</span><span>Ver</span></div>
+                ${rows}
+            </div>
+        </section>
+    `;
+}
+
+function OutputsTable(outputs) {
+    const list = outputs || [];
+    const rows = list.length ? list.map((o) => `
+        <div class="rpm-tr rpm-tr-out" data-searchable="${escapeHtml(String(o.name || "").toLowerCase())}">
+            <span class="rpm-shot" title="${escapeHtml(o.name || "")}">${escapeHtml(o.name || "")}</span>
+            <span class="rpm-tag">${escapeHtml(o.type || "")}</span>
+            <span class="rpm-dim">${escapeHtml(o.size || "")}</span>
+            <span class="rpm-dim">${escapeHtml(o.date || "")}</span>
+        </div>
+    `).join("") : EmptyState("No render outputs found in the ComfyUI output folder.");
+    return `
+        <section>
+            <div class="rpm-section-head"><h2 class="rpm-section-title">Recent outputs</h2></div>
+            <div class="rpm-table rpm-table-out">
+                <div class="rpm-tr rpm-tr-out rpm-thead"><span>File</span><span>Type</span><span>Size</span><span>Updated</span></div>
+                ${rows}
+            </div>
+        </section>
+    `;
+}
+
 function ProjectManagerDashboard(data) {
     return `
         ${Sidebar(data)}
         <main class="rpm-main">
-            ${TopBar(data.user)}
+            ${TopBar(data)}
             <div class="rpm-content">
-                <div class="rpm-grid">
-                    <div class="rpm-column">
-                        ${ContinueWorkingCard(data.continueWorking)}
-                        ${RecentProjects(data.projects, data.source || "Live API")}
-                        ${RecentOutputs(data.outputs)}
-                    </div>
-                    <div class="rpm-column">
-                        ${RecentVersions(data.versions)}
-                        ${ReviewNotes(data.notes)}
-                        ${QuickActions(data.quickActions)}
-                    </div>
+                <div class="rpm-top-grid">
+                    ${Hero(data.continueWorking || {})}
+                    ${StorageCard(data.storage || {})}
                 </div>
+                ${Stats(data)}
+                ${ShotsTable(data.versions)}
+                ${OutputsTable(data.outputs)}
             </div>
         </main>
         <div class="rpm-toast" data-toast></div>
