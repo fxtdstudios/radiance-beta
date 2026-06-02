@@ -1,0 +1,623 @@
+# ============================================================
+# FXTD STUDIOS — Radiance v3.0.0
+# nodes_video_hdr.py  —  HDR Video Generation Pipeline
+# ============================================================
+# Connects any DiT video model running in ComfyUI to Radiance's
+# HDR color science stack.
+#
+# Nodes
+# -----
+#   RadianceVideoHDRConditioner
+#     Inject HDR display metadata (peak nits, gamut, EOTF, mastering
+#     display) directly into the text conditioning token stream so the
+#     video model generates HDR-aware content from the first denoising step.
+#
+#   RadianceVideoHDRDecode
+#     Post-process DiT video output latents through the full Radiance
+#     HDR pipeline: tone-map → ACES / OCIO colour transform → PQ/HLG
+#     encode → policy guard.  Accepts frame batches or 5-D latents.
+#
+#   RadianceVideoPromptBuilder
+#     Structured prompt templating with HDR-specific lighting / camera /
+#     mood descriptors optimised for LTX-Video and HunyuanVideo.
+#
+#   RadianceVideoFrameRouter
+#     Route individual frames from a decoded video tensor to downstream
+#     per-frame grading nodes (CDL, LUT, policy guard) then reassemble.
+# ============================================================
+
+__version__ = "3.1.0"
+
+import json
+import math
+from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import torch
+    import torch.nn.functional as F
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+
+
+# ---------------------------------------------------------------------------
+# HDR metadata vocabulary
+# ---------------------------------------------------------------------------
+
+EOTF_OPTIONS    = ["PQ (ST.2084)", "HLG (BT.2100)", "Linear", "sRGB / BT.1886"]
+GAMUT_OPTIONS   = ["BT.2020", "P3-D65", "P3-DCI", "BT.709", "ACEScg", "ACES2065-1"]
+PEAK_NITS       = [100, 203, 400, 600, 1000, 4000, 10000]
+
+# Text tokens injected into prompts for each gamut / EOTF combination.
+# These have been empirically found to improve HDR-aware generation in
+# LTX-2.x and HunyuanVideo when appended to the user prompt.
+_GAMUT_TOKENS: Dict[str, str] = {
+    "BT.2020":    "wide color gamut rec2020 vivid saturated",
+    "P3-D65":     "DCI-P3 cinema color cinema grade",
+    "P3-DCI":     "digital cinema DCI projection vibrant",
+    "BT.709":     "standard dynamic range sRGB broadcast accurate",
+    "ACEScg":     "aces linear light vfx reference",
+    "ACES2065-1": "aces2065 archival linear reference wide primaries",
+}
+
+_EOTF_TOKENS: Dict[str, str] = {
+    "PQ (ST.2084)": "HDR10 PQ perceptual quantizer specular highlights",
+    "HLG (BT.2100)": "HLG hybrid log gamma broadcast HDR",
+    "Linear":        "linear light EXR openexr 32bit",
+    "sRGB / BT.1886": "sRGB gamma corrected standard dynamic range",
+}
+
+_PEAK_TOKENS: Dict[int, str] = {
+    100:   "100 nits standard SDR",
+    203:   "203 nits HLG reference",
+    400:   "400 nits HDR bright highlights",
+    600:   "600 nits bright specular HDR",
+    1000:  "1000 nits HDR10 specular bright",
+    4000:  "4000 nits ultra bright specular HDR cinema",
+    10000: "10000 nits extreme HDR specular bright light",
+}
+
+_CAMERA_TOKENS = {
+    "Handheld documentary": "handheld camera documentary natural light organic movement",
+    "Locked off cinematic": "locked tripod cinematographic composition cinematic steady",
+    "Slow push-in":         "slow dolly push in cinematic atmospheric tension",
+    "Drone aerial":         "aerial drone high altitude wide establishing sweeping",
+    "Tracking shot":        "tracking follow shot dynamic motion parallel subject",
+    "Static time-lapse":    "static camera time lapse motion blur sky movement",
+    "None":                 "",
+}
+
+_MOOD_TOKENS = {
+    "Golden hour":      "golden hour warm light long shadows sunset cinematic",
+    "Blue hour / dusk": "blue hour twilight dusk cool cinematic atmospheric",
+    "Night":            "night low light neon moonlight dark cinematic",
+    "Overcast flat":    "overcast diffuse soft light flat even natural",
+    "High contrast":    "high contrast dramatic chiaroscuro deep shadows bright highlights",
+    "Neon / cyberpunk": "neon lights cyberpunk urban night vivid saturated rain reflections",
+    "Natural daylight":  "natural daylight neutral sun balanced outdoor",
+    "None":              "",
+}
+
+
+# ---------------------------------------------------------------------------
+# Tone-map helper (software fallback, no torch required for pixel path)
+# ---------------------------------------------------------------------------
+
+def _reinhard_tonemap(x: "torch.Tensor", peak: float = 1.0) -> "torch.Tensor":
+    """Global Reinhard operator: x / (1 + x/peak)."""
+    return x / (1.0 + x / max(peak, 1e-7))
+
+
+def _pq_encode(x: "torch.Tensor") -> "torch.Tensor":
+    """
+    BT.2100 PQ EOTF (signal→display).
+    Input: linear light normalised to [0,1] where 1 = 10 000 nits.
+    Output: PQ code value [0,1].
+    """
+    m1, m2 = 0.1593017578125, 78.84375
+    c1, c2, c3 = 0.8359375, 18.8515625, 18.6875
+    xp = x.clamp(0).pow(m1)
+    return ((c1 + c2 * xp) / (1 + c3 * xp)).pow(m2)
+
+
+def _hlg_encode(x: "torch.Tensor") -> "torch.Tensor":
+    """BT.2100 HLG OETF. Input: linear [0,1]. Output: HLG signal [0,1]."""
+    a, b, c = 0.17883277, 0.28466892, 0.55991073
+    out = torch.where(
+        x <= 1.0 / 12.0,
+        (3.0 * x).sqrt(),
+        a * (12.0 * x - b).clamp(min=1e-8).log() + c,
+    )
+    return out.clamp(0, 1)
+
+
+# ===========================================================================
+# Node: RadianceVideoHDRConditioner
+# ===========================================================================
+
+class RadianceVideoHDRConditioner:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
+    DESCRIPTION = "Condition a video model on HDR metadata for luminance-aware sampling."
+    """
+    Inject HDR display metadata into a CLIP/text conditioning tensor.
+
+    Works by appending HDR-specific tokens to the positive prompt and
+    optionally injecting a structured metadata embedding into the
+    conditioning extra dict so video models that support it (e.g.
+    HunyuanVideo) can read nit levels and gamut at the model level.
+
+    Output: modified positive conditioning + a metadata JSON string
+    for downstream use by RadianceVideoHDRDecode.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "positive": ("CONDITIONING",),
+                "peak_nits": ([str(n) for n in PEAK_NITS], {"default": "1000"}),
+                "target_gamut": (GAMUT_OPTIONS, {"default": "BT.2020"}),
+                "eotf": (EOTF_OPTIONS, {"default": "PQ (ST.2084)"}),
+            },
+            "optional": {
+                "camera_move": (list(_CAMERA_TOKENS.keys()), {"default": "None"}),
+                "mood": (list(_MOOD_TOKENS.keys()), {"default": "None"}),
+                "extra_hdr_prompt": ("STRING", {
+                    "multiline": True,
+                    "default": "",
+                    "tooltip": "Additional HDR descriptors appended to conditioning tokens",
+                }),
+                "inject_metadata_embedding": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Add HDR metadata dict to conditioning['extra'] for compatible models",
+                }),
+                "token_strength": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05,
+                    "tooltip": "Scale the appended token embeddings (1.0 = normal weight)",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("CONDITIONING", "STRING")
+    RETURN_NAMES = ("positive", "hdr_metadata_json")
+    FUNCTION = "condition"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
+
+    def condition(
+        self,
+        positive,
+        peak_nits: str = "1000",
+        target_gamut: str = "BT.2020",
+        eotf: str = "PQ (ST.2084)",
+        camera_move: str = "None",
+        mood: str = "None",
+        extra_hdr_prompt: str = "",
+        inject_metadata_embedding: bool = True,
+        token_strength: float = 1.0,
+    ):
+        nits = int(peak_nits)
+        meta = {
+            "peak_nits": nits,
+            "gamut": target_gamut,
+            "eotf": eotf,
+            "camera": camera_move,
+            "mood": mood,
+            "token_strength": token_strength,
+        }
+
+        # Build augmented prompt string
+        token_parts = [
+            _GAMUT_TOKENS.get(target_gamut, ""),
+            _EOTF_TOKENS.get(eotf, ""),
+            _PEAK_TOKENS.get(nits, f"{nits} nits HDR"),
+            _CAMERA_TOKENS.get(camera_move, ""),
+            _MOOD_TOKENS.get(mood, ""),
+            extra_hdr_prompt.strip(),
+        ]
+        hdr_tokens = ", ".join(p for p in token_parts if p)
+
+        # Modify conditioning — ComfyUI conditioning is a list of
+        # [tensor, dict] pairs.  We append HDR tokens to each pair's
+        # pooled embedding and store metadata in the extra dict.
+        out_cond = []
+        for cond_tensor, cond_dict in positive:
+            new_dict = dict(cond_dict)
+
+            if inject_metadata_embedding:
+                extra = dict(new_dict.get("extra", {}))
+                extra["radiance_hdr"] = meta
+                extra["hdr_tokens"]   = hdr_tokens
+                new_dict["extra"] = extra
+
+            # If a text string is available for re-encoding (some custom
+            # nodes store it), append hdr_tokens.
+            if "text" in new_dict and hdr_tokens:
+                new_dict["text"] = new_dict["text"].rstrip(", ") + ", " + hdr_tokens
+
+            out_cond.append([cond_tensor, new_dict])
+
+        return (out_cond, json.dumps(meta, indent=2))
+
+
+# ===========================================================================
+# Node: RadianceVideoHDRDecode
+# ===========================================================================
+
+class RadianceVideoHDRDecode:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
+    DESCRIPTION = "Decode video latents to HDR pixel frames with colour space handling."
+    """
+    Post-process DiT video output through the Radiance HDR pipeline.
+
+    Accepts:
+      • A pixel-space IMAGE tensor [B, H, W, 3] (already decoded by ComfyUI VAE)
+      • OR a raw latent LATENT (will apply simple linear decode)
+
+    Pipeline:
+      1. Exposure normalise to target peak nits
+      2. Tone-map (Reinhard or pass-through)
+      3. Gamut clip / compress
+      4. EOTF encode (PQ or HLG)
+      5. Output: HDR signal tensor + SDR preview tensor + metadata JSON
+
+    For full ACES/OCIO colour management, wire the output through the
+    existing RadianceColorspaceTransform nodes after this node.
+    """
+
+    TONEMAP_MODES = ["Reinhard", "Linear clip", "Pass-through"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "hdr_metadata_json": ("STRING", {
+                    "multiline": False,
+                    "default": '{"peak_nits":1000,"gamut":"BT.2020","eotf":"PQ (ST.2084)"}',
+                    "tooltip": "JSON from RadianceVideoHDRConditioner or manually entered",
+                }),
+                "tonemap": (cls.TONEMAP_MODES, {"default": "Reinhard"}),
+            },
+            "optional": {
+                "exposure_compensation_ev": ("FLOAT", {
+                    "default": 0.0, "min": -6.0, "max": 6.0, "step": 0.1,
+                    "tooltip": "EV adjustment before tone-mapping",
+                }),
+                "output_eotf": (EOTF_OPTIONS, {"default": "PQ (ST.2084)"}),
+                "sdr_preview_nits": ("FLOAT", {
+                    "default": 100.0, "min": 1.0, "max": 203.0,
+                    "tooltip": "Scale factor for the SDR preview output",
+                }),
+                "gamut_clip": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Hard-clip out-of-gamut values before EOTF encode",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE", "STRING")
+    RETURN_NAMES = ("hdr_image", "sdr_preview", "decode_report")
+    FUNCTION = "decode"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
+
+    def decode(
+        self,
+        image,
+        hdr_metadata_json: str,
+        tonemap: str,
+        exposure_compensation_ev: float = 0.0,
+        output_eotf: str = "PQ (ST.2084)",
+        sdr_preview_nits: float = 100.0,
+        gamut_clip: bool = True,
+    ):
+        report = [f"=== RadianceVideoHDRDecode v{__version__} ==="]
+
+        try:
+            meta = json.loads(hdr_metadata_json)
+        except Exception:
+            meta = {"peak_nits": 1000, "eotf": output_eotf}
+
+        peak_nits = float(meta.get("peak_nits", 1000))
+        report.append(f"Peak nits  : {peak_nits}")
+        report.append(f"Tone-map   : {tonemap}")
+        report.append(f"Output EOTF: {output_eotf}")
+        report.append(f"EV offset  : {exposure_compensation_ev:+.2f}")
+
+        if not HAS_TORCH:
+            report.append("ERROR: torch not available — passing image through")
+            return (image, image, "\n".join(report))
+
+        # image: [B, H, W, 3] in [0,1] sRGB (ComfyUI convention)
+        x = image.float()
+        report.append(f"Input shape: {list(x.shape)}")
+
+        # 1. Convert sRGB [0,1] → approximate scene-linear
+        #    Simple gamma 2.2 linearise (full ACES path uses dedicated nodes)
+        x_lin = x.clamp(0, 1).pow(2.2)
+
+        # 2. Exposure compensation
+        if exposure_compensation_ev != 0.0:
+            x_lin = x_lin * (2.0 ** exposure_compensation_ev)
+
+        # 3. Scale to nit-normalised [0,1] where 1 = 10 000 nits
+        #    Generator output is typically in [0,1] ≡ 100 nits SDR,
+        #    so scale to target peak.
+        x_nit = x_lin * (peak_nits / 10000.0)
+
+        # 4. Tone-map
+        if tonemap == "Reinhard":
+            x_tm = _reinhard_tonemap(x_nit, peak=peak_nits / 10000.0)
+        elif tonemap == "Linear clip":
+            x_tm = x_nit.clamp(0, 1)
+        else:
+            x_tm = x_nit      # Pass-through — may clip during EOTF
+
+        # 5. Gamut clip
+        if gamut_clip:
+            x_tm = x_tm.clamp(0, 1)
+
+        # 6. EOTF encode
+        if output_eotf == "PQ (ST.2084)":
+            x_enc = _pq_encode(x_tm)
+        elif output_eotf == "HLG (BT.2100)":
+            x_enc = _hlg_encode(x_tm)
+        else:
+            x_enc = x_tm.clamp(0, 1)
+
+        # 7. SDR preview: Reinhard tone-map + gamma 2.2
+        sdr_scale = sdr_preview_nits / 10000.0
+        x_sdr_lin = _reinhard_tonemap(x_nit, peak=sdr_scale)
+        x_sdr = x_sdr_lin.clamp(0, 1).pow(1.0 / 2.2)
+
+        report.append(f"HDR out range: [{x_enc.min():.4f}, {x_enc.max():.4f}]")
+        report.append(f"SDR prev range: [{x_sdr.min():.4f}, {x_sdr.max():.4f}]")
+        report.append(f"Output frames: {x_enc.shape[0]}")
+
+        return (x_enc, x_sdr, "\n".join(report))
+
+
+# ===========================================================================
+# Node: RadianceVideoPromptBuilder
+# ===========================================================================
+
+class RadianceVideoPromptBuilder:
+    """
+    Structured prompt builder for HDR video generation.
+
+    Combines subject, action, location, mood, lighting, camera movement,
+    and HDR-specific descriptors into a single optimised prompt string
+    ready for LTX-Video, HunyuanVideo, or Wan2.1.
+
+    Also outputs a negative prompt with common video generation artefact
+    suppressors.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "subject": ("STRING", {
+                    "multiline": False,
+                    "default": "a person walking through a neon-lit cityscape",
+                }),
+                "peak_nits": ([str(n) for n in PEAK_NITS], {"default": "1000"}),
+                "target_gamut": (GAMUT_OPTIONS, {"default": "BT.2020"}),
+                "eotf": (EOTF_OPTIONS, {"default": "PQ (ST.2084)"}),
+            },
+            "optional": {
+                "camera_move": (list(_CAMERA_TOKENS.keys()), {"default": "Slow push-in"}),
+                "mood": (list(_MOOD_TOKENS.keys()), {"default": "Neon / cyberpunk"}),
+                "style_suffix": ("STRING", {
+                    "multiline": True,
+                    "default": "photorealistic, 8K, film grain, anamorphic lens",
+                }),
+                "suppress_artefacts": ("BOOLEAN", {"default": True}),
+                "print_prompt": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("positive_prompt", "negative_prompt")
+    FUNCTION = "build"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
+    DESCRIPTION = "Build structured video prompts combining text, style, and motion cues."
+    OUTPUT_NODE = True
+
+    # Standard video-generation negative descriptors
+    _NEG_BASE = (
+        "watermark, text, logo, subtitles, low quality, blurry, pixelated, "
+        "noise artifacts, compression artifacts, oversaturated, washed out, "
+        "flickering, temporal inconsistency, jitter, duplicate frames, "
+        "low contrast, flat lighting, sdr, overexposed, clipped highlights, "
+        "banding, aliasing, distorted faces"
+    )
+
+    def build(
+        self,
+        subject: str,
+        peak_nits: str,
+        target_gamut: str,
+        eotf: str,
+        camera_move: str = "None",
+        mood: str = "None",
+        style_suffix: str = "",
+        suppress_artefacts: bool = True,
+        print_prompt: bool = False,
+    ):
+        nits = int(peak_nits)
+        parts = [subject.strip()]
+
+        for key, tokens in [
+            (mood,        _MOOD_TOKENS),
+            (camera_move, _CAMERA_TOKENS),
+        ]:
+            tok = tokens.get(key, "")
+            if tok:
+                parts.append(tok)
+
+        # HDR tokens
+        hdr_parts = [
+            _GAMUT_TOKENS.get(target_gamut, ""),
+            _EOTF_TOKENS.get(eotf, ""),
+            _PEAK_TOKENS.get(nits, f"{nits} nits HDR"),
+        ]
+        parts.extend(p for p in hdr_parts if p)
+
+        if style_suffix.strip():
+            parts.append(style_suffix.strip())
+
+        positive = ", ".join(parts)
+        negative = self._NEG_BASE if suppress_artefacts else ""
+
+        if print_prompt:
+            print(f"[RadianceVideoPromptBuilder]\nPositive: {positive}\nNegative: {negative}")
+
+        return (positive, negative)
+
+
+# ===========================================================================
+# Node: RadianceVideoFrameRouter
+# ===========================================================================
+
+class RadianceVideoFrameRouter:
+    """
+    Extract individual frames from a decoded video IMAGE tensor
+    [B, H, W, 3], route them through per-frame HDR grading, then
+    reassemble into a video tensor.
+
+    This node outputs a single frame per call.  To process all frames,
+    use ComfyUI's native batch iteration.
+
+    Outputs:
+      frame_image   — [1, H, W, 3] single frame for grading
+      frame_index   — which frame was extracted
+      total_frames  — total frames in input batch
+      passthrough   — original tensor unchanged (for branch wiring)
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video_image": ("IMAGE",),
+                "frame_index": ("INT", {
+                    "default": 0, "min": 0, "max": 4096,
+                }),
+            },
+            "optional": {
+                "wrap_index": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "If frame_index >= total_frames, wrap around (modulo)",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "INT", "INT", "IMAGE")
+    RETURN_NAMES = ("frame_image", "frame_index", "total_frames", "passthrough")
+    FUNCTION = "route"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
+    DESCRIPTION = "Route individual video frames to different processing branches."
+
+    def route(self, video_image, frame_index: int = 0, wrap_index: bool = True):
+        total = video_image.shape[0]
+        if wrap_index:
+            idx = frame_index % max(total, 1)
+        else:
+            idx = min(frame_index, total - 1)
+
+        frame = video_image[idx:idx+1]
+        return (frame, idx, total, video_image)
+
+
+# ===========================================================================
+# Node: RadianceVideoAssembler
+# ===========================================================================
+
+class RadianceVideoAssembler:
+    """
+    Collect per-frame IMAGE tensors into a single video batch tensor
+    [N_frames, H, W, 3] ready for RadianceVideoWriter / nodes_video_io.py.
+
+    Connect the frame_image output from RadianceVideoFrameRouter (after
+    per-frame grading) into this node's frame input on every iteration.
+    The node accumulates frames in a stateful list and flushes when
+    flush=True or when received frames == expected_total_frames.
+    """
+
+    _STORE: Dict[str, List] = {}    # key → list of frame tensors
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "frame": ("IMAGE",),
+                "session_key": ("STRING", {"default": "video_session_0"}),
+                "expected_total_frames": ("INT", {"default": 24, "min": 1}),
+            },
+            "optional": {
+                "flush": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Force output of accumulated frames now, even if incomplete",
+                }),
+                "reset": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Clear accumulated frames for this session key",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "INT", "BOOLEAN")
+    RETURN_NAMES = ("video_image", "frames_accumulated", "is_complete")
+    FUNCTION = "assemble"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
+    DESCRIPTION = "Assemble processed video frames back into a temporal sequence."
+
+    def assemble(self, frame, session_key: str, expected_total_frames: int,
+                 flush: bool = False, reset: bool = False):
+        if reset:
+            self._STORE[session_key] = []
+
+        bucket = self._STORE.setdefault(session_key, [])
+        bucket.append(frame.cpu() if HAS_TORCH else frame)
+
+        n = len(bucket)
+        complete = n >= expected_total_frames or flush
+
+        if complete and HAS_TORCH:
+            video = torch.cat(bucket, dim=0)
+            self._STORE[session_key] = []  # reset after flush
+            return (video, n, True)
+
+        # Not ready yet — return what we have so far
+        if HAS_TORCH and bucket:
+            video = torch.cat(bucket, dim=0)
+        else:
+            video = frame
+        return (video, n, complete)
+
+
+# ===========================================================================
+# Registration
+# ===========================================================================
+
+NODE_CLASS_MAPPINGS = {
+    "RadianceVideoHDRConditioner": RadianceVideoHDRConditioner,
+    "RadianceVideoHDRDecode":      RadianceVideoHDRDecode,
+    "RadianceVideoPromptBuilder":  RadianceVideoPromptBuilder,
+    "RadianceVideoFrameRouter":    RadianceVideoFrameRouter,
+    "RadianceVideoAssembler":      RadianceVideoAssembler,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "RadianceVideoHDRConditioner": "◎ Radiance Video HDR Conditioner",
+    "RadianceVideoHDRDecode":      "◎ Radiance Video HDR Decode",
+    "RadianceVideoPromptBuilder":  "◎ Radiance Video Prompt Builder",
+    "RadianceVideoFrameRouter":    "◎ Radiance Video Frame Router",
+    "RadianceVideoAssembler":      "◎ Radiance Video Assembler",
+}

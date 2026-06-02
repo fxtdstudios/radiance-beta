@@ -792,6 +792,7 @@ def _apply_gate_weave(
 
 
 class RadianceFilmGrain:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
     """
     Unified photographic grain simulation.
 
@@ -890,16 +891,19 @@ class RadianceFilmGrain:
                         "tooltip": "Override gate weave (0 = use profile default). Film registration jitter.",
                     },
                 ),
-                "use_gpu": ("BOOLEAN", {"default": True}),
+                "use_gpu": ("BOOLEAN", {"default": True,
+                    "tooltip": "Run the effect on GPU via CUDA/MPS. Falls back to CPU if unavailable.",
+                }),
             },
         }
 
     RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
     FUNCTION = "apply_grain"
-    CATEGORY = "FXTD Studios/Radiance/Filter"
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Film"
     DESCRIPTION = (
         "Unified photographic grain simulation with camera and film stock profiles. "
-        "Full float32/HDR pipeline — zero output clamping. Physically-based grain "
+        "Full float32"
         "with silver halide clumping, exposure-dependent density, and HDR-safe compositing."
     )
 

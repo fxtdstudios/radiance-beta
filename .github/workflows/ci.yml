@@ -1,0 +1,263 @@
+# .github/workflows/ci.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# Radiance v3 — Continuous Integration
+#
+# Runs on every push and pull-request to main / dev / release branches.
+# Matrix: Python 3.9 · 3.10 · 3.11 · 3.12  ×  ubuntu-latest + windows-latest
+#
+# No GPU, no ComfyUI, no heavy model deps.
+# All torch-gated tests self-skip via @unittest.skipUnless(HAS_TORCH, …)
+# All ComfyUI imports are stubbed by tests/conftest.py.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - "release/**"
+  pull_request:
+    branches:
+      - main
+      - dev
+
+# Cancel in-flight CI runs for the same ref when a new commit is pushed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Main test matrix ────────────────────────────────────────────────────────
+  test:
+    name: "pytest · Python ${{ matrix.python-version }} · ${{ matrix.os }}"
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        os: ["ubuntu-latest", "windows-latest"]
+
+    steps:
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python ───────────────────────────────────────────────────────────
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # ── 3. Install test dependencies ────────────────────────────────────────
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            "pytest>=7.4" \
+            "pytest-timeout>=2.1" \
+            "pytest-cov>=4.0" \
+            "numpy>=1.22" \
+            "scipy>=1.9" \
+            "Pillow>=9.0" \
+            "defusedxml>=0.7" \
+            "opencv-python-headless>=4.7" \
+            "tqdm>=4.66"
+
+      # ── 4. Run test suite ────────────────────────────────────────────────────
+      #    conftest.py stubs torch + all comfy.* imports automatically.
+      #    No manual --ignore needed — torch-gated tests self-skip.
+      - name: Run tests
+        run: |
+          # Full suite on the lightweight matrix. torch/OpenEXR/OCIO-gated tests
+          # self-skip here; real-dependency coverage runs in the test-full job.
+          python -m pytest tests/ \
+            --tb=short \
+            --timeout=60 \
+            -q \
+            --cov=radiance \
+            --cov-fail-under=0 \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing
+
+      # ── 5. Upload coverage (Python 3.11 only to avoid duplicate uploads) ────
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml
+          flags: unittests
+          fail_ci_if_error: false   # non-blocking until token is configured
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      # ── 6. Upload pytest log on failure ─────────────────────────────────────
+      - name: Upload pytest log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "pytest-log-py${{ matrix.python-version }}"
+          path: |
+            .pytest_cache/
+            coverage.xml
+          retention-days: 7
+
+  # ── Full suite with REAL runtime dependencies ───────────────────────────────
+  # Installs CPU torch + OpenEXR + OpenColorIO + colour-science so the EXR,
+  # color-math, ACES and sampler tests actually execute (they self-skip on the
+  # lightweight matrix above). This is the lane that catches HDR/EXR regressions.
+  test-full:
+    name: "pytest · real deps (torch+OpenEXR+OCIO)"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install real runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install \
+            "numpy>=1.22" "scipy>=1.9" "Pillow>=9.0" "defusedxml>=0.7" \
+            "opencv-python-headless>=4.7" "tqdm>=4.66" \
+            "OpenEXR>=3.2.0" "Imath>=3.1.0" \
+            "opencolorio>=2.3.0" "colour-science>=0.4.4" \
+            "einops>=0.7.0" "pytest>=7.4" "pytest-timeout>=2.1"
+
+      - name: Run full test suite (real deps)
+        run: |
+          python -m pytest tests/ --tb=short --timeout=120 -q
+
+  # ── Import smoke-test ───────────────────────────────────────────────────────
+  # Verifies that pure-Python helpers import cleanly with minimal stubs,
+  # independent of the test suite (catches syntax errors, bad imports at
+  # module level, etc.)
+  smoke:
+    name: "Import smoke-test"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install minimal deps
+        run: |
+          pip install numpy scipy Pillow defusedxml tqdm
+
+      - name: Smoke-test — module imports
+        run: |
+          python - << 'EOF'
+          import sys, types
+          from unittest.mock import MagicMock
+
+          # ── Minimal stubs ──────────────────────────────────────────────────
+          _stub_names = [
+              "torch", "torch.nn", "torch.nn.functional",
+              "comfy", "comfy.samplers", "comfy.sample",
+              "comfy.model_management", "comfy.utils", "comfy.model_base",
+              "comfy.sd", "comfy.latent_formats", "comfy.nested_tensor",
+              "folder_paths",
+          ]
+          for mod in _stub_names:
+              m = types.ModuleType(mod)
+              m.__dict__.update({a: MagicMock() for a in dir(MagicMock())})
+              sys.modules.setdefault(mod, m)
+
+          # Minimal real attributes needed by our nodes
+          sys.modules["torch"].Tensor        = object
+          sys.modules["torch"].float32       = "float32"
+          sys.modules["torch"].float16       = "float16"
+          sys.modules["torch"].bfloat16      = "bfloat16"
+          sys.modules["folder_paths"].models_dir      = "/tmp"
+          sys.modules["folder_paths"].output_directory = "/tmp"
+          sys.modules["comfy.samplers"].SAMPLER_NAMES   = []
+          sys.modules["comfy.samplers"].SCHEDULER_NAMES = []
+
+          sys.path.insert(0, ".")
+
+          # ── Modules to smoke-test ──────────────────────────────────────────
+          _modules = [
+              ("radiance.nodes.ai.scene_cut",        "scene_cut"),
+              ("radiance.nodes.hdr.aces2",            "aces2"),
+              ("radiance.nodes_realtime_preview",    "nodes_realtime_preview"),
+              ("radiance.nodes.upscale.upscale",      "upscale"),
+              ("radiance.nodes.video.dit",            "dit"),
+              ("radiance.nodes.video.character",      "character"),
+          ]
+
+          ok = True
+          for pkg, label in _modules:
+              try:
+                  __import__(pkg)
+                  print(f"  ✓  {label}")
+              except Exception as exc:
+                  print(f"  ✗  {label}: {exc}")
+                  ok = False
+
+          sys.exit(0 if ok else 1)
+          EOF
+
+  # ── YAML / TOML lint ────────────────────────────────────────────────────────
+  lint-config:
+    name: "Config lint"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tomllib (stdlib 3.11+) or tomli
+        run: pip install tomli
+
+      - name: Validate pyproject.toml
+        run: |
+          python - << 'EOF'
+          import sys
+          try:
+              import tomllib          # stdlib 3.11+
+          except ImportError:
+              import tomli as tomllib  # backport
+          with open("pyproject.toml", "rb") as f:
+              data = tomllib.load(f)
+          assert "project" in data, "Missing [project] table"
+          assert "tool" in data,    "Missing [tool] table"
+          print("pyproject.toml  OK")
+          EOF
+
+      - name: Validate workflow YAML files
+        run: |
+          python - << 'EOF'
+          import sys, pathlib
+          try:
+              import yaml
+          except ImportError:
+              print("PyYAML not installed — skipping YAML lint")
+              sys.exit(0)
+          errors = []
+          for p in pathlib.Path(".github/workflows").glob("*.yml"):
+              try:
+                  yaml.safe_load(p.read_text())
+                  print(f"  ✓  {p.name}")
+              except Exception as exc:
+                  print(f"  ✗  {p.name}: {exc}")
+                  errors.append(p.name)
+          sys.exit(1 if errors else 0)
+          EOF

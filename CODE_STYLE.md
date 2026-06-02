@@ -21,11 +21,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 ```
 
 ### Menu Category
-All nodes must be grouped under `FXTD Studios/Radiance`.
+All nodes must be grouped under `FXTD STUDIOS/Radiance`.
 
 ```python
-CATEGORY = "FXTD Studios/Radiance/Color"  # ✅
-CATEGORY = "Radiance/Color"               # ❌ Old schema
+CATEGORY = "FXTD STUDIOS/Radiance/◎ Color"  # ✅
+CATEGORY = "Radiance"               # ❌ Old schema
 CATEGORY = "utils"                        # ❌ Too generic
 ```
 

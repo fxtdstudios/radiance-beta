@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Radiance Documentation</title>
+  <meta name="description" content="Radiance production documentation for ComfyUI HDR, VFX, color, review, video, and DCC workflows.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <header class="topbar">
+    <a class="top-brand" href="#overview" aria-label="Radiance documentation home">
+      <img src="../r_icon.png" alt="" class="top-brand-mark">
+      <span>Radiance</span>
+    </a>
+    <nav class="top-nav" aria-label="Primary navigation">
+      <a href="#quickstart">Get Started</a>
+      <a href="#nodes">Nodes</a>
+      <a href="#workflows">Workflows</a>
+      <a href="#developer">Development</a>
+      <a href="#troubleshooting">Support</a>
+    </nav>
+    <a class="download-link" href="../README.md">Repository</a>
+  </header>
+
+  <div class="site-shell">
+    <aside class="sidebar" aria-label="Documentation navigation">
+      <div class="brand">
+        <img src="../r_icon.png" alt="" class="brand-mark">
+        <div>
+          <div class="brand-title">Radiance Docs</div>
+          <div class="brand-subtitle">ComfyUI custom nodes</div>
+        </div>
+      </div>
+
+      <label class="search">
+        <span>Search...</span>
+        <input id="searchInput" type="search" placeholder="HDR, Nuke, Sampler..." autocomplete="off">
+        <kbd>Ctrl K</kbd>
+      </label>
+
+      <nav class="nav" id="nav"></nav>
+
+      <div class="sidebar-card">
+        <div class="card-kicker">Coverage</div>
+        <strong>103 registered nodes</strong>
+        <p>Verified against the grouped Radiance catalog.</p>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="hero">
+        <div class="hero-copy">
+          <div class="eyebrow">ComfyUI custom node documentation</div>
+          <h1>Radiance Documentation</h1>
+          <p>Professional HDR, ACES/OCIO, EXR, VFX plate prep, video, review, upscaling, and DCC handoff nodes for ComfyUI.</p>
+          <div class="hero-actions">
+            <a href="#quickstart" class="button primary">Get Started</a>
+            <a href="#nodes" class="button">Browse Nodes</a>
+          </div>
+        </div>
+        <div class="hero-panel" aria-label="Radiance docs highlights">
+          <div class="metric"><strong>10</strong><span>node groups</span></div>
+          <div class="metric"><strong>103</strong><span>catalog nodes</span></div>
+          <div class="metric"><strong>8</strong><span>docs pages</span></div>
+          <div class="metric"><strong>EXR</strong><span>first pipeline</span></div>
+        </div>
+      </header>
+
+      <section class="quick-links" aria-label="Common workflows">
+        <a href="#quickstart"><span>Get Started</span><strong>Install and first graph</strong><small>Build a working Radiance workflow.</small></a>
+        <a href="#concepts"><span>Basic Concepts</span><strong>HDR, EXR, ACES</strong><small>Understand the pipeline rules.</small></a>
+        <a href="#nodes"><span>Built-in Nodes</span><strong>103 node reference</strong><small>Every registered Radiance node.</small></a>
+        <a href="#workflows"><span>Tutorials</span><strong>Production recipes</strong><small>HDR, VFX, video, and DCC handoff.</small></a>
+      </section>
+
+      <section class="content-card">
+        <div class="content-toolbar">
+          <div>
+            <div class="section-label" id="pageLabel">Documentation</div>
+            <h2 id="pageTitle">Loading...</h2>
+          </div>
+          <a id="sourceLink" class="source-link" href="../index.md">View Markdown</a>
+        </div>
+        <article id="content" class="doc-content" tabindex="-1" aria-live="polite"></article>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

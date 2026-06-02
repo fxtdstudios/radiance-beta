@@ -1,0 +1,1845 @@
+import torch
+import time
+import math
+import logging
+import gc
+from typing import Tuple, Dict, Any, Optional, List
+from dataclasses import dataclass, field
+
+import comfy.samplers
+import comfy.sample
+import comfy.model_management
+import comfy.utils
+try:
+    from .tensor_contract import ensure_4d, ensure_5d
+except (ImportError, ValueError):
+    from tensor_contract import ensure_4d, ensure_5d
+
+
+try:
+    from comfy.nested_tensor import NestedTensor as _NestedTensor
+    _HAS_NESTED_TENSOR = True
+except ImportError:
+    _NestedTensor = None
+    _HAS_NESTED_TENSOR = False
+
+DYNAMIC_GUIDANCE_EARLY_MULTIPLIER = 0.6                                              
+DYNAMIC_GUIDANCE_LATE_MULTIPLIER = 0.95                                                                         
+DYNAMIC_GUIDANCE_EARLY_THRESHOLD = 0.2                               
+DYNAMIC_GUIDANCE_LATE_THRESHOLD = 0.9                                  
+DYNAMIC_GUIDANCE_RAMP_WIDTH = 0.05                                 
+
+GUIDANCE_RESCALE_PHI = 0.0                                              
+
+SIGMA_DISCONTINUITY_THRESHOLD = 0.01
+
+PAG_DEFAULT_SCALE = 0.0                       
+PAG_LAYER_NAMES = ["middle_block"]                               
+
+CFG_PLUS_PLUS_DEFAULT_SCALE = 1.6                           
+
+CFG_GUIDANCE_MODELS = {"wan", "hunyuan_video"}
+
+DYNAMIC_CFG_EARLY_MULTIPLIER = 1.2                                              
+DYNAMIC_CFG_LATE_MULTIPLIER = 0.7                                                
+DYNAMIC_CFG_EARLY_THRESHOLD = 0.15                      
+DYNAMIC_CFG_LATE_THRESHOLD = 0.85                      
+
+MODEL_TYPES = [
+    "auto",
+    "flux",
+    "sd3",
+    "sd35",
+    "sdxl",
+    "sd15",
+    "wan",
+    "ltxv",
+    "ltxav",                                     
+    "hunyuan_video",
+    "lumina2",
+    "z_image",
+    "chroma",
+    "cosmos",
+    "cogvideox",
+    "stepvideo",
+]
+
+VIDEO_MODEL_TYPES = {"wan", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "stepvideo"}
+
+GUIDANCE_EMBED_MODELS = {"flux", "lumina2", "z_image", "ltxv"}
+
+CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd35", "ltxav", "cogvideox", "stepvideo"}
+
+MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "flux": {
+        "cfg": 1.0,
+        "scheduler": "simple",
+        "guidance": 3.5,
+        "shift": 1.0,
+        "sampler": "euler",
+        "denoise_range": (0.3, 1.0),
+    },
+    "sd3": {
+        "cfg": 4.5,
+        "scheduler": "sgm_uniform",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "dpmpp_2m",
+        "denoise_range": (0.2, 1.0),
+    },
+    "sd35": {
+        "cfg": 4.5,
+        "scheduler": "sgm_uniform",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "dpmpp_2m",
+        "denoise_range": (0.2, 1.0),
+    },
+    "sdxl": {
+        "cfg": 7.0,
+        "scheduler": "karras",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "dpmpp_2m",                                                               
+        "denoise_range": (0.3, 1.0),
+    },
+    "sd15": {
+        "cfg": 7.0,
+        "scheduler": "normal",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "dpmpp_2m",                                                               
+        "denoise_range": (0.3, 1.0),
+    },
+
+    "wan": {
+        "cfg": 6.0,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 8.0,
+        "sampler": "euler",
+        "denoise_range": (0.3, 1.0),
+        "guidance_type": "cfg",                                              
+    },
+    "ltxv": {
+        "cfg": 1.0,
+        "scheduler": "simple",
+        "guidance": 3.5,                                   
+        "shift": 2.37,
+        "sampler": "euler",
+        "denoise_range": (0.3, 1.0),
+        "guidance_type": "embedding",
+    },
+
+    "ltxav": {
+        "cfg": 3.0,
+        "scheduler": "beta",
+        "guidance": 0.0,
+        "shift": 3.0,                                                     
+        "sampler": "euler",
+        "denoise_range": (0.3, 1.0),
+        "guidance_type": "cfg",
+    },
+    "hunyuan_video": {
+        "cfg": 6.0,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 7.0,
+        "sampler": "euler",
+        "denoise_range": (0.3, 1.0),
+        "guidance_type": "cfg",                                                       
+    },
+    "lumina2": {
+        "cfg": 1.0,
+        "scheduler": "simple",
+        "guidance": 3.5,                                    
+        "shift": 6.0,
+        "sampler": "euler",
+        "denoise_range": (0.3, 1.0),
+        "guidance_type": "embedding",
+    },
+    "z_image": {
+        "cfg": 1.0,
+        "scheduler": "simple",
+        "guidance": 3.5,                                            
+        "shift": 3.0,
+        "sampler": "euler",
+        "denoise_range": (0.3, 1.0),
+        "guidance_type": "embedding",
+    },
+    "cosmos": {
+        "cfg": 7.0,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 3.0,
+        "sampler": "euler",
+        "denoise_range": (0.3, 1.0),
+        "guidance_type": "cfg",
+    },
+    # ── v2.6.0: New video models ──────────────────────────────────────────────
+    "cogvideox": {
+        "cfg": 6.0,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 8.0,
+        "sampler": "euler",
+        "denoise_range": (0.0, 1.0),
+        "guidance_type": "cfg",
+    },
+    "stepvideo": {
+        "cfg": 9.0,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 13.0,
+        "sampler": "euler",
+        "denoise_range": (0.0, 1.0),
+        "guidance_type": "cfg",
+    },
+    "chroma": {
+        "cfg": 1.0,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "euler",
+        "denoise_range": (0.3, 1.0),
+    },
+}
+
+PREVIEW_METHODS = ["None", "TAESD", "Latent2RGB"]
+
+NOISE_TYPES = ["Gaussian", "Perlin", "Uniform", "Spectral", "Brownian", "Simplex", "Voronoi", "Curl"]
+
+CLIP_TARGETS = ["Auto", "clip_l", "clip_g", "t5xxl"]
+
+MULTI_COND_MODES = ["Off", "average", "weighted", "sequential"]
+
+TILE_BLEND_MODES = ["feather", "average", "gaussian"]
+
+class SamplerMode:
+
+    STANDARD = "Standard"
+    PHASE_SHIFT_DPM = "Phase-Shift (Euler >> DPM)"
+    PHASE_SHIFT_SGM = "Phase-Shift (Euler >> SGM)"
+    CFG_PLUS_PLUS = "CFG++ (Perpendicular)"
+
+    ALL = [STANDARD, PHASE_SHIFT_DPM, PHASE_SHIFT_SGM, CFG_PLUS_PLUS]
+
+    @classmethod
+    def is_phase_shift(cls, mode: str) -> bool:
+        return mode in (cls.PHASE_SHIFT_DPM, cls.PHASE_SHIFT_SGM)
+
+    @classmethod
+    def is_cfg_plus_plus(cls, mode: str) -> bool:
+        return mode == cls.CFG_PLUS_PLUS
+
+logger = logging.getLogger("radiance.sampler")
+
+class SigmaCache:
+    MAX_ENTRIES = 32
+
+    def __init__(self):
+        from collections import OrderedDict
+        self._cache: "OrderedDict[tuple, torch.Tensor]" = OrderedDict()
+
+    @staticmethod
+    def _make_key(model, scheduler: str, total_steps: int) -> tuple:
+        try:
+            ms = model.get_model_object("model_sampling")
+            sigma_max = ms.sigma_max.item() if hasattr(ms, "sigma_max") else 0.0
+            sigma_min = ms.sigma_min.item() if hasattr(ms, "sigma_min") else 0.0
+
+            config_name = "unknown"
+            try:
+                if hasattr(model, "model") and hasattr(model.model, "model_config"):
+                    config_name = type(model.model.model_config).__name__
+            except (AttributeError, RuntimeError):
+                pass
+
+            return (config_name, round(sigma_max, 6), round(sigma_min, 6), scheduler, total_steps)
+        except (AttributeError, RuntimeError):
+            # BUG-SIGMACACHE-KEY FIX: removed time.time() from the fallback key.
+            # Including it created a unique throwaway entry every call, filling
+            # the 32-slot LRU with non-reusable entries for unusual models.
+            logger.debug("SigmaCache: failed to build config key, using id-based fallback")
+            return (id(model), scheduler, total_steps)
+
+    def get(self, model, scheduler: str, total_steps: int) -> Optional[torch.Tensor]:
+        key = self._make_key(model, scheduler, total_steps)
+        if key in self._cache:
+            self._cache.move_to_end(key)   
+            return self._cache[key]
+        return None
+
+    def put(self, model, scheduler: str, total_steps: int, sigmas: torch.Tensor) -> None:
+        key = self._make_key(model, scheduler, total_steps)
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        else:
+            if len(self._cache) >= self.MAX_ENTRIES:
+                evicted = next(iter(self._cache))  
+                del self._cache[evicted]
+                logger.debug(f"SigmaCache: evicted LRU entry, {len(self._cache)} remaining")
+        self._cache[key] = sigmas
+
+    def clear(self) -> None:
+        count = len(self._cache)
+        self._cache.clear()
+        if count:
+            logger.debug(f"SigmaCache: cleared {count} entries")
+
+_sigma_cache = SigmaCache()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#                    MODEL REGISTRY & DETECTION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class RadianceModelRegistry:
+    """Registry for model architecture detection logic."""
+    _detectors = []
+
+    @classmethod
+    def register(cls, priority: int = 10):
+        def decorator(func):
+            cls._detectors.append((priority, func))
+            # Sort by priority (lower number = higher priority)
+            cls._detectors.sort(key=lambda x: x[0])
+            return func
+        return decorator
+
+    @classmethod
+    def detect(cls, model) -> str:
+        for _, detector in cls._detectors:
+            try:
+                res = detector(model)
+                if res: return res
+            except Exception as e:
+                logger.debug(f"Detector {detector.__name__} failed: {e}")
+        return "sd15"
+
+@RadianceModelRegistry.register(priority=1)
+def detect_by_config(model) -> Optional[str]:
+    """Detect model type by explicit config class name."""
+    try:
+        if not hasattr(model, "model") or not hasattr(model.model, "model_config"):
+            return None
+        config_cls = type(model.model.model_config).__name__
+        config_map = {
+            "WAN21": "wan", "WAN22": "wan",
+            "LTXV": "ltxv", "LTXAV": "ltxav",
+            "HunyuanVideo": "hunyuan_video",
+            "Lumina2": "lumina2", "ZImage": "z_image",
+            "Chroma": "chroma", "ChromaRadiance": "chroma",
+            "Flux": "flux", "FluxSchnell": "flux", "FluxInpaint": "flux", "Flux2": "flux",
+            "CogVideoX": "cogvideox", "CogVideo": "cogvideox",
+            "StepVideo": "stepvideo",
+        }
+        for pattern, mtype in config_map.items():
+            if pattern in config_cls: return mtype
+    except Exception as exc:
+        logger.warning("[nodes_sampler] detect_by_config: %s", exc)
+    return None
+
+@RadianceModelRegistry.register(priority=5)
+def detect_by_architecture(model) -> Optional[str]:
+    """Detect model type by inspecting diffusion model class and modules."""
+    try:
+        diffusion_model = model.get_model_object("diffusion_model")
+        if diffusion_model is None: return None
+        
+        model_cls = type(diffusion_model).__name__.lower()
+        model_module = type(diffusion_model).__module__.lower()
+        full_path = f"{model_module}.{model_cls}"
+
+        if "wan" in model_cls or "wan" in model_module: return "wan"
+        if "ltxav" in model_cls or ("lightricks" in model_module and hasattr(diffusion_model, "recombine_audio_and_video_latents")):
+            return "ltxav"
+        if "ltxv" in model_cls or "lightricks" in model_module: return "ltxv"
+        if "hunyuan" in model_cls and ("video" in model_cls or "video" in model_module):
+            return "hunyuan_video"
+        if "cogvideo" in model_cls or "cogvideo" in model_module: return "cogvideox"
+        if "stepvideo" in model_cls or "stepvideo" in model_module or "step_video" in model_module:
+            return "stepvideo"
+        if "lumina" in full_path:
+            if hasattr(diffusion_model, "hidden_size") and diffusion_model.hidden_size >= 3840:
+                return "z_image"
+            return "lumina2"
+        if "chroma" in full_path: return "chroma"
+        
+        if "mmdit" in model_cls or "sd3" in model_cls:
+            if hasattr(diffusion_model, "in_channels") and diffusion_model.in_channels >= 16:
+                return "sd35"
+            return "sd3"
+        
+        if "sdxl" in model_cls or hasattr(diffusion_model, "label_emb"): return "sdxl"
+    except Exception as exc:
+        logger.warning("[nodes_sampler]: %s", exc)
+    return None
+
+@RadianceModelRegistry.register(priority=10)
+def detect_by_sampling(model) -> Optional[str]:
+    """Detect model type by sampling attributes (e.g. Flux shift)."""
+    try:
+        ms = model.get_model_object("model_sampling")
+        if hasattr(ms, "shift") or hasattr(ms, "flux_shift"):
+            sigma_max = ms.sigma_max.item() if hasattr(ms, "sigma_max") else 1.0
+            if sigma_max <= 1.5: return "flux"
+    except Exception as exc:
+        logger.warning("[nodes_sampler] detect_by_sampling: %s", exc)
+    return None
+
+def detect_model_type(model) -> str:
+    """Universal model architecture detector."""
+    return RadianceModelRegistry.detect(model)
+
+def get_model_defaults(model_type: str) -> Dict[str, Any]:
+
+    return MODEL_DEFAULTS.get(model_type, MODEL_DEFAULTS["sd15"])
+
+def gradual_sigma_blend(
+    sigmas_a: torch.Tensor, sigmas_b: torch.Tensor, blend_steps: int = 3
+) -> torch.Tensor:
+
+    if blend_steps <= 0 or len(sigmas_a) == 0 or len(sigmas_b) == 0:
+        return sigmas_b
+
+    result = sigmas_b.clone()
+
+    last_sigma_a = sigmas_a[-1].item()
+
+    blend_steps = min(blend_steps, len(result) - 1)
+
+    result[0] = last_sigma_a
+
+    for i in range(1, blend_steps):
+
+        t = i / blend_steps
+
+        blend_factor = 0.5 * (1.0 - math.cos(math.pi * t))
+
+        result[i] = (
+            last_sigma_a * (1.0 - blend_factor) + sigmas_b[i].item() * blend_factor
+        )
+
+    logger.debug(
+        f"Sigma blend: {blend_steps} steps, "
+        f"transition {last_sigma_a:.4f} → {sigmas_b[blend_steps-1].item():.4f}"
+    )
+    return result
+
+def log_tensor(name: str, tensor: Optional[torch.Tensor]) -> None:
+
+    if tensor is None:
+        logger.debug(f"{name}: None")
+        return
+
+    if _HAS_NESTED_TENSOR and isinstance(tensor, _NestedTensor):
+        try:
+            shapes = [tuple(t.shape) for t in tensor.tensors]
+            logger.debug(f"{name} (NestedTensor): sub-shapes={shapes}")
+        except Exception:
+            logger.debug(f"{name}: NestedTensor (shape logging unavailable)")
+        return
+    try:
+        t = tensor.float()
+        logger.debug(
+            f"{name}: Shape={list(t.shape)} | "
+            f"Range=[{t.min().item():.3f}, {t.max().item():.3f}] | "
+            f"Mean={t.mean().item():.3f} | Std={t.std().item():.3f}"
+        )
+    except (RuntimeError, ValueError) as e:
+        logger.warning(f"{name}: Error logging stats ({e})")
+
+class SigmaIndexer:
+
+    def __init__(self, total_steps: int, base_sigmas: torch.Tensor):
+        self.total_steps = total_steps
+        self.base_sigmas = base_sigmas
+        self.num_sigmas = len(base_sigmas)
+
+        self.offset = total_steps - (self.num_sigmas - 1)
+
+        assert self.num_sigmas <= total_steps + 1, (
+            f"SigmaIndexer: schedule length {self.num_sigmas} exceeds "
+            f"steps+1 ({total_steps + 1}). A sigma correction probably "
+            f"appended instead of replacing."
+        )
+        assert self.offset >= 0, (
+            f"SigmaIndexer: negative offset {self.offset} — schedule has "
+            f"{self.num_sigmas} sigmas for {total_steps} steps"
+        )
+
+    def to_local(self, global_step: int) -> int:
+
+        return global_step - self.offset
+
+    def get_stage_sigmas(
+        self, global_start: int, global_end: int
+    ) -> Optional[torch.Tensor]:
+
+        local_start = self.to_local(global_start)
+        local_end = self.to_local(global_end)
+
+        if local_end < 0:
+            return None
+
+        safe_start = max(0, min(local_start, self.num_sigmas - 1))
+        safe_end = max(0, min(local_end + 1, self.num_sigmas))                
+
+        if safe_start >= safe_end:
+            return None
+
+        return self.base_sigmas[safe_start:safe_end]
+
+    def get_sigma_at(self, global_step: int) -> Optional[float]:
+
+        local = self.to_local(global_step)
+        if 0 <= local < self.num_sigmas:
+            return self.base_sigmas[local].item()
+        return None
+
+@dataclass
+class SamplingStage:
+
+    index: int                          
+    global_start: int                     
+    global_end: int                   
+    model: Any                         
+    sampler_name: str                          
+    scheduler_name: str                  
+    is_phase_shifted: bool = False                                            
+    is_blend_point: bool = False                                            
+
+def apply_flux_guidance(cond: List, guidance_value: float) -> List:
+
+    result = []
+    for c in cond:
+        new_dict = c[1].copy()                                        
+        new_dict["guidance"] = guidance_value
+        result.append([c[0], new_dict])
+    return result
+
+def compute_dynamic_guidance(
+    base_guidance: float,
+    step: int,
+    total_steps: int,
+    denoise: float,
+) -> float:
+
+    g_low = base_guidance * DYNAMIC_GUIDANCE_EARLY_MULTIPLIER
+    g_high = base_guidance
+
+    denoising_steps = max(
+        1, int(total_steps * denoise) if denoise < 1.0 else total_steps
+    )
+    denoising_start = total_steps - denoising_steps
+    progress = max(0.0, min(1.0, (step - denoising_start) / denoising_steps))
+
+    RAMP = DYNAMIC_GUIDANCE_RAMP_WIDTH
+    EARLY_T = DYNAMIC_GUIDANCE_EARLY_THRESHOLD
+    LATE_T = DYNAMIC_GUIDANCE_LATE_THRESHOLD
+
+    if progress < EARLY_T - RAMP:
+        return g_low
+
+    elif progress < EARLY_T + RAMP:
+        t = (progress - (EARLY_T - RAMP)) / (2 * RAMP)
+        blend = 0.5 * (1.0 - math.cos(math.pi * t))
+        return g_low + (g_high - g_low) * blend
+
+    elif progress < LATE_T - RAMP:
+        return g_high
+
+    elif progress < LATE_T + RAMP:
+        g_late = g_high * DYNAMIC_GUIDANCE_LATE_MULTIPLIER
+        t = (progress - (LATE_T - RAMP)) / (2 * RAMP)
+        blend = 0.5 * (1.0 - math.cos(math.pi * t))
+        return g_high + (g_late - g_high) * blend
+
+    else:
+        return g_high * DYNAMIC_GUIDANCE_LATE_MULTIPLIER
+
+def compute_dynamic_cfg(
+    base_cfg: float,
+    step: int,
+    total_steps: int,
+    denoise: float,
+) -> float:
+
+    denoising_steps = max(1, int(total_steps * denoise) if denoise < 1.0 else total_steps)
+    denoising_start = total_steps - denoising_steps
+    progress = max(0.0, min(1.0, (step - denoising_start) / denoising_steps))
+
+    RAMP = DYNAMIC_GUIDANCE_RAMP_WIDTH                               
+    EARLY_T = DYNAMIC_CFG_EARLY_THRESHOLD
+    LATE_T = DYNAMIC_CFG_LATE_THRESHOLD
+
+    cfg_early = base_cfg * DYNAMIC_CFG_EARLY_MULTIPLIER
+    cfg_late = base_cfg * DYNAMIC_CFG_LATE_MULTIPLIER
+
+    if progress < EARLY_T - RAMP:
+        return cfg_early
+    elif progress < EARLY_T + RAMP:
+        t = (progress - (EARLY_T - RAMP)) / (2 * RAMP)
+        blend = 0.5 * (1.0 - math.cos(math.pi * t))
+        return cfg_early + (base_cfg - cfg_early) * blend
+    elif progress < LATE_T - RAMP:
+        return base_cfg
+    elif progress < LATE_T + RAMP:
+        t = (progress - (LATE_T - RAMP)) / (2 * RAMP)
+        blend = 0.5 * (1.0 - math.cos(math.pi * t))
+        return base_cfg + (cfg_late - base_cfg) * blend
+    else:
+        return cfg_late
+
+def compute_base_sigmas(
+    model,
+    scheduler_name: str,
+    total_steps: int,
+    primary_scheduler: str,
+    flux_shift: float,
+    denoise: float,
+    cache: SigmaCache,
+    force_full_denoise: bool = False, 
+    force_exact_steps: bool = False, 
+) -> torch.Tensor:
+
+    # ALBABIT-FIX: Properly define how many schedule steps to generate conceptually.
+    if force_exact_steps and 0.0 < denoise < 1.0:
+        calc_steps = max(1, int(round(total_steps / denoise)))
+    else:
+        calc_steps = total_steps
+
+    cached = cache.get(model, scheduler_name, calc_steps)
+    if cached is not None:
+        bs = cached
+    else:
+        ms = model.get_model_object("model_sampling")
+        bs = comfy.samplers.calculate_sigmas(ms, scheduler_name, calc_steps)
+
+        if flux_shift != 1.0 and scheduler_name != primary_scheduler:
+            bs = flux_shift_sigmas(bs, flux_shift)
+
+        bs = correct_sigma_end(bs)
+        cache.put(model, scheduler_name, calc_steps, bs)
+
+    # ALBABIT-FIX: ALWAYS truncate the schedule based on denoise. 
+    # force_full does NOT bypass truncation, it only forces the final value to 0.0 later
+    if denoise < 1.0:
+        if force_exact_steps:
+            bs = bs[-(total_steps + 1):]
+        else:
+            n = len(bs) - 1
+            if n > 0:
+                start_step = max(0, int(n * (1.0 - denoise)))
+                bs = bs[start_step:]
+                
+    if force_full_denoise and len(bs) > 0:
+        bs[-1] = 0.0
+
+    return bs
+
+WORKFLOW_PRESETS = [
+    "None",
+    "Custom",
+    "[F] Flux txt2img",
+    "[F] Flux img2img",
+    "[F] Flux Inpaint",
+    "[F] Flux High-Res Fix",
+    "[F] Flux Fast (12 steps)",
+    "[F] Flux Quality (28 steps)",
+    "[F] Flux Cinematic (30 steps)",
+
+    "[F] Flux Schnell (4 steps)",
+    "[F] SD3.5 Turbo (4 steps)",
+    "[F] Flux Ultra Fast (8 steps)",
+
+    "[V] WAN txt2vid (30 steps)",
+    "[V] WAN img2vid (20 steps)",
+    "[V] LTX-Video (25 steps)",
+    "[V] LTX 2.3 LowRes (20 steps)",                                                
+    "[V] LTX 2.3 HighRes (40 steps)",                                                     
+    "[V] HunyuanVideo (30 steps)",
+
+    "[Q] Draft (4-step / AYS)",
+    "[Q] Fast (8-step / AYS)",
+    "[Q] Balanced (20-step)",
+    "[Q] Quality (35-step)",
+    "[Q] Cinema (60-step)",
+
+    "[Q] z_image (25 steps)",
+    "[Q] Lumina2 (25 steps)",
+]
+
+PRESET_CONFIGS: Dict[str, Dict[str, Any]] = {
+    "[F] Flux txt2img": {
+        "steps": 25,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 1.0,
+        "flux_guidance": 3.5,
+    },
+    "[F] Flux img2img": {
+        "steps": 20,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 0.75,
+        "flux_shift": 1.0,
+        "flux_guidance": 3.5,
+    },
+    "[F] Flux Inpaint": {
+        "steps": 25,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 1.0,
+        "flux_guidance": 4.0,
+    },
+    "[F] Flux High-Res Fix": {
+        "steps": 20,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 0.5,
+        "flux_shift": 3.0,
+        "flux_guidance": 3.5,
+    },
+    "[F] Flux Fast (12 steps)": {
+        "steps": 12,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 1.0,
+        "flux_guidance": 3.5,
+    },
+    "[F] Flux Quality (28 steps)": {
+        "steps": 28,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 1.0,
+        "flux_guidance": 4.0,
+    },
+    "[F] Flux Cinematic (30 steps)": {
+        "steps": 30,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 1.0,
+        "flux_guidance": 4.0,
+    },
+
+    "[F] Flux Schnell (4 steps)": {
+        "steps": 4,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 1.0,
+        "flux_guidance": 0.0,                            
+    },
+    "[F] SD3.5 Turbo (4 steps)": {
+        "steps": 4,
+        "cfg": 1.6,
+        "sampler": "euler",
+        "scheduler": "sgm_uniform",
+        "denoise": 1.0,
+        "flux_shift": 1.0,
+        "flux_guidance": 0.0,
+    },
+    "[F] Flux Ultra Fast (8 steps)": {
+        "steps": 8,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 1.0,
+        "flux_guidance": 2.0,
+    },
+
+    "[V] WAN txt2vid (30 steps)": {
+        "steps": 30,
+        "cfg": 6.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 8.0,
+        "flux_guidance": 0.0,
+    },
+    "[V] WAN img2vid (20 steps)": {
+        "steps": 20,
+        "cfg": 6.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 0.75,
+        "flux_shift": 8.0,
+        "flux_guidance": 0.0,
+    },
+    "[V] LTX-Video (25 steps)": {
+        "steps": 25,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 2.37,
+        "flux_guidance": 0.0,
+    },
+
+    "[V] LTX 2.3 LowRes (20 steps)": {
+        "steps": 20, 
+        "cfg": 3.0,
+        "sampler": "euler",
+        "scheduler": "beta",
+        "denoise": 1.0,
+        "flux_shift": 3.0,
+        "flux_guidance": 0.0,
+        "terminal_sigma_to_zero": True,
+        "force_exact_steps": True,
+        "model_type": "ltxav",
+    },
+    "[V] LTX 2.3 HighRes (40 steps)": {
+        "steps": 40,
+        "cfg": 3.0,
+        "sampler": "euler",
+        "scheduler": "beta",
+        "denoise": 0.45,
+        "flux_shift": 6.0,
+        "flux_guidance": 0.0,
+        "terminal_sigma_to_zero": True,
+        "force_exact_steps": True,
+        "model_type": "ltxav",
+    },
+    "[V] HunyuanVideo (30 steps)": {
+        "steps": 30,
+        "cfg": 6.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 7.0,
+        "flux_guidance": 0.0,
+    },
+
+    "[Q] Draft (4-step / AYS)": {
+        "steps": 4, "cfg": 1.0, "sampler": "euler", "scheduler": "simple",
+        "denoise": 1.0, "flux_shift": 1.0, "flux_guidance": 3.5,
+        "ays_schedule": True,
+    },
+    "[Q] Fast (8-step / AYS)": {
+        "steps": 8, "cfg": 1.0, "sampler": "euler", "scheduler": "simple",
+        "denoise": 1.0, "flux_shift": 1.0, "flux_guidance": 3.5,
+        "ays_schedule": True,
+    },
+    "[Q] Balanced (20-step)": {
+        "steps": 20, "cfg": 1.0, "sampler": "euler", "scheduler": "simple",
+        "denoise": 1.0, "flux_shift": 1.0, "flux_guidance": 3.5,
+        "ays_schedule": False,
+    },
+    "[Q] Quality (35-step)": {
+        "steps": 35, "cfg": 1.0, "sampler": "euler", "scheduler": "simple",
+        "denoise": 1.0, "flux_shift": 1.0, "flux_guidance": 4.0,
+        "sampler_mode": "Phase-Shift (Euler\u2192SGM)", "ays_schedule": False,
+    },
+    "[Q] Cinema (60-step)": {
+        "steps": 60, "cfg": 1.0, "sampler": "euler", "scheduler": "simple",
+        "denoise": 1.0, "flux_shift": 1.5, "flux_guidance": 4.5,
+        "sampler_mode": "Phase-Shift (Euler\u2192SGM)", "ays_schedule": False,
+    },
+
+    "[Q] z_image (25 steps)": {
+        "steps": 25,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 3.0,
+        "flux_guidance": 3.5,
+        "model_type": "z_image",
+    },
+    "[Q] Lumina2 (25 steps)": {
+        "steps": 25,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "flux_shift": 6.0,
+        "flux_guidance": 3.5,
+        "model_type": "lumina2",
+    },
+}
+
+def flux_shift_sigmas(sigmas: torch.Tensor, shift: float) -> torch.Tensor:
+
+    if shift <= 0:
+        raise ValueError(f"flux_shift must be > 0, got {shift}")
+
+    if shift == 1.0:
+        return sigmas
+
+    denominator = 1.0 + (shift - 1.0) * sigmas
+
+    denominator = torch.clamp(denominator, min=1e-6)
+
+    shifted = shift * sigmas / denominator
+    return shifted
+
+def get_flux_sigmas(
+    model, scheduler: str, steps: int, denoise: float, shift: float = 1.0,
+    force_full: bool = False, force_exact: bool = False,
+) -> torch.Tensor:
+
+    if steps < 1:
+        raise ValueError(f"steps must be >= 1, got {steps}")
+    if denoise < 0.0 or denoise > 1.0:
+        raise ValueError(f"denoise must be in [0.0, 1.0], got {denoise}")
+    if denoise <= 0.0:
+        return torch.tensor([0.0])
+
+    model_sampling = model.get_model_object("model_sampling")
+
+    if force_exact and 0.0 < denoise < 1.0:
+
+        total_steps = max(1, int(round(steps / denoise)))
+    else:
+        total_steps = steps
+
+    sigmas = comfy.samplers.calculate_sigmas(model_sampling, scheduler, total_steps)
+
+    if shift != 1.0:
+        sigmas = flux_shift_sigmas(sigmas, shift)
+
+    # ALBABIT-FIX: ALWAYS truncate the schedule based on denoise. 
+    # force_full does NOT prevent truncation, it only ensures the last sigma is 0.0
+    if denoise < 1.0:
+        if force_exact:
+            sigmas = sigmas[-(steps + 1):]
+        else:
+            total_s = len(sigmas) - 1
+            if total_s > 0:
+                start_step = max(0, int(total_s * (1.0 - denoise)))
+                sigmas = sigmas[start_step:]
+
+    # RADIANCE-AUDIT v2.6.0 [CRITICAL]: force_full must run for denoise==1.0
+    # too so Flow-Matching schedules with non-zero terminal sigma get
+    # clamped when the user asked for terminal_sigma_to_zero.
+    if force_full and len(sigmas) > 0:
+        sigmas[-1] = 0.0
+
+    return sigmas
+
+def validate_step_range(
+    start_step: int, end_step: int, steps: int, context: str = ""
+) -> Tuple[int, int]:
+
+    original = (start_step, end_step)
+
+    start = max(0, min(start_step, steps))
+    end = max(0, min(end_step, steps))
+
+    if start > end:
+        logger.warning(f"{context}start_step ({start}) > end_step ({end}), swapping")
+        start, end = end, start
+
+    if original != (start, end):
+        logger.debug(f"{context}Step range adjusted: {original} → ({start}, {end})")
+
+    return start, end
+
+def apply_pag_to_model(model, pag_scale: float):
+
+    if pag_scale <= 0:
+        return model
+
+    try:
+
+        model_pag = model.clone()
+
+        if hasattr(model_pag, "model_options"):
+            model_pag.model_options = model_pag.model_options.copy()
+            model_pag.model_options["pag_scale"] = pag_scale
+
+        def pag_attention_patch(q, k, v, extra_options):
+
+            cond_or_uncond = extra_options.get("cond_or_uncond", [0])
+            block_type = extra_options.get("block_type", "unknown")
+
+            if 1 not in cond_or_uncond or block_type != "middle":
+                return q, k, v
+
+            k_out = k.clone()
+            v_out = v.clone()
+
+            num_cond = len(cond_or_uncond)
+            batch_size = q.shape[0]
+            # BUG-PAG-CHUNK FIX: use ceil division so the last element is always
+            # perturbed when batch_size is not cleanly divisible by num_cond.
+            # Integer // silently truncated the final batch slice.
+            chunk_size = math.ceil(batch_size / num_cond) if num_cond > 0 else batch_size
+
+            for idx, cond_type in enumerate(cond_or_uncond):
+                if cond_type == 1:
+                    start = idx * chunk_size
+                    end = min(start + chunk_size, batch_size)
+
+                    k_out[start:end] = q[start:end]
+                    v_out[start:end] = q[start:end]
+
+            return q, k_out, v_out
+
+        model_pag.set_model_attn1_patch(pag_attention_patch)
+
+        logger.info(f"PAG applied with scale {pag_scale} (attention hook active)")
+        return model_pag
+
+    except (AttributeError, RuntimeError, TypeError) as e:
+
+        logger.warning(f"Failed to apply PAG: {e}, using original model")
+        return model
+
+AYS_ANCHORS = {
+    "sdxl": [14.615, 6.315, 3.771, 1.181, 0.468, 0.131, 0.029, 0.0],
+    "sd15": [
+        14.615,
+        6.475,
+        3.861,
+        2.697,
+        1.886,
+        1.396,
+        0.963,
+        0.652,
+        0.399,
+        0.152,
+        0.029,
+        0.0,
+    ],
+
+    "flux": [1.0, 0.90, 0.70, 0.45, 0.22, 0.08, 0.02, 0.0],
+    "sd3": [14.615, 6.291, 3.438, 1.566, 0.741, 0.288, 0.079, 0.0],
+
+    "wan": [1.0, 0.92, 0.78, 0.58, 0.35, 0.15, 0.04, 0.0],
+
+    "ltxv": [1.0, 0.88, 0.68, 0.42, 0.20, 0.07, 0.015, 0.0],
+}
+
+def get_ays_sigmas(model_type: str, steps: int) -> Optional[torch.Tensor]:
+
+    key = model_type if model_type in AYS_ANCHORS else None
+    if key is None:
+
+        if model_type in ("sd35",):
+            key = "sd3"
+        elif model_type in ("chroma",):
+            key = "flux"
+        elif model_type in ("hunyuan_video",):
+            key = "wan"                                      
+        elif model_type in ("lumina2", "z_image"):
+            key = "flux"                        
+        else:
+            return None
+
+    if key in ("flux", "wan", "ltxv"):
+        logger.info(
+            f"AYS for {model_type}: using experimental anchors (not from original paper)"
+        )
+
+    anchors = AYS_ANCHORS[key]
+    n_anchors = len(anchors)
+
+    if steps + 1 <= n_anchors:
+
+        indices = torch.linspace(0, n_anchors - 1, steps + 1).long()
+        return torch.tensor([anchors[i] for i in indices])
+
+    result = torch.zeros(steps + 1)
+    anchor_t = torch.tensor(anchors)
+
+    log_anchors = torch.log(torch.clamp(anchor_t[:-1], min=1e-6))                   
+    log_anchors = torch.cat([log_anchors, torch.tensor([-12.0])])                 
+
+    x_anchors = torch.linspace(0, 1, len(log_anchors))
+    x_result = torch.linspace(0, 1, steps + 1)
+
+    for i in range(steps + 1):
+        t = x_result[i].item()
+
+        idx = 0
+        while idx < len(x_anchors) - 2 and x_anchors[idx + 1] < t:
+            idx += 1
+
+        t_local = (t - x_anchors[idx].item()) / max(
+            1e-8, (x_anchors[idx + 1] - x_anchors[idx]).item()
+        )
+        t_local = max(0.0, min(1.0, t_local))
+
+        log_val = log_anchors[idx] * (1 - t_local) + log_anchors[idx + 1] * t_local
+        result[i] = math.exp(log_val.item())
+
+    result[-1] = 0.0
+
+    return result
+
+def guidance_rescale_cfg(
+    cond_output: torch.Tensor,
+    uncond_output: torch.Tensor,
+    cfg: float,
+    phi: float = 0.7,
+) -> torch.Tensor:
+
+    if phi <= 0.0 or cfg <= 1.0:
+        return uncond_output + cfg * (cond_output - uncond_output)
+
+    guided = uncond_output + cfg * (cond_output - uncond_output)
+
+    dims = list(range(1, guided.ndim))                         
+    guided_std = guided.std(dim=dims, keepdim=True) + 1e-6
+    cond_std = cond_output.std(dim=dims, keepdim=True) + 1e-6
+
+    rescaled = guided * (cond_std / guided_std)
+
+    return rescaled * phi + guided * (1.0 - phi)
+
+def correct_sigma_end(
+    sigmas: torch.Tensor, target_end: float = 0.0
+) -> torch.Tensor:
+
+    if len(sigmas) < 2:
+        return sigmas
+
+    if sigmas[-1].item() > 0.0 and target_end == 0.0:
+
+        result = sigmas.clone()
+        result[-1] = target_end
+        return result
+
+    return sigmas
+
+def apply_cfg_plus_plus(cfg: float, sigma: torch.Tensor, sigma_max: float) -> float:
+
+    if sigma_max <= 0:
+        return cfg
+
+    if isinstance(sigma, torch.Tensor):
+        sigma_val = sigma.item() if sigma.numel() == 1 else sigma[0].item()
+    else:
+        sigma_val = float(sigma)
+
+    progress = 1.0 - (sigma_val / sigma_max)
+    progress = max(0.0, min(1.0, progress))
+
+    cos_factor = (1.0 + math.cos(math.pi * progress)) / 2.0
+
+    effective_cfg = cfg * cos_factor + 1.0 * (1.0 - cos_factor)
+
+    return effective_cfg
+
+def build_sigma_report(
+    detected_type: str,
+    steps: int,
+    scheduler: str,
+    flux_shift: float,
+    denoise: float,
+    sigmas: torch.Tensor,
+    sampler_mode: str,
+    sorted_splits: List[int],
+    stage_timings: List[Tuple[int, int, int, str, float]],
+    total_time: float,
+    ays_active: bool = False,
+    frames: Optional[int] = None,
+) -> str:
+
+    video_tag = f" | Frames: {frames}" if frames is not None and frames > 1 else ""
+    lines = [
+        f"═══ Radiance Sampler v3.0.0 ═══",
+        f"Model: {detected_type} | Target Steps: {steps} | Scheduler: {scheduler}{'  [AYS]' if ays_active else ''}{video_tag}",
+        f"Shift: {flux_shift} | Denoise: {denoise} | Mode: {sampler_mode}",
+    ]
+
+    if len(sigmas) > 0:
+        lines.append(
+            f"Sigma range: [{sigmas[0].item():.4f} → {sigmas[-1].item():.4f}] "
+            f"({len(sigmas)} values)"
+        )
+
+    lines.append(f"Stages: {max(0, len(sorted_splits) - 1)}")
+
+    if stage_timings:
+        lines.append("─── Per-Stage Timing ───")
+        for stage_num, s_start, s_end, samp, t in stage_timings:
+            # ALBABIT-FIX: Display 1-based step counts for user clarity (1 to N) instead of 0-based
+            stage_steps = s_end - s_start
+            speed = stage_steps / t if t > 0.001 else 0
+            lines.append(
+                f"  Stage {stage_num}: Steps {s_start + 1}→{s_end} [{samp}] "
+                f"= {t:.3f}s ({speed:.1f} it/s)"
+            )
+
+    total_sampling_steps = (
+        sum(s_end - s_start for _, s_start, s_end, _, _ in stage_timings)
+        if stage_timings
+        else steps
+    )
+    overall_speed = total_sampling_steps / total_time if total_time > 0.001 else 0
+    lines.append(f"Total: {total_time:.2f}s ({overall_speed:.1f} it/s)")
+
+    return "\n".join(lines)
+
+def _temporally_correlate(
+    noise_fn, shape: tuple, device: torch.device, alpha: float = 0.6,
+    seed: Optional[int] = None,
+) -> torch.Tensor:
+
+    B, C, T, H, W = shape
+    frame_shape = (B, C, H, W)
+
+    frames = []
+    if seed is not None:
+        torch.manual_seed(seed)
+    prev = noise_fn(frame_shape, device)
+    for f in range(T):
+        if seed is not None:
+            torch.manual_seed(seed + f + 1)                                   
+        curr = noise_fn(frame_shape, device)
+        blended = alpha * prev + math.sqrt(1 - alpha ** 2) * curr
+        frames.append(blended)
+        prev = blended
+
+    result = torch.stack(frames, dim=2)                     
+
+    result = result - result.mean()
+    std = result.std().clamp(min=1e-6)
+    return result / std
+
+def _perlin_noise(shape: tuple, device: torch.device, seed: Optional[int] = None) -> torch.Tensor:
+
+    if len(shape) == 5 and shape[2] > 1:
+        return _temporally_correlate(_perlin_noise_2d, shape, device, seed=seed)
+
+    # RADIANCE-AUDIT v2.6.0 [IMPORTANT]: honour seed in the 2D path too.
+    if seed is not None:
+        torch.manual_seed(seed)
+    return _perlin_noise_2d(shape, device)
+
+def _perlin_noise_2d(shape: tuple, device: torch.device) -> torch.Tensor:
+
+    noise = torch.zeros(shape, device=device)
+    amplitude = 1.0
+    frequency = 1.0
+    spatial_h, spatial_w = shape[-2], shape[-1]
+
+    for _ in range(4):             
+        n = torch.randn(shape, device=device) * amplitude
+
+        if spatial_w > 1:
+            kernel = max(1, int(spatial_w / frequency))
+
+            leading = n.shape[:-2]
+            n_flat = n.reshape(-1, 1, spatial_h, spatial_w)
+
+            pad = kernel // 2
+            pooled = torch.nn.functional.avg_pool2d(
+                n_flat, kernel_size=kernel, stride=1, padding=pad
+            )
+
+            pooled = pooled[..., :spatial_h, :spatial_w]
+
+            n = pooled.reshape(*leading, spatial_h, spatial_w)
+
+        noise = noise + n
+        amplitude *= 0.5
+        frequency *= 2.0
+
+    noise = noise - noise.mean()
+    std = noise.std().clamp(min=1e-6)
+    return noise / std
+
+def _spectral_noise(shape: tuple, device: torch.device, seed: Optional[int] = None) -> torch.Tensor:
+
+    if len(shape) == 5 and shape[2] > 1:
+        return _temporally_correlate(_spectral_noise_2d, shape, device, seed=seed)
+
+    # RADIANCE-AUDIT v2.6.0 [IMPORTANT]: honour seed in the 2D path too.
+    if seed is not None:
+        torch.manual_seed(seed)
+    return _spectral_noise_2d(shape, device)
+
+_freq_grid_cache: Dict[tuple, torch.Tensor] = {}
+
+def _get_freq_grid(H: int, W: int, device: torch.device) -> torch.Tensor:
+    """Return a cached 1/f frequency weight grid for spectral noise."""
+    key = (H, W, str(device))
+    if key not in _freq_grid_cache:
+        freqs_h = torch.fft.fftfreq(H, device=device).abs()
+        freqs_w = torch.fft.rfftfreq(W, device=device).abs()
+        grid = torch.sqrt(
+            freqs_h.unsqueeze(-1) ** 2 + freqs_w.unsqueeze(0) ** 2
+        ).clamp(min=1e-6)
+        weight = 1.0 / grid
+        weight[0, 0] = 0.0  # zero DC component
+        _freq_grid_cache[key] = weight
+        # Evict oldest entry if cache grows too large (e.g. many resolutions)
+        if len(_freq_grid_cache) > 32:
+            oldest = next(iter(_freq_grid_cache))
+            del _freq_grid_cache[oldest]
+    return _freq_grid_cache[key]
+
+
+def _spectral_noise_2d(shape: tuple, device: torch.device) -> torch.Tensor:
+
+    white = torch.randn(shape, device=device)
+    fft = torch.fft.rfft2(white)
+
+    # PERF-FREQGRID FIX: cache the frequency weight grid per (H, W, device)
+    # to avoid recomputing it on every frame in video generation.
+    weight = _get_freq_grid(shape[-2], shape[-1], device)
+
+    # Broadcast to match fft dims (B*C, H, W/2+1) when fft.ndim > 2
+    w = weight
+    for _ in range(fft.ndim - 2):
+        w = w.unsqueeze(0)
+
+    filtered = fft * w
+    result = torch.fft.irfft2(filtered, s=(shape[-2], shape[-1]))
+
+    result = result - result.mean()
+    std = result.std().clamp(min=1e-6)
+    return result / std
+
+def _brownian_noise(
+    shape: tuple, device: torch.device, frames: Optional[int] = None,
+    seed: Optional[int] = None,
+) -> torch.Tensor:
+
+    if len(shape) == 5 and shape[2] > 1:
+        B, C, T, H, W = shape
+        alpha = 0.7                                          
+
+        frame_shape = (B, C, H, W)
+        noises = []
+        if seed is not None:
+            torch.manual_seed(seed)
+        prev = torch.randn(frame_shape, device=device)
+        for f in range(T):
+            if seed is not None:
+                torch.manual_seed(seed + f + 1)
+            curr = alpha * prev + math.sqrt(1 - alpha ** 2) * torch.randn(frame_shape, device=device)
+            noises.append(curr)
+            prev = curr
+
+        return torch.stack(noises, dim=2)
+
+    if frames is None or (len(shape) == 4 and shape[0] == 1):
+        return _spectral_noise(shape, device, seed=seed)
+
+    # RADIANCE-AUDIT v2.6.0 [IMPORTANT]: seed the 4D-with-frames path. The
+    # old code used the global torch RNG state unmodified, so the same
+    # seed could produce different output depending on upstream calls.
+    alpha = 0.7
+    noises = []
+    if seed is not None:
+        torch.manual_seed(seed)
+    prev = torch.randn(shape[1:], device=device)
+    for f in range(shape[0]):
+        if seed is not None:
+            torch.manual_seed(seed + f + 1)
+        curr = alpha * prev + math.sqrt(1 - alpha ** 2) * torch.randn(shape[1:], device=device)
+        noises.append(curr)
+        prev = curr
+    return torch.stack(noises, dim=0)
+
+
+# ── v2.4 Phase 4: New noise generators (pure PyTorch, no native deps) ─────────
+
+def _simplex_noise(shape: tuple, device: torch.device,
+                   seed: Optional[int] = None) -> torch.Tensor:
+    """
+    Approximate Simplex-style noise via trilinear hash grid.
+    Faster than Perlin for high-resolution latents; smoother frequency spectrum.
+    Based on Stefan Gustavson's method adapted for GPU tensors.
+    """
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    if len(shape) == 5:
+        B, C, T, H, W = shape
+        # PERF-SIMPLEX-LOOP FIX: pre-generate all frames then stack — avoids
+        # repeated Python-level dispatch overhead across T iterations.
+        frames = [
+            _simplex_noise((B, C, H, W), device, seed=(seed or 0) + t)
+            for t in range(T)
+        ]
+        return torch.stack(frames, dim=2)
+
+    # Work on last 2 dims (spatial)
+    out_shape = shape
+    if len(shape) == 4:
+        B, C, H, W = shape
+    else:
+        return torch.randn(shape, device=device)  # fallback for unknown shapes
+
+    # RADIANCE-AUDIT v2.6.0 [CRITICAL]: salt the hash with the seed so
+    # different seeds actually produce different simplex noise. The old
+    # 4D path derived everything from grid_x/grid_y and was fully
+    # deterministic regardless of seed.
+    seed_salt = int(seed) if seed is not None else 0
+    octave_salt = (seed_salt * 2654435761) & 0xFFFFFFFF
+
+    octaves = 4
+    persistence = 0.5
+    lacunarity = 2.0
+    result = torch.zeros(B, C, H, W, device=device)
+    amplitude = 1.0
+    frequency = 1.0
+    max_amplitude = 0.0
+
+    for octave_idx in range(octaves):
+        # RADIANCE-AUDIT v2.6.0 [CRITICAL]: per-octave jitter driven by the
+        # seeded RNG so the grid itself shifts across seeds.
+        jitter_y = torch.rand((), device=device).item() if seed is not None else 0.0
+        jitter_x = torch.rand((), device=device).item() if seed is not None else 0.0
+        ys = torch.linspace(0, frequency, H, device=device) + jitter_y
+        xs = torch.linspace(0, frequency, W, device=device) + jitter_x
+        grid_y, grid_x = torch.meshgrid(ys, xs, indexing='ij')
+
+        # Hash-based gradient (deterministic within an octave,
+        # seed-dependent across octaves)
+        octave_offset = (octave_salt + octave_idx * 0x9E3779B1) & 0xFFFFFFFF
+        ix = (grid_x.long() + (octave_offset & 0xFFFF)) % 255
+        iy = (grid_y.long() + ((octave_offset >> 16) & 0xFFFF)) % 255
+        hash_val = ((ix * 1619 + iy * 31337 + octave_offset) & 0xFFFF).float() / 32768.0 - 1.0
+        fx = grid_x - grid_x.long().float()
+        fy = grid_y - grid_y.long().float()
+
+        # Fade (smoothstep — quintic for C2 continuity)
+        u = fx * fx * fx * (fx * (fx * 6 - 15) + 10)
+        v = fy * fy * fy * (fy * (fy * 6 - 15) + 10)
+
+        # Gradient vectors from hash angle
+        angle = hash_val * 2.0 * math.pi
+        gx = torch.cos(angle)
+        gy = torch.sin(angle)
+
+        # BUG-SIMPLEX-GRAD FIX: sum all four bilinear corner contributions.
+        # The old code only computed the (0,0) corner, producing ~25% amplitude
+        # and no smooth tiling across cell boundaries.
+        #   corner (0,0): local coords (fx,     fy    )
+        #   corner (1,0): local coords (fx-1,   fy    )
+        #   corner (0,1): local coords (fx,     fy-1  )
+        #   corner (1,1): local coords (fx-1,   fy-1  )
+        g00 = (gx * fx       + gy * fy)       * (1.0 - u) * (1.0 - v)
+        g10 = (gx * (fx - 1) + gy * fy)       *        u  * (1.0 - v)
+        g01 = (gx * fx       + gy * (fy - 1)) * (1.0 - u) *        v
+        g11 = (gx * (fx - 1) + gy * (fy - 1)) *        u  *        v
+        grad = (g00 + g10 + g01 + g11).unsqueeze(0).unsqueeze(0).expand(B, C, -1, -1)
+
+        result += amplitude * grad
+        max_amplitude += amplitude
+        amplitude *= persistence
+        frequency *= lacunarity
+
+    return (result / max_amplitude)
+
+
+def _voronoi_noise(shape: tuple, device: torch.device,
+                   seed: Optional[int] = None) -> torch.Tensor:
+    """
+    Cellular / Voronoi noise. Each pixel value = distance to nearest random point.
+    Produces an organic, cellular texture pattern useful for breaking up uniform noise.
+    """
+    if len(shape) == 5:
+        B, C, T, H, W = shape
+        # PERF-VORONOI-LOOP FIX: pre-generate all frames then stack.
+        frames = [
+            _voronoi_noise((B, C, H, W), device, seed=(seed or 0) + t)
+            for t in range(T)
+        ]
+        return torch.stack(frames, dim=2)
+
+    if len(shape) == 4:
+        B, C, H, W = shape
+    else:
+        return torch.randn(shape, device=device)
+
+    n_points = max(8, (H * W) // 256)  # ~1 point per 16×16 cell
+
+    # BUG-VORONOI-SEED FIX: use a dedicated Generator so the point placement
+    # is seed-deterministic regardless of external RNG state.  The old
+    # torch.manual_seed() call was overridden by entropy consumed in the frame
+    # loop before points_y/points_x were sampled.
+    gen = torch.Generator(device=device)
+    gen.manual_seed(int(seed) if seed is not None else 0)
+    points_y = torch.rand(n_points, device=device, generator=gen) * H
+    points_x = torch.rand(n_points, device=device, generator=gen) * W
+
+    ys = torch.arange(H, device=device).float()
+    xs = torch.arange(W, device=device).float()
+    grid_y, grid_x = torch.meshgrid(ys, xs, indexing='ij')
+
+    # Distance to nearest voronoi point - Memory-safe chunked vectorization
+    # AUDIT FIX: Process points in batches of 256 to prevent OOM on 2K/4K latents
+    min_dist_sq = torch.full((H, W), float('inf'), device=device)
+    batch_size = 256
+    
+    for i in range(0, n_points, batch_size):
+        end = min(i + batch_size, n_points)
+        py = points_y[i:end].view(-1, 1, 1)
+        px = points_x[i:end].view(-1, 1, 1)
+        
+        dy = grid_y.unsqueeze(0) - py
+        dx = grid_x.unsqueeze(0) - px
+        chunk_dist_sq = dy * dy + dx * dx
+        
+        min_dist_sq = torch.minimum(min_dist_sq, torch.min(chunk_dist_sq, dim=0)[0])
+        del dy, dx, chunk_dist_sq
+
+    min_dist = torch.sqrt(min_dist_sq)
+
+    # Normalise to [-1, 1]
+    d_max = min_dist.max().clamp(min=1e-6)
+    noise_2d = (min_dist / d_max) * 2.0 - 1.0
+
+    return noise_2d.unsqueeze(0).unsqueeze(0).expand(B, C, -1, -1)
+
+
+def _curl_noise(shape: tuple, device: torch.device,
+                seed: Optional[int] = None) -> torch.Tensor:
+    """
+    Divergence-free Curl noise derived from the gradient of a Perlin potential field.
+    Produces swirling, fluid-like patterns. Excellent for organic motion blur or
+    fire/smoke latent initializations.
+    """
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    if len(shape) == 5:
+        B, C, T, H, W = shape
+        result = torch.zeros(shape, device=device)
+        for t in range(T):
+            result[:, :, t] = _curl_noise((B, C, H, W), device, seed=(seed or 0) + t)
+        return result
+
+    if len(shape) == 4:
+        B, C, H, W = shape
+    else:
+        return torch.randn(shape, device=device)
+
+    eps = 1.0 / max(H, W)
+
+    # Generate potential field as spectral noise (acts as the stream function)
+    potential = _spectral_noise_2d(shape, device)  # (B, C, H, W)
+
+    # Compute curl via finite differences on the potential field
+    # curl_x =  dPhi/dy,  curl_y = -dPhi/dx
+    phi = potential
+
+    # Pad for boundary conditions
+    phi_pad = torch.nn.functional.pad(phi, (1, 1, 1, 1), mode='replicate')
+    dPhi_dy = (phi_pad[:, :, 2:, 1:-1] - phi_pad[:, :, :-2, 1:-1]) / (2 * eps)
+    dPhi_dx = (phi_pad[:, :, 1:-1, 2:] - phi_pad[:, :, 1:-1, :-2]) / (2 * eps)
+
+    # Alternate channels between x and y components for multi-channel latents
+    result = torch.zeros_like(potential)
+    for c in range(C):
+        result[:, c] = dPhi_dy[:, c] if c % 2 == 0 else -dPhi_dx[:, c]
+
+    # Normalise
+    rms = result.pow(2).mean().sqrt().clamp(min=1e-6)
+    return result / rms
+
+
+# ── End v2.4 noise generators ──────────────────────────────────────────────────
+
+def generate_noise(
+    latent_samples: torch.Tensor,
+    seed: int,
+    noise_type: str = "Gaussian",
+    frames: Optional[int] = None,
+) -> torch.Tensor:
+
+    shape = latent_samples.shape
+    device = latent_samples.device
+    dtype = latent_samples.dtype
+
+    is_video = len(shape) == 5 and shape[2] > 1
+    if is_video and noise_type in ("Gaussian", "Uniform"):
+        B, C, T, H, W = shape
+        frame_shape = (B, C, H, W)
+        frame_noises = []
+        for f in range(T):
+            torch.manual_seed(seed + f)
+            if noise_type == "Gaussian":
+                frame_noises.append(torch.randn(frame_shape, device=device, dtype=dtype))
+            else:
+                frame_noises.append(
+                    (torch.rand(frame_shape, device=device, dtype=dtype) * 2 - 1) * (3 ** 0.5)
+                )
+        return torch.stack(frame_noises, dim=2)
+
+    torch.manual_seed(seed)
+
+    try:
+        if noise_type == "Gaussian":
+            return torch.randn(shape, device=device, dtype=dtype)
+        elif noise_type == "Uniform":
+            return (torch.rand(shape, device=device, dtype=dtype) * 2 - 1) * (3 ** 0.5)
+        elif noise_type == "Perlin":
+            return _perlin_noise(shape, device, seed=seed).to(dtype)
+        elif noise_type == "Spectral":
+            return _spectral_noise(shape, device, seed=seed).to(dtype)
+        elif noise_type == "Brownian":
+            return _brownian_noise(shape, device, frames=frames, seed=seed).to(dtype)
+        elif noise_type == "Simplex":
+            return _simplex_noise(shape, device, seed=seed).to(dtype)
+        elif noise_type == "Voronoi":
+            return _voronoi_noise(shape, device, seed=seed).to(dtype)
+        elif noise_type == "Curl":
+            return _curl_noise(shape, device, seed=seed).to(dtype)
+    except Exception as e:
+        logger.warning(f"[Noise] Failed to generate {noise_type} noise ({e}), falling back to Gaussian")
+
+    return torch.randn(shape, device=device, dtype=dtype)
+
+
+def merge_conditionings(
+    cond_a: List,
+    cond_b: List,
+    mode: str = "average",
+    weight_b: float = 0.5,
+    split_step: int = 0,
+    total_steps: int = 20,
+    sigmas: Optional[torch.Tensor] = None,
+) -> List:
+
+    if not cond_b or mode == "Off":
+        return cond_a
+    if mode in ("average", "weighted"):
+        w_b = weight_b if mode == "weighted" else 0.5
+        w_a = 1.0 - w_b
+        merged = []
+        max_len = max(len(cond_a), len(cond_b))
+        for i in range(max_len):
+            a = cond_a[i % len(cond_a)]
+            b = cond_b[i % len(cond_b)]
+            tensor_a = a[0]
+            tensor_b = b[0]
+
+            if tensor_a.shape[1] != tensor_b.shape[1]:
+                target_len = max(tensor_a.shape[1], tensor_b.shape[1])
+                def _pad(t, n):
+                    if t.shape[1] < n:
+                        pad = t[:, -1:, :].expand(-1, n - t.shape[1], -1)
+                        return torch.cat([t, pad], dim=1)
+                    return t
+                tensor_a = _pad(tensor_a, target_len)
+                tensor_b = _pad(tensor_b, target_len)
+            blended = tensor_a * w_a + tensor_b * w_b
+
+            pooled_a = a[1].get("pooled_output", None) if len(a) > 1 else None
+            pooled_b = b[1].get("pooled_output", None) if len(b) > 1 else None
+            extra = dict(a[1]) if len(a) > 1 else {}
+            if pooled_a is not None and pooled_b is not None:
+                try:
+                    extra["pooled_output"] = pooled_a * w_a + pooled_b * w_b
+                except Exception as exc:
+                    logger.warning("[nodes_sampler] _pad: %s", exc)
+            merged.append([blended, extra])
+        return merged
+    elif mode == "sequential":
+        # BUG-SEQCOND-FRAC FIX: ComfyUI start_percent/end_percent are sigma-space
+        # fractions (fraction of the noise-level trajectory), NOT step-count
+        # fractions. At non-uniform schedulers (Karras, SGM) the midpoint in
+        # steps is not the midpoint in sigma. Derive the fraction from the
+        # actual sigma schedule when available.
+        if sigmas is not None and len(sigmas) > 1:
+            sigma_max = float(sigmas[0].clamp(min=1e-8))
+            split_idx = max(0, min(split_step, len(sigmas) - 1))
+            frac = 1.0 - float(sigmas[split_idx]) / sigma_max
+        else:
+            frac = float(split_step) / max(1, total_steps)
+        cond_a_timed = []
+        for c in cond_a:
+            entry = [c[0], dict(c[1]) if len(c) > 1 else {}]
+            entry[1]["start_percent"] = 0.0
+            entry[1]["end_percent"] = frac
+            cond_a_timed.append(entry)
+        cond_b_timed = []
+        for c in cond_b:
+            entry = [c[0], dict(c[1]) if len(c) > 1 else {}]
+            entry[1]["start_percent"] = frac
+            entry[1]["end_percent"] = 1.0
+            cond_b_timed.append(entry)
+        return cond_a_timed + cond_b_timed
+    return cond_a
+
+def route_conditioning(cond: List, target_key: str) -> List:
+
+    if not target_key or target_key == "Auto":
+        return cond
+    routed = []
+    for entry in cond:
+        new_entry = [entry[0], dict(entry[1]) if len(entry) > 1 else {}]
+        new_entry[1]["encoder_target"] = target_key
+        routed.append(new_entry)
+    return routed
+
+def tile_sample(
+    model,
+    noise: torch.Tensor,
+    latent_samples: torch.Tensor,
+    positive: List,
+    negative: List,
+    sigmas: torch.Tensor,
+    sampler_obj,
+    seed: int,
+    tile_size: int = 128,                        
+    tile_overlap: int = 16,                      
+    tile_blend: str = "feather",
+    noise_mask: Optional[torch.Tensor] = None,
+    cfg: float = 1.0,
+) -> torch.Tensor:
+
+    import comfy.sample as cs
+
+    if latent_samples.ndim != 4:
+        raise ValueError(
+            f"[Radiance] tile_sample requires 4D latent (B, C, H, W), "
+            f"got {latent_samples.ndim}D. Video tile sampling is not supported."
+        )
+
+    B, C, H, W = latent_samples.shape
+    step = max(1, tile_size - tile_overlap)
+    device = latent_samples.device
+
+    output = torch.zeros_like(latent_samples)
+    weight = torch.zeros((B, 1, H, W), device=device, dtype=latent_samples.dtype)
+
+    tile_coords = []
+    for y in range(0, H, step):
+        for x in range(0, W, step):
+            y1 = min(y, H - tile_size) if H > tile_size else 0
+            x1 = min(x, W - tile_size) if W > tile_size else 0
+            y2 = min(y1 + tile_size, H)
+            x2 = min(x1 + tile_size, W)
+            tile_coords.append((y1, y2, x1, x2))
+
+    tile_coords = list(dict.fromkeys(tile_coords))
+
+    for idx, (y1, y2, x1, x2) in enumerate(tile_coords):
+        t_latent = latent_samples[:, :, y1:y2, x1:x2]
+        t_noise = noise[:, :, y1:y2, x1:x2]
+
+        try:
+            t_out = cs.sample_custom(
+                model,
+                t_noise,
+                cfg=cfg,                                                         
+                sampler=sampler_obj,
+                sigmas=sigmas,
+                positive=positive,
+                negative=negative,
+                latent_image=t_latent,
+                noise_mask=noise_mask[:, :, y1:y2, x1:x2] if noise_mask is not None else None,
+                callback=None,
+                disable_pbar=True,
+                seed=seed + idx,
+            )
+        except Exception as e:
+            logger.warning(f"[TileSample] Tile ({y1},{y2},{x1},{x2}) failed: {e} — using input")
+            t_out = t_latent
+
+        if t_out.device != device or t_out.dtype != latent_samples.dtype:
+            t_out = t_out.to(device=device, dtype=latent_samples.dtype)
+
+        th = y2 - y1
+        tw = x2 - x1
+
+        if tile_blend == "feather":
+
+            wy = torch.ones(th, device=device)
+            wx = torch.ones(tw, device=device)
+            fade = min(tile_overlap, th // 2, tw // 2)
+            if fade > 0:
+                ramp = (1 - torch.cos(torch.linspace(0, math.pi, fade, device=device))) / 2
+                wy[:fade] = ramp
+                wy[-fade:] = ramp.flip(0)
+                wx[:fade] = ramp
+                wx[-fade:] = ramp.flip(0)
+            w_tile = (wy.unsqueeze(1) * wx.unsqueeze(0)).unsqueeze(0).unsqueeze(0)
+        elif tile_blend == "gaussian":
+            sigma_h = th / 4.0
+            sigma_w = tw / 4.0
+            yg = torch.arange(th, device=device).float() - th / 2
+            xg = torch.arange(tw, device=device).float() - tw / 2
+            w_tile = torch.exp(-(yg.unsqueeze(1)**2 / (2*sigma_h**2) +
+                                  xg.unsqueeze(0)**2 / (2*sigma_w**2)))
+            w_tile = w_tile.unsqueeze(0).unsqueeze(0)
+        else:                                                       
+            w_tile = torch.ones((1, 1, th, tw), device=device, dtype=latent_samples.dtype)
+
+        output[:, :, y1:y2, x1:x2] += t_out * w_tile
+        weight[:, :, y1:y2, x1:x2] += w_tile
+
+    weight = weight.clamp(min=1e-6)
+    output = output / weight
+
+    return output
+
+def _build_latent_meta(
+    detected_type: str,
+    steps: int,
+    scheduler: str,
+    flux_shift: float,
+    denoise: float,
+    sigmas: torch.Tensor,
+    ays_active: bool,
+    pag_active: bool,
+    noise_type: str,
+    tile_mode: bool,
+    multi_cond_mode: str,
+    clip_target: str,
+    seed: int,
+    total_time_ms: int,
+    latent_format: str = "",
+    frames: Optional[int] = None,
+    sdr_blend: float = 0.0,
+    sdr_inject_steps: int = 0,
+    sdr_decay: float = 0.65,
+) -> str:
+
+    import json
+    sigma_min = float(sigmas[sigmas > 0].min()) if (sigmas > 0).any() else 0.0
+    sigma_max = float(sigmas.max())
+    is_video = frames is not None and frames > 1
+    meta = {
+        "version": "3.0.0",
+        "detected_arch": detected_type,
+        "is_video": is_video,
+        "frames": frames if is_video else None,
+        "steps": steps,
+        "scheduler": scheduler,
+        "flux_shift": flux_shift,
+        "denoise": denoise,
+        "sigma_min": round(sigma_min, 5),
+        "sigma_max": round(sigma_max, 5),
+        "ays_active": ays_active,
+        "pag_active": pag_active,
+        "noise_type": noise_type,
+        "tile_mode": tile_mode,
+        "multi_cond_mode": multi_cond_mode,
+        "clip_target": clip_target,
+        "latent_format": latent_format or "unknown",
+        "seed": seed,
+        "time_ms": total_time_ms,
+    }
+    if sdr_blend > 0.0:
+        meta["sdr_conditioning"] = {
+            "sdr_blend": round(sdr_blend, 4),
+            "sdr_inject_steps": sdr_inject_steps,
+            "sdr_decay": round(sdr_decay, 4),
+        }
+    return json.dumps(meta, indent=2)
+

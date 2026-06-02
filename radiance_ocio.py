@@ -4,7 +4,7 @@ import hashlib
 import numpy as np
 from typing import Dict, Any, Optional, List, Tuple
 
-logger = logging.getLogger("◎ Radiance.ocio")
+logger = logging.getLogger("radiance.ocio")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                        OCIO AVAILABILITY
@@ -126,6 +126,7 @@ def discover_ocio_config() -> Optional[str]:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class OCIOConfigManager:
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Utilities"
     """
     Manages a single OCIO config and caches baked 3D LUTs.
 
@@ -244,7 +245,8 @@ class OCIOConfigManager:
             return []
         try:
             return list(self.config.getViews(display))
-        except Exception:
+        except Exception as exc:
+            logger.warning("[radiance_ocio] get_views: %s", exc)
             return []
 
     def get_display_view_pairs(self) -> List[Dict[str, str]]:
@@ -285,9 +287,29 @@ class OCIOConfigManager:
                 )
                 if cs:
                     roles[role_name] = cs.getName()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("[radiance_ocio] get_roles: %s", exc)
+        
+        # Heuristic for common missing roles in older configs
+        if "scene_linear" not in roles:
+            # Look for ACEScg or linear spaces
+            for cs in self.config.getColorSpaces():
+                name = cs.getName().lower()
+                if "acescg" in name or ("linear" in name and "srgb" not in name):
+                    roles["scene_linear"] = cs.getName()
+                    break
+        
         return roles
+
+    def get_processor(self, src: str, dst: str):
+        """Get an OCIO processor for a transform between two spaces/roles."""
+        if not self.is_loaded:
+            return None
+        try:
+            return self.config.getProcessor(src, dst)
+        except Exception as e:
+            logger.error(f"[Radiance OCIO] getProcessor failed ({src} -> {dst}): {e}")
+            return None
 
     def get_config_info(self) -> Dict[str, Any]:
         """Full config summary for the frontend."""
@@ -355,11 +377,7 @@ class OCIOConfigManager:
                 ).getName()
 
             # Build the OCIO processor
-            processor = self.config.getProcessor(
-                OCIO.DisplayViewTransformDirection.DISPLAY_VIEW_FORWARD
-                if hasattr(OCIO, "DisplayViewTransformDirection")
-                else None,
-            ) if False else self._build_processor(display, view, input_space)
+            processor = self._build_processor(display, view, input_space)
 
             if processor is None:
                 return None
@@ -495,10 +513,10 @@ class OCIOConfigManager:
             result = coords.copy()
             for i in range(total):
                 pixel = result[i].tolist()
-                transformed = cpu_processor.applyRGB(pixel)
-                result[i, 0] = transformed[0]
-                result[i, 1] = transformed[1]
-                result[i, 2] = transformed[2]
+                cpu_processor.applyRGB(pixel)
+                result[i, 0] = pixel[0]
+                result[i, 1] = pixel[1]
+                result[i, 2] = pixel[2]
         else:
             # Batch API if available (OCIO v2.2+)
             result = coords.copy()
@@ -731,10 +749,10 @@ def apply_ocio_transform(
             flat = out.reshape(-1, 3)
             for i in range(flat.shape[0]):
                 pixel = flat[i].tolist()
-                result = cpu.applyRGB(pixel)
-                flat[i, 0] = result[0]
-                flat[i, 1] = result[1]
-                flat[i, 2] = result[2]
+                cpu.applyRGB(pixel)
+                flat[i, 0] = pixel[0]
+                flat[i, 1] = pixel[1]
+                flat[i, 2] = pixel[2]
             out = flat.reshape(h, w, 3)
 
         return out
