@@ -32,15 +32,30 @@ class ENV:
     RADIANCE_DCC_AUTH_TOKEN = "RADIANCE_DCC_AUTH_TOKEN"
     RADIANCE_DEV = "RADIANCE_DEV"
 
+    # Console log theme (pro | minimalist | classic | cyberpunk | matrix | compact)
+    RADIANCE_LOG_THEME = "RADIANCE_LOG_THEME"
+
     # Internal flags that must be set before OpenCV/OpenMP-backed imports.
     KMP_DUPLICATE_LIB_OK = "KMP_DUPLICATE_LIB_OK"
     OPENCV_IO_ENABLE_OPENEXR = "OPENCV_IO_ENABLE_OPENEXR"
 
 
+# Console log theme shipped with this install. Edit this single value to change
+# the default Radiance terminal theme for everyone using this checkout.
+# Per-user/session override always wins: set RADIANCE_LOG_THEME before launch.
+# Options: pro | minimalist | classic | cyberpunk | matrix | compact
+DEFAULT_LOG_THEME = "pro"
+
 RUNTIME_ENV_DEFAULTS: dict[str, str] = {
     ENV.KMP_DUPLICATE_LIB_OK: "TRUE",
     ENV.OPENCV_IO_ENABLE_OPENEXR: "1",
+    ENV.RADIANCE_LOG_THEME: DEFAULT_LOG_THEME,
 }
+
+# The logger is initialised before configure_runtime_environment() runs, so the
+# shipped theme default is also applied here at import time. setdefault() means a
+# value the user exported beforehand is never overwritten.
+os.environ.setdefault(ENV.RADIANCE_LOG_THEME, DEFAULT_LOG_THEME)
 
 
 def configure_runtime_environment(
