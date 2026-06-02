@@ -27,7 +27,7 @@ import numpy as np
 # ── Module under test ────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from radiance.nodes.color.qc import (
+from nodes_qc import (
     _luma,
     _mean_saturation,
     _gamut_out_of_p3,

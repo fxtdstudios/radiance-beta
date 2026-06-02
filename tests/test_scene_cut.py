@@ -24,7 +24,7 @@ skip_no_torch = unittest.skipUnless(HAS_TORCH, "real torch not available")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from radiance.nodes.ai.scene_cut import (
+from nodes_scene_cut import (
     _luminance,
     _histogram_diff,
     _edge_diff,

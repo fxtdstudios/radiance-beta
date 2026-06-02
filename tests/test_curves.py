@@ -21,7 +21,7 @@ skip_no_torch = unittest.skipUnless(HAS_TORCH, "real torch not available")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from radiance.nodes.color.curves import (
+from nodes_curves import (
     _rgb_to_hsl,
     _hsl_to_rgb,
     NODE_CLASS_MAPPINGS,

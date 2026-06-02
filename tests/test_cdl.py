@@ -27,7 +27,7 @@ skip_no_torch = unittest.skipUnless(HAS_TORCH, "real torch not available")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from radiance.nodes.color.cdl import (
+from nodes_cdl import (
     RadianceCDLTransform,
     RadianceCDLImport,
     RadianceCDLExport,

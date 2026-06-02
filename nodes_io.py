@@ -1682,14 +1682,49 @@ class RadianceDigitalCinemaRead:
         return (img, mask, shot_metadata)
 
 
+class RadianceDigitalCinemaWrite:
+    """Backward-compatible Digital Cinema writer shim.
+
+    Delegates to RadianceWrite. Recovered after the working-tree truncation that
+    removed this class; provides the OUTPUT_NODE write surface the pipeline and
+    tests expect. Returns a STRING status.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "output_path": ("STRING", {"default": ""}),
+            },
+            "optional": {
+                "format": (WRITE_FORMATS, {"default": "IMG │ EXR (16-bit half)"}),
+                "filename": ("STRING", {"default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("status",)
+    FUNCTION = "write"
+    OUTPUT_NODE = True
+    CATEGORY = "FXTD STUDIOS/Radiance/Pipeline"
+
+    def write(self, images, output_path, format="IMG │ EXR (16-bit half)", filename=""):
+        writer = RadianceWrite()
+        writer.write(image=images, output_path=output_path, format=format, filename=filename)
+        return (f"OK: wrote '{filename or output_path}' as {format}",)
+
+
 NODE_CLASS_MAPPINGS = {
     "RadianceRead": RadianceRead,
     "RadianceWrite": RadianceWrite,
     "RadianceEXRMultiPart": RadianceEXRMultiPart,
     "RadianceDigitalCinemaRead": RadianceDigitalCinemaRead,
+    "RadianceDigitalCinemaWrite": RadianceDigitalCinemaWrite,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "RadianceDigitalCinemaWrite": "◎ Radiance Digital Cinema Write",
     "RadianceRead": "◎ Radiance Read",
     "RadianceWrite": "◎ Radiance Write",
     "RadianceEXRMultiPart": "◎ Radiance EXR Multi-Part",
