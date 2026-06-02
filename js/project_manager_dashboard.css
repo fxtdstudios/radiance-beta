@@ -65,11 +65,18 @@ button {
 }
 
 .rpm-brand {
-    display: grid;
-    grid-template-columns: 34px 1fr;
-    gap: 11px;
-    align-items: center;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
     padding: 2px 4px 24px;
+}
+
+.rpm-brand-logo {
+    height: 24px;
+    width: auto;
+    max-width: 100%;
+    display: block;
 }
 
 .rpm-brand-mark {
