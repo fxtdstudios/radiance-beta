@@ -13,6 +13,7 @@ Image/video batch -> Upscale Tiler -> Upscale Image / Video -> Face Restore -> V
 - Tile large images when VRAM is tight.
 - Inspect confidence and face masks; restoration can overcorrect identity or fine texture.
 - Add grain after upscale/restoration when matching a plate.
+- **Scene-linear / HDR input:** Upscale Image and Upscale Video expose `hdr_mode` (`auto`/`preserve`/`clamp`) — `preserve` tonemaps (Reinhard) before super-resolution and re-expands after, so highlights above 1.0 survive — and `color_encoding` (`passthrough` / `linear<->sRGB` / `linear<->LogC3`) which round-trips through a display transfer so the LDR-trained SR networks see the domain they expect. Leave both on defaults (`auto` / `passthrough`) for display-referred input.
 
 ## Nodes in this section
 

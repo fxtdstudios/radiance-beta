@@ -13,6 +13,7 @@ Read plate -> Stabilize / Depth / Optical Flow / SAM -> Multipass / Inpaint / Co
 - Preview masks and depth maps directly; silent mask inversion is a common source of bad composites.
 - Use crop and stitch data from the same run when doing HDR inpaint workflows.
 - Feed multipass EXR writing from the multipass master so the beauty pass and layer names are present.
+- **Estimated vs real passes:** the *Multipass Master* **estimates** passes (albedo, roughness, AO, normals, segmentation ID, etc.) from a single beauty image — useful for AI/2D footage, but **not** physically-accurate render AOVs. For ground-truth passes, feed a real multilayer EXR through **Multipass: AOV Reader**. The `segmentation_id` output is a clustered matte, **not** a spec-compliant Cryptomatte.
 
 ## Nodes in this section
 
@@ -38,6 +39,7 @@ Read plate -> Stabilize / Depth / Optical Flow / SAM -> Multipass / Inpaint / Co
 | [◎ Vector Mask Draw (Roto)](#vector-mask-draw-roto) | `RadianceVectorMaskDraw` | Vector Mask Draw. |
 | [◎ Video Mask Propagator](#video-mask-propagator) | `RadianceVideoMaskPropagator` | Video Mask Propagator. |
 | [◎ Multipass: Master VFX Extractor](#multipass-master-vfx-extractor) | `RadianceMultipassMaster` | Performs the Radiance operation described by its inputs and outputs in the selected workflow group. |
+| [◎ Multipass: AOV Reader](#multipass-aov-reader) | `RadianceMultipassAOVReader` | Reads a real multilayer/AOV OpenEXR and splits its named layers into the same passes as the Master extractor (ground-truth, not estimates). |
 | [◎ Radiance EXR Passes Writer](#radiance-exr-passes-writer) | `RadianceEXRPassesWriter` | Writes or hands off the current result to a file, folder, preview, or DCC destination. |
 | [◎ Multipass: Real PBR Relight](#multipass-real-pbr-relight) | `RadianceMultipassRelight` | Performs the Radiance operation described by its inputs and outputs in the selected workflow group. |
 | [◎ Multipass: VFX Composite](#multipass-vfx-composite) | `RadianceMultipassComposite` | Performs the Radiance operation described by its inputs and outputs in the selected workflow group. |
@@ -984,3 +986,42 @@ Use `◎ Multipass: VFX Composite` when the graph reaches the Multipass: VFX Com
 
 - The node returns `composite` (`IMAGE`), `premultiplied_foreground` (`IMAGE`), `holdout_mask` (`IMAGE`), `depth_matte` (`IMAGE`), `comp_info` (`STRING`).
 - If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## ◎ Multipass: AOV Reader
+
+**Internal key:** `RadianceMultipassAOVReader`  
+**Category:** `FXTD STUDIOS/Radiance/◎ VFX`  
+**Source:** `nodes/vfx/multipass/aov_reader.py`
+**Function:** `read_passes`
+
+### What it does
+
+Reads a real multilayer / AOV OpenEXR (Arnold, Redshift, Karma, Cycles, V-Ray) and splits its named layers into the **same outputs as the Multipass Master extractor** — so genuine renderer passes flow straight into the EXR Passes Writer and the relight / composite chain. Layer names are matched case-insensitively against a built-in alias table (e.g. `diffuse`, `diffuse_color`, `albedo`, `basecolor` → albedo; `crypto00` → segmentation ID). Scene-linear values are preserved exactly; layers that are absent in the EXR come through as black.
+
+### When to use it
+
+Use `◎ Multipass: AOV Reader` when your footage is CG and you already have ground-truth render passes in a multilayer EXR. It is the trustworthy counterpart to the Master extractor: prefer it for any pass the renderer actually produced, and use the Master node only to *estimate* the layers your EXR is missing.
+
+### Inputs
+
+| Input | Required | Type | Default | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `exr_path` | Yes | `STRING` | `` | Path to a multilayer/AOV EXR. |
+| `beauty_layer` | Optional | `STRING` | `auto` | Override the beauty layer name, or `auto` to detect (RGBA / `beauty`). |
+| `albedo_layer` | Optional | `STRING` | `auto` | Override the albedo/diffuse layer name, or `auto`. |
+| `normal_layer` | Optional | `STRING` | `auto` | Override the normal layer name, or `auto`. |
+| `depth_layer` | Optional | `STRING` | `auto` | Override the depth (Z) layer name, or `auto`. |
+
+### Outputs
+
+| Output | Type | Description |
+| :--- | :--- | :--- |
+| `passes` | `RADIANCE_PASSES` | Bundle of all split layers, interchangeable with the Master extractor's `passes`. |
+| `beauty`, `albedo`, `normal_map`, `depth`, `roughness`, `specular`, `metallic`, `ao`, `emission`, `transmission`, `highpass`, `world_position`, `curvature`, `shadow_mask`, `midtone_mask`, `highlight_mask`, `reflection_mask`, `motion_vector`, `segmentation_id` | `IMAGE` | Individual passes mapped from the EXR's named layers; black where the layer is absent. |
+
+### Practical notes
+
+- Output order and types **mirror `RadianceMultipassMaster` exactly**, so the two nodes are drop-in interchangeable into the EXR Passes Writer and relight/composite nodes.
+- Scene-linear values pass through unchanged (no normalization) — highlights above 1.0 are preserved.
+- A per-read report of which layers were found and how they mapped is logged to the console; check it if a pass comes through black unexpectedly.
+- Requires the `OpenEXR` + `Imath` packages; the node raises a clear error if they are missing rather than failing silently.
+- `segmentation_id` here carries whatever ID/cryptomatte layer your EXR contains. (The *Master* extractor's `segmentation_id`, by contrast, is an estimated clustered matte, not a spec Cryptomatte.)

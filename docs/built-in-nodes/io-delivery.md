@@ -13,6 +13,7 @@ Radiance Read -> processing -> Radiance Write / EXR Multi-Part
 - Use EXR for HDR or float masters; use PNG/JPEG only for review proxies.
 - Keep mask outputs connected and preview them before crop, inpaint, or composite operations.
 - For DCC handoff, write the file or sequence first, then send that output to Nuke or Resolve.
+- **Alpha on EXR:** Radiance Write has an optional `mask` input. When connected and the format is EXR, the matte is written as the EXR alpha channel (RGBA); it is ignored for non-EXR formats. Write failures raise (the node turns red) rather than producing a silent empty file.
 
 ## Nodes in this section
 
