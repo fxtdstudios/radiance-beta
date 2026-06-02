@@ -99,8 +99,11 @@ function Sidebar(data) {
     return `
         <aside class="rpm-sidebar">
             <div class="rpm-brand">
-                <img class="rpm-brand-logo" src="/extensions/radiance/radiance_logo.png" alt="Radiance" />
-                <div class="rpm-brand-subtitle">Project Manager</div>
+                <img class="rpm-brand-mark" src="/extensions/radiance/r_icon.png" alt="Radiance" />
+                <div>
+                    <div class="rpm-brand-title">Radiance</div>
+                    <div class="rpm-brand-subtitle">Project Manager</div>
+                </div>
             </div>
             <nav class="rpm-nav" aria-label="Project Manager">
                 ${data.nav.map((item) => `
