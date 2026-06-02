@@ -27,16 +27,17 @@ def test_np_to_tensor_preserves_hdr_values():
     """Values above 2.0 must NOT be normalized away."""
     arr = np.array([[[0.0, 1.0, 5.0], [10.0, 50.0, 123.4]]], dtype=np.float32)
     t = nodes_io._np_to_tensor(arr)
+    # _np_to_tensor adds exactly one leading batch dim: (1,2,3) -> (1,1,2,3).
     assert tuple(t.shape) == (1, 1, 2, 3)
     out = t[0].cpu().numpy()
-    np.testing.assert_allclose(out, arr[0], rtol=0, atol=0)
+    np.testing.assert_allclose(out, arr, rtol=0, atol=0)
     assert float(out.max()) == pytest.approx(123.4, abs=1e-4)
 
 
 def test_np_to_tensor_does_not_touch_low_range():
     arr = np.array([[[0.25, 0.5, 0.75]]], dtype=np.float32)
     out = nodes_io._np_to_tensor(arr)[0].cpu().numpy()
-    np.testing.assert_allclose(out, arr[0], rtol=0, atol=0)
+    np.testing.assert_allclose(out, arr, rtol=0, atol=0)
 
 
 # ── C-3: EXR channel mapping handles 1 / 3 / 4 channels, never drops alpha ──
