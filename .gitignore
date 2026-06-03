@@ -106,3 +106,14 @@ docs/
 
 # Local dev-server artifacts
 artifacts/
+
+# ── Radiance user / project data (keep local; not shipped in the package) ──
+workflows/*.rad
+workflows/**/*.rad
+!workflows/official/
+!workflows/official/**
+workflows/_assets_bins.json
+workflows/.asset_thumbs/
+workflows/**/.shot_status.json
+workflows/**/.review_notes.json
+gizmos/*.gizmo
