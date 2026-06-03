@@ -394,6 +394,63 @@ class RadianceConsoleFormatter(logging.Formatter):
             return formatted_msg
 
 
+class ThrottleDedupeFilter(logging.Filter):
+    """Collapses identical, back-to-back log lines into a single line + rollup.
+
+    The Radiance pipeline can emit the exact same diagnostic many times in a
+    burst (e.g. an HDR-decode warning fired once per frame, or a per-step note).
+    This filter lets the first occurrence through, silently suppresses identical
+    repeats that arrive within ``window`` seconds, and — when a different line
+    finally arrives — prints one dim "previous line repeated xN" summary so
+    nothing is hidden without trace.
+
+    It only ever compares a record to the one immediately before it, so distinct
+    interleaved messages are never lost; only true consecutive duplicates fold.
+    """
+
+    def __init__(self, window: float = 3.0, use_color: bool = True, use_unicode: bool = True):
+        super().__init__()
+        self.window = window
+        self.use_color = use_color
+        self.use_unicode = use_unicode
+        self._last_key = None
+        self._last_time = 0.0
+        self._dup = 0
+
+    def _emit_rollup(self) -> None:
+        if self._dup <= 0:
+            return
+        n = self._dup + 1  # first occurrence + suppressed repeats
+        arrow = "↳" if self.use_unicode else "->"
+        text = f"  {arrow} previous line repeated ×{n}" if self.use_unicode \
+            else f"  {arrow} previous line repeated x{n}"
+        try:
+            if self.use_color:
+                sys.stdout.write(f"\033[38;5;240m{text}\033[0m\n")
+            else:
+                sys.stdout.write(text + "\n")
+            sys.stdout.flush()
+        except Exception:
+            pass
+        self._dup = 0
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            key = (record.name, record.levelno, record.getMessage())
+        except Exception:
+            return True
+        now = time.monotonic()
+        if key == self._last_key and (now - self._last_time) <= self.window:
+            self._dup += 1
+            self._last_time = now
+            return False  # suppress this duplicate
+        # A new, distinct line: flush any pending rollup for the prior burst.
+        self._emit_rollup()
+        self._last_key = key
+        self._last_time = now
+        return True
+
+
 def setup_radiance_logging(level: int = logging.INFO) -> logging.Logger:
     """Configures the main 'radiance' logger tree with the custom premium console formatter.
 
@@ -426,6 +483,16 @@ def setup_radiance_logging(level: int = logging.INFO) -> logging.Logger:
         )
     )
     stream_handler.setLevel(level)
+
+    # Collapse back-to-back identical lines (e.g. an HDR-decode warning fired
+    # once per frame) into one line + a dim "repeated xN" rollup.
+    stream_handler.addFilter(
+        ThrottleDedupeFilter(
+            window=3.0,
+            use_color=color_enabled,
+            use_unicode=unicode_enabled,
+        )
+    )
 
     logger.addHandler(stream_handler)
 
@@ -880,3 +947,57 @@ def _print_loader_summary_pro(preset, overrides, resolved_type, latent_fmt,
 
     sys.stdout.write("\n" + "\n".join(out) + "\n\n")
     sys.stdout.flush()
+
+
+_run_counter = {"n": 0}
+
+
+def print_run_banner() -> None:
+    """Print a thin separator that marks the start of a new prompt run.
+
+    Gives the console a per-run rhythm: each queued generation opens with a
+    quiet rule + index instead of every node's output running together. Safe to
+    call on any theme; no-ops gracefully if stdout is unavailable.
+    """
+    try:
+        use_color = supports_color()
+        use_unicode = supports_unicode()
+        _run_counter["n"] += 1
+        idx = _run_counter["n"]
+        stamp = time.strftime("%H:%M:%S")
+        rule = ("─" * 12) if use_unicode else ("-" * 12)
+        mark = "◎" if use_unicode else "o"
+        if use_color:
+            line = (f"\n\033[38;5;179m{mark}\033[0m \033[38;5;240m{rule}\033[0m "
+                    f"\033[38;5;110mrun {idx}\033[0m \033[38;5;240m{rule}\033[0m "
+                    f"\033[38;5;240m{stamp}\033[0m\n")
+        else:
+            line = f"\n{mark} {rule} run {idx} {rule} {stamp}\n"
+        sys.stdout.write(line)
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def register_run_grouping() -> bool:
+    """Hook ComfyUI's prompt queue so each run prints a separator banner.
+
+    Uses the stable ``PromptServer.add_on_prompt_handler`` API. Returns True if
+    the handler was registered. Fails closed (returns False) on any ComfyUI
+    build that does not expose the hook, so package load is never affected.
+    """
+    try:
+        from server import PromptServer  # type: ignore
+
+        instance = getattr(PromptServer, "instance", None)
+        if instance is None or not hasattr(instance, "add_on_prompt_handler"):
+            return False
+
+        def _on_prompt(json_data):
+            print_run_banner()
+            return json_data
+
+        instance.add_on_prompt_handler(_on_prompt)
+        return True
+    except Exception:
+        return False

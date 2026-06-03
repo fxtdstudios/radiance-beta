@@ -2499,6 +2499,13 @@ class RadianceVAE4KDecode:
         vae_factor = detect_vae_factor(vae)
         latent_fmt = detect_latent_format(vae)
 
+        # v3.1.1: When the video path decodes frame-by-frame it re-enters this
+        # method recursively. The setup diagnostics below (force_hdr note, the
+        # Compress(Log) source-space warning) describe decode *settings*, not the
+        # frame — so they would otherwise print once for the outer video call and
+        # again for every frame. `_quiet_diag` suppresses the per-frame repeats.
+        _quiet_diag = getattr(self, "_frame_decode_active", False)
+
         # v2.0 Feature 6: Read radiance_meta embedded by encode() if present
         radiance_meta = samples.get("radiance_meta", {})
         if radiance_meta:
@@ -2546,7 +2553,7 @@ class RadianceVAE4KDecode:
                     f"force_hdr_decode=True on this node."
                 )
                 hdr_mode = "Clip (SDR)"
-            elif hdr_mode in ("Compress (Log)", "Soft Clip") and force_hdr_decode:
+            elif hdr_mode in ("Compress (Log)", "Soft Clip") and force_hdr_decode and not _quiet_diag:
                 logger.info(
                     f"[Radiance 4K Decode v2.3] force_hdr_decode=True: respecting "
                     f"hdr_mode='{hdr_mode}' despite absent radiance_meta. "
@@ -2564,7 +2571,7 @@ class RadianceVAE4KDecode:
         # Valid source spaces for Compress(Log): the 6 camera log formats.
         if hdr_mode == "Compress (Log)":
             _valid_log_source = set(LOG_PROFILE_HDR_PARAMS.keys())
-            if source_space not in _valid_log_source:
+            if source_space not in _valid_log_source and not _quiet_diag:
                 logger.warning(
                     f"[Radiance 4K Decode v2.3.7] hdr_mode='Compress (Log)' but "
                     f"source_space='{source_space}' is not a log-encoded space. "
@@ -2608,41 +2615,48 @@ class RadianceVAE4KDecode:
                 else:
                     frame_alphas = [alpha] * num_frames
 
-            for fi in range(num_frames):
-                frame_latent = latent[:, :, fi, ...]
-                frame_samples = dict(samples)
-                frame_samples["samples"] = frame_latent
+            # Suppress duplicate per-frame setup diagnostics in the recursive
+            # decode() calls below (see `_quiet_diag`). Reset in `finally` so a
+            # failed frame never leaves the flag stuck on.
+            self._frame_decode_active = True
+            try:
+                for fi in range(num_frames):
+                    frame_latent = latent[:, :, fi, ...]
+                    frame_samples = dict(samples)
+                    frame_samples["samples"] = frame_latent
 
-                frame_alpha = frame_alphas[fi] if frame_alphas else None
+                    frame_alpha = frame_alphas[fi] if frame_alphas else None
 
-                decoded_frame, meta_str, fmt = self.decode(
-                    samples=frame_samples,
-                    vae=vae,
-                    target_space=target_space,
-                    tile_size=tile_size,
-                    overlap=overlap,
-                    exposure_adjust=exposure_adjust,
-                    alpha=frame_alpha,
-                    hdr_mode=hdr_mode,
-                    display_tonemap=display_tonemap,
-                    inverse_tonemap=inverse_tonemap,
-                    target_stops=target_stops,
-                    crop_padding=crop_padding,
-                    export_rhdr=False,   # RHDR handled on concatenated output below
-                    rhdr_precision=rhdr_precision,
-                    source_space=source_space,
-                    processing_mode=processing_mode,
-                    force_hdr_decode=force_hdr_decode,
-                    hdr_output=hdr_output,
-                    turbo_decoder=turbo_decoder,
-                    decode_noise_scale=decode_noise_scale,
-                )
-                decoded_frames.append(decoded_frame)
-                # Collect scene-linear for this frame (set by _vae_output_to_target)
-                _sl = getattr(self, '_scene_linear_for_rhdr', None)
-                if _sl is not None:
-                    _scene_linear_frames.append(_sl)
-                    self._scene_linear_for_rhdr = None  # clear immediately
+                    decoded_frame, meta_str, fmt = self.decode(
+                        samples=frame_samples,
+                        vae=vae,
+                        target_space=target_space,
+                        tile_size=tile_size,
+                        overlap=overlap,
+                        exposure_adjust=exposure_adjust,
+                        alpha=frame_alpha,
+                        hdr_mode=hdr_mode,
+                        display_tonemap=display_tonemap,
+                        inverse_tonemap=inverse_tonemap,
+                        target_stops=target_stops,
+                        crop_padding=crop_padding,
+                        export_rhdr=False,   # RHDR handled on concatenated output below
+                        rhdr_precision=rhdr_precision,
+                        source_space=source_space,
+                        processing_mode=processing_mode,
+                        force_hdr_decode=force_hdr_decode,
+                        hdr_output=hdr_output,
+                        turbo_decoder=turbo_decoder,
+                        decode_noise_scale=decode_noise_scale,
+                    )
+                    decoded_frames.append(decoded_frame)
+                    # Collect scene-linear for this frame (set by _vae_output_to_target)
+                    _sl = getattr(self, '_scene_linear_for_rhdr', None)
+                    if _sl is not None:
+                        _scene_linear_frames.append(_sl)
+                        self._scene_linear_for_rhdr = None  # clear immediately
+            finally:
+                self._frame_decode_active = False
 
             all_frames = torch.cat(decoded_frames, dim=0)
 

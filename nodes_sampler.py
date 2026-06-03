@@ -150,7 +150,7 @@ class RadianceSamplerPro:
                     {"default": "Static"},
                 ),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF,
-                    "tooltip": "Random seed for reproducible results. -1 = random each run."
+                    "tooltip": "Random seed for reproducible results. Use the control below it (randomize / increment / fixed) to vary the seed between runs."
                 }),
 
                 "pag_scale": (
@@ -376,9 +376,6 @@ class RadianceSamplerPro:
         "Denoised latent ready for VAE decode.",
         "The full sigma schedule used — chain to another sampler or inspect.",
         "Unused tail of the sigma schedule after end_step. Chain directly to a refiner or upscaler sampler.",
-        "Auto-detected model architecture string (flux, wan, sdxl, etc.). Use in conditional routing.",
-        "Human-readable timing and schedule report.",
-        "JSON telemetry: arch, steps, scheduler, noise_type, tile_mode, seed, time_ms, etc.",
         "Visual plot of the sigma schedule as an IMAGE. Blank if matplotlib is unavailable.",
     )
     FUNCTION = "sample"

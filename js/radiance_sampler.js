@@ -232,7 +232,40 @@ function refreshNodeSize(node) {
 }
 
 // ── 3. Dynamic folding logic ──
+// Self-heal + diagnostic. A widget marked visible (widget.hidden === false) but
+// still typed "hidden" means a restore was missed by the frontend — force it back
+// so parameters can never silently vanish. Set window.__RADIANCE_SAMPLER_DEBUG = true
+// in the browser console to log the folded state on every toggle.
+function auditSamplerWidgets(node) {
+    if (!node.widgets) return;
+    const stuck = node.widgets
+        .filter(w => w && w.name && w.hidden !== true && w.type === "hidden")
+        .map(w => w.name);
+    if (stuck.length) {
+        stuck.forEach(name => {
+            const w = node.widgets.find(x => x.name === name);
+            setWidgetVisible(w, true, node);
+        });
+        refreshNodeSize(node);
+        console.warn("[Radiance Sampler] self-healed stranded widgets:", stuck.join(", "));
+    }
+    if (window.__RADIANCE_SAMPLER_DEBUG) {
+        const hidden = node.widgets.filter(w => w && (w.hidden || w.type === "hidden")).map(w => w.name);
+        const pv = (node.widgets.find(w => w.name === "preset") || {}).value;
+        console.debug("[Radiance Sampler] preset=%s | hidden=[%s]", pv, hidden.join(", "));
+    }
+}
+
 function toggleFields(node) {
+    if (!node.widgets) return;
+    // Guarantee genuine widget types are known before any fold, so the un-hide
+    // path always has a correct type to restore (never falls back to "number").
+    captureWidgetTypes(node);
+    applyFolding(node);
+    auditSamplerWidgets(node);
+}
+
+function applyFolding(node) {
     if (!node.widgets) return;
 
     const find = (name) => node.widgets.find(w => w.name === name);
@@ -764,6 +797,7 @@ app.registerExtension({
             };
             requestAnimationFrame(reapply);  // after graph finishes configuring
             setTimeout(reapply, 50);         // belt-and-suspenders
+            setTimeout(reapply, 250);        // final pass for slow/late widget restore
         };
     }
 });

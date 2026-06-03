@@ -22,7 +22,7 @@ _bootstrap_package_context()
 from .config.constants import AUTHOR, VERSION, WEB_DIRECTORY
 from .config.dependencies import validate_runtime_dependencies
 from .config.env import configure_runtime_environment
-from .core.logging import setup_radiance_logging
+from .core.logging import register_run_grouping, setup_radiance_logging
 from .nodes.registry import NodeModuleSpec, load_node_mappings
 
 logger = setup_radiance_logging()
@@ -58,3 +58,6 @@ logger.info(
     __version__,
 )
 logger.debug("Radiance Viewer JavaScript extension enabled")
+
+# Mark each prompt run with a console separator (no-op if the hook is absent).
+register_run_grouping()
