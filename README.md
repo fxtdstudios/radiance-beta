@@ -1,5 +1,6 @@
 <div align="center">
-<img src="RADIANCE.png" width="800" alt="Radiance Logo">
+<img src="r_icon.png" width="76" alt="Radiance mark"><br>
+<img src="RADIANCE.png" width="640" alt="Radiance Logo">
 
 # ◎ Radiance
 
@@ -73,6 +74,28 @@ Windows users can use `requirements_windows.txt`; Apple Silicon users can use `r
 
 > Radiance assumes ComfyUI already provides `torch`. Install Radiance inside the same Python environment used by ComfyUI.
 
+## Feature Spotlights
+
+### Viewers
+
+- **Radiance Pro Viewer** — full review surface with waveform/vectorscope, channel isolation, A/B compare, focus peaking, frame stepping, and keyboard shortcuts (see [Viewer Shortcuts](#viewer-shortcuts)).
+- **Radiance Lite Viewer** — a lightweight inline viewer for quick frame inspection without the full review chrome.
+
+### HDR VAE Decoders
+
+- **Turbo Decoder** (`RadianceTurboDecoder`) — lightweight, near-realtime latent → scene-linear decode for fast iteration via `decode_to_linear_realtime`.
+- **Full Decoder** (`RadianceFullDecoder`) — deep residual decoder for production-quality reconstruction.
+- Exposed through **◎ Radiance HDR VAE Decode**, which also emits a decode-settings metadata string.
+
+### HDR LoRA
+
+- **HDR LoRA Loader / Apply** (`RadianceHDRLoRALoader`, `RadianceHDRLoRAApply`) — load and apply LoRAs tuned for HDR / scene-linear generation.
+- **LoRA Stack** (`RadianceLoraStack`) — stack multiple LoRAs with per-LoRA model/clip strengths.
+
+### Dynamic Gizmos
+
+Select any subgraph in ComfyUI and collapse it into a single styled **Gizmo** node — a reusable, shareable custom node saved under `gizmos/` and registered dynamically at load.
+
 ## Node Map
 
 Radiance is organized under:
@@ -108,28 +131,6 @@ The source exposes **104 registered node classes** (plus runtime-generated Gizmo
 | Upscale | Image/video upscale (HDR + color aware), tiling, face restoration |
 | Review | Radiance Pro Viewer, Lite Viewer, scopes, focus peaking, contact sheets, flipbook, preview server, policy guard |
 | Pipeline | Project Manager, MCP Bridge, Nuke Send, DaVinci Resolve folder handoff |
-
-## Feature Spotlights
-
-### Viewers
-
-- **Radiance Pro Viewer** — full review surface with waveform/vectorscope, channel isolation, A/B compare, focus peaking, frame stepping, and keyboard shortcuts (see [Viewer Shortcuts](#viewer-shortcuts)).
-- **Radiance Lite Viewer** — a lightweight inline viewer for quick frame inspection without the full review chrome.
-
-### HDR VAE Decoders
-
-- **Turbo Decoder** (`RadianceTurboDecoder`) — lightweight, near-realtime latent → scene-linear decode for fast iteration via `decode_to_linear_realtime`.
-- **Full Decoder** (`RadianceFullDecoder`) — deep residual decoder for production-quality reconstruction.
-- Exposed through **◎ Radiance HDR VAE Decode**, which also emits a decode-settings metadata string.
-
-### HDR LoRA
-
-- **HDR LoRA Loader / Apply** (`RadianceHDRLoRALoader`, `RadianceHDRLoRAApply`) — load and apply LoRAs tuned for HDR/scene-linear generation.
-- **LoRA Stack** (`RadianceLoraStack`) — stack multiple LoRAs with per-LoRA model/clip strengths.
-
-### Dynamic Gizmos
-
-Select any subgraph in ComfyUI and collapse it into a single styled **Gizmo** node — a reusable, shareable custom node saved under `gizmos/` and registered dynamically at load.
 
 ## DCC Handoff
 

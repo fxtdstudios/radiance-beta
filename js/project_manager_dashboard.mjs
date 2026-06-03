@@ -91,6 +91,8 @@ const NAV = [
     { key: "Library", icon: "library" },
 ];
 
+let activeView = "Dashboard";
+
 function svg(name) {
     const paths = {
         dashboard: '<rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>',
@@ -128,7 +130,7 @@ function Sidebar(data) {
     const reviewCount = versions.filter((v) => statusMeta(v.status).cls === "is-review").length;
     const navHtml = NAV.map((n) => {
         const badge = (n.badge === "review" && reviewCount) ? `<span class="rpm-nav-badge">${reviewCount}</span>` : "";
-        return `<button class="rpm-nav-item ${n.active ? "is-active" : ""}" type="button" data-action="Nav" data-nav="${escapeHtml(n.key)}">
+        return `<button class="rpm-nav-item ${n.key === activeView ? "is-active" : ""}" type="button" data-action="Nav" data-nav="${escapeHtml(n.key)}">
             <span class="rpm-nav-icon">${svg(n.icon)}</span><span>${escapeHtml(n.key)}</span>${badge}
         </button>`;
     }).join("");
@@ -152,13 +154,21 @@ function Sidebar(data) {
 }
 
 function TopBar(data) {
-    const proj = (data.projects || []).find((p) => p.id === data.activeProjectId) || (data.projects || [])[0];
+    const projects = data.projects || [];
+    const proj = projects.find((p) => p.id === data.activeProjectId) || projects[0];
     const projName = proj?.name || "No project";
+    const menu = projects.length ? projects.map((p) => `
+        <button class="rpm-proj-opt ${p.id === proj?.id ? "is-active" : ""}" type="button" data-action="Select Project" data-project-id="${escapeHtml(p.id)}">
+            <span class="rpm-proj-name">${escapeHtml(p.name)}</span><span class="rpm-dim">${escapeHtml(p.shots)} shots</span>
+        </button>`).join("") : `<div class="rpm-empty">No projects yet — save a .rad workflow.</div>`;
     return `
         <header class="rpm-topbar">
-            <button class="rpm-show" type="button" data-action="Pick Project">
-                <span class="rpm-nav-icon">${svg("folders")}</span><span>${escapeHtml(projName)}</span><span class="rpm-caret">&#9662;</span>
-            </button>
+            <div class="rpm-show-wrap">
+                <button class="rpm-show" type="button" data-action="Toggle Projects">
+                    <span class="rpm-nav-icon">${svg("folders")}</span><span>${escapeHtml(projName)}</span><span class="rpm-caret">&#9662;</span>
+                </button>
+                <div class="rpm-proj-menu" data-proj-menu hidden>${menu}</div>
+            </div>
             <label class="rpm-search">${svg("search")}<input data-search type="search" placeholder="Search shots, assets, versions…"></label>
             <button class="rpm-button is-primary rpm-topbtn" type="button" data-action="Save Version">${svg("save")}Save version</button>
             <span class="rpm-sync"><span class="rpm-sync-dot"></span>Synced</span>
@@ -260,19 +270,51 @@ function OutputsTable(outputs) {
     `;
 }
 
+function PageHead(data, title) {
+    const projects = data.projects || [];
+    const proj = projects.find((p) => p.id === data.activeProjectId) || projects[0];
+    return `<div class="rpm-page-head">
+        <div class="rpm-crumb">${escapeHtml(proj?.name || "No project")}</div>
+        <div class="rpm-page-title dsp">${escapeHtml(title || "Dashboard")}</div>
+    </div>`;
+}
+
+function ProjectsView(projects) {
+    const list = projects || [];
+    if (!list.length) return EmptyState("No projects yet — save a .rad workflow to create one.");
+    const rows = list.map((p) => `<div class="rpm-tr rpm-tr-proj rpm-tr-click" data-action="Select Project" data-project-id="${escapeHtml(p.id)}">
+        <span class="rpm-shot">${escapeHtml(p.name)}</span><span class="rpm-dim">${escapeHtml(p.shots)} shots</span><span class="rpm-dim">${escapeHtml(p.workflows || 0)} wf</span><span class="rpm-dim">${escapeHtml(p.updated || "")}</span>
+    </div>`).join("");
+    return `<div class="rpm-table">
+        <div class="rpm-tr rpm-tr-proj rpm-thead"><span>Project</span><span>Shots</span><span>Workflows</span><span>Updated</span></div>
+        ${rows}
+    </div>`;
+}
+
+function ViewBody(data) {
+    const versions = data.versions || [];
+    if (activeView === "Shots") return `${PageHead(data, "Shots")}${Stats(data)}${ShotsTable(versions)}`;
+    if (activeView === "Reviews") {
+        const review = versions.filter((v) => { const c = statusMeta(v.status).cls; return c === "is-review" || c === "is-retake"; });
+        return `${PageHead(data, "Reviews")}${ShotsTable(review)}`;
+    }
+    if (activeView === "Renders") return `${PageHead(data, "Outputs")}${OutputsTable(data.outputs)}`;
+    if (activeView === "Projects") return `${PageHead(data, "Projects")}${ProjectsView(data.projects)}`;
+    if (activeView !== "Dashboard") return `${PageHead(data, activeView)}<div class="rpm-empty">${escapeHtml(activeView)} — no data for this view yet.</div>`;
+    return `${PageHead(data, "Dashboard")}
+            <div class="rpm-top-grid">${Hero(data.continueWorking || {})}${StorageCard(data.storage || {})}</div>
+            ${Stats(data)}
+            ${ShotsTable(versions)}
+            ${OutputsTable(data.outputs)}`;
+}
+
 function ProjectManagerDashboard(data) {
     return `
         ${Sidebar(data)}
         <main class="rpm-main">
             ${TopBar(data)}
             <div class="rpm-content">
-                <div class="rpm-top-grid">
-                    ${Hero(data.continueWorking || {})}
-                    ${StorageCard(data.storage || {})}
-                </div>
-                ${Stats(data)}
-                ${ShotsTable(data.versions)}
-                ${OutputsTable(data.outputs)}
+                ${ViewBody(data)}
             </div>
         </main>
         <div class="rpm-toast" data-toast></div>
@@ -491,6 +533,7 @@ function bindInteractions(root, state) {
         const activeProjectId = state.data.activeProjectId || state.data.projects[0]?.id || "";
 
         if (action === "Select Project") {
+            activeView = "Dashboard";
             const projectId = button.dataset.projectId;
             loadProjectDetails(state, projectId)
                 .then((nextData) => render(nextData))
@@ -500,6 +543,18 @@ function bindInteractions(root, state) {
 
         if (action === "Open Workflow") {
             openWorkflow(state.data.continueWorking.filename).catch((error) => showToast(error.message));
+            return;
+        }
+
+        if (action === "Nav") {
+            activeView = button.dataset.nav || "Dashboard";
+            render(state.data);
+            return;
+        }
+
+        if (action === "Toggle Projects") {
+            const menu = root.querySelector("[data-proj-menu]");
+            if (menu) menu.hidden = !menu.hidden;
             return;
         }
 
@@ -520,6 +575,22 @@ function bindInteractions(root, state) {
             } else {
                 showToast("No saved workflow for this version yet.");
             }
+            return;
+        }
+
+        if (action === "Approve Shot" || action === "Request Changes") {
+            const shot = button.dataset.shot;
+            const status = action === "Approve Shot" ? "Approved" : "Retake";
+            if (!activeProjectId) { showToast("Save a project first."); return; }
+            fetchJson(`/radiance/projects/${encodeURIComponent(activeProjectId)}/shots/${encodeURIComponent(shot)}/status`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ status }),
+            })
+                .then(() => loadProjectDetails(state, activeProjectId))
+                .then((nextData) => { render(nextData); showToast(`${shot} → ${status}`); })
+                .catch((error) => showToast(error.message));
+            closeShotDrawer();
             return;
         }
 

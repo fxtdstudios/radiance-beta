@@ -139,6 +139,32 @@ const LTX_PRESETS = [
     "▶ LTX 2.3 HighRes (40 steps)"
 ];
 
+// Model taxonomy — mirrors sampler_utils.py so the UI folds the same way the
+// backend resolves models. GUIDANCE_EMBED models use flux_guidance; CFG_GUIDED
+// models drive denoising with plain CFG and ignore the guidance-embed widgets.
+const GUIDANCE_EMBED_MODELS = new Set(["flux", "lumina2", "z_image", "ltxv"]);
+const CFG_GUIDED_MODELS = new Set([
+    "wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd35",
+    "ltxav", "cogvideox", "stepvideo"
+]);
+const LTX_MODEL_TYPES = new Set(["ltxv", "ltxav"]);
+
+// Infer the effective model type when model_type is left on "auto" by reading
+// the chosen preset name. Returns "auto" when nothing matches (treated as a
+// generic flux-style flow model — guidance widgets stay visible).
+function resolveModelType(presetVal, modelTypeVal) {
+    if (modelTypeVal && modelTypeVal !== "auto") return modelTypeVal;
+    const p = (presetVal || "").toLowerCase();
+    if (LTX_PRESETS.includes(presetVal) || p.includes("ltx")) return "ltxav";
+    if (p.includes("wan"))      return "wan";
+    if (p.includes("hunyuan"))  return "hunyuan_video";
+    if (p.includes("z_image"))  return "z_image";
+    if (p.includes("lumina"))   return "lumina2";
+    if (p.includes("sd3.5") || p.includes("sd35")) return "sd35";
+    if (p.includes("flux"))     return "flux";
+    return "auto";
+}
+
 const LTX_INCOMPATIBLE_WIDGETS = [
     "flux_guidance",
     "flux_guidance_profile",
@@ -213,46 +239,40 @@ function toggleFields(node) {
 
     // Get key widget references
     const presetW = find("preset");
-    const isNone = presetW && presetW.value === "None";
+    const presetVal = presetW ? presetW.value : "None";
+    const isNone = presetVal === "None";
+    const isCustom = presetVal === "Custom";
 
     // Dummy compatibility absorbers that are always hidden
     const dummyWidgets = ["_js_export_btn", "_js_import_btn", "_js_preset_info"];
+    const controlAfterW = find("control_after_generate");
 
+    // ── None: simple default mode → hide EVERYTHING except the essentials ──
     if (isNone) {
-        // Hide all widgets EXCEPT the essential ones
         const alwaysVisible = ["preset", "preset_info", "› Export Preset", "› Import Preset"];
-        node.widgets.forEach(w => {
-            if (alwaysVisible.includes(w.name)) {
-                setWidgetVisible(w, true, node);
-            } else {
-                setWidgetVisible(w, false, node);
-            }
-        });
-
-        // Hide ComfyUI auto-added control_after_generate widget
-        const controlAfterW = find("control_after_generate");
-        if (controlAfterW) {
-            setWidgetVisible(controlAfterW, false, node);
-        }
-
+        node.widgets.forEach(w => setWidgetVisible(w, alwaysVisible.includes(w.name), node));
+        if (controlAfterW) setWidgetVisible(controlAfterW, false, node);
         refreshNodeSize(node);
         return;
     }
 
-    // --- Custom or Preset mode: Show all widgets by default and apply dynamic folding ---
-    node.widgets.forEach(w => {
-        if (w.name === "preset_info" || dummyWidgets.includes(w.name)) {
-            setWidgetVisible(w, false, node);
-        } else {
-            setWidgetVisible(w, true, node);
-        }
-    });
-
-    // Restore control_after_generate if it exists
-    const controlAfterW = find("control_after_generate");
-    if (controlAfterW) {
-        setWidgetVisible(controlAfterW, true, node);
+    // ── Custom: full manual control → SHOW EVERYTHING, no conditional folding ──
+    if (isCustom) {
+        node.widgets.forEach(w => {
+            const hide = (w.name === "preset_info") || dummyWidgets.includes(w.name);
+            setWidgetVisible(w, !hide, node);
+        });
+        if (controlAfterW) setWidgetVisible(controlAfterW, true, node);
+        refreshNodeSize(node);
+        return;
     }
+
+    // ── Preset: show all by default, then apply smart, model-aware folding ──
+    node.widgets.forEach(w => {
+        const hide = dummyWidgets.includes(w.name);
+        setWidgetVisible(w, !hide, node);
+    });
+    if (controlAfterW) setWidgetVisible(controlAfterW, true, node);
 
     const tileModeW = find("tile_mode");
     const restartCountW = find("restart_count");
@@ -266,46 +286,47 @@ function toggleFields(node) {
     const modelType = modelTypeW ? modelTypeW.value : "auto";
     const samplerMode = samplerModeW ? samplerModeW.value : "Standard";
 
+    // Resolve the effective model so folding matches what the backend will run.
+    const effectiveModel = resolveModelType(presetVal, modelType);
+    const isLTX = LTX_MODEL_TYPES.has(effectiveModel) || LTX_PRESETS.includes(presetVal);
+
     // 3.1. Refiner: visible if refiner_model input port is wired up
-    const refinerStartStepW = find("refiner_start_step");
-    setWidgetVisible(refinerStartStepW, hasRefinerModel, node);
+    setWidgetVisible(find("refiner_start_step"), hasRefinerModel, node);
 
     // 3.2. Tiled latent sampling: visible if tile_mode is checked
     const isTiled = tileModeW && tileModeW.value === true;
-    const tileSizeW = find("tile_size");
-    const tileOverlapW = find("tile_overlap");
-    const tileBlendW = find("tile_blend");
-    setWidgetVisible(tileSizeW, isTiled, node);
-    setWidgetVisible(tileOverlapW, isTiled, node);
-    setWidgetVisible(tileBlendW, isTiled, node);
+    setWidgetVisible(find("tile_size"), isTiled, node);
+    setWidgetVisible(find("tile_overlap"), isTiled, node);
+    setWidgetVisible(find("tile_blend"), isTiled, node);
 
     // 3.3. Restart schedules: visible if restart_count > 0
     const hasRestartCount = restartCountW && parseInt(restartCountW.value, 10) > 0;
-    const noiseAlphaStartW = find("noise_alpha_start");
-    const noiseAlphaEndW = find("noise_alpha_end");
-    setWidgetVisible(noiseAlphaStartW, hasRestartCount, node);
-    setWidgetVisible(noiseAlphaEndW, hasRestartCount, node);
+    setWidgetVisible(find("noise_alpha_start"), hasRestartCount, node);
+    setWidgetVisible(find("noise_alpha_end"), hasRestartCount, node);
 
-    // 3.4. Sigma blend steps: visible if phase_split sampler_mode OR ays_schedule is active
+    // 3.4. Sigma blend steps: visible if Phase-Shift sampler_mode OR ays_schedule is active
     const isPhaseShift = samplerMode.includes("Phase-Shift");
     const isAys = aysScheduleW && aysScheduleW.value === true;
-    const sigmaBlendStepsW = find("sigma_blend_steps");
-    setWidgetVisible(sigmaBlendStepsW, isPhaseShift || isAys, node);
+    setWidgetVisible(find("sigma_blend_steps"), isPhaseShift || isAys, node);
 
-    // 3.5. Flux specific parameters: hide if model type is explicitly non-flux, unless in custom/flux preset
-    const isFlux = (modelType === "auto" || modelType === "flux") &&
-                   (presetW.value.includes("Flux") || presetW.value === "Custom" || presetW.value === "None");
-    const fluxShiftW = find("flux_shift");
-    const fluxGuidanceW = find("flux_guidance");
-    const fluxGuidanceProfileW = find("flux_guidance_profile");
-    setWidgetVisible(fluxShiftW, isFlux, node);
-    setWidgetVisible(fluxGuidanceW, isFlux, node);
-    setWidgetVisible(fluxGuidanceProfileW, isFlux, node);
+    // 3.5. Model-aware shift/guidance folding.
+    //  - flux_shift (flow-match shift) is used by every modern flow model → show in preset mode.
+    //  - flux_guidance / profile only apply to guidance-embed models; CFG-guided
+    //    models (WAN, Hunyuan, SDXL, SD1.5/3/3.5, LTX-AV, CogVideoX, StepVideo) ignore them.
+    const usesGuidanceEmbed =
+        GUIDANCE_EMBED_MODELS.has(effectiveModel) ||
+        (effectiveModel === "auto" && !CFG_GUIDED_MODELS.has(effectiveModel));
+    setWidgetVisible(find("flux_shift"), true, node);
+    setWidgetVisible(find("flux_guidance"), usesGuidanceEmbed, node);
+    setWidgetVisible(find("flux_guidance_profile"), usesGuidanceEmbed, node);
 
-    // 3.6. Preset info text box: hide completely when in Custom mode, show in other presets
-    const presetInfoW = find("preset_info");
-    const isCustom = presetW && presetW.value === "Custom";
-    setWidgetVisible(presetInfoW, !isCustom, node);
+    // 3.5b. LTX models can't use the flux-style guidance / tiling / preview widgets.
+    if (isLTX) {
+        LTX_INCOMPATIBLE_WIDGETS.forEach(name => setWidgetVisible(find(name), false, node));
+    }
+
+    // 3.6. Preset info text box is shown for named presets.
+    setWidgetVisible(find("preset_info"), true, node);
 
     refreshNodeSize(node);
 }

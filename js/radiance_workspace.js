@@ -83,11 +83,13 @@ window.addEventListener("message", (event) => {
 // X button, the Esc key, or clicking the dimmed backdrop.
 if (!window.showRadianceDashboard) {
     window.showRadianceDashboard = function (url, title = "Radiance") {
+        // Cache-bust so dashboard edits always load fresh (ComfyUI caches static files).
+        const bust = (u) => u + (u.includes("?") ? "&" : "?") + "t=" + Date.now();
         // If one is already open, just bring focus / replace its source.
         const existing = document.getElementById("radiance-dashboard-overlay");
         if (existing) {
             const fr = existing.querySelector("iframe");
-            if (fr && url) fr.src = url;
+            if (fr && url) fr.src = bust(url);
             return;
         }
 
@@ -154,7 +156,7 @@ if (!window.showRadianceDashboard) {
         closeBtn.onmouseleave = () => { closeBtn.style.color = "#bbb"; closeBtn.style.background = "transparent"; closeBtn.style.borderColor = "rgba(255,255,255,0.12)"; };
 
         const iframe = document.createElement("iframe");
-        iframe.src = url;
+        iframe.src = bust(url);
         Object.assign(iframe.style, {
             flex: "1 1 auto", width: "100%", border: "0", background: "#0d0d0d",
         });
@@ -517,6 +519,9 @@ app.registerExtension({
             });
             this.addWidget("button", "WORKFLOW LIBRARY", "launch_dashboard", () => {
                 window.showRadianceDashboard("/extensions/radiance/workspace_dashboard.html", "Radiance Workflow Library");
+            });
+            this.addWidget("button", "◎ ASSETS", "launch_assets", () => {
+                window.showRadianceDashboard("/extensions/radiance/assets_dashboard.html", "Radiance Assets");
             });
             this.addWidget("button", "QUICK SAVE", "quick_save", () => this.saveToLibrary());
             this.addWidget("button", "INCREMENTAL SAVE", "inc_save", () => this.incrementalSave());
