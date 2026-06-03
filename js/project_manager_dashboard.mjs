@@ -221,7 +221,7 @@ function ShotsTable(versions) {
     const list = versions || [];
     const rows = list.length ? list.map((v) => {
         const st = statusMeta(v.status);
-        return `<div class="rpm-tr" data-searchable="${escapeHtml(((v.shot || "") + " " + (v.version || "")).toLowerCase())}">
+        return `<div class="rpm-tr rpm-tr-click" data-action="Open Shot" data-shot="${escapeHtml(v.shot || "")}" data-searchable="${escapeHtml(((v.shot || "") + " " + (v.version || "")).toLowerCase())}">
             <span class="rpm-thumb-sm"></span>
             <span class="rpm-shot dsp">${escapeHtml(v.shot || "—")}</span>
             <span class="rpm-pill ${st.cls}">${st.label}</span>
@@ -276,7 +276,77 @@ function ProjectManagerDashboard(data) {
             </div>
         </main>
         <div class="rpm-toast" data-toast></div>
+        <div id="rpm-drawer-root"></div>
     `;
+}
+
+function ShotDetail(shot, data) {
+    const vers = (data.versions || []).filter((v) => String(v.shot || "") === String(shot));
+    const latest = vers[0] || {};
+    const st = statusMeta(latest.status);
+    const outs = (data.outputs || []).filter((o) => String(o.name || "").toUpperCase().includes(String(shot).toUpperCase()));
+    const allNotes = data.notes || [];
+    const shotNotes = allNotes.filter((n) => String(n).toUpperCase().includes(String(shot).toUpperCase()));
+    const notes = shotNotes.length ? shotNotes : allNotes;
+
+    const verRows = vers.length ? vers.map((v, i) => {
+        const s = statusMeta(v.status);
+        return `<div class="rpm-drow ${i === 0 ? "is-latest" : ""}">
+            <span class="rpm-ver">${escapeHtml(v.version || "")}</span>
+            <span class="rpm-pill ${s.cls}">${s.label}</span>
+            ${i === 0 ? `<span class="rpm-drow-tag">latest</span>` : ""}
+        </div>`;
+    }).join("") : EmptyState("No versions for this shot yet.");
+
+    const outRows = outs.length ? outs.map((o) => `<div class="rpm-drow">
+        <span class="rpm-shot" title="${escapeHtml(o.name || "")}">${escapeHtml(o.name || "")}</span>
+        <span class="rpm-tag">${escapeHtml(o.type || "")}</span>
+        <span class="rpm-dim">${escapeHtml(o.size || "")}</span>
+    </div>`).join("") : EmptyState("No outputs for this shot.");
+
+    const noteRows = notes.length ? notes.map((n) => `<div class="rpm-note"><span class="rpm-note-dot"></span>${escapeHtml(n)}</div>`).join("") : EmptyState("No review notes.");
+
+    return `
+        <div class="rpm-drawer-backdrop" data-action="Close Shot"></div>
+        <aside class="rpm-drawer" role="dialog" aria-label="Shot ${escapeHtml(shot)}">
+            <header class="rpm-drawer-head">
+                <div>
+                    <div class="rpm-kicker">Shot</div>
+                    <div class="rpm-drawer-title dsp">${escapeHtml(shot)}</div>
+                </div>
+                <span class="rpm-pill ${st.cls}">${st.label}</span>
+                <button class="rpm-icon-btn" type="button" data-action="Close Shot" title="Close">&#10005;</button>
+            </header>
+            <div class="rpm-drawer-body">
+                <div class="rpm-drawer-preview">
+                    <span class="rpm-hero-range">1001–1142</span>
+                    <span class="rpm-hero-play">${svg("play")}</span>
+                </div>
+                <div class="rpm-drawer-actions">
+                    <button class="rpm-button is-primary" type="button" data-action="Open Shot Workflow" data-filename="${escapeHtml(latest.filename || "")}">${svg("resume")}Open in canvas</button>
+                    <button class="rpm-button" type="button" data-action="Approve Shot" data-shot="${escapeHtml(shot)}">Approve</button>
+                    <button class="rpm-button" type="button" data-action="Request Changes" data-shot="${escapeHtml(shot)}">Request changes</button>
+                </div>
+                <div class="rpm-drawer-section"><div class="rpm-drawer-label">Version history</div>${verRows}</div>
+                <div class="rpm-drawer-section"><div class="rpm-drawer-label">Outputs</div>${outRows}</div>
+                <div class="rpm-drawer-section"><div class="rpm-drawer-label">Review notes</div>${noteRows}</div>
+            </div>
+        </aside>
+    `;
+}
+
+function openShotDrawer(shot, data) {
+    const root = document.getElementById("rpm-drawer-root");
+    if (!root) return;
+    root.innerHTML = ShotDetail(shot, data);
+    requestAnimationFrame(() => root.classList.add("is-open"));
+}
+
+function closeShotDrawer() {
+    const root = document.getElementById("rpm-drawer-root");
+    if (!root) return;
+    root.classList.remove("is-open");
+    window.setTimeout(() => { if (root) root.innerHTML = ""; }, 220);
 }
 
 function showToast(message) {
@@ -433,6 +503,26 @@ function bindInteractions(root, state) {
             return;
         }
 
+        if (action === "Open Shot") {
+            openShotDrawer(button.dataset.shot, state.data);
+            return;
+        }
+
+        if (action === "Close Shot") {
+            closeShotDrawer();
+            return;
+        }
+
+        if (action === "Open Shot Workflow") {
+            const filename = button.dataset.filename;
+            if (filename) {
+                openWorkflow(filename).catch((error) => showToast(error.message));
+            } else {
+                showToast("No saved workflow for this version yet.");
+            }
+            return;
+        }
+
         if (action === "Save Version") {
             if (!activeProjectId) {
                 showToast("Save a workflow first to create a project.");
@@ -494,6 +584,11 @@ window.addEventListener("message", (event) => {
 
 window.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
+        const drawer = document.getElementById("rpm-drawer-root");
+        if (drawer && drawer.classList.contains("is-open")) {
+            closeShotDrawer();
+            return;
+        }
         if (window.parent && window.parent !== window && window.parent.closeRadianceDashboard) {
             window.parent.closeRadianceDashboard();
         }
