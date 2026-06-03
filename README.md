@@ -13,6 +13,8 @@ Professional VFX, HDR color science, review, and DCC handoff nodes for ComfyUI.
 
 **Radiance** is a production-oriented ComfyUI node pack for 32-bit image pipelines, HDR/ACES color management, VFX plate prep, video workflows, review tools, in-canvas studio dashboards, and Nuke/Resolve studio handoff.
 
+> **Radiance is the VFX & color-finishing toolkit for ComfyUI — with a studio production layer on top.** Artists get 32-bit / HDR / ACES image tools, viewers, and VFX nodes; supervisors and coordinators get project, shot, asset, and workflow management built right into the canvas.
+
 [Install](#install) · [Documentation](docs/index.html) · [Node Map](#node-map) · [Studio Dashboards](#studio-dashboards) · [DCC Handoff](#dcc-handoff) · [Release Status](#release-status) · [Support](#support)
 
 </div>
