@@ -1175,6 +1175,49 @@
                 border-bottom: 1px solid var(--border-color);
             }
         }
+        /* ───────── Radiance dark-minimal reskin (v3.1.1) ───────── */
+        :root {
+            --bg-base: #0a0a0c;
+            --bg-surface: transparent;
+            --bg-surface-glass: transparent;
+            --bg-card: transparent;
+            --bg-card-glass: transparent;
+            --bg-input: rgba(255,255,255,0.03);
+            --color-primary: #c8a96e;
+            --color-primary-glow: rgba(200,169,110,0.35);
+            --color-secondary: #d8bd87;
+            --color-accent: #c8a96e;
+            --color-accent-glow: rgba(200,169,110,0.3);
+            --color-purple: #9a8fb0;
+            --text-main: #ededf0;
+            --text-muted: #767a82;
+            --text-dark: #52555c;
+            --text-bright: #f2f2f4;
+            --border-color: rgba(255,255,255,0.07);
+        }
+        .sidebar { background: none; border-right: 1px solid rgba(255,255,255,0.06); }
+        .brand-title { font-family: 'Space Grotesk','Inter',sans-serif; letter-spacing: .14em; text-transform: uppercase; font-size: 13px; }
+        .brand-title span { color: var(--color-primary); }
+        .nav-item { background: none !important; border: 0 !important; border-left: 2px solid transparent !important; border-radius: 0 !important; color: var(--text-muted) !important; box-shadow: none !important; }
+        .nav-item:hover { background: none !important; color: #c9ccd2 !important; }
+        .nav-item.active { background: none !important; color: var(--text-bright) !important; border-left-color: var(--color-primary) !important; }
+        .nav-item svg, .nav-item.active svg { fill: currentColor !important; opacity: .8; }
+        .nav-badge, .nav-item.active .nav-badge { background: none !important; color: var(--text-dark) !important; box-shadow: none !important; }
+        .cards-grid { gap: 28px 20px; }
+        .workflow-card { background: none !important; backdrop-filter: none !important; border: 0 !important; border-radius: 0 !important; box-shadow: none !important; overflow: visible; }
+        .workflow-card:hover, .workflow-card.official-card:hover { transform: none !important; border: 0 !important; box-shadow: none !important; }
+        .card-cover { height: 150px; background: none !important; border: 1px solid rgba(255,255,255,0.08) !important; border-radius: 5px; border-bottom: 1px solid rgba(255,255,255,0.08) !important; }
+        .card-cover img { opacity: .8; border-radius: 5px; }
+        .card-cover-placeholder { color: var(--text-dark); }
+        .card-content { background: none !important; padding: 10px 2px 0 !important; }
+        .card-title { font-size: 13px; }
+        .card-desc { color: var(--text-muted); }
+        .badge { background: none !important; border: 0 !important; padding: 0 10px 0 0 !important; color: var(--text-muted) !important; font-weight: 400; }
+        .badge-cyan, .badge-gold, .badge-green, .badge-purple, .badge-slate { background: none !important; border: 0 !important; color: var(--text-muted) !important; }
+        .btn { background: none !important; border: 1px solid rgba(255,255,255,0.1) !important; box-shadow: none !important; color: var(--text-main) !important; }
+        .btn:hover { background: rgba(255,255,255,0.05) !important; }
+        .btn-primary { background: var(--color-primary) !important; border-color: var(--color-primary) !important; color: #241c08 !important; }
+        .btn-primary:hover { background: #d8bd87 !important; }
     </style>
 </head>
 <body>

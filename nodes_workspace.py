@@ -744,15 +744,41 @@ def _find_project(project_id: str) -> tuple[dict | None, list[dict]]:
     return projects.get(project_id), workflows
 
 
+def _shot_status_path(project: dict) -> Path:
+    return _WORKFLOW_DIR_RESOLVED / project["name"] / ".shot_status.json"
+
+
+def _load_shot_status(project: dict) -> dict:
+    try:
+        sp = _shot_status_path(project)
+        if sp.exists():
+            data = json.loads(sp.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_shot_status(project: dict, mapping: dict) -> None:
+    try:
+        sp = _shot_status_path(project)
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(json.dumps(mapping, indent=2), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("[Radiance] Failed to save shot status: %s", exc)
+
+
 def _versions_for_project(project: dict) -> list[dict]:
     versions = []
+    status_map = _load_shot_status(project)
 
     for workflow in sorted(project["workflows"], key=lambda w: w["mtime"], reverse=True):
         metadata = workflow.get("metadata") or {}
         name = Path(workflow["filename"]).stem
         versions.append({
             "version": str(metadata.get("version") or _version_from_name(name)),
-            "status": str(metadata.get("status") or metadata.get("review_status") or "WIP"),
+            "status": str(status_map.get(str(metadata.get("shot") or _shot_from_name(name))) or metadata.get("status") or metadata.get("review_status") or "WIP"),
             "shot": str(metadata.get("shot") or _shot_from_name(name)),
             "workflow": name,
             "filename": workflow["filename"],
@@ -1436,4 +1462,363 @@ async def get_workflow_preview(request):
             return web.Response(body=preview_data, content_type='image/png')
 
     except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#                           ASSET MANAGER  (v3.1.1)
+# ═══════════════════════════════════════════════════════════════════════════════
+import re as _re
+import hashlib as _hashlib
+
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp", ".gif"}
+_HDR_EXTS = {".exr", ".hdr"}
+_VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
+_WEB_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+_ASSET_EXTS = _IMAGE_EXTS | _HDR_EXTS | _VIDEO_EXTS
+_ASSETS_BINS_PATH = _WORKFLOW_DIR_RESOLVED / "_assets_bins.json"
+_ASSET_SCAN_LIMIT = 600
+_SEQ_RE = _re.compile(r"^(.*?)(\d{2,})(\.[^.]+)$")
+
+
+def _asset_roots() -> "list[Path]":
+    roots = []
+    for getter in ("get_input_directory", "get_output_directory"):
+        fn = getattr(folder_paths, getter, None)
+        if fn:
+            try:
+                p = Path(fn()).resolve()
+                if p.exists():
+                    roots.append(p)
+            except Exception:
+                pass
+    return roots
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except Exception:
+        return False
+
+
+def _asset_id(path: Path) -> str:
+    return _hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:16]
+
+
+def _classify(ext: str) -> str:
+    e = ext.lower()
+    if e in _VIDEO_EXTS:
+        return "video"
+    if e == ".hdr":
+        return "hdri"
+    return "image"
+
+
+def _load_bins() -> "list[dict]":
+    try:
+        if _ASSETS_BINS_PATH.exists():
+            data = json.loads(_ASSETS_BINS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data
+    except Exception:
+        pass
+    return []
+
+
+def _save_bins(bins: "list[dict]") -> None:
+    try:
+        _ASSETS_BINS_PATH.write_text(json.dumps(bins, indent=2), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("[Radiance] Failed to save asset bins: %s", exc)
+
+
+def _scan_assets() -> "list[dict]":
+    roots = _asset_roots()
+    files = []
+    for root in roots:
+        try:
+            for item in root.rglob("*"):
+                if not item.is_file() or item.suffix.lower() not in _ASSET_EXTS:
+                    continue
+                files.append((root, item))
+                if len(files) > _ASSET_SCAN_LIMIT * 4:
+                    break
+        except Exception as exc:
+            logger.warning("[Radiance] asset scan failed under %s: %s", root, exc)
+
+    seq_groups: "dict[tuple, list]" = {}
+    singles = []
+    for root, item in files:
+        m = _SEQ_RE.match(item.name)
+        if m and item.suffix.lower() in (_IMAGE_EXTS | _HDR_EXTS):
+            key = (str(item.parent), m.group(1), m.group(3).lower())
+            seq_groups.setdefault(key, []).append((root, item, int(m.group(2))))
+        else:
+            singles.append((root, item))
+
+    assets = []
+    for key, members in seq_groups.items():
+        if len(members) >= 3:
+            members.sort(key=lambda t: t[2])
+            _, first_item, first_n = members[0]
+            _, _last_item, last_n = members[-1]
+            total = 0
+            mtime = 0.0
+            for _r, it, _n in members:
+                try:
+                    st = it.stat(); total += st.st_size; mtime = max(mtime, st.st_mtime)
+                except Exception:
+                    pass
+            ext = key[2]
+            prefix = (key[1].rstrip("._-") or first_item.stem)
+            assets.append({
+                "id": _asset_id(first_item.parent / (key[1] + "####" + ext)),
+                "name": Path(prefix).name,
+                "type": "sequence",
+                "format": ext.lstrip(".").upper(),
+                "frames": len(members),
+                "frame_start": first_n,
+                "frame_end": last_n,
+                "meta": "%s seq · %d fr" % (ext.lstrip(".").upper(), len(members)),
+                "size": _format_bytes(total),
+                "date": _format_relative_time(mtime),
+                "path": str(first_item),
+                "previewable": False,
+                "_mtime": mtime,
+            })
+        else:
+            for mem in members:
+                singles.append((mem[0], mem[1]))
+
+    for root, item in singles:
+        try:
+            st = item.stat()
+        except Exception:
+            continue
+        ext = item.suffix.lower()
+        assets.append({
+            "id": _asset_id(item),
+            "name": item.name,
+            "type": _classify(ext),
+            "format": ext.lstrip(".").upper(),
+            "meta": ext.lstrip(".").upper(),
+            "size": _format_bytes(st.st_size),
+            "date": _format_relative_time(st.st_mtime),
+            "path": str(item),
+            "previewable": ext in _WEB_IMAGE_EXTS,
+            "_mtime": st.st_mtime,
+        })
+
+    assets.sort(key=lambda a: a.get("_mtime", 0), reverse=True)
+    return assets[:_ASSET_SCAN_LIMIT]
+
+
+def _assets_payload() -> dict:
+    assets = _scan_assets()
+    by_id = {a["id"] for a in assets}
+    bins = _load_bins()
+    for b in bins:
+        b["count"] = sum(1 for aid in b.get("assets", []) if aid in by_id)
+    counts = {
+        "all": len(assets),
+        "image": sum(1 for a in assets if a["type"] in ("image", "hdri")),
+        "video": sum(1 for a in assets if a["type"] == "video"),
+        "sequence": sum(1 for a in assets if a["type"] == "sequence"),
+    }
+    for a in assets:
+        a.pop("_mtime", None)
+    return {"assets": assets, "bins": bins, "counts": counts, "source": "Live scan"}
+
+
+@_route("get", "/radiance/assets")
+async def list_assets(request):
+    try:
+        return web.json_response(_assets_payload())
+    except Exception as e:
+        logger.exception("[Radiance] list_assets failed")
+        return web.json_response({"error": str(e)}, status=500)
+
+
+@_route("post", "/radiance/assets/bins")
+async def create_asset_bin(request):
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    name = str(data.get("name") or "").strip()
+    if not name:
+        return web.json_response({"error": "Bin name required"}, status=400)
+    bins = _load_bins()
+    bin_id = _hashlib.sha1((name + str(time.time())).encode()).hexdigest()[:10]
+    new_bin = {"id": bin_id, "name": name[:60], "assets": []}
+    bins.append(new_bin)
+    _save_bins(bins)
+    return web.json_response({"success": True, "bin": new_bin})
+
+
+@_route("post", "/radiance/assets/bins/{bin_id}")
+async def modify_asset_bin(request):
+    bin_id = request.match_info.get("bin_id", "")
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    action = str(data.get("action") or "")
+    asset_id = str(data.get("asset_id") or "")
+    bins = _load_bins()
+    target = next((b for b in bins if b.get("id") == bin_id), None)
+    if target is None:
+        return web.json_response({"error": "Bin not found"}, status=404)
+    if action == "add" and asset_id:
+        if asset_id not in target.setdefault("assets", []):
+            target["assets"].append(asset_id)
+    elif action == "remove" and asset_id:
+        target["assets"] = [a for a in target.get("assets", []) if a != asset_id]
+    elif action == "rename":
+        target["name"] = str(data.get("name") or target["name"])[:60]
+    elif action == "delete":
+        bins = [b for b in bins if b.get("id") != bin_id]
+    else:
+        return web.json_response({"error": "Unknown action"}, status=400)
+    _save_bins(bins)
+    return web.json_response({"success": True})
+
+
+_THUMB_CACHE = _WORKFLOW_DIR_RESOLVED / ".asset_thumbs"
+
+
+def _render_thumb_png(target: Path) -> "bytes | None":
+    """Best-effort: render a tonemapped first-frame PNG for EXR/HDR/TIFF/video.
+    Returns None if the optional cv2 dependency is missing or decode fails."""
+    ext = target.suffix.lower()
+    try:
+        import numpy as np
+        import cv2  # type: ignore
+    except Exception:
+        return None
+    try:
+        if ext in (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"):
+            cap = cv2.VideoCapture(str(target))
+            ok, img = cap.read()
+            cap.release()
+            if not ok or img is None:
+                return None
+        else:
+            img = cv2.imread(str(target), cv2.IMREAD_UNCHANGED | cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
+            if img is None:
+                return None
+            if np.issubdtype(img.dtype, np.floating):
+                x = np.clip(img.astype("float32"), 0, None)
+                x = x / (1.0 + x)                      # Reinhard tonemap
+                x = np.power(np.clip(x, 0, 1), 1.0 / 2.2)  # display gamma
+                img = (x * 255.0).astype("uint8")
+            elif img.dtype == np.uint16:
+                img = (img / 257.0).astype("uint8")
+        if img.ndim == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        elif img.shape[2] == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        h, w = img.shape[:2]
+        if w > 512:
+            img = cv2.resize(img, (512, max(1, int(h * 512 / w))), interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".png", img)
+        return buf.tobytes() if ok else None
+    except Exception:
+        return None
+
+
+@_route("get", "/radiance/assets/thumb")
+async def asset_thumb(request):
+    raw = request.query.get("path", "")
+    if not raw:
+        return web.json_response({"error": "path required"}, status=400)
+    try:
+        target = Path(raw).resolve()
+    except Exception:
+        return web.json_response({"error": "bad path"}, status=400)
+    if not any(_is_within(target, root) for root in _asset_roots()) or not target.is_file():
+        return web.json_response({"error": "forbidden"}, status=403)
+
+    ext = target.suffix.lower()
+    if ext in _WEB_IMAGE_EXTS:
+        ctype = {
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp",
+        }.get(ext, "application/octet-stream")
+        return web.Response(body=target.read_bytes(), content_type=ctype)
+
+    # EXR / HDR / TIFF / video -> rendered + cached PNG thumbnail (best-effort).
+    try:
+        mtime = target.stat().st_mtime
+        key = _hashlib.sha1(("%s:%s" % (target, mtime)).encode()).hexdigest()[:20]
+        _THUMB_CACHE.mkdir(parents=True, exist_ok=True)
+        cached = _THUMB_CACHE / (key + ".png")
+        if cached.exists():
+            return web.Response(body=cached.read_bytes(), content_type="image/png")
+        png = _render_thumb_png(target)
+        if png:
+            try:
+                cached.write_bytes(png)
+            except Exception:
+                pass
+            return web.Response(body=png, content_type="image/png")
+    except Exception as e:
+        logger.debug("[Radiance] thumb render failed: %s", e)
+    return web.json_response({"error": "not previewable"}, status=415)
+
+
+@_route("post", "/radiance/assets/upload")
+async def upload_asset(request):
+    try:
+        fn = getattr(folder_paths, "get_input_directory", None)
+        if not fn:
+            return web.json_response({"error": "No input directory"}, status=500)
+        dest_dir = Path(fn()).resolve() / "radiance_assets"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        reader = await request.multipart()
+        saved = []
+        async for part in reader:
+            if part.filename:
+                safe_name = os.path.basename(part.filename)
+                if Path(safe_name).suffix.lower() not in _ASSET_EXTS:
+                    continue
+                dest = dest_dir / safe_name
+                with open(dest, "wb") as fh:
+                    while True:
+                        chunk = await part.read_chunk()
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                saved.append(safe_name)
+        return web.json_response({"success": True, "saved": saved})
+    except Exception as e:
+        logger.exception("[Radiance] upload_asset failed")
+        return web.json_response({"error": str(e)}, status=500)
+
+
+@_route("post", "/radiance/projects/{project_id}/shots/{shot}/status")
+async def set_shot_status(request):
+    try:
+        project_id = request.match_info.get("project_id", "")
+        shot = request.match_info.get("shot", "")
+        project, _ = _find_project(project_id)
+        if project is None:
+            return web.json_response({"error": "Project not found"}, status=404)
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        status = str(data.get("status") or "").strip()
+        allowed = {"WIP", "Review", "Approved", "Retake", "Final"}
+        if status not in allowed:
+            return web.json_response({"error": "status must be one of %s" % sorted(allowed)}, status=400)
+        mapping = _load_shot_status(project)
+        if shot:
+            mapping[shot] = status
+        _save_shot_status(project, mapping)
+        return web.json_response({"success": True, "shot": shot, "status": status})
+    except Exception as e:
+        logger.exception("[Radiance] set_shot_status failed")
         return web.json_response({"error": str(e)}, status=500)
