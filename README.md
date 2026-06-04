@@ -2,8 +2,6 @@
 <img src="r_icon.png" width="76" alt="Radiance mark"><br>
 <img src="RADIANCE.png" width="640" alt="Radiance">
 
-# Radiance
-
 **Professional VFX, HDR color science, review, and DCC handoff for ComfyUI.**
 
 [![Version](https://img.shields.io/badge/version-3.1.1-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
