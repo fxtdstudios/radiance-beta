@@ -17,11 +17,11 @@ on:
     branches:
       - main
       - dev
-      - "release/**"
   pull_request:
     branches:
       - main
       - dev
+  workflow_dispatch:
 
 # Cancel in-flight CI runs for the same ref when a new commit is pushed.
 concurrency:
@@ -36,16 +36,31 @@ defaults:
     shell: bash
 
 jobs:
+  # Cost control: the full 4-Python x 2-OS matrix runs only on the public repo
+  # (Actions is free for public repos). On private mirrors (e.g. radiance-beta)
+  # a slim Linux-only matrix keeps usage within the free minute allowance.
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        run: |
+          if [ "${{ github.repository }}" = "fxtdstudios/radiance" ]; then
+            echo 'matrix={"python-version":["3.9","3.10","3.11","3.12"],"os":["ubuntu-latest","windows-latest"]}' >> "$GITHUB_OUTPUT"
+          else
+            echo 'matrix={"python-version":["3.11","3.12"],"os":["ubuntu-latest"]}' >> "$GITHUB_OUTPUT"
+          fi
+
   # ── Main test matrix ────────────────────────────────────────────────────────
   test:
     name: "pytest · Python ${{ matrix.python-version }} · ${{ matrix.os }}"
+    needs: setup
     runs-on: ${{ matrix.os }}
 
     strategy:
       fail-fast: false
-      matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
-        os: ["ubuntu-latest", "windows-latest"]
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
 
     steps:
       # ── 1. Checkout ─────────────────────────────────────────────────────────
@@ -127,6 +142,7 @@ jobs:
   # lightweight matrix above). This is the lane that catches HDR/EXR regressions.
   test-full:
     name: "pytest · real deps (torch+OpenEXR+OCIO)"
+    if: github.repository == 'fxtdstudios/radiance'
     runs-on: ubuntu-latest
 
     steps:
