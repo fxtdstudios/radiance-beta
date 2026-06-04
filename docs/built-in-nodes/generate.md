@@ -1,3 +1,5 @@
+[← Back to Radiance docs](../README.md)
+
 # Generate, Loaders, and Sampling
 
 Model loading, LoRA stacks, prompt conditioning, resolution setup, denoising, and sampling controls for Radiance generation workflows.

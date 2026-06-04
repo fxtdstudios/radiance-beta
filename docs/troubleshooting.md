@@ -1,3 +1,5 @@
+[← Back to Radiance docs](README.md)
+
 # Troubleshooting
 
 Use this page when a Radiance graph loads but the output is wrong, missing, clipped, or hard to interpret.

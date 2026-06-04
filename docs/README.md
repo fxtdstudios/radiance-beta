@@ -1,5 +1,3 @@
-[← Back to Radiance docs](README.md)
-
 # Radiance Documentation
 
 Radiance is a production-oriented ComfyUI node pack for HDR image handling, ACES/OCIO color management, VFX plate preparation, review, video workflows, upscaling, and DCC handoff.

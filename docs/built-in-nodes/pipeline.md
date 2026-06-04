@@ -1,3 +1,5 @@
+[← Back to Radiance docs](../README.md)
+
 # Pipeline and Studio
 
 Project containers, audio cut data, blend composites, cinema prompt setup, local MCP bridge, Nuke send, Resolve handoff, and parameter history tracking.
