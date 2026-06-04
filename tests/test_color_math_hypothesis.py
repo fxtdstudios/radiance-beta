@@ -307,9 +307,14 @@ class TestLogCurvesHypothesis(unittest.TestCase):
         assume(len(sigmas) >= 2)
         assume(all(sigmas[i] > sigmas[i + 1] for i in range(len(sigmas) - 1)))
         shifted = _flux_shift_sigmas(sigmas, shift)
+        # Allow a tiny floating-point tolerance: inputs one ULP apart (~1e-16)
+        # can flip order by a few ULPs through the nonlinear transform without
+        # that being a real ordering violation. 1e-9 is far above FP noise yet
+        # far below any genuine break.
+        _TOL = 1e-9
         for i in range(len(shifted) - 1):
             self.assertGreaterEqual(
-                shifted[i], shifted[i + 1],
+                shifted[i] - shifted[i + 1], -_TOL,
                 msg=f"flux_shift broke order at i={i} with shift={shift}: "
                     f"{shifted[i]} < {shifted[i+1]}"
             )
