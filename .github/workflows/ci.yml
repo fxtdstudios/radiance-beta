@@ -145,7 +145,7 @@ jobs:
           pip install \
             "numpy>=1.22" "scipy>=1.9" "Pillow>=9.0" "defusedxml>=0.7" \
             "opencv-python-headless>=4.7" "tqdm>=4.66" \
-            "OpenEXR>=3.2.0" "Imath>=3.1.0" \
+            "OpenEXR>=3.2.0" \
             "opencolorio>=2.3.0" "colour-science>=0.4.4" \
             "einops>=0.7.0" "pytest>=7.4" "pytest-timeout>=2.1"
 

@@ -23,7 +23,13 @@ class RadianceLoadImageMask:
     @classmethod
     def INPUT_TYPES(s):
         input_dir = folder_paths.get_input_directory()
-        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
+        # Guard against a missing/invalid input directory (fresh ComfyUI install,
+        # or a non-existent stub path on a different OS) — INPUT_TYPES must never
+        # raise, or the node fails to register.
+        try:
+            files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
+        except (FileNotFoundError, NotADirectoryError, OSError):
+            files = []
         files = folder_paths.filter_files_content_types(files, ["image"])
         # Same widget signature as default LoadImage
         return {"required":
