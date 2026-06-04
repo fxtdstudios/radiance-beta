@@ -184,6 +184,9 @@ jobs:
           for mod in _stub_names:
               m = types.ModuleType(mod)
               m.__dict__.update({a: MagicMock() for a in dir(MagicMock())})
+              # Any attribute we did not set explicitly resolves to a mock, so a
+              # module doing e.g. `torch.device(...)` at import time won't crash.
+              m.__getattr__ = lambda name: MagicMock()
               sys.modules.setdefault(mod, m)
 
           # Minimal real attributes needed by our nodes
@@ -191,12 +194,29 @@ jobs:
           sys.modules["torch"].float32       = "float32"
           sys.modules["torch"].float16       = "float16"
           sys.modules["torch"].bfloat16      = "bfloat16"
+          # nn.Module must be a real class so `class X(torch.nn.Module)` works.
+          sys.modules["torch.nn"].Module     = MagicMock
           sys.modules["folder_paths"].models_dir      = "/tmp"
           sys.modules["folder_paths"].output_directory = "/tmp"
           sys.modules["comfy.samplers"].SAMPLER_NAMES   = []
           sys.modules["comfy.samplers"].SCHEDULER_NAMES = []
 
           sys.path.insert(0, ".")
+
+          # Map the import name `radiance` to the checkout root regardless of the
+          # repo/dir name (e.g. a mirror checked out as "radiance-beta"), so
+          # `import radiance.*` resolves the same way it does in a "radiance" dir.
+          import importlib.abc, importlib.util, os
+          _ROOT = os.path.abspath(".")
+          if os.path.basename(_ROOT) != "radiance" and os.path.exists(os.path.join(_ROOT, "__init__.py")):
+              class _RadianceNameFinder(importlib.abc.MetaPathFinder):
+                  def find_spec(self, name, path=None, target=None):
+                      if name != "radiance":
+                          return None
+                      return importlib.util.spec_from_file_location(
+                          "radiance", os.path.join(_ROOT, "__init__.py"),
+                          submodule_search_locations=[_ROOT])
+              sys.meta_path.insert(0, _RadianceNameFinder())
 
           # ── Modules to smoke-test ──────────────────────────────────────────
           _modules = [
