@@ -9,7 +9,7 @@
 [![Nodes](https://img.shields.io/badge/nodes-104-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
 
-Radiance is a production-grade node pack for ComfyUI built around 32-bit float and HDR/ACES image pipelines. It brings VFX plate prep, color management, review tooling, in-canvas studio dashboards, and Nuke / DaVinci Resolve handoff into one coherent toolkit — so you can take a shot from generation through finishing without leaving the graph.
+Radiance is a production-grade node pack for ComfyUI built around 32-bit float and HDR/ACES image pipelines. It brings VFX plate prep, color management, review tooling, in-canvas studio dashboards, and Nuke / DaVinci Resolve handoff into one coherent toolkit, so you can take a shot from generation through finishing without leaving the graph.
 
 Artists get 32-bit, HDR, and ACES image tools, professional viewers, and VFX nodes. Supervisors and coordinators get project, shot, asset, and workflow management built directly into the canvas.
 
@@ -25,11 +25,11 @@ Artists get 32-bit, HDR, and ACES image tools, professional viewers, and VFX nod
 - ACES, OCIO, log curves, LUTs, CDL, scopes, QC, and grade-transfer tools.
 - VFX utilities for plate prep, masks, roto, depth, camera and optics, motion, multipass, real AOV ingestion, and relighting.
 - Video and temporal workflow nodes for loading, routing, conditioning, sampling, and delivery.
-- In-canvas studio dashboards — Project Manager, Workflow Library, and Assets — rendered over the ComfyUI graph, never in a separate browser tab.
+- In-canvas studio dashboards, Project Manager, Workflow Library, and Assets — rendered over the ComfyUI graph, never in a separate browser tab.
 - Smart Sampler Pro, a preset-driven sampler that hides irrelevant parameters and adapts to the selected model.
 - Radiance Pro Viewer and a lightweight Lite Viewer with scopes, frame review, and keyboard shortcuts.
 - HDR VAE decoders (Turbo and Full) and HDR LoRA tooling for scene-linear generation.
-- Dynamic Gizmos — collapse any group of nodes into a single reusable custom node.
+- Dynamic Gizmos, collapse any group of nodes into a single reusable custom node.
 - Secure-by-default handoff to Nuke and DaVinci Resolve.
 
 ## Studio Dashboards
