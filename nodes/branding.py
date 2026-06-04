@@ -2,13 +2,23 @@
 
 ComfyUI keeps node type keys as workflow compatibility identifiers. This module
 centralizes the user-facing brand and category names without renaming those keys.
+
+Naming scheme (Option C — compositor-friendly hybrid):
+  * Compositor-native nodes (Color, HDR finishing, VFX, Load & Save, Review,
+    Upscale, Pipeline) use bare, industry-standard names — the menu tab carries
+    the brand, exactly like Nuke shows ``Grade`` under Color.
+  * Generation nodes (Core dashboards, Generate, Video, Developer) keep a plain
+    ``Radiance`` prefix so the diffusion layer stays clearly badged.
+The ``◎`` glyph and marketing words (Pro/Smart/Ultra/Cinematic) are dropped.
+Search aliases keep every node discoverable by typing "radiance".
 """
 from __future__ import annotations
 
 import re
 from typing import Any, MutableMapping
 
-DISPLAY_PREFIX = "◎ Radiance"
+BRAND = "Radiance"
+DISPLAY_PREFIX = "◎ Radiance"  # retained for backward-compatible imports
 MENU_ROOT = "FXTD STUDIOS/Radiance"
 
 MENU_STRUCTURE = {
@@ -27,6 +37,68 @@ MENU_STRUCTURE = {
 
 DEFAULT_MENU_SECTION = "Core"
 
+# Sections whose nodes keep the "Radiance" prefix (the generation/AI layer).
+# Everything else gets a bare, Nuke-style name.
+GENERATION_SECTIONS = {"Core", "Generate", "Video", "Developer"}
+
+# Marketing words stripped from any node label.
+_MARKETING = re.compile(r"\b(Pro|Smart|Ultra|Cinematic)\b", re.IGNORECASE)
+
+# Exact label overrides keyed by node class id. The value is the BASE label
+# (the section rule then adds the "Radiance" prefix for generation sections).
+# Comp nodes are mapped to the vocabulary a Nuke/Flame compositor expects.
+TERM_OVERRIDES = {
+    # ── Color ─────────────────────────────────────────────────────────────
+    "RadianceCurves": "ColorLookup",
+    "RadianceHueCurves": "HueCorrect",
+    "RadianceColorSpaceConvert": "OCIO ColorSpace",
+    "RadianceColorSpaceInfo": "ColorSpace Info",
+    "RadianceCDLTransform": "CDL",
+    "RadianceFloat32ColorCorrect": "ColorCorrect",
+    "RadianceLUTApply": "LUT",
+    # ── HDR / finishing ───────────────────────────────────────────────────
+    "RadianceHDRToneMap": "Tonemap",
+    "RadianceHDROCIOTransform": "OCIO Transform",
+    # ── VFX ───────────────────────────────────────────────────────────────
+    "RadianceDepthOfField": "Defocus",
+    "RadianceFilmGrain": "Grain",
+    "RadianceMotionBlur": "MotionBlur",
+    "RadianceChromaticAberration": "Aberration",
+    "RadianceLensDistortion": "LensDistortion",
+    "RadianceVectorMaskDraw": "Roto",
+    "RadianceSubpixelStabilizer": "Stabilize",
+    "RadianceDepthMapGenerator": "Depth",
+    "RadianceOpticalFlow": "MotionVectors",
+    "RadianceMultipassAOVReader": "AOV Reader",
+    "RadianceMultipassMaster": "Multipass Extract",
+    "RadianceMultipassComposite": "Multipass Composite",
+    "RadianceMultipassRelight": "Relight",
+    "RadianceSAMGenerator": "Keyer (SAM)",
+    "RadianceLinearMatting": "Matte",
+    # ── Load & Save ───────────────────────────────────────────────────────
+    "RadianceImageLoader": "Read Image",
+    "RadianceLoadImageMask": "Read Mask",
+    "RadianceDigitalCinemaRead": "DPX Read",
+    "RadianceDigitalCinemaWrite": "DPX Write",
+    "RadianceEXRMultiPart": "Write EXR",
+    "RadianceEXRPassesWriter": "Write EXR Passes",
+    # ── Review ────────────────────────────────────────────────────────────
+    "RadianceViewer": "Viewer",
+    "RadianceLiteViewer": "Viewer (Lite)",
+    "RadianceFrameStamp": "Burn-In",
+    # ── Pipeline / DCC ────────────────────────────────────────────────────
+    "RadianceNukeSend": "Export to Nuke",
+    "RadianceDaVinciSend": "Export to Resolve",
+    # ── Generation (prefix added by the section rule) ─────────────────────
+    "RadianceSamplerPro": "Sampler",
+    "RadianceUnifiedLoader": "Loader",
+    "RadianceCinematicPromptEncoder": "Prompt",
+    "RadianceHDRVAEDecode": "VAE Decode (HDR)",
+    "RadianceHDRLatentEncoder": "VAE Encode (HDR)",
+    "RadianceControlNetApply": "ControlNet",
+    "RadianceControlApply": "Control",
+}
+
 
 def category_path(section: str) -> str:
     """Return the full ComfyUI category path for a menu section."""
@@ -44,26 +116,63 @@ def apply_radiance_branding(
     """
 
     for node_key, node_class in class_mappings.items():
-        display_name = display_name_mappings.get(node_key, node_key)
-        display_name_mappings[node_key] = normalize_display_name(node_key, display_name)
-        _set_node_category(
-            node_class,
-            classify_menu_section(node_key, node_class, display_name_mappings[node_key]),
-        )
+        raw = display_name_mappings.get(node_key, node_key)
+        section = classify_menu_section(node_key, node_class, raw)
+        final = compose_display_name(node_key, raw, section)
+        display_name_mappings[node_key] = final
+        _set_node_category(node_class, section)
+        _inject_search_aliases(node_class, node_key, raw)
+
+
+def compose_display_name(node_key: str, display_name: Any, section: str) -> str:
+    """Build the Option C display name: bare for comp sections, prefixed for gen."""
+
+    if node_key in TERM_OVERRIDES:
+        label = TERM_OVERRIDES[node_key]
+    else:
+        label = _base_label(node_key, display_name)
+    if section in GENERATION_SECTIONS:
+        return f"{BRAND} {label}".strip()
+    return label
 
 
 def normalize_display_name(node_key: str, display_name: Any) -> str:
-    """Ensure every visible node label starts with the Radiance brand."""
+    """Backward-compatible helper: always returns the legacy '◎ Radiance' form."""
+
+    return f"{DISPLAY_PREFIX} {_base_label(node_key, display_name)}".strip()
+
+
+def _base_label(node_key: str, display_name: Any) -> str:
+    """Strip glyphs, the Radiance/FXTD prefix, and marketing words to a bare label."""
 
     label = _clean_display_label(str(display_name or ""))
     if not label:
         label = _camel_to_words(node_key)
-
     label = _strip_known_prefixes(label)
     if not label:
         label = _camel_to_words(node_key)
+    label = _MARKETING.sub("", label)
+    label = re.sub(r"\s{2,}", " ", label).strip(" -—·")
+    if not label:
+        label = _camel_to_words(node_key)
+    return label
 
-    return f"{DISPLAY_PREFIX} {label}".strip()
+
+def _inject_search_aliases(node_class: Any, node_key: str, raw: Any) -> None:
+    """Keep nodes findable by 'radiance' even when the display name is bare."""
+
+    try:
+        existing = list(getattr(node_class, "SEARCH_ALIASES", []) or [])
+        words = _searchable_text(_base_label(node_key, raw))
+        extras = ["radiance", f"radiance {words}".strip(), words]
+        merged = []
+        for a in existing + extras:
+            a = str(a).strip()
+            if a and a.lower() not in {m.lower() for m in merged}:
+                merged.append(a)
+        setattr(node_class, "SEARCH_ALIASES", merged)
+    except Exception:
+        return
 
 
 def classify_menu_section(node_key: str, node_class: Any, display_name: str) -> str:
@@ -122,8 +231,6 @@ def _set_node_category(node_class: Any, section: str) -> None:
     try:
         setattr(node_class, "CATEGORY", category_path(section))
     except Exception:
-        # Some third-party node classes may block attribute writes. Their original
-        # category remains safer than failing package load.
         return
 
 
@@ -135,11 +242,7 @@ def _clean_display_label(display_name: str) -> str:
 
 
 def _strip_known_prefixes(label: str) -> str:
-    patterns = (
-        r"^radiance\s+",
-        r"^fxtd\s+studios?\s+",
-        r"^fxtd\s+",
-    )
+    patterns = (r"^radiance\s+", r"^fxtd\s+studios?\s+", r"^fxtd\s+")
     result = label.strip()
     for pattern in patterns:
         result = re.sub(pattern, "", result, flags=re.IGNORECASE).strip()
@@ -166,11 +269,15 @@ def _has_any(text: str, *tokens: str) -> bool:
 
 
 __all__ = [
+    "BRAND",
     "DISPLAY_PREFIX",
     "MENU_ROOT",
     "MENU_STRUCTURE",
+    "GENERATION_SECTIONS",
+    "TERM_OVERRIDES",
     "apply_radiance_branding",
     "category_path",
     "classify_menu_section",
+    "compose_display_name",
     "normalize_display_name",
 ]
