@@ -46,3 +46,15 @@ radiance_hdr_vae_decode_report.md
 *.svg
 RELEASE_NOTES_*.md
 docs/site/
+
+# --- Release tidy (v3.1.1): dev docs, dev tooling, and stray files ---
+docs/dev/
+tools/clean.py
+tools/clean_release.py
+tools/restructure_phase1.py
+clean.ps1
+CODE_STYLE.md
+CONTRIBUTING.md
+NODES.md
+splash_screen.html
+.hypothesis/
