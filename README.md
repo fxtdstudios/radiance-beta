@@ -15,7 +15,7 @@ Radiance is a production-grade node pack for ComfyUI built around 32-bit float a
 
 Artists get 32-bit, HDR, and ACES image tools, professional viewers, and VFX nodes. Supervisors and coordinators get project, shot, asset, and workflow management built directly into the canvas.
 
-[Install](#installation) · [Features](#features) · [Studio Dashboards](#studio-dashboards) · [Node Map](#node-map) · [DCC Handoff](#dcc-handoff) · [Support](#support)
+[Install](#installation) · [Features](#features) · [Studio Dashboards](#studio-dashboards) · [Node Map](#node-map) · [Documentation](docs/README.md) · [DCC Handoff](#dcc-handoff) · [Support](#support)
 
 </div>
 
@@ -168,7 +168,7 @@ Radiance supports DaVinci Resolve through a folder handoff: the Send to DaVinci 
 
 ## Documentation
 
-Full documentation is available at [radiance.fxtd.org](https://radiance.fxtd.org) and in the bundled docs at [docs/index.html](docs/index.html). It covers setup, core concepts, workflow recipes, a complete node reference, and troubleshooting.
+Full documentation is available at [radiance.fxtd.org](https://radiance.fxtd.org) and in the repository docs at [docs/](docs/README.md). It covers setup, core concepts, workflow recipes, a complete node reference, and troubleshooting.
 
 ## Support
 

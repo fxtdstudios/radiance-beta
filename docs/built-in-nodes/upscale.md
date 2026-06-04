@@ -1,3 +1,5 @@
+[← Back to Radiance docs](../README.md)
+
 # Upscale
 
 Image and video upscaling, tiling, confidence outputs, and face restoration for high-resolution finishing workflows.

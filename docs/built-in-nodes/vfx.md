@@ -1,3 +1,5 @@
+[← Back to Radiance docs](../README.md)
+
 # VFX, Masks, Optics, and Multipass
 
 Depth, optical flow, motion blur, lens effects, SAM masking, matting, inpaint crop/stitch, roto, video mask propagation, multipass extraction, relight, composite, and EXR pass writing.

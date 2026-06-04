@@ -1,3 +1,5 @@
+[← Back to Radiance docs](../README.md)
+
 # Video
 
 Video model inspection, latent noise, conditioning merge, sampling, T2V/I2V pipelines, batch decode, HDR video decode, frame routing, assembly, and export.
