@@ -47,9 +47,7 @@ def _protected(p: Path) -> bool:
     return bool(rel.parts) and rel.parts[0] in PROTECTED
 
 
-def _git(args, apply):
-    if not apply:
-        return False
+def _git(args):
     try:
         subprocess.run(["git", *args], cwd=ROOT, check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -100,7 +98,10 @@ def move_docs(apply):
             if apply:
                 dest.mkdir(parents=True, exist_ok=True)
                 if not _git(["mv", "--", rel, f"docs/dev/{src.name}"]):
-                    shutil.move(str(src), str(dest / src.name))
+                    try:
+                        shutil.move(str(src), str(dest / src.name))
+                    except OSError as e:
+                        print(f"           (skip move: {e})")
     return n
 
 
