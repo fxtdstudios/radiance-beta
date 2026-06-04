@@ -35,6 +35,8 @@
 
 __version__ = "3.1.0"
 
+import logging
+logger = logging.getLogger("radiance.video.t2v")
 import json
 import math
 import os
@@ -137,7 +139,7 @@ def _comfy_sample(model, noise, steps, cfg, sampler_name, scheduler,
                 denoise=denoise, seed=seed,
             )
         except Exception as exc:
-            print(f"[RadianceT2V] sampling fallback failed: {exc}")
+            logger.warning(f"[RadianceT2V] sampling fallback failed: {exc}")
             return noise
 
 
@@ -160,7 +162,7 @@ def _vae_encode(vae, image_tensor) -> "torch.Tensor":
         encoded = vae.encode(image_tensor[:, :, :, :3])
         return encoded
     except Exception as exc:
-        print(f"[RadianceT2V] VAE encode failed: {exc}")
+        logger.warning(f"[RadianceT2V] VAE encode failed: {exc}")
         B, H, W, C = image_tensor.shape
         return torch.zeros(B, 4, H // 8, W // 8)
 
@@ -173,7 +175,7 @@ def _vae_decode(vae, latent) -> "torch.Tensor":
         samples = _to_tensor(latent)
         return vae.decode(samples)
     except Exception as exc:
-        print(f"[RadianceT2V] VAE decode failed: {exc}")
+        logger.warning(f"[RadianceT2V] VAE decode failed: {exc}")
         return torch.zeros(1, 64, 64, 3)
 
 
@@ -255,7 +257,7 @@ class RadianceVideoModelInfo:
             f"  has_temporal       = {spec.get('temporal', False)}",
         ]
         if print_info:
-            print("\n".join(info))
+            logger.info("\n".join(info))
 
         defaults = _MODEL_DEFAULTS.get(spec["model_name"], {})
         spec["defaults"] = defaults
@@ -752,7 +754,7 @@ class RadianceT2VPipeline:
             cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
             return [[cond, {"pooled_output": pooled}]]
         except Exception as exc:
-            print(f"[T2V] text encode failed: {exc}")
+            logger.warning(f"[T2V] text encode failed: {exc}")
             return []
 
     def _hdr_tokens(self, peak_nits, gamut, eotf, strength):
@@ -1076,7 +1078,7 @@ class RadianceI2VPipeline:
                     il = il.repeat(1, rep, 1, 1)[:, :ch]
                 return noise * (1 - strength) + il * strength
         except Exception as exc:
-            print(f"[I2V first_frame_lock] {exc}")
+            logger.warning(f"[I2V first_frame_lock] {exc}")
             return noise
 
     def _concat_channels(self, noise, img_latent, pos_cond, strength, ch):
@@ -1098,7 +1100,7 @@ class RadianceI2VPipeline:
                 pos_cond[idx][1]["image_concat_channels"] = il.shape[1]
             return new_noise, pos_cond
         except Exception as exc:
-            print(f"[I2V concat_channels] {exc}")
+            logger.warning(f"[I2V concat_channels] {exc}")
             return noise, pos_cond
 
     def _clip_vision_inject(self, pos_cond, image, strength):
@@ -1120,7 +1122,7 @@ class RadianceI2VPipeline:
                 pos_cond[idx][1]["clip_vision_strength"] = strength
             return pos_cond
         except Exception as exc:
-            print(f"[I2V clip_vision] {exc}")
+            logger.warning(f"[I2V clip_vision] {exc}")
             return pos_cond
 
     def _prepend_latent(self, noise, img_latent, strength):
@@ -1141,7 +1143,7 @@ class RadianceI2VPipeline:
             result[:, :, :1] = result[:, :, :1] * (1 - strength) + il_t
             return result
         except Exception as exc:
-            print(f"[I2V prepend_latent] {exc}")
+            logger.warning(f"[I2V prepend_latent] {exc}")
             return noise
 
     def _decode_preview(self, vae, latent, target_frames):
