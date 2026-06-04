@@ -44,6 +44,14 @@ GENERATION_SECTIONS = {"Core", "Generate", "Video", "Developer"}
 # Marketing words stripped from any node label.
 _MARKETING = re.compile(r"\b(Pro|Smart|Ultra|Cinematic)\b", re.IGNORECASE)
 
+# Per-node section overrides for nodes the keyword classifier mis-files.
+SECTION_OVERRIDES = {
+    "RadianceNDISender": "Pipeline",        # network output, not generation
+    "RadianceHDRVAEDecode": "Generate",     # diffusion VAE -> Radiance-badged
+    "RadianceHDRLatentEncoder": "Generate", # diffusion VAE encode
+    "RadianceGradeApply": "Color",          # color op, not review
+}
+
 # Exact label overrides keyed by node class id. The value is the BASE label
 # (the section rule then adds the "Radiance" prefix for generation sections).
 # Comp nodes are mapped to the vocabulary a Nuke/Flame compositor expects.
@@ -177,6 +185,9 @@ def _inject_search_aliases(node_class: Any, node_key: str, raw: Any) -> None:
 
 def classify_menu_section(node_key: str, node_class: Any, display_name: str) -> str:
     """Classify a node into the public Radiance menu taxonomy."""
+
+    if node_key in SECTION_OVERRIDES:
+        return SECTION_OVERRIDES[node_key]
 
     module_name = getattr(node_class, "__module__", "") or ""
     current_category = str(getattr(node_class, "CATEGORY", "") or "")
