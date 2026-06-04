@@ -152,6 +152,27 @@ const LTX_MODEL_TYPES = new Set(["ltxv", "ltxav"]);
 // Infer the effective model type when model_type is left on "auto" by reading
 // the chosen preset name. Returns "auto" when nothing matches (treated as a
 // generic flux-style flow model — guidance widgets stay visible).
+// The dropdown values come from the backend (WORKFLOW_PRESETS) as "[F] …",
+// "[V] …", "[Q] …", but the PRESET_CONFIGS table above is keyed with "→/▶/◈"
+// markers. Match by the label after the marker so either naming resolves to the
+// same config — without this, selecting a preset silently applies nothing.
+function normPresetKey(name) {
+    return String(name || "")
+        .replace(/^\s*\[[A-Za-z]\]\s*/, "")
+        .replace(/^\s*[^A-Za-z0-9]+\s*/, "")
+        .trim()
+        .toLowerCase();
+}
+function getPresetConfig(name) {
+    if (!name) return null;
+    if (PRESET_CONFIGS[name]) return PRESET_CONFIGS[name];
+    const target = normPresetKey(name);
+    for (const k in PRESET_CONFIGS) {
+        if (normPresetKey(k) === target) return PRESET_CONFIGS[k];
+    }
+    return null;
+}
+
 function resolveModelType(presetVal, modelTypeVal) {
     if (modelTypeVal && modelTypeVal !== "auto") return modelTypeVal;
     const p = (presetVal || "").toLowerCase();
@@ -258,9 +279,6 @@ function auditSamplerWidgets(node) {
 
 function toggleFields(node) {
     if (!node.widgets) return;
-    // Guarantee genuine widget types are known before any fold, so the un-hide
-    // path always has a correct type to restore (never falls back to "number").
-    captureWidgetTypes(node);
     applyFolding(node);
     auditSamplerWidgets(node);
 }
@@ -400,7 +418,7 @@ function updateUILocks(node, presetName) {
 function applyPreset(node, presetName) {
     if (presetName === "None" || presetName === "Custom") return;
 
-    const config = PRESET_CONFIGS[presetName];
+    const config = getPresetConfig(presetName);
     if (!config) return;
 
     const widgets = node.widgets;
@@ -675,7 +693,7 @@ app.registerExtension({
             }, 100);
 
             const updateDescription = (presetName) => {
-                const config = PRESET_CONFIGS[presetName];
+                const config = getPresetConfig(presetName);
                 let text = "Manual / Custom Mode. All widgets are unlocked.";
                 if (presetName === "None") {
                     text = "Default simple mode. Parameters are hidden and use standard defaults. Select 'Custom' to manually tweak settings.";
@@ -725,7 +743,7 @@ app.registerExtension({
                 if (!pWidget || pWidget.value === "Custom" || pWidget.value === "None") return;
 
                 // If it's a property managed by the preset, verify if it diverges
-                const currentPreset = PRESET_CONFIGS[pWidget.value];
+                const currentPreset = getPresetConfig(pWidget.value);
                 if (currentPreset && currentPreset[property] !== undefined) {
                     if (currentPreset[property] != value) {
                         console.log(`[Radiance Sampler] Manual override detected on '${property}'. Switching to Custom.`);

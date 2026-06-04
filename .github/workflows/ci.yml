@@ -74,7 +74,16 @@ jobs:
         run: |
           # Full suite on the lightweight matrix. torch/OpenEXR/OCIO-gated tests
           # self-skip here; real-dependency coverage runs in the test-full job.
+          # These files import torch unconditionally (no effective skip guard), so
+          # they cannot pass without real torch — they run in the test-full job
+          # below instead of the no-torch lightweight matrix.
           python -m pytest tests/ \
+            --ignore=tests/test_dcc_studio.py \
+            --ignore=tests/test_hdr_blend_fixes.py \
+            --ignore=tests/test_io_hdr_regression.py \
+            --ignore=tests/test_math_transforms.py \
+            --ignore=tests/test_radiance_load_image_mask.py \
+            --ignore=tests/test_vfx_nodes.py \
             --tb=short \
             --timeout=60 \
             -q \

@@ -65,11 +65,18 @@ except ImportError:
     def settings(*_a, **_kw):   return lambda f: f          # type: ignore
     def assume(_):              return None                  # type: ignore
     class HealthCheck:          too_slow = None              # type: ignore
-    class st:                                                # type: ignore
-        @staticmethod
-        def floats(**kw):       return None
-        @staticmethod
-        def lists(*a, **kw):    return None
+    # Strategy objects must be chainable (.map/.filter/.flatmap): @given(...)
+    # evaluates its arguments at class-body (collection) time, before
+    # skipUnless can skip — a None here aborts the whole CI run.
+    class _DummyStrategy:                                    # type: ignore
+        def map(self, *a, **k):      return self
+        def filter(self, *a, **k):   return self
+        def flatmap(self, *a, **k):  return self
+
+    class _DummyStrategies:                                  # type: ignore
+        def __getattr__(self, _name):
+            return lambda *a, **k: _DummyStrategy()
+    st = _DummyStrategies()                                  # type: ignore
 
 import numpy as np
 import sys, os
