@@ -5,6 +5,7 @@ nodes_hdr_smart.py — Radiance intelligent HDR pre-processing nodes.
                                         model-aware compression_ratio preset.
   2. RadianceHDRDiagnostics          — structured JSON diagnostics panel (P6 observability).
 """
+from __future__ import annotations
 
 import json
 import math

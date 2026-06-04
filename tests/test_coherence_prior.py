@@ -18,6 +18,7 @@ variation) or deliberately flickery (large per-pixel EV jumps), then verify:
 
 All tests run in CPU-only mode (no CUDA required).
 """
+from __future__ import annotations
 
 import unittest
 
