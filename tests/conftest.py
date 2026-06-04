@@ -22,6 +22,34 @@ RADIANCE_PARENT = RADIANCE_ROOT.parent
 if str(RADIANCE_PARENT) not in sys.path:
     sys.path.insert(0, str(RADIANCE_PARENT))
 
+# Make `import radiance` resolve regardless of the checkout directory name.
+# The package imports itself as `radiance`, which normally requires the repo
+# directory to be named exactly "radiance". CI on a mirror/fork checked out as
+# e.g. "radiance-beta" would otherwise fail every `import radiance` with
+# ModuleNotFoundError → collection errors → exit code 2. Register the package
+# from its __init__.py under the stable name so the dir name no longer matters.
+if RADIANCE_ROOT.name != "radiance" and (RADIANCE_ROOT / "__init__.py").exists():
+    # Install a lazy meta-path finder that maps the import name `radiance` to the
+    # repo root. This makes the FIRST `import radiance` run __init__ through the
+    # normal import machinery — exactly as it would if the checkout directory were
+    # named "radiance" — instead of eagerly pre-importing here (which would cache
+    # partial submodules under the test stubs and skew node-count tests).
+    import importlib.abc as _iabc
+    import importlib.util as _iutil
+
+    class _RadianceNameFinder(_iabc.MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name != "radiance":
+                return None
+            return _iutil.spec_from_file_location(
+                "radiance",
+                str(RADIANCE_ROOT / "__init__.py"),
+                submodule_search_locations=[str(RADIANCE_ROOT)],
+            )
+
+    if not any(type(f).__name__ == "_RadianceNameFinder" for f in sys.meta_path):
+        sys.meta_path.insert(0, _RadianceNameFinder())
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Torch stub — installed BEFORE any radiance import so modules that do
