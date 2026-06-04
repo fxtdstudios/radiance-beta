@@ -116,7 +116,7 @@ def parse_timecode(tc_str: str, fps: float = 24.0) -> Optional[Any]:
         # Drop frame detection (simplified: if ; is used or if FPS is 29.97/59.94)
         is_drop = ";" in tc_str or abs(fps - 29.97) < 0.01 or abs(fps - 59.94) < 0.01
         return Imath.TimeCode(h, m, s, f, rate=int(round(fps)), dropFrame=is_drop)
-    except:
+    except Exception:
         return None
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -133,13 +133,13 @@ def write_exr_cv2(filepath: str, image: np.ndarray, bit_depth: str = "float32", 
             elif img.shape[2] == 4: img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGRA)
         flags = [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_HALF if "16" in str(bit_depth) else cv2.IMWRITE_EXR_TYPE_FLOAT]
         return cv2.imwrite(filepath, img, flags)
-    except: return False
+    except Exception: return False
 
 def check_openexr_available() -> bool:
     try:
         import OpenEXR
         return True
-    except: return False
+    except Exception: return False
 
 def write_exr_openexr(filepath: str, channels: Dict[str, np.ndarray], compression: str = "ZIP", pixel_type: str = "HALF", metadata: Optional[Dict[str, Any]] = None) -> None:
     import OpenEXR, Imath
@@ -228,7 +228,7 @@ def write_hdr_rgbe(filepath: str, image: np.ndarray) -> bool:
             f.write(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n" + f"-Y {h} +X {w}\n".encode())
             for y in range(h): f.write(rgb_to_rgbe(image[y]).tobytes())
         return True
-    except: return False
+    except Exception: return False
 
 def write_exr_imageio(filepath: str, image: np.ndarray, pixel_type: str = "HALF") -> bool:
     """Fallback EXR writer using imageio."""
@@ -238,7 +238,7 @@ def write_exr_imageio(filepath: str, image: np.ndarray, pixel_type: str = "HALF"
         # Note: imageio usually requires freeimage plugin for EXR
         iio.imwrite(filepath, image.astype(np.float32))
         return True
-    except:
+    except Exception:
         return False
 
 def write_exr_robust(filepath: str, image: np.ndarray, bit_depth: str = "32-bit Float", compression: str = "ZIP", metadata: Optional[Dict[str, Any]] = None) -> bool:
@@ -250,11 +250,11 @@ def write_exr_robust(filepath: str, image: np.ndarray, bit_depth: str = "32-bit 
         try:
             write_exr_openexr(filepath, channels, compression, ptype, metadata)
             return True
-        except: pass
+        except Exception: pass
     try:
         SimpleEXRWriter().write(filepath, channels, compression, ptype, metadata)
         return True
-    except: return False
+    except Exception: return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
