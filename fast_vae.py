@@ -25,6 +25,7 @@ TRAINING:
 
       export RADIANCE_TURBO_DECODER=/path/to/turbo_decoder_ema_step050000.pth
 """
+from __future__ import annotations
 
 import os
 import logging
