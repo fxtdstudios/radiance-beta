@@ -28,6 +28,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Use bash for every run step on every OS. Windows runners default to PowerShell,
+# where bash line-continuations (\\) and heredocs are syntax errors; git-bash is
+# preinstalled on windows-latest, so this keeps the steps portable.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # ── Main test matrix ────────────────────────────────────────────────────────
   test:
