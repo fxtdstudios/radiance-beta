@@ -211,7 +211,7 @@ def _write_colmap_bin(d):
 class TestColmap:
     def test_load_text(self, tmp_path):
         _write_colmap_txt(tmp_path)
-        cams, pts, cols = load_colmap(str(tmp_path))
+        cams, pts, cols, names = load_colmap(str(tmp_path))
         assert len(cams) == 2
         assert pts.shape == (2, 3) and cols.shape == (2, 3)
         np.testing.assert_allclose(cams.Ks[0], [[50, 0, 32], [0, 50, 24], [0, 0, 1]], atol=1e-4)
@@ -220,7 +220,7 @@ class TestColmap:
 
     def test_load_binary(self, tmp_path):
         _write_colmap_bin(tmp_path)
-        cams, pts, cols = load_colmap(str(tmp_path))
+        cams, pts, cols, names = load_colmap(str(tmp_path))
         assert len(cams) == 1 and pts.shape == (1, 3)
         np.testing.assert_allclose(pts[0], [0.1, 0.2, 0.3], atol=1e-5)
         np.testing.assert_allclose(cols[0], [255, 0, 0], atol=1e-3)
@@ -228,6 +228,17 @@ class TestColmap:
     def test_missing_dir_raises(self):
         with pytest.raises((FileNotFoundError, ValueError)):
             load_colmap("/no/such/colmap/dir")
+
+    def test_load_images_matched(self, tmp_path):
+        from PIL import Image
+        from radiance.splatting.colmap import load_images
+        _write_colmap_txt(tmp_path)
+        _, _, _, names = load_colmap(str(tmp_path))
+        for nm in names:
+            Image.new("RGB", (10, 8), (120, 30, 200)).save(tmp_path / nm)
+        arr = load_images(str(tmp_path), names, 64, 48)
+        assert arr.shape == (len(names), 48, 64, 3)
+        assert 0.0 <= float(arr.min()) and float(arr.max()) <= 1.0
 
 
 def test_train_config_defaults():

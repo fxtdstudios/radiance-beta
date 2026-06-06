@@ -137,7 +137,11 @@ def _read_points3D_bin(path):
 
 
 def load_colmap(model_dir: str) -> Tuple[Cameras, np.ndarray, np.ndarray]:
-    """Load a COLMAP sparse model dir -> (Cameras, points (M,3), colors (M,3) 0..255)."""
+    """Load a COLMAP sparse model dir -> (Cameras, points, colors, image_names).
+
+    image_names are in the SAME order as the cameras, so training images can be
+    paired to cameras by name (see load_images).
+    """
     if not os.path.isdir(model_dir):
         raise FileNotFoundError(f"COLMAP model dir not found: {model_dir}")
     has_bin = os.path.isfile(os.path.join(model_dir, "cameras.bin"))
@@ -164,8 +168,34 @@ def load_colmap(model_dir: str) -> Tuple[Cameras, np.ndarray, np.ndarray]:
         v[:3, 3] = [tx, ty, tz]
         viewmats.append(v)
         Ks.append(_K_from_params(model, params))
+    names = [rec[8] for rec in imgs]
     cameras = Cameras(np.stack(viewmats, 0), np.stack(Ks, 0), width, height)
-    return cameras, pts, cols
+    return cameras, pts, cols, names
 
 
-__all__ = ["load_colmap"]
+def load_images(images_dir, names, width, height):
+    """Load training images referenced by a COLMAP model, in the given order.
+
+    Each image is resized to (width, height) and returned as (B, H, W, 3) float32
+    in 0..1 — already aligned to the camera order, so no separate matching step is
+    needed downstream.
+    """
+    from PIL import Image
+    images_dir = str(images_dir)
+    out = []
+    for nm in names:
+        path = os.path.join(images_dir, nm)
+        if not os.path.isfile(path):
+            alt = os.path.join(images_dir, os.path.basename(nm))
+            if os.path.isfile(alt):
+                path = alt
+            else:
+                raise FileNotFoundError(f"Training image '{nm}' not found in {images_dir}")
+        im = Image.open(path).convert("RGB").resize((int(width), int(height)))
+        out.append(np.asarray(im, np.float32) / 255.0)
+    if not out:
+        raise ValueError("load_images: no images to load")
+    return np.stack(out, 0)
+
+
+__all__ = ["load_colmap", "load_images"]
