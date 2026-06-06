@@ -194,7 +194,7 @@ def classify_menu_section(node_key: str, node_class: Any, display_name: str) -> 
     current_category = str(getattr(node_class, "CATEGORY", "") or "")
     text = _searchable_text(" ".join([node_key, display_name, module_name, current_category]))
 
-    if _has_any(text, "splat", "gaussian splat", "gaussian splatting", "3dgs"):
+    if "splatting" in module_name or _has_any(text, "splat", "3dgs"):
         return "Gaussian Splatting"
 
     if _has_any(text, "training", "sdr degradation", "turbo train", "developer", "diagnostic"):
