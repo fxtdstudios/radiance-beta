@@ -14,3 +14,8 @@ tqdm>=4.66.0
 aiohttp>=3.8.0
 einops>=0.7.0
 torchsde>=0.3.8
+
+# Optional — Gaussian Splatting render/train (NVIDIA CUDA only).
+# .ply/.splat IO and COLMAP import work without these; uncomment to enable GPU render/train.
+# gsplat>=1.0
+# plyfile>=1.0
