@@ -86,7 +86,8 @@ class TestNodes:
     def test_nodes_registered(self):
         from radiance.nodes.splatting import NODE_CLASS_MAPPINGS as M
         assert set(M) == {"RadianceSplatLoad", "RadianceSplatInfo", "RadianceSplatExport",
-                          "RadianceCameraOrbit", "RadianceSplatRender"}
+                          "RadianceCameraOrbit", "RadianceSplatRender",
+                          "RadianceColmapLoad", "RadianceSplatTrain"}
         for cls in M.values():
             assert cls.INPUT_TYPES()
             assert len(cls.RETURN_TYPES) == len(cls.RETURN_NAMES)
@@ -148,3 +149,101 @@ def test_render_smoke():
     image, depth, alpha = render(s, cams)
     assert tuple(image.shape) == (2, 48, 64, 3)
     assert tuple(alpha.shape[:3]) == (2, 48, 64)
+
+
+import struct
+from radiance.splatting.init import init_from_points, rgb_to_sh, inverse_sigmoid
+from radiance.splatting.colmap import load_colmap
+from radiance.splatting.train import TrainConfig, HAS_GSPLAT as TRAIN_HAS_GSPLAT
+
+
+class TestInit:
+    def test_init_shapes(self):
+        pts = np.random.default_rng(0).standard_normal((30, 3)).astype(np.float32)
+        s = init_from_points(pts, sh_degree=3)
+        assert s.count == 30
+        assert s.sh_coeffs == 16
+        s.validate()
+
+    def test_identity_quats_and_dc(self):
+        pts = np.zeros((4, 3), np.float32)
+        cols = np.array([[1, 0, 0]] * 4, np.float32)
+        s = init_from_points(pts, cols, sh_degree=0)
+        np.testing.assert_allclose(s.quats, np.tile([1, 0, 0, 0], (4, 1)), atol=1e-6)
+        np.testing.assert_allclose(s.sh[:, 0, :], rgb_to_sh(cols), rtol=1e-5)
+
+    def test_accepts_0_255_colors(self):
+        s = init_from_points(np.zeros((2, 3), np.float32),
+                             np.array([[255, 255, 255], [0, 0, 0]], np.float32), sh_degree=0)
+        s.validate()
+
+    def test_empty_raises(self):
+        with pytest.raises(ValueError):
+            init_from_points(np.zeros((0, 3), np.float32))
+
+
+def _write_colmap_txt(d):
+    with open(d / "cameras.txt", "w") as f:
+        f.write("# cam\n1 PINHOLE 64 48 50 50 32 24\n")
+    with open(d / "images.txt", "w") as f:
+        f.write("1 1 0 0 0 0 0 5 1 a.png\n\n")
+        f.write("2 0.9239 0 0.3827 0 1 0 4 1 b.png\n\n")
+    with open(d / "points3D.txt", "w") as f:
+        f.write("1 0.1 0.2 0.3 255 0 0 0.5\n2 -0.1 0.0 1.0 0 255 0 0.4\n")
+
+
+def _write_colmap_bin(d):
+    with open(d / "cameras.bin", "wb") as f:
+        f.write(struct.pack("<Q", 1))
+        f.write(struct.pack("<iiQQ", 1, 1, 64, 48))      # id, PINHOLE, w, h
+        f.write(struct.pack("<dddd", 50, 50, 32, 24))    # fx fy cx cy
+    with open(d / "images.bin", "wb") as f:
+        f.write(struct.pack("<Q", 1))
+        f.write(struct.pack("<idddddddi", 1, 1, 0, 0, 0, 0, 0, 5, 1))
+        f.write(b"a.png\x00")
+        f.write(struct.pack("<Q", 0))
+    with open(d / "points3D.bin", "wb") as f:
+        f.write(struct.pack("<Q", 1))
+        f.write(struct.pack("<QdddBBBd", 1, 0.1, 0.2, 0.3, 255, 0, 0, 0.5))
+        f.write(struct.pack("<Q", 0))
+
+
+class TestColmap:
+    def test_load_text(self, tmp_path):
+        _write_colmap_txt(tmp_path)
+        cams, pts, cols = load_colmap(str(tmp_path))
+        assert len(cams) == 2
+        assert pts.shape == (2, 3) and cols.shape == (2, 3)
+        np.testing.assert_allclose(cams.Ks[0], [[50, 0, 32], [0, 50, 24], [0, 0, 1]], atol=1e-4)
+        R = cams.viewmats[0, :3, :3]
+        np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-4)
+
+    def test_load_binary(self, tmp_path):
+        _write_colmap_bin(tmp_path)
+        cams, pts, cols = load_colmap(str(tmp_path))
+        assert len(cams) == 1 and pts.shape == (1, 3)
+        np.testing.assert_allclose(pts[0], [0.1, 0.2, 0.3], atol=1e-5)
+        np.testing.assert_allclose(cols[0], [255, 0, 0], atol=1e-3)
+
+    def test_missing_dir_raises(self):
+        with pytest.raises((FileNotFoundError, ValueError)):
+            load_colmap("/no/such/colmap/dir")
+
+
+def test_train_config_defaults():
+    c = TrainConfig()
+    assert c.steps > 0 and 0 <= c.sh_degree <= 4
+
+
+@pytest.mark.skipif(not TRAIN_HAS_GSPLAT, reason="gsplat not installed (CUDA train path)")
+def test_train_smoke():
+    import torch
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA GPU")
+    from radiance.splatting.train import train
+    pts = np.random.default_rng(0).standard_normal((500, 3)).astype(np.float32)
+    init = init_from_points(pts, sh_degree=0)
+    cams = orbit(num_frames=2, width=32, height=24)
+    imgs = np.zeros((2, 24, 32, 3), np.float32)
+    out = train(imgs, cams, init, TrainConfig(steps=3, sh_degree=0))
+    assert out.count == init.count
