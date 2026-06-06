@@ -33,6 +33,7 @@ MENU_STRUCTURE = {
     "Review": "Viewer, scopes, preview servers, contact sheets, and QC.",
     "Pipeline": "DCC bridges, metadata, audio, project handoff, and studio integration.",
     "Developer": "Training, diagnostics, and developer-only utilities.",
+    "Gaussian Splatting": "Load, render, train, and export 3D Gaussian Splatting scenes.",
 }
 
 DEFAULT_MENU_SECTION = "Core"
@@ -192,6 +193,9 @@ def classify_menu_section(node_key: str, node_class: Any, display_name: str) -> 
     module_name = getattr(node_class, "__module__", "") or ""
     current_category = str(getattr(node_class, "CATEGORY", "") or "")
     text = _searchable_text(" ".join([node_key, display_name, module_name, current_category]))
+
+    if _has_any(text, "splat", "gaussian splat", "gaussian splatting", "3dgs"):
+        return "Gaussian Splatting"
 
     if _has_any(text, "training", "sdr degradation", "turbo train", "developer", "diagnostic"):
         return "Developer"
