@@ -44,6 +44,8 @@ OPTIONAL_DEPENDENCIES: Tuple[DependencySpec, ...] = (
     DependencySpec("transformers", "transformers", "Depth Anything V2", "pip install transformers"),
     DependencySpec("colour", "colour-science", "advanced color science", "pip install colour-science"),
     DependencySpec("defusedxml", "defusedxml", "secure CDL XML parsing", "pip install defusedxml"),
+    DependencySpec("gsplat", "gsplat", "Gaussian Splatting render/train (CUDA)", "pip install gsplat"),
+    DependencySpec("plyfile", "plyfile", "Gaussian Splatting .ply (optional accel)", "pip install plyfile"),
 )
 
 

@@ -85,7 +85,8 @@ class TestPlyRoundtrip:
 class TestNodes:
     def test_nodes_registered(self):
         from radiance.nodes.splatting import NODE_CLASS_MAPPINGS as M
-        assert set(M) == {"RadianceSplatLoad", "RadianceSplatInfo", "RadianceSplatExport"}
+        assert set(M) == {"RadianceSplatLoad", "RadianceSplatInfo", "RadianceSplatExport",
+                          "RadianceCameraOrbit", "RadianceSplatRender"}
         for cls in M.values():
             assert cls.INPUT_TYPES()
             assert len(cls.RETURN_TYPES) == len(cls.RETURN_NAMES)
@@ -98,3 +99,52 @@ class TestNodes:
         assert splat.count == 12 and "points" in info
         out = RadianceSplatExport().export(splat, str(tmp_path / "out.ply"))
         assert os.path.isfile(out["result"][0])
+
+
+from radiance.splatting.cameras import orbit, look_at, Cameras
+from radiance.splatting.backend import HAS_GSPLAT
+
+
+class TestCameras:
+    def test_orbit_shapes(self):
+        c = orbit(num_frames=8, width=320, height=240)
+        assert len(c) == 8
+        assert c.viewmats.shape == (8, 4, 4)
+        assert c.Ks.shape == (8, 3, 3)
+        assert (c.width, c.height) == (320, 240)
+
+    def test_viewmats_orthonormal(self):
+        c = orbit(num_frames=5)
+        for v in c.viewmats:
+            R = v[:3, :3]
+            np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-4)
+            assert abs(np.linalg.det(R) - 1.0) < 1e-4
+
+    def test_centers_on_radius(self):
+        center = np.array([1.0, 2.0, -1.0], np.float32)
+        c = orbit(num_frames=12, radius=4.0, elevation_deg=0.0, center=tuple(center))
+        d = np.linalg.norm(c.centers() - center, axis=1)
+        np.testing.assert_allclose(d, 4.0, atol=1e-3)
+
+    def test_cameras_look_at_center(self):
+        center = np.zeros(3, np.float32)
+        c = orbit(num_frames=6, radius=3.0, elevation_deg=10.0)
+        centers = c.centers()
+        for i, v in enumerate(c.viewmats):
+            fwd = v[2, :3]
+            to_center = center - centers[i]
+            to_center /= np.linalg.norm(to_center)
+            assert float(fwd @ to_center) > 0.99
+
+
+@pytest.mark.skipif(not HAS_GSPLAT, reason="gsplat not installed (CUDA render path)")
+def test_render_smoke():
+    import torch
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA GPU")
+    from radiance.splatting.backend import render
+    s = _make(n=200, degree=0)
+    cams = orbit(num_frames=2, width=64, height=48)
+    image, depth, alpha = render(s, cams)
+    assert tuple(image.shape) == (2, 48, 64, 3)
+    assert tuple(alpha.shape[:3]) == (2, 48, 64)
