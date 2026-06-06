@@ -233,6 +233,7 @@ class TestColmap:
 def test_train_config_defaults():
     c = TrainConfig()
     assert c.steps > 0 and 0 <= c.sh_degree <= 4
+    assert c.densify is True and c.refine_every > 0 and 0.0 <= c.ssim_lambda <= 1.0
 
 
 @pytest.mark.skipif(not TRAIN_HAS_GSPLAT, reason="gsplat not installed (CUDA train path)")
