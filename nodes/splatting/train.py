@@ -10,8 +10,8 @@ class RadianceColmapLoad:
     CATEGORY = _CATEGORY
     DESCRIPTION = "Read a COLMAP sparse reconstruction -> camera rig + point-cloud-initialized SPLAT."
     FUNCTION = "load"
-    RETURN_TYPES = ("RAD_CAMERAS", "SPLAT", "STRING")
-    RETURN_NAMES = ("cameras", "init_splat", "info")
+    RETURN_TYPES = ("RAD_CAMERAS", "IMAGE", "SPLAT", "STRING")
+    RETURN_NAMES = ("cameras", "images", "init_splat", "info")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -19,20 +19,40 @@ class RadianceColmapLoad:
             "required": {
                 "model_dir": ("STRING", {
                     "default": "",
-                    "tooltip": "COLMAP sparse model folder (containing cameras/images/points3D .bin or .txt).",
+                    "tooltip": "COLMAP sparse model folder (cameras/images/points3D .bin or .txt).",
                 }),
                 "sh_degree": ("INT", {"default": 3, "min": 0, "max": 4}),
-            }
+            },
+            "optional": {
+                "images_dir": ("STRING", {
+                    "default": "",
+                    "tooltip": "Folder with the source images. When set, they are loaded in camera "
+                               "order (matched by filename) ready for Splat Train.",
+                }),
+            },
         }
 
-    def load(self, model_dir, sh_degree):
-        from radiance.splatting.colmap import load_colmap
+    def load(self, model_dir, sh_degree, images_dir=""):
+        import torch
+        from radiance.splatting.colmap import load_colmap, load_images
         from radiance.splatting.init import init_from_points
-        cams, pts, cols = load_colmap(model_dir.strip().strip('"'))
+
+        cams, pts, cols, names = load_colmap(model_dir.strip().strip('"'))
         splat = init_from_points(pts, cols, sh_degree=int(sh_degree))
+
+        images_dir = images_dir.strip().strip('"')
+        if images_dir:
+            arr = load_images(images_dir, names, cams.width, cams.height)
+            images = torch.from_numpy(arr)
+            img_note = f"{arr.shape[0]} images @ {cams.width}x{cams.height} (camera-ordered)"
+        else:
+            images = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
+            img_note = "none (set images_dir to load training images)"
+
         info = (f"COLMAP model loaded\n  cameras : {len(cams)}\n"
-                f"  points  : {pts.shape[0]:,}\n  init    : {splat.count:,} gaussians (SH {sh_degree})")
-        return (cams, splat, info)
+                f"  points  : {pts.shape[0]:,}\n  init    : {splat.count:,} gaussians (SH {sh_degree})\n"
+                f"  images  : {img_note}")
+        return (cams, images, splat, info)
 
 
 class RadianceSplatTrain:

@@ -11,6 +11,7 @@ This documentation is written as a repo-based wiki. It is meant for artists, tec
 | [Quickstart](quickstart.md) | Installing Radiance and building a first working graph. |
 | [Concepts](concepts.md) | Understanding HDR, EXR, ACES/OCIO, tensors, and DCC handoff. |
 | [Node Reference](nodes.md) | End-user descriptions for every registered Radiance node. |
+| [Gaussian Splatting](built-in-nodes/splatting.md) | Load, render, and train 3D Gaussian Splatting scenes. |
 | [Workflows](workflows.md) | Production recipes for HDR roundtrip, review, VFX, video, and DCC export. |
 | [Troubleshooting](troubleshooting.md) | Fixes for common install, color, EXR, preview, and bridge issues. |
 | [Developer Notes](developer.md) | Architecture, node authoring, tests, release checks, and dynamic gizmos. |
