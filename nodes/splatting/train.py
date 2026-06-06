@@ -74,10 +74,14 @@ class RadianceSplatTrain:
                 "steps": ("INT", {"default": 7000, "min": 1, "max": 100000}),
                 "sh_degree": ("INT", {"default": 3, "min": 0, "max": 4}),
                 "densify": ("BOOLEAN", {"default": True, "tooltip": "Adaptive density control (clone/split/prune). Off = plain optimization."}),
+                "preview_every": ("INT", {"default": 100, "min": 0, "max": 10000,
+                                          "tooltip": "Show a live render in the UI every N steps while training (0 = off)."}),
             }
         }
 
-    def train(self, images, cameras, init_splat, steps, sh_degree, densify=True):
+    def train(self, images, cameras, init_splat, steps, sh_degree, densify=True,
+              preview_every=100):
+        import numpy as np
         from radiance.splatting.train import train as _train, TrainConfig
 
         pbar = None
@@ -87,8 +91,23 @@ class RadianceSplatTrain:
         except Exception:
             pbar = None
 
+        latest = {"img": None}
+
+        def _preview(arr):
+            try:
+                from PIL import Image
+                latest["img"] = Image.fromarray(
+                    (np.clip(arr, 0.0, 1.0) * 255.0).astype(np.uint8))
+            except Exception:
+                latest["img"] = None
+
         def _progress(step, total, loss):
-            if pbar is not None:
+            if pbar is None:
+                return
+            img, latest["img"] = latest["img"], None
+            if img is not None:
+                pbar.update_absolute(step, total, ("JPEG", img, 512))
+            else:
                 pbar.update_absolute(step)
 
         def _interrupt():
@@ -98,9 +117,10 @@ class RadianceSplatTrain:
             except ImportError:
                 pass
 
-        cfg = TrainConfig(steps=int(steps), sh_degree=int(sh_degree), densify=bool(densify))
+        cfg = TrainConfig(steps=int(steps), sh_degree=int(sh_degree), densify=bool(densify),
+                          preview_every=int(preview_every))
         splat = _train(images, cameras, init_splat, cfg,
-                       progress=_progress, interrupt=_interrupt)
+                       progress=_progress, interrupt=_interrupt, preview=_preview)
         return (splat, splat.info())
 
 

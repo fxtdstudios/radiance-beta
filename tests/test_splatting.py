@@ -88,7 +88,8 @@ class TestNodes:
         assert set(M) == {"RadianceSplatLoad", "RadianceSplatInfo", "RadianceSplatExport",
                           "RadianceCameraOrbit", "RadianceSplatRender",
                           "RadianceColmapLoad", "RadianceSplatTrain",
-                          "RadianceSplatTransform", "RadianceSplatCrop", "RadianceSplatMerge"}
+                          "RadianceSplatTransform", "RadianceSplatCrop", "RadianceSplatMerge",
+                          "RadianceSplatViewer3D"}
         for cls in M.values():
             assert cls.INPUT_TYPES()
             assert len(cls.RETURN_TYPES) == len(cls.RETURN_NAMES)
@@ -358,3 +359,23 @@ class TestEditNodes:
         from radiance.nodes.splatting.edit import RadianceSplatMerge
         out, info = RadianceSplatMerge().apply(_make(n=5), _make(n=7))
         assert out.count == 12 and "Merged" in info
+
+
+class TestViewerNode:
+    def test_viewer_writes_splat_file(self, tmp_path, monkeypatch):
+        import radiance.nodes.splatting.viewer as V
+        monkeypatch.setattr(V, "_temp_dir", lambda: str(tmp_path))
+        out = V.RadianceSplatViewer3D().show(_make(n=30), max_points=500000)
+        name = out["ui"]["splat_file"][0]
+        f = tmp_path / name
+        assert f.is_file() and f.stat().st_size == 30 * 32
+        assert out["ui"]["splat_count"] == [30]
+
+    def test_viewer_subsamples(self, tmp_path, monkeypatch):
+        import radiance.nodes.splatting.viewer as V
+        monkeypatch.setattr(V, "_temp_dir", lambda: str(tmp_path))
+        out = V.RadianceSplatViewer3D().show(_make(n=200), max_points=1000)
+        assert out["ui"]["splat_count"][0] == 200  # under cap: untouched
+        out2 = V.RadianceSplatViewer3D().show(_make(n=5000), max_points=1000)
+        assert out2["ui"]["splat_count"][0] == 1000
+        assert out2["ui"]["splat_total"][0] == 5000
