@@ -73,6 +73,14 @@ Windows users can use `requirements_windows.txt`; Apple Silicon users can use `r
 
 Radiance relies on the same PyTorch installation that ComfyUI uses, so install it inside the same Python environment as ComfyUI.
 
+### Optional: Gaussian Splatting
+
+Loading, inspecting, editing, and exporting splats (`.ply` / `.splat`) and COLMAP import work out of the box. **Rendering and training** require [`gsplat`](https://github.com/nerfstudio-project/gsplat) and an NVIDIA CUDA GPU:
+
+```bash
+pip install gsplat plyfile
+```
+
 ## Feature Spotlights
 
 ### Viewers
