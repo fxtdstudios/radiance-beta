@@ -51,12 +51,13 @@ class RadianceSplatTrain:
                 "images": ("IMAGE",),
                 "cameras": ("RAD_CAMERAS",),
                 "init_splat": ("SPLAT",),
-                "steps": ("INT", {"default": 3000, "min": 1, "max": 100000}),
+                "steps": ("INT", {"default": 7000, "min": 1, "max": 100000}),
                 "sh_degree": ("INT", {"default": 3, "min": 0, "max": 4}),
+                "densify": ("BOOLEAN", {"default": True, "tooltip": "Adaptive density control (clone/split/prune). Off = plain optimization."}),
             }
         }
 
-    def train(self, images, cameras, init_splat, steps, sh_degree):
+    def train(self, images, cameras, init_splat, steps, sh_degree, densify=True):
         from radiance.splatting.train import train as _train, TrainConfig
 
         pbar = None
@@ -77,7 +78,7 @@ class RadianceSplatTrain:
             except ImportError:
                 pass
 
-        cfg = TrainConfig(steps=int(steps), sh_degree=int(sh_degree))
+        cfg = TrainConfig(steps=int(steps), sh_degree=int(sh_degree), densify=bool(densify))
         splat = _train(images, cameras, init_splat, cfg,
                        progress=_progress, interrupt=_interrupt)
         return (splat, splat.info())
