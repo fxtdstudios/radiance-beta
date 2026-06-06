@@ -87,7 +87,8 @@ class TestNodes:
         from radiance.nodes.splatting import NODE_CLASS_MAPPINGS as M
         assert set(M) == {"RadianceSplatLoad", "RadianceSplatInfo", "RadianceSplatExport",
                           "RadianceCameraOrbit", "RadianceSplatRender",
-                          "RadianceColmapLoad", "RadianceSplatTrain"}
+                          "RadianceColmapLoad", "RadianceSplatTrain",
+                          "RadianceSplatTransform", "RadianceSplatCrop", "RadianceSplatMerge"}
         for cls in M.values():
             assert cls.INPUT_TYPES()
             assert len(cls.RETURN_TYPES) == len(cls.RETURN_NAMES)
@@ -259,3 +260,101 @@ def test_train_smoke():
     imgs = np.zeros((2, 24, 32, 3), np.float32)
     out = train(imgs, cams, init, TrainConfig(steps=3, sh_degree=0))
     assert out.count == init.count
+
+
+class TestEdit:
+    def test_transform_identity(self):
+        from radiance.splatting.edit import transform
+        s = _make(n=30)
+        out = transform(s, translate=(0, 0, 0), rotate_euler=(0, 0, 0), scale=1.0)
+        assert out.count == s.count
+        assert np.allclose(out.means, s.means, atol=1e-5)
+        assert np.allclose(out.scales, s.scales, atol=1e-5)
+
+    def test_transform_translate_scale(self):
+        from radiance.splatting.edit import transform
+        s = _make(n=20)
+        out = transform(s, translate=(1.0, 2.0, 3.0), scale=2.0)
+        assert np.allclose(out.means, s.means * 2.0 + np.array([1.0, 2.0, 3.0]), atol=1e-5)
+        # uniform scale shifts log-scales by ln(2)
+        assert np.allclose(out.scales, s.scales + np.log(2.0), atol=1e-5)
+        # rotation by a unit quaternion preserves each quat's magnitude
+        assert np.allclose(np.linalg.norm(out.quats, axis=1),
+                           np.linalg.norm(s.quats, axis=1), atol=1e-4)
+
+    def test_transform_rotation_preserves_count_and_norm(self):
+        from radiance.splatting.edit import transform
+        s = _make(n=15)
+        out = transform(s, rotate_euler=(90, 0, 0))
+        assert out.count == s.count
+        # a 90-degree rotation reorients but preserves quat magnitudes
+        assert np.allclose(np.linalg.norm(out.quats, axis=1),
+                           np.linalg.norm(s.quats, axis=1), atol=1e-4)
+
+    def test_crop(self):
+        from radiance.splatting.edit import crop
+        s = _make(n=50)
+        out = crop(s, (-0.5, -0.5, -0.5), (0.5, 0.5, 0.5))
+        assert out.count <= s.count
+        assert np.all(out.means >= -0.5 - 1e-6) and np.all(out.means <= 0.5 + 1e-6)
+
+    def test_crop_empty_raises(self):
+        from radiance.splatting.edit import crop
+        s = _make(n=10)
+        with pytest.raises(ValueError):
+            crop(s, (1e5, 1e5, 1e5), (1e5 + 1, 1e5 + 1, 1e5 + 1))
+
+    def test_merge(self):
+        from radiance.splatting.edit import merge
+        a, b = _make(n=12), _make(n=8)
+        out = merge(a, b)
+        assert out.count == a.count + b.count
+        assert out.sh_degree == max(a.sh_degree, b.sh_degree)
+
+    def test_merge_pads_sh_degree(self):
+        from radiance.splatting.edit import merge
+        a, b = _make(n=6, degree=0), _make(n=6, degree=2)
+        out = merge(a, b)
+        assert out.sh_degree == 2
+        assert out.sh_coeffs == 9
+
+
+class TestSplatFormat:
+    def test_roundtrip(self, tmp_path):
+        from radiance.splatting.splat_format import load_splat, save_splat
+        s = _make(n=40)
+        path = str(tmp_path / "scene.splat")
+        save_splat(s, path)
+        back = load_splat(path)
+        assert back.count == s.count
+        # positions are stored as float32 -> exact round-trip
+        assert np.allclose(back.means, s.means, atol=1e-5)
+        # .splat keeps only the DC SH term
+        assert back.sh_degree == 0
+        assert np.allclose(np.linalg.norm(back.quats, axis=1), 1.0, atol=1e-3)
+
+    def test_export_node_dispatches_splat(self, tmp_path):
+        from radiance.nodes.splatting.io import RadianceSplatExport, RadianceSplatLoad
+        path = str(tmp_path / "n.splat")
+        RadianceSplatExport().export(_make(n=10), path)
+        assert os.path.isfile(path)
+        out = RadianceSplatLoad().load(path)
+        splat = out[0] if isinstance(out, tuple) else out
+        assert splat.count == 10
+
+
+class TestEditNodes:
+    def test_transform_node(self):
+        from radiance.nodes.splatting.edit import RadianceSplatTransform
+        (out,) = RadianceSplatTransform().apply(_make(n=10), 1, 0, 0, 0, 0, 0, 1.0)
+        assert out.count == 10
+
+    def test_crop_node(self):
+        from radiance.nodes.splatting.edit import RadianceSplatCrop
+        out, info = RadianceSplatCrop().apply(_make(n=20), -1, -1, -1, 1, 1, 1)
+        assert out.count <= 20 and "Cropped" in info
+
+    def test_merge_node(self):
+        from radiance.nodes.splatting.edit import RadianceSplatMerge
+        out, info = RadianceSplatMerge().apply(_make(n=5), _make(n=7))
+        assert out.count == 12 and "Merged" in info

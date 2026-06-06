@@ -8,6 +8,15 @@ from __future__ import annotations
 import os
 
 from radiance.splatting.ply import load_ply, save_ply
+from radiance.splatting.splat_format import load_splat, save_splat
+
+
+def _load_any(path: str):
+    return load_splat(path) if path.lower().endswith('.splat') else load_ply(path)
+
+
+def _save_any(splat, path: str):
+    return save_splat(splat, path) if path.lower().endswith('.splat') else save_ply(splat, path)
 
 _CATEGORY = "FXTD STUDIOS/Radiance/Gaussian Splatting"
 
@@ -16,7 +25,7 @@ class RadianceSplatLoad:
     """Load a 3D Gaussian Splatting .ply file into a SPLAT."""
 
     CATEGORY = _CATEGORY
-    DESCRIPTION = "Load a Gaussian Splatting .ply file into a SPLAT (CPU, no GPU required)."
+    DESCRIPTION = "Load a Gaussian Splatting .ply or .splat file into a SPLAT (CPU, no GPU required)."
     FUNCTION = "load"
     RETURN_TYPES = ("SPLAT", "STRING")
     RETURN_NAMES = ("splat", "info")
@@ -27,7 +36,7 @@ class RadianceSplatLoad:
             "required": {
                 "ply_path": ("STRING", {
                     "default": "",
-                    "tooltip": "Absolute or ComfyUI-relative path to a Gaussian Splatting .ply file.",
+                    "tooltip": "Path to a Gaussian Splatting .ply or .splat file.",
                 }),
             }
         }
@@ -38,7 +47,7 @@ class RadianceSplatLoad:
             raise ValueError("RadianceSplatLoad: ply_path is empty.")
         if not os.path.isfile(path):
             raise FileNotFoundError(f"RadianceSplatLoad: file not found: {path}")
-        splat = load_ply(path)
+        splat = _load_any(path)
         return (splat, splat.info())
 
 
@@ -65,7 +74,7 @@ class RadianceSplatExport:
     """Write a SPLAT back out as a binary 3DGS .ply file."""
 
     CATEGORY = _CATEGORY
-    DESCRIPTION = "Export a SPLAT to a binary Gaussian Splatting .ply file."
+    DESCRIPTION = "Export a SPLAT to a Gaussian Splatting .ply or .splat file."
     FUNCTION = "export"
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("path",)
@@ -78,13 +87,13 @@ class RadianceSplatExport:
                 "splat": ("SPLAT",),
                 "output_path": ("STRING", {
                     "default": "output/radiance_splat.ply",
-                    "tooltip": "Destination .ply path (folders are created as needed).",
+                    "tooltip": "Destination path; .ply or .splat is chosen by extension (folders auto-created).",
                 }),
             }
         }
 
     def export(self, splat, output_path: str):
-        path = save_ply(splat, output_path.strip().strip('"'))
+        path = _save_any(splat, output_path.strip().strip('"'))
         return {"ui": {"text": [f"Saved {splat.count:,} gaussians -> {path}"]}, "result": (path,)}
 
 

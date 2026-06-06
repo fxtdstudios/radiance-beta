@@ -18,9 +18,12 @@ straight into the rest of Radiance (Grade, OCIO, HDR, Write, Viewer, DCC handoff
 
 | Node | Purpose |
 | :--- | :--- |
-| **Splat Load** | Read a Gaussian Splatting `.ply` into a `SPLAT`. |
+| **Splat Load** | Read a Gaussian Splatting `.ply` or `.splat` into a `SPLAT`. |
 | **Splat Info** | Report point count, SH degree, bounds, and opacity range. |
-| **Splat Export** | Write a `SPLAT` back to a binary `.ply`. |
+| **Splat Export** | Write a `SPLAT` to a binary `.ply` or web `.splat`. |
+| **Splat Transform** | Translate, rotate, and uniformly scale a `SPLAT`. |
+| **Splat Crop** | Keep only gaussians inside an axis-aligned box. |
+| **Splat Merge** | Concatenate two `SPLAT`s into one. |
 | **Camera Orbit** | Build an orbit camera rig (`RAD_CAMERAS`) around a center point. |
 | **Splat Render** | Render a `SPLAT` through a camera rig → image, depth, alpha *(gsplat/CUDA)*. |
 | **COLMAP Load** | Read a COLMAP sparse model (`.bin`/`.txt`) → cameras, camera-ordered images, and a point-initialized `SPLAT`. |
