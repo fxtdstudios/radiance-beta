@@ -14,7 +14,7 @@ const pages = [
   { id: "nodes-upscale", title: "Upscale", file: "built-in-nodes/upscale.md", short: "4", group: "Reference" },
   { id: "nodes-video", title: "Video", file: "built-in-nodes/video.md", short: "12", group: "Reference" },
   { id: "nodes-ai", title: "AI Assist", file: "built-in-nodes/ai-assist.md", short: "2", group: "Reference" },
-  { id: "nodes-splatting", title: "Gaussian Splatting", file: "built-in-nodes/splatting.md", short: "7", group: "Reference" },
+  { id: "nodes-splatting", title: "Gaussian Splatting", file: "built-in-nodes/splatting.md", short: "10", group: "Reference" },
   { id: "coverage", title: "Coverage Ledger", file: "coverage.md", short: "Check", group: "Reference" },
   { id: "developer", title: "Development Guide", file: "developer.md", short: "Dev", group: "Development" },
   { id: "troubleshooting", title: "Troubleshooting", file: "troubleshooting.md", short: "Fixes", group: "Support" },
