@@ -8,7 +8,7 @@
 
 [![Version](https://img.shields.io/badge/version-3.1.1-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
-[![Nodes](https://img.shields.io/badge/nodes-114-c8a96e?style=for-the-badge)](#node-map)
+[![Nodes](https://img.shields.io/badge/nodes-115-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
 
 Radiance is a production-grade node pack for ComfyUI built around 32-bit float and HDR/ACES image pipelines. It brings VFX plate prep, color management, review tooling, in-canvas studio dashboards, and Nuke / DaVinci Resolve handoff into one coherent toolkit — so you can take a shot from generation through finishing without leaving the graph.
@@ -122,7 +122,7 @@ FXTD STUDIOS/Radiance
 └─ Gaussian Splatting
 ```
 
-Radiance provides **114 nodes** (plus any Gizmos you create). Some nodes depend on optional packages and your ComfyUI environment.
+Radiance provides **115 nodes** (plus any Gizmos you create). Some nodes depend on optional packages and your ComfyUI environment.
 
 Node names follow standard compositing vocabulary under the **Radiance** menu — `Grade`, `CDL`, `OCIO ColorSpace`, `Roto`, `Defocus`, `Viewer`, `Read`/`Write` — so they read the way they do in Nuke or Flame. AI and generation nodes keep a `Radiance` prefix (`Radiance Sampler`, `Radiance VAE Decode`) to mark the diffusion layer. You can still find any node by typing "radiance" in the search.
 
@@ -138,7 +138,7 @@ Node names follow standard compositing vocabulary under the **Radiance** menu �
 | Upscale | Image and video upscale (HDR and color aware), tiling, face restoration |
 | Review | Viewer, Lite Viewer, scopes, focus peaking, contact sheets, flipbook, preview server |
 | Pipeline | Project Manager, Send to Nuke, DaVinci Resolve handoff |
-| Gaussian Splatting | Splat Load/Info/Export, Transform, Crop, Merge, Camera Orbit, Splat Render, COLMAP Load, Splat Train |
+| Gaussian Splatting | Splat Load/Info/Export, Transform, Crop, Merge, Camera Orbit, Splat Render, Splat Viewer 3D, COLMAP Load, Splat Train |
 
 ## DCC Handoff
 

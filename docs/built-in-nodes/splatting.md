@@ -26,8 +26,9 @@ straight into the rest of Radiance (Grade, OCIO, HDR, Write, Viewer, DCC handoff
 | **Splat Merge** | Concatenate two `SPLAT`s into one. |
 | **Camera Orbit** | Build an orbit camera rig (`RAD_CAMERAS`) around a center point. |
 | **Splat Render** | Render a `SPLAT` through a camera rig → image, depth, alpha *(gsplat/CUDA)*. |
+| **Splat Viewer 3D** | Interactive in-node viewer — orbit, pan, zoom (WebGL, no GPU/gsplat needed). |
 | **COLMAP Load** | Read a COLMAP sparse model (`.bin`/`.txt`) → cameras, camera-ordered images, and a point-initialized `SPLAT`. |
-| **Splat Train** | Optimize a `SPLAT` against posed images with adaptive densification *(gsplat/CUDA)*. |
+| **Splat Train** | Optimize a `SPLAT` against posed images with adaptive densification and a live preview every N steps *(gsplat/CUDA)*. |
 
 ## Workflows
 

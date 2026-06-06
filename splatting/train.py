@@ -36,6 +36,8 @@ class TrainConfig:
     refine_stop: int = 15000
     refine_every: int = 100
     reset_every: int = 3000
+    # live preview: every N steps hand the current render to the preview callback (0 = off)
+    preview_every: int = 0
 
 
 def _ssim(pred, target):
@@ -71,7 +73,8 @@ def _scene_scale(cameras: Cameras) -> float:
 def train(images, cameras: Cameras, init_splat: Splat,
           config: Optional[TrainConfig] = None,
           progress: Optional[Callable[[int, int, float], None]] = None,
-          interrupt: Optional[Callable[[], None]] = None) -> Splat:
+          interrupt: Optional[Callable[[], None]] = None,
+          preview: Optional[Callable[[np.ndarray], None]] = None) -> Splat:
     """Optimize `init_splat` against `images` (B,H,W,3 in 0..1), order-matched to cameras."""
     config = config or TrainConfig()
     import torch
@@ -81,6 +84,9 @@ def train(images, cameras: Cameras, init_splat: Splat,
         raise RuntimeError("Splat Train needs 'gsplat' (CUDA). Install: pip install gsplat") from exc
     if not torch.cuda.is_available():
         raise RuntimeError("Splat Train requires a CUDA GPU.")
+    from radiance.splatting.backend import _gsplat_cuda_ready, _GSPLAT_DISABLED_HINT
+    if not _gsplat_cuda_ready():
+        raise RuntimeError(_GSPLAT_DISABLED_HINT)
 
     init_splat.validate()
     dev = "cuda"
@@ -161,6 +167,12 @@ def train(images, cameras: Cameras, init_splat: Splat,
             opt.step()
 
         last = float(loss.item())
+        if (preview is not None and config.preview_every > 0
+                and (step + 1) % int(config.preview_every) == 0):
+            try:  # never let a preview failure kill a training run
+                preview(pred[0].detach().clamp(0.0, 1.0).cpu().numpy())
+            except Exception:
+                pass
         if progress is not None:
             progress(step + 1, int(config.steps), last)
 

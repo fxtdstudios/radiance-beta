@@ -17,6 +17,25 @@ from radiance.splatting.data import Splat
 HAS_GSPLAT = importlib.util.find_spec("gsplat") is not None
 
 
+_GSPLAT_DISABLED_HINT = (
+    "gsplat is installed but its CUDA backend is not compiled "
+    "(\"No CUDA toolkit found. gsplat will be disabled.\"). PyTorch ships a CUDA "
+    "runtime, but gsplat needs to build native kernels. Install a matching "
+    "prebuilt wheel instead of compiling, e.g. for PyTorch 2.4 + CUDA 12.1:\n"
+    "    pip install --force-reinstall gsplat --index-url https://docs.gsplat.studio/whl/pt24cu121\n"
+    "Check your versions with: python -c \"import torch; print(torch.__version__, torch.version.cuda)\""
+)
+
+
+def _gsplat_cuda_ready() -> bool:
+    """True only if gsplat's compiled CUDA backend actually loaded."""
+    try:  # private path, guarded: fall through to normal behaviour if it moves
+        from gsplat.cuda._wrapper import _C
+        return _C is not None
+    except Exception:
+        return True  # can't tell — let the real call surface any error
+
+
 def _require_backend():
     import torch  # local import: torch is a core dep but keep this module light
     try:
@@ -30,6 +49,8 @@ def _require_backend():
         raise RuntimeError(
             "Gaussian Splatting rendering requires a CUDA GPU; none is available."
         )
+    if not _gsplat_cuda_ready():
+        raise RuntimeError(_GSPLAT_DISABLED_HINT)
     return torch, rasterization
 
 
