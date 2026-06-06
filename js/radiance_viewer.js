@@ -451,6 +451,12 @@ class RadianceViewer {
                 .radiance-pro-viewer-bar select {
                     max-width: 130px;
                 }
+                .radiance-pro-viewer-bar select option,
+                .radiance-ref-field select option,
+                select.radiance-ocio-select option {
+                    background: #16181d;
+                    color: rgba(245, 248, 252, 0.92);
+                }
                 .radiance-pro-viewer-bar button:hover {
                     background: rgba(255,255,255,0.1);
                     color: #fff;
@@ -2964,6 +2970,7 @@ class RadianceViewer {
             height: 100%;
             min-height: 300px;
             background: #070a0f;
+            color-scheme: dark;
             border-radius: 6px;
             overflow: hidden;
             user-select: none;
