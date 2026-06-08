@@ -143,10 +143,6 @@ Then use the Send to Nuke node from ComfyUI. The listener binds to `127.0.0.1` b
 
 Radiance supports DaVinci Resolve through a folder handoff: the Send to DaVinci Resolve node exports PNG, TIFF, or EXR media into a folder Resolve can import.
 
-## Viewer Shortcuts
-
-![Radiance Pro Viewer](viewer.png)
-![Radiance Shortcuts](Viewer_shortcut.png)
 
 | Key | Action |
 | :--- | :--- |
