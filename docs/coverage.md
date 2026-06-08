@@ -1,3 +1,5 @@
+[← Back to Radiance docs](README.md)
+
 # Documentation Coverage Ledger
 
 This ledger is generated from the grouped Radiance node catalog used by the documentation. Dynamic `.gizmo` nodes are runtime-generated and are not counted as fixed catalog nodes.

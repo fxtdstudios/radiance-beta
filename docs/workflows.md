@@ -1,3 +1,5 @@
+[← Back to Radiance docs](README.md)
+
 # Workflows
 
 These recipes are written for end users who want a working graph pattern first, then tuning.

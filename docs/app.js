@@ -1,5 +1,5 @@
 const pages = [
-  { id: "overview", title: "Introduction", file: "index.md", short: "Start", group: "Get Started" },
+  { id: "overview", title: "Introduction", file: "README.md", short: "Start", group: "Get Started" },
   { id: "quickstart", title: "Quickstart", file: "quickstart.md", short: "Setup", group: "Get Started" },
   { id: "concepts", title: "Basic Concepts", file: "concepts.md", short: "Theory", group: "Get Started" },
   { id: "workflows", title: "Tutorials", file: "workflows.md", short: "Recipes", group: "Learn" },
@@ -180,7 +180,7 @@ function inlineMarkdown(value) {
 function routeMarkdownLink(href) {
   const clean = href.replace(/^\.\//, "");
   const map = {
-    "index.md": "#overview",
+    "README.md": "#overview",
     "quickstart.md": "#quickstart",
     "concepts.md": "#concepts",
     "workflows.md": "#workflows",
