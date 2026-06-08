@@ -1,3 +1,5 @@
+[← Back to Radiance docs](../README.md)
+
 # AI Assist
 
 Scene cut detection and shot splitting for per-shot processing and grade routing.

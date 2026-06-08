@@ -334,7 +334,10 @@ def load_radiance_decoder_weights(
     """
     cfg = resolve_model_vae_config(model_type)
     expected_channels = cfg.get("latent_channels", 16) if cfg else 16
-    request_is_full = (model_size == "full")
+    # Accept "full" or the node's dropdown value "rudra_full" (substring match) —
+    # an exact "== full" check silently built the Turbo arch for rudra_full and
+    # then failed the strict load of full-decoder weights.
+    request_is_full = ("full" in str(model_size).lower())
     cache_key = (expected_channels, request_is_full)
 
     # Fast path: return already-loaded model for this (channels, size) pair.
@@ -343,7 +346,7 @@ def load_radiance_decoder_weights(
     if _TRAINED_DECODER_CACHE and cache_key in _TRAINED_DECODER_CACHE:
         return _TRAINED_DECODER_CACHE[cache_key]
 
-    if model_size == "full":
+    if request_is_full:
         model = RadianceFullDecoder(latent_channels=expected_channels)
     else:
         model = RadianceTurboDecoder(latent_channels=expected_channels)

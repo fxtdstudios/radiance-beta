@@ -28,6 +28,8 @@
 
 __version__ = "3.1.0"
 
+import logging
+logger = logging.getLogger("radiance.video.hdr")
 import json
 import math
 from typing import Any, Dict, List, Optional, Tuple
@@ -476,7 +478,7 @@ class RadianceVideoPromptBuilder:
         negative = self._NEG_BASE if suppress_artefacts else ""
 
         if print_prompt:
-            print(f"[RadianceVideoPromptBuilder]\nPositive: {positive}\nNegative: {negative}")
+            logger.info(f"[RadianceVideoPromptBuilder]\nPositive: {positive}\nNegative: {negative}")
 
         return (positive, negative)
 

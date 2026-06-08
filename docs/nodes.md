@@ -1,3 +1,5 @@
+[← Back to Radiance docs](README.md)
+
 # Radiance Built-in Nodes
 
 Radiance nodes are installed under `FXTD STUDIOS/Radiance` in ComfyUI. This reference follows the same style as the ComfyUI built-in node documentation: start with the node group, then open the page for the node family you are using.
