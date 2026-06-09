@@ -1,3 +1,6 @@
+// ALBABIT-FIX: resolve extension base at runtime so asset paths work regardless of the install folder name
+const _EXT_BASE = import.meta.url.replace(/\/[^/]+$/, '');
+
 const futureApi = {
     dashboard: "/radiance/projects/dashboard",
     projects: "/radiance/projects",
@@ -138,7 +141,7 @@ function Sidebar(data) {
     return `
         <aside class="rpm-sidebar">
             <div class="rpm-brand">
-                <img class="rpm-brand-mark" src="/extensions/radiance/r_icon.png" alt="Radiance" />
+                <img class="rpm-brand-mark" src="${_EXT_BASE}/r_icon.png" alt="Radiance" />
                 <div class="rpm-brand-title">Radiance</div>
             </div>
             <nav class="rpm-nav" aria-label="Project Manager">${navHtml}</nav>

@@ -9,11 +9,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { app } from "../../scripts/app.js";
 
+// ALBABIT-FIX: resolve extension base at runtime so the path works regardless of the install folder name (e.g. "radiance" vs "radiance-beta")
+const _EXT_BASE = import.meta.url.replace(/\/[^/]+$/, '');
+
 const GOLD = "#c8a96e";
 
 function openDash(file, title) {
-    if (window.showRadianceDashboard) window.showRadianceDashboard(`/extensions/radiance/${file}`, title);
-    else window.open(`/extensions/radiance/${file}`, "_blank");
+    if (window.showRadianceDashboard) window.showRadianceDashboard(`${_EXT_BASE}/${file}`, title);
+    else window.open(`${_EXT_BASE}/${file}`, "_blank");
 }
 
 function build() {
