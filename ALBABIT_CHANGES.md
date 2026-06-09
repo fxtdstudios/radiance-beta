@@ -5,6 +5,32 @@ Branch: `fix/bugs` — Fork: `https://github.com/Albabit/radiance-beta`
 
 ---
 
+## js/radiance_pm_launcher.js, radiance_menu.js, radiance_studio.js, radiance_workspace.js, project_manager_dashboard.mjs, assets_dashboard.mjs, workspace_dashboard.html — Dashboard URL fix
+
+**Problem:** Opening Manager, Library, or Assets from the Radiance Project
+Manager node (or the floating FAB menu) returned a 404 / blank page when the
+custom node folder was named anything other than exactly `radiance`
+(e.g. `radiance-beta` for beta testers).
+
+**Root cause:** All dashboard URLs and asset paths were hardcoded as
+`/extensions/radiance/<file>`. ComfyUI derives the `/extensions/<name>/`
+path from the actual folder name on disk. Any mismatch between the hardcoded
+name and the real folder name causes a 404.
+
+**Fixes:**
+- Added `const _EXT_BASE = import.meta.url.replace(/\/[^/]+$/, '');` at the
+  top of each affected ES-module JS file. This resolves the real extension
+  base URL at runtime, regardless of the install folder name.
+- Replaced every hardcoded `/extensions/radiance/<file>` with
+  `` `${_EXT_BASE}/<file>` `` in `radiance_pm_launcher.js`,
+  `radiance_menu.js`, `radiance_studio.js`, `radiance_workspace.js`,
+  `project_manager_dashboard.mjs`, and `assets_dashboard.mjs`.
+- In `workspace_dashboard.html` (static file, no JS module scope), replaced
+  the absolute `/extensions/radiance/r_icon.png` with the relative path
+  `r_icon.png` — the browser resolves it correctly from the file's own URL.
+
+---
+
 ## js/radiance_resolution.js — v2.4 (Widget visibility fix)
 
 **Problem:** In ComfyUI Nodes 2.0 (Vue 3 frontend), conditional widgets
