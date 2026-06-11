@@ -176,3 +176,49 @@ when loading the encoder/decoder weights. (Note: this is unrelated to the
 Verified: "Radiance Video Loader" now loads `ltx-2.3-22b-dev.safetensors` +
 `LTX23_video_vae_bf16.safetensors` successfully, with `model_meta` reporting
 `"latent_ch": 128, "latent_format": "ltx_128ch"`.
+
+---
+
+## nodes_loader.py — RadianceVideoLoader: Baked VAE, Audio VAE & Latent Upscale Model
+
+**Goal:** Port the legacy Radiance loader's "Baked VAE", Audio VAE, and
+latent upscale model support to `RadianceVideoLoader`, adapted to the v3.x
+loader architecture (`loader_utils.py` SSOT, `_unet_cache`/`_clip_cache`/
+`_vae_cache`, `_apply_preset_override`, etc.). `RadianceUnifiedLoader`
+(image loader) is untouched.
+
+**Changes (`RadianceVideoLoader` only):**
+- New outputs: `AUDIO_VAE` and `LATENT_UPSCALE_MODEL` (alongside the
+  existing `MODEL`, `CLIP`, `VAE`, `lora_stack`, `model_meta`).
+- `vae_name` now offers **"Baked VAE (from UNET)"** (default) in addition
+  to standalone `.safetensors` files. When selected, the VAE is extracted
+  natively from the checkpoint via
+  `comfy.sd.load_checkpoint_guess_config(..., output_vae=True)`.
+- New optional `audio_vae_name` input: `"None"`, `"Baked Audio VAE (from
+  UNET)"`, or a standalone checkpoint/VAE file (LTX 2.3 audio). Both baked
+  and standalone paths use `comfy.utils.state_dict_prefix_replace(...,
+  {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."}) +
+  comfy.sd.VAE(sd=..., metadata=...)` — the ComfyUI 0.22.0+ compatible
+  pattern (mirrors the built-in `LTXVAudioVAELoader`).
+- New optional `upscale_model_name` input (from
+  `models/latent_upscale_models/`): recognizes HunyuanVideo SR 720p/1080p
+  upsamplers and the LTX `LatentUpsampler` (via safetensors metadata
+  `config`).
+- New dedicated LRU caches `_audio_vae_cache` / `_upscale_model_cache`
+  (separate from the core unet/clip/vae caches) for the baked/standalone
+  Audio VAE and upscale model.
+- `model_meta` JSON gains `"audio_vae"` and `"upscale_model"` fields.
+- Input layout: `audio_vae_name` and `upscale_model_name` are placed right
+  after `vae_name` (matching the legacy node layout) instead of at the
+  bottom of the node.
+
+**Tooltip clarifications (CLIP slots, both loaders):**
+- `t5xxl`: now notes it's used by LTX **pre-2.3** (LTX 2.3 uses Gemma 3 via
+  `llm_encoder` instead).
+- `llm_encoder`: now explicitly mentions LTX 2.3 (Gemma 3), in addition to
+  Kolors/HunyuanVideo (ChatGLM3).
+- `text_projection`: now explicitly scoped to LTX 2.3 with Gemma 3.
+
+Confirmed: `config/model_map.py`'s LTX/LTX-AV profiles already route Gemma 3
+(`gemma_3_12B_it*`) to `llm_encoder` + `text_projection`, consistent with our
+earlier fix — no regression from upstream.
