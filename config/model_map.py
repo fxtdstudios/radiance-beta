@@ -507,9 +507,27 @@ CHECKPOINT_PRESETS: dict = {
         "clip_slots": {"t5xxl": True},
         "vram_gb": 14,
         "unet_hints": ["wan2.1", "wan_2.1", "wan-2.1", "Wan2.1"],
-        "vae_hints": ["wan_vae", "wan2_vae", "open_wan"],
+        "vae_hints": ["wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
         "clip_hints": {
-            "t5xxl": ["umt5-xxl", "umt5xxl", "t5xxl"],
+            "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
+        },
+    },
+    # ALBABIT-FIX: separate preset for Wan 2.2 checkpoints — same CLIP
+    # slot layout as Wan 2.1, distinct unet_hints to avoid matching the
+    # wrong version when both are installed.
+    "Wan 2.2": {
+        "model_type": "wan",
+        "weight_dtype": "fp8_e4m3fn",
+        "clip_dtype": "fp16",
+        "offload_mode": "none",
+        "clip_slots": {"t5xxl": True},
+        "vram_gb": 14,
+        "unet_hints": ["wan2.2", "wan_2.2", "wan-2.2", "Wan2.2"],
+        # ALBABIT-FIX: 14B Wan 2.2 models reuse the Wan 2.1 VAE; only the
+        # 5B model ships its own "wan2.2_vae.safetensors".
+        "vae_hints": ["wan2.2_vae", "wan_2.2_vae", "wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
+        "clip_hints": {
+            "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
         },
     },
     "LTX Video": {
@@ -520,7 +538,7 @@ CHECKPOINT_PRESETS: dict = {
         "clip_slots": {"llm_encoder": True},
         "vram_gb": 12,
         "unet_hints": ["ltx-video-2b", "ltxv-2b", "ltx_video", "ltxv"],
-        "vae_hints": ["ltx_vae", "ltxv_vae", "causal_vae"],
+        "vae_hints": ["ltxvideo_vae", "ltx_vae", "ltxv_vae", "causal_vae"],
         "clip_hints": {
             "llm_encoder": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
         },
@@ -533,7 +551,7 @@ CHECKPOINT_PRESETS: dict = {
         "clip_slots": {"llm_encoder": True},
         "vram_gb": 16,
         "unet_hints": ["ltx-video-13b", "ltxv-13b", "ltx_13b"],
-        "vae_hints": ["ltx_vae", "ltxv_vae", "causal_vae"],
+        "vae_hints": ["ltxvideo_vae", "ltx_vae", "ltxv_vae", "causal_vae"],
         "clip_hints": {
             "llm_encoder": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
         },
@@ -574,7 +592,7 @@ CHECKPOINT_PRESETS: dict = {
         "clip_slots": {"t5xxl": True},
         "vram_gb": 8,
         "unet_hints": ["pixart_sigma", "pixart-sigma", "PixArt-Sigma"],
-        "vae_hints": ["sd_vae", "pixart_vae", "vae-ft-mse"],
+        "vae_hints": ["pixart_sigma_sdxlvae", "sdxl_vae", "sd_vae", "pixart_vae", "vae-ft-mse"],
         "clip_hints": {
             "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
         },
@@ -610,12 +628,15 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp16",
         "clip_dtype": "fp16",
         "offload_mode": "none",
-        "clip_slots": {"t5xxl": True},
+        # ALBABIT-FIX: Lumina Image 2.0 uses a Gemma-2 2B LLM text encoder
+        # (routed to llm_encoder, like Gemma 3 for LTX 2.3), not T5-XXL.
+        "clip_slots": {"llm_encoder": True},
         "vram_gb": 12,
         "unet_hints": ["lumina2", "lumina-2", "lumina_2"],
-        "vae_hints": ["sd3_vae", "sd_vae", "lumina_vae"],
+        # Lumina Image 2.0 ships with the Flux VAE ("ae.safetensors").
+        "vae_hints": ["ae.safetensors", "flux_ae", "sd3_vae", "sd_vae", "lumina_vae"],
         "clip_hints": {
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+            "llm_encoder": ["gemma_2_2b", "gemma2_2b", "gemma_2"],
         },
     },
     "Z-Image": {
@@ -623,12 +644,28 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp16",
         "clip_dtype": "fp16",
         "offload_mode": "none",
-        "clip_slots": {"t5xxl": True},
+        # ALBABIT-FIX: Z-Image (Tongyi) uses a Qwen3-4B LLM text encoder
+        # (routed to llm_encoder, like Gemma 3 for LTX 2.3), not T5-XXL.
+        "clip_slots": {"llm_encoder": True},
         "vram_gb": 10,
         "unet_hints": ["z_image", "z-image", "zimage"],
-        "vae_hints": ["sd3_vae", "sd_vae"],
+        # Z-Image (Tongyi) reuses the Flux.1 VAE.
+        "vae_hints": ["flux_vae", "ae.safetensors", "flux_ae", "sd3_vae", "sd_vae"],
         "clip_hints": {
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+            "llm_encoder": ["qwen_3_4b", "qwen3_4b", "qwen_3"],
         },
     },
+}
+
+# ALBABIT-FIX: presets for video-generation architectures, used by
+# RadianceVideoLoader to filter the "preset" dropdown so only relevant
+# presets are shown (RadianceUnifiedLoader shows the remaining/image presets).
+VIDEO_PRESET_NAMES: set = {
+    "HunyuanVideo",
+    "Wan 2.1",
+    "Wan 2.2",
+    "LTX Video",
+    "LTX Video 13B",
+    "LTX Video 2.3",
+    "LTX Video 2.3 (Low VRAM)",
 }
