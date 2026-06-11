@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/version-3.1.1-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
-[![Nodes](https://img.shields.io/badge/nodes-104-c8a96e?style=for-the-badge)](#node-map)
+[![Nodes](https://img.shields.io/badge/nodes-115-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
 
 Radiance is a production-grade node pack for ComfyUI built around 32-bit float and HDR/ACES image pipelines. It brings VFX plate prep, color management, review tooling, in-canvas studio dashboards, and Nuke / DaVinci Resolve handoff into one coherent toolkit, so you can take a shot from generation through finishing without leaving the graph.
@@ -25,11 +25,12 @@ Artists get 32-bit, HDR, and ACES image tools, professional viewers, and VFX nod
 - ACES, OCIO, log curves, LUTs, CDL, scopes, QC, and grade-transfer tools.
 - VFX utilities for plate prep, masks, roto, depth, camera and optics, motion, multipass, real AOV ingestion, and relighting.
 - Video and temporal workflow nodes for loading, routing, conditioning, sampling, and delivery.
-- In-canvas studio dashboards, Project Manager, Workflow Library, and Assets — rendered over the ComfyUI graph, never in a separate browser tab.
-- Smart Sampler Pro, a preset-driven sampler that hides irrelevant parameters and adapts to the selected model.
-- Radiance Pro Viewer and a lightweight Lite Viewer with scopes, frame review, and keyboard shortcuts.
+- In-canvas studio dashboards — Project Manager, Workflow Library, and Assets — rendered over the ComfyUI graph, never in a separate browser tab.
+- **Radiance Sampler** — a preset-driven sampler that hides irrelevant parameters and adapts to the selected model.
+- A full-featured **Viewer** and a lightweight **Lite Viewer** with scopes, frame review, and keyboard shortcuts.
 - HDR VAE decoders (Turbo and Full) and HDR LoRA tooling for scene-linear generation.
-- Dynamic Gizmos, collapse any group of nodes into a single reusable custom node.
+- Dynamic Gizmos — collapse any group of nodes into a single reusable custom node.
+- Gaussian Splatting — load, render, and train 3D Gaussian Splatting scenes; renders feed the color/HDR/finishing pipeline.
 - Secure-by-default handoff to Nuke and DaVinci Resolve.
 
 ## Studio Dashboards
@@ -46,7 +47,7 @@ The Project Manager node keeps its launchers (open, save, and links) in a single
 
 ## Smart Interface
 
-- **Adaptive Sampler Pro.** The sampler hides every parameter when no preset is selected, shows everything in Custom mode, and for a named preset shows only the parameters relevant to that model — so you only see the controls that matter.
+- **Adaptive sampler.** The Radiance Sampler hides every parameter when no preset is selected, shows everything in Custom mode, and for a named preset shows only the parameters relevant to that model — so you only see the controls that matter.
 - **In-canvas overlays.** Dashboards open over the graph and close with Esc, the dimmed background, or the close button, with an option to open in a full tab.
 - **Dynamic Gizmos.** Collapse any selection of nodes into a single styled custom node that you can save and reuse like any other node.
 - **Smart Backdrops.** Group nodes get a clear, tinted-glass background keyed to the node category instead of a near-invisible panel.
@@ -70,11 +71,19 @@ Windows users can use `requirements_windows.txt`; Apple Silicon users can use `r
 
 Radiance relies on the same PyTorch installation that ComfyUI uses, so install it inside the same Python environment as ComfyUI.
 
+### Optional: Gaussian Splatting
+
+Loading, inspecting, editing, and exporting splats (`.ply` / `.splat`) and COLMAP import work out of the box. **Rendering and training** require [`gsplat`](https://github.com/nerfstudio-project/gsplat) and an NVIDIA CUDA GPU:
+
+```bash
+pip install gsplat plyfile
+```
+
 ## Feature Spotlights
 
 ### Viewers
 
-- **Radiance Pro Viewer** — a full review surface with waveform and vectorscope, channel isolation, A/B compare, focus peaking, frame stepping, and keyboard shortcuts (see [Viewer Shortcuts](#viewer-shortcuts)).
+- **Viewer** — a full review surface with waveform and vectorscope, channel isolation, A/B compare, focus peaking, frame stepping, and keyboard shortcuts (see [Viewer Shortcuts](#viewer-shortcuts)).
 - **Radiance Lite Viewer** — a lightweight inline viewer for quick frame inspection.
 
 ### HDR VAE Decoders
@@ -107,23 +116,27 @@ FXTD STUDIOS/Radiance
 ├─ Video
 ├─ Upscale
 ├─ Review
-└─ Pipeline
+├─ Pipeline
+└─ Gaussian Splatting
 ```
 
-Radiance provides **104 nodes** (plus any Gizmos you create). Some nodes depend on optional packages and your ComfyUI environment.
+Radiance provides **115 nodes** (plus any Gizmos you create). Some nodes depend on optional packages and your ComfyUI environment.
+
+Node names follow standard compositing vocabulary under the **Radiance** menu — `Grade`, `CDL`, `OCIO ColorSpace`, `Roto`, `Defocus`, `Viewer`, `Read`/`Write` — so they read the way they do in Nuke or Flame. AI and generation nodes keep a `Radiance` prefix (`Radiance Sampler`, `Radiance VAE Decode`) to mark the diffusion layer. You can still find any node by typing "radiance" in the search.
 
 | Group | Examples |
 | :--- | :--- |
 | Core | Project Manager / Workspace, Resolution, workspace utilities |
 | Load & Save | Read, Write (EXR alpha and mask), image and mask loading, EXR multipart and sequence export |
-| Generate | Unified Loader, Sampler Pro, HDR VAE Decode, prompt tools, LoRA stack, HDR LoRA, regional prompts |
+| Generate | Radiance Loader, Radiance Sampler, VAE Decode (HDR), prompt tools, LoRA stack, HDR LoRA, regional prompts |
 | Color | Grade, Grade Match, CDL, LUTs, Curves, Hue Curves, White Balance, Color Space Convert |
 | HDR | ACES 2.0, OCIO, HDR VAE encode/decode, tone mapping, HDR synthesis, relight, QC |
 | VFX | Plate prep, masks, roto, depth, optics, motion, multipass, AOV reader (real EXR layers), relight |
 | Video | Video loader, prompt builder, sampler, text-to-video, image-to-video, routing, batch decode, export |
 | Upscale | Image and video upscale (HDR and color aware), tiling, face restoration |
-| Review | Pro Viewer, Lite Viewer, scopes, focus peaking, contact sheets, flipbook, preview server |
+| Review | Viewer, Lite Viewer, scopes, focus peaking, contact sheets, flipbook, preview server |
 | Pipeline | Project Manager, Send to Nuke, DaVinci Resolve handoff |
+| Gaussian Splatting | Splat Load/Info/Export, Transform, Crop, Merge, Camera Orbit, Splat Render, Splat Viewer 3D, COLMAP Load, Splat Train |
 
 ## DCC Handoff
 
@@ -143,6 +156,7 @@ Then use the Send to Nuke node from ComfyUI. The listener binds to `127.0.0.1` b
 
 Radiance supports DaVinci Resolve through a folder handoff: the Send to DaVinci Resolve node exports PNG, TIFF, or EXR media into a folder Resolve can import.
 
+## Viewer Shortcuts
 
 | Key | Action |
 | :--- | :--- |

@@ -22,6 +22,8 @@ keywords = [
     "openexr",
     "nuke",
     "davinci-resolve",
+    "gaussian-splatting",
+    "3dgs",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -89,6 +91,12 @@ full = [
     "openai>=1.0",
     "google-generativeai>=0.5",
 ]
+# Gaussian Splatting render/train. gsplat requires an NVIDIA CUDA toolchain and is
+# not installed by default; .ply/.splat IO and COLMAP import work without it.
+splatting = [
+    "gsplat>=1.0",
+    "plyfile>=1.0",
+]
 
 [project.urls]
 Repository    = "https://github.com/fxtdstudios/radiance"
@@ -125,11 +133,13 @@ packages = [
     "radiance.nodes.io",
     "radiance.nodes.monitor",
     "radiance.nodes.pipeline",
+    "radiance.nodes.splatting",
     "radiance.nodes.training",
     "radiance.nodes.upscale",
     "radiance.nodes.vfx",
     "radiance.nodes.vfx.multipass",
     "radiance.nodes.video",
+    "radiance.splatting",
     "radiance.tools",
 ]
 include-package-data = true
