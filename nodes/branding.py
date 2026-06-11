@@ -78,10 +78,10 @@ TERM_OVERRIDES = {
     "RadianceSubpixelStabilizer": "Stabilize",
     "RadianceDepthMapGenerator": "Depth",
     "RadianceOpticalFlow": "MotionVectors",
-    "RadianceMultipassAOVReader": "AOV Reader",
+    "RadianceMultipassAOVReader": "Multipass AOV Reader",
     "RadianceMultipassMaster": "Multipass Extract",
     "RadianceMultipassComposite": "Multipass Composite",
-    "RadianceMultipassRelight": "Relight",
+    "RadianceMultipassRelight": "Multipass Relight",
     "RadianceSAMGenerator": "Keyer (SAM)",
     "RadianceLinearMatting": "Matte",
     # ── Load & Save ───────────────────────────────────────────────────────

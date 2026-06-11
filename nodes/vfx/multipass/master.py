@@ -63,7 +63,7 @@ def _generate_cryptomatte_manifest(K: int) -> str:
 
 
 class RadianceMultipassMaster:
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
+    CATEGORY = "FXTD STUDIOS/Radiance/VFX"
     DESCRIPTION = "Master VFX Multipass Extractor: extracts 18+ high-fidelity physical, utility, and lighting passes from a single beauty image."
 
     @classmethod
@@ -359,7 +359,7 @@ class RadianceMultipassMaster:
 
 
 class RadianceEXRPassesWriter:
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ IO & Delivery"
+    CATEGORY = "FXTD STUDIOS/Radiance/Load & Save"
     DESCRIPTION = "Write all passes inside the RADIANCE_PASSES bundle into a standard multi-part EXR v2 file fully compatible with Nuke, Resolve, and Fusion."
     FUNCTION = "write_passes"
     RETURN_TYPES = ("STRING",)
@@ -489,6 +489,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceMultipassMaster": "◎ Multipass: Master VFX Extractor",
-    "RadianceEXRPassesWriter": "◎ Radiance EXR Passes Writer"
+    "RadianceMultipassMaster": "Multipass Extract",
+    "RadianceEXRPassesWriter": "Write EXR Passes"
 }
