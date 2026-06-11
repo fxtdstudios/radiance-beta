@@ -22,6 +22,7 @@ const PRESET_SLOTS = {
     "SD 1.5": ["clip_l"],
     "HunyuanVideo": ["clip_l", "llm_encoder"],
     "Wan 2.1": ["t5xxl"],
+    "Wan 2.2": ["t5xxl"],
     "LTX Video": ["llm_encoder", "text_projection"],
     "LTX Video 13B": ["llm_encoder", "text_projection"],
     "LTX Video 2.3": ["llm_encoder", "text_projection"],
@@ -29,8 +30,8 @@ const PRESET_SLOTS = {
     "PixArt Sigma": ["t5xxl"],
     "AuraFlow": ["clip_l"],
     "Kolors": ["llm_encoder"],
-    "Lumina2": ["t5xxl"],
-    "Z-Image": ["t5xxl"],
+    "Lumina2": ["llm_encoder"],
+    "Z-Image": ["llm_encoder"],
 };
 
 // Dynamic visibility rules for CLIP slots per model_type
@@ -45,8 +46,8 @@ const MODEL_SLOTS = {
     "wan": ["t5xxl"],
     "ltx": ["llm_encoder", "text_projection"],
     "ltxav": ["llm_encoder", "text_projection"],
-    "lumina2": ["t5xxl"],
-    "z_image": ["t5xxl"],
+    "lumina2": ["llm_encoder"],
+    "z_image": ["llm_encoder"],
     "pixart": ["t5xxl"],
     "aura_flow": ["clip_l"],
     "kolors": ["llm_encoder"],
@@ -55,7 +56,7 @@ const MODEL_SLOTS = {
 // Full hints configs for automatic local file selection matching
 const PRESET_CONFIGS = {
     "Flux Dev": {
-        "unet_hints":    ["flux1-dev-fp8", "flux1-dev", "flux-dev"],
+        "unet_hints":    ["flux1-dev-fp8", "flux1-dev", "flux1-krea-dev", "krea-dev", "flux-dev"],
         "vae_hints":     ["ae.safetensors", "flux_ae", "ae_"],
         "clip_hints":    {
             "clip_l": ["clip_l.safetensors", "clip_l"],
@@ -71,7 +72,7 @@ const PRESET_CONFIGS = {
         },
     },
     "Flux Dev (Low VRAM)": {
-        "unet_hints":    ["flux1-dev-fp8", "flux1-dev", "flux-dev"],
+        "unet_hints":    ["flux1-dev-fp8", "flux1-dev", "flux1-krea-dev", "krea-dev", "flux-dev"],
         "vae_hints":     ["ae.safetensors", "flux_ae", "ae_"],
         "clip_hints":    {
             "clip_l": ["clip_l.safetensors", "clip_l"],
@@ -138,44 +139,59 @@ const PRESET_CONFIGS = {
     },
     "Wan 2.1": {
         "unet_hints":    ["wan2.1", "wan_2.1", "wan-2.1", "Wan2.1"],
-        "vae_hints":     ["wan_vae", "wan2_vae", "open_wan"],
+        "vae_hints":     ["wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
         "clip_hints":    {
-            "t5xxl": ["umt5-xxl", "umt5xxl", "t5xxl"],
+            "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
+        },
+    },
+    "Wan 2.2": {
+        "unet_hints":    ["wan2.2", "wan_2.2", "wan-2.2", "Wan2.2"],
+        "vae_hints":     ["wan2.2_vae", "wan_2.2_vae", "wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
+        "clip_hints":    {
+            "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
         },
     },
     "LTX Video": {
         "unet_hints":    ["ltx-video-2b", "ltxv-2b", "ltx_video", "ltxv"],
-        "vae_hints":     ["ltx_vae", "ltxv_vae", "causal_vae"],
+        "vae_hints":     ["Baked VAE (from UNET)", "ltxvideo_vae", "ltx_vae", "ltxv_vae", "causal_vae"],
         "clip_hints":    {
             "llm_encoder": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
         },
+        "extra_widgets": ["upscale_model_name"],
+        "upscale_hints": ["ltxv", "ltx_video", "latent_upsampler", "upsampler"],
     },
     "LTX Video 13B": {
         "unet_hints":    ["ltx-video-13b", "ltxv-13b", "ltx_13b"],
-        "vae_hints":     ["ltx_vae", "ltxv_vae", "causal_vae"],
+        "vae_hints":     ["Baked VAE (from UNET)", "ltxvideo_vae", "ltx_vae", "ltxv_vae", "causal_vae"],
         "clip_hints":    {
             "llm_encoder": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
         },
+        "extra_widgets": ["upscale_model_name"],
+        "upscale_hints": ["ltxv-13b", "ltx_13b", "latent_upsampler", "upsampler"],
     },
     "LTX Video 2.3": {
-        "unet_hints":    ["ltx-2.3-22b-dev", "ltx-2.3", "ltx_2.3"],
-        "vae_hints":     ["LTX23_video_vae", "ltx23_video", "ltx_23_video"],
+        "unet_hints":    ["ltx-2.3-22b-dev.safetensors", "ltx-2.3-22b-dev", "ltx-2.3", "ltx_2.3"],
+        "vae_hints":     ["Baked VAE (from UNET)", "LTX23_video_vae", "ltx23_video", "ltx_23_video"],
         "clip_hints":    {
-            "llm_encoder":     ["gemma_3_12B_it_fp4", "gemma_3_12B_it", "gemma_3", "gemma"],
+            "llm_encoder":     ["gemma_3_12B_it.safetensors", "gemma_3_12B_it_fp4", "gemma_3_12B_it", "gemma_3", "gemma"],
             "text_projection": ["ltx-2.3_text_projection", "text_projection"],
         },
+        "extra_widgets": ["upscale_model_name"],
+        "upscale_hints": ["ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "ltx-2.3-spatial-upscaler-x2-1.0.safetensors", "ltx-2.3", "ltx_2.3", "latent_upsampler", "upsampler"],
     },
     "LTX Video 2.3 (Low VRAM)": {
-        "unet_hints":    ["ltx-2.3-22b-dev-fp8", "ltx-2.3", "ltx_2.3"],
-        "vae_hints":     ["LTX23_video_vae", "ltx23_video", "ltx_23_video"],
+        "unet_hints":    ["ltx-2.3-22b-dev-fp8.safetensors", "ltx-2.3-22b-dev-fp8", "ltx-2.3", "ltx_2.3"],
+        "vae_hints":     ["Baked VAE (from UNET)", "LTX23_video_vae", "ltx23_video", "ltx_23_video"],
         "clip_hints":    {
-            "llm_encoder":     ["gemma_3_12B_it_fp4", "gemma_3_12B_it", "gemma_3", "gemma"],
+            "llm_encoder":     ["gemma_3_12B_it_fp4_mixed.safetensors", "gemma_3_12B_it_fp4", "gemma_3_12B_it", "gemma_3", "gemma"],
             "text_projection": ["ltx-2.3_text_projection", "text_projection"],
         },
+        "extra_widgets": ["upscale_model_name"],
+        "upscale_hints": ["ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "ltx-2.3-spatial-upscaler-x2-1.0.safetensors", "ltx-2.3", "ltx_2.3", "latent_upsampler", "upsampler"],
     },
     "PixArt Sigma": {
         "unet_hints":    ["pixart_sigma", "pixart-sigma", "PixArt-Sigma"],
-        "vae_hints":     ["sd_vae", "pixart_vae", "vae-ft-mse"],
+        "vae_hints":     ["pixart_sigma_sdxlvae", "sdxl_vae", "sd_vae", "pixart_vae", "vae-ft-mse"],
         "clip_hints":    {
             "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
         },
@@ -196,16 +212,16 @@ const PRESET_CONFIGS = {
     },
     "Lumina2": {
         "unet_hints":    ["lumina2", "lumina-2", "lumina_2"],
-        "vae_hints":     ["sd3_vae", "sd_vae", "lumina_vae"],
+        "vae_hints":     ["ae.safetensors", "flux_ae", "sd3_vae", "sd_vae", "lumina_vae"],
         "clip_hints":    {
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+            "llm_encoder": ["gemma_2_2b", "gemma2_2b", "gemma_2"],
         },
     },
     "Z-Image": {
         "unet_hints":    ["z_image", "z-image", "zimage"],
-        "vae_hints":     ["sd3_vae", "sd_vae"],
+        "vae_hints":     ["flux_vae", "ae.safetensors", "flux_ae", "sd3_vae", "sd_vae"],
         "clip_hints":    {
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+            "llm_encoder": ["qwen_3_4b", "qwen3_4b", "qwen_3"],
         },
     },
 };
@@ -270,6 +286,34 @@ function autoFillPresetFiles(node, cleanPreset) {
             clipW.value = "None";
         }
     }
+
+    // 4. Match Latent Upscale Model (Radiance Video Loader only)
+    const upscaleW = getWidget(node, "upscale_model_name");
+    if (upscaleW && upscaleW.options?.values) {
+        if (config.upscale_hints) {
+            const matched = findMatchingFile(config.upscale_hints, upscaleW.options.values);
+            upscaleW.value = matched || "None";
+        } else {
+            upscaleW.value = "None";
+        }
+    }
+}
+
+/**
+ * ALBABIT-FIX: Vue 3's virtual-DOM differ reuses the existing widget component
+ * instance when the same object reference stays in node.widgets — a plain
+ * `splice(0, 0)` no-op notifies Vue "something changed" but Vue doesn't
+ * re-read `type`/`options.hidden` on that reused instance, so a widget
+ * restored from `type === "hidden"` can stay invisible/zero-height (e.g. when
+ * switching back to "Custom"). Removing and re-inserting the widget at the
+ * same index forces Vue to destroy and remount its component.
+ */
+function _forceWidgetReinsert(widget, node) {
+    if (!node?.widgets) return;
+    const idx = node.widgets.indexOf(widget);
+    if (idx === -1) return;
+    node.widgets.splice(idx, 1);
+    node.widgets.splice(idx, 0, widget);
 }
 
 /**
@@ -316,7 +360,7 @@ function setWidgetVisible(widget, visible, node) {
             widget.computedHeight = 4;
         }
     }
-    if (node?.widgets) node.widgets.splice(0, 0);
+    _forceWidgetReinsert(widget, node);
 }
 
 /**
@@ -357,6 +401,7 @@ function updateLoaderUI(node, forceAutoFill = false) {
     // Hide general utilities to keep the UI clean: check_vram, use_cache, lora_on_error, auto_download
     // Show only: preset, unet_name, vae_name, and active CLIP slots!
     const activeSlots = PRESET_SLOTS[cleanPreset] || ALL_CLIP_WIDGETS;
+    const extraWidgets = (PRESET_CONFIGS[cleanPreset] && PRESET_CONFIGS[cleanPreset].extra_widgets) || [];
 
     if (forceAutoFill) {
         autoFillPresetFiles(node, cleanPreset);
@@ -368,6 +413,8 @@ function updateLoaderUI(node, forceAutoFill = false) {
         } else if (ALL_CLIP_WIDGETS.includes(w.name)) {
             const shouldShow = activeSlots.includes(w.name);
             setWidgetVisible(w, shouldShow, node);
+        } else if (extraWidgets.includes(w.name)) {
+            setWidgetVisible(w, true, node);
         } else {
             setWidgetVisible(w, false, node);
         }
@@ -376,40 +423,63 @@ function updateLoaderUI(node, forceAutoFill = false) {
     refreshNodeSize(node);
 }
 
+// ALBABIT-FIX: app.registerExtension({ nodeCreated, loadedGraphNode }) wraps
+// presetW.callback / modelTypeW.callback AFTER Vue (Nodes 2.0) has already
+// mounted the combo widget components, so the wrapped callback is never
+// invoked when the user changes the dropdown (no console output, nothing is
+// folded/auto-filled). The beforeRegisterNodeDef + prototype.onNodeCreated /
+// onConfigure pattern (as used in radiance_sampler.js) hooks the node before
+// widget construction, so the wrapped callbacks are the ones Vue captures and
+// actually fire on user interaction. The preset/auto-fill logic itself
+// (updateLoaderUI, autoFillPresetFiles, PRESET_SLOTS, ...) is unchanged.
 app.registerExtension({
     name: "Radiance.UnifiedLoaderSync",
 
-    nodeCreated(node) {
-        const nodeId = node.type ?? node.comfyClass ?? "";
-        if (!LOADER_NODES.includes(nodeId)) return;
+    async beforeRegisterNodeDef(nodeType, nodeData, app) {
+        if (!LOADER_NODES.includes(nodeData.name)) return;
 
-        const presetW = getWidget(node, "preset");
-        const modelTypeW = getWidget(node, "model_type");
+        const onNodeCreated = nodeType.prototype.onNodeCreated;
+        nodeType.prototype.onNodeCreated = function () {
+            const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
 
-        if (presetW) {
-            const origPresetCallback = presetW.callback;
-            presetW.callback = function(value) {
-                if (origPresetCallback) origPresetCallback.call(this, value);
-                // Trigger updates and execute smart file matching
-                setTimeout(() => updateLoaderUI(node, true), 10);
-            };
-        }
+            const node = this;
+            const presetW = getWidget(node, "preset");
+            const modelTypeW = getWidget(node, "model_type");
 
-        if (modelTypeW) {
-            const origModelCallback = modelTypeW.callback;
-            modelTypeW.callback = function(value) {
-                if (origModelCallback) origModelCallback.call(this, value);
-                setTimeout(() => updateLoaderUI(node, false), 10);
-            };
-        }
+            if (presetW) {
+                const origPresetCallback = presetW.callback;
+                presetW.callback = function(value) {
+                    if (origPresetCallback) origPresetCallback.call(this, value);
+                    // Trigger updates and execute smart file matching
+                    setTimeout(() => updateLoaderUI(node, true), 10);
+                };
+            }
 
-        // Apply initial layout folding immediately on creation (defaults to None, so everything folds)
-        setTimeout(() => updateLoaderUI(node, false), 50);
-    },
+            if (modelTypeW) {
+                const origModelCallback = modelTypeW.callback;
+                modelTypeW.callback = function(value) {
+                    if (origModelCallback) origModelCallback.call(this, value);
+                    setTimeout(() => updateLoaderUI(node, false), 10);
+                };
+            }
 
-    loadedGraphNode(node) {
-        const nodeId = node.type ?? node.comfyClass ?? "";
-        if (!LOADER_NODES.includes(nodeId)) return;
-        setTimeout(() => updateLoaderUI(node, false), 100);
+            // Apply initial layout folding on creation, unless onConfigure
+            // (loaded workflow) is about to do it with the restored values.
+            setTimeout(() => {
+                if (node._configuredByLoad) return;
+                updateLoaderUI(node, false);
+            }, 50);
+
+            return r;
+        };
+
+        const onConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function (info) {
+            const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
+            this._configuredByLoad = true;
+            const node = this;
+            setTimeout(() => updateLoaderUI(node, false), 100);
+            return r;
+        };
     }
 });

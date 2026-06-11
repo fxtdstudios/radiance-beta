@@ -23,6 +23,7 @@ from comfy.cldm.control_types import UNION_CONTROLNET_TYPES
 from .loader_utils import (
     RADIANCE_MODEL_MAP,
     CHECKPOINT_PRESETS,
+    VIDEO_PRESET_NAMES,
     CLIP_SLOT_ORDER,
     LATENT_CHANNELS,
     detect_model_type as _detect_model_type,
@@ -176,7 +177,9 @@ class RadianceUnifiedLoader:
             "required": {
                 # ── Preset ──
                 "preset": (
-                    list(CHECKPOINT_PRESETS.keys()),
+                    # ALBABIT-FIX: image loader only lists image-model presets
+                    # (video presets are exclusive to RadianceVideoLoader).
+                    [k for k in CHECKPOINT_PRESETS if k not in VIDEO_PRESET_NAMES],
                     {"default": "Custom",
                      "tooltip": "Quick-configure for common architectures. "
                                 "Overrides model_type, dtypes, offload_mode, and hints "
@@ -649,6 +652,14 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
     @classmethod
     def INPUT_TYPES(cls):
         types = super().INPUT_TYPES()
+
+        # ALBABIT-FIX: video loader only lists video-model presets
+        # (image presets are exclusive to RadianceUnifiedLoader).
+        _, preset_kwargs = types["required"]["preset"]
+        types["required"]["preset"] = (
+            [k for k in CHECKPOINT_PRESETS if k == "Custom" or k in VIDEO_PRESET_NAMES],
+            preset_kwargs,
+        )
 
         # ALBABIT-FIX: "Baked VAE (from UNET)" lets LTX 2.3 checkpoints that
         # embed their own VAE skip the standalone vae_name file entirely.
