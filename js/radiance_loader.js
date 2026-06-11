@@ -326,6 +326,7 @@ function setWidgetVisible(widget, visible, node) {
     widget.options.hidden = !visible;
 
     widget.hidden = !visible;
+
     if (visible) {
         if (widget.type === "hidden") {
             widget.type = widget._origType || "combo";
@@ -360,6 +361,16 @@ function setWidgetVisible(widget, visible, node) {
             widget.computedHeight = 4;
         }
     }
+
+    // ALBABIT-FIX: always force a remove+reinsert, even if type/hidden didn't
+    // change this call. Empirically, once a widget's Vue component has been
+    // (re)mounted, it stops reacting to later type/hidden changes via a
+    // no-op splice(0,0) alone -- it keeps rendering its previous state until
+    // reinserted again (e.g. after "LTX -> Custom -> LTX", the 2nd LTX still
+    // showed every widget, even though widget.type was already correctly
+    // "hidden" again). Reinserting unconditionally guarantees every widget's
+    // component reflects its current state regardless of how many times it
+    // toggled before.
     _forceWidgetReinsert(widget, node);
 }
 
@@ -367,12 +378,17 @@ function setWidgetVisible(widget, visible, node) {
  * Recalculate node dimensions and refresh the canvas layout cleanly
  */
 function refreshNodeSize(node) {
-    if (node.computeSize) {
-        const sz = node.computeSize();
-        node.size[0] = Math.max(node.size[0], sz[0]);
-        node.size[1] = sz[1];
-        app.graph.setDirtyCanvas(true, true);
-    }
+    if (!node.computeSize) return;
+
+    const sz = node.computeSize();
+    // ALBABIT-FIX: directly mutating node.size[i] updates the LiteGraph
+    // model but Vue's node component never observes it, so the rendered
+    // box keeps its old (larger) height forever. node.setSize(...) is the
+    // API Vue's resize handling actually reacts to, and computeSize() is
+    // already correct synchronously here (no DOM-timing issue), so a
+    // single immediate call is enough.
+    node.setSize([Math.max(node.size[0], sz[0]), sz[1]]);
+    app.graph.setDirtyCanvas(true, true);
 }
 
 function updateLoaderUI(node, forceAutoFill = false) {
@@ -478,7 +494,15 @@ app.registerExtension({
             const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
             this._configuredByLoad = true;
             const node = this;
-            setTimeout(() => updateLoaderUI(node, false), 100);
+            // ALBABIT-FIX: a single 100ms reapply can fire before graph.configure()
+            // has finished applying the saved "preset" widget value, so
+            // updateLoaderUI reads the still-default value and folds as if
+            // "Custom" (showing every widget) — and nothing corrects it
+            // afterwards. Mirror radiance_sampler.js's onConfigure: 150ms for
+            // Vue's first layout pass, 600ms as a safety net for heavy
+            // workflows where configure() takes longer than 150ms.
+            setTimeout(() => updateLoaderUI(node, false), 150);
+            setTimeout(() => updateLoaderUI(node, false), 600);
             return r;
         };
     }
