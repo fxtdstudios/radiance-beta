@@ -1,0 +1,743 @@
+{
+  "id": "eb335ae7-92b1-41ea-b0db-4f7fbd589a1a",
+  "revision": 0,
+  "last_node_id": 34,
+  "last_link_id": 30,
+  "nodes": [
+    {
+      "id": 4,
+      "type": "RadianceCinematicPromptEncoder",
+      "pos": [
+        -2316.6972276826627,
+        13178.734246994818
+      ],
+      "size": [
+        400,
+        707.90625
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "links": [
+            10
+          ]
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "links": [
+            11
+          ]
+        },
+        {
+          "name": "positive_text",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "negative_text",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "resolved_arch",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "token_count",
+          "type": "INT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RadianceCinematicPromptEncoder"
+      },
+      "widgets_values": [
+        "women on fashion stage with red dress and white lights ",
+        "None (Custom)",
+        "Medium Shot (MS)",
+        "ARRI Alexa 35",
+        "50mm Standard Prime",
+        "f/2.8 (Cinematic Separation)",
+        "God Rays (Crepuscular Rays)",
+        "Cinematic Movie Still",
+        "None",
+        "Standard",
+        "",
+        ""
+      ],
+      "color": "#3c2020",
+      "bgcolor": "#141419"
+    },
+    {
+      "id": 5,
+      "type": "RadianceResolution",
+      "pos": [
+        -1860.887812829205,
+        13559.507667675927
+      ],
+      "size": [
+        345.65625,
+        711.96875
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "links": [
+            12
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RadianceResolution"
+      },
+      "widgets_values": [
+        "2K DCI (2048×1080)",
+        1024,
+        1024,
+        "As Preset",
+        "Auto (Flux 16ch)",
+        1,
+        1,
+        0,
+        0,
+        "16:9",
+        false,
+        81,
+        24
+      ],
+      "color": "#1c223c",
+      "bgcolor": "#141419"
+    },
+    {
+      "id": 18,
+      "type": "RadianceProjectManager",
+      "pos": [
+        -1305.3094552226798,
+        11907.922333862321
+      ],
+      "size": [
+        374.84375,
+        474
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "RadianceProjectManager",
+        "last_commit": "No commits yet",
+        "vram_peak": "0.0 GB",
+        "version": "v0.0"
+      },
+      "widgets_values": [
+        "shot01",
+        "ahmed",
+        2,
+        ""
+      ],
+      "color": "#111111",
+      "bgcolor": "#111111"
+    },
+    {
+      "id": 10,
+      "type": "RadianceSamplerPro",
+      "pos": [
+        -1415.4301424091116,
+        13252.269129769467
+      ],
+      "size": [
+        312.65625,
+        1074
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 19
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 10
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 11
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 12
+        },
+        {
+          "name": "refiner_model",
+          "shape": 7,
+          "type": "MODEL",
+          "link": null
+        },
+        {
+          "name": "noise_override",
+          "shape": 7,
+          "type": "LATENT",
+          "link": null
+        },
+        {
+          "name": "sigmas_override",
+          "shape": 7,
+          "type": "SIGMAS",
+          "link": null
+        },
+        {
+          "name": "custom_ays_anchors",
+          "shape": 7,
+          "type": "SIGMAS",
+          "link": null
+        },
+        {
+          "name": "restart_schedule",
+          "shape": 7,
+          "type": "SIGMAS",
+          "link": null
+        },
+        {
+          "name": "sdr_reference",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "sdr_vae",
+          "shape": 7,
+          "type": "VAE",
+          "link": 14
+        }
+      ],
+      "outputs": [
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "links": [
+            13
+          ]
+        },
+        {
+          "name": "sigmas",
+          "type": "SIGMAS",
+          "links": null
+        },
+        {
+          "name": "sigmas_remaining",
+          "type": "SIGMAS",
+          "links": null
+        },
+        {
+          "name": "sigma_plot",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RadianceSamplerPro"
+      },
+      "widgets_values": [
+        "[F] Flux Cinematic (30 steps)",
+        30,
+        0,
+        0,
+        1,
+        "euler",
+        "Standard",
+        0.4,
+        "simple",
+        "Manual",
+        1,
+        1,
+        4,
+        "Static",
+        635798887398420,
+        "randomize",
+        0,
+        "auto",
+        0,
+        0,
+        "None",
+        "Gaussian",
+        "Auto",
+        true,
+        false,
+        false,
+        false,
+        128,
+        16,
+        "feather",
+        false,
+        false,
+        20,
+        "",
+        "",
+        "",
+        0,
+        1,
+        1,
+        0.35,
+        6,
+        0.65,
+        null,
+        null,
+        "Cinema-grade 30-step Flux run with strong guidance."
+      ],
+      "color": "#182238",
+      "bgcolor": "#141419"
+    },
+    {
+      "id": 2,
+      "type": "RadianceUnifiedLoader",
+      "pos": [
+        -2703.2249341269635,
+        12963.03970812874
+      ],
+      "size": [
+        270,
+        715.84375
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "lora_stack",
+          "shape": 7,
+          "type": "LORA_STACK",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            19
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            2
+          ]
+        },
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            3,
+            14
+          ]
+        },
+        {
+          "name": "lora_stack",
+          "type": "LORA_STACK",
+          "links": null
+        },
+        {
+          "name": "model_meta",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RadianceUnifiedLoader"
+      },
+      "widgets_values": [
+        "Custom",
+        "flux1-dev.safetensors",
+        "default",
+        "Auto-Detect",
+        "ae.safetensors",
+        "None",
+        "None",
+        "t5xxl_fp16.safetensors",
+        "None",
+        "None",
+        "default",
+        "none",
+        "On",
+        "On",
+        "raise",
+        false
+      ],
+      "color": "#182238",
+      "bgcolor": "#141419"
+    },
+    {
+      "id": 7,
+      "type": "RadianceLiteViewer",
+      "pos": [
+        13.78067886916699,
+        12301.967243455805
+      ],
+      "size": [
+        708.5625,
+        1110.171875
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE,VIDEO",
+          "link": 15
+        },
+        {
+          "name": "compare_image",
+          "shape": 7,
+          "type": "IMAGE,VIDEO",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RadianceLiteViewer"
+      },
+      "widgets_values": [
+        ""
+      ],
+      "color": "#282830",
+      "bgcolor": "#141419"
+    },
+    {
+      "id": 6,
+      "type": "RadianceHDRVAEDecode",
+      "pos": [
+        -785.8536785648305,
+        12957.41396541338
+      ],
+      "size": [
+        381.625,
+        651.609375
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 13
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 3
+        },
+        {
+          "name": "alpha",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            15,
+            22,
+            23
+          ]
+        },
+        {
+          "name": "metadata",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RadianceHDRVAEDecode"
+      },
+      "widgets_values": [
+        "ACEScg",
+        "Auto",
+        128,
+        0.7,
+        "Compress (Log)",
+        "None",
+        false,
+        12,
+        true,
+        "f32",
+        "Linear",
+        true,
+        0,
+        1,
+        "Disabled",
+        "rudra_full"
+      ],
+      "color": "#3c2020",
+      "bgcolor": "#141419"
+    },
+    {
+      "id": 22,
+      "type": "RadianceViewer",
+      "pos": [
+        9.183506825539535,
+        13465.074712875241
+      ],
+      "size": [
+        1946.75,
+        1467.5
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE,VIDEO",
+          "link": 22
+        },
+        {
+          "name": "compare_image",
+          "shape": 7,
+          "type": "IMAGE,VIDEO",
+          "link": null
+        },
+        {
+          "name": "zdepth",
+          "shape": 7,
+          "type": "IMAGE,VIDEO",
+          "link": 24
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RadianceViewer"
+      },
+      "widgets_values": [
+        ""
+      ],
+      "color": "#282830",
+      "bgcolor": "#141419"
+    },
+    {
+      "id": 23,
+      "type": "RadianceDepthMapGenerator",
+      "pos": [
+        -316.30087382340963,
+        13839.276525397016
+      ],
+      "size": [
+        270,
+        223.65625
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 23
+        }
+      ],
+      "outputs": [
+        {
+          "name": "depth_map",
+          "type": "IMAGE",
+          "links": [
+            24
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RadianceDepthMapGenerator"
+      },
+      "widgets_values": [
+        "Large (335M - Best)",
+        true,
+        false,
+        0,
+        true
+      ],
+      "color": "#122c1e",
+      "bgcolor": "#141419"
+    }
+  ],
+  "links": [
+    [
+      2,
+      2,
+      1,
+      4,
+      0,
+      "CLIP"
+    ],
+    [
+      3,
+      2,
+      2,
+      6,
+      1,
+      "VAE"
+    ],
+    [
+      10,
+      4,
+      0,
+      10,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      11,
+      4,
+      1,
+      10,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      12,
+      5,
+      0,
+      10,
+      3,
+      "LATENT"
+    ],
+    [
+      13,
+      10,
+      0,
+      6,
+      0,
+      "LATENT"
+    ],
+    [
+      14,
+      2,
+      2,
+      10,
+      10,
+      "VAE"
+    ],
+    [
+      15,
+      6,
+      0,
+      7,
+      0,
+      "IMAGE"
+    ],
+    [
+      19,
+      2,
+      0,
+      10,
+      0,
+      "MODEL"
+    ],
+    [
+      22,
+      6,
+      0,
+      22,
+      0,
+      "IMAGE"
+    ],
+    [
+      23,
+      6,
+      0,
+      23,
+      0,
+      "IMAGE"
+    ],
+    [
+      24,
+      23,
+      0,
+      22,
+      2,
+      "IMAGE"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 2,
+      "title": "Generation",
+      "bounding": [
+        -2727.7502509398464,
+        12504.88761469853,
+        1687.5076085307358,
+        1815.5155964585574
+      ],
+      "color": "#3a2a5a",
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "Conditioning",
+      "bounding": [
+        -833.0700572484577,
+        12517.330546036386,
+        481.625,
+        1129.1664984533145
+      ],
+      "color": "#5a3a1a",
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.718488534426815,
+      "offset": [
+        3186.0326997252278,
+        -11520.784684082606
+      ]
+    },
+    "frontendVersion": "1.44.19",
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true
+  },
+  "version": 0.4
+}
