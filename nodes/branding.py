@@ -39,8 +39,9 @@ MENU_STRUCTURE = {
 DEFAULT_MENU_SECTION = "Core"
 
 # Sections whose nodes keep the "Radiance" prefix (the generation/AI layer).
-# Everything else gets a bare, Nuke-style name.
-GENERATION_SECTIONS = {"Core", "Generate", "Video", "Developer"}
+# Empty = every node uses a bare, Nuke-style name (no "Radiance " prefix).
+# Nodes stay findable by typing "radiance" via the injected search aliases.
+GENERATION_SECTIONS: set = set()
 
 # Marketing words stripped from any node label.
 _MARKETING = re.compile(r"\b(Pro|Smart|Ultra|Cinematic)\b", re.IGNORECASE)
