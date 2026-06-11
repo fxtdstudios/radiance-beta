@@ -35,6 +35,7 @@ NODE_GROUPS: Tuple[NodeGroupSpec, ...] = (
     NodeGroupSpec("radiance.nodes.video"),
     NodeGroupSpec("radiance.nodes.ai"),
     NodeGroupSpec("radiance.nodes.generate"),
+    NodeGroupSpec("radiance.nodes.splatting"),
     NodeGroupSpec("radiance.nodes.training", env_flag=ENV.RADIANCE_DEV),
 )
 
