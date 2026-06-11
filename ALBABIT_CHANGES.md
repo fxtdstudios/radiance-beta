@@ -222,3 +222,77 @@ loader architecture (`loader_utils.py` SSOT, `_unet_cache`/`_clip_cache`/
 Confirmed: `config/model_map.py`'s LTX/LTX-AV profiles already route Gemma 3
 (`gemma_3_12B_it*`) to `llm_encoder` + `text_projection`, consistent with our
 earlier fix — no regression from upstream.
+
+---
+
+## js/radiance_loader.js, config/model_map.py, nodes_loader.py, loader_utils.py — Preset dropdown fix & preset corrections
+
+**Problem:** The "preset" dropdown in "Radiance Video Loader" / "Radiance
+Loader" was completely non-functional — selecting a preset produced no
+console output and did not fold/unfold widgets or auto-fill model files.
+
+**Root cause:** The previous registration used
+`app.registerExtension({ nodeCreated, loadedGraphNode })`, which wraps
+`presetW.callback` / `modelTypeW.callback` *after* Vue (Nodes 2.0) has
+already mounted the combo widget components — so the wrapped callback was
+never invoked on live user interaction.
+
+**Fixes:**
+- Replaced the registration block with the `beforeRegisterNodeDef` +
+  `nodeType.prototype.onNodeCreated` / `onConfigure` pattern (mirroring the
+  confirmed-working pattern in `radiance_sampler.js`), wrapping
+  `presetW.callback` / `modelTypeW.callback` before widget construction.
+- Added `_forceWidgetReinsert(widget, node)` (ported from
+  `radiance_sampler.js`) to work around a Vue 3 component-reuse issue where
+  restoring a hidden widget left it visually broken; `setWidgetVisible` now
+  calls this instead of a bare `splice`.
+- "Custom" preset now correctly restores all hidden widgets via the above.
+
+**Preset hint/auto-fill corrections** (researched real-world `.safetensors`
+filenames as of June 2026):
+- **Flux Dev / Flux Dev (Low VRAM)**: added `flux1-krea-dev` / `krea-dev`
+  hints so `flux1-krea-dev.safetensors` is correctly auto-filled.
+- **LTX Video 2.3 / (Low VRAM)**: fixed unet hint collision where the fp8 and
+  full-precision presets could both match `ltx-2.3-22b-dev*` (now uses exact
+  filename priority); `vae_name` now defaults to "Baked VAE (from UNET)" for
+  all LTX presets; added `extra_widgets`/`upscale_hints` mechanism so
+  `upscale_model_name` is shown and auto-filled
+  (`ltx-2.3-spatial-upscaler-x2-1.1.safetensors` then `...-1.0.safetensors`);
+  `llm_encoder` now prioritizes `gemma_3_12B_it.safetensors`
+  (`gemma_3_12B_it_fp4_mixed.safetensors` for Low VRAM).
+- **LTX Video / LTX Video 13B**: added "Baked VAE (from UNET)" + corrected
+  `ltxvideo_vae` hints (was `ltx_vae`/`ltxv_vae`/`causal_vae`, none of which
+  match the real `ltxvideo_vae_bf16.safetensors` / `LTX23_video_vae_bf16.safetensors`
+  filenames); added `extra_widgets`/`upscale_hints` for `upscale_model_name`.
+- **Wan 2.1**: fixed `t5xxl` hints — `umt5_xxl_fp8_e4m3fn_scaled.safetensors`
+  uses an underscore (`umt5_xxl`), not `umt5-xxl`/`umt5xxl`; corrected
+  `vae_name` hints to `wan_2.1_vae.safetensors`.
+- **Wan 2.2 (new preset)**: split out from "Wan 2.1" as a separate preset
+  with its own `unet_hints` (`wan2.2`/`wan_2.2`/`wan-2.2`) and `vae_hints`
+  prioritizing `wan2.2_vae.safetensors` (falling back to
+  `wan_2.1_vae.safetensors`); same corrected `t5xxl` hints as Wan 2.1.
+  (Wan 2.2's multi-file MoE high/low-noise expert UNETs and t2v/i2v variants
+  are a larger architectural change, deferred for a future task.)
+- **PixArt Sigma**: corrected `vae_name` hints to the SDXL-based VAE
+  (`pixart_sigma_sdxlvae` / `sdxl_vae` / `vae-ft-mse`).
+- **Lumina2**: corrected text encoder to `gemma_2_2b_fp16.safetensors`
+  (Gemma-2 2B), routed to the **`llm_encoder`** clip slot (not `t5xxl`),
+  consistent with how Gemma 3 is handled for LTX 2.3; corrected `vae_name`
+  to `ae.safetensors` (Flux VAE, reused by Lumina2).
+- **Z-Image**: corrected text encoder to `qwen_3_4b.safetensors` (Qwen3-4B),
+  routed to the **`llm_encoder`** clip slot (not `t5xxl`); corrected
+  `vae_name` to `flux_vae.safetensors`.
+- **"Flux Dev (Flux.2)"**: this preset (added during this session) was found
+  to conflate `flux1-krea-dev.safetensors` (FLUX.1, correctly using
+  `clip_l`+`t5xxl`+`ae.safetensors`) with `flux2-dev.safetensors` (true
+  Flux.2: Mistral-3 text encoder + `flux2-vae.safetensors`, 128-channel
+  latent — incompatible with the current clip-slot infrastructure). Removed
+  entirely rather than ship an incorrect preset; true Flux.2 support is
+  deferred for a future task.
+
+**Per-loader preset filtering:**
+- Added `VIDEO_PRESET_NAMES` to `config/model_map.py` (HunyuanVideo, Wan 2.1,
+  Wan 2.2, LTX Video, LTX Video 13B, LTX Video 2.3, LTX Video 2.3 (Low VRAM)).
+- "Radiance Video Loader" now only lists `Custom` + video presets;
+  "Radiance Loader" now only lists `Custom` + image presets, via filtering
+  in `INPUT_TYPES` in `nodes_loader.py`.
