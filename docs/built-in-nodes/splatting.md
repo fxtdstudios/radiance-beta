@@ -53,3 +53,6 @@ image/camera correspondence Splat Train needs is guaranteed — no manual matchi
   colour; it is passed between splat nodes like `IMAGE`/`LATENT`.
 - `Splat Train` uses gsplat's adaptive density control (clone/split/prune) plus an
   L1 + SSIM loss. It is a strong baseline; tune steps and learning rates per scene.
+- `Splat Viewer 3D` renders with WebGL2 for maximum browser compatibility. Planned:
+  a WebGPU backend (GPU compute sort) for smooth interaction on multi-million-splat
+  scenes, with automatic fallback to the current WebGL2 renderer.
