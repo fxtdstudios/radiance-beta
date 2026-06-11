@@ -141,7 +141,7 @@ def _to_image_tensor(arr: Optional[np.ndarray], h: int, w: int) -> torch.Tensor:
 class RadianceMultipassAOVReader:
     """◎ Multipass: AOV Reader — split a real multilayer EXR into Radiance passes."""
 
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
+    CATEGORY = "FXTD STUDIOS/Radiance/VFX"
     DESCRIPTION = (
         "Read a real multilayer/AOV OpenEXR and split its named layers into the "
         "same passes as the Master extractor. Ground-truth renderer passes — not "
@@ -269,5 +269,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceMultipassAOVReader": "◎ Multipass: AOV Reader (real EXR layers)",
+    "RadianceMultipassAOVReader": "Multipass AOV Reader",
 }

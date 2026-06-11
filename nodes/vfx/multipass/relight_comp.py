@@ -121,7 +121,7 @@ def _blur_bhwc(x: torch.Tensor, radius: int) -> torch.Tensor:
 
 
 class RadianceMultipassRelight:
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
+    CATEGORY = "FXTD STUDIOS/Radiance/VFX"
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -296,7 +296,7 @@ class RadianceMultipassRelight:
 
 
 class RadianceMultipassComposite:
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
+    CATEGORY = "FXTD STUDIOS/Radiance/VFX"
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -405,6 +405,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceMultipassRelight": "◎ Multipass: Real PBR Relight",
-    "RadianceMultipassComposite": "◎ Multipass: VFX Composite",
+    "RadianceMultipassRelight": "Multipass Relight",
+    "RadianceMultipassComposite": "Multipass Composite",
 }
