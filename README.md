@@ -73,6 +73,36 @@ Windows users can use `requirements_windows.txt`; Apple Silicon users can use `r
 
 Radiance relies on the same PyTorch installation that ComfyUI uses, so install it inside the same Python environment as ComfyUI.
 
+### Models (RUDRA decoders)
+
+The HDR VAE decoders (Turbo and Full) use trained **RUDRA** decoder weights, published on Hugging Face under Apache-2.0: [fxtdstudios/RUDRA](https://huggingface.co/fxtdstudios/RUDRA/tree/main).
+
+Download the `.safetensors` files and place them in your ComfyUI models folder under a `radiance` subfolder — create it if it doesn't exist:
+
+```
+ComfyUI/models/radiance/
+```
+
+Radiance finds the checkpoints there automatically by filename, so keep the original names (for example `rudra_turbo_decoder_flux_ema.safetensors`). Download only the decoders for the models you use:
+
+| Model | Turbo | Full |
+| :--- | :---: | :---: |
+| Flux.1 | `rudra_turbo_decoder_flux_ema` | `rudra_full_decoder_flux_ema` |
+| Flux.2 | `rudra_turbo_decoder_flux2_ema` | — |
+| Flux.2 Klein | `rudra_turbo_decoder_flux2-klein_ema` | — |
+| SDXL | `rudra_turbo_decoder_sdxl_ema` | `rudra_full_decoder_sdxl_ema` |
+| Qwen-Image | `rudra_turbo_decoder_qwen_ema` | — |
+| Z-Image | `rudra_turbo_decoder_zimage_ema` | `rudra_full_decoder_zimage_ema` |
+| Wan | `rudra_turbo_decoder_wan_ema` | `rudra_full_decoder_wan_ema` |
+| LTX-Video | `rudra_turbo_decoder_ltx_ema` | `rudra_full_decoder_ltx-video_ema` |
+
+To fetch everything at once with the Hugging Face CLI:
+
+```bash
+pip install -U "huggingface_hub[cli]"
+huggingface-cli download fxtdstudios/RUDRA --local-dir "ComfyUI/models/radiance"
+```
+
 ### Optional: Gaussian Splatting
 
 Loading, inspecting, editing, and exporting splats (`.ply` / `.splat`) and COLMAP import work out of the box. **Rendering and training** require [`gsplat`](https://github.com/nerfstudio-project/gsplat) and an NVIDIA CUDA GPU:
@@ -93,6 +123,7 @@ pip install gsplat plyfile
 - **Turbo Decoder** — a lightweight, near-realtime decode to scene-linear for fast iteration.
 - **Full Decoder** — a deep decoder for production-quality reconstruction.
 - Both are available through the Radiance HDR VAE Decode node, which also reports the decode settings it used.
+- Decoder weights come from the [RUDRA models](#models-rudra-decoders) — see installation for the download and folder location.
 
 ### HDR LoRA
 
