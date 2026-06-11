@@ -1,5 +1,8 @@
 // ◎ Radiance — Assets manager (dark minimal). Live data from /radiance/assets.
 
+// ALBABIT-FIX: resolve extension base at runtime so asset paths work regardless of the install folder name
+const _EXT_BASE = import.meta.url.replace(/\/[^/]+$/, '');
+
 const API = {
     list: "/radiance/assets",
     bins: "/radiance/assets/bins",
@@ -55,7 +58,7 @@ function Sidebar() {
         </button>`).join("");
     return `
         <aside class="ast-sidebar">
-            <div class="ast-brand"><img src="/extensions/radiance/r_icon.png" alt="Radiance"><span>Radiance</span></div>
+            <div class="ast-brand"><img src="${_EXT_BASE}/r_icon.png" alt="Radiance"><span>Radiance</span></div>
             <div class="ast-label">Library</div>
             <nav class="ast-nav">${libHtml}</nav>
             <div class="ast-label mt">Custom <button class="ast-newbin" data-action="New Bin" title="New bin">+</button></div>

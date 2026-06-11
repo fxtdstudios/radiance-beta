@@ -1,5 +1,8 @@
 import { app } from "../../scripts/app.js";
 
+// ALBABIT-FIX: resolve extension base at runtime so the path works regardless of the install folder name (e.g. "radiance" vs "radiance-beta")
+const _EXT_BASE = import.meta.url.replace(/\/[^/]+$/, '');
+
 /**
  * ═══════════════════════════════════════════════════════════════════════════════
  *                         RADIANCE STUDIO
@@ -103,9 +106,9 @@ app.registerExtension({
                 content: "Open Project Manager",
                 callback: () => {
                     if (window.showRadianceDashboard) {
-                        window.showRadianceDashboard("/extensions/radiance/project_manager_dashboard.html", "Radiance Project Manager");
+                        window.showRadianceDashboard("${_EXT_BASE}/project_manager_dashboard.html", "Radiance Project Manager");
                     } else {
-                        window.open("/extensions/radiance/project_manager_dashboard.html", "_blank");
+                        window.open("${_EXT_BASE}/project_manager_dashboard.html", "_blank");
                     }
                 }
             },
@@ -113,9 +116,9 @@ app.registerExtension({
                 content: "Open Workflow Library",
                 callback: () => {
                     if (window.showRadianceDashboard) {
-                        window.showRadianceDashboard("/extensions/radiance/workspace_dashboard.html", "Radiance Workflow Library");
+                        window.showRadianceDashboard("${_EXT_BASE}/workspace_dashboard.html", "Radiance Workflow Library");
                     } else {
-                        window.open("/extensions/radiance/workspace_dashboard.html", "_blank");
+                        window.open("${_EXT_BASE}/workspace_dashboard.html", "_blank");
                     }
                 }
             },
