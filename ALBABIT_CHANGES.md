@@ -296,3 +296,54 @@ filenames as of June 2026):
 - "Radiance Video Loader" now only lists `Custom` + video presets;
   "Radiance Loader" now only lists `Custom` + image presets, via filtering
   in `INPUT_TYPES` in `nodes_loader.py`.
+
+---
+
+## js/radiance_loader.js, radiance_sampler.js, radiance_resolution.js, radiance_upscale.js — Node resize & widget remount fixes for preset folding
+
+**Problem:** On "Radiance Video Loader", switching presets correctly hid/showed
+widgets but the node box did not shrink/grow to match (leftover empty space or
+clipped widgets). Additionally, after a page reload, or after toggling
+`Custom -> <preset> -> Custom -> <preset>`, all widgets would incorrectly
+re-appear as if the preset were "Custom".
+
+**Root causes & fixes (`radiance_loader.js`):**
+- **Node box not resizing**: `refreshNodeSize` mutated `node.size[i]` directly.
+  This updates LiteGraph's internal model but Vue's resize handling never
+  observes it — the rendered box keeps its old size indefinitely.
+  `node.computeSize()` is already correct synchronously after a widget
+  visibility change (no DOM-timing issue). Fix: `refreshNodeSize` now calls
+  `node.setSize([Math.max(node.size[0], sz[0]), sz[1]])`, the API Vue's resize
+  handling actually reacts to.
+- **Stale widgets after reload / repeated preset toggling**: `_forceWidgetReinsert`
+  (remove+reinsert via `splice`) was only called when a widget transitioned
+  hidden→visible. Empirically, once a widget's Vue component has been
+  (re)mounted, it stops reacting to *any* later `type`/`hidden` mutation via a
+  no-op `splice(0,0)` — it keeps rendering its previous state until reinserted
+  again. Fix: `setWidgetVisible` now calls `_forceWidgetReinsert(widget, node)`
+  unconditionally, in both directions (visible→hidden and hidden→visible), on
+  every call.
+
+**Generalization:** the same two fixes (`setSize` in `refreshNodeSize`,
+unconditional bidirectional `_forceWidgetReinsert` in `setWidgetVisible`) were
+ported to every other JS file with conditionally shown/hidden widgets and a
+node size that can change:
+- `radiance_sampler.js`: `_forceWidgetReinsert` already existed but was called
+  conditionally; now called unconditionally for both directions.
+- `radiance_resolution.js`: `_forceWidgetReinsert` helper added (didn't exist
+  before); outdated header comment claiming in-place `node.size[i]` mutation
+  was "required for Vue reactivity" removed/corrected (v2.4 → v2.5).
+- `radiance_upscale.js`: `_forceWidgetReinsert` helper added.
+
+All four nodes confirmed working (no resize gap, correct folding across
+reload and repeated preset switches) by Albabit.
+
+**Note (not fixed, tracked for later):** `radiance_upscale.js`'s
+`beforeRegisterNodeDef` targets `nodeData.name === "RadianceAIUpscale"`, a node
+type that no longer exists (current upscale nodes are `RadianceUpscaleTiler`,
+`RadianceUpscaleImage`, `RadianceUpscaleVideo`, `RadianceUpscaleFaceRestore`) —
+this file's widget-folding logic is currently dead code. Also,
+`radiance_resolution.js`'s `preset` widget does not drive any widget
+visibility (only `enable_video` and `mp_target` do) — switching resolution
+presets does not fold/unfold any widgets, which is the existing behavior, not
+a regression.

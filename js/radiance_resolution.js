@@ -12,12 +12,14 @@ import { app } from "../../../scripts/app.js";
  *         exactly our node type before registration, avoiding the fragile 10ms
  *         race condition on widget availability.
  *
- * ALBABIT-FIX v2.4: Four-part fix for Nodes 2.0 empty-space bug:
- *   1. setWidgetVisible now takes (widget, visible, node) — node.widgets.splice(0,0)
- *      triggers Vue reactive proxy re-evaluation of options.hidden.
+ * ALBABIT-FIX v2.5: Updated fix for Nodes 2.0 empty-space bug:
+ *   1. setWidgetVisible now takes (widget, visible, node) and unconditionally
+ *      forces a remove+reinsert of the widget in node.widgets via
+ *      _forceWidgetReinsert — a splice(0,0) no-op alone stops working once a
+ *      widget's Vue component has been (re)mounted.
  *   2. computedHeight = 4 (not -4) for hidden widgets — Vue maps this to 0px CSS height.
- *   3. refreshNodeSize uses in-place mutation (node.size[1] = sz[1]) — array replacement
- *      breaks Vue reactivity tracking.
+ *   3. refreshNodeSize uses node.setSize(...) — this is the API Vue's resize
+ *      handling actually observes; raw node.size[i] mutation has zero visual effect.
  *   4. Initial toggleFields deferred 100ms — Vue must complete its first layout pass
  *      BEFORE any widget is hidden, otherwise widget.computedHeight is undefined and
  *      the restore path falls back to 32 (wrong height, causes ghost space on re-show).
@@ -26,8 +28,22 @@ import { app } from "../../../scripts/app.js";
  *          mp_target > 0, alongside the existing video/batch toggle.
  */
 
-// ALBABIT-FIX: node param required so splice can trigger Vue reactive re-evaluation.
-// Nodes 2.0 uses widget.options.hidden to filter widgets from the Vue render list.
+// Force Vue to destroy and recreate a widget's component instance by doing a real
+// remove+re-insert in the reactive array. A splice(0,0) no-op only notifies Vue that
+// the array changed but Vue's vdom differ may reuse the existing component instance
+// (same object reference) and skip re-reading changed properties like `type`.
+// A true remove+insert forces Vue to treat it as a new item → fresh component mount.
+function _forceWidgetReinsert(widget, node) {
+    if (!node?.widgets) return;
+    const idx = node.widgets.indexOf(widget);
+    if (idx === -1) return;
+    node.widgets.splice(idx, 1);          // remove → Vue destroys component instance
+    node.widgets.splice(idx, 0, widget);  // re-insert → Vue creates fresh instance
+}
+
+// ALBABIT-FIX: node param required so we can force a remove+reinsert in Vue's
+// reactive widgets array. Nodes 2.0 uses widget.options.hidden to filter widgets
+// from the Vue render list.
 // (confirmed in ComfyUI frontend source: t.filter(e=>!(e.options?.hidden||...)))
 function setWidgetVisible(widget, visible, node) {
     if (!widget) return;
@@ -66,20 +82,24 @@ function setWidgetVisible(widget, visible, node) {
             widget.computedHeight = 4;
         }
     }
-    // ALBABIT-FIX: splice triggers Vue reactive proxy to re-evaluate options.hidden,
-    // even when widget.type was already "hidden" (e.g. showing a widget on fresh load).
-    if (node?.widgets) node.widgets.splice(0, 0);
+
+    // ALBABIT-FIX: always force a remove+reinsert, even if type/hidden didn't
+    // change this call. Once a widget's Vue component has been (re)mounted, it
+    // stops reacting to later type/hidden changes via a no-op splice(0,0) alone
+    // -- it keeps rendering its previous state until reinserted again. Reinserting
+    // unconditionally guarantees every widget's component reflects its current
+    // state regardless of how many times it toggled before.
+    _forceWidgetReinsert(widget, node);
 }
 
 function refreshNodeSize(node) {
-    // ALBABIT-FIX: in-place element mutation required — replacing node.size with a new
-    // array breaks Vue's reactive tracking of the existing array reference.
-    if (node.computeSize) {
-        const sz = node.computeSize();
-        node.size[0] = Math.max(node.size[0], sz[0]);
-        node.size[1] = sz[1];
-        app.graph.setDirtyCanvas(true, true);
-    }
+    if (!node.computeSize) return;
+
+    const sz = node.computeSize();
+    // ALBABIT-FIX: node.setSize(...) is the API Vue's resize handling actually
+    // observes; raw node.size[i] mutation has zero visual effect.
+    node.setSize([Math.max(node.size[0], sz[0]), sz[1]]);
+    app.graph.setDirtyCanvas(true, true);
 }
 
 app.registerExtension({

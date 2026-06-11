@@ -248,11 +248,6 @@ function setWidgetVisible(widget, visible, node) {
             // so Vue can recompute the real height without ghost-space artefacts.
             widget.computedHeight = widget._origComputedHeight ?? 32;
             delete widget._origComputedHeight;
-            // Force Vue to destroy + recreate the component instance (see comment on
-            // _forceWidgetReinsert). Must run AFTER type/computedHeight are corrected.
-            _forceWidgetReinsert(widget, node);
-        } else {
-            if (node?.widgets) node.widgets.splice(0, 0);
         }
     } else {
         if (widget.type !== "hidden") {
@@ -262,19 +257,27 @@ function setWidgetVisible(widget, visible, node) {
             widget.type = "hidden";
             widget.computeSize = () => [0, -4];
             widget.computedHeight = 4;
-            if (node?.widgets) node.widgets.splice(0, 0);
         }
     }
+
+    // ALBABIT-FIX: always force a remove+reinsert, even if type/hidden didn't
+    // change this call. Once a widget's Vue component has been (re)mounted, it
+    // stops reacting to later type/hidden changes via a no-op splice(0,0) alone
+    // -- it keeps rendering its previous state until reinserted again. Reinserting
+    // unconditionally guarantees every widget's component reflects its current
+    // state regardless of how many times it toggled before.
+    _forceWidgetReinsert(widget, node);
 }
 
-// ── 2. Resize and redraw helper (verbatim from standard radiance_upscale.js) ──
+// ── 2. Resize and redraw helper ──
 function refreshNodeSize(node) {
-    if (node.computeSize) {
-        const sz = node.computeSize();
-        node.size[0] = Math.max(node.size[0], sz[0]);
-        node.size[1] = sz[1]; // Set height directly to let it shrink cleanly!
-        app.graph.setDirtyCanvas(true, true);
-    }
+    if (!node.computeSize) return;
+
+    const sz = node.computeSize();
+    // ALBABIT-FIX: node.setSize(...) is the API Vue's resize handling actually
+    // observes; raw node.size[i] mutation has zero visual effect.
+    node.setSize([Math.max(node.size[0], sz[0]), sz[1]]);
+    app.graph.setDirtyCanvas(true, true);
 }
 
 // ── 3. Dynamic folding logic ──
