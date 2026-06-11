@@ -18,7 +18,19 @@ import { app } from "../../../scripts/app.js";
 // ALBABIT-FIX: SUPIR model name identifiers — must match _SUPIR_MODELS in upscale.py.
 const SUPIR_MODEL_NAMES = ["SUPIR-v0F_fp16", "SUPIR-v0Q_fp16"];
 
-// Copied verbatim from radiance_io.js — shared pattern across all Radiance JS extensions.
+// Force Vue to destroy and recreate a widget's component instance by doing a real
+// remove+re-insert in the reactive array. A splice(0,0) no-op only notifies Vue that
+// the array changed but Vue's vdom differ may reuse the existing component instance
+// (same object reference) and skip re-reading changed properties like `type`.
+// A true remove+insert forces Vue to treat it as a new item → fresh component mount.
+function _forceWidgetReinsert(widget, node) {
+	if (!node?.widgets) return;
+	const idx = node.widgets.indexOf(widget);
+	if (idx === -1) return;
+	node.widgets.splice(idx, 1);          // remove → Vue destroys component instance
+	node.widgets.splice(idx, 0, widget);  // re-insert → Vue creates fresh instance
+}
+
 function setWidgetVisible(widget, visible, node) {
 	if (!widget) return;
 
@@ -60,16 +72,24 @@ function setWidgetVisible(widget, visible, node) {
 			widget.computedHeight = 4;
 		}
 	}
-	if (node?.widgets) node.widgets.splice(0, 0);
+
+	// ALBABIT-FIX: always force a remove+reinsert, even if type/hidden didn't
+	// change this call. Once a widget's Vue component has been (re)mounted, it
+	// stops reacting to later type/hidden changes via a no-op splice(0,0) alone
+	// -- it keeps rendering its previous state until reinserted again. Reinserting
+	// unconditionally guarantees every widget's component reflects its current
+	// state regardless of how many times it toggled before.
+	_forceWidgetReinsert(widget, node);
 }
 
 function refreshNodeSize(node) {
-	if (node.computeSize) {
-		const sz = node.computeSize();
-		node.size[0] = Math.max(node.size[0], sz[0]);
-		node.size[1] = sz[1];
-		app.graph.setDirtyCanvas(true, true);
-	}
+	if (!node.computeSize) return;
+
+	const sz = node.computeSize();
+	// ALBABIT-FIX: node.setSize(...) is the API Vue's resize handling actually
+	// observes; raw node.size[i] mutation has zero visual effect.
+	node.setSize([Math.max(node.size[0], sz[0]), sz[1]]);
+	app.graph.setDirtyCanvas(true, true);
 }
 
 app.registerExtension({

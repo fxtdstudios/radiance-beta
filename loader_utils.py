@@ -14,7 +14,7 @@ import logging
 import tqdm
 import folder_paths
 
-from radiance.config.model_map import RADIANCE_MODEL_MAP, CHECKPOINT_PRESETS
+from radiance.config.model_map import RADIANCE_MODEL_MAP, CHECKPOINT_PRESETS, VIDEO_PRESET_NAMES
 from radiance.model.detect import (
     detect_model_type,
     latent_format,
