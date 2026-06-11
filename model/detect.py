@@ -33,14 +33,15 @@ _ARCH_HEURISTICS = [
 ]
 
 LATENT_CHANNELS = {
-    "flux": 16, "sd3": 16, "sd3.5": 16, "ltx": 16, "ltxav": 16,
+    # ALBABIT-FIX: LTX-Video VAE (incl. LTX 2.3) uses 128 latent channels, not 16
+    "flux": 16, "sd3": 16, "sd3.5": 16, "ltx": 128, "ltxav": 128,
     "hunyuan_video": 16, "wan": 16, "lumina2": 16, "z_image": 16,
     "sdxl": 4, "sd1.5": 4, "pixart": 4, "aura_flow": 4, "kolors": 4,
 }
 
 _FORMAT_MAP = {
     "flux": "flux_16ch", "sd3": "sd3_16ch", "sd3.5": "sd3_16ch",
-    "ltx": "ltx_16ch", "ltxav": "ltx_16ch",
+    "ltx": "ltx_128ch", "ltxav": "ltx_128ch",  # ALBABIT-FIX: match 128ch VAE
     "hunyuan_video": "hunyuan_16ch", "wan": "wan_16ch",
     "lumina2": "lumina_16ch", "z_image": "z_image_16ch",
     "sdxl": "sd_4ch", "sd1.5": "sd_4ch", "pixart": "sd_4ch",
