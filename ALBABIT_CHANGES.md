@@ -130,3 +130,18 @@ family ("flux", "wan", "ltxv", "ltxav", "hunyuan_video", etc.) to the
 When the user switches **to None or Custom** (via the preset dropdown or via
 a manual widget edit that auto-switches to Custom), `model_type` is reset to
 `"auto"` so the widget reflects that no specific model family is locked.
+
+---
+
+## model/detect.py — LTX latent channel count fix
+
+**Problem:** `LATENT_CHANNELS` and `_FORMAT_MAP` listed `"ltx"` and `"ltxav"`
+as 16-channel (`"ltx_16ch"`), but the LTX-Video VAE (including LTX 2.3) uses
+128 latent channels. This did not break model loading (the real MODEL/VAE
+come from the checkpoint), but the `model_meta` JSON output from
+`RadianceUnifiedLoader` reported `latent_ch: 16` / `latent_format: "ltx_16ch"`
+for any LTX model — incorrect info for downstream QC/analytics nodes.
+
+**Fix:** `LATENT_CHANNELS["ltx"]` and `["ltxav"]` set to `128`;
+`_FORMAT_MAP["ltx"]` and `["ltxav"]` set to `"ltx_128ch"`, matching
+`config/model_map.py`'s `MODEL_VAE_CONFIG["ltx-video"]`.
