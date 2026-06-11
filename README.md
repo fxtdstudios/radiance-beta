@@ -72,6 +72,10 @@ Windows users can use `requirements_windows.txt`; Apple Silicon users can use `r
 
 Radiance relies on the same PyTorch installation that ComfyUI uses, so install it inside the same Python environment as ComfyUI.
 
+### Example workflow
+
+To get started quickly, drag [`workflows/start.json`](workflows/start.json) onto the ComfyUI canvas — a ready-made graph wiring the Radiance loader, Sampler Pro, HDR VAE decode, and viewers end to end.
+
 ### Models (RUDRA decoders)
 
 The HDR VAE decoders (Turbo and Full) use trained **RUDRA** decoder weights, published on Hugging Face under Apache-2.0: [fxtdstudios/RUDRA](https://huggingface.co/fxtdstudios/RUDRA/tree/main).
