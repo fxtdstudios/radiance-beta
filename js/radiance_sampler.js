@@ -174,15 +174,24 @@ function getPresetConfig(name) {
 }
 
 function resolveModelType(presetVal, modelTypeVal) {
-    if (modelTypeVal && modelTypeVal !== "auto") return modelTypeVal;
+    // ALBABIT-FIX: prioritise preset name FIRST — it is always more reliable than
+    // modelTypeVal, which may carry a stale backend default ("ltxav") from an earlier
+    // LTX workflow, causing Flux/WAN presets to be falsely classified as isLTX and
+    // hiding flux_guidance / tile widgets even for non-LTX presets.
     const p = (presetVal || "").toLowerCase();
-    if (LTX_PRESETS.includes(presetVal) || p.includes("ltx")) return "ltxav";
+    if (LTX_PRESETS.includes(presetVal) || p.includes("ltx 2.3")) return "ltxav";
+    if (p.includes("ltx"))      return "ltxv";
     if (p.includes("wan"))      return "wan";
     if (p.includes("hunyuan"))  return "hunyuan_video";
     if (p.includes("z_image"))  return "z_image";
     if (p.includes("lumina"))   return "lumina2";
     if (p.includes("sd3.5") || p.includes("sd35")) return "sd35";
-    if (p.includes("flux"))     return "flux";
+    if (p.includes("flux") || p.includes("schnell") || p.includes("draft") ||
+        p.includes("fast")    || p.includes("balanced") || p.includes("quality") ||
+        p.includes("cinema")  || p.includes("txt2img")  || p.includes("img2img") ||
+        p.includes("inpaint") || p.includes("high-res")) return "flux";
+    // Preset name didn't match a known model family: fall back to the widget value
+    if (modelTypeVal && modelTypeVal !== "auto") return modelTypeVal;
     return "auto";
 }
 
@@ -197,49 +206,65 @@ const LTX_INCOMPATIBLE_WIDGETS = [
     "tile_blend"
 ];
 
-// ── 1. Widget visibility helper (verbatim from standard radiance_io.js / radiance_upscale.js pattern) ──
+// ── 1. Widget visibility helpers ──
+// ALBABIT-FIX: three-mechanism pattern for Nodes 2.0 + Legacy LiteGraph:
+//   1. widget.options.hidden  — Nodes 2.0 Vue filter
+//   2. widget.hidden          — LiteGraph getLayoutWidgets() exclusion
+//   3. widget.type="hidden" + computeSize=[0,-4] + computedHeight=4 — physical height collapse
+
+// Force Vue to destroy and recreate a widget's component instance by doing a real
+// remove+re-insert in the reactive array. A splice(0,0) no-op only notifies Vue that
+// the array changed but Vue's vdom differ may reuse the existing component instance
+// (same object reference) and skip re-reading changed properties like `type`.
+// A true remove+insert forces Vue to treat it as a new item → fresh component mount.
+function _forceWidgetReinsert(widget, node) {
+    if (!node?.widgets) return;
+    const idx = node.widgets.indexOf(widget);
+    if (idx === -1) return;
+    node.widgets.splice(idx, 1);          // remove → Vue destroys component instance
+    node.widgets.splice(idx, 0, widget);  // re-insert → Vue creates fresh instance
+}
+
 function setWidgetVisible(widget, visible, node) {
     if (!widget) return;
 
     if (!widget.options) widget.options = {};
     widget.options.hidden = !visible;
-
     widget.hidden = !visible;
+
     if (visible) {
         if (widget.type === "hidden") {
-            widget.type = widget._origType || "text";
-            delete widget.computeSize;
+            widget.type = widget._origType || "number";
+            if (widget._origComputeSize !== undefined) {
+                widget.computeSize = widget._origComputeSize;
+            } else {
+                delete widget.computeSize;
+            }
             delete widget._origComputeSize;
-            if (widget._origDraw !== undefined) {
-                widget.draw = widget._origDraw;
-                delete widget._origDraw;
-            } else {
-                delete widget.draw;
-            }
-            if (widget.inputEl) widget.inputEl.style.display = "";
-            if (widget.element)  widget.element.style.display  = "";
-            if (widget._origComputedHeight !== undefined) {
-                widget.computedHeight = widget._origComputedHeight;
-                delete widget._origComputedHeight;
-            } else {
-                widget.computedHeight = 32;
-            }
+            // ALBABIT-FIX: set a positive default height BEFORE reinserting so Vue
+            // renders the widget at a valid size on first mount (undefined → "undefinedpx"
+            // in CSS collapses to 0 on page load when Vue hasn't computed heights yet).
+            // The deferred cleanup in toggleFields() deletes this after Vue's first pass
+            // so Vue can recompute the real height without ghost-space artefacts.
+            widget.computedHeight = widget._origComputedHeight ?? 32;
+            delete widget._origComputedHeight;
+            // Force Vue to destroy + recreate the component instance (see comment on
+            // _forceWidgetReinsert). Must run AFTER type/computedHeight are corrected.
+            _forceWidgetReinsert(widget, node);
+        } else {
+            if (node?.widgets) node.widgets.splice(0, 0);
         }
     } else {
         if (widget.type !== "hidden") {
-            widget._origType        = widget.type;
+            widget._origType = widget.type;
             widget._origComputeSize = widget.computeSize;
             widget._origComputedHeight = widget.computedHeight;
             widget.type = "hidden";
             widget.computeSize = () => [0, -4];
-            if (widget.draw) widget._origDraw = widget.draw;
-            widget.draw = function() {};
-            if (widget.inputEl) widget.inputEl.style.display = "none";
-            if (widget.element)  widget.element.style.display  = "none";
             widget.computedHeight = 4;
+            if (node?.widgets) node.widgets.splice(0, 0);
         }
     }
-    if (node?.widgets) node.widgets.splice(0, 0);
 }
 
 // ── 2. Resize and redraw helper (verbatim from standard radiance_upscale.js) ──
@@ -281,6 +306,23 @@ function toggleFields(node) {
     if (!node.widgets) return;
     applyFolding(node);
     auditSamplerWidgets(node);
+    // ALBABIT-FIX: after Vue processes this render cycle, clear the synthetic
+    // computedHeight = 32 we set so Vue can recompute the real per-widget height.
+    // The 32 was needed as a safe initial value for the _forceWidgetReinsert mount;
+    // after Vue's first layout pass the value would be wrong if the real height ≠ 32.
+    setTimeout(() => {
+        if (!node.widgets) return;
+        let changed = false;
+        node.widgets.forEach(w => {
+            if (!w.options?.hidden && !w.hidden && w.type !== "hidden") {
+                if (w.computedHeight === 32) {
+                    delete w.computedHeight;
+                    changed = true;
+                }
+            }
+        });
+        if (changed) node.widgets.splice(0, 0);
+    }, 50);
 }
 
 function applyFolding(node) {
@@ -307,13 +349,21 @@ function applyFolding(node) {
         return;
     }
 
-    // ── Custom: full manual control → SHOW EVERYTHING, no conditional folding ──
+    // ── Custom: full manual control → show everything, only tile sub-options follow tile_mode ──
     if (isCustom) {
         node.widgets.forEach(w => {
             const hide = (w.name === "preset_info") || dummyWidgets.includes(w.name);
             setWidgetVisible(w, !hide, node);
         });
         if (controlAfterW) setWidgetVisible(controlAfterW, true, node);
+        // ALBABIT-FIX: tile sub-options are meaningless when tile_mode is off — keep them
+        // hidden in Custom too so the UI stays uncluttered. tile_mode callback triggers
+        // toggleFields, so toggling tile_mode immediately shows/hides these.
+        const tileModeW = find("tile_mode");
+        const isTiled = tileModeW && tileModeW.value === true;
+        setWidgetVisible(find("tile_size"),    isTiled, node);
+        setWidgetVisible(find("tile_overlap"), isTiled, node);
+        setWidgetVisible(find("tile_blend"),   isTiled, node);
         refreshNodeSize(node);
         return;
     }
@@ -415,6 +465,24 @@ function updateUILocks(node, presetName) {
     node.setDirtyCanvas(true, true);
 }
 
+// ALBABIT-FIX: infer the model_type that best matches the preset name, used when
+// the preset config doesn't explicitly include model_type. Mirrors resolveModelType
+// so the UI widget reflects the model family the preset targets.
+function inferModelTypeForPreset(presetName) {
+    if (LTX_PRESETS.includes(presetName)) return "ltxav";
+    const p = (presetName || "").toLowerCase();
+    if (p.includes("ltx 2.3") || p.includes("ltxav")) return "ltxav";
+    if (p.includes("ltx"))      return "ltxv";
+    if (p.includes("wan"))      return "wan";
+    if (p.includes("hunyuan"))  return "hunyuan_video";
+    if (p.includes("z_image"))  return "z_image";
+    if (p.includes("lumina"))   return "lumina2";
+    if (p.includes("sd3.5") || p.includes("sd35")) return "sd35";
+    if (p.includes("flux") || p.includes("draft") || p.includes("fast") ||
+        p.includes("balanced") || p.includes("quality") || p.includes("cinema")) return "flux";
+    return null;  // unknown, leave unchanged
+}
+
 function applyPreset(node, presetName) {
     if (presetName === "None" || presetName === "Custom") return;
 
@@ -428,6 +496,17 @@ function applyPreset(node, presetName) {
     for (const widget of widgets) {
         if (config[widget.name] !== undefined) {
             widget.value = config[widget.name];
+        }
+    }
+
+    // ALBABIT-FIX: ensure model_type matches the preset's model family so
+    // resolveModelType (which returns early if model_type != "auto") picks the
+    // correct effective model and doesn't falsely flag Flux presets as isLTX.
+    if (!config.model_type) {
+        const inferred = inferModelTypeForPreset(presetName);
+        if (inferred) {
+            const modelTypeW = widgets.find(w => w.name === "model_type");
+            if (modelTypeW) modelTypeW.value = inferred;
         }
     }
 
@@ -726,6 +805,12 @@ app.registerExtension({
                     toggleFields(this);
                 } else if (value !== lastPresetValue) {
                     lastPresetValue = value;
+                    // ALBABIT-FIX: reset model_type to "auto" on manual switch to None/Custom
+                    // (named presets set it via applyPreset/inferModelTypeForPreset above)
+                    if (value === "None" || value === "Custom") {
+                        const modelTypeW = this.widgets?.find(w => w.name === "model_type");
+                        if (modelTypeW) modelTypeW.value = "auto";
+                    }
                     updateUILocks(this, value);
                     updateDescription(value);
                     toggleFields(this);
@@ -749,6 +834,9 @@ app.registerExtension({
                         console.log(`[Radiance Sampler] Manual override detected on '${property}'. Switching to Custom.`);
                         pWidget.value = "Custom";
                         lastPresetValue = "Custom";
+                        // ALBABIT-FIX: reset model_type to "auto" on auto-switch to Custom
+                        const modelTypeW = this.widgets?.find(w => w.name === "model_type");
+                        if (modelTypeW) modelTypeW.value = "auto";
                         updateUILocks(this, "Custom");
                         updateDescription("Custom");
                         toggleFields(this);
@@ -778,44 +866,52 @@ app.registerExtension({
                 toggleFields(this);
             };
 
-            // Initialize UI immediately (for drag-and-drop / instant start)
+            // Initialize UI state immediately (safe — no widget visibility changes)
             const val = presetWidget.value;
             if (val) {
                 lastPresetValue = val;
                 updateUILocks(this, val);
                 updateDescription(val);
             }
-            toggleFields(this);
 
-            // Re-run in a short timeout to handle post-construction/layout changes (e.g. loaded workflows)
+            // ALBABIT-FIX: _configuredByLoad is set in onConfigure (loaded workflow).
+            // For a loaded node, onConfigure fires right after onNodeCreated with correct values;
+            // its 150ms timer handles initial folding so we skip this one to avoid a race where
+            // this fires while configure() is still running (large workflows take > 100ms).
+            // For a freshly added node, onConfigure never fires, so this timer is the only one.
+            const nodeRef = this;
             setTimeout(() => {
+                if (nodeRef._configuredByLoad) return;
                 const val = presetWidget.value;
                 if (val) {
                     lastPresetValue = val;
-                    updateUILocks(this, val);
+                    updateUILocks(nodeRef, val);
                     updateDescription(val);
                 }
-                toggleFields(this);
-            }, 100);
+                toggleFields(nodeRef);
+            }, 150);
         };
 
         // Re-apply folding after a saved workflow restores this node. onNodeCreated
         // runs BEFORE ComfyUI deserializes widget values, so the preset value isn't
         // known at creation time; without this hook a node saved with a non-None
-        // preset (or in Custom mode) could load stuck-collapsed. toggleFields and
-        // updateUILocks are module-level, so they are safe to call here.
+        // preset (or in Custom mode) could load stuck-collapsed.
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (info) {
             if (onConfigure) onConfigure.apply(this, arguments);
             const self = this;
+            // ALBABIT-FIX: signal to the onNodeCreated timer that onConfigure ran,
+            // so the timer skips and avoids a potential race with in-progress configuration.
+            self._configuredByLoad = true;
             const reapply = () => {
                 const presetW = self.widgets?.find(w => w.name === "preset");
                 if (presetW) updateUILocks(self, presetW.value);
                 toggleFields(self);
             };
-            requestAnimationFrame(reapply);  // after graph finishes configuring
-            setTimeout(reapply, 50);         // belt-and-suspenders
-            setTimeout(reapply, 250);        // final pass for slow/late widget restore
+            // ALBABIT-FIX: 150ms for Vue's first layout pass; 600ms safety net for
+            // heavy workflows where graph.configure() stalls the main thread > 100ms.
+            setTimeout(reapply, 150);
+            setTimeout(reapply, 600);
         };
     }
 });
