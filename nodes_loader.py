@@ -253,6 +253,11 @@ class RadianceUnifiedLoader:
     )
 
     @staticmethod
+    def _load_vae_sd_metadata(vae_path):
+        # ALBABIT-FIX: base loader does not need VAE metadata.
+        return comfy.utils.load_torch_file(vae_path), None
+
+    @staticmethod
     def _apply_preset_override(cfg, field, key, cur, overrides):
         new = cfg.get(key, cur)
         if new != cur:
@@ -502,8 +507,8 @@ class RadianceUnifiedLoader:
             info_lines.append(f"VAE: {vae_name} (cached)")
         else:
             try:
-                sd  = comfy.utils.load_torch_file(vae_path)
-                vae = comfy.sd.VAE(sd=sd)
+                sd, vae_metadata = self._load_vae_sd_metadata(vae_path)
+                vae = comfy.sd.VAE(sd=sd, metadata=vae_metadata)
                 vae_time = time.time() - t0
                 logger.info(f"VAE loaded {divider} {vae_name} {divider} {vae_time:.1f}s")
                 info_lines.append(f"VAE: {vae_name} ({vae_time:.1f}s)")
@@ -619,8 +624,17 @@ class RadianceUnifiedLoader:
 
 
 class RadianceVideoLoader(RadianceUnifiedLoader):
-    """Alias — identical to RadianceUnifiedLoader. Kept for backward compatibility."""
-    pass
+    """Video-oriented loader (LTX, Wan, HunyuanVideo, ...). Currently identical
+    to RadianceUnifiedLoader except for VAE loading, which also reads the
+    .safetensors metadata so ComfyUI can pick the correct internal VAE
+    architecture (e.g. LTX 2.3's video VAE)."""
+
+    @staticmethod
+    def _load_vae_sd_metadata(vae_path):
+        # ALBABIT-FIX: read metadata so comfy.sd.VAE selects the correct
+        # internal config (e.g. LTX 2.3 video VAE) instead of falling back
+        # to the default config and raising a state_dict size mismatch.
+        return comfy.utils.load_torch_file(vae_path, return_metadata=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

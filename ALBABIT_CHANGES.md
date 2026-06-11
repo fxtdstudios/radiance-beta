@@ -145,3 +145,34 @@ for any LTX model — incorrect info for downstream QC/analytics nodes.
 **Fix:** `LATENT_CHANNELS["ltx"]` and `["ltxav"]` set to `128`;
 `_FORMAT_MAP["ltx"]` and `["ltxav"]` set to `"ltx_128ch"`, matching
 `config/model_map.py`'s `MODEL_VAE_CONFIG["ltx-video"]`.
+
+---
+
+## nodes_loader.py — RadianceVideoLoader: LTX 2.3 VAE size mismatch fix
+
+**Problem:** Loading `LTX23_video_vae_bf16.safetensors` with "Radiance Video
+Loader" raised:
+```
+RuntimeError: Failed to load VAE 'LTX23_video_vae_bf16.safetensors':
+Error(s) in loading state_dict for VideoVAE: size mismatch for ...
+```
+
+**Root cause:** The VAE was loaded via `comfy.utils.load_torch_file(vae_path)`
+(no metadata) and `comfy.sd.VAE(sd=sd)`. Without the file's metadata,
+`comfy.sd.VAE` cannot read the VAE's internal architecture config (`config`
+key in the safetensors metadata) and falls back to a default internal layout
+that doesn't match LTX 2.3's video VAE, causing a state_dict size mismatch
+when loading the encoder/decoder weights. (Note: this is unrelated to the
+128 latent channels, which is correct and unchanged for LTX/LTX 2.3.)
+
+**Fix:** Added `_load_vae_sd_metadata(vae_path)`:
+- `RadianceUnifiedLoader` (image loader): unchanged behaviour —
+  `comfy.utils.load_torch_file(vae_path)`, no metadata.
+- `RadianceVideoLoader` (video loader): overrides it to use
+  `comfy.utils.load_torch_file(vae_path, return_metadata=True)`, so
+  `comfy.sd.VAE(sd=sd, metadata=metadata)` picks the correct internal VAE
+  architecture for LTX 2.3.
+
+Verified: "Radiance Video Loader" now loads `ltx-2.3-22b-dev.safetensors` +
+`LTX23_video_vae_bf16.safetensors` successfully, with `model_meta` reporting
+`"latent_ch": 128, "latent_format": "ltx_128ch"`.
