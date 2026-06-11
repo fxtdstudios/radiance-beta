@@ -41,6 +41,11 @@ import numpy as np
 import torch
 
 try:
+    from .config.constants import VERSION as _RADIANCE_VERSION
+except Exception:  # keep the writer importable even if constants move
+    _RADIANCE_VERSION = "3.1.1"
+
+try:
     from PIL import Image as _PIL
     _HAS_PIL = True
 except ImportError:
@@ -721,6 +726,11 @@ def _save_exr(arr_f32: np.ndarray, path: Path, half: bool) -> None:
         h, w = arr_f32.shape[:2]
         pixel_type = Imath.PixelType(Imath.PixelType.HALF if half else Imath.PixelType.FLOAT)
         hdr = OpenEXR.Header(w, h)
+        try:
+            hdr["rad_version"] = _RADIANCE_VERSION
+            hdr["software"] = f"Radiance v{_RADIANCE_VERSION}"
+        except Exception:
+            pass  # header stamp is best-effort; never block the EXR write
         hdr["channels"] = {name: Imath.Channel(pixel_type) for name, _ in channels}
         out = OpenEXR.OutputFile(str(path), hdr)
         try:
@@ -1578,7 +1588,8 @@ class RadianceEXRMultiPart:
                 )
 
         meta: Dict[str, Any] = {
-            "software": "Radiance v3.1",
+            "software": f"Radiance v{_RADIANCE_VERSION}",
+            "rad_version": _RADIANCE_VERSION,
             "created":  datetime.datetime.now().isoformat(),
         }
         for line in custom_metadata.strip().split("\n"):

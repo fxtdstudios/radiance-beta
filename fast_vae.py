@@ -106,23 +106,19 @@ class RadianceTurboDecoder(nn.Module):
     Inference: ~4ms on A100 for a 64×64 latent → 512×512 output (fp16)
     """
 
-    def __init__(self, latent_channels: int = 16, output_channels: int = 3):
+    def __init__(self, latent_channels: int = 16, output_channels: int = 3, n_upsample: int = 3):
         super().__init__()
         self.latent_channels = latent_channels
-        self.layers = nn.Sequential(
-            nn.Conv2d(latent_channels, 64, 3, padding=1),
-            Block(64, 64),
-            nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(64, 64, 3, padding=1),
-            Block(64, 64),
-            nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(64, 64, 3, padding=1),
-            Block(64, 64),
-            nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(64, 64, 3, padding=1),
-            Block(64, 64),
-            nn.Conv2d(64, output_channels, 3, padding=1),
-        )
+        self.n_upsample = n_upsample
+        # n_upsample stages of ×2 → total upscale 2**n_upsample. Default 3 = 8×
+        # (reproduces the original fixed layer order, so old checkpoints load).
+        # Klein etc. (16× VAE) use n_upsample=4.
+        layers = [nn.Conv2d(latent_channels, 64, 3, padding=1), Block(64, 64)]
+        for _ in range(n_upsample):
+            layers += [nn.Upsample(scale_factor=2, mode="nearest"),
+                       nn.Conv2d(64, 64, 3, padding=1), Block(64, 64)]
+        layers += [nn.Conv2d(64, output_channels, 3, padding=1)]
+        self.layers = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.layers(x)
@@ -139,26 +135,18 @@ class RadianceFullDecoder(nn.Module):
     Parameters: ~32M (flux 16ch), ~28M (sdxl 4ch)
     """
 
-    def __init__(self, latent_channels: int = 16, output_channels: int = 3):
+    def __init__(self, latent_channels: int = 16, output_channels: int = 3, n_upsample: int = 3):
         super().__init__()
         self.latent_channels = latent_channels
-        self.layers = nn.Sequential(
-            nn.Conv2d(latent_channels, 128, 3, padding=1),
-            BlockFull(128, 128),
-            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
-            nn.Conv2d(128, 128, 3, padding=1),
-            BlockFull(128, 128),
-            BlockFull(128, 128),
-            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
-            nn.Conv2d(128, 128, 3, padding=1),
-            BlockFull(128, 128),
-            BlockFull(128, 128),
-            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
-            nn.Conv2d(128, 128, 3, padding=1),
-            BlockFull(128, 128),
-            BlockFull(128, 128),
-            nn.Conv2d(128, output_channels, 3, padding=1),
-        )
+        self.n_upsample = n_upsample
+        # Default 3 = 8× and reproduces the original layer order (old checkpoints
+        # load). 16× backbones (Flux.2 Klein) use n_upsample=4.
+        layers = [nn.Conv2d(latent_channels, 128, 3, padding=1), BlockFull(128, 128)]
+        for _ in range(n_upsample):
+            layers += [nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+                       nn.Conv2d(128, 128, 3, padding=1), BlockFull(128, 128), BlockFull(128, 128)]
+        layers += [nn.Conv2d(128, output_channels, 3, padding=1)]
+        self.layers = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.layers(x)
@@ -332,8 +320,12 @@ def load_radiance_decoder_weights(
 
     Returns initialised nn.Module in eval mode.
     """
+    import math as _math
     cfg = resolve_model_vae_config(model_type)
     expected_channels = cfg.get("latent_channels", 16) if cfg else 16
+    # Number of ×2 upsample stages = log2(VAE spatial factor). 8× → 3, 16× → 4.
+    _spatial = cfg.get("vae_spatial_factor", 8) if cfg else 8
+    n_upsample = max(1, int(round(_math.log2(_spatial))))
     # Accept "full" or the node's dropdown value "rudra_full" (substring match) —
     # an exact "== full" check silently built the Turbo arch for rudra_full and
     # then failed the strict load of full-decoder weights.
@@ -347,9 +339,9 @@ def load_radiance_decoder_weights(
         return _TRAINED_DECODER_CACHE[cache_key]
 
     if request_is_full:
-        model = RadianceFullDecoder(latent_channels=expected_channels)
+        model = RadianceFullDecoder(latent_channels=expected_channels, n_upsample=n_upsample)
     else:
-        model = RadianceTurboDecoder(latent_channels=expected_channels)
+        model = RadianceTurboDecoder(latent_channels=expected_channels, n_upsample=n_upsample)
 
     # Resolve checkpoint path
     ckpt_path = checkpoint_path or _ENV_CKPT
