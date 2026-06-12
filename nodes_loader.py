@@ -153,6 +153,8 @@ MODEL_TYPES = [
     "hunyuan_video", "wan", "ltx",
     "lumina2", "z_image",
     "pixart", "aura_flow", "kolors",
+    # ALBABIT-FIX: Cosmos / CogVideoX / Mochi — match Resolution/Sampler model types
+    "cosmos", "cogvideox", "mochi",
 ]
 
 WEIGHT_DTYPES = ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"]

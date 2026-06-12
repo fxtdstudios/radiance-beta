@@ -37,6 +37,8 @@ LATENT_CHANNELS = {
     "flux": 16, "sd3": 16, "sd3.5": 16, "ltx": 128, "ltxav": 128,
     "hunyuan_video": 16, "wan": 16, "lumina2": 16, "z_image": 16,
     "sdxl": 4, "sd1.5": 4, "pixart": 4, "aura_flow": 4, "kolors": 4,
+    # ALBABIT-FIX: Cosmos / CogVideoX / Mochi latent channels
+    "cosmos": 16, "cogvideox": 16, "mochi": 12,
 }
 
 _FORMAT_MAP = {
@@ -46,6 +48,8 @@ _FORMAT_MAP = {
     "lumina2": "lumina_16ch", "z_image": "z_image_16ch",
     "sdxl": "sd_4ch", "sd1.5": "sd_4ch", "pixart": "sd_4ch",
     "aura_flow": "sd_4ch", "kolors": "sd_4ch",
+    # ALBABIT-FIX: Cosmos / CogVideoX / Mochi latent formats
+    "cosmos": "cosmos_16ch", "cogvideox": "cogvideox_16ch", "mochi": "mochi_12ch",
 }
 
 CLIP_SLOT_ORDER = {
@@ -63,6 +67,8 @@ CLIP_SLOT_ORDER = {
     "pixart": ["t5xxl"],
     "aura_flow": ["clip_l"],
     "kolors": ["llm_encoder"],
+    # ALBABIT-FIX: Cosmos / CogVideoX / Mochi all use a single T5XXL text encoder
+    "cosmos": ["t5xxl"], "cogvideox": ["t5xxl"], "mochi": ["t5xxl"],
 }
 
 _CLIP_TYPE_VARIANTS = {
@@ -77,6 +83,8 @@ _BASE_CLIP_VRAM = {
     "flux": 4.5, "sd3": 3.0, "sd3.5": 3.5, "sdxl": 1.5, "sd1.5": 0.8,
     "hunyuan_video": 4.5, "wan": 3.0, "ltx": 2.5, "ltxav": 8.0,
     "pixart": 2.0, "aura_flow": 2.0, "kolors": 3.0, "lumina2": 3.0, "z_image": 3.0,
+    # ALBABIT-FIX: Cosmos / CogVideoX / Mochi — single T5XXL encoder, similar to Wan
+    "cosmos": 3.0, "cogvideox": 3.0, "mochi": 3.0,
 }
 
 _DTYPE_MULT = {
@@ -95,6 +103,8 @@ _BASE_VRAM = {
     "hunyuan_video": 20.0, "wan": 14.0, "ltx": 11.0, "ltxav": 15.0,
     "pixart": 6.0, "aura_flow": 8.0, "kolors": 8.0,
     "lumina2": 12.0, "z_image": 14.0,
+    # ALBABIT-FIX: Cosmos / CogVideoX / Mochi base VRAM estimates
+    "cosmos": 14.0, "cogvideox": 12.0, "mochi": 16.0,
 }
 
 
@@ -145,7 +155,9 @@ def get_clip_type_enum(model_type: str):
         "sd1.5": comfy.sd.CLIPType.STABLE_DIFFUSION,
     }
 
-    for name in ("hunyuan_video", "wan", "ltx", "ltxav", "pixart", "aura_flow", "kolors", "lumina2", "z_image"):
+    # ALBABIT-FIX: Cosmos / CogVideoX / Mochi resolve via CLIPType.{COSMOS,COGVIDEOX,MOCHI}
+    for name in ("hunyuan_video", "wan", "ltx", "ltxav", "pixart", "aura_flow", "kolors", "lumina2", "z_image",
+                  "cosmos", "cogvideox", "mochi"):
         enum_name = name.upper().replace(".", "_")
         auto_variants = [enum_name, name.upper(), name.title().replace("_", "")]
         extra = _CLIP_TYPE_VARIANTS.get(name, [])

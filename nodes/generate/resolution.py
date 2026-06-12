@@ -100,14 +100,18 @@ LATENT_FORMAT_MAP = {
     "Auto (Flux 16ch)": "flux",
     "Flux / SD3 (16ch)": "flux",
     "SDXL / SD 1.5 (4ch)": "sdxl",
-    "Cosmos (16ch)": "flux",
-    "CogVideoX (16ch)": "flux",
-    "Mochi (12ch)": "flux",
-    # ALBABIT-FIX: LTX-Video latent format
-    "LTXV (128ch)": "ltx",
+    # ALBABIT-FIX: Cosmos/CogVideoX/Mochi map to their own sampler model_type
+    # (matches sampler_utils.py keys) instead of being aliased to "flux"
+    "Cosmos (16ch)": "cosmos",
+    "CogVideoX (16ch)": "cogvideox",
+    "Mochi (12ch)": "mochi",
+    # ALBABIT-FIX: LTX-Video latent format. "ltxav" (not "ltx") to match the
+    # LTX 2.3 model_type key used by RadianceSamplerPro (sampler_utils.py).
+    "LTXV (128ch)": "ltxav",
     # ALBABIT-FIX: Added model types matching the Radiance Video Loader / RUDRA decoder set
     "WAN (16ch)": "wan",
-    "HunyuanVideo (16ch)": "hunyuan",
+    # ALBABIT-FIX: "hunyuan_video" (not "hunyuan") to match sampler_utils.py model_type
+    "HunyuanVideo (16ch)": "hunyuan_video",
     "Lumina2 / Z-Image (16ch)": "flux",
     "PixArt / Aura Flow / Kolors (4ch)": "sdxl",
     # ALBABIT-FIX: Flux.2 latent format (comfy.latent_formats.Flux2)
@@ -118,10 +122,11 @@ LATENT_FORMAT_MAP = {
 VIDEO_LATENT_FORMAT_MAP = {
     "WAN Video": "wan",
     "WAN 2.1": "wan",
-    "LTX Video": "ltx",
-    "HunyuanVideo": "hunyuan",
-    "Hunyuan I2V": "hunyuan",
-    "CogVideoX": "flux",
+    # ALBABIT-FIX: aligned with sampler_utils.py model_type keys ("ltxav"/"hunyuan_video")
+    "LTX Video": "ltxav",
+    "HunyuanVideo": "hunyuan_video",
+    "Hunyuan I2V": "hunyuan_video",
+    "CogVideoX": "cogvideox",  # ALBABIT-FIX: was aliased to "flux"
 }
 
 # Common aspect ratios for megapixel target mode
@@ -202,9 +207,11 @@ MODEL_BASE_VRAM = {
     "sdxl": 4.5,   # SDXL is medium
     "sd15": 2.5,   # SD 1.5 is light
     "wan":  14.0,  # Video models are very heavy
-    "ltx":  10.0,
-    "hunyuan": 16.0,  # ALBABIT-FIX: HunyuanVideo base VRAM estimate
+    "ltxav": 10.0,  # ALBABIT-FIX: renamed from "ltx" to match latent_format key
+    "hunyuan_video": 16.0,  # ALBABIT-FIX: renamed from "hunyuan" to match latent_format key
     "flux2": 20.0,    # ALBABIT-FIX: Flux.2 base VRAM estimate (32B+ models)
+    # ALBABIT-FIX: Cosmos / CogVideoX / Mochi base VRAM estimates
+    "cosmos": 14.0, "cogvideox": 12.0, "mochi": 16.0,
 }
 
 LATENT_SCALE = 8  # VAE downscale factor

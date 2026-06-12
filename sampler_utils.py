@@ -62,13 +62,14 @@ MODEL_TYPES = [
     "cosmos",
     "cogvideox",
     "stepvideo",
+    "mochi",  # ALBABIT-FIX: Mochi-1 — match Resolution/Loader model types
 ]
 
-VIDEO_MODEL_TYPES = {"wan", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "stepvideo"}
+VIDEO_MODEL_TYPES = {"wan", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "stepvideo", "mochi"}
 
 GUIDANCE_EMBED_MODELS = {"flux", "lumina2", "z_image", "ltxv"}
 
-CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd35", "ltxav", "cogvideox", "stepvideo"}
+CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd35", "ltxav", "cogvideox", "stepvideo", "mochi"}
 
 MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "flux": {
@@ -203,6 +204,16 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "sampler": "euler",
         "denoise_range": (0.3, 1.0),
     },
+    # ALBABIT-FIX: Mochi-1 (Genmo) — 12ch video VAE, T5XXL text encoder
+    "mochi": {
+        "cfg": 4.5,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 6.0,
+        "sampler": "euler",
+        "denoise_range": (0.0, 1.0),
+        "guidance_type": "cfg",
+    },
 }
 
 PREVIEW_METHODS = ["None", "TAESD", "Latent2RGB"]
@@ -332,6 +343,7 @@ def detect_by_config(model) -> Optional[str]:
             "Flux": "flux", "FluxSchnell": "flux", "FluxInpaint": "flux", "Flux2": "flux",
             "CogVideoX": "cogvideox", "CogVideo": "cogvideox",
             "StepVideo": "stepvideo",
+            "Mochi": "mochi",  # ALBABIT-FIX: Mochi-1 config class detection
         }
         for pattern, mtype in config_map.items():
             if pattern in config_cls: return mtype
@@ -357,6 +369,7 @@ def detect_by_architecture(model) -> Optional[str]:
         if "hunyuan" in model_cls and ("video" in model_cls or "video" in model_module):
             return "hunyuan_video"
         if "cogvideo" in model_cls or "cogvideo" in model_module: return "cogvideox"
+        if "mochi" in model_cls or "mochi" in model_module: return "mochi"  # ALBABIT-FIX
         if "stepvideo" in model_cls or "stepvideo" in model_module or "step_video" in model_module:
             return "stepvideo"
         if "lumina" in full_path:
