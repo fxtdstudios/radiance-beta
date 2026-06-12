@@ -410,7 +410,7 @@ visibility (only `enable_video` and `mp_target` do) — switching resolution
 presets does not fold/unfold any widgets, which is the existing behavior, not
 a regression.
 
-## nodes/generate/resolution.py, js/radiance_resolution.js — model_type-driven presets & alignment (étape 4)
+## nodes/generate/resolution.py, js/radiance_resolution.js — model_type-driven presets & alignment
 
 **Problem:** Model-specific behavior (pixel alignment, video-latent
 detection, WAN's 4k+1 frame rule, frame-count stride, `latent_format`) was
@@ -457,7 +457,7 @@ resolution **down** — making the exact target resolution unreachable.
 
 ### Follow-up — model_type-driven `enable_video` auto-toggle + TEMPORAL_SCALE audit
 
-**Problem:** The étape-4 refactor removed the old preset-name-based
+**Problem:** This refactor removed the old preset-name-based
 auto-toggle of `enable_video`/`model_type` but didn't add a model_type-based
 equivalent, so selecting a video `model_type` (LTXV/WAN/HunyuanVideo) no
 longer auto-enabled video mode.
@@ -487,8 +487,8 @@ callback to toggle `enable_video` on/off accordingly.
 ### Follow-up — instant width/height alignment preview on model_type change
 
 **Problem:** Changing `model_type` only updated the aligned `width`/`height`
-shown in the UI after running generation (via the `onExecuted` sync added in
-étape 4). Selecting e.g. `LTXV (128ch)` after a `HD 1080p (1920×1080)` preset
+shown in the UI after running generation (via the `onExecuted` sync added by
+the refactor above). Selecting e.g. `LTXV (128ch)` after a `HD 1080p (1920×1080)` preset
 still showed `1920x1080` until the next run.
 
 **Fix (`radiance_resolution.js`):**
