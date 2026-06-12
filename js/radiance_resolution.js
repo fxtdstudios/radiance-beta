@@ -95,6 +95,10 @@ function setWidgetVisible(widget, visible, node) {
 // ALBABIT-FIX: Mirrors the temporal stride logic in resolution.py's generate()
 // (n*stride + 1 frame counts) so video_frames <-> duration_seconds stay in sync
 // when the user toggles frame_computation.
+// ALBABIT-FIX (étape 4 follow-up): mirrors VIDEO_MODEL_TYPES in resolution.py —
+// model_types that emit 5D video latents and should auto-enable "enable_video".
+const VIDEO_MODEL_TYPES_JS = new Set(["WAN (16ch)", "LTXV (128ch)", "HunyuanVideo (16ch)"]);
+
 function _frameStride(modelType) {
     const m = (modelType || "").toLowerCase();
     if (m.includes("ltx")) return 8;
@@ -169,6 +173,22 @@ app.registerExtension({
 
                 refreshNodeSize(this);
             };
+
+            // ALBABIT-FIX (étape 4 follow-up): auto-toggle enable_video when model_type
+            // switches to/from a video model (mirrors VIDEO_MODEL_TYPES in resolution.py).
+            if (modelTypeW && enableVideoW) {
+                const orig = modelTypeW.callback;
+                modelTypeW.callback = function () {
+                    if (orig) orig.apply(this, arguments);
+
+                    const isVideoModel = VIDEO_MODEL_TYPES_JS.has(modelTypeW.value);
+                    if (enableVideoW.value !== isVideoModel) {
+                        enableVideoW.value = isVideoModel;
+                        if (enableVideoW.callback) enableVideoW.callback.call(enableVideoW, isVideoModel);
+                    }
+                    toggleFields();
+                };
+            }
 
             // Wire callbacks
             if (enableVideoW) {
