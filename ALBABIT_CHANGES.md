@@ -594,5 +594,46 @@ models. The deferred item is purely about which Cosmos *video* variant (1.0
 "World" @ stride 8, vs Predict2 @ stride 4) `"Cosmos (16ch)"` should map to before
 enabling 5D latents — not about whether Cosmos belongs in this node at all.
 
-**CogVideoX**: left out of `VIDEO_MODEL_TYPES` for now (same as StepVideo) —
-not a priority, deferred without further action.
+## Follow-up — added Cosmos (16ch) and CogVideoX (16ch) to VIDEO_MODEL_TYPES
+
+**Cosmos**: confirmed by Albabit — the relevant ComfyUI checkpoints are Cosmos 1.0
+"World" text/image-to-video models (e.g.
+`Cosmos-1_0-Diffusion-7B-Text2World.safetensors`), which use a ×8 temporal
+compression (`nodes_cosmos.py`), same as LTXV:
+- `VIDEO_MODEL_TYPES`: added `"Cosmos (16ch)"`.
+- `TEMPORAL_SCALE["Cosmos (16ch)"] = 8`.
+- `js/radiance_resolution.js`: `VIDEO_MODEL_TYPES_JS` and `_frameStride` now
+  include Cosmos (stride 8, same bucket as LTXV) — `video_frames` instantly snaps
+  to `8k+1` (1, 9, 17...) for Cosmos.
+
+**Deferred**: Cosmos Predict2 (×4 temporal stride) is NOT covered by the
+`"Cosmos (16ch)"` entry — revisit if Predict2 support is needed.
+
+**CogVideoX**: CogVideoX is itself a text-to-video model — its previous exclusion
+from `VIDEO_MODEL_TYPES` meant `is_video_latent` stayed `False` and the latent was
+never computed as 5D, even with `enable_video=true`. Its stride (4,
+`AutoencoderKLCogVideoX.temporal_compression_ratio` default) was already verified
+correct in the previous follow-up — nothing was technically missing, it just
+hadn't been added/validated yet. Now enabled:
+- `VIDEO_MODEL_TYPES`: added `"CogVideoX (16ch)"`.
+- `TEMPORAL_SCALE["CogVideoX (16ch)"]` was already `4` (unchanged).
+- `js/radiance_resolution.js`: `VIDEO_MODEL_TYPES_JS` now includes CogVideoX;
+  `_frameStride` already returned `4` for it via the default branch (unchanged) —
+  `video_frames` instantly snaps to `4k+1` (1, 5, 9, 13...) for CogVideoX.
+
+The generalized "Auto (Seconds)" stride and frame-count validation warning (from
+the earlier follow-up) automatically pick up both new `TEMPORAL_SCALE`/
+`VIDEO_MODEL_TYPES` entries — no separate code path needed for either model.
+
+`VIDEO_MODEL_TYPES` now covers all 6 models with verified `TEMPORAL_SCALE`
+entries: WAN/HunyuanVideo/CogVideoX (4), Mochi (6), LTXV/Cosmos (8).
+
+## Follow-up — renamed `"Cosmos (16ch)"` -> `"Cosmos World (16ch)"`
+
+Per Albabit: since Cosmos Predict2 (stride 4) is explicitly NOT covered by this
+entry, the name now states the supported variant (Cosmos 1.0 "World"
+text/image-to-video) to avoid implying Predict2 support. Renamed across
+`MODEL_TYPES`, `LATENT_CHANNELS`, `LATENT_FORMAT_MAP`, `SPATIAL_SCALE`/
+`TEMPORAL_SCALE`, `VIDEO_MODEL_TYPES` (Python) and `VIDEO_MODEL_TYPES_JS`
+(`radiance_resolution.js`). Safe rename — `model_type` is an input-only field on
+this node (never an output), so no downstream node references this string.

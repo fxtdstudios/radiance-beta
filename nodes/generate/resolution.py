@@ -47,22 +47,19 @@ PRESET_NAMES = ["Custom"] + list(PRESETS.keys())
 # Deferred items (not addressed in this refactor):
 #  - WAN previously got a 16px alignment heuristic; it now falls back to the 8px
 #    default (SPATIAL_SCALE has no WAN entry). Revisit if WAN needs 16px alignment.
-#  - Cosmos/CogVideoX are excluded from VIDEO_MODEL_TYPES. Audited against
-#    ComfyUI's comfy_extras/ (2026-06-12): LTXV (8), WAN (4), HunyuanVideo (4) and
-#    CogVideoX (4, AutoencoderKLCogVideoX.temporal_compression_ratio default) all
-#    match our TEMPORAL_SCALE/_frameStride values. Mochi requires temporal_scale=6
-#    (nodes_mochi.py: (length-1)//6+1) and has been added to VIDEO_MODEL_TYPES with
-#    its own TEMPORAL_SCALE entry. Cosmos (nodes_cosmos.py) has TWO different
-#    temporal strides (8 and 4) depending on variant (Cosmos 1.0/"World" vs Cosmos
-#    Predict2) — needs clarification of which variant before enabling 5D latents.
-#    CogVideoX's stride (4) is verified correct but untested with a real 5D-latent
-#    workflow — left out of VIDEO_MODEL_TYPES pending validation, not because of a
-#    known stride conflict.
+#  - VIDEO_MODEL_TYPES audited against ComfyUI's comfy_extras/ (2026-06-12):
+#    LTXV (8), WAN (4), HunyuanVideo (4), CogVideoX (4,
+#    AutoencoderKLCogVideoX.temporal_compression_ratio default), Mochi (6,
+#    nodes_mochi.py: (length-1)//6+1), and Cosmos (8, nodes_cosmos.py, Cosmos 1.0
+#    "World" text/image-to-video — e.g. Cosmos-1_0-Diffusion-7B-Text2World) all
+#    have verified TEMPORAL_SCALE entries and are included in VIDEO_MODEL_TYPES.
+#    Cosmos Predict2 (stride 4) is NOT covered by the "Cosmos World (16ch)" entry —
+#    revisit if Predict2 support is needed.
 #  - Flux.1 vs Flux.2 (and other version-specific) alignment distinctions are not
 #    further differentiated beyond the existing SPATIAL_SCALE/LATENT_CHANNELS entries.
 
 # Model types that emit 5D latent (1, C, T, H, W)
-VIDEO_MODEL_TYPES = {"WAN (16ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)"}
+VIDEO_MODEL_TYPES = {"WAN (16ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)", "Cosmos World (16ch)", "CogVideoX (16ch)"}
 
 # Latent format string matching nodes_sampler.py latent_format input
 LATENT_FORMAT_MAP = {
@@ -79,7 +76,7 @@ LATENT_FORMAT_MAP = {
     "Chroma (16ch)": "chroma",
     # ALBABIT-FIX: Cosmos/CogVideoX/Mochi map to their own sampler model_type
     # (matches sampler_utils.py keys) instead of being aliased to "flux"
-    "Cosmos (16ch)": "cosmos",
+    "Cosmos World (16ch)": "cosmos",
     "CogVideoX (16ch)": "cogvideox",
     "Mochi (12ch)": "mochi",
     # ALBABIT-FIX: LTX-Video latent format. "ltxav" (not "ltx") to match the
@@ -108,7 +105,7 @@ MODEL_TYPES = [
     # — both 4ch/8px/"sdxl" with no other distinguishing entries in this file.
     "SDXL / SD 1.5 / PixArt / Aura Flow / Kolors (4ch)",
     "Chroma (16ch)",
-    "Cosmos (16ch)",
+    "Cosmos World (16ch)",
     "CogVideoX (16ch)",
     # ALBABIT-FIX: Mochi has its own temporal compression (×6, see TEMPORAL_SCALE)
     # and is a 5D video latent like WAN/LTXV/HunyuanVideo.
@@ -131,7 +128,7 @@ LATENT_CHANNELS = {
     "Flux / SD3 / Lumina2 / Z-Image (16ch)": 16,
     "SDXL / SD 1.5 / PixArt / Aura Flow / Kolors (4ch)": 4,
     "Chroma (16ch)": 16,
-    "Cosmos (16ch)": 16,
+    "Cosmos World (16ch)": 16,
     "CogVideoX (16ch)": 16,
     "Mochi (12ch)": 12,
     # ALBABIT-FIX: LTX-Video latent is 128 channels
@@ -167,6 +164,10 @@ TEMPORAL_SCALE = {
     # ALBABIT-FIX: Mochi's VAE temporal compression is ×6 (nodes_mochi.py:
     # (length-1)//6+1), distinct from the 4x default used by WAN/Hunyuan/CogVideoX.
     "Mochi (12ch)": 6,
+    # ALBABIT-FIX: Cosmos 1.0 "World" text/image-to-video models (e.g.
+    # Cosmos-1_0-Diffusion-7B-Text2World) use a ×8 temporal compression
+    # (nodes_cosmos.py), same as LTXV. Cosmos Predict2 (×4) is not covered.
+    "Cosmos World (16ch)": 8,
 }
 
 # ── VRAM Estimation Metadata ──────────────────────────────────────────────────
