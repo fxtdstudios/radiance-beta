@@ -210,13 +210,11 @@ app.registerExtension({
                 };
             }
 
-            // ALBABIT-FIX: Restored from previous radiance version — auto-fill
-            // width/height/enable_video/model_type/scale_factor when a preset is
-            // selected. Adapted for the current model_type list (LTXV 128ch,
-            // WAN/HunyuanVideo/Lumina2-ZImage/PixArt etc.).
+            // ALBABIT-FIX (étape 4): presets are now plain Cinema/Social resolutions,
+            // model-agnostic. Set width/height as an immediate visual baseline; the
+            // final model_type-aligned values are synced back via onExecuted below.
             if (presetW && widthW && heightW) {
                 const orig = presetW.callback;
-                const node = this;
 
                 presetW.callback = function () {
                     if (orig) orig.apply(this, arguments);
@@ -230,34 +228,6 @@ app.registerExtension({
                         heightW.value = parseInt(match[2], 10);
                         if (widthW.inputEl)  widthW.inputEl.value  = widthW.value;
                         if (heightW.inputEl) heightW.inputEl.value = heightW.value;
-                    }
-
-                    const name = presetW.value;
-                    const isVideoPreset = name.includes("WAN") || name.includes("LTX")
-                        || name.includes("Hunyuan") || name.includes("CogVideoX");
-
-                    // Auto-toggle video mode for known video presets
-                    if (enableVideoW && enableVideoW.value !== isVideoPreset) {
-                        enableVideoW.value = isVideoPreset;
-                        if (enableVideoW.callback) enableVideoW.callback.call(enableVideoW, isVideoPreset);
-                    }
-
-                    // Auto-set model_type to match the preset's category
-                    if (modelTypeW) {
-                        if (name.includes("LTX")) {
-                            modelTypeW.value = "LTXV (128ch)";
-                        } else if (name.includes("WAN")) {
-                            modelTypeW.value = "WAN (16ch)";
-                        } else if (name.includes("Hunyuan")) {
-                            modelTypeW.value = "HunyuanVideo (16ch)";
-                        } else if (name.includes("CogVideoX")) {
-                            modelTypeW.value = "CogVideoX (16ch)";
-                        } else if (name.includes("Flux")) {
-                            modelTypeW.value = "Flux / SD3 (16ch)";
-                        } else if (name.includes("SDXL") || name.includes("SD 1.5")) {
-                            modelTypeW.value = "SDXL / SD 1.5 (4ch)";
-                        }
-                        // Cinema/Social presets: leave model_type as-is (resolution-only shortcuts)
                     }
 
                     // Reset scale_factor to 1.0 — per-model spatial scale is now
@@ -310,6 +280,29 @@ app.registerExtension({
             };
             requestAnimationFrame(reapply);
             setTimeout(reapply, 250);
+        };
+
+        // ALBABIT-FIX (étape 4): sync width/height widgets to the final
+        // model_type-aligned values computed by generate() (always >= preset
+        // values, rounded up — see resolution.py _align_up).
+        const onExecuted = nodeType.prototype.onExecuted;
+        nodeType.prototype.onExecuted = function (message) {
+            if (onExecuted) onExecuted.apply(this, arguments);
+
+            const newW = message?.computed_width?.[0];
+            const newH = message?.computed_height?.[0];
+            const widthW  = this.widgets?.find((wg) => wg.name === "width");
+            const heightW = this.widgets?.find((wg) => wg.name === "height");
+
+            if (newW != null && widthW) {
+                widthW.value = newW;
+                if (widthW.inputEl) widthW.inputEl.value = newW;
+            }
+            if (newH != null && heightW) {
+                heightW.value = newH;
+                if (heightW.inputEl) heightW.inputEl.value = newH;
+            }
+            this.setDirtyCanvas?.(true, true);
         };
     }
 });
