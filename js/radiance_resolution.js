@@ -95,11 +95,11 @@ function setWidgetVisible(widget, visible, node) {
 // ALBABIT-FIX: Mirrors the temporal stride logic in resolution.py's generate()
 // (n*stride + 1 frame counts) so video_frames <-> duration_seconds stay in sync
 // when the user toggles frame_computation.
-// ALBABIT-FIX (étape 4 follow-up): mirrors VIDEO_MODEL_TYPES in resolution.py —
+// ALBABIT-FIX follow-up: mirrors VIDEO_MODEL_TYPES in resolution.py —
 // model_types that emit 5D video latents and should auto-enable "enable_video".
 const VIDEO_MODEL_TYPES_JS = new Set(["WAN (16ch)", "LTXV (128ch)", "HunyuanVideo (16ch)"]);
 
-// ALBABIT-FIX (étape 4 follow-up): mirrors SPATIAL_SCALE/_align_up in resolution.py —
+// ALBABIT-FIX follow-up: mirrors SPATIAL_SCALE/_align_up in resolution.py —
 // recompute width/height instantly when model_type changes, instead of waiting
 // for the next execution's onExecuted sync.
 const SPATIAL_SCALE_JS = {
@@ -226,7 +226,7 @@ app.registerExtension({
                 refreshNodeSize(this);
             };
 
-            // ALBABIT-FIX (étape 4 follow-up): auto-toggle enable_video when model_type
+            // ALBABIT-FIX follow-up: auto-toggle enable_video when model_type
             // switches to/from a video model (mirrors VIDEO_MODEL_TYPES in resolution.py).
             if (modelTypeW && enableVideoW) {
                 const orig = modelTypeW.callback;
@@ -320,7 +320,7 @@ app.registerExtension({
                 };
             }
 
-            // ALBABIT-FIX (étape 4): presets are now plain Cinema/Social resolutions,
+            // ALBABIT-FIX: presets are now plain Cinema/Social resolutions,
             // model-agnostic. Set width/height as an immediate visual baseline; the
             // final model_type-aligned values are synced back via onExecuted below.
             if (presetW && widthW && heightW) {
@@ -483,7 +483,7 @@ app.registerExtension({
             setTimeout(reapply, 250);
         };
 
-        // ALBABIT-FIX (étape 4): sync width/height widgets to the final
+        // ALBABIT-FIX: sync width/height widgets to the final
         // model_type-aligned values computed by generate() (always >= preset
         // values, rounded up — see resolution.py _align_up).
         const onExecuted = nodeType.prototype.onExecuted;

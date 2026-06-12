@@ -39,7 +39,7 @@ PRESETS: Dict[str, Tuple[int, int, str, str]] = {
 
 PRESET_NAMES = ["Custom"] + list(PRESETS.keys())
 
-# ALBABIT-FIX (étape 4): model-specific behavior (alignment, video-latent detection,
+# ALBABIT-FIX: model-specific behavior (alignment, video-latent detection,
 # WAN frame rule, frame stride, latent_format) is now driven entirely by `model_type`
 # (see SPATIAL_SCALE, VIDEO_MODEL_TYPES, LATENT_FORMAT_MAP below) instead of preset
 # category. Presets are now plain Cinema/Social resolutions, model-agnostic.
@@ -178,7 +178,7 @@ LATENT_SCALE = 8  # VAE downscale factor
 
 
 def _align_up(val: int, scale: int) -> int:
-    """Round UP to the nearest multiple of `scale` (never down — ALBABIT-FIX étape 4)."""
+    """Round UP to the nearest multiple of `scale` (never down)."""
     return max(scale, math.ceil(val / scale) * scale)
 
 
@@ -908,13 +908,13 @@ class RadianceResolution:
                 )
             w, h = w_pre, h_pre
 
-        # ── Step 2: Determine Alignment Rule (model_type-driven, étape 4) ────────
+        # ── Step 2: Determine Alignment Rule (model_type-driven) ────────
         # ALBABIT-FIX: alignment is now derived solely from SPATIAL_SCALE for the
         # selected model_type (LTXV=32, Flux.2=16, default=8), always rounded UP.
         align_val   = SPATIAL_SCALE.get(model_type, 8)
         align_label = f"{align_val}px"
 
-        # Apply alignment — always round UP, never down (ALBABIT-FIX étape 4)
+        # Apply alignment — always round UP, never down
         w, h = _align_up(w, align_val), _align_up(h, align_val)
 
         # ── Step 3: Latent Format & VRAM Estimation (model_type-driven) ──────────
@@ -960,7 +960,7 @@ class RadianceResolution:
         else:
             latent_c = LATENT_CHANNELS.get(model_type, 16)
 
-        # ── Determine if this is a video latent (model_type-driven, étape 4) ────
+        # ── Determine if this is a video latent (model_type-driven) ────
         is_video_latent = enable_video and model_type in VIDEO_MODEL_TYPES
         actual_batch = video_frames if enable_video else batch_size
 
@@ -1056,7 +1056,7 @@ class RadianceResolution:
         except Exception as e:
             logger.warning(f"Preview render failed: {e}")
 
-        # ── Latent format string (model_type-driven, étape 4) ───────────────────
+        # ── Latent format string (model_type-driven) ───────────────────
         latent_fmt = latent_format
         if latent_channels > 0 and not is_video_latent:
             latent_fmt = "flux" if latent_c >= 16 else "sdxl"
