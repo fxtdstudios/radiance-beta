@@ -5,6 +5,68 @@ Branch: `fix/bugs` — Fork: `https://github.com/Albabit/radiance-beta`
 
 ---
 
+## nodes/generate/resolution.py, js/radiance_resolution.js — Per-model VAE compression, frame computation, multi-output, preset auto-fill
+
+### Spatial & temporal VAE compression fixes
+
+**Problem 1 (spatial):** The empty latent's spatial size always used a global
+`LATENT_SCALE = 8` divisor, regardless of `model_type`. This produced grossly
+oversized latents for LTXV (×32 VAE) and Flux.2 (×16 VAE).
+
+**Fix:** Added `SPATIAL_SCALE` map (`LTXV (128ch)`: 32, `Flux.2 / Flux.2 Klein
+(128ch)`: 16, default: 8), applied in the empty-latent computation and in
+`_render_preview_card`.
+
+**Problem 2 (temporal — major perf bug):** For video latents, the temporal
+(frame) dimension of the empty 5D latent tensor (`torch.zeros(1, latent_c,
+T, H, W)`) was set directly to the raw pixel-space `video_frames` (e.g. 241
+for a 10s/24fps LTX 2.3 clip), instead of the 3D-VAE-compressed latent frame
+count (31). This made the sampler process ~8x more "frames" than necessary.
+
+Measured impact on an identical LTX 2.3 / 20-step test: **65.89s** (old
+`radiance` version, latent T=31) vs **443.33s** (beta before fix, latent
+T=241) — a ~6.7x slowdown, closely matching the 241/31 ≈ 7.8x latent size
+ratio.
+
+**Fix:** Added `TEMPORAL_SCALE` map (`LTXV (128ch)`: 8, `WAN (16ch)`: 4,
+`HunyuanVideo (16ch)`: 4, `CogVideoX (16ch)`: 4, default: 4), and compute
+`lat_t = (video_frames - 1) // temporal_scale + 1` for the latent's temporal
+dimension — mirroring the formula from the previous `radiance` version.
+Outputs (`frame_count`, `duration_sec`, `video_frames`) remain unchanged
+(raw pixel-space frame count), only the latent tensor itself is resized.
+
+### Restored `frame_computation` (Manual/Auto Seconds) + `duration_seconds`
+
+Restored from the previous `radiance` version: a `frame_computation` combo
+(`"Manual (Frames)"` / `"Auto (Seconds)"`) plus a `duration_seconds` float
+input. In "Auto (Seconds)" mode, `video_frames` is computed from
+`duration_seconds × frame_rate`, aligned to the model's temporal stride
+(`n*stride + 1`, stride=8 for LTX, 4 for WAN/Hunyuan/other).
+
+`js/radiance_resolution.js`: added `_frameStride(modelType)` helper and
+toggle/sync logic in `frameModeW.callback` so `video_frames` and
+`duration_seconds` stay in sync when switching modes (previously the hidden
+field kept a stale value).
+
+### Restored multi-output `RETURN_TYPES`
+
+Previously `RETURN_TYPES = ("LATENT",)` only. Restored from the previous
+`radiance` version:
+`("LATENT", "INT", "INT", "INT", "STRING", "FLOAT", "INT", "STRING", "FLOAT")`
+→ `(latent, width, height, channels, info, frame_rate, frame_count,
+latent_format, duration_sec)`, so this node can drive Sampler Pro and other
+downstream nodes directly.
+
+### JS preset auto-fill
+
+`js/radiance_resolution.js`: selecting a `preset` now auto-fills
+`width`/`height` (from the `(WxH)` in the preset name), auto-toggles
+`enable_video` for video presets (WAN/LTX/Hunyuan/CogVideoX), sets
+`model_type` to match the preset's family, and resets `scale_factor` to 1.0
+(per-model spatial scale is now handled by `SPATIAL_SCALE`, not this widget).
+
+---
+
 ## js/radiance_pm_launcher.js, radiance_menu.js, radiance_studio.js, radiance_workspace.js, project_manager_dashboard.mjs, assets_dashboard.mjs, workspace_dashboard.html — Dashboard URL fix
 
 **Problem:** Opening Manager, Library, or Assets from the Radiance Project
