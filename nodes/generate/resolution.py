@@ -47,9 +47,14 @@ PRESET_NAMES = ["Custom"] + list(PRESETS.keys())
 # Deferred items (not addressed in this refactor):
 #  - WAN previously got a 16px alignment heuristic; it now falls back to the 8px
 #    default (SPATIAL_SCALE has no WAN entry). Revisit if WAN needs 16px alignment.
-#  - Cosmos/CogVideoX/Mochi are excluded from VIDEO_MODEL_TYPES — no presets ever
-#    exercised 5D latents for them, so TEMPORAL_SCALE/5D shape correctness for these
-#    is unverified. Revisit once confirmed.
+#  - Cosmos/CogVideoX/Mochi are excluded from VIDEO_MODEL_TYPES. Audited against
+#    ComfyUI's comfy_extras/ (2026-06-12): LTXV (8), WAN (4), HunyuanVideo (4) and
+#    CogVideoX (4, AutoencoderKLCogVideoX.temporal_compression_ratio default) all
+#    match our TEMPORAL_SCALE/_frameStride values. Mochi requires temporal_scale=6
+#    (nodes_mochi.py: (length-1)//6+1) — our default of 4 would be WRONG if Mochi
+#    is ever added to VIDEO_MODEL_TYPES. Cosmos (nodes_cosmos.py) has TWO different
+#    temporal strides (8 and 4) depending on variant — needs clarification before
+#    enabling 5D latents for Cosmos.
 #  - Flux.1 vs Flux.2 (and other version-specific) alignment distinctions are not
 #    further differentiated beyond the existing SPATIAL_SCALE/LATENT_CHANNELS entries.
 
