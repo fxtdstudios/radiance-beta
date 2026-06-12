@@ -99,6 +99,36 @@ function setWidgetVisible(widget, visible, node) {
 // model_types that emit 5D video latents and should auto-enable "enable_video".
 const VIDEO_MODEL_TYPES_JS = new Set(["WAN (16ch)", "LTXV (128ch)", "HunyuanVideo (16ch)"]);
 
+// ALBABIT-FIX (étape 4 follow-up): mirrors SPATIAL_SCALE/_align_up in resolution.py —
+// recompute width/height instantly when model_type changes, instead of waiting
+// for the next execution's onExecuted sync.
+const SPATIAL_SCALE_JS = {
+    "LTXV (128ch)": 32,
+    "Flux.2 / Flux.2 Klein (128ch)": 16,
+};
+
+function _alignUp(val, scale) {
+    return Math.max(scale, Math.ceil(val / scale) * scale);
+}
+
+// Aligns widthW/heightW in place to the SPATIAL_SCALE of the current model_type.
+// Always realigns from node._resBaseW/_resBaseH (the unaligned base resolution,
+// e.g. the raw preset values) rather than the widgets' current value — _alignUp
+// only rounds up, so re-aligning an already-aligned value can't recover a smaller
+// alignment for a different model_type (e.g. 1088 LTXV -> 1080 Flux).
+function _applyAlignment(node, modelTypeW, widthW, heightW) {
+    if (!widthW || !heightW) return;
+    const baseW = node._resBaseW ?? parseInt(widthW.value, 10);
+    const baseH = node._resBaseH ?? parseInt(heightW.value, 10);
+    const scale = SPATIAL_SCALE_JS[modelTypeW?.value] || 8;
+    const newW = _alignUp(baseW, scale);
+    const newH = _alignUp(baseH, scale);
+    widthW.value = newW;
+    heightW.value = newH;
+    if (widthW.inputEl) widthW.inputEl.value = newW;
+    if (heightW.inputEl) heightW.inputEl.value = newH;
+}
+
 function _frameStride(modelType) {
     const m = (modelType || "").toLowerCase();
     if (m.includes("ltx")) return 8;
@@ -127,6 +157,7 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
 
+            const node = this;
             const find = (name) => this.widgets?.find(w => w.name === name);
 
             const enableVideoW  = find("enable_video");
@@ -186,6 +217,11 @@ app.registerExtension({
                         enableVideoW.value = isVideoModel;
                         if (enableVideoW.callback) enableVideoW.callback.call(enableVideoW, isVideoModel);
                     }
+
+                    // Instantly reflect the alignment this model_type will enforce,
+                    // instead of waiting for onExecuted after generation.
+                    _applyAlignment(node, modelTypeW, widthW, heightW);
+
                     toggleFields();
                 };
             }
@@ -248,7 +284,14 @@ app.registerExtension({
                         heightW.value = parseInt(match[2], 10);
                         if (widthW.inputEl)  widthW.inputEl.value  = widthW.value;
                         if (heightW.inputEl) heightW.inputEl.value = heightW.value;
+                        // New unaligned base resolution — model_type alignment realigns from this.
+                        node._resBaseW = parseInt(match[1], 10);
+                        node._resBaseH = parseInt(match[2], 10);
                     }
+
+                    // Align to the current model_type immediately, so switching presets
+                    // after picking a video model_type doesn't briefly show un-aligned values.
+                    _applyAlignment(node, modelTypeW, widthW, heightW);
 
                     // Reset scale_factor to 1.0 — per-model spatial scale is now
                     // handled by SPATIAL_SCALE in resolution.py, not by this widget.
@@ -259,6 +302,28 @@ app.registerExtension({
                     toggleFields();
                 };
             }
+
+            // Track manual width/height edits (Custom preset) as the new alignment base,
+            // so a later model_type change realigns from the user's intended value.
+            if (widthW) {
+                const orig = widthW.callback;
+                widthW.callback = function () {
+                    if (orig) orig.apply(this, arguments);
+                    node._resBaseW = parseInt(widthW.value, 10);
+                };
+            }
+            if (heightW) {
+                const orig = heightW.callback;
+                heightW.callback = function () {
+                    if (orig) orig.apply(this, arguments);
+                    node._resBaseH = parseInt(heightW.value, 10);
+                };
+            }
+
+            // Initial alignment base = whatever width/height are at node creation
+            // (defaults, or values restored from a saved workflow via onConfigure below).
+            node._resBaseW = widthW ? parseInt(widthW.value, 10) : undefined;
+            node._resBaseH = heightW ? parseInt(heightW.value, 10) : undefined;
 
             // ALBABIT-FIX: Defer initial toggleFields 100ms so Vue completes its first layout
             // pass before any widget is hidden. If we hide immediately, widget.computedHeight is
@@ -284,7 +349,14 @@ app.registerExtension({
                 const mpAspectW    = self.widgets?.find(w => w.name === "mp_aspect_ratio");
                 const frameModeW   = self.widgets?.find(w => w.name === "frame_computation");
                 const durSecW      = self.widgets?.find(w => w.name === "duration_seconds");
+                const widthW       = self.widgets?.find(w => w.name === "width");
+                const heightW      = self.widgets?.find(w => w.name === "height");
                 if (!enableVideoW) return;
+
+                // Re-derive the alignment base from the restored width/height values
+                // (onNodeCreated ran before deserialization, so its base was the default).
+                if (widthW)  self._resBaseW = parseInt(widthW.value, 10);
+                if (heightW) self._resBaseH = parseInt(heightW.value, 10);
 
                 const isVideo = enableVideoW.value === true || enableVideoW.value === 1;
                 const mpActive = mpTargetW ? parseFloat(mpTargetW.value) > 0 : false;
