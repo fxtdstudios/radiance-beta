@@ -92,6 +92,16 @@ function setWidgetVisible(widget, visible, node) {
     _forceWidgetReinsert(widget, node);
 }
 
+// ALBABIT-FIX: Mirrors the temporal stride logic in resolution.py's generate()
+// (n*stride + 1 frame counts) so video_frames <-> duration_seconds stay in sync
+// when the user toggles frame_computation.
+function _frameStride(modelType) {
+    const m = (modelType || "").toLowerCase();
+    if (m.includes("ltx")) return 8;
+    if (m.includes("wan") || m.includes("hunyuan")) return 4;
+    return 4;
+}
+
 function refreshNodeSize(node) {
     if (!node.computeSize) return;
 
@@ -121,6 +131,16 @@ app.registerExtension({
             const batchSizeW    = find("batch_size");
             const mpTargetW     = find("mp_target");
             const mpAspectW     = find("mp_aspect_ratio");
+            // ALBABIT-FIX: Restored from previous radiance version — frame computation
+            // mode (Manual frames vs Auto seconds) toggle.
+            const frameModeW    = find("frame_computation");
+            const durSecW       = find("duration_seconds");
+            // ALBABIT-FIX: widgets needed for preset auto-fill
+            const presetW       = find("preset");
+            const widthW        = find("width");
+            const heightW       = find("height");
+            const modelTypeW    = find("model_type");
+            const scaleFactorW  = find("scale_factor");
 
             const toggleFields = () => {
                 if (!enableVideoW) return;
@@ -131,8 +151,13 @@ app.registerExtension({
                     || enableVideoW.value === "true"
                     || enableVideoW.value === "True";
 
+                // ALBABIT-FIX: Auto (Seconds) hides video_frames in favor of duration_seconds
+                const isAutoSec = frameModeW && frameModeW.value === "Auto (Seconds)";
+
                 // ALBABIT-FIX: pass node (this) so setWidgetVisible can splice the widgets array
-                setWidgetVisible(videoFramesW, isVideo, this);
+                setWidgetVisible(frameModeW,   isVideo, this);
+                setWidgetVisible(videoFramesW, isVideo && !isAutoSec, this);
+                setWidgetVisible(durSecW,      isVideo && isAutoSec, this);
                 setWidgetVisible(frameRateW,   isVideo, this);
                 setWidgetVisible(batchSizeW,   !isVideo, this);
 
@@ -154,10 +179,93 @@ app.registerExtension({
                 };
             }
 
+            // ALBABIT-FIX: Restored from previous radiance version. Also syncs
+            // video_frames <-> duration_seconds when switching modes, so the
+            // hidden widget's value reflects what the other mode last computed
+            // instead of going stale.
+            if (frameModeW) {
+                const orig = frameModeW.callback;
+                frameModeW.callback = function () {
+                    if (orig) orig.apply(this, arguments);
+
+                    const fps = frameRateW ? parseFloat(frameRateW.value) || 24.0 : 24.0;
+                    const stride = _frameStride(modelTypeW?.value);
+
+                    if (frameModeW.value === "Manual (Frames)" && durSecW && videoFramesW) {
+                        const raw = parseFloat(durSecW.value) * fps;
+                        videoFramesW.value = Math.max(1, Math.round(raw / stride) * stride + 1);
+                    } else if (frameModeW.value === "Auto (Seconds)" && durSecW && videoFramesW) {
+                        durSecW.value = Math.round((videoFramesW.value / fps) * 10) / 10;
+                    }
+
+                    toggleFields();
+                };
+            }
+
             if (mpTargetW) {
                 const orig = mpTargetW.callback;
                 mpTargetW.callback = function () {
                     if (orig) orig.apply(this, arguments);
+                    toggleFields();
+                };
+            }
+
+            // ALBABIT-FIX: Restored from previous radiance version — auto-fill
+            // width/height/enable_video/model_type/scale_factor when a preset is
+            // selected. Adapted for the current model_type list (LTXV 128ch,
+            // WAN/HunyuanVideo/Lumina2-ZImage/PixArt etc.).
+            if (presetW && widthW && heightW) {
+                const orig = presetW.callback;
+                const node = this;
+
+                presetW.callback = function () {
+                    if (orig) orig.apply(this, arguments);
+
+                    if (presetW.value === "Custom") return;
+
+                    // Extract dimensions from "... (WxH)"
+                    const match = presetW.value.match(/\((\d+)[x×](\d+)\)/);
+                    if (match) {
+                        widthW.value  = parseInt(match[1], 10);
+                        heightW.value = parseInt(match[2], 10);
+                        if (widthW.inputEl)  widthW.inputEl.value  = widthW.value;
+                        if (heightW.inputEl) heightW.inputEl.value = heightW.value;
+                    }
+
+                    const name = presetW.value;
+                    const isVideoPreset = name.includes("WAN") || name.includes("LTX")
+                        || name.includes("Hunyuan") || name.includes("CogVideoX");
+
+                    // Auto-toggle video mode for known video presets
+                    if (enableVideoW && enableVideoW.value !== isVideoPreset) {
+                        enableVideoW.value = isVideoPreset;
+                        if (enableVideoW.callback) enableVideoW.callback.call(enableVideoW, isVideoPreset);
+                    }
+
+                    // Auto-set model_type to match the preset's category
+                    if (modelTypeW) {
+                        if (name.includes("LTX")) {
+                            modelTypeW.value = "LTXV (128ch)";
+                        } else if (name.includes("WAN")) {
+                            modelTypeW.value = "WAN (16ch)";
+                        } else if (name.includes("Hunyuan")) {
+                            modelTypeW.value = "HunyuanVideo (16ch)";
+                        } else if (name.includes("CogVideoX")) {
+                            modelTypeW.value = "CogVideoX (16ch)";
+                        } else if (name.includes("Flux")) {
+                            modelTypeW.value = "Flux / SD3 (16ch)";
+                        } else if (name.includes("SDXL") || name.includes("SD 1.5")) {
+                            modelTypeW.value = "SDXL / SD 1.5 (4ch)";
+                        }
+                        // Cinema/Social presets: leave model_type as-is (resolution-only shortcuts)
+                    }
+
+                    // Reset scale_factor to 1.0 — per-model spatial scale is now
+                    // handled by SPATIAL_SCALE in resolution.py, not by this widget.
+                    if (scaleFactorW) {
+                        scaleFactorW.value = 1.0;
+                    }
+
                     toggleFields();
                 };
             }
@@ -184,12 +292,17 @@ app.registerExtension({
                 const frameRateW   = self.widgets?.find(w => w.name === "frame_rate");
                 const batchSizeW   = self.widgets?.find(w => w.name === "batch_size");
                 const mpAspectW    = self.widgets?.find(w => w.name === "mp_aspect_ratio");
+                const frameModeW   = self.widgets?.find(w => w.name === "frame_computation");
+                const durSecW      = self.widgets?.find(w => w.name === "duration_seconds");
                 if (!enableVideoW) return;
 
                 const isVideo = enableVideoW.value === true || enableVideoW.value === 1;
                 const mpActive = mpTargetW ? parseFloat(mpTargetW.value) > 0 : false;
+                const isAutoSec = frameModeW && frameModeW.value === "Auto (Seconds)";
 
-                setWidgetVisible(videoFramesW, isVideo, self);
+                setWidgetVisible(frameModeW,   isVideo, self);
+                setWidgetVisible(videoFramesW, isVideo && !isAutoSec, self);
+                setWidgetVisible(durSecW,      isVideo && isAutoSec, self);
                 setWidgetVisible(frameRateW,   isVideo, self);
                 setWidgetVisible(batchSizeW,   !isVideo, self);
                 setWidgetVisible(mpAspectW,    mpActive, self);
