@@ -409,3 +409,48 @@ this file's widget-folding logic is currently dead code. Also,
 visibility (only `enable_video` and `mp_target` do) — switching resolution
 presets does not fold/unfold any widgets, which is the existing behavior, not
 a regression.
+
+## nodes/generate/resolution.py, js/radiance_resolution.js — model_type-driven presets & alignment (étape 4)
+
+**Problem:** Model-specific behavior (pixel alignment, video-latent
+detection, WAN's 4k+1 frame rule, frame-count stride, `latent_format`) was
+keyed off the **preset category** (`VIDEO_PRESET_CATEGORIES`,
+`WAN_FRAME_CATEGORIES`, `ALIGN32_CATEGORIES`, `VIDEO_LATENT_FORMAT_MAP`), and
+`PRESETS` contained ~51 model-specific entries (Flux/SDXL/SD1.5/WAN/LTX/
+Hunyuan/CogVideoX). This coupled the preset list to model behavior and
+duplicated logic between image and video paths. Additionally, `_align8`
+rounded to the *nearest* multiple of 8, which could round a requested
+resolution **down** — making the exact target resolution unreachable.
+
+**Fix — inversion:**
+- `PRESETS` is now a plain list of Cinema (12) + Social (4) resolutions,
+  model-agnostic. All model-specific preset categories were removed.
+- `model_type` is now the single source of truth for: pixel alignment (via
+  `SPATIAL_SCALE`, always rounded **up** via the new `_align_up(val, scale)`
+  helper — `_align8`/`_align32` are now thin wrappers around it), 5D
+  video-latent detection (`VIDEO_MODEL_TYPES`), WAN's 4k+1 frame validation
+  (`"wan" in model_type.lower()`), the "Auto (Seconds)" frame stride (8 for
+  LTX, 4 otherwise), and `latent_format` (single `LATENT_FORMAT_MAP` lookup,
+  used for both image and video latents — `VIDEO_LATENT_FORMAT_MAP` removed).
+- Default `preset` changed from the removed `"Flux Square (1024×1024)"` to
+  `"HD 1080p (1920×1080)"`.
+- `generate()` now returns `computed_width`/`computed_height` in its `ui`
+  payload; `radiance_resolution.js` adds an `onExecuted` hook that writes
+  these final, model_type-aligned values back into the `width`/`height`
+  widgets after each run (the preset callback still sets a raw baseline
+  immediately for visual feedback).
+- `radiance_resolution.js`: removed the preset → `enable_video`/`model_type`
+  auto-detection (matched preset names against "WAN"/"LTX"/"Hunyuan"/
+  "CogVideoX"/"Flux"/"SDXL" substrings) — no longer meaningful now that
+  presets are model-agnostic.
+
+**Deferred (not addressed here):**
+- WAN previously got a 16px alignment heuristic via `WAN_FRAME_CATEGORIES`;
+  it now falls back to the 8px default (no `SPATIAL_SCALE` entry for WAN).
+  Revisit if WAN actually requires 16px alignment.
+- `Cosmos (16ch)`, `CogVideoX (16ch)`, `Mochi (12ch)` are excluded from
+  `VIDEO_MODEL_TYPES` — no preset ever exercised a 5D latent for these, so
+  `TEMPORAL_SCALE`/5D-shape correctness for them is unverified.
+- Flux.1 vs Flux.2 (and other version-specific) alignment distinctions are
+  not further differentiated beyond the existing `SPATIAL_SCALE`/
+  `LATENT_CHANNELS` entries.

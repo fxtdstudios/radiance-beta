@@ -35,65 +35,26 @@ PRESETS: Dict[str, Tuple[int, int, str, str]] = {
     "Instagram Story (1080×1920)": (1080, 1920, "Social", "9:16"),
     "YouTube Thumb (1280×720)": (1280, 720, "Social", "16:9"),
     "TikTok (1080×1920)": (1080, 1920, "Social", "9:16"),
-    # ── Flux (1 megapixel target) ──
-    "Flux Square (1024×1024)": (1024, 1024, "Flux", "1:1"),
-    "Flux 16:9 (1360×768)": (1360, 768, "Flux", "16:9"),
-    "Flux 9:16 (768×1360)": (768, 1360, "Flux", "9:16"),
-    "Flux 3:2 (1256×832)": (1256, 832, "Flux", "3:2"),
-    "Flux 2:3 (832×1256)": (832, 1256, "Flux", "2:3"),
-    "Flux 21:9 (1536×656)": (1536, 656, "Flux", "21:9"),
-    "Flux 4:3 (1184×888)": (1184, 888, "Flux", "4:3"),
-    "Flux 2.39:1 (1568×656)": (1568, 656, "Flux", "2.39:1"),
-    # ── SDXL (1 megapixel target) ──
-    # BUG FIX: renamed misleading presets — actual ratios match names now
-    "SDXL Square (1024×1024)": (1024, 1024, "SDXL", "1:1"),
-    "SDXL 3:2 (1216×832)": (1216, 832, "SDXL", "3:2"),    # was mislabeled "16:9" — actual=1.46
-    "SDXL 2:3 (832×1216)": (832, 1216, "SDXL", "2:3"),
-    "SDXL 9:7 (1152×896)": (1152, 896, "SDXL", "9:7"),    # was mislabeled "4:3" — actual=1.29
-    "SDXL 7:9 (896×1152)": (896, 1152, "SDXL", "7:9"),
-    # ── SD 1.5 ──
-    "SD 1.5 Square (512×512)": (512, 512, "SD 1.5", "1:1"),
-    "SD 1.5 Wide (768×512)": (768, 512, "SD 1.5", "3:2"),
-    "SD 1.5 Tall (512×768)": (512, 768, "SD 1.5", "2:3"),
-    # ── WAN Video 1.x (recommended resolutions, 16px-aligned) ──
-    "WAN 720p 16:9 (1280×720)": (1280, 720, "WAN Video", "16:9"),
-    "WAN 480p 16:9 (832×480)": (832, 480, "WAN Video", "16:9"),
-    "WAN Portrait (480×832)": (480, 832, "WAN Video", "9:16"),
-    "WAN Square (512×512)": (512, 512, "WAN Video", "1:1"),
-    # ── WAN 2.1 (updated recommended sizes) ──
-    "WAN 2.1 720p (1280×720)": (1280, 720, "WAN 2.1", "16:9"),
-    "WAN 2.1 480p (854×480)": (854, 480, "WAN 2.1", "16:9"),
-    "WAN 2.1 Portrait 720p (720×1280)": (720, 1280, "WAN 2.1", "9:16"),
-    "WAN 2.1 Portrait 480p (480×854)": (480, 854, "WAN 2.1", "9:16"),
-    "WAN 2.1 Square (512×512)": (512, 512, "WAN 2.1", "1:1"),
-    "WAN 2.1 1080p (1920×1080)": (1920, 1080, "WAN 2.1", "16:9"),
-    # ── LTX-Video (requires 32px alignment, lat=8) ──
-    "LTX 720p (1216×704)": (1216, 704, "LTX Video", "16:9"),
-    "LTX Portrait (704×1216)": (704, 1216, "LTX Video", "9:16"),
-    "LTX Square (768×768)": (768, 768, "LTX Video", "1:1"),
-    "LTX 1080p (1920×1088)": (1920, 1088, "LTX Video", "16:9"),
-    # ── HunyuanVideo (text-to-video) ──
-    "HunyuanVideo 720p (1280×720)": (1280, 720, "HunyuanVideo", "16:9"),
-    "HunyuanVideo Portrait (720×1280)": (720, 1280, "HunyuanVideo", "9:16"),
-    # ── Hunyuan I2V (image-to-video — different resolution set) ──
-    "Hunyuan I2V 720p (1280×720)": (1280, 720, "Hunyuan I2V", "16:9"),
-    "Hunyuan I2V 480p (848×480)": (848, 480, "Hunyuan I2V", "16:9"),
-    "Hunyuan I2V Portrait (720×1280)": (720, 1280, "Hunyuan I2V", "9:16"),
-    # ── CogVideoX ──
-    "CogVideoX 720p (720×480)": (720, 480, "CogVideoX", "3:2"),
-    "CogVideoX 1080p (1280×720)": (1280, 720, "CogVideoX", "16:9"),
 }
 
 PRESET_NAMES = ["Custom"] + list(PRESETS.keys())
 
-# These preset categories emit 5D latent (1, C, T, H, W) for video models
-VIDEO_PRESET_CATEGORIES = {"WAN Video", "WAN 2.1", "LTX Video", "HunyuanVideo", "Hunyuan I2V", "CogVideoX"}
+# ALBABIT-FIX (étape 4): model-specific behavior (alignment, video-latent detection,
+# WAN frame rule, frame stride, latent_format) is now driven entirely by `model_type`
+# (see SPATIAL_SCALE, VIDEO_MODEL_TYPES, LATENT_FORMAT_MAP below) instead of preset
+# category. Presets are now plain Cinema/Social resolutions, model-agnostic.
+#
+# Deferred items (not addressed in this refactor):
+#  - WAN previously got a 16px alignment heuristic; it now falls back to the 8px
+#    default (SPATIAL_SCALE has no WAN entry). Revisit if WAN needs 16px alignment.
+#  - Cosmos/CogVideoX/Mochi are excluded from VIDEO_MODEL_TYPES — no presets ever
+#    exercised 5D latents for them, so TEMPORAL_SCALE/5D shape correctness for these
+#    is unverified. Revisit once confirmed.
+#  - Flux.1 vs Flux.2 (and other version-specific) alignment distinctions are not
+#    further differentiated beyond the existing SPATIAL_SCALE/LATENT_CHANNELS entries.
 
-# Categories that require WAN's (4k+1) frame count rule
-WAN_FRAME_CATEGORIES = {"WAN Video", "WAN 2.1"}
-
-# Categories that require 32px pixel alignment instead of 8px
-ALIGN32_CATEGORIES = {"LTX Video"}
+# Model types that emit 5D latent (1, C, T, H, W)
+VIDEO_MODEL_TYPES = {"WAN (16ch)", "LTXV (128ch)", "HunyuanVideo (16ch)"}
 
 # Latent format string matching nodes_sampler.py latent_format input
 LATENT_FORMAT_MAP = {
@@ -116,17 +77,6 @@ LATENT_FORMAT_MAP = {
     "PixArt / Aura Flow / Kolors (4ch)": "sdxl",
     # ALBABIT-FIX: Flux.2 latent format (comfy.latent_formats.Flux2)
     "Flux.2 / Flux.2 Klein (128ch)": "flux2",
-}
-
-# Latent format for video preset categories (overrides LATENT_FORMAT_MAP)
-VIDEO_LATENT_FORMAT_MAP = {
-    "WAN Video": "wan",
-    "WAN 2.1": "wan",
-    # ALBABIT-FIX: aligned with sampler_utils.py model_type keys ("ltxav"/"hunyuan_video")
-    "LTX Video": "ltxav",
-    "HunyuanVideo": "hunyuan_video",
-    "Hunyuan I2V": "hunyuan_video",
-    "CogVideoX": "cogvideox",  # ALBABIT-FIX: was aliased to "flux"
 }
 
 # Common aspect ratios for megapixel target mode
@@ -222,14 +172,19 @@ LATENT_SCALE = 8  # VAE downscale factor
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+def _align_up(val: int, scale: int) -> int:
+    """Round UP to the nearest multiple of `scale` (never down — ALBABIT-FIX étape 4)."""
+    return max(scale, math.ceil(val / scale) * scale)
+
+
 def _align8(val: int) -> int:
-    """Round to nearest multiple of 8 (VAE requirement)."""
-    return max(8, (val + 4) // 8 * 8)
+    """Round UP to nearest multiple of 8 (VAE requirement)."""
+    return _align_up(val, 8)
 
 
 def _align32(val: int) -> int:
     """Round UP to nearest multiple of 32 (LTX Video requirement)."""
-    return max(32, math.ceil(val / 32) * 32)
+    return _align_up(val, 32)
 
 
 def _estimate_vram(w: int, h: int, c: int, b: int, format_key: str = "flux") -> float:
@@ -729,10 +684,10 @@ class RadianceResolution:
                 "preset": (
                     PRESET_NAMES,
                     {
-                        "default": "Flux Square (1024×1024)",
+                        "default": "HD 1080p (1920×1080)",
                         "tooltip": (
-                            "Resolution preset. Cinema, Social, Flux, SDXL, SD 1.5, "
-                            "WAN, WAN 2.1, LTX, HunyuanVideo, Hunyuan I2V, CogVideoX presets. "
+                            "Resolution preset (Cinema or Social). The final width/height "
+                            "are automatically aligned for the selected 'model_type'. "
                             "Select 'Custom' to use manual width/height."
                         ),
                     },
@@ -948,56 +903,24 @@ class RadianceResolution:
                 )
             w, h = w_pre, h_pre
 
-        # ── Step 2: Determine Alignment Rule (Adaptive v3.5) ─────────────────────
-        align_val   = 8
-        align_label = "8px"
-        
-        # LTX Video requires 32px
-        if category in ALIGN32_CATEGORIES or "ltx" in model_type.lower():
-            align_val   = 32
-            align_label = "32px"
-        # WAN Video often works better with 16px or its specific 4k+1 rule
-        elif category in WAN_FRAME_CATEGORIES or "wan" in model_type.lower():
-            align_val   = 16
-            align_label = "16px"
-        # ALBABIT-FIX: Flux.2 VAE has a ×16 spatial downscale (vs ×8 for Flux.1/SD3)
-        elif "flux.2" in model_type.lower():
-            align_val   = 16
-            align_label = "16px"
+        # ── Step 2: Determine Alignment Rule (model_type-driven, étape 4) ────────
+        # ALBABIT-FIX: alignment is now derived solely from SPATIAL_SCALE for the
+        # selected model_type (LTXV=32, Flux.2=16, default=8), always rounded UP.
+        align_val   = SPATIAL_SCALE.get(model_type, 8)
+        align_label = f"{align_val}px"
 
+        # Apply alignment — always round UP, never down (ALBABIT-FIX étape 4)
+        w, h = _align_up(w, align_val), _align_up(h, align_val)
 
-        # Apply alignment
-        if align_val == 32:
-            w, h = _align32(w), _align32(h)
-        else:
-            # Standard align to whatever align_val is (usually 8 or 16)
-            w = max(align_val, (w + align_val // 2) // align_val * align_val)
-            h = max(align_val, (h + align_val // 2) // align_val * align_val)
+        # ── Step 3: Latent Format & VRAM Estimation (model_type-driven) ──────────
+        latent_format = LATENT_FORMAT_MAP.get(model_type, "flux" if LATENT_CHANNELS.get(model_type, 16) >= 16 else "sdxl")
 
-        # ── Step 3: Latent Format & VRAM Estimation ──────────────────────────────
-        latent_format = "sdxl"
-        preset_category = PRESETS.get(preset, (0, 0, "", ""))[2]
-        if enable_video and preset_category in VIDEO_LATENT_FORMAT_MAP:
-            latent_format = VIDEO_LATENT_FORMAT_MAP[preset_category]
-        else:
-            # Fallback to model_type map
-            for key, fmt in LATENT_FORMAT_MAP.items():
-                if key == model_type:
-                    latent_format = fmt
-                    break
-        
         # ALBABIT-FIX: Restored from previous radiance version — auto frame count from
         # a target duration, aligned to the model's temporal stride (n*stride + 1).
         if enable_video and frame_computation == "Auto (Seconds)":
             raw_frames = duration_seconds * float(frame_rate)
 
-            if "ltx" in model_type.lower():
-                stride = 8
-            elif preset_category in WAN_FRAME_CATEGORIES or "wan" in model_type.lower() \
-                    or "hunyuan" in model_type.lower():
-                stride = 4
-            else:
-                stride = 4  # Safe fallback for other 3D VAEs
+            stride = 8 if "ltx" in model_type.lower() else 4
 
             video_frames = max(1, int(round(raw_frames / stride)) * stride + 1)
             logger.info(
@@ -1013,14 +936,14 @@ class RadianceResolution:
         w, h = _apply_orientation(w, h, orientation)
 
         # ── Step 5: WAN frame count validation ──────────────────────────────────
-        # WAN Video and WAN 2.1 require frame count = (4k + 1): 1, 5, 9, 13, 17...
-        if enable_video and preset_category in WAN_FRAME_CATEGORIES:
+        # WAN requires frame count = (4k + 1): 1, 5, 9, 13, 17...
+        if enable_video and "wan" in model_type.lower():
             if (video_frames - 1) % 4 != 0:
                 k_low  = (video_frames - 1) // 4
                 v_low  = 4 * k_low + 1
                 v_high = v_low + 4
                 logger.warning(
-                    f"{preset_category} requires frame count = 4k+1 "
+                    f"{model_type} requires frame count = 4k+1 "
                     f"(1, 5, 9, 13, 17, 21, 49, 81, 97...). Got {video_frames}. "
                     f"Nearest valid values: {v_low} or {v_high}. "
                     f"Using {video_frames} may cause sampler errors or incorrect output."
@@ -1032,8 +955,8 @@ class RadianceResolution:
         else:
             latent_c = LATENT_CHANNELS.get(model_type, 16)
 
-        # ── Determine if this is a video latent ──────────────────────────────────
-        is_video_latent = enable_video and preset_category in VIDEO_PRESET_CATEGORIES
+        # ── Determine if this is a video latent (model_type-driven, étape 4) ────
+        is_video_latent = enable_video and model_type in VIDEO_MODEL_TYPES
         actual_batch = video_frames if enable_video else batch_size
 
         # ── Create empty latent ──────────────────────────────────────────────────
@@ -1128,22 +1051,19 @@ class RadianceResolution:
         except Exception as e:
             logger.warning(f"Preview render failed: {e}")
 
-        # ── Latent format string ─────────────────────────────────────────────────
-        # Video preset categories get their own format map; image models use model_type
-        if is_video_latent:
-            latent_fmt = VIDEO_LATENT_FORMAT_MAP.get(
-                preset_category,
-                "flux" if latent_c >= 16 else "sdxl"
-            )
-        else:
-            latent_fmt = LATENT_FORMAT_MAP.get(model_type, "flux" if latent_c >= 16 else "sdxl")
+        # ── Latent format string (model_type-driven, étape 4) ───────────────────
+        latent_fmt = latent_format
         if latent_channels > 0 and not is_video_latent:
             latent_fmt = "flux" if latent_c >= 16 else "sdxl"
 
         duration_sec = video_frames / frame_rate if enable_video else 0.0
 
         return {
-            "ui": {"images": preview_images},
+            "ui": {
+                "images": preview_images,
+                "computed_width": [w],
+                "computed_height": [h],
+            },
             "result": (
                 latent_dict, w, h, latent_c, info,
                 float(frame_rate), int(actual_batch), latent_fmt, duration_sec,
