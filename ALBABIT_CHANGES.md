@@ -637,3 +637,30 @@ text/image-to-video) to avoid implying Predict2 support. Renamed across
 `TEMPORAL_SCALE`, `VIDEO_MODEL_TYPES` (Python) and `VIDEO_MODEL_TYPES_JS`
 (`radiance_resolution.js`). Safe rename — `model_type` is an input-only field on
 this node (never an output), so no downstream node references this string.
+
+## Follow-up — replaced "Auto (Flux 16ch)" with "Manual" (new default)
+
+Per Albabit: `RadianceResolution` has no `model` input, so "Auto" detection was
+never real — it was just an alias for the Flux/SD3/16ch settings. Renamed to
+"Manual" and repurposed as a genuinely unconstrained mode for experimental/unlisted
+models, leaning on the SPATIAL_SCALE/TEMPORAL_SCALE generalization from the
+previous follow-ups:
+
+- `SPATIAL_SCALE["Manual"] = 1` -> `_align_up`/`_alignUp` are no-ops, +/- step = 1.
+  width/height are fully free, no rounding.
+- `TEMPORAL_SCALE["Manual"] = 1` -> `_alignNk1`/the frame-count validation warning
+  treat every `video_frames` value as valid (stride=1 -> `(n-1)%1==0` always true).
+- `LATENT_CHANNELS["Manual"] = 16` and `LATENT_FORMAT_MAP["Manual"] = "flux"` remain
+  sensible fallbacks, but the user is expected to use the `latent_channels` input
+  to set the correct channel count for unlisted/experimental models.
+- **NOT** added to `VIDEO_MODEL_TYPES`/`VIDEO_MODEL_TYPES_JS` — selecting "Manual"
+  does NOT auto-toggle `enable_video` (it's the default, used mainly for images).
+  However, `is_video_latent` was changed to
+  `enable_video and (model_type in VIDEO_MODEL_TYPES or model_type == "Manual")`,
+  so if the user manually enables video with "Manual" selected, a 5D latent is
+  still computed (with no temporal compression assumed, since stride=1).
+- `MODEL_TYPES` default changed from `"Auto (Flux 16ch)"` to `"Manual"`.
+- Tooltip updated to explain the new "Manual" behavior and the `latent_channels`
+  override.
+
+1382 tests pass (unchanged).

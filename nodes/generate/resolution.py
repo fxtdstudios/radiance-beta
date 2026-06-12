@@ -63,7 +63,12 @@ VIDEO_MODEL_TYPES = {"WAN (16ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi
 
 # Latent format string matching nodes_sampler.py latent_format input
 LATENT_FORMAT_MAP = {
-    "Auto (Flux 16ch)": "flux",
+    # ALBABIT-FIX: "Manual" is the new default (formerly "Auto (Flux 16ch)") —
+    # this node has no `model` input so "Auto" detection was never real.
+    # SPATIAL_SCALE/TEMPORAL_SCALE=1 below make width/height/video_frames fully
+    # unconstrained; "flux" remains a sensible latent_format fallback, and the
+    # user can override channels/format via the `latent_channels` input.
+    "Manual": "flux",
     # ALBABIT-FIX: merged with "Lumina2 / Z-Image (16ch)" — both are 16ch, 8px,
     # "flux" latent format with no other distinguishing entries anywhere in
     # resolution.py (SPATIAL_SCALE/TEMPORAL_SCALE/VIDEO_MODEL_TYPES all default).
@@ -97,7 +102,7 @@ MP_ASPECT_RATIOS = [
 ]
 
 MODEL_TYPES = [
-    "Auto (Flux 16ch)",
+    "Manual",
     # ALBABIT-FIX: merged "Flux / SD3 (16ch)" + "Lumina2 / Z-Image (16ch)" — both
     # 16ch/8px/"flux" with no other distinguishing entries in this file.
     "Flux / SD3 / Lumina2 / Z-Image (16ch)",
@@ -124,7 +129,7 @@ ORIENTATIONS = ["As Preset", "Landscape", "Portrait", "Square"]
 
 # Latent channels per model type
 LATENT_CHANNELS = {
-    "Auto (Flux 16ch)": 16,
+    "Manual": 16,
     "Flux / SD3 / Lumina2 / Z-Image (16ch)": 16,
     "SDXL / SD 1.5 / PixArt / Aura Flow / Kolors (4ch)": 4,
     "Chroma (16ch)": 16,
@@ -148,6 +153,9 @@ LATENT_CHANNELS = {
 SPATIAL_SCALE = {
     "LTXV (128ch)": 32,
     "Flux.2 / Flux.2 Klein (128ch)": 16,
+    # ALBABIT-FIX: "Manual" uses scale=1 -> _align_up is a no-op, so width/height
+    # are fully unconstrained (no rounding, +/- step of 1) for experimental models.
+    "Manual": 1,
 }
 
 # ── Per-model latent temporal downscale factor (3D VAE compression) ─────────────
@@ -168,6 +176,9 @@ TEMPORAL_SCALE = {
     # Cosmos-1_0-Diffusion-7B-Text2World) use a ×8 temporal compression
     # (nodes_cosmos.py), same as LTXV. Cosmos Predict2 (×4) is not covered.
     "Cosmos World (16ch)": 8,
+    # ALBABIT-FIX: "Manual" uses stride=1 -> any video_frames value satisfies
+    # (n-1)%1==0, so frame-count snapping/validation is fully unconstrained.
+    "Manual": 1,
 }
 
 # ── VRAM Estimation Metadata ──────────────────────────────────────────────────
@@ -744,10 +755,14 @@ class RadianceResolution:
                 "model_type": (
                     MODEL_TYPES,
                     {
-                        "default": "Auto (Flux 16ch)",
+                        "default": "Manual",
                         "tooltip": (
-                            "Determines latent channel count. "
-                            "Flux/SD3/Cosmos = 16ch. SDXL/SD 1.5 = 4ch. Mochi = 12ch."
+                            "Drives pixel alignment, video-latent shape, frame-count "
+                            "rules, and latent_format for the selected model family. "
+                            "Flux/SD3/Cosmos = 16ch. SDXL/SD 1.5 = 4ch. Mochi = 12ch. "
+                            "'Manual' applies no alignment/frame-count constraints — "
+                            "use the 'latent_channels' input to set channels for "
+                            "experimental/unlisted models."
                         ),
                     },
                 ),
@@ -982,7 +997,11 @@ class RadianceResolution:
             latent_c = LATENT_CHANNELS.get(model_type, 16)
 
         # ── Determine if this is a video latent (model_type-driven) ────
-        is_video_latent = enable_video and model_type in VIDEO_MODEL_TYPES
+        # ALBABIT-FIX: "Manual" is not in VIDEO_MODEL_TYPES (so selecting it doesn't
+        # auto-enable enable_video in the JS toggle), but if the user explicitly
+        # enables video with "Manual" selected, still compute a 5D latent — with
+        # TEMPORAL_SCALE["Manual"]=1, i.e. no compression assumed.
+        is_video_latent = enable_video and (model_type in VIDEO_MODEL_TYPES or model_type == "Manual")
         actual_batch = video_frames if enable_video else batch_size
 
         # ── Create empty latent ──────────────────────────────────────────────────
