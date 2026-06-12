@@ -66,6 +66,9 @@ LATENT_FORMAT_MAP = {
     "Auto (Flux 16ch)": "flux",
     "Flux / SD3 (16ch)": "flux",
     "SDXL / SD 1.5 (4ch)": "sdxl",
+    # ALBABIT-FIX: Chroma uses the Flux latent format (16ch, 8px spatial
+    # compression) — matches sampler_utils.py's "chroma" -> "flux" mapping.
+    "Chroma (16ch)": "chroma",
     # ALBABIT-FIX: Cosmos/CogVideoX/Mochi map to their own sampler model_type
     # (matches sampler_utils.py keys) instead of being aliased to "flux"
     "Cosmos (16ch)": "cosmos",
@@ -94,6 +97,7 @@ MODEL_TYPES = [
     "Auto (Flux 16ch)",
     "Flux / SD3 (16ch)",
     "SDXL / SD 1.5 (4ch)",
+    "Chroma (16ch)",
     "Cosmos (16ch)",
     "CogVideoX (16ch)",
     "Mochi (12ch)",
@@ -116,6 +120,7 @@ LATENT_CHANNELS = {
     "Auto (Flux 16ch)": 16,
     "Flux / SD3 (16ch)": 16,
     "SDXL / SD 1.5 (4ch)": 4,
+    "Chroma (16ch)": 16,
     "Cosmos (16ch)": 16,
     "CogVideoX (16ch)": 16,
     "Mochi (12ch)": 12,

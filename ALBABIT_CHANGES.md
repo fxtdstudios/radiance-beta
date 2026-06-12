@@ -536,3 +536,25 @@ per-model stride).
 **Validated by Albabit**: HD 1080p + LTXV, `-` on height -> 1056 (preset switches to
 "Custom"), `+` back to 1088 -> preset returns to "HD 1080p". Typing `100` into
 `video_frames` with LTXV -> snaps to `97` (8k+1); with WAN -> snaps to `101` (4k+1).
+
+## Follow-up — added `Chroma (16ch)` model type
+
+Audited against ComfyUI core (`comfy/sd.py` CLIPType.CHROMA, `comfy/latent_formats.py`
+Flux) and this repo's `sampler_utils.py` (already maps `"Chroma"`/"ChromaRadiance" ->
+`"chroma"` -> flux sampling defaults). Standard Chroma uses the same 16ch / 8px-aligned
+Flux latent shape, so it's a low-risk addition:
+
+- `MODEL_TYPES`: added `"Chroma (16ch)"`.
+- `LATENT_CHANNELS["Chroma (16ch)"] = 16`.
+- `LATENT_FORMAT_MAP["Chroma (16ch)"] = "chroma"`.
+- No `SPATIAL_SCALE` entry needed (8px default is correct, same as Flux/SD3).
+- Not a video model — no `VIDEO_MODEL_TYPES`/`TEMPORAL_SCALE` change.
+
+**Deferred**: `ChromaRadiance` (pixel-space variant, 3ch, no VAE) is a fundamentally
+different case and is NOT covered by this addition.
+
+**Also audited, not added**: `StepVideo` — ComfyUI core in this checkout has no
+`latent_formats` class, no `CLIPType`, and no `supported_models` entry for it. The
+`sampler_utils.py` "stepvideo" references appear to be forward-looking stubs with no
+working load path yet. Adding it to `resolution.py` now would let users select a
+model_type the loader can't actually run — deferred until core ComfyUI ships support.
