@@ -541,7 +541,7 @@ Use `◎ Resolution` when the graph reaches the Resolution step in a generate, l
 
 | Input | Required | Type | Default | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| `preset` | Yes | `(PRESET_NAMES, {'default': 'Flux Square (1024×1024)', 'tooltip': "Resolution preset. Cinema, Social, Flux, SDXL, SD 1.5, WAN, WAN 2.1, LTX, HunyuanVideo, Hunyuan I2V, CogVideoX presets. Select 'Custom' to use manual width/height."})` | - | - |
+| `preset` | Yes | `(PRESET_NAMES, {'default': 'HD 1080p (1920×1080)', 'tooltip': "Resolution preset (Cinema or Social). The final width/height are automatically aligned for the selected 'model_type'. Select 'Custom' to use manual width/height."})` | - | - |
 | `width` | Yes | `INT` | `1024` | Custom width (only used when preset is 'Custom'). Auto-aligned to 8px (32px for LTX Video). |
 | `height` | Yes | `INT` | `1024` | Custom height (only used when preset is 'Custom'). Auto-aligned to 8px (32px for LTX Video). |
 | `orientation` | Yes | `(ORIENTATIONS, {'default': 'As Preset', 'tooltip': "Override orientation. 'As Preset' uses the preset's native orientation."})` | - | - |
