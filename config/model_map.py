@@ -120,6 +120,35 @@ MODEL_VAE_CONFIG: dict[str, dict] = {
         "clip_slots":          ["qwen3_4b"],
         "notes":               "Flux.2 Klein — 128ch latent (post pixel-shuffle), 16x -> 4 upsample stages.",
     },
+    # ALBABIT-FIX: Cosmos (16ch, T5XXL-old encoder) and Mochi (12ch, T5XXL encoder)
+    "cosmos": {
+        "latent_channels":     16,
+        "scale_factor":        1.0,
+        "log_curve":           "ARRI LogC4",
+        "compression_ratio":   0.50,
+        "norm_center":         3.0,
+        "vae_spatial_factor":  8,
+        "vae_temporal_factor": 8,
+        "noise_schedule":      "flow",
+        "text_embed_seq_len":  512,
+        "text_embed_hidden":   1024,
+        "clip_slots":          ["t5xxl"],
+        "notes":               "NVIDIA Cosmos; 16ch causal video VAE, T5-XXL (old) text encoder.",
+    },
+    "mochi": {
+        "latent_channels":     12,
+        "scale_factor":        1.0,
+        "log_curve":           "ARRI LogC4",
+        "compression_ratio":   0.50,
+        "norm_center":         3.0,
+        "vae_spatial_factor":  8,
+        "vae_temporal_factor": 6,
+        "noise_schedule":      "flow",
+        "text_embed_seq_len":  256,
+        "text_embed_hidden":   4096,
+        "clip_slots":          ["t5xxl"],
+        "notes":               "Genmo Mochi-1; 12ch latent, T5-XXL text encoder.",
+    },
     "cogvideox": {
         "latent_channels":     16,
         "scale_factor":        0.18215,
@@ -278,6 +307,13 @@ _MODEL_VAE_ALIASES: dict[str, str] = {
     # CogVideoX variants
     "cogvideo":    "cogvideox",
     "cogvideox5b": "cogvideox",
+    # Cosmos variants
+    "cosmos1":     "cosmos",
+    "cosmos-1":    "cosmos",
+    # Mochi variants
+    "mochi1":      "mochi",
+    "mochi-1":     "mochi",
+    "genmo-mochi": "mochi",
     # Wan variants
     "wanvideo":    "wan",
     "wan2":        "wan",
