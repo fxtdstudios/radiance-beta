@@ -105,6 +105,9 @@ const VIDEO_MODEL_TYPES_JS = new Set(["WAN (16ch)", "LTXV (128ch)", "HunyuanVide
 const SPATIAL_SCALE_JS = {
     "LTXV (128ch)": 32,
     "Flux.2 / Flux.2 Klein (128ch)": 16,
+    // ALBABIT-FIX: "Manual" -> scale=1, _alignUp is a no-op and the +/- step
+    // becomes 1, so width/height are fully unconstrained.
+    "Manual": 1,
 };
 
 function _alignUp(val, scale) {
@@ -152,6 +155,8 @@ function _applyAlignment(node, modelTypeW, widthW, heightW) {
 
 function _frameStride(modelType) {
     const m = (modelType || "").toLowerCase();
+    // ALBABIT-FIX: "Manual" -> stride=1, _alignNk1 is a no-op (any value valid).
+    if (m === "manual") return 1;
     if (m.includes("ltx") || m.includes("cosmos")) return 8;
     if (m.includes("mochi")) return 6;
     if (m.includes("wan") || m.includes("hunyuan")) return 4;
