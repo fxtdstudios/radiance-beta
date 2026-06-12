@@ -97,7 +97,7 @@ function setWidgetVisible(widget, visible, node) {
 // when the user toggles frame_computation.
 // ALBABIT-FIX follow-up: mirrors VIDEO_MODEL_TYPES in resolution.py —
 // model_types that emit 5D video latents and should auto-enable "enable_video".
-const VIDEO_MODEL_TYPES_JS = new Set(["WAN (16ch)", "LTXV (128ch)", "HunyuanVideo (16ch)"]);
+const VIDEO_MODEL_TYPES_JS = new Set(["WAN (16ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)"]);
 
 // ALBABIT-FIX follow-up: mirrors SPATIAL_SCALE/_align_up in resolution.py —
 // recompute width/height instantly when model_type changes, instead of waiting
@@ -153,6 +153,7 @@ function _applyAlignment(node, modelTypeW, widthW, heightW) {
 function _frameStride(modelType) {
     const m = (modelType || "").toLowerCase();
     if (m.includes("ltx")) return 8;
+    if (m.includes("mochi")) return 6;
     if (m.includes("wan") || m.includes("hunyuan")) return 4;
     return 4;
 }

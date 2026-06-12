@@ -47,25 +47,33 @@ PRESET_NAMES = ["Custom"] + list(PRESETS.keys())
 # Deferred items (not addressed in this refactor):
 #  - WAN previously got a 16px alignment heuristic; it now falls back to the 8px
 #    default (SPATIAL_SCALE has no WAN entry). Revisit if WAN needs 16px alignment.
-#  - Cosmos/CogVideoX/Mochi are excluded from VIDEO_MODEL_TYPES. Audited against
+#  - Cosmos/CogVideoX are excluded from VIDEO_MODEL_TYPES. Audited against
 #    ComfyUI's comfy_extras/ (2026-06-12): LTXV (8), WAN (4), HunyuanVideo (4) and
 #    CogVideoX (4, AutoencoderKLCogVideoX.temporal_compression_ratio default) all
 #    match our TEMPORAL_SCALE/_frameStride values. Mochi requires temporal_scale=6
-#    (nodes_mochi.py: (length-1)//6+1) — our default of 4 would be WRONG if Mochi
-#    is ever added to VIDEO_MODEL_TYPES. Cosmos (nodes_cosmos.py) has TWO different
-#    temporal strides (8 and 4) depending on variant — needs clarification before
-#    enabling 5D latents for Cosmos.
+#    (nodes_mochi.py: (length-1)//6+1) and has been added to VIDEO_MODEL_TYPES with
+#    its own TEMPORAL_SCALE entry. Cosmos (nodes_cosmos.py) has TWO different
+#    temporal strides (8 and 4) depending on variant (Cosmos 1.0/"World" vs Cosmos
+#    Predict2) — needs clarification of which variant before enabling 5D latents.
+#    CogVideoX's stride (4) is verified correct but untested with a real 5D-latent
+#    workflow — left out of VIDEO_MODEL_TYPES pending validation, not because of a
+#    known stride conflict.
 #  - Flux.1 vs Flux.2 (and other version-specific) alignment distinctions are not
 #    further differentiated beyond the existing SPATIAL_SCALE/LATENT_CHANNELS entries.
 
 # Model types that emit 5D latent (1, C, T, H, W)
-VIDEO_MODEL_TYPES = {"WAN (16ch)", "LTXV (128ch)", "HunyuanVideo (16ch)"}
+VIDEO_MODEL_TYPES = {"WAN (16ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)"}
 
 # Latent format string matching nodes_sampler.py latent_format input
 LATENT_FORMAT_MAP = {
     "Auto (Flux 16ch)": "flux",
-    "Flux / SD3 (16ch)": "flux",
-    "SDXL / SD 1.5 (4ch)": "sdxl",
+    # ALBABIT-FIX: merged with "Lumina2 / Z-Image (16ch)" — both are 16ch, 8px,
+    # "flux" latent format with no other distinguishing entries anywhere in
+    # resolution.py (SPATIAL_SCALE/TEMPORAL_SCALE/VIDEO_MODEL_TYPES all default).
+    "Flux / SD3 / Lumina2 / Z-Image (16ch)": "flux",
+    # ALBABIT-FIX: merged with "PixArt / Aura Flow / Kolors (4ch)" — both are 4ch,
+    # 8px, "sdxl" latent format with no other distinguishing entries.
+    "SDXL / SD 1.5 / PixArt / Aura Flow / Kolors (4ch)": "sdxl",
     # ALBABIT-FIX: Chroma uses the Flux latent format (16ch, 8px spatial
     # compression) — matches sampler_utils.py's "chroma" -> "flux" mapping.
     "Chroma (16ch)": "chroma",
@@ -81,8 +89,6 @@ LATENT_FORMAT_MAP = {
     "WAN (16ch)": "wan",
     # ALBABIT-FIX: "hunyuan_video" (not "hunyuan") to match sampler_utils.py model_type
     "HunyuanVideo (16ch)": "hunyuan_video",
-    "Lumina2 / Z-Image (16ch)": "flux",
-    "PixArt / Aura Flow / Kolors (4ch)": "sdxl",
     # ALBABIT-FIX: Flux.2 latent format (comfy.latent_formats.Flux2)
     "Flux.2 / Flux.2 Klein (128ch)": "flux2",
 }
@@ -95,19 +101,23 @@ MP_ASPECT_RATIOS = [
 
 MODEL_TYPES = [
     "Auto (Flux 16ch)",
-    "Flux / SD3 (16ch)",
-    "SDXL / SD 1.5 (4ch)",
+    # ALBABIT-FIX: merged "Flux / SD3 (16ch)" + "Lumina2 / Z-Image (16ch)" — both
+    # 16ch/8px/"flux" with no other distinguishing entries in this file.
+    "Flux / SD3 / Lumina2 / Z-Image (16ch)",
+    # ALBABIT-FIX: merged "SDXL / SD 1.5 (4ch)" + "PixArt / Aura Flow / Kolors (4ch)"
+    # — both 4ch/8px/"sdxl" with no other distinguishing entries in this file.
+    "SDXL / SD 1.5 / PixArt / Aura Flow / Kolors (4ch)",
     "Chroma (16ch)",
     "Cosmos (16ch)",
     "CogVideoX (16ch)",
+    # ALBABIT-FIX: Mochi has its own temporal compression (×6, see TEMPORAL_SCALE)
+    # and is a 5D video latent like WAN/LTXV/HunyuanVideo.
     "Mochi (12ch)",
     # ALBABIT-FIX: LTX-Video uses a 128-channel latent (vs 16ch for Flux/SD3)
     "LTXV (128ch)",
     # ALBABIT-FIX: Added model types matching the Radiance Video Loader / RUDRA decoder set
     "WAN (16ch)",
     "HunyuanVideo (16ch)",
-    "Lumina2 / Z-Image (16ch)",
-    "PixArt / Aura Flow / Kolors (4ch)",
     # ALBABIT-FIX: Flux.2 / Flux.2 Klein — 128ch latent like LTXV, but ×16 spatial
     # downscale (vs ×32 for LTXV) and no 5D/video handling.
     "Flux.2 / Flux.2 Klein (128ch)",
@@ -118,8 +128,8 @@ ORIENTATIONS = ["As Preset", "Landscape", "Portrait", "Square"]
 # Latent channels per model type
 LATENT_CHANNELS = {
     "Auto (Flux 16ch)": 16,
-    "Flux / SD3 (16ch)": 16,
-    "SDXL / SD 1.5 (4ch)": 4,
+    "Flux / SD3 / Lumina2 / Z-Image (16ch)": 16,
+    "SDXL / SD 1.5 / PixArt / Aura Flow / Kolors (4ch)": 4,
     "Chroma (16ch)": 16,
     "Cosmos (16ch)": 16,
     "CogVideoX (16ch)": 16,
@@ -129,8 +139,6 @@ LATENT_CHANNELS = {
     # ALBABIT-FIX: Added model types matching the Radiance Video Loader / RUDRA decoder set
     "WAN (16ch)": 16,
     "HunyuanVideo (16ch)": 16,
-    "Lumina2 / Z-Image (16ch)": 16,
-    "PixArt / Aura Flow / Kolors (4ch)": 4,
     # ALBABIT-FIX: Flux.2 latent is 128 channels (comfy.latent_formats.Flux2)
     "Flux.2 / Flux.2 Klein (128ch)": 128,
 }
@@ -156,6 +164,9 @@ TEMPORAL_SCALE = {
     "WAN (16ch)": 4,
     "HunyuanVideo (16ch)": 4,
     "CogVideoX (16ch)": 4,
+    # ALBABIT-FIX: Mochi's VAE temporal compression is ×6 (nodes_mochi.py:
+    # (length-1)//6+1), distinct from the 4x default used by WAN/Hunyuan/CogVideoX.
+    "Mochi (12ch)": 6,
 }
 
 # ── VRAM Estimation Metadata ──────────────────────────────────────────────────
@@ -822,7 +833,9 @@ class RadianceResolution:
                         "default": 81, "min": 1, "max": 100000, "step": 1,
                         "tooltip": (
                             "Total number of video frames. "
-                            "WAN/WAN 2.1: must satisfy (4k+1) — e.g. 1, 5, 9, 13, 17, 21, 49, 81. "
+                            "5D-latent models require (stride*k+1) — e.g. 4k+1 for "
+                            "WAN/HunyuanVideo (1, 5, 9, 13...), 8k+1 for LTXV (1, 9, 17...), "
+                            "6k+1 for Mochi (1, 7, 13...). "
                             "A warning is logged if this constraint is violated. "
                             "Ignored when frame_computation = 'Auto (Seconds)'."
                         ),
@@ -930,7 +943,7 @@ class RadianceResolution:
         if enable_video and frame_computation == "Auto (Seconds)":
             raw_frames = duration_seconds * float(frame_rate)
 
-            stride = 8 if "ltx" in model_type.lower() else 4
+            stride = TEMPORAL_SCALE.get(model_type, 4)
 
             video_frames = max(1, int(round(raw_frames / stride)) * stride + 1)
             logger.info(
@@ -945,16 +958,18 @@ class RadianceResolution:
         # Apply orientation
         w, h = _apply_orientation(w, h, orientation)
 
-        # ── Step 5: WAN frame count validation ──────────────────────────────────
-        # WAN requires frame count = (4k + 1): 1, 5, 9, 13, 17...
-        if enable_video and "wan" in model_type.lower():
-            if (video_frames - 1) % 4 != 0:
-                k_low  = (video_frames - 1) // 4
-                v_low  = 4 * k_low + 1
-                v_high = v_low + 4
+        # ── Step 5: Video frame count validation (model_type-driven) ────────────
+        # 5D-latent models require frame count = (stride*k + 1): 1, 5, 9, 13...
+        # for stride=4 (WAN/HunyuanVideo), or 1, 9, 17... for stride=8 (LTXV), etc.
+        if enable_video and model_type in VIDEO_MODEL_TYPES:
+            stride = TEMPORAL_SCALE.get(model_type, 4)
+            if (video_frames - 1) % stride != 0:
+                k_low  = (video_frames - 1) // stride
+                v_low  = stride * k_low + 1
+                v_high = v_low + stride
                 logger.warning(
-                    f"{model_type} requires frame count = 4k+1 "
-                    f"(1, 5, 9, 13, 17, 21, 49, 81, 97...). Got {video_frames}. "
+                    f"{model_type} requires frame count = {stride}k+1 "
+                    f"(1, {stride + 1}, {2 * stride + 1}, {3 * stride + 1}...). Got {video_frames}. "
                     f"Nearest valid values: {v_low} or {v_high}. "
                     f"Using {video_frames} may cause sampler errors or incorrect output."
                 )

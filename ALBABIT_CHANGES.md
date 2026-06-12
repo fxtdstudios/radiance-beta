@@ -558,3 +558,41 @@ different case and is NOT covered by this addition.
 `sampler_utils.py` "stepvideo" references appear to be forward-looking stubs with no
 working load path yet. Adding it to `resolution.py` now would let users select a
 model_type the loader can't actually run — deferred until core ComfyUI ships support.
+
+## Follow-up — merged equivalent model_types, added Mochi to VIDEO_MODEL_TYPES
+
+**Merged model_types with no distinguishing entries** (audited: identical
+`LATENT_CHANNELS`, default `SPATIAL_SCALE`/`TEMPORAL_SCALE` for both, neither in
+`VIDEO_MODEL_TYPES`, and neither string referenced anywhere outside
+`resolution.py` — `model_type` is an input only, never an output of this node, so
+renaming these entries cannot break downstream nodes):
+- `"Flux / SD3 (16ch)"` + `"Lumina2 / Z-Image (16ch)"` -> `"Flux / SD3 / Lumina2 /
+  Z-Image (16ch)"` (16ch, 8px, `latent_format="flux"`).
+- `"SDXL / SD 1.5 (4ch)"` + `"PixArt / Aura Flow / Kolors (4ch)"` -> `"SDXL / SD 1.5
+  / PixArt / Aura Flow / Kolors (4ch)"` (4ch, 8px, `latent_format="sdxl"`).
+- `"Chroma (16ch)"` was NOT merged into the Flux group despite identical
+  dimensions — its `latent_format="chroma"` differs and feeds a different sampler
+  default in `sampler_utils.py`.
+
+**Added `Mochi (12ch)` to `VIDEO_MODEL_TYPES`** (5D latent) with its own
+`TEMPORAL_SCALE["Mochi (12ch)"] = 6` (matches `nodes_mochi.py`:
+`(length-1)//6+1`), resolving the "would be WRONG with default stride 4" caveat
+from the previous audit:
+- `js/radiance_resolution.js`: `VIDEO_MODEL_TYPES_JS` and `_frameStride` now
+  include Mochi (stride 6) — `video_frames` instantly snaps to `6k+1` (1, 7, 13,
+  19...) for Mochi, same as the WAN/LTXV/HunyuanVideo snapping.
+- `resolution.py`: generalized the "Auto (Seconds)" frame-count stride (was
+  hardcoded `8 if ltx else 4`) and the WAN-only `4k+1` validation warning to use
+  `TEMPORAL_SCALE.get(model_type, 4)` and `model_type in VIDEO_MODEL_TYPES` for
+  ALL video models, not just WAN/LTXV.
+
+**Cosmos clarification (re: "why Cosmos at all?")**: ComfyUI's Cosmos support
+(`nodes_cosmos.py`) targets NVIDIA's Cosmos *video generation* world-foundation
+models (text/image-to-video), which Radiance's loader/sampler already expose as a
+`model_type` — not the separate robotics/embodied-AI "Cosmos Reason"/policy
+models. The deferred item is purely about which Cosmos *video* variant (1.0
+"World" @ stride 8, vs Predict2 @ stride 4) `"Cosmos (16ch)"` should map to before
+enabling 5D latents — not about whether Cosmos belongs in this node at all.
+
+**CogVideoX**: left out of `VIDEO_MODEL_TYPES` for now (same as StepVideo) —
+not a priority, deferred without further action.
