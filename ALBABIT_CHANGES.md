@@ -483,3 +483,30 @@ callback to toggle `enable_video` on/off accordingly.
 - Cosmos (`nodes_cosmos.py`) has **two different** temporal strides (8 and 4)
   depending on variant — needs clarification before enabling 5D latents for
   Cosmos.
+
+### Follow-up — instant width/height alignment preview on model_type change
+
+**Problem:** Changing `model_type` only updated the aligned `width`/`height`
+shown in the UI after running generation (via the `onExecuted` sync added in
+étape 4). Selecting e.g. `LTXV (128ch)` after a `HD 1080p (1920×1080)` preset
+still showed `1920x1080` until the next run.
+
+**Fix (`radiance_resolution.js`):**
+- Added `SPATIAL_SCALE_JS` (mirrors `SPATIAL_SCALE` in `resolution.py`: LTXV=32,
+  Flux.2/Flux.2 Klein=16, default=8) and `_alignUp`/`_applyAlignment` helpers.
+- The node now tracks an unaligned "base" resolution (`node._resBaseW/_resBaseH`),
+  set from the selected preset, restored from a saved workflow (`onConfigure`),
+  or updated live when the user edits `width`/`height` directly (Custom mode).
+- `model_type`'s callback re-aligns `width`/`height` from this base instantly —
+  e.g. `1920x1080` -> `1920x1088` for LTXV, then back to `1920x1080` for
+  `Flux / SD3 (16ch)` (`_align_up` only rounds up, so re-aligning from the
+  already-aligned value couldn't recover the smaller alignment — hence the
+  separate base tracking).
+- `preset`'s callback also re-aligns immediately after setting the raw preset
+  values, so switching presets after picking a video `model_type` doesn't
+  briefly show un-aligned values.
+
+**Validated by Albabit**: `HD 1080p` -> `LTXV (128ch)` shows `1920x1088`
+instantly; switching to `Flux / SD3 (16ch)` correctly returns to `1920x1080`.
+`1280x720` (HD 720p) with `Flux.2 / Flux.2 Klein (128ch)` stays `1280x720`
+(already a multiple of 16).
