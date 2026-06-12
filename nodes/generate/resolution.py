@@ -689,7 +689,7 @@ class RadianceResolution:
                 "preset": (
                     PRESET_NAMES,
                     {
-                        "default": "HD 1080p (1920×1080)",
+                        "default": "Custom",
                         "tooltip": (
                             "Resolution preset (Cinema or Social). The final width/height "
                             "are automatically aligned for the selected 'model_type'. "

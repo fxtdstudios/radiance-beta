@@ -116,6 +116,27 @@ function _alignUp(val, scale) {
 // e.g. the raw preset values) rather than the widgets' current value — _alignUp
 // only rounds up, so re-aligning an already-aligned value can't recover a smaller
 // alignment for a different model_type (e.g. 1088 LTXV -> 1080 Flux).
+// Sets the +/- step of a width/height widget so it always lands on a valid
+// alignment for the current model_type (32 for LTXV, 16 for Flux.2, 8 default).
+function _setWidgetStep(widget, scale) {
+    if (!widget) return;
+    if (!widget.options) widget.options = {};
+    widget.options.step = scale;
+    widget.options.step2 = scale;
+}
+
+function _syncStepsToModelType(modelTypeW, widthW, heightW) {
+    const scale = SPATIAL_SCALE_JS[modelTypeW?.value] || 8;
+    _setWidgetStep(widthW, scale);
+    _setWidgetStep(heightW, scale);
+}
+
+// Video models require video_frames = N*stride + 1 (e.g. WAN: 4k+1 -> 1,5,9,13...;
+// LTXV: 8k+1 -> 1,9,17,25...). Snaps to the nearest valid value.
+function _alignNk1(val, stride) {
+    return Math.max(1, Math.round((val - 1) / stride) * stride + 1);
+}
+
 function _applyAlignment(node, modelTypeW, widthW, heightW) {
     if (!widthW || !heightW) return;
     const baseW = node._resBaseW ?? parseInt(widthW.value, 10);
@@ -218,9 +239,22 @@ app.registerExtension({
                         if (enableVideoW.callback) enableVideoW.callback.call(enableVideoW, isVideoModel);
                     }
 
-                    // Instantly reflect the alignment this model_type will enforce,
-                    // instead of waiting for onExecuted after generation.
+                    // Match the width/height +/- step to this model_type's alignment
+                    // (32 for LTXV, 16 for Flux.2, 8 default) so it always lands on
+                    // a valid value, then instantly reflect the alignment this
+                    // model_type will enforce, instead of waiting for onExecuted.
+                    _syncStepsToModelType(modelTypeW, widthW, heightW);
                     _applyAlignment(node, modelTypeW, widthW, heightW);
+
+                    // Snap video_frames to a valid N*stride+1 value for the new model_type.
+                    if (videoFramesW && VIDEO_MODEL_TYPES_JS.has(modelTypeW.value)) {
+                        const val = parseInt(videoFramesW.value, 10);
+                        const aligned = _alignNk1(val, _frameStride(modelTypeW.value));
+                        if (aligned !== val) {
+                            videoFramesW.value = aligned;
+                            if (videoFramesW.inputEl) videoFramesW.inputEl.value = aligned;
+                        }
+                    }
 
                     toggleFields();
                 };
@@ -258,6 +292,26 @@ app.registerExtension({
                 };
             }
 
+            // ALBABIT-FIX: instantly snap video_frames to a valid N*stride+1 value for
+            // video models (4k+1 for WAN/HunyuanVideo, 8k+1 for LTXV) — mirrors the
+            // Python-side WAN warning/suggestion in generate(), but applied live and
+            // for all VIDEO_MODEL_TYPES.
+            if (videoFramesW) {
+                const orig = videoFramesW.callback;
+                videoFramesW.callback = function () {
+                    if (orig) orig.apply(this, arguments);
+
+                    if (VIDEO_MODEL_TYPES_JS.has(modelTypeW?.value)) {
+                        const val = parseInt(videoFramesW.value, 10);
+                        const aligned = _alignNk1(val, _frameStride(modelTypeW.value));
+                        if (aligned !== val) {
+                            videoFramesW.value = aligned;
+                            if (videoFramesW.inputEl) videoFramesW.inputEl.value = aligned;
+                        }
+                    }
+                };
+            }
+
             if (mpTargetW) {
                 const orig = mpTargetW.callback;
                 mpTargetW.callback = function () {
@@ -287,6 +341,12 @@ app.registerExtension({
                         // New unaligned base resolution — model_type alignment realigns from this.
                         node._resBaseW = parseInt(match[1], 10);
                         node._resBaseH = parseInt(match[2], 10);
+                        // Remember the preset's own (pre-alignment) resolution and name, so
+                        // manual width/height edits can detect when they drift from it (or
+                        // come back to it) and toggle `preset` accordingly.
+                        node._presetRawW = node._resBaseW;
+                        node._presetRawH = node._resBaseH;
+                        node._lastPresetName = presetW.value;
                     }
 
                     // Align to the current model_type immediately, so switching presets
@@ -303,20 +363,57 @@ app.registerExtension({
                 };
             }
 
+            // Switches `preset` to "Custom" if the user edits width/height away from
+            // what the current preset (aligned for the current model_type) would
+            // produce — e.g. typing 1000 while preset=HD 1080p/model_type=LTXV
+            // snaps to 992 (still a valid 32px alignment) but no longer matches the
+            // preset's own 1920x1088, so it's effectively a custom resolution now.
+            const _flagCustomIfNotPreset = (val, rawBase, scale) => {
+                if (presetW && presetW.value !== "Custom" && rawBase != null && val !== _alignUp(rawBase, scale)) {
+                    presetW.value = "Custom";
+                    if (presetW.callback) presetW.callback.call(presetW);
+                }
+            };
+
+            // Reverse of the above: if the user edits width/height back to exactly
+            // what the previously-selected preset (aligned for the current
+            // model_type) would produce, switch `preset` back to that preset.
+            const _restorePresetIfMatching = () => {
+                if (!presetW || presetW.value !== "Custom" || !node._lastPresetName) return;
+                if (node._presetRawW == null || node._presetRawH == null) return;
+                const scale = SPATIAL_SCALE_JS[modelTypeW?.value] || 8;
+                const w = parseInt(widthW.value, 10);
+                const h = parseInt(heightW.value, 10);
+                if (w === _alignUp(node._presetRawW, scale) && h === _alignUp(node._presetRawH, scale)) {
+                    presetW.value = node._lastPresetName;
+                    if (presetW.callback) presetW.callback.call(presetW);
+                }
+            };
+
             // Track manual width/height edits (Custom preset) as the new alignment base,
             // so a later model_type change realigns from the user's intended value.
+            // The +/- step is synced to the model_type's alignment (_syncStepsToModelType),
+            // so +/- clicks always land on valid values; only direct typing can misalign.
             if (widthW) {
                 const orig = widthW.callback;
                 widthW.callback = function () {
                     if (orig) orig.apply(this, arguments);
-                    node._resBaseW = parseInt(widthW.value, 10);
+                    const val = parseInt(widthW.value, 10);
+                    node._resBaseW = val;
+                    const scale = SPATIAL_SCALE_JS[modelTypeW?.value] || 8;
+                    _flagCustomIfNotPreset(val, node._presetRawW, scale);
+                    _restorePresetIfMatching();
                 };
             }
             if (heightW) {
                 const orig = heightW.callback;
                 heightW.callback = function () {
                     if (orig) orig.apply(this, arguments);
-                    node._resBaseH = parseInt(heightW.value, 10);
+                    const val = parseInt(heightW.value, 10);
+                    node._resBaseH = val;
+                    const scale = SPATIAL_SCALE_JS[modelTypeW?.value] || 8;
+                    _flagCustomIfNotPreset(val, node._presetRawH, scale);
+                    _restorePresetIfMatching();
                 };
             }
 
@@ -324,6 +421,7 @@ app.registerExtension({
             // (defaults, or values restored from a saved workflow via onConfigure below).
             node._resBaseW = widthW ? parseInt(widthW.value, 10) : undefined;
             node._resBaseH = heightW ? parseInt(heightW.value, 10) : undefined;
+            _syncStepsToModelType(modelTypeW, widthW, heightW);
 
             // ALBABIT-FIX: Defer initial toggleFields 100ms so Vue completes its first layout
             // pass before any widget is hidden. If we hide immediately, widget.computedHeight is
@@ -351,12 +449,23 @@ app.registerExtension({
                 const durSecW      = self.widgets?.find(w => w.name === "duration_seconds");
                 const widthW       = self.widgets?.find(w => w.name === "width");
                 const heightW      = self.widgets?.find(w => w.name === "height");
+                const modelTypeW   = self.widgets?.find(w => w.name === "model_type");
+                const presetW      = self.widgets?.find(w => w.name === "preset");
                 if (!enableVideoW) return;
 
                 // Re-derive the alignment base from the restored width/height values
                 // (onNodeCreated ran before deserialization, so its base was the default).
                 if (widthW)  self._resBaseW = parseInt(widthW.value, 10);
                 if (heightW) self._resBaseH = parseInt(heightW.value, 10);
+                if (presetW && presetW.value !== "Custom") {
+                    const match = presetW.value.match(/\((\d+)[x×](\d+)\)/);
+                    if (match) {
+                        self._presetRawW = parseInt(match[1], 10);
+                        self._presetRawH = parseInt(match[2], 10);
+                        self._lastPresetName = presetW.value;
+                    }
+                }
+                _syncStepsToModelType(modelTypeW, widthW, heightW);
 
                 const isVideo = enableVideoW.value === true || enableVideoW.value === 1;
                 const mpActive = mpTargetW ? parseFloat(mpTargetW.value) > 0 : false;

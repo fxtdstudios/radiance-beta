@@ -510,3 +510,29 @@ still showed `1920x1080` until the next run.
 instantly; switching to `Flux / SD3 (16ch)` correctly returns to `1920x1080`.
 `1280x720` (HD 720p) with `Flux.2 / Flux.2 Klein (128ch)` stays `1280x720`
 (already a multiple of 16).
+
+### Follow-up — model_type-driven step size, auto-Custom preset, and video_frames N*stride+1 snapping
+
+**`width`/`height` +/- step now matches the current `model_type`'s alignment**
+(32 for LTXV, 16 for Flux.2, 8 default) via `_setWidgetStep`/`_syncStepsToModelType`,
+so +/- always lands on a valid value (e.g. LTXV: 1088 -> 1056 -> 1024, never 1080).
+
+**Default `preset` changed from `"HD 1080p (1920×1080)"` to `"Custom"`**
+(`resolution.py`), matching the default `width`/`height` (1024x1024) so a freshly
+added node doesn't show a preset name inconsistent with its displayed resolution.
+
+**Auto-switch `preset` <-> `"Custom"`:** editing `width`/`height` away from the
+currently-selected preset's aligned resolution switches `preset` to `"Custom"`
+(`_flagCustomIfNotPreset`); editing back to that exact aligned resolution switches
+`preset` back to its original name (`_restorePresetIfMatching`). Tracked via
+`node._presetRawW/H` (preset's pre-alignment resolution) and `node._lastPresetName`.
+
+**`video_frames` now instantly snaps to a valid `N*stride+1` value** for all
+`VIDEO_MODEL_TYPES` (4k+1 for WAN/HunyuanVideo, 8k+1 for LTXV) — both when typing a
+value directly and when switching `model_type` to a video model. Generalizes the
+existing WAN-only `4k+1` Python warning (`_alignNk1`, using `_frameStride` for the
+per-model stride).
+
+**Validated by Albabit**: HD 1080p + LTXV, `-` on height -> 1056 (preset switches to
+"Custom"), `+` back to 1088 -> preset returns to "HD 1080p". Typing `100` into
+`video_frames` with LTXV -> snaps to `97` (8k+1); with WAN -> snaps to `101` (4k+1).
