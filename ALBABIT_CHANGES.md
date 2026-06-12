@@ -454,3 +454,32 @@ resolution **down** — making the exact target resolution unreachable.
 - Flux.1 vs Flux.2 (and other version-specific) alignment distinctions are
   not further differentiated beyond the existing `SPATIAL_SCALE`/
   `LATENT_CHANNELS` entries.
+
+### Follow-up — model_type-driven `enable_video` auto-toggle + TEMPORAL_SCALE audit
+
+**Problem:** The étape-4 refactor removed the old preset-name-based
+auto-toggle of `enable_video`/`model_type` but didn't add a model_type-based
+equivalent, so selecting a video `model_type` (LTXV/WAN/HunyuanVideo) no
+longer auto-enabled video mode.
+
+**Fix:** Added `VIDEO_MODEL_TYPES_JS` (mirrors `VIDEO_MODEL_TYPES` in
+`resolution.py`) to `radiance_resolution.js` and wired `model_type`'s
+callback to toggle `enable_video` on/off accordingly.
+
+**Validated by Albabit** (real WAN run, preset HD 1080p, 10s/24fps):
+`Video latent 5D: (1, 16, 61, 135, 240)` and
+`1920×1080 (16:9) 2.07MP │ Latent: 240×135×16ch (WAN) │ Video: 241f @ 24.0fps`
+— `(241-1)//4+1=61` ✓, `1920/8=240` ✓, `1080/8=135` ✓.
+
+**`TEMPORAL_SCALE` audit against ComfyUI core** (`comfy_extras/nodes_lt.py`,
+`nodes_wan.py`, `nodes_hunyuan.py`, `nodes_cosmos.py`, `nodes_mochi.py`,
+`comfy/ldm/cogvideo/vae.py`):
+- LTXV (8), WAN (4), HunyuanVideo (4), CogVideoX (4, default
+  `AutoencoderKLCogVideoX.temporal_compression_ratio`) — all match our
+  `TEMPORAL_SCALE`/`_frameStride`. No changes needed for the 4 model_types
+  currently in `VIDEO_MODEL_TYPES`.
+- Mochi requires stride **6** (`nodes_mochi.py`: `(length-1)//6+1`) — our
+  default of 4 would be wrong if Mochi is ever added to `VIDEO_MODEL_TYPES`.
+- Cosmos (`nodes_cosmos.py`) has **two different** temporal strides (8 and 4)
+  depending on variant — needs clarification before enabling 5D latents for
+  Cosmos.
