@@ -39,6 +39,8 @@ LATENT_CHANNELS = {
     "sdxl": 4, "sd1.5": 4, "pixart": 4, "aura_flow": 4, "kolors": 4,
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi latent channels
     "cosmos": 16, "cogvideox": 16, "mochi": 12,
+    # ALBABIT-FIX: Chroma (distilled Flux, 16ch) and Flux.2 / Flux.2 Klein (128ch)
+    "chroma": 16, "flux2": 128, "flux2-klein": 128,
 }
 
 _FORMAT_MAP = {
@@ -50,6 +52,8 @@ _FORMAT_MAP = {
     "aura_flow": "sd_4ch", "kolors": "sd_4ch",
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi latent formats
     "cosmos": "cosmos_16ch", "cogvideox": "cogvideox_16ch", "mochi": "mochi_12ch",
+    # ALBABIT-FIX: Chroma and Flux.2 / Flux.2 Klein (share the 128ch VAE)
+    "chroma": "chroma_16ch", "flux2": "flux2_128ch", "flux2-klein": "flux2_128ch",
 }
 
 CLIP_SLOT_ORDER = {
@@ -62,13 +66,19 @@ CLIP_SLOT_ORDER = {
     "wan": ["t5xxl"],
     "ltx": ["llm_encoder", "text_projection"],
     "ltxav": ["llm_encoder", "text_projection"],
-    "lumina2": ["t5xxl"],
-    "z_image": ["t5xxl"],
+    # ALBABIT-FIX: Lumina2 (Gemma-2 2B) and Z-Image (Qwen3-4B) are routed to
+    # llm_encoder by their presets, not t5xxl — fixes "No CLIP encoders
+    # provided" error when only llm_encoder is filled.
+    "lumina2": ["llm_encoder"],
+    "z_image": ["llm_encoder"],
     "pixart": ["t5xxl"],
     "aura_flow": ["clip_l"],
     "kolors": ["llm_encoder"],
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi all use a single T5XXL text encoder
     "cosmos": ["t5xxl"], "cogvideox": ["t5xxl"], "mochi": ["t5xxl"],
+    # ALBABIT-FIX: Chroma — distilled Flux, single T5XXL (no clip_l). Flux.2 /
+    # Flux.2 Klein — single LLM encoder (Mistral-3 24B / Qwen3-4B).
+    "chroma": ["t5xxl"], "flux2": ["llm_encoder"], "flux2-klein": ["llm_encoder"],
 }
 
 _CLIP_TYPE_VARIANTS = {
@@ -77,6 +87,9 @@ _CLIP_TYPE_VARIANTS = {
     "hunyuan_video": ["HUNYUAN_VIDEO", "HUNYUANVIDEO"],
     "wan": ["WAN", "WAN2", "WAN_VIDEO"],
     "aura_flow": ["AURA_FLOW", "AURAFLOW"],
+    # ALBABIT-FIX: Flux.2 Klein shares CLIPType.FLUX2 with Flux.2 Dev (the
+    # auto-generated "FLUX2-KLEIN" enum name doesn't exist).
+    "flux2-klein": ["FLUX2"],
 }
 
 _BASE_CLIP_VRAM = {
@@ -85,6 +98,9 @@ _BASE_CLIP_VRAM = {
     "pixart": 2.0, "aura_flow": 2.0, "kolors": 3.0, "lumina2": 3.0, "z_image": 3.0,
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi — single T5XXL encoder, similar to Wan
     "cosmos": 3.0, "cogvideox": 3.0, "mochi": 3.0,
+    # ALBABIT-FIX: Chroma — single T5XXL (no clip_l). Flux.2 Dev — Mistral-3 24B
+    # encoder (much heavier). Flux.2 Klein — Qwen3-4B, same as Z-Image.
+    "chroma": 3.5, "flux2": 8.0, "flux2-klein": 3.0,
 }
 
 _DTYPE_MULT = {
@@ -105,6 +121,8 @@ _BASE_VRAM = {
     "lumina2": 12.0, "z_image": 14.0,
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi base VRAM estimates
     "cosmos": 14.0, "cogvideox": 12.0, "mochi": 16.0,
+    # ALBABIT-FIX: Chroma (~8.9B distilled Flux) and Flux.2 / Flux.2 Klein (128ch)
+    "chroma": 10.0, "flux2": 20.0, "flux2-klein": 14.0,
 }
 
 
@@ -131,18 +149,29 @@ def latent_format(arch: str) -> str:
     return _FORMAT_MAP.get(arch, f"{arch}_{LATENT_CHANNELS.get(arch, 4)}ch")
 
 
-def assemble_clip_paths(arch: str, **slots) -> list[str]:
+def assemble_clip_paths(arch: str, unet_path: str | None = None, **slots) -> list[str]:
     slot_map = slots
     order = CLIP_SLOT_ORDER.get(arch, list(slot_map.keys()))
     paths = []
     for slot in order:
         val = slot_map.get(slot)
-        if val and val not in ("None", ""):
-            p = folder_paths.get_full_path("text_encoders", val)
-            if p:
-                paths.append(p)
+        if not val or val in ("None", ""):
+            continue
+        # ALBABIT-FIX: "Baked (from UNET)" for text_projection — LTX 2.3's
+        # text_embedding_projection weights ship inside the main UNET
+        # checkpoint, mirroring the native "LTXV Audio Text Encoder Loader"
+        # node (which loads the UNET checkpoint a second time as a CLIP source).
+        if val == "Baked (from UNET)":
+            if unet_path:
+                paths.append(unet_path)
             else:
-                logger.warning("CLIP slot '%s' file not found: %s", slot, val)
+                logger.warning("CLIP slot '%s' set to 'Baked (from UNET)' but no UNET path available.", slot)
+            continue
+        p = folder_paths.get_full_path("text_encoders", val)
+        if p:
+            paths.append(p)
+        else:
+            logger.warning("CLIP slot '%s' file not found: %s", slot, val)
     return paths
 
 
@@ -155,9 +184,11 @@ def get_clip_type_enum(model_type: str):
         "sd1.5": comfy.sd.CLIPType.STABLE_DIFFUSION,
     }
 
-    # ALBABIT-FIX: Cosmos / CogVideoX / Mochi resolve via CLIPType.{COSMOS,COGVIDEOX,MOCHI}
+    # ALBABIT-FIX: Cosmos / CogVideoX / Mochi resolve via CLIPType.{COSMOS,COGVIDEOX,MOCHI}.
+    # Chroma -> CLIPType.CHROMA, Flux.2 -> CLIPType.FLUX2 (Flux.2 Klein via
+    # _CLIP_TYPE_VARIANTS override above, since "FLUX2-KLEIN" isn't a real enum).
     for name in ("hunyuan_video", "wan", "ltx", "ltxav", "pixart", "aura_flow", "kolors", "lumina2", "z_image",
-                  "cosmos", "cogvideox", "mochi"):
+                  "cosmos", "cogvideox", "mochi", "chroma", "flux2", "flux2-klein"):
         enum_name = name.upper().replace(".", "_")
         auto_variants = [enum_name, name.upper(), name.title().replace("_", "")]
         extra = _CLIP_TYPE_VARIANTS.get(name, [])
