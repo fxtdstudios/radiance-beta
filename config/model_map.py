@@ -77,6 +77,21 @@ MODEL_VAE_CONFIG: dict[str, dict] = {
         "clip_slots":          ["clip_l", "t5xxl"],
         "notes":               "Flux.1 image model — validated against Bradford sRGB derivation.",
     },
+    # ALBABIT-FIX: Chroma (distilled Flux.1, single T5-XXL encoder)
+    "chroma": {
+        "latent_channels":     16,
+        "scale_factor":        0.18215,
+        "log_curve":           "ARRI LogC4",
+        "compression_ratio":   0.50,
+        "norm_center":         3.0,
+        "vae_spatial_factor":  8,
+        "vae_temporal_factor": 1,
+        "noise_schedule":      "flow",
+        "text_embed_seq_len":  256,
+        "text_embed_hidden":   4096,
+        "clip_slots":          ["t5xxl"],
+        "notes":               "Chroma — distilled Flux.1 variant, single T5-XXL encoder (no clip_l), reuses the Flux.1 VAE (16ch).",
+    },
     "zimage": {
         "latent_channels":     16,
         "scale_factor":        0.3611,
@@ -105,6 +120,21 @@ MODEL_VAE_CONFIG: dict[str, dict] = {
         "text_embed_hidden":   3584,
         "clip_slots":          ["qwen2.5_vl_7b"],
         "notes":               "Qwen-Image — 16ch VAE (qwen_image_vae.safetensors), 8x. Standard decoder.",
+    },
+    # ALBABIT-FIX: Flux.2 Dev (Mistral-3 24B encoder) — shares the 128ch VAE with Flux.2 Klein.
+    "flux2": {
+        "latent_channels":     128,
+        "scale_factor":        0.3611,
+        "log_curve":           "ARRI LogC4",
+        "compression_ratio":   0.50,
+        "norm_center":         3.0,
+        "vae_spatial_factor":  16,
+        "vae_temporal_factor": 1,
+        "noise_schedule":      "flow",
+        "text_embed_seq_len":  512,
+        "text_embed_hidden":   7680,
+        "clip_slots":          ["mistral_3_small"],
+        "notes":               "Flux.2 Dev — Mistral-3 24B encoder, 128ch latent (post pixel-shuffle), shares the same VAE/DiT conditioning dim as Flux.2 Klein.",
     },
     "flux2-klein": {
         "latent_channels":     128,
@@ -435,6 +465,51 @@ CHECKPOINT_PRESETS: dict = {
             "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
         },
     },
+    # ALBABIT-FIX: Chroma and Flux.2 / Flux.2 Klein presets — new model_types
+    # added to model/detect.py and MODEL_VAE_CONFIG above. weight_dtype and
+    # clip_dtype use "default" (no entry in dtype_map) so ComfyUI's own
+    # VRAM-aware auto-selection applies, regardless of whether the user has
+    # a full-precision or pre-quantized checkpoint/encoder file.
+    "Chroma": {
+        "model_type": "chroma",
+        "weight_dtype": "default",
+        "clip_dtype": "default",
+        "offload_mode": "none",
+        "clip_slots": {"t5xxl": True},
+        "vram_gb": 14,
+        "unet_hints": ["chroma-unlocked", "chroma_unlocked", "chroma"],
+        # Chroma (Lodestone) reuses the Flux.1 VAE.
+        "vae_hints": ["ae.safetensors", "flux_ae", "ae_"],
+        "clip_hints": {
+            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+        },
+    },
+    "Flux.2 Dev": {
+        "model_type": "flux2",
+        "weight_dtype": "default",
+        "clip_dtype": "default",
+        "offload_mode": "none",
+        "clip_slots": {"llm_encoder": True},
+        "vram_gb": 28,
+        "unet_hints": ["flux2-dev", "flux2_dev", "flux.2-dev"],
+        "vae_hints": ["flux2-vae", "flux2_vae", "flux2_ae"],
+        "clip_hints": {
+            "llm_encoder": ["mistral_3_small_flux2_bf16", "mistral_3_small_flux2_fp8", "mistral_3_small_flux2", "mistral_3", "mistral"],
+        },
+    },
+    "Flux.2 Klein": {
+        "model_type": "flux2-klein",
+        "weight_dtype": "default",
+        "clip_dtype": "default",
+        "offload_mode": "none",
+        "clip_slots": {"llm_encoder": True},
+        "vram_gb": 17,
+        "unet_hints": ["flux2-klein", "flux2_klein", "flux.2-klein", "klein"],
+        "vae_hints": ["flux2-vae", "flux2_vae", "flux2_ae"],
+        "clip_hints": {
+            "llm_encoder": ["qwen_3_4b", "qwen3_4b", "qwen_3"],
+        },
+    },
     "SD3.5 Large": {
         "model_type": "sd3.5",
         "weight_dtype": "fp16",
@@ -524,7 +599,7 @@ CHECKPOINT_PRESETS: dict = {
     "HunyuanVideo": {
         "model_type": "hunyuan_video",
         "weight_dtype": "fp8_e4m3fn",
-        "clip_dtype": "fp16",
+        "clip_dtype": "default",
         "offload_mode": "none",
         "clip_slots": {"clip_l": True, "llm_encoder": True},
         "vram_gb": 12,
@@ -538,7 +613,7 @@ CHECKPOINT_PRESETS: dict = {
     "Wan 2.1": {
         "model_type": "wan",
         "weight_dtype": "fp8_e4m3fn",
-        "clip_dtype": "fp16",
+        "clip_dtype": "default",
         "offload_mode": "none",
         "clip_slots": {"t5xxl": True},
         "vram_gb": 14,
@@ -554,7 +629,7 @@ CHECKPOINT_PRESETS: dict = {
     "Wan 2.2": {
         "model_type": "wan",
         "weight_dtype": "fp8_e4m3fn",
-        "clip_dtype": "fp16",
+        "clip_dtype": "default",
         "offload_mode": "none",
         "clip_slots": {"t5xxl": True},
         "vram_gb": 14,
@@ -569,7 +644,7 @@ CHECKPOINT_PRESETS: dict = {
     "LTX Video": {
         "model_type": "ltx",
         "weight_dtype": "fp16",
-        "clip_dtype": "fp16",
+        "clip_dtype": "default",
         "offload_mode": "none",
         "clip_slots": {"llm_encoder": True},
         "vram_gb": 12,
@@ -582,7 +657,7 @@ CHECKPOINT_PRESETS: dict = {
     "LTX Video 13B": {
         "model_type": "ltx",
         "weight_dtype": "fp8_e4m3fn",
-        "clip_dtype": "fp16",
+        "clip_dtype": "default",
         "offload_mode": "none",
         "clip_slots": {"llm_encoder": True},
         "vram_gb": 16,
@@ -595,7 +670,7 @@ CHECKPOINT_PRESETS: dict = {
     "LTX Video 2.3": {
         "model_type": "ltxav",
         "weight_dtype": "fp16",
-        "clip_dtype": "fp16",
+        "clip_dtype": "default",
         "offload_mode": "none",
         "clip_slots": {"llm_encoder": True, "text_projection": True},
         "vram_gb": 24,
@@ -618,6 +693,48 @@ CHECKPOINT_PRESETS: dict = {
         "clip_hints": {
             "llm_encoder": ["gemma_3_12B_it_fp4", "gemma_3_12B_it", "gemma_3", "gemma"],
             "text_projection": ["ltx-2.3_text_projection", "text_projection"],
+        },
+    },
+    # ALBABIT-FIX: Cosmos World, CogVideoX and Mochi presets — new video
+    # model_types added to model/detect.py. weight_dtype/clip_dtype use
+    # "default" (see Chroma/Flux.2 note above).
+    "Cosmos World": {
+        "model_type": "cosmos",
+        "weight_dtype": "default",
+        "clip_dtype": "default",
+        "offload_mode": "none",
+        "clip_slots": {"t5xxl": True},
+        "vram_gb": 17,
+        "unet_hints": ["cosmos-1_0-diffusion", "Cosmos-1_0", "cosmos_world", "cosmos"],
+        "vae_hints": ["cosmos_vae", "cosmos-tokenizer", "cosmos"],
+        "clip_hints": {
+            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+        },
+    },
+    "CogVideoX": {
+        "model_type": "cogvideox",
+        "weight_dtype": "default",
+        "clip_dtype": "default",
+        "offload_mode": "none",
+        "clip_slots": {"t5xxl": True},
+        "vram_gb": 15,
+        "unet_hints": ["cogvideox-5b", "cogvideox_5b", "CogVideoX", "cogvideox"],
+        "vae_hints": ["cogvideox_vae", "cogvideox-vae", "cogvideo_vae"],
+        "clip_hints": {
+            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+        },
+    },
+    "Mochi": {
+        "model_type": "mochi",
+        "weight_dtype": "default",
+        "clip_dtype": "default",
+        "offload_mode": "none",
+        "clip_slots": {"t5xxl": True},
+        "vram_gb": 19,
+        "unet_hints": ["mochi_preview", "mochi-1-preview", "genmo_mochi", "mochi"],
+        "vae_hints": ["mochi_vae", "mochi-vae"],
+        "clip_hints": {
+            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
         },
     },
     "PixArt Sigma": {
@@ -649,7 +766,7 @@ CHECKPOINT_PRESETS: dict = {
     "Kolors": {
         "model_type": "kolors",
         "weight_dtype": "fp16",
-        "clip_dtype": "fp16",
+        "clip_dtype": "default",
         "offload_mode": "none",
         "clip_slots": {"llm_encoder": True},
         "vram_gb": 8,
@@ -662,7 +779,7 @@ CHECKPOINT_PRESETS: dict = {
     "Lumina2": {
         "model_type": "lumina2",
         "weight_dtype": "fp16",
-        "clip_dtype": "fp16",
+        "clip_dtype": "default",
         "offload_mode": "none",
         # ALBABIT-FIX: Lumina Image 2.0 uses a Gemma-2 2B LLM text encoder
         # (routed to llm_encoder, like Gemma 3 for LTX 2.3), not T5-XXL.
@@ -677,8 +794,8 @@ CHECKPOINT_PRESETS: dict = {
     },
     "Z-Image": {
         "model_type": "z_image",
-        "weight_dtype": "fp16",
-        "clip_dtype": "fp16",
+        "weight_dtype": "default",
+        "clip_dtype": "default",
         "offload_mode": "none",
         # ALBABIT-FIX: Z-Image (Tongyi) uses a Qwen3-4B LLM text encoder
         # (routed to llm_encoder, like Gemma 3 for LTX 2.3), not T5-XXL.
@@ -704,4 +821,16 @@ VIDEO_PRESET_NAMES: set = {
     "LTX Video 13B",
     "LTX Video 2.3",
     "LTX Video 2.3 (Low VRAM)",
+    # ALBABIT-FIX: Cosmos World, CogVideoX and Mochi are video models.
+    "Cosmos World",
+    "CogVideoX",
+    "Mochi",
+}
+
+# ALBABIT-FIX: model_type analog of VIDEO_PRESET_NAMES — used by
+# RadianceVideoLoader / RadianceUnifiedLoader to filter the "model_type"
+# dropdown (Custom mode + Auto-Detect) the same way "preset" is filtered.
+VIDEO_MODEL_TYPES: set = {
+    "hunyuan_video", "wan", "ltx", "ltxav",
+    "cosmos", "cogvideox", "mochi",
 }

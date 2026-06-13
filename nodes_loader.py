@@ -24,6 +24,7 @@ from .loader_utils import (
     RADIANCE_MODEL_MAP,
     CHECKPOINT_PRESETS,
     VIDEO_PRESET_NAMES,
+    VIDEO_MODEL_TYPES,
     CLIP_SLOT_ORDER,
     LATENT_CHANNELS,
     detect_model_type as _detect_model_type,
@@ -155,6 +156,8 @@ MODEL_TYPES = [
     "pixart", "aura_flow", "kolors",
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi — match Resolution/Sampler model types
     "cosmos", "cogvideox", "mochi",
+    # ALBABIT-FIX: Chroma (distilled Flux) and Flux.2 / Flux.2 Klein
+    "chroma", "flux2", "flux2-klein",
 ]
 
 WEIGHT_DTYPES = ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"]
@@ -174,6 +177,10 @@ class RadianceUnifiedLoader:
     def INPUT_TYPES(cls):
         clip_list = ["None"] + folder_paths.get_filename_list("text_encoders")
         clip_slot = lambda tip: (clip_list, {"default": "None", "tooltip": tip})
+        # ALBABIT-FIX: "Baked (from UNET)" — LTX 2.3's text_embedding_projection
+        # weights ship inside the main UNET checkpoint (see assemble_clip_paths).
+        text_projection_list = ["None", "Baked (from UNET)"] + folder_paths.get_filename_list("text_encoders")
+        text_projection_slot = lambda tip: (text_projection_list, {"default": "None", "tooltip": tip})
 
         return {
             "required": {
@@ -199,7 +206,10 @@ class RadianceUnifiedLoader:
                 ),
                 # ── Architecture ──
                 "model_type": (
-                    MODEL_TYPES,
+                    # ALBABIT-FIX: image loader only lists image-model
+                    # model_types (video model_types are exclusive to
+                    # RadianceVideoLoader).
+                    [m for m in MODEL_TYPES if m not in VIDEO_MODEL_TYPES],
                     {"default": "Auto-Detect",
                      "tooltip": "'Auto-Detect' reads the checkpoint's key names to determine "
                                 "architecture. Override manually if detection fails."},
@@ -220,8 +230,9 @@ class RadianceUnifiedLoader:
                     "T5-XXL (text encoder). Used by: Flux, SD3, SD3.5, Wan, PixArt, LTX (pre-2.3)."),
                 "llm_encoder": clip_slot(
                     "LLM encoder. Used by: Kolors/HunyuanVideo (ChatGLM3), LTX 2.3 (Gemma 3)."),
-                "text_projection": clip_slot(
-                    "Text projection matrix. Used by: LTX 2.3 (with Gemma 3 llm_encoder)."),
+                "text_projection": text_projection_slot(
+                    "Text projection matrix. Used by: LTX 2.3 (with Gemma 3 llm_encoder). "
+                    "'Baked (from UNET)' loads it from the main LTX 2.3 checkpoint, like the native LTXV Audio Text Encoder Loader."),
                 # ── CLIP precision ──
                 "clip_dtype": (
                     CLIP_DTYPES,
@@ -438,12 +449,13 @@ class RadianceUnifiedLoader:
         t0 = time.time()
         
         # Ensure all selected CLIPs exist/downloaded
-        for slot, val in [("clip_l", clip_l), ("clip_g", clip_g), 
+        for slot, val in [("clip_l", clip_l), ("clip_g", clip_g),
                           ("t5xxl", t5xxl), ("llm_encoder", llm_encoder),
                           ("text_projection", text_projection)]:
-             _ensure_model_exists(val, "text_encoders", auto_download)
+             if val != "Baked (from UNET)":
+                 _ensure_model_exists(val, "text_encoders", auto_download)
 
-        clip_paths = _assemble_clip_paths(resolved_type, clip_l=clip_l, clip_g=clip_g, t5xxl=t5xxl, llm_encoder=llm_encoder, text_projection=text_projection)
+        clip_paths = _assemble_clip_paths(resolved_type, unet_path=unet_path, clip_l=clip_l, clip_g=clip_g, t5xxl=t5xxl, llm_encoder=llm_encoder, text_projection=text_projection)
 
         if not clip_paths:
             raise ValueError(
@@ -661,6 +673,14 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
         types["required"]["preset"] = (
             [k for k in CHECKPOINT_PRESETS if k == "Custom" or k in VIDEO_PRESET_NAMES],
             preset_kwargs,
+        )
+
+        # ALBABIT-FIX: video loader only lists video-model model_types
+        # (image model_types are exclusive to RadianceUnifiedLoader).
+        _, model_type_kwargs = types["required"]["model_type"]
+        types["required"]["model_type"] = (
+            [m for m in MODEL_TYPES if m == "Auto-Detect" or m in VIDEO_MODEL_TYPES],
+            model_type_kwargs,
         )
 
         # ALBABIT-FIX: "Baked VAE (from UNET)" lets LTX 2.3 checkpoints that
@@ -932,9 +952,10 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
         for slot, val in [("clip_l", clip_l), ("clip_g", clip_g),
                           ("t5xxl", t5xxl), ("llm_encoder", llm_encoder),
                           ("text_projection", text_projection)]:
-             _ensure_model_exists(val, "text_encoders", auto_download)
+             if val != "Baked (from UNET)":
+                 _ensure_model_exists(val, "text_encoders", auto_download)
 
-        clip_paths = _assemble_clip_paths(resolved_type, clip_l=clip_l, clip_g=clip_g, t5xxl=t5xxl, llm_encoder=llm_encoder, text_projection=text_projection)
+        clip_paths = _assemble_clip_paths(resolved_type, unet_path=unet_path, clip_l=clip_l, clip_g=clip_g, t5xxl=t5xxl, llm_encoder=llm_encoder, text_projection=text_projection)
 
         if not clip_paths:
             raise ValueError(

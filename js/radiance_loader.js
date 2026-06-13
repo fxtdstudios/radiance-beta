@@ -32,6 +32,13 @@ const PRESET_SLOTS = {
     "Kolors": ["llm_encoder"],
     "Lumina2": ["llm_encoder"],
     "Z-Image": ["llm_encoder"],
+    // ALBABIT-FIX: Chroma, Flux.2 Dev/Klein, Cosmos World, CogVideoX, Mochi
+    "Chroma": ["t5xxl"],
+    "Flux.2 Dev": ["llm_encoder"],
+    "Flux.2 Klein": ["llm_encoder"],
+    "Cosmos World": ["t5xxl"],
+    "CogVideoX": ["t5xxl"],
+    "Mochi": ["t5xxl"],
 };
 
 // Dynamic visibility rules for CLIP slots per model_type
@@ -171,12 +178,13 @@ const PRESET_CONFIGS = {
     },
     "LTX Video 2.3": {
         "unet_hints":    ["ltx-2.3-22b-dev.safetensors", "ltx-2.3-22b-dev", "ltx-2.3", "ltx_2.3"],
-        "vae_hints":     ["Baked VAE (from UNET)", "LTX23_video_vae", "ltx23_video", "ltx_23_video"],
+        "vae_hints":     ["LTX23_video_vae_bf16.safetensors", "LTX23_video_vae", "ltx23_video", "ltx_23_video", "Baked VAE (from UNET)"],
+        "audio_vae_hints": ["LTX23_audio_vae_bf16.safetensors", "LTX23_audio_vae", "ltx23_audio", "ltx_23_audio"],
         "clip_hints":    {
             "llm_encoder":     ["gemma_3_12B_it.safetensors", "gemma_3_12B_it_fp4", "gemma_3_12B_it", "gemma_3", "gemma"],
-            "text_projection": ["ltx-2.3_text_projection", "text_projection"],
+            "text_projection": ["ltx-2.3_text_projection_bf16.safetensors", "ltx-2.3_text_projection", "text_projection"],
         },
-        "extra_widgets": ["upscale_model_name"],
+        "extra_widgets": ["upscale_model_name", "audio_vae_name"],
         "upscale_hints": ["ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "ltx-2.3-spatial-upscaler-x2-1.0.safetensors", "ltx-2.3", "ltx_2.3", "latent_upsampler", "upsampler"],
     },
     "LTX Video 2.3 (Low VRAM)": {
@@ -184,7 +192,7 @@ const PRESET_CONFIGS = {
         "vae_hints":     ["Baked VAE (from UNET)", "LTX23_video_vae", "ltx23_video", "ltx_23_video"],
         "clip_hints":    {
             "llm_encoder":     ["gemma_3_12B_it_fp4_mixed.safetensors", "gemma_3_12B_it_fp4", "gemma_3_12B_it", "gemma_3", "gemma"],
-            "text_projection": ["ltx-2.3_text_projection", "text_projection"],
+            "text_projection": ["Baked (from UNET)"],
         },
         "extra_widgets": ["upscale_model_name"],
         "upscale_hints": ["ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "ltx-2.3-spatial-upscaler-x2-1.0.safetensors", "ltx-2.3", "ltx_2.3", "latent_upsampler", "upsampler"],
@@ -222,6 +230,50 @@ const PRESET_CONFIGS = {
         "vae_hints":     ["flux_vae", "ae.safetensors", "flux_ae", "sd3_vae", "sd_vae"],
         "clip_hints":    {
             "llm_encoder": ["qwen_3_4b", "qwen3_4b", "qwen_3"],
+        },
+    },
+    // ALBABIT-FIX: Chroma, Flux.2 Dev/Klein, Cosmos World, CogVideoX, Mochi —
+    // mirrors CHECKPOINT_PRESETS in config/model_map.py.
+    "Chroma": {
+        "unet_hints":    ["chroma-unlocked", "chroma_unlocked", "chroma"],
+        "vae_hints":     ["ae.safetensors", "flux_ae", "ae_"],
+        "clip_hints":    {
+            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+        },
+    },
+    "Flux.2 Dev": {
+        "unet_hints":    ["flux2-dev", "flux2_dev", "flux.2-dev"],
+        "vae_hints":     ["flux2-vae", "flux2_vae", "flux2_ae"],
+        "clip_hints":    {
+            "llm_encoder": ["mistral_3_small_flux2_bf16", "mistral_3_small_flux2_fp8", "mistral_3_small_flux2", "mistral_3", "mistral"],
+        },
+    },
+    "Flux.2 Klein": {
+        "unet_hints":    ["flux2-klein", "flux2_klein", "flux.2-klein", "klein"],
+        "vae_hints":     ["flux2-vae", "flux2_vae", "flux2_ae"],
+        "clip_hints":    {
+            "llm_encoder": ["qwen_3_4b", "qwen3_4b", "qwen_3"],
+        },
+    },
+    "Cosmos World": {
+        "unet_hints":    ["cosmos-1_0-diffusion", "Cosmos-1_0", "cosmos_world", "cosmos"],
+        "vae_hints":     ["cosmos_vae", "cosmos-tokenizer", "cosmos"],
+        "clip_hints":    {
+            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+        },
+    },
+    "CogVideoX": {
+        "unet_hints":    ["cogvideox-5b", "cogvideox_5b", "CogVideoX", "cogvideox"],
+        "vae_hints":     ["cogvideox_vae", "cogvideox-vae", "cogvideo_vae"],
+        "clip_hints":    {
+            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+        },
+    },
+    "Mochi": {
+        "unet_hints":    ["mochi_preview", "mochi-1-preview", "genmo_mochi", "mochi"],
+        "vae_hints":     ["mochi_vae", "mochi-vae"],
+        "clip_hints":    {
+            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
         },
     },
 };
@@ -287,7 +339,18 @@ function autoFillPresetFiles(node, cleanPreset) {
         }
     }
 
-    // 4. Match Latent Upscale Model (Radiance Video Loader only)
+    // 4. Match Audio VAE (LTX 2.3, Radiance Video Loader only)
+    const audioVaeW = getWidget(node, "audio_vae_name");
+    if (audioVaeW && audioVaeW.options?.values) {
+        if (config.audio_vae_hints) {
+            const matched = findMatchingFile(config.audio_vae_hints, audioVaeW.options.values);
+            audioVaeW.value = matched || "None";
+        } else {
+            audioVaeW.value = "None";
+        }
+    }
+
+    // 5. Match Latent Upscale Model (Radiance Video Loader only)
     const upscaleW = getWidget(node, "upscale_model_name");
     if (upscaleW && upscaleW.options?.values) {
         if (config.upscale_hints) {
