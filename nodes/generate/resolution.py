@@ -188,13 +188,13 @@ LATENT_ELEMENT_BYTES = 4
 MODEL_BASE_VRAM = {
     "flux": 12.0,  # Flux is heavy
     "sdxl": 4.5,   # SDXL is medium
-    "sd15": 2.5,   # SD 1.5 is light
     "wan":  14.0,  # Video models are very heavy
     "ltxav": 10.0,  # ALBABIT-FIX: renamed from "ltx" to match latent_format key
     "hunyuan_video": 16.0,  # ALBABIT-FIX: renamed from "hunyuan" to match latent_format key
     "flux2": 20.0,    # ALBABIT-FIX: Flux.2 base VRAM estimate (32B+ models)
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi base VRAM estimates
     "cosmos": 14.0, "cogvideox": 12.0, "mochi": 16.0,
+    "chroma": 12.0,  # ALBABIT-FIX: Chroma is Flux-sized (16ch, ~12GB base)
 }
 
 LATENT_SCALE = 8  # VAE downscale factor
@@ -210,23 +210,13 @@ def _align_up(val: int, scale: int) -> int:
     return max(scale, math.ceil(val / scale) * scale)
 
 
-def _align8(val: int) -> int:
-    """Round UP to nearest multiple of 8 (VAE requirement)."""
-    return _align_up(val, 8)
-
-
-def _align32(val: int) -> int:
-    """Round UP to nearest multiple of 32 (LTX Video requirement)."""
-    return _align_up(val, 32)
-
-
-def _estimate_vram(w: int, h: int, c: int, b: int, format_key: str = "flux") -> float:
+def _estimate_vram(w: int, h: int, c: int, b: int, format_key: str = "flux", spatial_scale: int = 8) -> float:
     """
     Estimate VRAM usage in Gigabytes.
     Includes latent tensor size + estimated model activation overhead.
     """
-    # Latent dimensions (1/8th of pixel res)
-    lw, lh = w // 8, h // 8
+    # Latent dimensions (model-specific spatial downscale, e.g. 8/16/32)
+    lw, lh = w // spatial_scale, h // spatial_scale
     # Tensor size in bytes
     latent_bytes = b * c * lw * lh * LATENT_ELEMENT_BYTES
     # Convert to GB
@@ -277,11 +267,12 @@ def _gcd_ratio(w: int, h: int) -> str:
     return f"{rw}:{rh}"
 
 
-def _mp_target_dimensions(mp_target: float, aspect_str: str) -> tuple[int, int]:
+def _mp_target_dimensions(mp_target: float, aspect_str: str, align_val: int = 8) -> tuple[int, int]:
     """
     FEATURE: Compute (width, height) from a megapixel target and aspect ratio string.
-    The result is aligned to 8px and respects the exact aspect ratio as closely as
-    possible without exceeding the MP target.
+    The result is aligned to `align_val`px (model-specific, via SPATIAL_SCALE) and
+    respects the exact aspect ratio as closely as possible without exceeding the
+    MP target.
 
     Examples:
         _mp_target_dimensions(1.0, "16:9")  → (1360, 768)  ≈ 1.04MP
@@ -304,8 +295,8 @@ def _mp_target_dimensions(mp_target: float, aspect_str: str) -> tuple[int, int]:
     h_raw = math.sqrt(pixels / ratio)
     w_raw = h_raw * ratio
 
-    w = _align8(int(round(w_raw)))
-    h = _align8(int(round(h_raw)))
+    w = _align_up(int(round(w_raw)), align_val)
+    h = _align_up(int(round(h_raw)), align_val)
     return w, h
 
 
@@ -913,6 +904,12 @@ class RadianceResolution:
         unique_id: str = "",
     ) -> Dict[str, Any]:
 
+        # ── Step 2 (computed early): Determine Alignment Rule (model_type-driven) ──
+        # ALBABIT-FIX: alignment is derived solely from SPATIAL_SCALE for the
+        # selected model_type (LTXV=32, Flux.2=16, default=8), always rounded UP.
+        align_val   = SPATIAL_SCALE.get(model_type, 8)
+        align_label = f"{align_val}px"
+
         # ── Megapixel target mode overrides preset/custom ────────────────────────
         if mp_target > 0.0:
             # BUG FIX: warn when mp_target produces a size too small for any model
@@ -922,7 +919,7 @@ class RadianceResolution:
                     f"mp_target={mp_target} MP produces < 256×256 pixels. "
                     f"Minimum recommended is 0.065 MP (256×256). Results may be unusable."
                 )
-            w, h = _mp_target_dimensions(mp_target, mp_aspect_ratio)
+            w, h = _mp_target_dimensions(mp_target, mp_aspect_ratio, align_val)
             category = "MP Target"
         # ── Resolve resolution from preset or custom ─────────────────────────────
         elif preset != "Custom" and preset in PRESETS:
@@ -941,12 +938,6 @@ class RadianceResolution:
                     f"(before alignment)"
                 )
             w, h = w_pre, h_pre
-
-        # ── Step 2: Determine Alignment Rule (model_type-driven) ────────
-        # ALBABIT-FIX: alignment is now derived solely from SPATIAL_SCALE for the
-        # selected model_type (LTXV=32, Flux.2=16, default=8), always rounded UP.
-        align_val   = SPATIAL_SCALE.get(model_type, 8)
-        align_label = f"{align_val}px"
 
         # Apply alignment — always round UP, never down
         w, h = _align_up(w, align_val), _align_up(h, align_val)
@@ -969,7 +960,7 @@ class RadianceResolution:
 
         # Estimate VRAM
         v_count = video_frames if enable_video else batch_size
-        vram_est = _estimate_vram(w, h, latent_channels or LATENT_CHANNELS.get(model_type, 4), v_count, latent_format)
+        vram_est = _estimate_vram(w, h, latent_channels or LATENT_CHANNELS.get(model_type, 4), v_count, latent_format, align_val)
 
         # Apply orientation
         w, h = _apply_orientation(w, h, orientation)

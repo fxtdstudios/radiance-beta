@@ -664,3 +664,39 @@ previous follow-ups:
   override.
 
 1382 tests pass (unchanged).
+
+## Follow-up — audit cleanup in `resolution.py` (dead code + VRAM estimate)
+
+Per Albabit, a full audit of `resolution.py`/`radiance_resolution.js` (and a
+cross-node check confirming `SPATIAL_SCALE`/`TEMPORAL_SCALE`/`_estimate_vram`/etc.
+are only used here) turned up 3 small issues, now fixed:
+
+- **Removed `_align8`/`_align32`**: both were leftovers from the pre-model_type
+  alignment scheme. `_align32` had zero callers anywhere in the repo (pure dead
+  code). `_align8` was only used inside `_mp_target_dimensions()` to pre-round the
+  megapixel-target result to 8px — but `generate()` already unconditionally
+  re-aligns the result to `SPATIAL_SCALE.get(model_type, 8)` via `_align_up()`
+  afterwards, making the 8px pre-rounding redundant (and, for "Manual"
+  model_type with scale=1, actually wrong — it forced an 8px-aligned size even
+  though "Manual" is meant to be fully unconstrained). `_mp_target_dimensions()`
+  now takes `align_val` directly and calls `_align_up(val, align_val)`, so
+  Megapixel-target mode aligns to the *correct* model-specific scale (1/8/16/32)
+  in one step. `align_val = SPATIAL_SCALE.get(model_type, 8)` is now computed at
+  the top of `generate()` (before the preset/MP-target branch) so it can be
+  passed in. Only `_align_up()` remains.
+
+- **`MODEL_BASE_VRAM`**: removed the unreachable `"sd15": 2.5` entry (no
+  `latent_format`/`model_type` ever resolves to `"sd15"` since the SD1.5/SDXL
+  merge), and added a `"chroma": 12.0` entry — Chroma is a 16ch Flux-latent model
+  and was previously falling back to the generic 4.0 GB default, underestimating
+  its actual ~12GB footprint.
+
+- **`_estimate_vram()`**: previously hardcoded `lw, lh = w // 8, h // 8` for the
+  latent tensor size regardless of the model's actual spatial downscale —
+  underestimating latent memory for LTXV (×32) and Flux.2 (×16), and
+  overestimating for "Manual" (×1). Now takes a `spatial_scale: int = 8`
+  parameter; `generate()` passes the already-computed `align_val`
+  (`SPATIAL_SCALE.get(model_type, 8)`), so the estimate matches the model's real
+  latent resolution.
+
+1382 tests pass (unchanged).
