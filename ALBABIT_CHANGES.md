@@ -194,6 +194,13 @@ widgets when switching back to "Custom".
 - `loader_utils.py`: `resolve_hint()` (defined, never called).
 - `js/radiance_loader.js`: `MODEL_SLOTS` dict (defined, never referenced,
   already stale vs. `PRESET_SLOTS`).
+- `config/model_map.py`: removed `offload_mode`/`clip_slots`/`vram_gb`/
+  `unet_hints`/`vae_hints`/`clip_hints` from all 26 `CHECKPOINT_PRESETS`
+  entries — audited, none of these fields were ever read (`_apply_preset_override`
+  only uses `model_type`/`weight_dtype`/`clip_dtype`); they had drifted out of
+  sync with the equivalent JS `PRESET_SLOTS`/`PRESET_CONFIGS` (6 presets
+  diverged, worst case "LTX Video 2.3 (Low VRAM)" `text_projection`/audio VAE
+  hints). JS is now the sole source of truth for hints/slots/offload_mode.
 
 ---
 
