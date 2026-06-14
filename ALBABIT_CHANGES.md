@@ -215,6 +215,26 @@ widgets when switching back to "Custom".
   diverged, worst case "LTX Video 2.3 (Low VRAM)" `text_projection`/audio VAE
   hints). JS is now the sole source of truth for hints/slots/offload_mode.
 
+### De-duplicated `load_radiance_stack` pipeline (SSOT refactor)
+
+`RadianceUnifiedLoader.load_radiance_stack` (image) and
+`RadianceVideoLoader.load_radiance_stack` (video) were ~80% copy-pasted
+(preset application, Auto-Detect, offload setup, VRAM estimation,
+UNET/CLIP/VAE/LoRA loading, HUD printing) — every fix above (`offload_mode`
+cache-key, audio-VAE double-read, etc.) had to be located and applied in both
+copies. Extracted the shared pipeline steps into 10 new free functions in
+`loader_utils.py`, per this file's stated SSOT convention: `resolve_divider`,
+`apply_checkpoint_preset`, `resolve_architecture`, `setup_offload_mode`,
+`estimate_vram_for_load`, `load_unet_and_baked_vae`, `load_clip_stack`,
+`load_standalone_vae`, `apply_lora_stack`, plus the private
+`_apply_preset_field` helper. `_audio_vae_cache` moved from `nodes_loader.py`
+to `model/cache.py` alongside `_unet_cache`/`_clip_cache`/`_vae_cache`
+(`_upscale_model_cache` stays in `nodes_loader.py`, video-only). Each
+`load_radiance_stack` is now a thin orchestrator; video keeps inline only its
+unique sections (baked/standalone Audio VAE, Latent Upscale Model). No
+behavior change — `nodes_loader.py` shrank from 1389 to 882 lines; the
+extracted logic was verified byte-for-byte against the pre-refactor superset.
+
 ---
 
 ## Radiance Resolution (nodes/generate/resolution.py, js/radiance_resolution.js)
