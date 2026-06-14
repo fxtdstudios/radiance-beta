@@ -421,49 +421,29 @@ def get_model_vae_param(model_hint: str, param: str, default=None):
     return cfg.get(param, default)
 
 
+# ALBABIT-FIX: each preset only carries model_type/weight_dtype/clip_dtype —
+# the only fields _apply_preset_override() (nodes_loader.py) actually reads.
+# File-matching hints, CLIP slot layout and offload_mode defaults live in
+# js/radiance_loader.js (PRESET_CONFIGS/PRESET_SLOTS), which is the single
+# source of truth for the loader UI's auto-fill. Previously this dict also
+# carried offload_mode/clip_slots/vram_gb/unet_hints/vae_hints/clip_hints —
+# all dead (never read anywhere), and drifted out of sync with the JS copies.
 CHECKPOINT_PRESETS: dict = {
     "Custom": {},
     "Flux Dev": {
         "model_type": "flux",
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "fp16",
-        "offload_mode": "none",
-        "clip_slots": {"clip_l": True, "t5xxl": True},
-        "vram_gb": 12,
-        "unet_hints": ["flux1-dev-fp8", "flux1-dev", "flux-dev"],
-        "vae_hints": ["ae.safetensors", "flux_ae", "ae_"],
-        "clip_hints": {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
-        },
     },
     "Flux Schnell": {
         "model_type": "flux",
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "fp16",
-        "offload_mode": "none",
-        "clip_slots": {"clip_l": True, "t5xxl": True},
-        "vram_gb": 10,
-        "unet_hints": ["flux1-schnell-fp8", "flux1-schnell", "flux-schnell"],
-        "vae_hints": ["ae.safetensors", "flux_ae", "ae_"],
-        "clip_hints": {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
-        },
     },
     "Flux Dev (Low VRAM)": {
         "model_type": "flux",
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "fp8_e4m3fn",
-        "offload_mode": "cpu_offload",
-        "clip_slots": {"clip_l": True, "t5xxl": True},
-        "vram_gb": 8,
-        "unet_hints": ["flux1-dev-fp8", "flux1-dev", "flux-dev"],
-        "vae_hints": ["ae.safetensors", "flux_ae", "ae_"],
-        "clip_hints": {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
-        },
     },
     # ALBABIT-FIX: Chroma and Flux.2 / Flux.2 Klein presets — new model_types
     # added to model/detect.py and MODEL_VAE_CONFIG above. weight_dtype and
@@ -474,198 +454,74 @@ CHECKPOINT_PRESETS: dict = {
         "model_type": "chroma",
         "weight_dtype": "default",
         "clip_dtype": "default",
-        "offload_mode": "none",
-        "clip_slots": {"t5xxl": True},
-        "vram_gb": 14,
-        "unet_hints": ["chroma-unlocked", "chroma_unlocked", "chroma"],
-        # Chroma (Lodestone) reuses the Flux.1 VAE.
-        "vae_hints": ["ae.safetensors", "flux_ae", "ae_"],
-        "clip_hints": {
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
-        },
     },
     "Flux.2 Dev": {
         "model_type": "flux2",
         "weight_dtype": "default",
         "clip_dtype": "default",
-        "offload_mode": "none",
-        "clip_slots": {"llm_encoder": True},
-        "vram_gb": 28,
-        "unet_hints": ["flux2-dev", "flux2_dev", "flux.2-dev"],
-        "vae_hints": ["flux2-vae", "flux2_vae", "flux2_ae"],
-        "clip_hints": {
-            "llm_encoder": ["mistral_3_small_flux2_bf16", "mistral_3_small_flux2_fp8", "mistral_3_small_flux2", "mistral_3", "mistral"],
-        },
     },
     "Flux.2 Klein": {
         "model_type": "flux2-klein",
         "weight_dtype": "default",
         "clip_dtype": "default",
-        "offload_mode": "none",
-        "clip_slots": {"llm_encoder": True},
-        "vram_gb": 17,
-        "unet_hints": ["flux2-klein", "flux2_klein", "flux.2-klein", "klein"],
-        "vae_hints": ["flux2-vae", "flux2_vae", "flux2_ae"],
-        "clip_hints": {
-            "llm_encoder": ["qwen_3_4b", "qwen3_4b", "qwen_3"],
-        },
     },
     "SD3.5 Large": {
         "model_type": "sd3.5",
         "weight_dtype": "fp16",
         "clip_dtype": "fp16",
-        "offload_mode": "none",
-        "clip_slots": {"clip_l": True, "clip_g": True, "t5xxl": True},
-        "vram_gb": 16,
-        "unet_hints": ["sd3.5_large_turbo", "sd3.5_large", "sd3-5_large"],
-        "vae_hints": ["sd3_vae", "sd3.5_vae", "sd3"],
-        "clip_hints": {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-            "clip_g": ["clip_g.safetensors", "clip_g"],
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
-        },
     },
     "SD3.5 Medium": {
         "model_type": "sd3.5",
         "weight_dtype": "fp16",
         "clip_dtype": "fp16",
-        "offload_mode": "none",
-        "clip_slots": {"clip_l": True, "clip_g": True, "t5xxl": True},
-        "vram_gb": 10,
-        "unet_hints": ["sd3.5_medium", "sd3-5_medium"],
-        "vae_hints": ["sd3_vae", "sd3.5_vae", "sd3"],
-        "clip_hints": {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-            "clip_g": ["clip_g.safetensors", "clip_g"],
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
-        },
     },
     "SD3.5 Turbo": {
         "model_type": "sd3.5",
         "weight_dtype": "fp16",
         "clip_dtype": "fp16",
-        "offload_mode": "none",
-        "clip_slots": {"clip_l": True, "clip_g": True, "t5xxl": True},
-        "vram_gb": 8,
-        "unet_hints": ["sd3.5_large_turbo", "sd3.5_turbo", "sd3-5_turbo"],
-        "vae_hints": ["sd3_vae", "sd3.5_vae", "sd3"],
-        "clip_hints": {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-            "clip_g": ["clip_g.safetensors", "clip_g"],
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
-        },
     },
     "SDXL Base": {
         "model_type": "sdxl",
         "weight_dtype": "fp16",
         "clip_dtype": "fp16",
-        "offload_mode": "none",
-        "clip_slots": {"clip_l": True, "clip_g": True},
-        "vram_gb": 8,
-        "unet_hints": ["sd_xl_base", "sdxl_base", "sdxl-base"],
-        "vae_hints": ["sdxl_vae", "vae-ft-mse", "xl_vae"],
-        "clip_hints": {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-            "clip_g": ["clip_g.safetensors", "clip_g"],
-        },
     },
     "SDXL Turbo": {
         "model_type": "sdxl",
         "weight_dtype": "fp16",
         "clip_dtype": "fp16",
-        "offload_mode": "none",
-        "clip_slots": {"clip_l": True, "clip_g": True},
-        "vram_gb": 6,
-        "unet_hints": ["sdxl_turbo", "sdxl-turbo", "turbo"],
-        "vae_hints": ["sdxl_vae", "vae-ft-mse", "xl_vae"],
-        "clip_hints": {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-            "clip_g": ["clip_g.safetensors", "clip_g"],
-        },
     },
     "SD 1.5": {
         "model_type": "sd1.5",
         "weight_dtype": "fp16",
         "clip_dtype": "fp16",
-        "offload_mode": "none",
-        "clip_slots": {"clip_l": True},
-        "vram_gb": 4,
-        "unet_hints": ["v1-5", "v1_5", "sd15", "sd-1-5", "sd_1.5"],
-        "vae_hints": ["vae-ft-mse", "sd15_vae", "kl-f8"],
-        "clip_hints": {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-        },
     },
     "HunyuanVideo": {
         "model_type": "hunyuan_video",
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "default",
-        "offload_mode": "none",
-        "clip_slots": {"clip_l": True, "llm_encoder": True},
-        "vram_gb": 12,
-        "unet_hints": ["hunyuan_video", "hunyuanvideo", "hyvideo"],
-        "vae_hints": ["hunyuan_video_vae", "hunyuan_vae", "hyvideo_vae"],
-        "clip_hints": {
-            "llm_encoder": ["llava_llama3", "llm_llava", "hunyuan_llm"],
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-        },
     },
     "Wan 2.1": {
         "model_type": "wan",
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "default",
-        "offload_mode": "none",
-        "clip_slots": {"t5xxl": True},
-        "vram_gb": 14,
-        "unet_hints": ["wan2.1", "wan_2.1", "wan-2.1", "Wan2.1"],
-        "vae_hints": ["wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
-        "clip_hints": {
-            "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
-        },
     },
     # ALBABIT-FIX: separate preset for Wan 2.2 checkpoints — same CLIP
-    # slot layout as Wan 2.1, distinct unet_hints to avoid matching the
-    # wrong version when both are installed.
+    # slot layout as Wan 2.1, distinct unet_hints (js/radiance_loader.js) to
+    # avoid matching the wrong version when both are installed.
     "Wan 2.2": {
         "model_type": "wan",
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "default",
-        "offload_mode": "none",
-        "clip_slots": {"t5xxl": True},
-        "vram_gb": 14,
-        "unet_hints": ["wan2.2", "wan_2.2", "wan-2.2", "Wan2.2"],
-        # ALBABIT-FIX: 14B Wan 2.2 models reuse the Wan 2.1 VAE; only the
-        # 5B model ships its own "wan2.2_vae.safetensors".
-        "vae_hints": ["wan2.2_vae", "wan_2.2_vae", "wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
-        "clip_hints": {
-            "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
-        },
     },
     "LTX Video": {
         "model_type": "ltx",
         "weight_dtype": "fp16",
         "clip_dtype": "default",
-        "offload_mode": "none",
-        "clip_slots": {"llm_encoder": True},
-        "vram_gb": 12,
-        "unet_hints": ["ltx-video-2b", "ltxv-2b", "ltx_video", "ltxv"],
-        "vae_hints": ["ltxvideo_vae", "ltx_vae", "ltxv_vae", "causal_vae"],
-        "clip_hints": {
-            "llm_encoder": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
-        },
     },
     "LTX Video 13B": {
         "model_type": "ltx",
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "default",
-        "offload_mode": "none",
-        "clip_slots": {"llm_encoder": True},
-        "vram_gb": 16,
-        "unet_hints": ["ltx-video-13b", "ltxv-13b", "ltx_13b"],
-        "vae_hints": ["ltxvideo_vae", "ltx_vae", "ltxv_vae", "causal_vae"],
-        "clip_hints": {
-            "llm_encoder": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
-        },
     },
     "LTX Video 2.3": {
         "model_type": "ltxav",
@@ -674,29 +530,11 @@ CHECKPOINT_PRESETS: dict = {
         # (same issue as the Z-Image clip_dtype fix above).
         "weight_dtype": "default",
         "clip_dtype": "default",
-        "offload_mode": "none",
-        "clip_slots": {"llm_encoder": True, "text_projection": True},
-        "vram_gb": 24,
-        "unet_hints": ["ltx-2.3-22b-dev", "ltx-2.3", "ltx_2.3"],
-        "vae_hints": ["LTX23_video_vae", "ltx23_video", "ltx_23_video"],
-        "clip_hints": {
-            "llm_encoder": ["gemma_3_12B_it_fp4", "gemma_3_12B_it", "gemma_3", "gemma"],
-            "text_projection": ["ltx-2.3_text_projection", "text_projection"],
-        },
     },
     "LTX Video 2.3 (Low VRAM)": {
         "model_type": "ltxav",
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "fp8_e4m3fn",
-        "offload_mode": "cpu_offload",
-        "clip_slots": {"llm_encoder": True, "text_projection": True},
-        "vram_gb": 12,
-        "unet_hints": ["ltx-2.3-22b-dev-fp8", "ltx-2.3", "ltx_2.3"],
-        "vae_hints": ["LTX23_video_vae", "ltx23_video", "ltx_23_video"],
-        "clip_hints": {
-            "llm_encoder": ["gemma_3_12B_it_fp4", "gemma_3_12B_it", "gemma_3", "gemma"],
-            "text_projection": ["ltx-2.3_text_projection", "text_projection"],
-        },
     },
     # ALBABIT-FIX: Cosmos World, CogVideoX and Mochi presets — new video
     # model_types added to model/detect.py. weight_dtype/clip_dtype use
@@ -705,111 +543,41 @@ CHECKPOINT_PRESETS: dict = {
         "model_type": "cosmos",
         "weight_dtype": "default",
         "clip_dtype": "default",
-        "offload_mode": "none",
-        "clip_slots": {"t5xxl": True},
-        "vram_gb": 17,
-        "unet_hints": ["cosmos-1_0-diffusion", "Cosmos-1_0", "cosmos_world", "cosmos"],
-        "vae_hints": ["cosmos_vae", "cosmos-tokenizer", "cosmos"],
-        "clip_hints": {
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
-        },
     },
     "CogVideoX": {
         "model_type": "cogvideox",
         "weight_dtype": "default",
         "clip_dtype": "default",
-        "offload_mode": "none",
-        "clip_slots": {"t5xxl": True},
-        "vram_gb": 15,
-        "unet_hints": ["cogvideox-5b", "cogvideox_5b", "CogVideoX", "cogvideox"],
-        "vae_hints": ["cogvideox_vae", "cogvideox-vae", "cogvideo_vae"],
-        "clip_hints": {
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
-        },
     },
     "Mochi": {
         "model_type": "mochi",
         "weight_dtype": "default",
         "clip_dtype": "default",
-        "offload_mode": "none",
-        "clip_slots": {"t5xxl": True},
-        "vram_gb": 19,
-        "unet_hints": ["mochi_preview", "mochi-1-preview", "genmo_mochi", "mochi"],
-        "vae_hints": ["mochi_vae", "mochi-vae"],
-        "clip_hints": {
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
-        },
     },
     "PixArt Sigma": {
         "model_type": "pixart",
         "weight_dtype": "fp16",
         "clip_dtype": "fp16",
-        "offload_mode": "none",
-        "clip_slots": {"t5xxl": True},
-        "vram_gb": 8,
-        "unet_hints": ["pixart_sigma", "pixart-sigma", "PixArt-Sigma"],
-        "vae_hints": ["pixart_sigma_sdxlvae", "sdxl_vae", "sd_vae", "pixart_vae", "vae-ft-mse"],
-        "clip_hints": {
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
-        },
     },
     "AuraFlow": {
         "model_type": "aura_flow",
         "weight_dtype": "fp16",
         "clip_dtype": "fp16",
-        "offload_mode": "none",
-        "clip_slots": {"clip_l": True},
-        "vram_gb": 12,
-        "unet_hints": ["auraflow", "aura_flow", "aura-flow"],
-        "vae_hints": ["aura_vae", "sd_vae"],
-        "clip_hints": {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-        },
     },
     "Kolors": {
         "model_type": "kolors",
         "weight_dtype": "fp16",
         "clip_dtype": "default",
-        "offload_mode": "none",
-        "clip_slots": {"llm_encoder": True},
-        "vram_gb": 8,
-        "unet_hints": ["kolors", "Kolors"],
-        "vae_hints": ["kolors_vae", "sdxl_vae"],
-        "clip_hints": {
-            "llm_encoder": ["chatglm3", "chatglm", "kolors_clip"],
-        },
     },
     "Lumina2": {
         "model_type": "lumina2",
         "weight_dtype": "fp16",
         "clip_dtype": "default",
-        "offload_mode": "none",
-        # ALBABIT-FIX: Lumina Image 2.0 uses a Gemma-2 2B LLM text encoder
-        # (routed to llm_encoder, like Gemma 3 for LTX 2.3), not T5-XXL.
-        "clip_slots": {"llm_encoder": True},
-        "vram_gb": 12,
-        "unet_hints": ["lumina2", "lumina-2", "lumina_2"],
-        # Lumina Image 2.0 ships with the Flux VAE ("ae.safetensors").
-        "vae_hints": ["ae.safetensors", "flux_ae", "sd3_vae", "sd_vae", "lumina_vae"],
-        "clip_hints": {
-            "llm_encoder": ["gemma_2_2b", "gemma2_2b", "gemma_2"],
-        },
     },
     "Z-Image": {
         "model_type": "z_image",
         "weight_dtype": "default",
         "clip_dtype": "default",
-        "offload_mode": "none",
-        # ALBABIT-FIX: Z-Image (Tongyi) uses a Qwen3-4B LLM text encoder
-        # (routed to llm_encoder, like Gemma 3 for LTX 2.3), not T5-XXL.
-        "clip_slots": {"llm_encoder": True},
-        "vram_gb": 10,
-        "unet_hints": ["z_image", "z-image", "zimage"],
-        # Z-Image (Tongyi) reuses the Flux.1 VAE.
-        "vae_hints": ["flux_vae", "ae.safetensors", "flux_ae", "sd3_vae", "sd_vae"],
-        "clip_hints": {
-            "llm_encoder": ["qwen_3_4b", "qwen3_4b", "qwen_3"],
-        },
     },
 }
 
