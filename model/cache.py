@@ -54,6 +54,7 @@ class LRUCache:
 _unet_cache = LRUCache()
 _clip_cache = LRUCache()
 _vae_cache = LRUCache()
+_audio_vae_cache = LRUCache()
 
 
 def get_model_cache(kind: str) -> LRUCache:

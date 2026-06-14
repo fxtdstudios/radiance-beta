@@ -1,666 +1,343 @@
 # Albabit — Modifications & Fixes
 
 Changes applied on top of upstream `fxtdstudios/radiance-beta`.
-Branch: `fix/bugs` — Fork: `https://github.com/Albabit/radiance-beta`
+Fork: `https://github.com/Albabit/radiance-beta`
+
+Organized by node/area. Within each section, fixes are listed roughly in the
+order they were made.
 
 ---
 
-## nodes/generate/resolution.py, js/radiance_resolution.js — Per-model VAE compression, frame computation, multi-output, preset auto-fill
+## Widget visibility / node resize (shared across loader, sampler, resolution, upscale)
 
-### Spatial & temporal VAE compression fixes
+- **v2.4 widget-visibility fix** (`radiance_resolution.js`): conditional
+  widgets (`video_frames`, `frame_rate`, `batch_size`, `mp_aspect_ratio`) left
+  ghost spaces / didn't restore on reload, because
+  `widget.inputEl.style.display`/`widget.draw` overrides bypass Vue. Fixed
+  with `setWidgetVisible()` (three-mechanism: `options.hidden`, `hidden`,
+  `type="hidden"` + `computeSize`/`computedHeight`), deferred 150ms/600ms
+  re-application in `onConfigure`.
+- **Node resize / stale widgets after preset folding** (`radiance_loader.js`):
+  node box didn't resize on preset switch (`refreshNodeSize` mutated
+  `node.size[i]` directly — Vue doesn't observe it; fixed via
+  `node.setSize(...)`), and repeated `Custom ↔ preset` toggling left all
+  widgets visible as if "Custom" (Vue stops reacting to a no-op
+  `splice(0,0)` once mounted; fixed by making `_forceWidgetReinsert()`
+  unconditional in `setWidgetVisible`). Generalized to
+  `radiance_sampler.js`, `radiance_resolution.js` (v2.4 → v2.5),
+  `radiance_upscale.js`.
+- **Note (not fixed, dead code)**: `radiance_upscale.js`'s
+  `beforeRegisterNodeDef` targets `"RadianceAIUpscale"`, a node type that no
+  longer exists (current: `RadianceUpscaleTiler`/`Image`/`Video`/`FaceRestore`).
+  `radiance_resolution.js`'s `preset` widget doesn't drive widget visibility
+  (pre-existing, not a regression).
 
-**Problem 1 (spatial):** The empty latent's spatial size always used a global
-`LATENT_SCALE = 8` divisor, regardless of `model_type`. This produced grossly
-oversized latents for LTXV (×32 VAE) and Flux.2 (×16 VAE).
+---
 
-**Fix:** Added `SPATIAL_SCALE` map (`LTXV (128ch)`: 32, `Flux.2 / Flux.2 Klein
-(128ch)`: 16, default: 8), applied in the empty-latent computation and in
-`_render_preview_card`.
+## Dashboards (Project Manager, Menu, Studio, Workspace)
 
-**Problem 2 (temporal — major perf bug):** For video latents, the temporal
-(frame) dimension of the empty 5D latent tensor (`torch.zeros(1, latent_c,
-T, H, W)`) was set directly to the raw pixel-space `video_frames` (e.g. 241
-for a 10s/24fps LTX 2.3 clip), instead of the 3D-VAE-compressed latent frame
-count (31). This made the sampler process ~8x more "frames" than necessary.
+Files: `js/radiance_pm_launcher.js`, `radiance_menu.js`, `radiance_studio.js`,
+`radiance_workspace.js`, `project_manager_dashboard.mjs`,
+`assets_dashboard.mjs`, `workspace_dashboard.html`.
 
-Measured impact on an identical LTX 2.3 / 20-step test: **65.89s** (old
-`radiance` version, latent T=31) vs **443.33s** (beta before fix, latent
-T=241) — a ~6.7x slowdown, closely matching the 241/31 ≈ 7.8x latent size
-ratio.
+**Problem:** Opening Manager/Library/Assets from the Project Manager node (or
+the FAB menu) returned a 404 when the custom-node folder wasn't named exactly
+`radiance` (e.g. `radiance-beta`) — all URLs were hardcoded as
+`/extensions/radiance/<file>`, but ComfyUI derives `/extensions/<name>/` from
+the actual folder name.
 
-**Fix:** Added `TEMPORAL_SCALE` map (`LTXV (128ch)`: 8, `WAN (16ch)`: 4,
-`HunyuanVideo (16ch)`: 4, `CogVideoX (16ch)`: 4, default: 4), and compute
-`lat_t = (video_frames - 1) // temporal_scale + 1` for the latent's temporal
-dimension — mirroring the formula from the previous `radiance` version.
-Outputs (`frame_count`, `duration_sec`, `video_frames`) remain unchanged
-(raw pixel-space frame count), only the latent tensor itself is resized.
+**Fix:** Added `const _EXT_BASE = import.meta.url.replace(/\/[^/]+$/, '');`
+and replaced every hardcoded `/extensions/radiance/<file>` with
+`` `${_EXT_BASE}/<file>` ``. In `workspace_dashboard.html` (no JS module
+scope), used the relative path `r_icon.png`.
 
-### Restored `frame_computation` (Manual/Auto Seconds) + `duration_seconds`
+---
 
-Restored from the previous `radiance` version: a `frame_computation` combo
-(`"Manual (Frames)"` / `"Auto (Seconds)"`) plus a `duration_seconds` float
-input. In "Auto (Seconds)" mode, `video_frames` is computed from
-`duration_seconds × frame_rate`, aligned to the model's temporal stride
-(`n*stride + 1`, stride=8 for LTX, 4 for WAN/Hunyuan/other).
+## Radiance Loader (RadianceUnifiedLoader / RadianceVideoLoader)
 
-`js/radiance_resolution.js`: added `_frameStride(modelType)` helper and
-toggle/sync logic in `frameModeW.callback` so `video_frames` and
-`duration_seconds` stay in sync when switching modes (previously the hidden
-field kept a stale value).
+Files: `nodes_loader.py`, `loader_utils.py`, `model/detect.py`,
+`config/model_map.py`, `js/radiance_loader.js`.
 
-### Restored multi-output `RETURN_TYPES`
+### Preset dropdown was completely non-functional
 
-Previously `RETURN_TYPES = ("LATENT",)` only. Restored from the previous
-`radiance` version:
-`("LATENT", "INT", "INT", "INT", "STRING", "FLOAT", "INT", "STRING", "FLOAT")`
-→ `(latent, width, height, channels, info, frame_rate, frame_count,
-latent_format, duration_sec)`, so this node can drive Sampler Pro and other
-downstream nodes directly.
+Selecting a `preset` did nothing (`app.registerExtension({nodeCreated, ...})`
+wrapped widget callbacks *after* Vue had already mounted them). Fixed by
+switching to `beforeRegisterNodeDef` + `onNodeCreated`/`onConfigure` (mirrors
+`radiance_sampler.js`), with `_forceWidgetReinsert()` to restore hidden
+widgets when switching back to "Custom".
+
+### model_type / architecture coverage
+
+- Added 6 new `model_type`s + presets to bring the Loader in line with
+  Radiance Resolution: **Chroma, Flux.2 Dev/Klein, Cosmos World, CogVideoX,
+  Mochi** (`model/detect.py`: `LATENT_CHANNELS`, `_FORMAT_MAP`,
+  `CLIP_SLOT_ORDER`, `_CLIP_TYPE_VARIANTS`, `_BASE_CLIP_VRAM`, `_BASE_VRAM`,
+  `get_clip_type_enum`; `config/model_map.py`; `js`: `PRESET_SLOTS` +
+  `PRESET_CONFIGS`).
+- `LATENT_CHANNELS`/`_FORMAT_MAP` had `"ltx"`/`"ltxav"` as 16ch
+  (`"ltx_16ch"`) — the LTX-Video VAE (incl. 2.3) is actually **128ch**. Fixed
+  to `"ltx_128ch"`, matching `MODEL_VAE_CONFIG["ltx-video"]`. (Only affected
+  `model_meta` reporting for downstream QC nodes, not actual loading.)
+- `CLIP_SLOT_ORDER["z_image"]`/`["lumina2"]` pointed to `t5xxl`, but both fill
+  `llm_encoder` (Qwen3-4B / Gemma-2 2B) → caused "No CLIP encoders provided".
+  Fixed to `["llm_encoder"]`.
+- **`"ltxav"` was unselectable** in `RadianceVideoLoader`'s Custom-mode
+  `model_type` dropdown (~5.5GB VRAM-estimate understatement for manual LTX
+  2.3 setups). Root cause: two module-level `MODEL_TYPES` lists in
+  `nodes_loader.py` (upstream v3.1 leftover) — the second silently shadowed
+  the first, and only the first (dead) one included `"ltxav"`. Removed the
+  dead block, added `"ltxav"` to the active list.
+
+### `_ARCH_HEURISTICS` (Auto-Detect) — fixed/added, cross-checked vs `comfy/model_detection.py`
+
+- `lumina2`'s heuristic (`cap_v_projection.weight`) matched no real
+  checkpoint — Lumina2/Z-Image were never auto-detected. Fixed to the real
+  key pair `cap_embedder.1.weight` + `noise_refiner.0.attention.k_norm.weight`.
+  Added `z_image`, distinguished from `lumina2` via `cap_embedder.1.weight`'s
+  shape (3840 = Z-Image, 2304 = Lumina2, new `_tensor_dim0()` helper).
+- `chroma`/`flux2` were absent → silently misdetected as `"flux"` (wrong CLIP
+  slots). Added both, checked *before* `flux` (Chroma Radiance's
+  `nerf_blocks.*` excluded/unsupported).
+- Added `mochi` (`t5_yproj.weight`), `cosmos`/Cosmos World
+  (`blocks.block0.blocks.0.block.attn.to_q.0.weight`), `cogvideox`
+  (`blocks.0.norm1.linear.weight`).
+- Removed the `_SAFETENSORS_PEEK = 200` key-count limit (listing keys only
+  reads the header; some keys like Mochi's `t5_yproj.weight` sort past 200).
+- Verified: Z-Image checkpoint now logs `Auto-detected architecture: z_image`;
+  Flux still logs `flux` (non-regression).
+
+### `clip_dtype`/`weight_dtype` forced casts on bf16-native models
+
+- Forcing `clip_dtype: "fp8_e4m3fn"`/`"fp16"` on large bf16-native LLM/T5
+  encoders risks overflow/NaN (root cause of Z-Image producing black/abstract
+  images). Changed `clip_dtype` → `"default"` (bf16 == fp16 size, zero VRAM
+  cost) for: HunyuanVideo, Wan 2.1/2.2, LTX Video, LTX Video 13B, LTX Video
+  2.3 (+ Low VRAM), Kolors, Lumina2, Z-Image. Z-Image's `weight_dtype` (UNet)
+  likewise `"fp16"` → `"default"`. (`"Flux Dev (Low VRAM)"` keeps
+  `clip_dtype: "fp8_e4m3fn"` — that's a T5-XXL cast, the established
+  low-VRAM pattern, different risk profile.)
+- Same issue for **"LTX Video 2.3"**'s `weight_dtype: "fp16"` —
+  `ltx-2.3-22b-dev.safetensors` is bf16-native, so this was a no-benefit
+  bf16→fp16 cast. Changed to `"default"`.
+
+### LTX Video 2.3 — VAE, Audio VAE & text_projection
+
+- **VAE size-mismatch fix**: `LTX23_video_vae_bf16.safetensors` raised `size
+  mismatch` in `VideoVAE` because it was loaded via `load_torch_file()` (no
+  metadata) + `comfy.sd.VAE(sd=sd)`, losing the safetensors `config` key.
+  Added `_load_vae_sd_metadata()` (RadianceVideoLoader only) using
+  `load_torch_file(..., return_metadata=True)`.
+- **Ported Baked VAE / Audio VAE / Latent Upscale Model** from the legacy
+  loader to `RadianceVideoLoader`: new outputs `AUDIO_VAE`,
+  `LATENT_UPSCALE_MODEL`; `vae_name` defaults to **"Baked VAE (from UNET)"**;
+  new optional `audio_vae_name` (`"None"` / `"Baked Audio VAE (from UNET)"` /
+  standalone file) and `upscale_model_name`; dedicated `_audio_vae_cache` /
+  `_upscale_model_cache`; `model_meta` gains `"audio_vae"`/`"upscale_model"`.
+- **"Baked (from UNET)" for `text_projection`**: the native LTX 2.3 workflow
+  loads the Gemma 3 12B encoder *and* the UNET checkpoint as a second CLIP
+  source (the `text_embedding_projection.*` weights are baked into the UNET,
+  and this 2-file path selects the `ltxav_te`/`LTXAVTEModel` wrapper instead
+  of the bare `gemma3_te`). `assemble_clip_paths()` now takes `unet_path` and
+  appends it as a second CLIP source when `text_projection == "Baked (from
+  UNET)"`. "LTX Video 2.3" still prioritizes the standalone
+  `ltx-2.3_text_projection_bf16.safetensors`; "LTX Video 2.3 (Low VRAM)"
+  defaults to "Baked (from UNET)".
+- **"LTX Video 2.3" — no `text_projection` fallback**: this preset only
+  listed the standalone `ltx-2.3_text_projection_bf16.safetensors` hints; if
+  that file is absent, auto-fill left `text_projection` empty. Added
+  `"Baked (from UNET)"` as a last-resort hint, mirroring the Low VRAM preset.
+- **"LTX Video 2.3 (Low VRAM)" — Audio VAE not extracted**
+  (`AssertionError: Audio VAE model is required` from `nodes_lt_audio.py`):
+  the JS preset config had no `audio_vae_hints`, so `audio_vae_name` defaulted
+  to `"None"` and `extract_audio_vae` stayed `False`. Added
+  `"audio_vae_hints": ["Baked Audio VAE (from UNET)"]` (mirrors the
+  `text_projection` pattern; widget stays hidden but is correctly filled).
+- **Double UNET file read for audio VAE extraction**: when
+  `extract_audio_vae=True`, the (often multi-GB) UNET file was read twice —
+  once via `load_diffusion_model`/`load_checkpoint_guess_config`, once more
+  via `comfy.utils.load_torch_file` for the audio VAE state dict.
+  `RadianceVideoLoader.load_radiance_stack` now reads the state dict once and
+  reuses it for both `load_diffusion_model_state_dict`/
+  `load_state_dict_guess_config` (model + optional baked VAE) and the audio
+  VAE extraction; `cached_patcher_init` is set manually on the resulting
+  model/VAE patchers to preserve multi-GPU dynamic-delegate reload support.
+
+### Preset hint/auto-fill corrections (real-world filenames, June 2026)
+
+- **Flux Dev / (Low VRAM)**: added `flux1-krea-dev`/`krea-dev` hints.
+- **LTX Video 2.3 / (Low VRAM)**: fixed unet hint collision between fp8 and
+  full-precision presets; `vae_name` → "Baked VAE (from UNET)"; added
+  `upscale_model_name` hints; `llm_encoder` prioritizes `gemma_3_12B_it`
+  (`_fp4_mixed` for Low VRAM); `vae_hints`/audio VAE filenames corrected
+  (`LTX23_video_vae_bf16`/`LTX23_audio_vae_bf16.safetensors`).
+- **LTX Video / 13B**: added "Baked VAE (from UNET)" + corrected
+  `ltxvideo_vae` hints (was `ltx_vae`/`ltxv_vae`/`causal_vae`); added
+  `upscale_model_name`.
+- **Wan 2.1**: fixed `t5xxl` hints to `umt5_xxl_*`; corrected `vae_name` to
+  `wan_2.1_vae.safetensors`.
+- **Wan 2.2** (new preset): own `unet_hints`/`vae_hints` (`wan2.2_vae`,
+  fallback `wan_2.1_vae`); MoE multi-file UNETs / t2v-i2v variants deferred.
+- **PixArt Sigma**: corrected `vae_name` to the SDXL-based VAE.
+- **Lumina2**: text encoder → `gemma_2_2b_fp16.safetensors` on `llm_encoder`
+  (not `t5xxl`); `vae_name` → `ae.safetensors`.
+- **Z-Image**: text encoder → `qwen_3_4b.safetensors` on `llm_encoder`;
+  `vae_name` → `flux_vae.safetensors`.
+- **"Flux Dev (Flux.2)"**: removed — conflated FLUX.1 (`flux1-krea-dev`) with
+  true Flux.2 (`flux2-dev` + Mistral-3 + 128ch latent, not supported by the
+  clip-slot infra at the time).
+- Added `VIDEO_PRESET_NAMES` (`config/model_map.py`) so "Radiance Video
+  Loader" only lists video presets and "Radiance Loader" only image presets.
+
+### `offload_mode` ("none" / "cpu_offload" / "sequential")
+
+- **"Low VRAM" presets now expose `offload_mode`**: previously hardcoded to
+  `"cpu_offload"` (forces the CLIP/text-encoder to load *and run* entirely on
+  CPU — ~87s for a 12B Gemma-3 encoder in fp8 vs ~6s on GPU; only needed on
+  genuinely ~8-12GB cards). Removed `offload_mode` from
+  `_apply_preset_override` (both loaders) and added it to `extra_widgets` for
+  "Flux Dev (Low VRAM)" / "LTX Video 2.3 (Low VRAM)" — visible and
+  user-editable, JS still sets the previous default (`"cpu_offload"`).
+- **Stale-cache fix**: switching `offload_mode` between runs had no effect —
+  `unet_key`/`clip_key` didn't include `offload_mode`, so a cached
+  CLIP/UNET kept whatever `load_device`/lowvram-patching it was first loaded
+  with. Added `offload_mode` to both cache keys.
+
+### Dead code removed
+
+- `loader_utils.py`: `resolve_hint()` (defined, never called).
+- `js/radiance_loader.js`: `MODEL_SLOTS` dict (defined, never referenced,
+  already stale vs. `PRESET_SLOTS`).
+- `config/model_map.py`: removed `offload_mode`/`clip_slots`/`vram_gb`/
+  `unet_hints`/`vae_hints`/`clip_hints` from all 26 `CHECKPOINT_PRESETS`
+  entries — audited, none of these fields were ever read (`_apply_preset_override`
+  only uses `model_type`/`weight_dtype`/`clip_dtype`); they had drifted out of
+  sync with the equivalent JS `PRESET_SLOTS`/`PRESET_CONFIGS` (6 presets
+  diverged, worst case "LTX Video 2.3 (Low VRAM)" `text_projection`/audio VAE
+  hints). JS is now the sole source of truth for hints/slots/offload_mode.
+
+### De-duplicated `load_radiance_stack` pipeline (SSOT refactor)
+
+`RadianceUnifiedLoader.load_radiance_stack` (image) and
+`RadianceVideoLoader.load_radiance_stack` (video) were ~80% copy-pasted
+(preset application, Auto-Detect, offload setup, VRAM estimation,
+UNET/CLIP/VAE/LoRA loading, HUD printing) — every fix above (`offload_mode`
+cache-key, audio-VAE double-read, etc.) had to be located and applied in both
+copies. Extracted the shared pipeline steps into 10 new free functions in
+`loader_utils.py`, per this file's stated SSOT convention: `resolve_divider`,
+`apply_checkpoint_preset`, `resolve_architecture`, `setup_offload_mode`,
+`estimate_vram_for_load`, `load_unet_and_baked_vae`, `load_clip_stack`,
+`load_standalone_vae`, `apply_lora_stack`, plus the private
+`_apply_preset_field` helper. `_audio_vae_cache` moved from `nodes_loader.py`
+to `model/cache.py` alongside `_unet_cache`/`_clip_cache`/`_vae_cache`
+(`_upscale_model_cache` stays in `nodes_loader.py`, video-only). Each
+`load_radiance_stack` is now a thin orchestrator; video keeps inline only its
+unique sections (baked/standalone Audio VAE, Latent Upscale Model). No
+behavior change — `nodes_loader.py` shrank from 1389 to 882 lines; the
+extracted logic was verified byte-for-byte against the pre-refactor superset.
+
+---
+
+## Radiance Resolution (nodes/generate/resolution.py, js/radiance_resolution.js)
+
+### Per-model VAE compression (spatial & temporal)
+
+- **Spatial**: empty-latent size always divided by a global `LATENT_SCALE =
+  8`, producing oversized latents for LTXV (×32 VAE) and Flux.2 (×16 VAE).
+  Added `SPATIAL_SCALE` map (LTXV: 32, Flux.2/Klein: 16, default: 8).
+- **Temporal (major perf bug)**: the 5D empty latent's frame dimension used
+  the raw pixel-space `video_frames` (e.g. 241) instead of the VAE-compressed
+  latent frame count (31) — sampler processed ~8x more "frames" than needed.
+  Measured: **65.89s** (correct, T=31) vs **443.33s** (bug, T=241) for an
+  identical LTX 2.3/20-step run. Added `TEMPORAL_SCALE` map (LTXV: 8,
+  WAN/HunyuanVideo/CogVideoX: 4, default: 4); `lat_t = (video_frames - 1) //
+  temporal_scale + 1`. Outputs (`frame_count`/`duration_sec`/`video_frames`)
+  unchanged — only the latent tensor is resized.
+
+### Restored features (from previous `radiance` version)
+
+- `frame_computation` combo (`"Manual (Frames)"` / `"Auto (Seconds)"`) +
+  `duration_seconds` input; in Auto mode `video_frames = duration_seconds ×
+  frame_rate`, aligned to the model's temporal stride.
+- Multi-output `RETURN_TYPES`: `("LATENT", "INT", "INT", "INT", "STRING",
+  "FLOAT", "INT", "STRING", "FLOAT")` (latent, width, height, channels, info,
+  frame_rate, frame_count, latent_format, duration_sec) — drives Sampler Pro
+  and other downstream nodes directly.
+
+### `model_type`-driven inversion (replaced preset-category system)
+
+Previously, pixel alignment / video-latent detection / WAN's 4k+1 rule /
+frame stride / `latent_format` were keyed off **preset category**
+(`VIDEO_PRESET_CATEGORIES`, `WAN_FRAME_CATEGORIES`, `ALIGN32_CATEGORIES`,
+`VIDEO_LATENT_FORMAT_MAP`, ~51 model-specific `PRESETS` entries), and `_align8`
+rounded to the *nearest* multiple of 8 (could round down).
+
+- `PRESETS` is now a plain, model-agnostic list of Cinema (12) + Social (4)
+  resolutions.
+- `model_type` is the single source of truth: `SPATIAL_SCALE` +
+  `_align_up()` (always rounds **up**), `VIDEO_MODEL_TYPES` (5D latent),
+  WAN's 4k+1 rule, `TEMPORAL_SCALE` (Auto-Seconds stride), `LATENT_FORMAT_MAP`.
+- `generate()` returns `computed_width`/`computed_height`; JS `onExecuted`
+  writes the aligned values back into `width`/`height`.
+- JS: removed preset-name-based `enable_video`/`model_type` auto-detection;
+  added `model_type`'s callback to auto-toggle `enable_video`
+  (`VIDEO_MODEL_TYPES_JS`); added instant width/height re-alignment on
+  `model_type` change (`SPATIAL_SCALE_JS`/`_alignUp`/`_applyAlignment`,
+  tracking unaligned "base" resolution `node._resBaseW/H`); `+`/`-` step size
+  matches alignment (`_setWidgetStep`); `preset` auto-switches to/from
+  "Custom" when width/height is edited; `video_frames` snaps to `N*stride+1`.
+- Default `preset` → final default **`"Custom"`** (1024×1024).
+
+**`model_type` coverage** (audited against `comfy/sd.py`,
+`comfy_extras/nodes_lt.py`, `nodes_wan.py`, `nodes_hunyuan.py`,
+`nodes_cosmos.py`, `nodes_mochi.py`, `comfy/ldm/cogvideo/vae.py`):
+- Merged equivalent entries: `"Flux/SD3 (16ch)"` + `"Lumina2/Z-Image (16ch)"`
+  → `"Flux / SD3 / Lumina2 / Z-Image (16ch)"`; `"SDXL/SD1.5 (4ch)"` +
+  `"PixArt/AuraFlow/Kolors (4ch)"` → merged.
+- Added `"Chroma (16ch)"` (distinct sampler defaults, kept separate from Flux).
+- `VIDEO_MODEL_TYPES` covers 6 models: WAN/HunyuanVideo/CogVideoX (×4), Mochi
+  (×6), LTXV/"Cosmos World (16ch)" (×8). "Cosmos World" = Cosmos 1.0 only
+  (Predict2 ×4 deferred).
+- `"Auto (Flux 16ch)"` → **`"Manual"`** (new default, fully unconstrained:
+  scale/temporal ×1, 16ch, `latent_format="flux"`).
+
+**Deferred / audited-not-added**: `ChromaRadiance` (pixel-space, no VAE —
+fundamentally different), `StepVideo` (no working load path in this ComfyUI
+checkout), Cosmos Predict2.
+
+### Cleanup
+
+- Removed `_align8`/`_align32` (dead/redundant with `_align_up`).
+  `_mp_target_dimensions()` now takes `align_val` directly.
+- `MODEL_BASE_VRAM`: removed unreachable `"sd15": 2.5`; added `"chroma": 12.0`.
+- `_estimate_vram()` takes `spatial_scale: int = 8` instead of hardcoding
+  `w//8, h//8` (was under/overestimating LTXV/Flux.2/Manual).
 
 ### JS preset auto-fill
 
-`js/radiance_resolution.js`: selecting a `preset` now auto-fills
-`width`/`height` (from the `(WxH)` in the preset name), auto-toggles
-`enable_video` for video presets (WAN/LTX/Hunyuan/CogVideoX), sets
-`model_type` to match the preset's family, and resets `scale_factor` to 1.0
-(per-model spatial scale is now handled by `SPATIAL_SCALE`, not this widget).
+Selecting a `preset` auto-fills `width`/`height` (from `(WxH)` in the name),
+auto-toggles `enable_video`, sets `model_type`, resets `scale_factor` to 1.0.
 
 ---
 
-## js/radiance_pm_launcher.js, radiance_menu.js, radiance_studio.js, radiance_workspace.js, project_manager_dashboard.mjs, assets_dashboard.mjs, workspace_dashboard.html — Dashboard URL fix
+## Radiance Sampler (js/radiance_sampler.js)
 
-**Problem:** Opening Manager, Library, or Assets from the Radiance Project
-Manager node (or the floating FAB menu) returned a 404 / blank page when the
-custom node folder was named anything other than exactly `radiance`
-(e.g. `radiance-beta` for beta testers).
-
-**Root cause:** All dashboard URLs and asset paths were hardcoded as
-`/extensions/radiance/<file>`. ComfyUI derives the `/extensions/<name>/`
-path from the actual folder name on disk. Any mismatch between the hardcoded
-name and the real folder name causes a 404.
-
-**Fixes:**
-- Added `const _EXT_BASE = import.meta.url.replace(/\/[^/]+$/, '');` at the
-  top of each affected ES-module JS file. This resolves the real extension
-  base URL at runtime, regardless of the install folder name.
-- Replaced every hardcoded `/extensions/radiance/<file>` with
-  `` `${_EXT_BASE}/<file>` `` in `radiance_pm_launcher.js`,
-  `radiance_menu.js`, `radiance_studio.js`, `radiance_workspace.js`,
-  `project_manager_dashboard.mjs`, and `assets_dashboard.mjs`.
-- In `workspace_dashboard.html` (static file, no JS module scope), replaced
-  the absolute `/extensions/radiance/r_icon.png` with the relative path
-  `r_icon.png` — the browser resolves it correctly from the file's own URL.
+- **Empty spaces in Custom mode after a named preset**: `resolveModelType`
+  trusted the backend's `model_type="ltxav"` default for *every* preset
+  (hiding LTX-only widgets even for Flux); `applyPreset` never updated
+  `model_type` for presets without one. Fixed: `resolveModelType` checks the
+  **preset name first**; `inferModelTypeForPreset` + `applyPreset` write the
+  inferred `model_type`; `_forceWidgetReinsert()` forces Vue to remount
+  hidden→visible widgets; `tile_size`/`tile_overlap`/`tile_blend` hidden in
+  Custom mode when `tile_mode=false`.
+- **Page reload hid all widgets**: `onNodeCreated`'s 150ms timer could fire
+  mid-`graph.configure()`, reading the still-default `preset="None"`. Fixed:
+  `onConfigure` sets `node._configuredByLoad = true` synchronously;
+  `onNodeCreated` bails if set.
+- **`model_type` showed "ltxav" for non-LTX presets**: `applyPreset` now
+  calls `inferModelTypeForPreset` to write the correct family; switching to
+  None/Custom resets `model_type` to `"auto"`.
 
 ---
 
-## js/radiance_resolution.js — v2.4 (Widget visibility fix)
-
-**Problem:** In ComfyUI Nodes 2.0 (Vue 3 frontend), conditional widgets
-(`video_frames`, `frame_rate`, `batch_size`, `mp_aspect_ratio`) left empty
-ghost spaces when hidden, and failed to restore on workflow reload.
-
-**Root cause:** The original code used `widget.inputEl.style.display` and
-`widget.draw` overrides, which bypass Vue's reactivity system. Also,
-`toggleFields` was called immediately on node creation — before Vue's first
-layout pass — so `widget.computedHeight` was `undefined` at the time of
-hiding, causing the restore path to fall back to an incorrect height.
-
-**Fixes:**
-- `setWidgetVisible(widget, visible, node)` — three-mechanism pattern:
-  1. `widget.options.hidden` — Vue 3 filter in Nodes 2.0
-  2. `widget.hidden` — LiteGraph `getLayoutWidgets()` exclusion
-  3. `widget.type="hidden"` + `computeSize=[0,-4]` + `computedHeight=4` — physical height collapse
-- `node.widgets.splice(0, 0)` after every visibility change — triggers Vue
-  reactive proxy to re-evaluate `options.hidden`.
-- `node.size[1] = sz[1]` (in-place mutation) instead of array replacement —
-  preserves Vue's reactive tracking of the existing array reference.
-- Initial `toggleFields` deferred 150 ms via `setTimeout` — Vue must complete
-  its first layout pass before any widget is hidden.
-- `onConfigure` hook with `setTimeout(150ms)` and `setTimeout(600ms)` —
-  re-applies toggle state after a saved workflow deserializes widget values.
-
----
-
-## js/radiance_sampler.js — Widget visibility & preset fixes
-
-### Bug A — Empty spaces in Custom mode after a named preset
-
-**Problem:** Switching from e.g. "LTX 2.3 LowRes" to "Custom" left empty
-ghost spaces where `flux_guidance`, `flux_guidance_profile`,
-`sigma_blend_steps`, `preview_method`, `noise_alpha_start/end` should be.
-
-**Root cause:**
-1. `resolveModelType` returned `modelTypeVal` immediately if it was not
-   `"auto"`. Since the backend initialises `model_type = "ltxav"`, every
-   named preset (including Flux) was resolved as `isLTX = true`, hiding all
-   `LTX_INCOMPATIBLE_WIDGETS` even for non-LTX presets.
-2. `applyPreset` never updated `model_type` for presets whose config did not
-   explicitly include it (all Flux / WAN / AYS presets).
-3. Vue 3's virtual-DOM differ reuses component instances when the same object
-   reference stays in the widgets array — a `splice(0, 0)` no-op notifies Vue
-   the array changed but Vue skips re-reading widget properties (`type`,
-   `options.hidden`) on the existing instance. Widgets restored from
-   `type="hidden"` would keep a stale component state (zero height, no content).
-
-**Fixes:**
-- `resolveModelType` now checks the **preset name first** (authoritative),
-  falling back to `modelTypeVal` only when the name gives no match. Flux,
-  WAN, AYS, SD3.5, Lumina2, HunyuanVideo, z_image presets all resolve
-  correctly regardless of the current `model_type` widget value.
-- `inferModelTypeForPreset` + `applyPreset` — when applying a named preset
-  that has no `model_type` in its config, the correct model type is inferred
-  from the preset name and written to the `model_type` widget.
-- `_forceWidgetReinsert(widget, node)` — performs a real
-  `splice(remove) + splice(reinsert)` to force Vue to destroy and recreate
-  the component instance. Called in `setWidgetVisible` whenever a widget
-  transitions from `type="hidden"` back to visible.
-- `toggleFields` deferred cleanup (50 ms) — deletes synthetic
-  `computedHeight = 32` values set during the restore so Vue recomputes the
-  real per-widget height in its next layout pass.
-- `tile_size`, `tile_overlap`, `tile_blend` are now hidden in **Custom mode**
-  as well when `tile_mode = false`. `tile_mode` is in `foldTriggers` so
-  toggling it immediately shows/hides the sub-options.
-
-### Bug B — Page reload: all widgets hidden after browser refresh
-
-**Problem:** After a browser page reload, the node displayed only the preset
-dropdown regardless of the saved preset value.
-
-**Root cause:** The `onNodeCreated` 150 ms timer could fire while
-`graph.configure()` was still running (large workflows), at which point the
-preset widget still held its default value `"None"` → `applyFolding` hid
-everything. `onConfigure`'s timers would eventually correct this, but a
-second race meant both timers competed and left the node stuck.
-
-**Fix:**
-- `onConfigure` sets `node._configuredByLoad = true` synchronously (before
-  any timers). The `onNodeCreated` 150 ms timer checks this flag and returns
-  early — `onConfigure`'s own timers (150 ms + 600 ms safety net) take over
-  with the correct, already-deserialized widget values.
-
-### Bug C — model_type shows "ltxav" for non-LTX presets
-
-**Problem:** Selecting "Flux Ultra Fast (8 steps)" still showed
-`model_type = ltxav`.
-
-**Fix:** `applyPreset` calls `inferModelTypeForPreset` and writes the correct
-family ("flux", "wan", "ltxv", "ltxav", "hunyuan_video", etc.) to the
-`model_type` widget whenever the preset config does not include it explicitly.
-
-### model_type reset on None / Custom
-
-When the user switches **to None or Custom** (via the preset dropdown or via
-a manual widget edit that auto-switches to Custom), `model_type` is reset to
-`"auto"` so the widget reflects that no specific model family is locked.
-
----
-
-## model/detect.py — LTX latent channel count fix
-
-**Problem:** `LATENT_CHANNELS` and `_FORMAT_MAP` listed `"ltx"` and `"ltxav"`
-as 16-channel (`"ltx_16ch"`), but the LTX-Video VAE (including LTX 2.3) uses
-128 latent channels. This did not break model loading (the real MODEL/VAE
-come from the checkpoint), but the `model_meta` JSON output from
-`RadianceUnifiedLoader` reported `latent_ch: 16` / `latent_format: "ltx_16ch"`
-for any LTX model — incorrect info for downstream QC/analytics nodes.
-
-**Fix:** `LATENT_CHANNELS["ltx"]` and `["ltxav"]` set to `128`;
-`_FORMAT_MAP["ltx"]` and `["ltxav"]` set to `"ltx_128ch"`, matching
-`config/model_map.py`'s `MODEL_VAE_CONFIG["ltx-video"]`.
-
----
-
-## nodes_loader.py — RadianceVideoLoader: LTX 2.3 VAE size mismatch fix
-
-**Problem:** Loading `LTX23_video_vae_bf16.safetensors` with "Radiance Video
-Loader" raised:
-```
-RuntimeError: Failed to load VAE 'LTX23_video_vae_bf16.safetensors':
-Error(s) in loading state_dict for VideoVAE: size mismatch for ...
-```
-
-**Root cause:** The VAE was loaded via `comfy.utils.load_torch_file(vae_path)`
-(no metadata) and `comfy.sd.VAE(sd=sd)`. Without the file's metadata,
-`comfy.sd.VAE` cannot read the VAE's internal architecture config (`config`
-key in the safetensors metadata) and falls back to a default internal layout
-that doesn't match LTX 2.3's video VAE, causing a state_dict size mismatch
-when loading the encoder/decoder weights. (Note: this is unrelated to the
-128 latent channels, which is correct and unchanged for LTX/LTX 2.3.)
-
-**Fix:** Added `_load_vae_sd_metadata(vae_path)`:
-- `RadianceUnifiedLoader` (image loader): unchanged behaviour —
-  `comfy.utils.load_torch_file(vae_path)`, no metadata.
-- `RadianceVideoLoader` (video loader): overrides it to use
-  `comfy.utils.load_torch_file(vae_path, return_metadata=True)`, so
-  `comfy.sd.VAE(sd=sd, metadata=metadata)` picks the correct internal VAE
-  architecture for LTX 2.3.
-
-Verified: "Radiance Video Loader" now loads `ltx-2.3-22b-dev.safetensors` +
-`LTX23_video_vae_bf16.safetensors` successfully, with `model_meta` reporting
-`"latent_ch": 128, "latent_format": "ltx_128ch"`.
-
----
-
-## nodes_loader.py — RadianceVideoLoader: Baked VAE, Audio VAE & Latent Upscale Model
-
-**Goal:** Port the legacy Radiance loader's "Baked VAE", Audio VAE, and
-latent upscale model support to `RadianceVideoLoader`, adapted to the v3.x
-loader architecture (`loader_utils.py` SSOT, `_unet_cache`/`_clip_cache`/
-`_vae_cache`, `_apply_preset_override`, etc.). `RadianceUnifiedLoader`
-(image loader) is untouched.
-
-**Changes (`RadianceVideoLoader` only):**
-- New outputs: `AUDIO_VAE` and `LATENT_UPSCALE_MODEL` (alongside the
-  existing `MODEL`, `CLIP`, `VAE`, `lora_stack`, `model_meta`).
-- `vae_name` now offers **"Baked VAE (from UNET)"** (default) in addition
-  to standalone `.safetensors` files. When selected, the VAE is extracted
-  natively from the checkpoint via
-  `comfy.sd.load_checkpoint_guess_config(..., output_vae=True)`.
-- New optional `audio_vae_name` input: `"None"`, `"Baked Audio VAE (from
-  UNET)"`, or a standalone checkpoint/VAE file (LTX 2.3 audio). Both baked
-  and standalone paths use `comfy.utils.state_dict_prefix_replace(...,
-  {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."}) +
-  comfy.sd.VAE(sd=..., metadata=...)` — the ComfyUI 0.22.0+ compatible
-  pattern (mirrors the built-in `LTXVAudioVAELoader`).
-- New optional `upscale_model_name` input (from
-  `models/latent_upscale_models/`): recognizes HunyuanVideo SR 720p/1080p
-  upsamplers and the LTX `LatentUpsampler` (via safetensors metadata
-  `config`).
-- New dedicated LRU caches `_audio_vae_cache` / `_upscale_model_cache`
-  (separate from the core unet/clip/vae caches) for the baked/standalone
-  Audio VAE and upscale model.
-- `model_meta` JSON gains `"audio_vae"` and `"upscale_model"` fields.
-- Input layout: `audio_vae_name` and `upscale_model_name` are placed right
-  after `vae_name` (matching the legacy node layout) instead of at the
-  bottom of the node.
-
-**Tooltip clarifications (CLIP slots, both loaders):**
-- `t5xxl`: now notes it's used by LTX **pre-2.3** (LTX 2.3 uses Gemma 3 via
-  `llm_encoder` instead).
-- `llm_encoder`: now explicitly mentions LTX 2.3 (Gemma 3), in addition to
-  Kolors/HunyuanVideo (ChatGLM3).
-- `text_projection`: now explicitly scoped to LTX 2.3 with Gemma 3.
-
-Confirmed: `config/model_map.py`'s LTX/LTX-AV profiles already route Gemma 3
-(`gemma_3_12B_it*`) to `llm_encoder` + `text_projection`, consistent with our
-earlier fix — no regression from upstream.
-
----
-
-## js/radiance_loader.js, config/model_map.py, nodes_loader.py, loader_utils.py — Preset dropdown fix & preset corrections
-
-**Problem:** The "preset" dropdown in "Radiance Video Loader" / "Radiance
-Loader" was completely non-functional — selecting a preset produced no
-console output and did not fold/unfold widgets or auto-fill model files.
-
-**Root cause:** The previous registration used
-`app.registerExtension({ nodeCreated, loadedGraphNode })`, which wraps
-`presetW.callback` / `modelTypeW.callback` *after* Vue (Nodes 2.0) has
-already mounted the combo widget components — so the wrapped callback was
-never invoked on live user interaction.
-
-**Fixes:**
-- Replaced the registration block with the `beforeRegisterNodeDef` +
-  `nodeType.prototype.onNodeCreated` / `onConfigure` pattern (mirroring the
-  confirmed-working pattern in `radiance_sampler.js`), wrapping
-  `presetW.callback` / `modelTypeW.callback` before widget construction.
-- Added `_forceWidgetReinsert(widget, node)` (ported from
-  `radiance_sampler.js`) to work around a Vue 3 component-reuse issue where
-  restoring a hidden widget left it visually broken; `setWidgetVisible` now
-  calls this instead of a bare `splice`.
-- "Custom" preset now correctly restores all hidden widgets via the above.
-
-**Preset hint/auto-fill corrections** (researched real-world `.safetensors`
-filenames as of June 2026):
-- **Flux Dev / Flux Dev (Low VRAM)**: added `flux1-krea-dev` / `krea-dev`
-  hints so `flux1-krea-dev.safetensors` is correctly auto-filled.
-- **LTX Video 2.3 / (Low VRAM)**: fixed unet hint collision where the fp8 and
-  full-precision presets could both match `ltx-2.3-22b-dev*` (now uses exact
-  filename priority); `vae_name` now defaults to "Baked VAE (from UNET)" for
-  all LTX presets; added `extra_widgets`/`upscale_hints` mechanism so
-  `upscale_model_name` is shown and auto-filled
-  (`ltx-2.3-spatial-upscaler-x2-1.1.safetensors` then `...-1.0.safetensors`);
-  `llm_encoder` now prioritizes `gemma_3_12B_it.safetensors`
-  (`gemma_3_12B_it_fp4_mixed.safetensors` for Low VRAM).
-- **LTX Video / LTX Video 13B**: added "Baked VAE (from UNET)" + corrected
-  `ltxvideo_vae` hints (was `ltx_vae`/`ltxv_vae`/`causal_vae`, none of which
-  match the real `ltxvideo_vae_bf16.safetensors` / `LTX23_video_vae_bf16.safetensors`
-  filenames); added `extra_widgets`/`upscale_hints` for `upscale_model_name`.
-- **Wan 2.1**: fixed `t5xxl` hints — `umt5_xxl_fp8_e4m3fn_scaled.safetensors`
-  uses an underscore (`umt5_xxl`), not `umt5-xxl`/`umt5xxl`; corrected
-  `vae_name` hints to `wan_2.1_vae.safetensors`.
-- **Wan 2.2 (new preset)**: split out from "Wan 2.1" as a separate preset
-  with its own `unet_hints` (`wan2.2`/`wan_2.2`/`wan-2.2`) and `vae_hints`
-  prioritizing `wan2.2_vae.safetensors` (falling back to
-  `wan_2.1_vae.safetensors`); same corrected `t5xxl` hints as Wan 2.1.
-  (Wan 2.2's multi-file MoE high/low-noise expert UNETs and t2v/i2v variants
-  are a larger architectural change, deferred for a future task.)
-- **PixArt Sigma**: corrected `vae_name` hints to the SDXL-based VAE
-  (`pixart_sigma_sdxlvae` / `sdxl_vae` / `vae-ft-mse`).
-- **Lumina2**: corrected text encoder to `gemma_2_2b_fp16.safetensors`
-  (Gemma-2 2B), routed to the **`llm_encoder`** clip slot (not `t5xxl`),
-  consistent with how Gemma 3 is handled for LTX 2.3; corrected `vae_name`
-  to `ae.safetensors` (Flux VAE, reused by Lumina2).
-- **Z-Image**: corrected text encoder to `qwen_3_4b.safetensors` (Qwen3-4B),
-  routed to the **`llm_encoder`** clip slot (not `t5xxl`); corrected
-  `vae_name` to `flux_vae.safetensors`.
-- **"Flux Dev (Flux.2)"**: this preset (added during this session) was found
-  to conflate `flux1-krea-dev.safetensors` (FLUX.1, correctly using
-  `clip_l`+`t5xxl`+`ae.safetensors`) with `flux2-dev.safetensors` (true
-  Flux.2: Mistral-3 text encoder + `flux2-vae.safetensors`, 128-channel
-  latent — incompatible with the current clip-slot infrastructure). Removed
-  entirely rather than ship an incorrect preset; true Flux.2 support is
-  deferred for a future task.
-
-**Per-loader preset filtering:**
-- Added `VIDEO_PRESET_NAMES` to `config/model_map.py` (HunyuanVideo, Wan 2.1,
-  Wan 2.2, LTX Video, LTX Video 13B, LTX Video 2.3, LTX Video 2.3 (Low VRAM)).
-- "Radiance Video Loader" now only lists `Custom` + video presets;
-  "Radiance Loader" now only lists `Custom` + image presets, via filtering
-  in `INPUT_TYPES` in `nodes_loader.py`.
-
----
-
-## js/radiance_loader.js, radiance_sampler.js, radiance_resolution.js, radiance_upscale.js — Node resize & widget remount fixes for preset folding
-
-**Problem:** On "Radiance Video Loader", switching presets correctly hid/showed
-widgets but the node box did not shrink/grow to match (leftover empty space or
-clipped widgets). Additionally, after a page reload, or after toggling
-`Custom -> <preset> -> Custom -> <preset>`, all widgets would incorrectly
-re-appear as if the preset were "Custom".
-
-**Root causes & fixes (`radiance_loader.js`):**
-- **Node box not resizing**: `refreshNodeSize` mutated `node.size[i]` directly.
-  This updates LiteGraph's internal model but Vue's resize handling never
-  observes it — the rendered box keeps its old size indefinitely.
-  `node.computeSize()` is already correct synchronously after a widget
-  visibility change (no DOM-timing issue). Fix: `refreshNodeSize` now calls
-  `node.setSize([Math.max(node.size[0], sz[0]), sz[1]])`, the API Vue's resize
-  handling actually reacts to.
-- **Stale widgets after reload / repeated preset toggling**: `_forceWidgetReinsert`
-  (remove+reinsert via `splice`) was only called when a widget transitioned
-  hidden→visible. Empirically, once a widget's Vue component has been
-  (re)mounted, it stops reacting to *any* later `type`/`hidden` mutation via a
-  no-op `splice(0,0)` — it keeps rendering its previous state until reinserted
-  again. Fix: `setWidgetVisible` now calls `_forceWidgetReinsert(widget, node)`
-  unconditionally, in both directions (visible→hidden and hidden→visible), on
-  every call.
-
-**Generalization:** the same two fixes (`setSize` in `refreshNodeSize`,
-unconditional bidirectional `_forceWidgetReinsert` in `setWidgetVisible`) were
-ported to every other JS file with conditionally shown/hidden widgets and a
-node size that can change:
-- `radiance_sampler.js`: `_forceWidgetReinsert` already existed but was called
-  conditionally; now called unconditionally for both directions.
-- `radiance_resolution.js`: `_forceWidgetReinsert` helper added (didn't exist
-  before); outdated header comment claiming in-place `node.size[i]` mutation
-  was "required for Vue reactivity" removed/corrected (v2.4 → v2.5).
-- `radiance_upscale.js`: `_forceWidgetReinsert` helper added.
-
-All four nodes confirmed working (no resize gap, correct folding across
-reload and repeated preset switches) by Albabit.
-
-**Note (not fixed, tracked for later):** `radiance_upscale.js`'s
-`beforeRegisterNodeDef` targets `nodeData.name === "RadianceAIUpscale"`, a node
-type that no longer exists (current upscale nodes are `RadianceUpscaleTiler`,
-`RadianceUpscaleImage`, `RadianceUpscaleVideo`, `RadianceUpscaleFaceRestore`) —
-this file's widget-folding logic is currently dead code. Also,
-`radiance_resolution.js`'s `preset` widget does not drive any widget
-visibility (only `enable_video` and `mp_target` do) — switching resolution
-presets does not fold/unfold any widgets, which is the existing behavior, not
-a regression.
-
-## nodes/generate/resolution.py, js/radiance_resolution.js — model_type-driven presets & alignment
-
-**Problem:** Model-specific behavior (pixel alignment, video-latent
-detection, WAN's 4k+1 frame rule, frame-count stride, `latent_format`) was
-keyed off the **preset category** (`VIDEO_PRESET_CATEGORIES`,
-`WAN_FRAME_CATEGORIES`, `ALIGN32_CATEGORIES`, `VIDEO_LATENT_FORMAT_MAP`), and
-`PRESETS` contained ~51 model-specific entries (Flux/SDXL/SD1.5/WAN/LTX/
-Hunyuan/CogVideoX). This coupled the preset list to model behavior and
-duplicated logic between image and video paths. Additionally, `_align8`
-rounded to the *nearest* multiple of 8, which could round a requested
-resolution **down** — making the exact target resolution unreachable.
-
-**Fix — inversion:**
-- `PRESETS` is now a plain list of Cinema (12) + Social (4) resolutions,
-  model-agnostic. All model-specific preset categories were removed.
-- `model_type` is now the single source of truth for: pixel alignment (via
-  `SPATIAL_SCALE`, always rounded **up** via the new `_align_up(val, scale)`
-  helper — `_align8`/`_align32` are now thin wrappers around it), 5D
-  video-latent detection (`VIDEO_MODEL_TYPES`), WAN's 4k+1 frame validation
-  (`"wan" in model_type.lower()`), the "Auto (Seconds)" frame stride (8 for
-  LTX, 4 otherwise), and `latent_format` (single `LATENT_FORMAT_MAP` lookup,
-  used for both image and video latents — `VIDEO_LATENT_FORMAT_MAP` removed).
-- Default `preset` changed from the removed `"Flux Square (1024×1024)"` to
-  `"HD 1080p (1920×1080)"`.
-- `generate()` now returns `computed_width`/`computed_height` in its `ui`
-  payload; `radiance_resolution.js` adds an `onExecuted` hook that writes
-  these final, model_type-aligned values back into the `width`/`height`
-  widgets after each run (the preset callback still sets a raw baseline
-  immediately for visual feedback).
-- `radiance_resolution.js`: removed the preset → `enable_video`/`model_type`
-  auto-detection (matched preset names against "WAN"/"LTX"/"Hunyuan"/
-  "CogVideoX"/"Flux"/"SDXL" substrings) — no longer meaningful now that
-  presets are model-agnostic.
-
-**Deferred (not addressed here):**
-- WAN previously got a 16px alignment heuristic via `WAN_FRAME_CATEGORIES`;
-  it now falls back to the 8px default (no `SPATIAL_SCALE` entry for WAN).
-  Revisit if WAN actually requires 16px alignment.
-- `Cosmos (16ch)`, `CogVideoX (16ch)`, `Mochi (12ch)` are excluded from
-  `VIDEO_MODEL_TYPES` — no preset ever exercised a 5D latent for these, so
-  `TEMPORAL_SCALE`/5D-shape correctness for them is unverified.
-- Flux.1 vs Flux.2 (and other version-specific) alignment distinctions are
-  not further differentiated beyond the existing `SPATIAL_SCALE`/
-  `LATENT_CHANNELS` entries.
-
-### Follow-up — model_type-driven `enable_video` auto-toggle + TEMPORAL_SCALE audit
-
-**Problem:** This refactor removed the old preset-name-based
-auto-toggle of `enable_video`/`model_type` but didn't add a model_type-based
-equivalent, so selecting a video `model_type` (LTXV/WAN/HunyuanVideo) no
-longer auto-enabled video mode.
-
-**Fix:** Added `VIDEO_MODEL_TYPES_JS` (mirrors `VIDEO_MODEL_TYPES` in
-`resolution.py`) to `radiance_resolution.js` and wired `model_type`'s
-callback to toggle `enable_video` on/off accordingly.
-
-**Validated by Albabit** (real WAN run, preset HD 1080p, 10s/24fps):
-`Video latent 5D: (1, 16, 61, 135, 240)` and
-`1920×1080 (16:9) 2.07MP │ Latent: 240×135×16ch (WAN) │ Video: 241f @ 24.0fps`
-— `(241-1)//4+1=61` ✓, `1920/8=240` ✓, `1080/8=135` ✓.
-
-**`TEMPORAL_SCALE` audit against ComfyUI core** (`comfy_extras/nodes_lt.py`,
-`nodes_wan.py`, `nodes_hunyuan.py`, `nodes_cosmos.py`, `nodes_mochi.py`,
-`comfy/ldm/cogvideo/vae.py`):
-- LTXV (8), WAN (4), HunyuanVideo (4), CogVideoX (4, default
-  `AutoencoderKLCogVideoX.temporal_compression_ratio`) — all match our
-  `TEMPORAL_SCALE`/`_frameStride`. No changes needed for the 4 model_types
-  currently in `VIDEO_MODEL_TYPES`.
-- Mochi requires stride **6** (`nodes_mochi.py`: `(length-1)//6+1`) — our
-  default of 4 would be wrong if Mochi is ever added to `VIDEO_MODEL_TYPES`.
-- Cosmos (`nodes_cosmos.py`) has **two different** temporal strides (8 and 4)
-  depending on variant — needs clarification before enabling 5D latents for
-  Cosmos.
-
-### Follow-up — instant width/height alignment preview on model_type change
-
-**Problem:** Changing `model_type` only updated the aligned `width`/`height`
-shown in the UI after running generation (via the `onExecuted` sync added by
-the refactor above). Selecting e.g. `LTXV (128ch)` after a `HD 1080p (1920×1080)` preset
-still showed `1920x1080` until the next run.
-
-**Fix (`radiance_resolution.js`):**
-- Added `SPATIAL_SCALE_JS` (mirrors `SPATIAL_SCALE` in `resolution.py`: LTXV=32,
-  Flux.2/Flux.2 Klein=16, default=8) and `_alignUp`/`_applyAlignment` helpers.
-- The node now tracks an unaligned "base" resolution (`node._resBaseW/_resBaseH`),
-  set from the selected preset, restored from a saved workflow (`onConfigure`),
-  or updated live when the user edits `width`/`height` directly (Custom mode).
-- `model_type`'s callback re-aligns `width`/`height` from this base instantly —
-  e.g. `1920x1080` -> `1920x1088` for LTXV, then back to `1920x1080` for
-  `Flux / SD3 (16ch)` (`_align_up` only rounds up, so re-aligning from the
-  already-aligned value couldn't recover the smaller alignment — hence the
-  separate base tracking).
-- `preset`'s callback also re-aligns immediately after setting the raw preset
-  values, so switching presets after picking a video `model_type` doesn't
-  briefly show un-aligned values.
-
-**Validated by Albabit**: `HD 1080p` -> `LTXV (128ch)` shows `1920x1088`
-instantly; switching to `Flux / SD3 (16ch)` correctly returns to `1920x1080`.
-`1280x720` (HD 720p) with `Flux.2 / Flux.2 Klein (128ch)` stays `1280x720`
-(already a multiple of 16).
-
-### Follow-up — model_type-driven step size, auto-Custom preset, and video_frames N*stride+1 snapping
-
-**`width`/`height` +/- step now matches the current `model_type`'s alignment**
-(32 for LTXV, 16 for Flux.2, 8 default) via `_setWidgetStep`/`_syncStepsToModelType`,
-so +/- always lands on a valid value (e.g. LTXV: 1088 -> 1056 -> 1024, never 1080).
-
-**Default `preset` changed from `"HD 1080p (1920×1080)"` to `"Custom"`**
-(`resolution.py`), matching the default `width`/`height` (1024x1024) so a freshly
-added node doesn't show a preset name inconsistent with its displayed resolution.
-
-**Auto-switch `preset` <-> `"Custom"`:** editing `width`/`height` away from the
-currently-selected preset's aligned resolution switches `preset` to `"Custom"`
-(`_flagCustomIfNotPreset`); editing back to that exact aligned resolution switches
-`preset` back to its original name (`_restorePresetIfMatching`). Tracked via
-`node._presetRawW/H` (preset's pre-alignment resolution) and `node._lastPresetName`.
-
-**`video_frames` now instantly snaps to a valid `N*stride+1` value** for all
-`VIDEO_MODEL_TYPES` (4k+1 for WAN/HunyuanVideo, 8k+1 for LTXV) — both when typing a
-value directly and when switching `model_type` to a video model. Generalizes the
-existing WAN-only `4k+1` Python warning (`_alignNk1`, using `_frameStride` for the
-per-model stride).
-
-**Validated by Albabit**: HD 1080p + LTXV, `-` on height -> 1056 (preset switches to
-"Custom"), `+` back to 1088 -> preset returns to "HD 1080p". Typing `100` into
-`video_frames` with LTXV -> snaps to `97` (8k+1); with WAN -> snaps to `101` (4k+1).
-
-## Follow-up — added `Chroma (16ch)` model type
-
-Audited against ComfyUI core (`comfy/sd.py` CLIPType.CHROMA, `comfy/latent_formats.py`
-Flux) and this repo's `sampler_utils.py` (already maps `"Chroma"`/"ChromaRadiance" ->
-`"chroma"` -> flux sampling defaults). Standard Chroma uses the same 16ch / 8px-aligned
-Flux latent shape, so it's a low-risk addition:
-
-- `MODEL_TYPES`: added `"Chroma (16ch)"`.
-- `LATENT_CHANNELS["Chroma (16ch)"] = 16`.
-- `LATENT_FORMAT_MAP["Chroma (16ch)"] = "chroma"`.
-- No `SPATIAL_SCALE` entry needed (8px default is correct, same as Flux/SD3).
-- Not a video model — no `VIDEO_MODEL_TYPES`/`TEMPORAL_SCALE` change.
-
-**Deferred**: `ChromaRadiance` (pixel-space variant, 3ch, no VAE) is a fundamentally
-different case and is NOT covered by this addition.
-
-**Also audited, not added**: `StepVideo` — ComfyUI core in this checkout has no
-`latent_formats` class, no `CLIPType`, and no `supported_models` entry for it. The
-`sampler_utils.py` "stepvideo" references appear to be forward-looking stubs with no
-working load path yet. Adding it to `resolution.py` now would let users select a
-model_type the loader can't actually run — deferred until core ComfyUI ships support.
-
-## Follow-up — merged equivalent model_types, added Mochi to VIDEO_MODEL_TYPES
-
-**Merged model_types with no distinguishing entries** (audited: identical
-`LATENT_CHANNELS`, default `SPATIAL_SCALE`/`TEMPORAL_SCALE` for both, neither in
-`VIDEO_MODEL_TYPES`, and neither string referenced anywhere outside
-`resolution.py` — `model_type` is an input only, never an output of this node, so
-renaming these entries cannot break downstream nodes):
-- `"Flux / SD3 (16ch)"` + `"Lumina2 / Z-Image (16ch)"` -> `"Flux / SD3 / Lumina2 /
-  Z-Image (16ch)"` (16ch, 8px, `latent_format="flux"`).
-- `"SDXL / SD 1.5 (4ch)"` + `"PixArt / Aura Flow / Kolors (4ch)"` -> `"SDXL / SD 1.5
-  / PixArt / Aura Flow / Kolors (4ch)"` (4ch, 8px, `latent_format="sdxl"`).
-- `"Chroma (16ch)"` was NOT merged into the Flux group despite identical
-  dimensions — its `latent_format="chroma"` differs and feeds a different sampler
-  default in `sampler_utils.py`.
-
-**Added `Mochi (12ch)` to `VIDEO_MODEL_TYPES`** (5D latent) with its own
-`TEMPORAL_SCALE["Mochi (12ch)"] = 6` (matches `nodes_mochi.py`:
-`(length-1)//6+1`), resolving the "would be WRONG with default stride 4" caveat
-from the previous audit:
-- `js/radiance_resolution.js`: `VIDEO_MODEL_TYPES_JS` and `_frameStride` now
-  include Mochi (stride 6) — `video_frames` instantly snaps to `6k+1` (1, 7, 13,
-  19...) for Mochi, same as the WAN/LTXV/HunyuanVideo snapping.
-- `resolution.py`: generalized the "Auto (Seconds)" frame-count stride (was
-  hardcoded `8 if ltx else 4`) and the WAN-only `4k+1` validation warning to use
-  `TEMPORAL_SCALE.get(model_type, 4)` and `model_type in VIDEO_MODEL_TYPES` for
-  ALL video models, not just WAN/LTXV.
-
-**Cosmos clarification (re: "why Cosmos at all?")**: ComfyUI's Cosmos support
-(`nodes_cosmos.py`) targets NVIDIA's Cosmos *video generation* world-foundation
-models (text/image-to-video), which Radiance's loader/sampler already expose as a
-`model_type` — not the separate robotics/embodied-AI "Cosmos Reason"/policy
-models. The deferred item is purely about which Cosmos *video* variant (1.0
-"World" @ stride 8, vs Predict2 @ stride 4) `"Cosmos (16ch)"` should map to before
-enabling 5D latents — not about whether Cosmos belongs in this node at all.
-
-## Follow-up — added Cosmos (16ch) and CogVideoX (16ch) to VIDEO_MODEL_TYPES
-
-**Cosmos**: confirmed by Albabit — the relevant ComfyUI checkpoints are Cosmos 1.0
-"World" text/image-to-video models (e.g.
-`Cosmos-1_0-Diffusion-7B-Text2World.safetensors`), which use a ×8 temporal
-compression (`nodes_cosmos.py`), same as LTXV:
-- `VIDEO_MODEL_TYPES`: added `"Cosmos (16ch)"`.
-- `TEMPORAL_SCALE["Cosmos (16ch)"] = 8`.
-- `js/radiance_resolution.js`: `VIDEO_MODEL_TYPES_JS` and `_frameStride` now
-  include Cosmos (stride 8, same bucket as LTXV) — `video_frames` instantly snaps
-  to `8k+1` (1, 9, 17...) for Cosmos.
-
-**Deferred**: Cosmos Predict2 (×4 temporal stride) is NOT covered by the
-`"Cosmos (16ch)"` entry — revisit if Predict2 support is needed.
-
-**CogVideoX**: CogVideoX is itself a text-to-video model — its previous exclusion
-from `VIDEO_MODEL_TYPES` meant `is_video_latent` stayed `False` and the latent was
-never computed as 5D, even with `enable_video=true`. Its stride (4,
-`AutoencoderKLCogVideoX.temporal_compression_ratio` default) was already verified
-correct in the previous follow-up — nothing was technically missing, it just
-hadn't been added/validated yet. Now enabled:
-- `VIDEO_MODEL_TYPES`: added `"CogVideoX (16ch)"`.
-- `TEMPORAL_SCALE["CogVideoX (16ch)"]` was already `4` (unchanged).
-- `js/radiance_resolution.js`: `VIDEO_MODEL_TYPES_JS` now includes CogVideoX;
-  `_frameStride` already returned `4` for it via the default branch (unchanged) —
-  `video_frames` instantly snaps to `4k+1` (1, 5, 9, 13...) for CogVideoX.
-
-The generalized "Auto (Seconds)" stride and frame-count validation warning (from
-the earlier follow-up) automatically pick up both new `TEMPORAL_SCALE`/
-`VIDEO_MODEL_TYPES` entries — no separate code path needed for either model.
-
-`VIDEO_MODEL_TYPES` now covers all 6 models with verified `TEMPORAL_SCALE`
-entries: WAN/HunyuanVideo/CogVideoX (4), Mochi (6), LTXV/Cosmos (8).
-
-## Follow-up — renamed `"Cosmos (16ch)"` -> `"Cosmos World (16ch)"`
-
-Per Albabit: since Cosmos Predict2 (stride 4) is explicitly NOT covered by this
-entry, the name now states the supported variant (Cosmos 1.0 "World"
-text/image-to-video) to avoid implying Predict2 support. Renamed across
-`MODEL_TYPES`, `LATENT_CHANNELS`, `LATENT_FORMAT_MAP`, `SPATIAL_SCALE`/
-`TEMPORAL_SCALE`, `VIDEO_MODEL_TYPES` (Python) and `VIDEO_MODEL_TYPES_JS`
-(`radiance_resolution.js`). Safe rename — `model_type` is an input-only field on
-this node (never an output), so no downstream node references this string.
-
-## Follow-up — replaced "Auto (Flux 16ch)" with "Manual" (new default)
-
-Per Albabit: `RadianceResolution` has no `model` input, so "Auto" detection was
-never real — it was just an alias for the Flux/SD3/16ch settings. Renamed to
-"Manual" and repurposed as a genuinely unconstrained mode for experimental/unlisted
-models, leaning on the SPATIAL_SCALE/TEMPORAL_SCALE generalization from the
-previous follow-ups:
-
-- `SPATIAL_SCALE["Manual"] = 1` -> `_align_up`/`_alignUp` are no-ops, +/- step = 1.
-  width/height are fully free, no rounding.
-- `TEMPORAL_SCALE["Manual"] = 1` -> `_alignNk1`/the frame-count validation warning
-  treat every `video_frames` value as valid (stride=1 -> `(n-1)%1==0` always true).
-- `LATENT_CHANNELS["Manual"] = 16` and `LATENT_FORMAT_MAP["Manual"] = "flux"` remain
-  sensible fallbacks, but the user is expected to use the `latent_channels` input
-  to set the correct channel count for unlisted/experimental models.
-- **NOT** added to `VIDEO_MODEL_TYPES`/`VIDEO_MODEL_TYPES_JS` — selecting "Manual"
-  does NOT auto-toggle `enable_video` (it's the default, used mainly for images).
-  However, `is_video_latent` was changed to
-  `enable_video and (model_type in VIDEO_MODEL_TYPES or model_type == "Manual")`,
-  so if the user manually enables video with "Manual" selected, a 5D latent is
-  still computed (with no temporal compression assumed, since stride=1).
-- `MODEL_TYPES` default changed from `"Auto (Flux 16ch)"` to `"Manual"`.
-- Tooltip updated to explain the new "Manual" behavior and the `latent_channels`
-  override.
-
-1382 tests pass (unchanged).
+Tests: 1382 pass (41 unrelated gsplat/splatting tests excluded — CUDA DLL not
+available in this environment).
