@@ -911,7 +911,57 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
                     model_options["dtype"] = dtype_map[weight_dtype]
 
             try:
-                if extract_vae:
+                if extract_audio_vae:
+                    # ALBABIT-FIX: read the UNET state dict once and reuse it
+                    # for both the audio VAE extraction and the model/baked-VAE
+                    # load below (load_state_dict_guess_config /
+                    # load_diffusion_model_state_dict), instead of reading the
+                    # (often multi-GB) UNET file from disk twice.
+                    t_av0 = time.time()
+                    sd, metadata = comfy.utils.load_torch_file(unet_path, return_metadata=True)
+                    # AudioVAE no longer takes sd directly (ComfyUI 0.22.0+) —
+                    # use state_dict_prefix_replace + comfy.sd.VAE, mirroring
+                    # the built-in LTXVAudioVAELoader. filter_keys=True pops
+                    # the audio_vae./vocoder. keys out of sd, which is correct
+                    # since they aren't part of the main UNET state dict anyway.
+                    sd_audio = comfy.utils.state_dict_prefix_replace(
+                        sd, {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."}, filter_keys=True
+                    )
+                    audio_vae = comfy.sd.VAE(sd=sd_audio, metadata=metadata)
+                    av_time = time.time() - t_av0
+                    logger.info("Audio VAE extracted natively from UNET")
+                    info_lines.append(f"AUDIO VAE: Baked from UNET ({av_time:.1f}s)")
+                    if caching:
+                        _audio_vae_cache.put(baked_audio_vae_key, audio_vae)
+
+                    if extract_vae:
+                        out = comfy.sd.load_state_dict_guess_config(
+                            sd, output_vae=True, output_clip=False,
+                            output_clipvision=False, model_options=model_options,
+                            metadata=metadata,
+                        )
+                        model = out[0]
+                        model.cached_patcher_init = (
+                            comfy.sd.load_checkpoint_guess_config,
+                            (unet_path, False, False, False, None, True, model_options, {}),
+                            0,
+                        )
+                        t_vae0 = time.time()
+                        vae = out[2]
+                        if getattr(vae, "patcher", None) is not None:
+                            vae.patcher.cached_patcher_init = (
+                                comfy.sd.load_checkpoint_vae_patcher,
+                                (unet_path, None, model_options, {}),
+                            )
+                        vae_time = time.time() - t_vae0
+                        logger.info("VAE extracted natively from UNET")
+                        info_lines.append(f"VAE: Baked from UNET ({vae_time:.1f}s)")
+                        if caching:
+                            _vae_cache.put(baked_vae_key, vae)
+                    else:
+                        model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata)
+                        model.cached_patcher_init = (comfy.sd.load_diffusion_model, (unet_path, model_options))
+                elif extract_vae:
                     # ALBABIT-FIX: load_checkpoint_guess_config to extract the
                     # baked VAE natively from the checkpoint.
                     out = comfy.sd.load_checkpoint_guess_config(
@@ -928,22 +978,6 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
                         _vae_cache.put(baked_vae_key, vae)
                 else:
                     model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
-
-                if extract_audio_vae:
-                    # ALBABIT-FIX: AudioVAE no longer takes sd directly (ComfyUI
-                    # 0.22.0+) — use state_dict_prefix_replace + comfy.sd.VAE,
-                    # mirroring the built-in LTXVAudioVAELoader.
-                    t_av0 = time.time()
-                    sd, metadata = comfy.utils.load_torch_file(unet_path, return_metadata=True)
-                    sd_audio = comfy.utils.state_dict_prefix_replace(
-                        sd, {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."}, filter_keys=True
-                    )
-                    audio_vae = comfy.sd.VAE(sd=sd_audio, metadata=metadata)
-                    av_time = time.time() - t_av0
-                    logger.info("Audio VAE extracted natively from UNET")
-                    info_lines.append(f"AUDIO VAE: Baked from UNET ({av_time:.1f}s)")
-                    if caching:
-                        _audio_vae_cache.put(baked_audio_vae_key, audio_vae)
 
                 unet_time = time.time() - t0
                 logger.info(f"UNET loaded {divider} {unet_name} [{weight_dtype}] {divider} {unet_time:.1f}s")

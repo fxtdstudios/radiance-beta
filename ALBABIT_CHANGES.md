@@ -142,12 +142,25 @@ widgets when switching back to "Custom".
   UNET)"`. "LTX Video 2.3" still prioritizes the standalone
   `ltx-2.3_text_projection_bf16.safetensors`; "LTX Video 2.3 (Low VRAM)"
   defaults to "Baked (from UNET)".
+- **"LTX Video 2.3" — no `text_projection` fallback**: this preset only
+  listed the standalone `ltx-2.3_text_projection_bf16.safetensors` hints; if
+  that file is absent, auto-fill left `text_projection` empty. Added
+  `"Baked (from UNET)"` as a last-resort hint, mirroring the Low VRAM preset.
 - **"LTX Video 2.3 (Low VRAM)" — Audio VAE not extracted**
   (`AssertionError: Audio VAE model is required` from `nodes_lt_audio.py`):
   the JS preset config had no `audio_vae_hints`, so `audio_vae_name` defaulted
   to `"None"` and `extract_audio_vae` stayed `False`. Added
   `"audio_vae_hints": ["Baked Audio VAE (from UNET)"]` (mirrors the
   `text_projection` pattern; widget stays hidden but is correctly filled).
+- **Double UNET file read for audio VAE extraction**: when
+  `extract_audio_vae=True`, the (often multi-GB) UNET file was read twice —
+  once via `load_diffusion_model`/`load_checkpoint_guess_config`, once more
+  via `comfy.utils.load_torch_file` for the audio VAE state dict.
+  `RadianceVideoLoader.load_radiance_stack` now reads the state dict once and
+  reuses it for both `load_diffusion_model_state_dict`/
+  `load_state_dict_guess_config` (model + optional baked VAE) and the audio
+  VAE extraction; `cached_patcher_init` is set manually on the resulting
+  model/VAE patchers to preserve multi-GPU dynamic-delegate reload support.
 
 ### Preset hint/auto-fill corrections (real-world filenames, June 2026)
 
