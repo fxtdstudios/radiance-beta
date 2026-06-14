@@ -25,27 +25,28 @@ from .loader_utils import (
     CHECKPOINT_PRESETS,
     VIDEO_PRESET_NAMES,
     VIDEO_MODEL_TYPES,
-    CLIP_SLOT_ORDER,
     LATENT_CHANNELS,
-    detect_model_type as _detect_model_type,
-    latent_format as _latent_format,
     file_fingerprint as _file_fingerprint,
-    assemble_clip_paths as _assemble_clip_paths,
     ensure_model_exists as _ensure_model_exists,
-    estimate_vram_usage,
-    get_available_vram,
-    get_total_vram,
-    get_clip_type_enum,
+    resolve_divider,
+    apply_checkpoint_preset,
+    resolve_architecture,
+    setup_offload_mode,
+    estimate_vram_for_load,
+    load_unet_and_baked_vae,
+    load_clip_stack,
+    load_standalone_vae,
+    apply_lora_stack,
     _unet_cache,
     _clip_cache,
     _vae_cache,
+    _audio_vae_cache,
 )
 from radiance.model.cache import LRUCache
 
-# ALBABIT-FIX: dedicated caches for RadianceVideoLoader's audio VAE / latent
-# upscale model extras (LTX 2.3). Kept separate from the core unet/clip/vae
-# caches so they don't compete for eviction with the main pipeline models.
-_audio_vae_cache = LRUCache()
+# ALBABIT-FIX: dedicated cache for RadianceVideoLoader's latent upscale model
+# extra (LTX 2.3 / HunyuanVideo SR). Kept separate from the core unet/clip/vae
+# caches so it doesn't compete for eviction with the main pipeline models.
 _upscale_model_cache = LRUCache()
 
 logger = logging.getLogger("radiance.loader")
@@ -272,13 +273,6 @@ class RadianceUnifiedLoader:
         # ALBABIT-FIX: base loader does not need VAE metadata.
         return comfy.utils.load_torch_file(vae_path), None
 
-    @staticmethod
-    def _apply_preset_override(cfg, field, key, cur, overrides):
-        new = cfg.get(key, cur)
-        if new != cur:
-            overrides.append(f"{field}: {cur}→{new}")
-        return new
-
     def load_radiance_stack(
         self,
         preset,
@@ -311,25 +305,13 @@ class RadianceUnifiedLoader:
         load_start  = time.time()
         info_lines  = []
         caching     = use_cache == "On"
-        overrides   = []
 
         # ════════════════════════════════════════════════════════════════
         # 0. APPLY PRESET
         # ════════════════════════════════════════════════════════════════
-        if preset not in ("Custom",) and preset in CHECKPOINT_PRESETS:
-            cfg = CHECKPOINT_PRESETS[preset]
-
-            model_type   = self._apply_preset_override(cfg, "model_type",   "model_type",   model_type,   overrides)
-            weight_dtype = self._apply_preset_override(cfg, "weight_dtype",  "weight_dtype", weight_dtype, overrides)
-            clip_dtype   = self._apply_preset_override(cfg, "clip_dtype",    "clip_dtype",   clip_dtype,   overrides)
-            # ALBABIT-FIX: offload_mode is NOT preset-overridden — it's exposed
-            # as a visible widget for "Low VRAM" presets (JS sets its default
-            # to match the preset, but the user can change it, e.g. on a
-            # higher-VRAM GPU where cpu_offload is unnecessarily slow).
-
-            msg = f"Preset '{preset}'" + (f" (overrode: {', '.join(overrides)})" if overrides else " (no overrides)")
-            logger.info(msg)
-            info_lines.append(msg)
+        model_type, weight_dtype, clip_dtype, overrides = apply_checkpoint_preset(
+            preset, model_type, weight_dtype, clip_dtype, info_lines
+        )
 
         # ════════════════════════════════════════════════════════════════
         # 1. RESOLVE ARCHITECTURE
@@ -340,248 +322,58 @@ class RadianceUnifiedLoader:
                 f"❌ UNET not found: '{unet_name}'. Enable auto_download or install it manually."
             )
 
-        from radiance.core.logging import supports_unicode
-        divider = "│" if supports_unicode() else "|"
+        divider = resolve_divider()
 
-        detected_type = None
-        if model_type == "Auto-Detect":
-            detected_type = _detect_model_type(unet_path)
-            if detected_type:
-                resolved_type = detected_type
-                info_lines.append(f"Auto-detected: {resolved_type}")
-            else:
-                resolved_type = "sdxl"   # safe fallback
-                logger.warning(
-                    "Architecture auto-detect failed. Falling back to 'sdxl'. "
-                    "Set model_type manually if this is wrong."
-                )
-                info_lines.append("Auto-detect failed — fallback: sdxl")
-        else:
-            resolved_type = model_type
-
-        latent_fmt  = _latent_format(resolved_type)
-        lat_msg     = f"Latent format: {latent_fmt} ({resolved_type})"
-        logger.info(lat_msg)
-        info_lines.append(lat_msg)
+        resolved_type, detected_type, latent_fmt = resolve_architecture(
+            unet_path, model_type, info_lines
+        )
 
         # ════════════════════════════════════════════════════════════════
         # 2. OFFLOAD MODE
         # ════════════════════════════════════════════════════════════════
-        if offload_mode == "sequential":
-            try:
-                comfy.model_management.set_lowvram_mode(True)
-                logger.info("Sequential CPU offload enabled")
-                info_lines.append("Offload: sequential")
-            except Exception as e:
-                logger.warning(f"Could not enable sequential offload: {e}")
-
-        # FIX 6: ComfyUI model_options["load_device"] expects torch.device, not str.
-        clip_load_device = torch.device("cpu") if offload_mode == "cpu_offload" else None
+        clip_load_device = setup_offload_mode(offload_mode, info_lines)
 
         # ════════════════════════════════════════════════════════════════
         # 3. VRAM ESTIMATION
         # ════════════════════════════════════════════════════════════════
         has_loras = bool(lora_stack)
-
-        if check_vram == "On":
-            est   = estimate_vram_usage(resolved_type, weight_dtype, clip_dtype,
-                                        has_loras, False)
-            avail = get_available_vram()
-            total = get_total_vram()
-            vram_msg = f"VRAM: ~{est} GB needed {divider} {avail:.2f} GB free / {total:.2f} GB total"
-            logger.info(vram_msg)
-            info_lines.append(vram_msg)
-            if avail > 0 and est > avail * 0.9:
-                warn = f"VRAM tight! {est} GB estimated, {avail:.2f} GB free. Consider fp8 dtype or cpu_offload."
-                logger.warning(warn)
-                info_lines.append(warn)
-        else:
-            est = estimate_vram_usage(resolved_type, weight_dtype, clip_dtype,
-                                      has_loras, False)
+        est, avail, total = estimate_vram_for_load(
+            resolved_type, weight_dtype, clip_dtype, has_loras, check_vram, divider, info_lines
+        )
 
         # ════════════════════════════════════════════════════════════════
         # 4. LOAD UNET  (mtime + size cache key)
         # ════════════════════════════════════════════════════════════════
-        t0 = time.time()
-        unet_fp   = _file_fingerprint(unet_path)
-        # ALBABIT-FIX: include offload_mode — "sequential" patches the model
-        # for lowvram at load time (set_lowvram_mode), so a cached UNET
-        # loaded under a different offload_mode would silently keep its
-        # stale patching.
-        unet_key  = f"unet:{unet_path}:{weight_dtype}:{offload_mode}:{unet_fp}"
-
-        unet_time = 0.0
-        unet_cache_hit = caching and _unet_cache.has(unet_key)
-        if unet_cache_hit:
-            model = _unet_cache.get(unet_key)
-            logger.info(f"UNET loaded from cache: {unet_name}")
-            info_lines.append(f"UNET: {unet_name} (cached)")
-        else:
-            model_options = {}
-            is_gguf = unet_name.lower().endswith(".gguf")
-            if is_gguf:
-                logger.info(f"GGUF detected: {unet_name} (embedded quant)")
-            else:
-                dtype_map = {
-                    "fp8_e4m3fn": torch.float8_e4m3fn,
-                    "fp8_e5m2":   torch.float8_e5m2,
-                    "fp16":       torch.float16,
-                    "bf16":       torch.bfloat16,
-                    "fp32":       torch.float32,
-                }
-                if weight_dtype in dtype_map:
-                    model_options["dtype"] = dtype_map[weight_dtype]
-
-            try:
-                model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
-                unet_time = time.time() - t0
-                logger.info(f"UNET loaded {divider} {unet_name} [{weight_dtype}] {divider} {unet_time:.1f}s")
-                info_lines.append(f"UNET: {unet_name} [{weight_dtype}] ({unet_time:.1f}s)")
-                if caching:
-                    _unet_cache.put(unet_key, model)
-            except Exception as e:
-                raise RuntimeError(f"❌ Failed to load UNET '{unet_name}': {e}")
+        # The base loader never extracts a baked VAE/Audio VAE (vae_name is
+        # never "Baked VAE (from UNET)" and there's no audio_vae_name slot),
+        # so the baked-VAE outputs below are always None/0.0/False.
+        model, _vae, _audio_vae, unet_time, unet_cache_hit, _vae_time, _vae_cache_hit = load_unet_and_baked_vae(
+            unet_path, unet_name, weight_dtype, offload_mode, vae_name, "None",
+            caching, divider, info_lines
+        )
 
         # ════════════════════════════════════════════════════════════════
         # 5. LOAD CLIP  (named slots → ordered paths → mtime cache key)
         # ════════════════════════════════════════════════════════════════
-        t0 = time.time()
-        
-        # Ensure all selected CLIPs exist/downloaded
-        for slot, val in [("clip_l", clip_l), ("clip_g", clip_g),
-                          ("t5xxl", t5xxl), ("llm_encoder", llm_encoder),
-                          ("text_projection", text_projection)]:
-             if val != "Baked (from UNET)":
-                 _ensure_model_exists(val, "text_encoders", auto_download)
-
-        clip_paths = _assemble_clip_paths(resolved_type, unet_path=unet_path, clip_l=clip_l, clip_g=clip_g, t5xxl=t5xxl, llm_encoder=llm_encoder, text_projection=text_projection)
-
-        if not clip_paths:
-            raise ValueError(
-                f"❌ No CLIP encoders provided for architecture '{resolved_type}'. "
-                f"Fill the required slot(s): "
-                f"{', '.join(CLIP_SLOT_ORDER.get(resolved_type, ['clip_l']))}"
-            )
-
-        clip_fps     = ":".join(_file_fingerprint(p) for p in clip_paths)
-        # ALBABIT-FIX: include offload_mode — a cached CLIP keeps the
-        # load_device it was first loaded with, so switching offload_mode
-        # without this would silently reuse a CLIP stuck on CPU (or GPU).
-        clip_key     = f"clip:{':'.join(clip_paths)}:{resolved_type}:{clip_dtype}:{offload_mode}:{clip_fps}"
-
-        clip_slot_used = []
-        for slot, val in [("clip_l", clip_l), ("clip_g", clip_g),
-                          ("t5xxl", t5xxl), ("llm_encoder", llm_encoder),
-                          ("text_projection", text_projection)]:
-            if val is not None:
-                clip_slot_used.append(slot)
-
-        clip_time = 0.0
-        clip_cache_hit = caching and _clip_cache.has(clip_key)
-        if clip_cache_hit:
-            clip = _clip_cache.get(clip_key)
-            logger.info(f"CLIP loaded from cache: {' + '.join(clip_slot_used)}")
-            info_lines.append(f"CLIP: {'+'.join(clip_slot_used)} (cached)")
-        else:
-            clip_type_enum = get_clip_type_enum(resolved_type)
-            clip_model_opts = {}
-            if clip_load_device:
-                clip_model_opts["load_device"] = clip_load_device
-            dtype_map = {
-                "fp16": torch.float16, "bf16": torch.bfloat16,
-                "fp8_e4m3fn": torch.float8_e4m3fn, "fp32": torch.float32,
-            }
-            if clip_dtype in dtype_map:
-                clip_model_opts["dtype"] = dtype_map[clip_dtype]
-
-            try:
-                clip = comfy.sd.load_clip(
-                    ckpt_paths=clip_paths,
-                    embedding_directory=folder_paths.get_folder_paths("embeddings"),
-                    clip_type=clip_type_enum,
-                    model_options=clip_model_opts if clip_model_opts else {},
-                )
-                clip_time = time.time() - t0
-                logger.info(
-                    f"CLIP loaded {divider} {' + '.join(clip_slot_used)} "
-                    f"[{clip_dtype}] {divider} {clip_time:.1f}s"
-                )
-                info_lines.append(
-                    f"CLIP: {'+'.join(clip_slot_used)} [{clip_dtype}] ({clip_time:.1f}s)"
-                )
-                if caching:
-                    _clip_cache.put(clip_key, clip)
-            except Exception as e:
-                raise RuntimeError(f"❌ Failed to load CLIP: {e}")
+        clip, clip_slot_used, clip_time, clip_cache_hit = load_clip_stack(
+            resolved_type, unet_path, clip_l, clip_g, t5xxl, llm_encoder, text_projection,
+            clip_dtype, offload_mode, clip_load_device, caching, divider, auto_download, info_lines
+        )
 
         # ════════════════════════════════════════════════════════════════
         # 6. LOAD VAE  (mtime cache key)
         # ════════════════════════════════════════════════════════════════
-        t0 = time.time()
-        vae_path = _ensure_model_exists(vae_name, "vae", auto_download)
-        if not vae_path:
-            raise FileNotFoundError(f"❌ VAE not found: '{vae_name}'. Enable auto_download or install it manually.")
-
-        vae_fp  = _file_fingerprint(vae_path)
-        vae_key = f"vae:{vae_path}:{vae_fp}"
-
-        vae_time = 0.0
-        vae_cache_hit = caching and _vae_cache.has(vae_key)
-        if vae_cache_hit:
-            vae = _vae_cache.get(vae_key)
-            logger.info(f"VAE loaded from cache: {vae_name}")
-            info_lines.append(f"VAE: {vae_name} (cached)")
-        else:
-            try:
-                sd, vae_metadata = self._load_vae_sd_metadata(vae_path)
-                vae = comfy.sd.VAE(sd=sd, metadata=vae_metadata)
-                vae_time = time.time() - t0
-                logger.info(f"VAE loaded {divider} {vae_name} {divider} {vae_time:.1f}s")
-                info_lines.append(f"VAE: {vae_name} ({vae_time:.1f}s)")
-                if caching:
-                    _vae_cache.put(vae_key, vae)
-            except Exception as e:
-                raise RuntimeError(f"❌ Failed to load VAE '{vae_name}': {e}")
+        vae, vae_time, vae_cache_hit = load_standalone_vae(
+            vae_name, auto_download, caching, divider, info_lines, self._load_vae_sd_metadata
+        )
 
         # ════════════════════════════════════════════════════════════════
         # 7. APPLY LoRA STACK
         #    Priority: upstream lora_stack input stack
         # ════════════════════════════════════════════════════════════════
-        combined_loras = list(lora_stack) if lora_stack else []
-
-        applied_loras = []
-        for i, (lora_name, model_str, clip_str) in enumerate(combined_loras, 1):
-            if model_str == 0 and clip_str == 0:
-                continue
-            lora_path = folder_paths.get_full_path("loras", lora_name)
-            if not lora_path:
-                msg = f"LoRA not found: '{lora_name}'"
-                if lora_on_error == "raise":
-                    raise FileNotFoundError(msg)
-                logger.warning(f"{msg} — Skipping.")
-                info_lines.append(f"LoRA {i}: {lora_name} (not found)")
-                continue
-            try:
-                t0 = time.time()
-                lora_data = comfy.utils.load_torch_file(lora_path)
-                model, clip = comfy.sd.load_lora_for_models(
-                    model, clip, lora_data, model_str, clip_str
-                )
-                elapsed = time.time() - t0
-                logger.info(
-                    f"LoRA {i} applied {divider} {lora_name} [model={model_str}, clip={clip_str}] {divider} {elapsed:.1f}s"
-                )
-                info_lines.append(
-                    f"LoRA {i}: {lora_name} [m={model_str} c={clip_str}] ({elapsed:.1f}s)"
-                )
-                applied_loras.append({"name": lora_name, "model_str": model_str,
-                                      "clip_str": clip_str})
-            except Exception as e:
-                msg = f"Failed to apply LoRA '{lora_name}': {e}"
-                if lora_on_error == "raise":
-                    raise RuntimeError(f"❌ {msg}")
-                logger.warning(f"{msg} — Skipping.")
-                info_lines.append(f"LoRA {i}: {lora_name} (failed)")
+        model, clip, applied_loras, out_lora_stack = apply_lora_stack(
+            model, clip, lora_stack, lora_on_error, divider, info_lines
+        )
 
         # ════════════════════════════════════════════════════════════════
         # 8. BUILD OUTPUTS
@@ -635,10 +427,6 @@ class RadianceUnifiedLoader:
             "load_ms":       total_ms,
             "cached_unet":   unet_cache_hit,
         }
-
-        # Output the accumulated lora list
-        out_lora_stack = [(e["name"], e["model_str"], e["clip_str"])
-                          for e in applied_loras] if applied_loras else None
 
         return (
             model,
@@ -764,25 +552,13 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
         load_start  = time.time()
         info_lines  = []
         caching     = use_cache == "On"
-        overrides   = []
 
         # ════════════════════════════════════════════════════════════════
         # 0. APPLY PRESET
         # ════════════════════════════════════════════════════════════════
-        if preset not in ("Custom",) and preset in CHECKPOINT_PRESETS:
-            cfg = CHECKPOINT_PRESETS[preset]
-
-            model_type   = self._apply_preset_override(cfg, "model_type",   "model_type",   model_type,   overrides)
-            weight_dtype = self._apply_preset_override(cfg, "weight_dtype",  "weight_dtype", weight_dtype, overrides)
-            clip_dtype   = self._apply_preset_override(cfg, "clip_dtype",    "clip_dtype",   clip_dtype,   overrides)
-            # ALBABIT-FIX: offload_mode is NOT preset-overridden — it's exposed
-            # as a visible widget for "Low VRAM" presets (JS sets its default
-            # to match the preset, but the user can change it, e.g. on a
-            # higher-VRAM GPU where cpu_offload is unnecessarily slow).
-
-            msg = f"Preset '{preset}'" + (f" (overrode: {', '.join(overrides)})" if overrides else " (no overrides)")
-            logger.info(msg)
-            info_lines.append(msg)
+        model_type, weight_dtype, clip_dtype, overrides = apply_checkpoint_preset(
+            preset, model_type, weight_dtype, clip_dtype, info_lines
+        )
 
         # ════════════════════════════════════════════════════════════════
         # 1. RESOLVE ARCHITECTURE
@@ -793,299 +569,51 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
                 f"❌ UNET not found: '{unet_name}'. Enable auto_download or install it manually."
             )
 
-        from radiance.core.logging import supports_unicode
-        divider = "│" if supports_unicode() else "|"
+        divider = resolve_divider()
 
-        detected_type = None
-        if model_type == "Auto-Detect":
-            detected_type = _detect_model_type(unet_path)
-            if detected_type:
-                resolved_type = detected_type
-                info_lines.append(f"Auto-detected: {resolved_type}")
-            else:
-                resolved_type = "sdxl"   # safe fallback
-                logger.warning(
-                    "Architecture auto-detect failed. Falling back to 'sdxl'. "
-                    "Set model_type manually if this is wrong."
-                )
-                info_lines.append("Auto-detect failed — fallback: sdxl")
-        else:
-            resolved_type = model_type
-
-        latent_fmt  = _latent_format(resolved_type)
-        lat_msg     = f"Latent format: {latent_fmt} ({resolved_type})"
-        logger.info(lat_msg)
-        info_lines.append(lat_msg)
+        resolved_type, detected_type, latent_fmt = resolve_architecture(
+            unet_path, model_type, info_lines
+        )
 
         # ════════════════════════════════════════════════════════════════
         # 2. OFFLOAD MODE
         # ════════════════════════════════════════════════════════════════
-        if offload_mode == "sequential":
-            try:
-                comfy.model_management.set_lowvram_mode(True)
-                logger.info("Sequential CPU offload enabled")
-                info_lines.append("Offload: sequential")
-            except Exception as e:
-                logger.warning(f"Could not enable sequential offload: {e}")
-
-        clip_load_device = torch.device("cpu") if offload_mode == "cpu_offload" else None
+        clip_load_device = setup_offload_mode(offload_mode, info_lines)
 
         # ════════════════════════════════════════════════════════════════
         # 3. VRAM ESTIMATION
         # ════════════════════════════════════════════════════════════════
         has_loras = bool(lora_stack)
-
-        if check_vram == "On":
-            est   = estimate_vram_usage(resolved_type, weight_dtype, clip_dtype,
-                                        has_loras, False)
-            avail = get_available_vram()
-            total = get_total_vram()
-            vram_msg = f"VRAM: ~{est} GB needed {divider} {avail:.2f} GB free / {total:.2f} GB total"
-            logger.info(vram_msg)
-            info_lines.append(vram_msg)
-            if avail > 0 and est > avail * 0.9:
-                warn = f"VRAM tight! {est} GB estimated, {avail:.2f} GB free. Consider fp8 dtype or cpu_offload."
-                logger.warning(warn)
-                info_lines.append(warn)
-        else:
-            est = estimate_vram_usage(resolved_type, weight_dtype, clip_dtype,
-                                      has_loras, False)
+        est, avail, total = estimate_vram_for_load(
+            resolved_type, weight_dtype, clip_dtype, has_loras, check_vram, divider, info_lines
+        )
 
         # ════════════════════════════════════════════════════════════════
         # 4. LOAD UNET  (+ optional baked VAE / Audio VAE extraction)
         # ════════════════════════════════════════════════════════════════
-        t0 = time.time()
-        unet_fp   = _file_fingerprint(unet_path)
-        # ALBABIT-FIX: include offload_mode — "sequential" patches the model
-        # for lowvram at load time (set_lowvram_mode), so a cached UNET
-        # loaded under a different offload_mode would silently keep its
-        # stale patching.
-        unet_key  = f"unet:{unet_path}:{weight_dtype}:{offload_mode}:{unet_fp}"
-
-        extract_vae       = (vae_name == "Baked VAE (from UNET)")
-        extract_audio_vae = (audio_vae_name == "Baked Audio VAE (from UNET)")
-        baked_vae_key       = f"vae:baked:{unet_path}:{unet_fp}"
-        baked_audio_vae_key = f"audio_vae:baked:{unet_path}:{unet_fp}"
-
-        vae = None
-        audio_vae = None
-        vae_time = 0.0
-        vae_cache_hit = False
-        unet_time = 0.0
-
-        unet_cache_hit = caching and _unet_cache.has(unet_key)
-        if unet_cache_hit:
-            if extract_vae and not _vae_cache.has(baked_vae_key):
-                unet_cache_hit = False
-            if extract_audio_vae and not _audio_vae_cache.has(baked_audio_vae_key):
-                unet_cache_hit = False
-
-        if unet_cache_hit:
-            model = _unet_cache.get(unet_key)
-            logger.info(f"UNET loaded from cache: {unet_name}")
-            info_lines.append(f"UNET: {unet_name} (cached)")
-
-            if extract_vae:
-                vae = _vae_cache.get(baked_vae_key)
-                vae_cache_hit = True
-                logger.info("Baked VAE loaded from cache")
-                info_lines.append("VAE: Baked from UNET (cached)")
-            if extract_audio_vae:
-                audio_vae = _audio_vae_cache.get(baked_audio_vae_key)
-                logger.info("Baked Audio VAE loaded from cache")
-                info_lines.append("AUDIO VAE: Baked from UNET (cached)")
-        else:
-            model_options = {}
-            is_gguf = unet_name.lower().endswith(".gguf")
-            if is_gguf:
-                logger.info(f"GGUF detected: {unet_name} (embedded quant)")
-            else:
-                dtype_map = {
-                    "fp8_e4m3fn": torch.float8_e4m3fn,
-                    "fp8_e5m2":   torch.float8_e5m2,
-                    "fp16":       torch.float16,
-                    "bf16":       torch.bfloat16,
-                    "fp32":       torch.float32,
-                }
-                if weight_dtype in dtype_map:
-                    model_options["dtype"] = dtype_map[weight_dtype]
-
-            try:
-                if extract_audio_vae:
-                    # ALBABIT-FIX: read the UNET state dict once and reuse it
-                    # for both the audio VAE extraction and the model/baked-VAE
-                    # load below (load_state_dict_guess_config /
-                    # load_diffusion_model_state_dict), instead of reading the
-                    # (often multi-GB) UNET file from disk twice.
-                    t_av0 = time.time()
-                    sd, metadata = comfy.utils.load_torch_file(unet_path, return_metadata=True)
-                    # AudioVAE no longer takes sd directly (ComfyUI 0.22.0+) —
-                    # use state_dict_prefix_replace + comfy.sd.VAE, mirroring
-                    # the built-in LTXVAudioVAELoader. filter_keys=True pops
-                    # the audio_vae./vocoder. keys out of sd, which is correct
-                    # since they aren't part of the main UNET state dict anyway.
-                    sd_audio = comfy.utils.state_dict_prefix_replace(
-                        sd, {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."}, filter_keys=True
-                    )
-                    audio_vae = comfy.sd.VAE(sd=sd_audio, metadata=metadata)
-                    av_time = time.time() - t_av0
-                    logger.info("Audio VAE extracted natively from UNET")
-                    info_lines.append(f"AUDIO VAE: Baked from UNET ({av_time:.1f}s)")
-                    if caching:
-                        _audio_vae_cache.put(baked_audio_vae_key, audio_vae)
-
-                    if extract_vae:
-                        out = comfy.sd.load_state_dict_guess_config(
-                            sd, output_vae=True, output_clip=False,
-                            output_clipvision=False, model_options=model_options,
-                            metadata=metadata,
-                        )
-                        model = out[0]
-                        model.cached_patcher_init = (
-                            comfy.sd.load_checkpoint_guess_config,
-                            (unet_path, False, False, False, None, True, model_options, {}),
-                            0,
-                        )
-                        t_vae0 = time.time()
-                        vae = out[2]
-                        if getattr(vae, "patcher", None) is not None:
-                            vae.patcher.cached_patcher_init = (
-                                comfy.sd.load_checkpoint_vae_patcher,
-                                (unet_path, None, model_options, {}),
-                            )
-                        vae_time = time.time() - t_vae0
-                        logger.info("VAE extracted natively from UNET")
-                        info_lines.append(f"VAE: Baked from UNET ({vae_time:.1f}s)")
-                        if caching:
-                            _vae_cache.put(baked_vae_key, vae)
-                    else:
-                        model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata)
-                        model.cached_patcher_init = (comfy.sd.load_diffusion_model, (unet_path, model_options))
-                elif extract_vae:
-                    # ALBABIT-FIX: load_checkpoint_guess_config to extract the
-                    # baked VAE natively from the checkpoint.
-                    out = comfy.sd.load_checkpoint_guess_config(
-                        unet_path, output_vae=True, output_clip=False,
-                        output_clipvision=False, model_options=model_options,
-                    )
-                    model = out[0]
-                    t_vae0 = time.time()
-                    vae = out[2]
-                    vae_time = time.time() - t_vae0
-                    logger.info("VAE extracted natively from UNET")
-                    info_lines.append(f"VAE: Baked from UNET ({vae_time:.1f}s)")
-                    if caching:
-                        _vae_cache.put(baked_vae_key, vae)
-                else:
-                    model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
-
-                unet_time = time.time() - t0
-                logger.info(f"UNET loaded {divider} {unet_name} [{weight_dtype}] {divider} {unet_time:.1f}s")
-                info_lines.append(f"UNET: {unet_name} [{weight_dtype}] ({unet_time:.1f}s)")
-                if caching:
-                    _unet_cache.put(unet_key, model)
-            except Exception as e:
-                raise RuntimeError(f"❌ Failed to load UNET '{unet_name}': {e}")
+        model, vae, audio_vae, unet_time, unet_cache_hit, vae_time, vae_cache_hit = load_unet_and_baked_vae(
+            unet_path, unet_name, weight_dtype, offload_mode, vae_name, audio_vae_name,
+            caching, divider, info_lines
+        )
 
         # ════════════════════════════════════════════════════════════════
         # 5. LOAD CLIP  (named slots → ordered paths → mtime cache key)
         # ════════════════════════════════════════════════════════════════
-        t0 = time.time()
-
-        for slot, val in [("clip_l", clip_l), ("clip_g", clip_g),
-                          ("t5xxl", t5xxl), ("llm_encoder", llm_encoder),
-                          ("text_projection", text_projection)]:
-             if val != "Baked (from UNET)":
-                 _ensure_model_exists(val, "text_encoders", auto_download)
-
-        clip_paths = _assemble_clip_paths(resolved_type, unet_path=unet_path, clip_l=clip_l, clip_g=clip_g, t5xxl=t5xxl, llm_encoder=llm_encoder, text_projection=text_projection)
-
-        if not clip_paths:
-            raise ValueError(
-                f"❌ No CLIP encoders provided for architecture '{resolved_type}'. "
-                f"Fill the required slot(s): "
-                f"{', '.join(CLIP_SLOT_ORDER.get(resolved_type, ['clip_l']))}"
-            )
-
-        clip_fps     = ":".join(_file_fingerprint(p) for p in clip_paths)
-        # ALBABIT-FIX: include offload_mode — a cached CLIP keeps the
-        # load_device it was first loaded with, so switching offload_mode
-        # without this would silently reuse a CLIP stuck on CPU (or GPU).
-        clip_key     = f"clip:{':'.join(clip_paths)}:{resolved_type}:{clip_dtype}:{offload_mode}:{clip_fps}"
-
-        clip_slot_used = []
-        for slot, val in [("clip_l", clip_l), ("clip_g", clip_g),
-                          ("t5xxl", t5xxl), ("llm_encoder", llm_encoder),
-                          ("text_projection", text_projection)]:
-            if val is not None:
-                clip_slot_used.append(slot)
-
-        clip_time = 0.0
-        clip_cache_hit = caching and _clip_cache.has(clip_key)
-        if clip_cache_hit:
-            clip = _clip_cache.get(clip_key)
-            logger.info(f"CLIP loaded from cache: {' + '.join(clip_slot_used)}")
-            info_lines.append(f"CLIP: {'+'.join(clip_slot_used)} (cached)")
-        else:
-            clip_type_enum = get_clip_type_enum(resolved_type)
-            clip_model_opts = {}
-            if clip_load_device:
-                clip_model_opts["load_device"] = clip_load_device
-            dtype_map = {
-                "fp16": torch.float16, "bf16": torch.bfloat16,
-                "fp8_e4m3fn": torch.float8_e4m3fn, "fp32": torch.float32,
-            }
-            if clip_dtype in dtype_map:
-                clip_model_opts["dtype"] = dtype_map[clip_dtype]
-
-            try:
-                clip = comfy.sd.load_clip(
-                    ckpt_paths=clip_paths,
-                    embedding_directory=folder_paths.get_folder_paths("embeddings"),
-                    clip_type=clip_type_enum,
-                    model_options=clip_model_opts if clip_model_opts else {},
-                )
-                clip_time = time.time() - t0
-                logger.info(
-                    f"CLIP loaded {divider} {' + '.join(clip_slot_used)} "
-                    f"[{clip_dtype}] {divider} {clip_time:.1f}s"
-                )
-                info_lines.append(
-                    f"CLIP: {'+'.join(clip_slot_used)} [{clip_dtype}] ({clip_time:.1f}s)"
-                )
-                if caching:
-                    _clip_cache.put(clip_key, clip)
-            except Exception as e:
-                raise RuntimeError(f"❌ Failed to load CLIP: {e}")
+        clip, clip_slot_used, clip_time, clip_cache_hit = load_clip_stack(
+            resolved_type, unet_path, clip_l, clip_g, t5xxl, llm_encoder, text_projection,
+            clip_dtype, offload_mode, clip_load_device, caching, divider, auto_download, info_lines
+        )
 
         # ════════════════════════════════════════════════════════════════
         # 6. LOAD STANDALONE VAE  (mtime cache key) — skipped if baked
         # ════════════════════════════════════════════════════════════════
+        extract_vae       = (vae_name == "Baked VAE (from UNET)")
+        extract_audio_vae = (audio_vae_name == "Baked Audio VAE (from UNET)")
+
         if not extract_vae:
-            t0 = time.time()
-            vae_path = _ensure_model_exists(vae_name, "vae", auto_download)
-            if not vae_path:
-                raise FileNotFoundError(f"❌ VAE not found: '{vae_name}'. Enable auto_download or install it manually.")
-
-            vae_fp  = _file_fingerprint(vae_path)
-            vae_key = f"vae:{vae_path}:{vae_fp}"
-
-            vae_cache_hit = caching and _vae_cache.has(vae_key)
-            if vae_cache_hit:
-                vae = _vae_cache.get(vae_key)
-                logger.info(f"VAE loaded from cache: {vae_name}")
-                info_lines.append(f"VAE: {vae_name} (cached)")
-            else:
-                try:
-                    sd, vae_metadata = self._load_vae_sd_metadata(vae_path)
-                    vae = comfy.sd.VAE(sd=sd, metadata=vae_metadata)
-                    vae_time = time.time() - t0
-                    logger.info(f"VAE loaded {divider} {vae_name} {divider} {vae_time:.1f}s")
-                    info_lines.append(f"VAE: {vae_name} ({vae_time:.1f}s)")
-                    if caching:
-                        _vae_cache.put(vae_key, vae)
-                except Exception as e:
-                    raise RuntimeError(f"❌ Failed to load VAE '{vae_name}': {e}")
+            vae, vae_time, vae_cache_hit = load_standalone_vae(
+                vae_name, auto_download, caching, divider, info_lines, self._load_vae_sd_metadata
+            )
 
         # ════════════════════════════════════════════════════════════════
         # 6b. LOAD STANDALONE AUDIO VAE — skipped if baked or "None"
@@ -1197,41 +725,9 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
         # ════════════════════════════════════════════════════════════════
         # 7. APPLY LoRA STACK
         # ════════════════════════════════════════════════════════════════
-        combined_loras = list(lora_stack) if lora_stack else []
-
-        applied_loras = []
-        for i, (lora_name, model_str, clip_str) in enumerate(combined_loras, 1):
-            if model_str == 0 and clip_str == 0:
-                continue
-            lora_path = folder_paths.get_full_path("loras", lora_name)
-            if not lora_path:
-                msg = f"LoRA not found: '{lora_name}'"
-                if lora_on_error == "raise":
-                    raise FileNotFoundError(msg)
-                logger.warning(f"{msg} — Skipping.")
-                info_lines.append(f"LoRA {i}: {lora_name} (not found)")
-                continue
-            try:
-                t0 = time.time()
-                lora_data = comfy.utils.load_torch_file(lora_path)
-                model, clip = comfy.sd.load_lora_for_models(
-                    model, clip, lora_data, model_str, clip_str
-                )
-                elapsed = time.time() - t0
-                logger.info(
-                    f"LoRA {i} applied {divider} {lora_name} [model={model_str}, clip={clip_str}] {divider} {elapsed:.1f}s"
-                )
-                info_lines.append(
-                    f"LoRA {i}: {lora_name} [m={model_str} c={clip_str}] ({elapsed:.1f}s)"
-                )
-                applied_loras.append({"name": lora_name, "model_str": model_str,
-                                      "clip_str": clip_str})
-            except Exception as e:
-                msg = f"Failed to apply LoRA '{lora_name}': {e}"
-                if lora_on_error == "raise":
-                    raise RuntimeError(f"❌ {msg}")
-                logger.warning(f"{msg} — Skipping.")
-                info_lines.append(f"LoRA {i}: {lora_name} (failed)")
+        model, clip, applied_loras, out_lora_stack = apply_lora_stack(
+            model, clip, lora_stack, lora_on_error, divider, info_lines
+        )
 
         # ════════════════════════════════════════════════════════════════
         # 8. BUILD OUTPUTS
@@ -1283,9 +779,6 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
             "load_ms":       total_ms,
             "cached_unet":   unet_cache_hit,
         }
-
-        out_lora_stack = [(e["name"], e["model_str"], e["clip_str"])
-                          for e in applied_loras] if applied_loras else None
 
         return (
             model,
