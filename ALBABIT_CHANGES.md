@@ -435,4 +435,29 @@ wrapper.
   VRAM)" now defaults `text_projection` to `"Baked (from UNET)"`. Both keep
   the `text_projection` widget visible.
 
+### `model/detect.py` — fixed/added `_ARCH_HEURISTICS` for Auto-Detect
+
+Cross-checked against `comfy/model_detection.py`. The `"lumina2"` heuristic
+(`cap_v_projection.weight`) matched no real checkpoint — Lumina2/Z-Image were
+never auto-detected. `chroma` and `flux2` were entirely absent and silently
+misdetected as `"flux"` (wrong `CLIP_SLOT_ORDER`: `clip_l`+`t5xxl` instead of
+`t5xxl`/`llm_encoder`). `mochi`, `cosmos`, `cogvideox` were also absent.
+
+- Fixed `lumina2` to use the real key pair `cap_embedder.1.weight` +
+  `noise_refiner.0.attention.k_norm.weight`. Added `z_image`, distinguished
+  from `lumina2` by the shape of `cap_embedder.1.weight` (3840 = Z-Image,
+  2304 = Lumina2) via new `_tensor_dim0()` helper.
+- Added `chroma` and `flux2` heuristics, checked *before* `flux` (both share
+  `double_blocks`/`img_in` with Flux). Chroma Radiance (`nerf_blocks.*`) is
+  excluded from the `chroma` match and falls through unchanged (unsupported).
+- Added `mochi` (`t5_yproj.weight`), `cosmos`/Cosmos World
+  (`blocks.block0.blocks.0.block.attn.to_q.0.weight`), `cogvideox`
+  (`blocks.0.norm1.linear.weight`).
+- Removed the `_SAFETENSORS_PEEK = 200` key-count limit on
+  `list(f.keys())` — listing keys only reads the safetensors header (no extra
+  cost), and some keys (e.g. Mochi's `t5_yproj.weight`) sort past 200 entries.
+- Verified in real conditions (Albabit): Z-Image checkpoint now logs
+  `Auto-detected architecture: z_image`; Flux checkpoint still logs `flux`
+  (non-regression). 1421 tests pass.
+
 22 loader smoke tests pass (unchanged).
