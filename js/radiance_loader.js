@@ -168,7 +168,9 @@ const PRESET_CONFIGS = {
         "audio_vae_hints": ["LTX23_audio_vae_bf16.safetensors", "LTX23_audio_vae", "ltx23_audio", "ltx_23_audio"],
         "clip_hints":    {
             "llm_encoder":     ["gemma_3_12B_it.safetensors", "gemma_3_12B_it_fp4", "gemma_3_12B_it", "gemma_3", "gemma"],
-            "text_projection": ["ltx-2.3_text_projection_bf16.safetensors", "ltx-2.3_text_projection", "text_projection"],
+            // ALBABIT-FIX: fall back to "Baked (from UNET)" if the standalone
+            // text_projection file isn't present (mirrors the Low VRAM preset).
+            "text_projection": ["ltx-2.3_text_projection_bf16.safetensors", "ltx-2.3_text_projection", "text_projection", "Baked (from UNET)"],
         },
         "extra_widgets": ["upscale_model_name", "audio_vae_name"],
         "upscale_hints": ["ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "ltx-2.3-spatial-upscaler-x2-1.0.safetensors", "ltx-2.3", "ltx_2.3", "latent_upsampler", "upsampler"],
