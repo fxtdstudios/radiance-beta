@@ -669,7 +669,10 @@ CHECKPOINT_PRESETS: dict = {
     },
     "LTX Video 2.3": {
         "model_type": "ltxav",
-        "weight_dtype": "fp16",
+        # ALBABIT-FIX: ltx-2.3-22b-dev.safetensors is bf16-native; "fp16"
+        # forced a bf16->fp16 cast with no VRAM benefit and overflow risk
+        # (same issue as the Z-Image clip_dtype fix above).
+        "weight_dtype": "default",
         "clip_dtype": "default",
         "offload_mode": "none",
         "clip_slots": {"llm_encoder": True, "text_projection": True},

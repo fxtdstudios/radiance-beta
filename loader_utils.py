@@ -137,15 +137,6 @@ def get_total_vram() -> float:
     return _get_total_vram(get_torch_device()) / (1024 ** 3)
 
 
-def resolve_hint(hints: list[str], available: list[str]) -> str | None:
-    for hint in hints:
-        h = hint.lower()
-        for f in available:
-            if h in f.lower():
-                return f
-    return None
-
-
 def file_fingerprint(path: str) -> str:
     try:
         st = os.stat(path)

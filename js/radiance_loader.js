@@ -41,25 +41,6 @@ const PRESET_SLOTS = {
     "Mochi": ["t5xxl"],
 };
 
-// Dynamic visibility rules for CLIP slots per model_type
-const MODEL_SLOTS = {
-    "Auto-Detect": ["clip_l", "clip_g", "t5xxl", "llm_encoder", "text_projection"], // Show all for safety
-    "flux": ["clip_l", "t5xxl"],
-    "sd3": ["clip_l", "clip_g", "t5xxl"],
-    "sd3.5": ["clip_l", "clip_g", "t5xxl"],
-    "sdxl": ["clip_l", "clip_g"],
-    "sd1.5": ["clip_l"],
-    "hunyuan_video": ["clip_l", "llm_encoder"],
-    "wan": ["t5xxl"],
-    "ltx": ["llm_encoder", "text_projection"],
-    "ltxav": ["llm_encoder", "text_projection"],
-    "lumina2": ["llm_encoder"],
-    "z_image": ["llm_encoder"],
-    "pixart": ["t5xxl"],
-    "aura_flow": ["clip_l"],
-    "kolors": ["llm_encoder"],
-};
-
 // Full hints configs for automatic local file selection matching
 const PRESET_CONFIGS = {
     "Flux Dev": {
@@ -85,6 +66,11 @@ const PRESET_CONFIGS = {
             "clip_l": ["clip_l.safetensors", "clip_l"],
             "t5xxl":  ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
         },
+        // ALBABIT-FIX: "Low VRAM" presets force offload_mode — expose the
+        // widget so the user can still override it (e.g. on a higher-VRAM
+        // GPU where cpu_offload is unnecessarily slow).
+        "extra_widgets": ["offload_mode"],
+        "offload_mode": "cpu_offload",
     },
     "SD3.5 Large": {
         "unet_hints":    ["sd3.5_large_turbo", "sd3.5_large", "sd3-5_large"],
@@ -190,11 +176,20 @@ const PRESET_CONFIGS = {
     "LTX Video 2.3 (Low VRAM)": {
         "unet_hints":    ["ltx-2.3-22b-dev-fp8.safetensors", "ltx-2.3-22b-dev-fp8", "ltx-2.3", "ltx_2.3"],
         "vae_hints":     ["Baked VAE (from UNET)", "LTX23_video_vae", "ltx23_video", "ltx_23_video"],
+        // ALBABIT-FIX: without this, autoFillPresetFiles() falls back to
+        // audio_vae_name = "None" (no hints), so extract_audio_vae is False
+        // and the AUDIO_VAE output stays None, failing downstream with
+        // "Audio VAE model is required" (nodes_lt_audio.py).
+        "audio_vae_hints": ["Baked Audio VAE (from UNET)"],
         "clip_hints":    {
             "llm_encoder":     ["gemma_3_12B_it_fp4_mixed.safetensors", "gemma_3_12B_it_fp4", "gemma_3_12B_it", "gemma_3", "gemma"],
             "text_projection": ["Baked (from UNET)"],
         },
-        "extra_widgets": ["upscale_model_name"],
+        // ALBABIT-FIX: "Low VRAM" presets force offload_mode — expose the
+        // widget so the user can still override it (e.g. on a higher-VRAM
+        // GPU where cpu_offload is unnecessarily slow).
+        "extra_widgets": ["upscale_model_name", "offload_mode"],
+        "offload_mode": "cpu_offload",
         "upscale_hints": ["ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "ltx-2.3-spatial-upscaler-x2-1.0.safetensors", "ltx-2.3", "ltx_2.3", "latent_upsampler", "upsampler"],
     },
     "PixArt Sigma": {
@@ -359,6 +354,13 @@ function autoFillPresetFiles(node, cleanPreset) {
         } else {
             upscaleW.value = "None";
         }
+    }
+
+    // 6. Default offload_mode (visible widget for "Low VRAM" presets — see
+    // extra_widgets — but the user can change it afterward; not preset-locked)
+    const offloadW = getWidget(node, "offload_mode");
+    if (offloadW) {
+        offloadW.value = config.offload_mode || "none";
     }
 }
 

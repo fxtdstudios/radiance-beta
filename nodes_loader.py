@@ -51,19 +51,6 @@ _upscale_model_cache = LRUCache()
 logger = logging.getLogger("radiance.loader")
 from radiance.core.logging import print_premium_loader_hud
 
-# ── Node-local UI option lists ──
-MODEL_TYPES = [
-    "Auto-Detect",
-    "flux", "sd3", "sd3.5",
-    "sdxl", "sd1.5",
-    "hunyuan_video", "wan", "ltx", "ltxav",
-    "lumina2", "z_image",
-    "pixart", "aura_flow", "kolors",
-]
-WEIGHT_DTYPES = ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"]
-CLIP_DTYPES   = ["default", "fp16", "bf16", "fp8_e4m3fn", "fp32"]
-OFFLOAD_MODES = ["none", "cpu_offload", "sequential"]
-
 
 
 
@@ -152,6 +139,11 @@ MODEL_TYPES = [
     "flux", "sd3", "sd3.5",
     "sdxl", "sd1.5",
     "hunyuan_video", "wan", "ltx",
+    # ALBABIT-FIX: LTX 2.3 (audio) — distinct VRAM profile from "ltx" (LTX
+    # Video 2B/13B). Was only present in a dead duplicate MODEL_TYPES list
+    # above, never in the active one, so "ltxav" was unselectable in Custom
+    # mode despite being used by the "LTX Video 2.3" presets.
+    "ltxav",
     "lumina2", "z_image",
     "pixart", "aura_flow", "kolors",
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi — match Resolution/Sampler model types
@@ -330,7 +322,10 @@ class RadianceUnifiedLoader:
             model_type   = self._apply_preset_override(cfg, "model_type",   "model_type",   model_type,   overrides)
             weight_dtype = self._apply_preset_override(cfg, "weight_dtype",  "weight_dtype", weight_dtype, overrides)
             clip_dtype   = self._apply_preset_override(cfg, "clip_dtype",    "clip_dtype",   clip_dtype,   overrides)
-            offload_mode = self._apply_preset_override(cfg, "offload_mode",  "offload_mode", offload_mode, overrides)
+            # ALBABIT-FIX: offload_mode is NOT preset-overridden — it's exposed
+            # as a visible widget for "Low VRAM" presets (JS sets its default
+            # to match the preset, but the user can change it, e.g. on a
+            # higher-VRAM GPU where cpu_offload is unnecessarily slow).
 
             msg = f"Preset '{preset}'" + (f" (overrode: {', '.join(overrides)})" if overrides else " (no overrides)")
             logger.info(msg)
@@ -409,7 +404,11 @@ class RadianceUnifiedLoader:
         # ════════════════════════════════════════════════════════════════
         t0 = time.time()
         unet_fp   = _file_fingerprint(unet_path)
-        unet_key  = f"unet:{unet_path}:{weight_dtype}:{unet_fp}"
+        # ALBABIT-FIX: include offload_mode — "sequential" patches the model
+        # for lowvram at load time (set_lowvram_mode), so a cached UNET
+        # loaded under a different offload_mode would silently keep its
+        # stale patching.
+        unet_key  = f"unet:{unet_path}:{weight_dtype}:{offload_mode}:{unet_fp}"
 
         unet_time = 0.0
         unet_cache_hit = caching and _unet_cache.has(unet_key)
@@ -465,7 +464,10 @@ class RadianceUnifiedLoader:
             )
 
         clip_fps     = ":".join(_file_fingerprint(p) for p in clip_paths)
-        clip_key     = f"clip:{':'.join(clip_paths)}:{resolved_type}:{clip_dtype}:{clip_fps}"
+        # ALBABIT-FIX: include offload_mode — a cached CLIP keeps the
+        # load_device it was first loaded with, so switching offload_mode
+        # without this would silently reuse a CLIP stuck on CPU (or GPU).
+        clip_key     = f"clip:{':'.join(clip_paths)}:{resolved_type}:{clip_dtype}:{offload_mode}:{clip_fps}"
 
         clip_slot_used = []
         for slot, val in [("clip_l", clip_l), ("clip_g", clip_g),
@@ -773,7 +775,10 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
             model_type   = self._apply_preset_override(cfg, "model_type",   "model_type",   model_type,   overrides)
             weight_dtype = self._apply_preset_override(cfg, "weight_dtype",  "weight_dtype", weight_dtype, overrides)
             clip_dtype   = self._apply_preset_override(cfg, "clip_dtype",    "clip_dtype",   clip_dtype,   overrides)
-            offload_mode = self._apply_preset_override(cfg, "offload_mode",  "offload_mode", offload_mode, overrides)
+            # ALBABIT-FIX: offload_mode is NOT preset-overridden — it's exposed
+            # as a visible widget for "Low VRAM" presets (JS sets its default
+            # to match the preset, but the user can change it, e.g. on a
+            # higher-VRAM GPU where cpu_offload is unnecessarily slow).
 
             msg = f"Preset '{preset}'" + (f" (overrode: {', '.join(overrides)})" if overrides else " (no overrides)")
             logger.info(msg)
@@ -851,7 +856,11 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
         # ════════════════════════════════════════════════════════════════
         t0 = time.time()
         unet_fp   = _file_fingerprint(unet_path)
-        unet_key  = f"unet:{unet_path}:{weight_dtype}:{unet_fp}"
+        # ALBABIT-FIX: include offload_mode — "sequential" patches the model
+        # for lowvram at load time (set_lowvram_mode), so a cached UNET
+        # loaded under a different offload_mode would silently keep its
+        # stale patching.
+        unet_key  = f"unet:{unet_path}:{weight_dtype}:{offload_mode}:{unet_fp}"
 
         extract_vae       = (vae_name == "Baked VAE (from UNET)")
         extract_audio_vae = (audio_vae_name == "Baked Audio VAE (from UNET)")
@@ -965,7 +974,10 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
             )
 
         clip_fps     = ":".join(_file_fingerprint(p) for p in clip_paths)
-        clip_key     = f"clip:{':'.join(clip_paths)}:{resolved_type}:{clip_dtype}:{clip_fps}"
+        # ALBABIT-FIX: include offload_mode — a cached CLIP keeps the
+        # load_device it was first loaded with, so switching offload_mode
+        # without this would silently reuse a CLIP stuck on CPU (or GPU).
+        clip_key     = f"clip:{':'.join(clip_paths)}:{resolved_type}:{clip_dtype}:{offload_mode}:{clip_fps}"
 
         clip_slot_used = []
         for slot, val in [("clip_l", clip_l), ("clip_g", clip_g),
