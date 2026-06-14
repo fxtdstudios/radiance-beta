@@ -8,28 +8,68 @@ import folder_paths
 
 logger = logging.getLogger("radiance.model.detect")
 
-_SAFETENSORS_PEEK = 200
+
+def _tensor_dim0(f, ks: list[str], substr: str) -> int | None:
+    """Return shape[0] of the first key containing `substr`, or None.
+
+    ALBABIT-FIX: used to distinguish architectures that share identical key
+    names but differ by tensor width (e.g. Lumina2 vs Z-Image).
+    """
+    for k in ks:
+        if substr in k:
+            try:
+                return f.get_slice(k).get_shape()[0]
+            except Exception:
+                return None
+    return None
+
 
 _ARCH_HEURISTICS = [
-    (lambda ks: any("double_blocks" in k for k in ks), "flux"),
-    (lambda ks: any("joint_blocks" in k for k in ks), "sd3"),
-    (lambda ks: any("img_in" in k and "proj" in k for k in ks), "hunyuan_video"),
-    (lambda ks: any("cap_v_projection.weight" in k for k in ks), "lumina2"),
-    (lambda ks: any("chatglm" in k.lower() for k in ks), "kolors"),
-    (lambda ks: any("auraflow" in k.lower() for k in ks), "aura_flow"),
-    (lambda ks: any("patch_embedding" in k for k in ks)
+    # ALBABIT-FIX: Chroma (and Chroma Radiance) share Flux's double_blocks/
+    # img_in keys but add a distilled_guidance_layer — must be checked before
+    # "flux" (different CLIP slots: chroma=["t5xxl"] vs flux=["clip_l","t5xxl"]).
+    # Chroma Radiance (pixel-space, nerf_blocks.*) is excluded — unsupported,
+    # falls through like before rather than being mislabeled "chroma" (16ch VAE).
+    (lambda ks, f: any("double_blocks" in k for k in ks)
+     and any("distilled_guidance_layer" in k for k in ks)
+     and not any("nerf_blocks" in k for k in ks), "chroma"),
+    # ALBABIT-FIX: Flux.2 shares Flux's double_blocks/img_in keys but adds
+    # double_stream_modulation_img — must be checked before "flux".
+    (lambda ks, f: any("double_stream_modulation_img" in k for k in ks), "flux2"),
+    (lambda ks, f: any("double_blocks" in k for k in ks), "flux"),
+    (lambda ks, f: any("joint_blocks" in k for k in ks), "sd3"),
+    (lambda ks, f: any("img_in" in k and "proj" in k for k in ks), "hunyuan_video"),
+    # ALBABIT-FIX: Lumina2 and Z-Image share the same NextDiT architecture and
+    # key names (cap_embedder.1.weight + noise_refiner.0.attention.k_norm.weight,
+    # per comfy/model_detection.py); they differ only by the output dim of
+    # cap_embedder.1.weight (2304 = Lumina2, 3840 = Z-Image). The previous
+    # "cap_v_projection.weight" heuristic never matched any real checkpoint.
+    (lambda ks, f: any("cap_embedder.1.weight" in k for k in ks)
+     and any("noise_refiner.0.attention.k_norm.weight" in k for k in ks)
+     and _tensor_dim0(f, ks, "cap_embedder.1.weight") == 3840, "z_image"),
+    (lambda ks, f: any("cap_embedder.1.weight" in k for k in ks)
+     and any("noise_refiner.0.attention.k_norm.weight" in k for k in ks), "lumina2"),
+    (lambda ks, f: any("chatglm" in k.lower() for k in ks), "kolors"),
+    (lambda ks, f: any("auraflow" in k.lower() for k in ks), "aura_flow"),
+    # ALBABIT-FIX: Mochi (Genmo preview) UNET.
+    (lambda ks, f: any("t5_yproj.weight" in k for k in ks), "mochi"),
+    # ALBABIT-FIX: Cosmos World (T2V/I2V, stride 8) UNET.
+    (lambda ks, f: any("blocks.block0.blocks.0.block.attn.to_q.0.weight" in k for k in ks), "cosmos"),
+    # ALBABIT-FIX: CogVideoX UNET.
+    (lambda ks, f: any("blocks.0.norm1.linear.weight" in k for k in ks), "cogvideox"),
+    (lambda ks, f: any("patch_embedding" in k for k in ks)
      and any("time_embedding" in k for k in ks)
      and not any("joint_blocks" in k for k in ks), "wan"),
-    (lambda ks: any("patchify_proj" in k for k in ks), "ltx"),
-    (lambda ks: any("patch_embedding" in k for k in ks)
+    (lambda ks, f: any("patchify_proj" in k for k in ks), "ltx"),
+    (lambda ks, f: any("patch_embedding" in k for k in ks)
      and any("adaln_single" in k for k in ks)
      and not any("time_embedding" in k for k in ks), "ltx"),
-    (lambda ks: any("adaln_single" in k for k in ks)
+    (lambda ks, f: any("adaln_single" in k for k in ks)
      and not any("patchify_proj" in k for k in ks), "pixart"),
-    (lambda ks: any("down_blocks.0" in k for k in ks)
+    (lambda ks, f: any("down_blocks.0" in k for k in ks)
      and any("add_embedding" in k for k in ks), "sdxl"),
-    (lambda ks: any("input_blocks.0" in k for k in ks), "sd1.5"),
-    (lambda ks: any("down_blocks.0" in k for k in ks), "sdxl"),
+    (lambda ks, f: any("input_blocks.0" in k for k in ks), "sd1.5"),
+    (lambda ks, f: any("down_blocks.0" in k for k in ks), "sdxl"),
 ]
 
 LATENT_CHANNELS = {
@@ -130,14 +170,17 @@ def detect_model_type(unet_path: str) -> str | None:
     try:
         from safetensors import safe_open
         with safe_open(unet_path, framework="pt", device="cpu") as f:
-            keys = list(f.keys())[:_SAFETENSORS_PEEK]
-        for test_fn, arch in _ARCH_HEURISTICS:
-            if test_fn(keys):
-                logger.info(
-                    "Auto-detected architecture: %s from %s",
-                    arch, unet_path.rsplit("/", 1)[-1],
-                )
-                return arch
+            # ALBABIT-FIX: no key-count limit — listing keys only reads the
+            # safetensors header (cheap), and some architectures (e.g. Mochi's
+            # t5_yproj.weight) sort late alphabetically among hundreds of keys.
+            keys = list(f.keys())
+            for test_fn, arch in _ARCH_HEURISTICS:
+                if test_fn(keys, f):
+                    logger.info(
+                        "Auto-detected architecture: %s from %s",
+                        arch, unet_path.rsplit("/", 1)[-1],
+                    )
+                    return arch
     except ImportError:
         logger.debug("safetensors not available — skipping auto-detect")
     except Exception as e:
