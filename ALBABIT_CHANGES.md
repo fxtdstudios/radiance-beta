@@ -188,6 +188,20 @@ widgets when switching back to "Custom".
 - Added `VIDEO_PRESET_NAMES` (`config/model_map.py`) so "Radiance Video
   Loader" only lists video presets and "Radiance Loader" only image presets.
 
+### T5-XXL `clip_hints` quality/correctness pass (June 2026)
+
+- **"Cosmos World"**: Cosmos 1.0 requires the "old" T5-XXL (T5 1.0) encoder,
+  not the T5 1.1 `t5xxl_*` used by Flux/SD3/etc. — distinct, non-interchangeable
+  checkpoints. `t5xxl` hints now prioritize `oldt5_xxl_fp8_e4m3fn` /
+  `oldt5_xxl_fp16` / `oldt5_xxl`, with `t5xxl_fp8_e4m3fn`/`t5xxl_fp16`/`t5xxl`
+  kept as last-resort fallbacks.
+- **All other `t5xxl` presets** (Flux, SD3, Chroma, CogVideoX, Mochi, LTX
+  Video/13B/2.3, Flux.2 Dev/Klein): hint order was `t5xxl_fp8_e4m3fn` before
+  `t5xxl_fp16`, defaulting auto-fill to the lower-precision fp8 variant.
+  Reordered to prioritize `t5xxl_fp16` (max quality), `t5xxl_fp8_e4m3fn` as
+  fallback. WAN/HunyuanVideo (`umt5_xxl_*`) and Cosmos World (`oldt5_xxl_*`,
+  see above) unaffected.
+
 ### `offload_mode` ("none" / "cpu_offload" / "sequential")
 
 - **"Low VRAM" presets now expose `offload_mode`**: previously hardcoded to

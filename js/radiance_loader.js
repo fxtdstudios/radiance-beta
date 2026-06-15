@@ -48,7 +48,7 @@ const PRESET_CONFIGS = {
         "vae_hints":     ["ae.safetensors", "flux_ae", "ae_"],
         "clip_hints":    {
             "clip_l": ["clip_l.safetensors", "clip_l"],
-            "t5xxl":  ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+            "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
     },
     "Flux Schnell": {
@@ -56,7 +56,7 @@ const PRESET_CONFIGS = {
         "vae_hints":     ["ae.safetensors", "flux_ae", "ae_"],
         "clip_hints":    {
             "clip_l": ["clip_l.safetensors", "clip_l"],
-            "t5xxl":  ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+            "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
     },
     "Flux Dev (Low VRAM)": {
@@ -64,7 +64,7 @@ const PRESET_CONFIGS = {
         "vae_hints":     ["ae.safetensors", "flux_ae", "ae_"],
         "clip_hints":    {
             "clip_l": ["clip_l.safetensors", "clip_l"],
-            "t5xxl":  ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+            "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
         // ALBABIT-FIX: "Low VRAM" presets force offload_mode — expose the
         // widget so the user can still override it (e.g. on a higher-VRAM
@@ -78,7 +78,7 @@ const PRESET_CONFIGS = {
         "clip_hints":    {
             "clip_l": ["clip_l.safetensors", "clip_l"],
             "clip_g": ["clip_g.safetensors", "clip_g"],
-            "t5xxl":  ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+            "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
     },
     "SD3.5 Medium": {
@@ -87,7 +87,7 @@ const PRESET_CONFIGS = {
         "clip_hints":    {
             "clip_l": ["clip_l.safetensors", "clip_l"],
             "clip_g": ["clip_g.safetensors", "clip_g"],
-            "t5xxl":  ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+            "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
     },
     "SD3.5 Turbo": {
@@ -96,7 +96,7 @@ const PRESET_CONFIGS = {
         "clip_hints":    {
             "clip_l": ["clip_l.safetensors", "clip_l"],
             "clip_g": ["clip_g.safetensors", "clip_g"],
-            "t5xxl":  ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+            "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
     },
     "SDXL Base": {
@@ -198,7 +198,7 @@ const PRESET_CONFIGS = {
         "unet_hints":    ["pixart_sigma", "pixart-sigma", "PixArt-Sigma"],
         "vae_hints":     ["pixart_sigma_sdxlvae", "sdxl_vae", "sd_vae", "pixart_vae", "vae-ft-mse"],
         "clip_hints":    {
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+            "t5xxl": ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
     },
     "AuraFlow": {
@@ -235,7 +235,7 @@ const PRESET_CONFIGS = {
         "unet_hints":    ["chroma-unlocked", "chroma_unlocked", "chroma"],
         "vae_hints":     ["ae.safetensors", "flux_ae", "ae_"],
         "clip_hints":    {
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+            "t5xxl": ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
     },
     "Flux.2 Dev": {
@@ -256,21 +256,25 @@ const PRESET_CONFIGS = {
         "unet_hints":    ["cosmos-1_0-diffusion", "Cosmos-1_0", "cosmos_world", "cosmos"],
         "vae_hints":     ["cosmos_vae", "cosmos-tokenizer", "cosmos"],
         "clip_hints":    {
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+            // ALBABIT-FIX: Cosmos uses the "old" T5-XXL (T5 1.0) encoder,
+            // distinct from the t5xxl_fp8/fp16 (T5 1.1) used by Flux/SD3/etc.
+            // Prioritize oldt5_xxl_*, fall back to t5xxl_* if absent.
+            "t5xxl": ["oldt5_xxl_fp8_e4m3fn", "oldt5_xxl_fp16", "oldt5_xxl", "t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
         },
     },
     "CogVideoX": {
         "unet_hints":    ["cogvideox-5b", "cogvideox_5b", "CogVideoX", "cogvideox"],
         "vae_hints":     ["cogvideox_vae", "cogvideox-vae", "cogvideo_vae"],
         "clip_hints":    {
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+            "t5xxl": ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
     },
     "Mochi": {
         "unet_hints":    ["mochi_preview", "mochi-1-preview", "genmo_mochi", "mochi"],
         "vae_hints":     ["mochi_vae", "mochi-vae"],
         "clip_hints":    {
-            "t5xxl": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+            // ALBABIT-FIX: prioritize fp16 t5xxl for Mochi, fp8 as fallback.
+            "t5xxl": ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
     },
 };
