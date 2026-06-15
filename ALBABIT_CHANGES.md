@@ -414,6 +414,23 @@ won't crash) rather than a clean standard-VAE fallback — acceptable for now
 since the FiLM `flux2_ema` checkpoint is never referenced by either code path
 either way.
 
+**Manual ComfyUI validation:**
+
+- Flux 1 Krea Dev (16ch): RUDRA decoder loads (`rudra_turbo_decoder_flux_ema`),
+  decode completes normally — no change vs. before the fix.
+- SDXL (4ch): RUDRA decoder loads (`rudra_turbo_decoder_sdxl_ema`), decode
+  completes normally — same result as before the fix.
+- LTX Video 2.3 (128ch, 5D): RUDRA decoder now found and loaded
+  (`rudra_turbo_decoder_ltx_ema`, via the `"ltx"` fallback) — previously an
+  immediate `nn.Conv2d` crash (4ch vs 128ch). Routing/selection is fixed;
+  the decoded output's color normalization is a separate, pre-existing issue
+  (not addressed here).
+- Mochi (12ch, 5D): no RUDRA checkpoint available — `detect_rudra_model_type`
+  returns `"mochi"`, `load_radiance_decoder_weights` returns `None`, and the
+  node falls back to the standard VAE decode, exactly like the native "VAE
+  Decode" node. Previously this combination crashed with the same
+  `nn.Conv2d` 4ch/12ch mismatch as LTX-Video.
+
 ---
 
 Tests: 1382 pass (41 unrelated gsplat/splatting tests excluded — CUDA DLL not
