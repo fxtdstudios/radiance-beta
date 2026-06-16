@@ -339,97 +339,57 @@ auto-toggles `enable_video`, sets `model_type`, resets `scale_factor` to 1.0.
 
 ---
 
-## RUDRA decoder (fast_vae.py, RadianceHDRVAEDecode, RadianceNDISender)
+## Radiance HDR VAE Decode (hdr/vae.py, fast_vae.py, nodes/generate/engine.py)
 
-**Problem:** both `RadianceHDRVAEDecode.apply()` and `RadianceNDISender.apply()`
-detected the RUDRA `model_type` with a 2-bucket heuristic
-(`_ch == 16 -> wan/flux else -> sdxl`, resp. `ch >= 16 -> flux else -> sdxl`).
-Any latent with 12ch (Mochi) or 128ch (LTX-Video, Flux.2, Flux.2 Klein) was
-misclassified as 4ch "sdxl"; `load_radiance_decoder_weights` then built a
-4-channel decoder, loaded the (shape-compatible) sdxl checkpoint successfully,
-and the caller fed it a 12/128-channel latent — `nn.Conv2d` channel-mismatch
-crash whenever the RUDRA decoder was enabled for these models.
+### RUDRA model_type detection + graceful fallback (PR #12 — fix/rudra-model-detection)
 
-**Fix:**
+Both `RadianceHDRVAEDecode.apply()` and `RadianceNDISender.apply()` detected
+the RUDRA `model_type` with a 2-bucket heuristic (`_ch == 16 → wan/flux else →
+sdxl`). Any latent with 12ch (Mochi) or 128ch (LTX-Video, Flux.2 Klein) was
+misclassified as `"sdxl"` → `nn.Conv2d` channel-mismatch crash.
 
-- Added a single shared `detect_rudra_model_type(latent_channels, is_video,
-  vae)` helper in `fast_vae.py` (SSOT for both nodes), replacing both
-  heuristics.
-  - 128ch: `ltx-video` for 5D (video) latents, `flux2-klein` for 4D (image)
-    latents — the only two 128ch entries in `MODEL_VAE_CONFIG`, distinguished
-    by shape alone.
-  - 16ch: `cogvideox`/`cosmos`/`wan` for video (by VAE class name), `flux` for
-    image (covers Chroma/Z-Image/Qwen/SD3/Lumina2, which share Flux's 16ch
-    VAE).
-  - 12ch: `mochi` (only 12ch entry). 4ch: `sdxl` (with the existing
-    "could not confirm SDXL architecture" warning for non-XL 4ch VAEs).
-- **Flux.2 (non-Klein) FiLM architecture excluded**:
-  `rudra_turbo_decoder_flux2_ema.safetensors` uses a FiLM-conditioned
-  architecture (`film_in`/`film_out`/`projection`) incompatible with
-  `RadianceTurboDecoder`/`RadianceFullDecoder` — confirmed against the
-  upstream RUDRA README, where "Flux.2" (non-Klein) is absent from the
-  supported-file table (only "Flux.2 Klein" is listed). New
-  `_FILM_CONDITIONED_MODEL_TYPES` set makes `load_radiance_decoder_weights`
-  skip this `model_type` cleanly (returns `None`) until upstream's `dr_dim`
-  decoder integration lands.
-- **`load_radiance_decoder_weights` no longer returns random weights**:
-  previously, both "no checkpoint found" and a failed `strict=True` load fell
-  through to returning the model with its randomly-initialised weights
-  ("output will be garbage"). Both paths now log and return `None`, cached, so
-  callers fall back to the standard (slower, correct) VAE decode instead of
-  producing noise.
-- **`RadianceHDRVAEDecode.apply()`** previously force-set `hdr_mode` to
-  "Compress (Log)" and `source_space` to a log curve *unconditionally* whenever
-  `rudra_decoder=Enabled` — even if the decoder load silently failed/returned
-  garbage. Now this forcing only happens when `load_radiance_decoder_weights`
-  actually returns a decoder; otherwise the user's original `hdr_mode`/
-  `source_space` are preserved and the standard VAE decode runs normally.
-- **`RadianceNDISender` `model_size="turbo"` naming bug**: on-disk checkpoints
-  are named `rudra_turbo_decoder_*_ema.safetensors`, but the node passed
-  `model_size="turbo"` — the generated candidates (`turbo_decoder_*_ema...`)
-  never matched, so NDI turbo mode silently always fell back to the raw image
-  input. Aligned to `"rudra_turbo"` (matches `RadianceHDRVAEDecode`'s
-  `decoder_size` dropdown). A `None` return from
-  `load_radiance_decoder_weights` now raises, caught by the existing
-  `try/except` that falls back to the image input (BUG 6 FIX path).
-- **Decoder cache key collision**: the cache was keyed on
-  `(channels, is_full)` only. With 128ch routing fixed, `ltx-video` (8x VAE,
-  `n_upsample=3`) and `flux2-klein` (16x VAE, `n_upsample=4`) would collide and
-  could return a wrong-shape decoder. Added `n_upsample` to the cache key.
-- **`ltx-video` turbo checkpoint never found**: the on-disk turbo file is named
-  `rudra_turbo_decoder_ltx_ema.safetensors` (no "-video"), but the candidate
-  list only tried the canonical `model_type` ("ltx-video"). Replaced the
-  hardcoded flux↔wan fallback if/elif with a `_DECODER_TYPE_FALLBACKS` table
-  that adds `"ltx"` as a fallback token for `"ltx-video"`, and also covers the
-  RUDRA README's documented cross-model decoder reuse (e.g. "Z-Image: use the
-  Flux decoder") for chroma/cosmos/sd3/lumina2 (→ flux) and
-  cogvideox/hunyuanvideo (→ wan).
+- Added `detect_rudra_model_type(latent_channels, is_video, vae)` in
+  `fast_vae.py` (SSOT for both nodes): 128ch+5D → `ltx-video`, 128ch+4D →
+  `flux2-klein`, 12ch → `mochi`, 16ch+video → `wan`/`cogvideox`/`cosmos`,
+  16ch+image → `flux`, 4ch → `sdxl`.
+- `_FILM_CONDITIONED_MODEL_TYPES = {"flux2"}` — FiLM-conditioned checkpoint
+  skipped cleanly (returns `None`) until upstream `dr_dim` integration lands.
+- `_DECODER_TYPE_FALLBACKS` table replaces hardcoded flux↔wan if/elif:
+  `ltx-video → ["ltx"]` (on-disk turbo file has no "-video" suffix),
+  plus RUDRA README cross-model reuse (chroma/sd3/lumina2 → flux, etc.).
+- `load_radiance_decoder_weights()` now returns `None` (not a randomly-
+  initialised model) on "no checkpoint found" or `strict=True` load failure,
+  with explicit console messages. `hdr_mode`/`source_space` forcing gated on
+  `turbo_decoder is not None`.
+- `RadianceNDISender` `model_size="turbo"` naming bug fixed → `"rudra_turbo"`.
+- Cache key extended to `(channels, n_upsample, is_full)` — prevents 128ch
+  ltx-video (n_upsample=3) / flux2-klein (n_upsample=4) collision.
 
-**Known limitation:** Flux.2 (non-Klein) and Flux.2 Klein are both 128ch/4D
-with identical generic VAE classes — no signal distinguishes them.
-`detect_rudra_model_type` defaults this bucket to `"flux2-klein"` (the
-README-documented/supported checkpoint). A true non-Klein Flux.2 user gets
-Flux.2 Klein's RUDRA weights applied to Flux.2 latents (shape-compatible,
-won't crash) rather than a clean standard-VAE fallback — acceptable for now
-since the FiLM `flux2_ema` checkpoint is never referenced by either code path
-either way.
+**Manual validation:** Flux/SDXL unchanged; LTX 128ch no longer crashes (loads
+via `"ltx"` fallback); Mochi 12ch cleanly falls back to standard VAE.
 
-**Manual ComfyUI validation:**
+### LTX tiled decode b-update fix (fix/ltx-rudra-video-decode)
 
-- Flux 1 Krea Dev (16ch): RUDRA decoder loads (`rudra_turbo_decoder_flux_ema`),
-  decode completes normally — no change vs. before the fix.
-- SDXL (4ch): RUDRA decoder loads (`rudra_turbo_decoder_sdxl_ema`), decode
-  completes normally — same result as before the fix.
-- LTX Video 2.3 (128ch, 5D): RUDRA decoder now found and loaded
-  (`rudra_turbo_decoder_ltx_ema`, via the `"ltx"` fallback) — previously an
-  immediate `nn.Conv2d` crash (4ch vs 128ch). Routing/selection is fixed;
-  the decoded output's color normalization is a separate, pre-existing issue
-  (not addressed here).
-- Mochi (12ch, 5D): no RUDRA checkpoint available — `detect_rudra_model_type`
-  returns `"mochi"`, `load_radiance_decoder_weights` returns `None`, and the
-  node falls back to the standard VAE decode, exactly like the native "VAE
-  Decode" node. Previously this combination crashed with the same
-  `nn.Conv2d` 4ch/12ch mismatch as LTX-Video.
+In `_tiled_decode()` (`hdr/vae.py`), RUDRA's 5D→4D reshape runs *before* the
+BHWC permute, so `tile_decoded` exits as 4D. The FIX-4 `ndim==5` branch that
+updates `b` from 1 to `B*F` never fires. The lazy accumulator is allocated as
+`(1, H, W, C)` while each tile produces `(F, H, W, C)` → `RuntimeError: size
+mismatch` for any tiled resolution.
+
+Fix: after the BHWC permute, `b = tile_decoded.shape[0]` when
+`_tile_video_frames is not None and turbo_decoder is not None`.
+
+**Validated:** 768×432 output (2×1 tiles at tile_size=512), 16 RHDR frames
+exported, no crash.
+
+### LTX RUDRA warning log (fix/ltx-rudra-video-decode)
+
+`logger.warning(...)` added in `load_radiance_decoder_weights()` after a
+successful `ltx-video` checkpoint load: the decoder was trained on isolated
+still images (T=1, no temporal context) via `ltx_vae.safetensors` (LTX v1),
+while inference receives multi-frame causal video latents from LTX 2.3. This
+mismatch causes abstract noise; the decoder needs retraining on real LTX 2.3
+video data.
 
 ---
 
