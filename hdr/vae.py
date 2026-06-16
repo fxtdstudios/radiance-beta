@@ -1916,6 +1916,13 @@ class RadianceVAE4KDecode:
                 if turbo_decoder is not None and tile_decoded.shape[1] == 3:
                    tile_decoded = tile_decoded.permute(0, 2, 3, 1)
 
+                # ALBABIT-FIX: For 3D-native video VAEs (LTX), RUDRA's 5D→4D
+                # reshape (lines 1886-1888) makes tile_decoded 4D — the FIX-4
+                # ndim==5 branch never fires, leaving b=1 instead of B*F.
+                # Update b here so the lazy accumulator is correctly sized.
+                if _tile_video_frames is not None and turbo_decoder is not None:
+                    b = tile_decoded.shape[0]
+
                 # Pixel coordinates
                 px1 = lx1 * scale
                 py1 = ly1 * scale

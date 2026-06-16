@@ -474,6 +474,15 @@ def load_radiance_decoder_weights(
                 f"[Radiance {model_size.upper()}] Loaded trained decoder: {ckpt_path} "
                 f"({expected_channels}ch / {model_type})"
             )
+            if model_type == "ltx-video":
+                logger.warning(
+                    "[Radiance RUDRA] LTX-Video decoder was trained on isolated still "
+                    "images encoded as 1-frame videos via ltx_vae.safetensors (LTX v1). "
+                    "At inference, LTX 2.3 video latents carry full causal temporal "
+                    "context across 81 frames — a distribution the decoder was never "
+                    "trained on. Output quality may be severely degraded (abstract noise). "
+                    "Retrain the decoder on actual LTX 2.3 video latents for correct results."
+                )
         except Exception as e:
             # ALBABIT-FIX: previously fell through and returned the model with
             # random weights ("output will be garbage"). Cache and return None
