@@ -75,7 +75,7 @@ import torch
 import numpy as np
 
 from radiance.hdr.vae import RadianceVAE4KDecode
-from radiance.fast_vae import decode_to_linear_realtime, load_radiance_decoder_weights
+from radiance.fast_vae import decode_to_linear_realtime, detect_rudra_model_type, load_radiance_decoder_weights
 from radiance.color.transfer import (
     tensor_linear_to_logc4,
     tensor_linear_to_slog3,
@@ -268,9 +268,9 @@ class RadianceHDRVAEDecode:
         # samples.get("samples") returned None, _samples.shape raised AttributeError
         # before model_type was assigned — the except block then raised NameError,
         # masking the real error entirely.
-        # FIX (Medium — SD 1.5): 4-channel latents are shared by SD 1.x, SD 2.x, and
-        # SDXL. Inspect the VAE class name for "xl" to distinguish; warn and default
-        # to "sdxl" weights for unrecognised 4ch VAEs (closest channel match available).
+        # ALBABIT-FIX: model_type detection (including the 4ch SD1.x/2.x/SDXL
+        # disambiguation) now lives in detect_rudra_model_type() (fast_vae.py) —
+        # single source of truth shared with RadianceNDISender.
         turbo_decoder = None
         if rudra_decoder == "Enabled":
             model_type = "unknown"  # safe sentinel — always defined before except block
@@ -282,52 +282,43 @@ class RadianceHDRVAEDecode:
                         "ensure a LATENT is connected to this node."
                     )
                 _ch = _samples.shape[1]
-                if _ch == 16:
-                    # 16ch + 5D (video) => Wan model architecture
-                    model_type = "wan" if _samples.ndim == 5 else "flux"
-                else:
-                    # 4-channel: SD 1.x, SD 2.x, and SDXL all share this channel
-                    # count. Inspect the VAE's first_stage_model class name.
-                    _vae_cls = type(
-                        getattr(vae, "first_stage_model", vae)
-                    ).__name__.lower()
-                    if "xl" in _vae_cls or "sdxl" in _vae_cls:
-                        model_type = "sdxl"
-                    else:
-                        # Could be SD 1.x / 2.x — no dedicated fast-decoder weights.
-                        # Default to "sdxl" (same 4ch width) and warn.
-                        logger.warning(
-                            f"[RadianceHDRVAEDecode] Could not confirm SDXL "
-                            f"architecture from VAE class '{type(vae).__name__}'. "
-                            f"Using 'sdxl' VAE weights as closest 4ch match. "
-                            f"If output looks incorrect, disable the RUDRA decoder."
-                        )
-                        model_type = "sdxl"
+                model_type = detect_rudra_model_type(_ch, _samples.ndim == 5, vae=vae)
 
                 turbo_decoder = load_radiance_decoder_weights(
                     model_type=model_type,
                     model_size=decoder_size,
                 )
-                # Turbo/Full models expect log targets. Force log mode if not already set.
-                if hdr_mode != "Compress (Log)":
-                    logger.warning(
-                        f"[RadianceHDRVAEDecode] RUDRA Decoder enabled but hdr_mode='{hdr_mode}'. "
-                        f"Distilled models require log-coded targets; forcing 'Compress (Log)'."
-                    )
-                    hdr_mode = "Compress (Log)"
+                if turbo_decoder is not None:
+                    # Turbo/Full models expect log targets. Force log mode if not already set.
+                    if hdr_mode != "Compress (Log)":
+                        logger.warning(
+                            f"[RadianceHDRVAEDecode] RUDRA Decoder enabled but hdr_mode='{hdr_mode}'. "
+                            f"Distilled models require log-coded targets; forcing 'Compress (Log)'."
+                        )
+                        hdr_mode = "Compress (Log)"
 
-                # Auto-align source_space to a valid log profile if needed
-                VALID_LOG_SPACES = {"ARRI LogC4", "Sony S-Log3", "ARRI LogC3", "Panasonic V-Log", "DaVinci Intermediate", "RED Log3G10"}
-                if source_space not in VALID_LOG_SPACES:
-                    from radiance.config.model_map import resolve_model_vae_config
-                    cfg = resolve_model_vae_config(model_type) or {}
-                    default_curve = cfg.get("log_curve", "ARRI LogC4")
+                    # Auto-align source_space to a valid log profile if needed
+                    VALID_LOG_SPACES = {"ARRI LogC4", "Sony S-Log3", "ARRI LogC3", "Panasonic V-Log", "DaVinci Intermediate", "RED Log3G10"}
+                    if source_space not in VALID_LOG_SPACES:
+                        from radiance.config.model_map import resolve_model_vae_config
+                        cfg = resolve_model_vae_config(model_type) or {}
+                        default_curve = cfg.get("log_curve", "ARRI LogC4")
+                        logger.info(
+                            f"[RadianceHDRVAEDecode] RUDRA Decoder enabled but source_space='{source_space}' "
+                            f"is not a log-encoded space. Automatically setting decompression profile to "
+                            f"'{default_curve}' to match distilled weights."
+                        )
+                        source_space = default_curve
+                else:
+                    # ALBABIT-FIX: load_radiance_decoder_weights() now returns None
+                    # (instead of a randomly-initialised decoder) when no compatible
+                    # RUDRA checkpoint is available — keep hdr_mode/source_space
+                    # untouched and fall back to the standard VAE decode.
                     logger.info(
-                        f"[RadianceHDRVAEDecode] RUDRA Decoder enabled but source_space='{source_space}' "
-                        f"is not a log-encoded space. Automatically setting decompression profile to "
-                        f"'{default_curve}' to match distilled weights."
+                        f"[RadianceHDRVAEDecode] No RUDRA decoder available for "
+                        f"model_type={model_type!r} (size={decoder_size!r}). "
+                        f"Falling back to the standard VAE decoder."
                     )
-                    source_space = default_curve
             except Exception as _fast_err:
                 logger.error(
                     f"[RadianceHDRVAEDecode] RUDRA decoder load failed "
@@ -667,9 +658,21 @@ class RadianceNDISender:
                 # Direct fast decode via fast_vae library
                 latent = latent_in["samples"]
                 ch = latent.shape[1]
-                model_type = "flux" if ch >= 16 else "sdxl"
+                # ALBABIT-FIX: shared detect_rudra_model_type() (fast_vae.py) replaces
+                # "ch >= 16 -> flux else sdxl", which misclassified 12ch (mochi) and
+                # 128ch (ltx-video, flux2/flux2-klein) latents as 4ch sdxl.
+                model_type = detect_rudra_model_type(ch, latent.ndim == 5, vae=vae)
                 compute_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-                decoder = load_radiance_decoder_weights(model_type=model_type, model_size="turbo").to(compute_device)
+                # ALBABIT-FIX: model_size="turbo" never matched on-disk
+                # "rudra_turbo_decoder_*_ema.safetensors" filenames — aligned to
+                # "rudra_turbo" like RadianceHDRVAEDecode. load_radiance_decoder_weights()
+                # can now return None (no compatible checkpoint); raise so the
+                # existing try/except below falls back to the plain image input
+                # (BUG 6 FIX).
+                decoder = load_radiance_decoder_weights(model_type=model_type, model_size="rudra_turbo")
+                if decoder is None:
+                    raise RuntimeError(f"No RUDRA decoder available for model_type={model_type!r}")
+                decoder = decoder.to(compute_device)
                 scale_factor = getattr(vae, "scale_factor", None)
                 if not isinstance(scale_factor, (int, float)) or scale_factor == 0:
                     from radiance.config.model_map import get_model_vae_param

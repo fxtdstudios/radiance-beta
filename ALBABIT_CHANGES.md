@@ -339,5 +339,102 @@ auto-toggles `enable_video`, sets `model_type`, resets `scale_factor` to 1.0.
 
 ---
 
+## Radiance HDR VAE Decode (hdr/vae.py, fast_vae.py, nodes/generate/engine.py)
+
+### RUDRA model_type detection + graceful fallback (PR #12 — fix/rudra-model-detection)
+
+Both `RadianceHDRVAEDecode.apply()` and `RadianceNDISender.apply()` detected
+the RUDRA `model_type` with a 2-bucket heuristic (`_ch == 16 → wan/flux else →
+sdxl`). Any latent with 12ch (Mochi) or 128ch (LTX-Video, Flux.2 Klein) was
+misclassified as `"sdxl"` → `nn.Conv2d` channel-mismatch crash.
+
+- Added `detect_rudra_model_type(latent_channels, is_video, vae)` in
+  `fast_vae.py` (SSOT for both nodes): 128ch+5D → `ltx-video`, 128ch+4D →
+  `flux2-klein`, 12ch → `mochi`, 16ch+video → `wan`/`cogvideox`/`cosmos`,
+  16ch+image → `flux`, 4ch → `sdxl`.
+- `_FILM_CONDITIONED_MODEL_TYPES = {"flux2"}` — FiLM-conditioned checkpoint
+  skipped cleanly (returns `None`) until upstream `dr_dim` integration lands.
+- `_DECODER_TYPE_FALLBACKS` table replaces hardcoded flux↔wan if/elif:
+  `ltx-video → ["ltx"]` (on-disk turbo file has no "-video" suffix),
+  plus RUDRA README cross-model reuse (chroma/sd3/lumina2 → flux, etc.).
+- `load_radiance_decoder_weights()` now returns `None` (not a randomly-
+  initialised model) on "no checkpoint found" or `strict=True` load failure,
+  with explicit console messages. `hdr_mode`/`source_space` forcing gated on
+  `turbo_decoder is not None`.
+- `RadianceNDISender` `model_size="turbo"` naming bug fixed → `"rudra_turbo"`.
+- Cache key extended to `(channels, n_upsample, is_full)` — prevents 128ch
+  ltx-video (n_upsample=3) / flux2-klein (n_upsample=4) collision.
+
+**Manual validation:** Flux/SDXL unchanged; LTX 128ch no longer crashes (loads
+via `"ltx"` fallback); Mochi 12ch cleanly falls back to standard VAE.
+
+### LTX tiled decode b-update fix (fix/ltx-rudra-video-decode)
+
+In `_tiled_decode()` (`hdr/vae.py`), RUDRA's 5D→4D reshape runs *before* the
+BHWC permute, so `tile_decoded` exits as 4D. The FIX-4 `ndim==5` branch that
+updates `b` from 1 to `B*F` never fires. The lazy accumulator is allocated as
+`(1, H, W, C)` while each tile produces `(F, H, W, C)` → `RuntimeError: size
+mismatch` for any tiled resolution.
+
+Fix: after the BHWC permute, `b = tile_decoded.shape[0]` when
+`_tile_video_frames is not None and turbo_decoder is not None`.
+
+**Validated:** 768×432 output (2×1 tiles at tile_size=512), 16 RHDR frames
+exported, no crash.
+
+### LTX RUDRA warning log (fix/ltx-rudra-video-decode)
+
+`logger.warning(...)` added in `load_radiance_decoder_weights()` after a
+successful `ltx-video` checkpoint load: the decoder was trained on isolated
+still images (T=1, no temporal context) via `ltx_vae.safetensors` (LTX v1),
+while inference receives multi-frame causal video latents from LTX 2.3. This
+mismatch causes abstract noise; the decoder needs retraining on real LTX 2.3
+video data.
+
+### 4ch spurious warning removed (`detect_rudra_model_type`)
+
+`detect_rudra_model_type()` previously tried to confirm SDXL architecture via
+the VAE class name (`"xl" in _vae_cls`), then emitted a warning when the check
+failed. In practice, ComfyUI wraps every VAE — SDXL and SD 1.5 alike — in the
+same generic `comfy.sd.VAE` class, so the check could never succeed. Since
+`"sdxl"` is the only 4ch RUDRA checkpoint that exists, the VAE-class check and
+the warning were removed; the function now returns `"sdxl"` unconditionally for
+4ch latents.
+
+### Temporal chunking (`temporal_size` / `temporal_overlap`)
+
+`RadianceVAE4KDecode` and `RadianceHDRVAEDecode` gain two new optional inputs:
+
+- **`temporal_size`** (INT, default 0): latent frames per temporal chunk.
+  `0` = disabled (all frames decoded at once, same as before).
+- **`temporal_overlap`** (INT, default 0): overlap in latent frames between
+  consecutive chunks.
+
+**Architecture:** Temporal chunking is handled in `decode()`, *before* the
+`pix_h <= ts_px` spatial decision. This is deliberate: for 3D-native VAEs like
+Mochi (848×480), the spatial footprint fits within one tile, so `_tiled_decode()`
+is never called — placing temporal chunking inside `_tiled_decode()` (initial
+approach) caused it to be silently bypassed, resulting in an OOM crash during
+testing. Moving it to `decode()` ensures it fires for all 5D latents regardless
+of spatial size or tiling mode.
+
+When `temporal_size > 0` and the latent is 5D with `T > temporal_size`, `decode()`
+splits the T axis into chunks and calls itself recursively with `temporal_size=0`
+per chunk (to prevent infinite recursion). Each chunk independently chooses tiled
+or direct decode based on its spatial size. For overlapping chunks, the
+overlapping pixel frames at the end of each non-last chunk are trimmed (the next
+chunk's start covers those frames with more intra-chunk context). `_tiled_decode()`
+has no temporal params — temporal and spatial concerns are fully orthogonal.
+
+The `RadianceHDRVAEDecode` node inherits the new inputs automatically via
+`**safe_kwargs`; no changes to `engine.py` were required.
+
+**Use case:** Mochi OOM at 848×480 / 49 frames — the full (1, 12, 9, 53, 60)
+latent exhausts 32GB VRAM when decoded in one shot alongside bf16 models.
+Setting `temporal_size=5` splits the 9 latent T frames into two chunks of 5
+and 4 frames, roughly halving peak activation memory during VAE decode.
+
+---
+
 Tests: 1382 pass (41 unrelated gsplat/splatting tests excluded — CUDA DLL not
 available in this environment).
