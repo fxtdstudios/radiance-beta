@@ -401,6 +401,31 @@ same generic `comfy.sd.VAE` class, so the check could never succeed. Since
 the warning were removed; the function now returns `"sdxl"` unconditionally for
 4ch latents.
 
+### Temporal chunking (`temporal_size` / `temporal_overlap`)
+
+`RadianceVAE4KDecode` and `RadianceHDRVAEDecode` gain two new optional inputs:
+
+- **`temporal_size`** (INT, default 0): latent frames per temporal chunk.
+  `0` = disabled (all frames decoded at once, same as before).
+- **`temporal_overlap`** (INT, default 0): overlap in latent frames between
+  consecutive chunks.
+
+When `temporal_size > 0` and the latent is 5D (video), `_tiled_decode()` splits
+the T axis into smaller chunks before VAE decode. Each chunk is decoded
+independently with the full spatial tiling logic applied within it. For
+non-overlapping chunks the results are concatenated directly; for overlapping
+chunks, the overlapping frames at the end of each non-last chunk are trimmed
+(the next chunk's start provides a fresher decode of those frames).
+
+The `RadianceHDRVAEDecode` node inherits the new inputs automatically (via
+`INPUT_TYPES` inheritance) and forwards them through `**safe_kwargs` without
+any changes to `engine.py`.
+
+**Use case:** Mochi OOM at 848×480 / 49 frames — the full (1, 12, 9, 53, 60)
+latent exhausts 32GB VRAM when decoded in one shot alongside bf16 models.
+Setting `temporal_size=5` splits the 9 latent T frames into two chunks of 5
+and 4 frames, roughly halving the peak activation memory during VAE decode.
+
 ---
 
 Tests: 1382 pass (41 unrelated gsplat/splatting tests excluded — CUDA DLL not
