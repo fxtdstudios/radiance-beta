@@ -2773,6 +2773,9 @@ class RadianceVAE4KDecode:
                 self._frame_decode_active = True
                 try:
                     for t1, t2 in t_chunks:
+                        # ALBABIT-FIX: nudge ComfyUI's memory manager to offload idle
+                        # models before each chunk so the VAE conv activations fit.
+                        comfy.model_management.soft_empty_cache()
                         chunk_samples = dict(samples)
                         chunk_samples["samples"] = latent[:, :, t1:t2, :, :].contiguous()
                         chunk_img, _, _ = self.decode(
@@ -2916,7 +2919,7 @@ class RadianceVAE4KDecode:
         # NOT Compress(Log) (log mode requires explicit source_space to invert
         # the right curve). We suggest a warning; we do NOT silently override
         # because for encode→decode pipelines "Linear" may be correct.
-        if source_space == "Linear" and hdr_mode not in ("Compress (Log)",):
+        if source_space == "Linear" and hdr_mode not in ("Compress (Log)",) and not _quiet_diag:
             try:
                 _sample_px = img[0].reshape(-1, img.shape[-1]) if img.ndim == 4 else img.reshape(-1, img.shape[-1])
                 _step = max(1, _sample_px.shape[0] // 50_000)
