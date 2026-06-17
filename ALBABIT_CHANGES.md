@@ -445,8 +445,36 @@ The `RadianceHDRVAEDecode` node inherits the new inputs automatically via
 
 **Use case:** Mochi OOM at 848×480 / 49 frames — the full (1, 12, 9, 53, 60)
 latent exhausts 32GB VRAM when decoded in one shot alongside bf16 models.
-Setting `temporal_size=5` splits the 9 latent T frames into two chunks of 5
-and 4 frames, roughly halving peak activation memory during VAE decode.
+Setting `temporal_size=2` with `temporal_overlap=1` splits the 9 latent T frames
+into 8 overlapping chunks, keeping each VAE forward pass well within available
+VRAM.
+
+### Temporal chunking — post-merge polish
+
+Three additional fixes applied after the initial PR merge:
+
+- **`soft_empty_cache()` before each chunk** (`hdr/vae.py`): calls
+  `comfy.model_management.soft_empty_cache()` at the start of each temporal
+  chunk iteration. This nudges ComfyUI's DynamicVRAM scheduler to offload idle
+  models (UNET, text encoder) to CPU before the VideoVAE conv activations are
+  allocated, significantly reducing the risk of OOM even when large models
+  remain staged.
+
+- **Per-chunk `pix_per_lat` in overlap trimming** (`hdr/vae.py`): the overlap
+  pixel count was previously computed from the first chunk's frame ratio and
+  applied uniformly to all chunks. Fixed to compute `pix_per_lat` per chunk
+  inside the trim loop — correct for future 3D causal VAEs where padding may
+  produce asymmetric pixel-per-latent-frame ratios.
+
+- **Per-chunk diagnostic warning suppressed** (`hdr/vae.py`): the v4.5
+  `source_space='Linear'` luma heuristic warning was firing once per temporal
+  chunk (8× in a typical Mochi run). Gated on `not _quiet_diag` so it fires
+  at most once per top-level `decode()` call.
+
+- **`hunyuanvideo` dead entry removed** (`fast_vae.py`): `"hunyuanvideo": ["wan"]`
+  in `_DECODER_TYPE_FALLBACKS` was never reachable — `detect_rudra_model_type()`
+  maps HunyuanVideo (16ch video) directly to `"wan"` before any fallback lookup.
+  Entry removed.
 
 ---
 

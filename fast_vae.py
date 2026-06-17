@@ -67,7 +67,7 @@ _DECODER_TYPE_FALLBACKS: dict[str, list[str]] = {
     "flux": ["wan"], "wan": ["flux"],
     "ltx-video": ["ltx"],
     "chroma": ["flux"], "cosmos": ["flux"], "sd3": ["flux"], "lumina2": ["flux"],
-    "cogvideox": ["wan"], "hunyuanvideo": ["wan"],
+    "cogvideox": ["wan"],
 }
 
 

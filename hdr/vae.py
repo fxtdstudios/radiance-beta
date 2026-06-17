@@ -2807,12 +2807,14 @@ class RadianceVAE4KDecode:
                     self._frame_decode_active = _quiet_prev
 
                 if t_ov > 0 and len(chunk_imgs) > 1:
-                    f1_t1, f1_t2, f1_img = chunk_imgs[0]
-                    pix_per_lat = f1_img.shape[0] / max(1, f1_t2 - f1_t1)
-                    pix_ov = max(1, round(t_ov * pix_per_lat))
                     trimmed = []
                     for i, (t1, t2, ch) in enumerate(chunk_imgs):
-                        trimmed.append(ch[:max(1, ch.shape[0] - pix_ov)] if i < len(chunk_imgs) - 1 else ch)
+                        if i < len(chunk_imgs) - 1:
+                            pix_per_lat = ch.shape[0] / max(1, t2 - t1)
+                            pix_ov = max(1, round(t_ov * pix_per_lat))
+                            trimmed.append(ch[:max(1, ch.shape[0] - pix_ov)])
+                        else:
+                            trimmed.append(ch)
                     img_out = torch.cat(trimmed, dim=0)
                 else:
                     img_out = torch.cat([ch for _, _, ch in chunk_imgs], dim=0)
