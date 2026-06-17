@@ -476,7 +476,27 @@ Three additional fixes applied after the initial PR merge:
   maps HunyuanVideo (16ch video) directly to `"wan"` before any fallback lookup.
   Entry removed.
 
+- **`LATENT_FORMAT_MAP` extended** (`hdr/vae.py`): added `12 → "mochi_12ch"` and
+  `128 → "ltx_128ch"`. Previously these channel counts fell through to the
+  `"unknown_Nch"` fallback, causing misleading `fmt=sd_4ch` labels in decode logs
+  for Mochi (12ch) and LTX-Video (128ch). Also annotated existing entries with
+  accurate model names.
+
+### Test suite — temporal chunking (`tests/test_temporal_chunking.py`)
+
+13 new tests added, all passing:
+
+- **`TileEngine.compute_tiles`** (3 tests): confirms equal-sized chunks with
+  `t_ov > 0`, full T-axis coverage, and single-chunk edge case.
+- **Overlap trimming — per-chunk `pix_per_lat`** (3 tests): validates the
+  asymmetric-chunk case where first-chunk ratio would be wrong (confirms fix),
+  equal-chunk path unchanged (no regression), minimum-1-frame guard.
+- **`decode()` smoke** (3 tests): no-overlap and with-overlap frame count
+  assertions using a mock VAE; `temporal_size=0` confirmed to disable chunking.
+- **`LATENT_FORMAT_MAP`** (4 tests): new 12ch/128ch entries, existing entries
+  unchanged, unknown-channel fallback.
+
 ---
 
-Tests: 1382 pass (41 unrelated gsplat/splatting tests excluded — CUDA DLL not
+Tests: 1395 pass (41 unrelated gsplat/splatting tests excluded — CUDA DLL not
 available in this environment).
