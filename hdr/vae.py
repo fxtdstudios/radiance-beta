@@ -150,10 +150,12 @@ VAE_FACTOR_MAP: Dict[str, int] = {
 
 # Feature 1: channel count → format label
 LATENT_FORMAT_MAP: Dict[int, str] = {
-    4:  "sd_4ch",     # SD1.x, SD2.x
-    8:  "sd3_8ch",    # SD3 medium (8-ch)
-    16: "flux_16ch",  # Flux, SD3 large, WAN, LTX-V
-    32: "cascade_32ch",
+    4:   "sd_4ch",        # SD1.x, SD2.x, SDXL
+    8:   "sd3_8ch",       # SD3 medium (8-ch)
+    12:  "mochi_12ch",    # Mochi (Genmo) causal video VAE
+    16:  "flux_16ch",     # Flux, SD3 large, WAN, Chroma, HunyuanVideo
+    32:  "cascade_32ch",  # Stable Cascade
+    128: "ltx_128ch",     # LTX-Video (all versions), Flux.2 Klein
 }
 
 # Feature 4: latent distribution sampling modes
@@ -2773,6 +2775,9 @@ class RadianceVAE4KDecode:
                 self._frame_decode_active = True
                 try:
                     for t1, t2 in t_chunks:
+                        # ALBABIT-FIX: nudge ComfyUI's memory manager to offload idle
+                        # models before each chunk so the VAE conv activations fit.
+                        comfy.model_management.soft_empty_cache()
                         chunk_samples = dict(samples)
                         chunk_samples["samples"] = latent[:, :, t1:t2, :, :].contiguous()
                         chunk_img, _, _ = self.decode(
@@ -2804,12 +2809,14 @@ class RadianceVAE4KDecode:
                     self._frame_decode_active = _quiet_prev
 
                 if t_ov > 0 and len(chunk_imgs) > 1:
-                    f1_t1, f1_t2, f1_img = chunk_imgs[0]
-                    pix_per_lat = f1_img.shape[0] / max(1, f1_t2 - f1_t1)
-                    pix_ov = max(1, round(t_ov * pix_per_lat))
                     trimmed = []
                     for i, (t1, t2, ch) in enumerate(chunk_imgs):
-                        trimmed.append(ch[:max(1, ch.shape[0] - pix_ov)] if i < len(chunk_imgs) - 1 else ch)
+                        if i < len(chunk_imgs) - 1:
+                            pix_per_lat = ch.shape[0] / max(1, t2 - t1)
+                            pix_ov = max(1, round(t_ov * pix_per_lat))
+                            trimmed.append(ch[:max(1, ch.shape[0] - pix_ov)])
+                        else:
+                            trimmed.append(ch)
                     img_out = torch.cat(trimmed, dim=0)
                 else:
                     img_out = torch.cat([ch for _, _, ch in chunk_imgs], dim=0)
@@ -2916,7 +2923,7 @@ class RadianceVAE4KDecode:
         # NOT Compress(Log) (log mode requires explicit source_space to invert
         # the right curve). We suggest a warning; we do NOT silently override
         # because for encode→decode pipelines "Linear" may be correct.
-        if source_space == "Linear" and hdr_mode not in ("Compress (Log)",):
+        if source_space == "Linear" and hdr_mode not in ("Compress (Log)",) and not _quiet_diag:
             try:
                 _sample_px = img[0].reshape(-1, img.shape[-1]) if img.ndim == 4 else img.reshape(-1, img.shape[-1])
                 _step = max(1, _sample_px.shape[0] // 50_000)

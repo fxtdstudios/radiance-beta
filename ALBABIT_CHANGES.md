@@ -445,10 +445,58 @@ The `RadianceHDRVAEDecode` node inherits the new inputs automatically via
 
 **Use case:** Mochi OOM at 848×480 / 49 frames — the full (1, 12, 9, 53, 60)
 latent exhausts 32GB VRAM when decoded in one shot alongside bf16 models.
-Setting `temporal_size=5` splits the 9 latent T frames into two chunks of 5
-and 4 frames, roughly halving peak activation memory during VAE decode.
+Setting `temporal_size=2` with `temporal_overlap=1` splits the 9 latent T frames
+into 8 overlapping chunks, keeping each VAE forward pass well within available
+VRAM.
+
+### Temporal chunking — post-merge polish
+
+Three additional fixes applied after the initial PR merge:
+
+- **`soft_empty_cache()` before each chunk** (`hdr/vae.py`): calls
+  `comfy.model_management.soft_empty_cache()` at the start of each temporal
+  chunk iteration. This nudges ComfyUI's DynamicVRAM scheduler to offload idle
+  models (UNET, text encoder) to CPU before the VideoVAE conv activations are
+  allocated, significantly reducing the risk of OOM even when large models
+  remain staged.
+
+- **Per-chunk `pix_per_lat` in overlap trimming** (`hdr/vae.py`): the overlap
+  pixel count was previously computed from the first chunk's frame ratio and
+  applied uniformly to all chunks. Fixed to compute `pix_per_lat` per chunk
+  inside the trim loop — correct for future 3D causal VAEs where padding may
+  produce asymmetric pixel-per-latent-frame ratios.
+
+- **Per-chunk diagnostic warning suppressed** (`hdr/vae.py`): the v4.5
+  `source_space='Linear'` luma heuristic warning was firing once per temporal
+  chunk (8× in a typical Mochi run). Gated on `not _quiet_diag` so it fires
+  at most once per top-level `decode()` call.
+
+- **`hunyuanvideo` dead entry removed** (`fast_vae.py`): `"hunyuanvideo": ["wan"]`
+  in `_DECODER_TYPE_FALLBACKS` was never reachable — `detect_rudra_model_type()`
+  maps HunyuanVideo (16ch video) directly to `"wan"` before any fallback lookup.
+  Entry removed.
+
+- **`LATENT_FORMAT_MAP` extended** (`hdr/vae.py`): added `12 → "mochi_12ch"` and
+  `128 → "ltx_128ch"`. Previously these channel counts fell through to the
+  `"unknown_Nch"` fallback, causing misleading `fmt=sd_4ch` labels in decode logs
+  for Mochi (12ch) and LTX-Video (128ch). Also annotated existing entries with
+  accurate model names.
+
+### Test suite — temporal chunking (`tests/test_temporal_chunking.py`)
+
+13 new tests added, all passing:
+
+- **`TileEngine.compute_tiles`** (3 tests): confirms equal-sized chunks with
+  `t_ov > 0`, full T-axis coverage, and single-chunk edge case.
+- **Overlap trimming — per-chunk `pix_per_lat`** (3 tests): validates the
+  asymmetric-chunk case where first-chunk ratio would be wrong (confirms fix),
+  equal-chunk path unchanged (no regression), minimum-1-frame guard.
+- **`decode()` smoke** (3 tests): no-overlap and with-overlap frame count
+  assertions using a mock VAE; `temporal_size=0` confirmed to disable chunking.
+- **`LATENT_FORMAT_MAP`** (4 tests): new 12ch/128ch entries, existing entries
+  unchanged, unknown-channel fallback.
 
 ---
 
-Tests: 1382 pass (41 unrelated gsplat/splatting tests excluded — CUDA DLL not
+Tests: 1395 pass (41 unrelated gsplat/splatting tests excluded — CUDA DLL not
 available in this environment).
