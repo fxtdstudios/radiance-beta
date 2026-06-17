@@ -150,10 +150,12 @@ VAE_FACTOR_MAP: Dict[str, int] = {
 
 # Feature 1: channel count → format label
 LATENT_FORMAT_MAP: Dict[int, str] = {
-    4:  "sd_4ch",     # SD1.x, SD2.x
-    8:  "sd3_8ch",    # SD3 medium (8-ch)
-    16: "flux_16ch",  # Flux, SD3 large, WAN, LTX-V
-    32: "cascade_32ch",
+    4:   "sd_4ch",        # SD1.x, SD2.x, SDXL
+    8:   "sd3_8ch",       # SD3 medium (8-ch)
+    12:  "mochi_12ch",    # Mochi (Genmo) causal video VAE
+    16:  "flux_16ch",     # Flux, SD3 large, WAN, Chroma, HunyuanVideo
+    32:  "cascade_32ch",  # Stable Cascade
+    128: "ltx_128ch",     # LTX-Video (all versions), Flux.2 Klein
 }
 
 # Feature 4: latent distribution sampling modes
