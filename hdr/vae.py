@@ -1603,6 +1603,41 @@ class RadianceVAE4KDecode:
                         "tooltip": "Overlap between tiles. 128px optimal for cosine blending.",
                     },
                 ),
+                # ALBABIT-FIX: Temporal chunking for video VAE decode.
+                # Splits the video latent along the T axis into smaller chunks
+                # before VAE decode to reduce peak VRAM. Each chunk is decoded
+                # independently with the full spatial tiling logic applied within
+                # it. Results are concatenated along the frame axis.
+                "temporal_size": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 256,
+                        "step": 1,
+                        "tooltip": (
+                            "Temporal chunk size in latent frames. 0 = disabled (full video decoded at once). "
+                            "Splits video latents along the time axis to reduce peak VRAM during VAE decode. "
+                            "Useful when hitting OOM on long videos. "
+                            "For Mochi: try 4–6. For LTX-Video: try 8–16. "
+                            "Images (4D latents) are not affected."
+                        ),
+                    },
+                ),
+                "temporal_overlap": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 32,
+                        "step": 1,
+                        "tooltip": (
+                            "Overlap in latent frames between temporal chunks. 0 = no overlap. "
+                            "A small value (1–2) reduces temporal seams at chunk boundaries. "
+                            "Only active when temporal_size > 0."
+                        ),
+                    },
+                ),
                 "exposure_adjust": (
                     "FLOAT",
                     {
@@ -1779,41 +1814,6 @@ class RadianceVAE4KDecode:
                             "  DaVinci Intermediate: 0.030\n"
                             "  RED Log3G10:          0.035\n"
                             "Ignored for non-Compress(Log) hdr_modes."
-                        ),
-                    },
-                ),
-                # ALBABIT-FIX: Temporal chunking for video VAE decode.
-                # Splits the video latent along the T axis into smaller chunks
-                # before VAE decode to reduce peak VRAM. Each chunk is decoded
-                # independently with the full spatial tiling logic applied within
-                # it. Results are concatenated along the frame axis.
-                "temporal_size": (
-                    "INT",
-                    {
-                        "default": 0,
-                        "min": 0,
-                        "max": 256,
-                        "step": 1,
-                        "tooltip": (
-                            "Temporal chunk size in latent frames. 0 = disabled (full video decoded at once). "
-                            "Splits video latents along the time axis to reduce peak VRAM during VAE decode. "
-                            "Useful when hitting OOM on long videos. "
-                            "For Mochi: try 4–6. For LTX-Video: try 8–16. "
-                            "Images (4D latents) are not affected."
-                        ),
-                    },
-                ),
-                "temporal_overlap": (
-                    "INT",
-                    {
-                        "default": 0,
-                        "min": 0,
-                        "max": 32,
-                        "step": 1,
-                        "tooltip": (
-                            "Overlap in latent frames between temporal chunks. 0 = no overlap. "
-                            "A small value (1–2) reduces temporal seams at chunk boundaries. "
-                            "Only active when temporal_size > 0."
                         ),
                     },
                 ),
