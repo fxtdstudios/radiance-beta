@@ -347,13 +347,10 @@ def detect_rudra_model_type(latent_channels: int, is_video: bool, vae=None) -> s
     if latent_channels == 12:
         return "mochi"  # only 12ch entry in MODEL_VAE_CONFIG
     if latent_channels == 4:
-        if "xl" in _vae_cls or "sdxl" in _vae_cls:
-            return "sdxl"
-        logger.warning(
-            f"[Radiance] Could not confirm SDXL architecture from VAE class "
-            f"'{type(vae).__name__ if vae is not None else '?'}'. Using 'sdxl' "
-            f"VAE weights as closest 4ch match."
-        )
+        # ALBABIT-FIX: SDXL and SD 1.5 share the same VAE architecture (4ch,
+        # identical structure) — ComfyUI wraps both in the same generic class,
+        # so no VAE-level signal can distinguish them. "sdxl" is the only
+        # 4ch RUDRA checkpoint that exists, so return it unconditionally.
         return "sdxl"
     raise ValueError(f"RUDRA decoder: unsupported latent channel count {latent_channels}.")
 
