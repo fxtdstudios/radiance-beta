@@ -1846,25 +1846,21 @@ class RadianceVAE4KDecode:
         pbar: Any = None,
         vae_factor: int = 8,
         turbo_decoder: torch.nn.Module = None,
-        temporal_size: int = 0,
-        temporal_overlap: int = 0,
     ) -> torch.Tensor:
         """
-        Decode full latent in overlapping tiles with cosine blend.
+        Decode full latent in overlapping spatial tiles with cosine blend.
 
-        When temporal_size > 0 and the latent is 5D (video), the T axis is first
-        split into temporal chunks which are decoded independently to reduce peak
-        VRAM. The chunk outputs are concatenated along the frame dimension.
+        Temporal chunking is handled upstream in decode() before this method
+        is called, so samples["samples"] may be 4D (B, C, H, W) or a 5D
+        (B, C, T, H, W) chunk whose T dimension fits in VRAM.
 
         Args:
-            samples:          {"samples": latent} — 4D or 5D
-            vae:              ComfyUI VAE model
-            tile_size_px:     Tile size in pixel space
-            overlap_px:       Spatial overlap in pixel space
-            pbar:             Optional ComfyUI ProgressBar
-            vae_factor:       Spatial downscale factor (auto-detected by caller)
-            temporal_size:    Latent frames per temporal chunk (0 = no chunking)
-            temporal_overlap: Overlap in latent frames between temporal chunks
+            samples:      {"samples": latent} — 4D or 5D
+            vae:          ComfyUI VAE model
+            tile_size_px: Tile size in pixel space
+            overlap_px:   Spatial overlap in pixel space
+            pbar:         Optional ComfyUI ProgressBar
+            vae_factor:   Spatial downscale factor (auto-detected by caller)
 
         Returns:
             Tuple of:
@@ -1872,59 +1868,6 @@ class RadianceVAE4KDecode:
               - int | None — pixel frame count if a 3D-native VAE was detected
         """
         latent = samples["samples"]
-
-        # ALBABIT-FIX: Temporal chunking for 5D video latents.
-        # When the latent has a T dimension and temporal_size > 0, split it into
-        # smaller temporal chunks and decode each independently. This reduces the
-        # peak VRAM needed by the VAE decoder (useful for Mochi, LTX-Video, etc.).
-        if latent.ndim == 5 and temporal_size > 0:
-            _B, _C, _T, _latH, _latW = latent.shape
-            if _T > temporal_size:
-                t_ov = max(0, temporal_overlap)
-                if t_ov > 0:
-                    t_chunks = TileEngine.compute_tiles(_T, temporal_size, t_ov)
-                else:
-                    # Non-overlapping: simple contiguous split (no duplicate frames)
-                    t_chunks = [
-                        (t, min(t + temporal_size, _T))
-                        for t in range(0, _T, temporal_size)
-                    ]
-
-                logger.info(
-                    f"[Radiance Temporal Decode] {_T} latent frames → "
-                    f"{len(t_chunks)} chunks (chunk_size={temporal_size}, overlap={t_ov})"
-                )
-
-                chunk_outputs = []
-                for t1, t2 in t_chunks:
-                    sub = {"samples": latent[:, :, t1:t2, :, :].contiguous()}
-                    chunk_img, chunk_frames = self._tiled_decode(
-                        sub, vae, tile_size_px, overlap_px, pbar,
-                        vae_factor, turbo_decoder,
-                        temporal_size=0, temporal_overlap=0,
-                    )
-                    chunk_outputs.append((t1, t2, chunk_img))
-
-                if t_ov > 0 and len(chunk_outputs) > 1:
-                    # Trim the latent-frame overlap from the end of every non-last
-                    # chunk (the next chunk's start provides the canonical decode
-                    # for those frames with fresher context).
-                    f1_t1, f1_t2, f1_dec = chunk_outputs[0]
-                    pix_per_lat = f1_dec.shape[0] / max(1, f1_t2 - f1_t1)
-                    pix_ov = max(1, round(t_ov * pix_per_lat))
-
-                    trimmed = []
-                    for i, (t1, t2, dec) in enumerate(chunk_outputs):
-                        if i < len(chunk_outputs) - 1:
-                            keep = max(1, dec.shape[0] - pix_ov)
-                            trimmed.append(dec[:keep])
-                        else:
-                            trimmed.append(dec)
-                    result = torch.cat(trimmed, dim=0)
-                else:
-                    result = torch.cat([dec for _, _, dec in chunk_outputs], dim=0)
-
-                return result, result.shape[0]
 
         b, c = latent.shape[0], latent.shape[1]
         lat_h, lat_w = latent.shape[-2], latent.shape[-1]
@@ -2804,6 +2747,75 @@ class RadianceVAE4KDecode:
         lat_h, lat_w = latent.shape[-2], latent.shape[-1]
         pix_h, pix_w = lat_h * vae_factor, lat_w * vae_factor
 
+        # ALBABIT-FIX: Temporal chunking — orthogonal to spatial tiling.
+        # Placed here so it fires for ALL model types (3D-native VAEs such as
+        # Mochi and LTX-Video whose 5D latent reaches this branch after the
+        # non-3D frame-loop is skipped, as well as any future path bringing a
+        # 5D latent directly here). Each chunk is decoded independently via a
+        # recursive decode() call (temporal_size=0 prevents further recursion);
+        # the individual chunk calls choose tiled or direct decode on their own
+        # based on spatial size, so temporal and spatial chunking stay orthogonal.
+        if latent.ndim == 5 and temporal_size > 0:
+            _T = latent.shape[2]
+            if _T > temporal_size:
+                t_ov = max(0, temporal_overlap)
+                t_chunks = (
+                    TileEngine.compute_tiles(_T, temporal_size, t_ov)
+                    if t_ov > 0
+                    else [(t, min(t + temporal_size, _T)) for t in range(0, _T, temporal_size)]
+                )
+                logger.info(
+                    f"[Radiance Temporal Decode] {_T} latent frames → "
+                    f"{len(t_chunks)} chunks (chunk_size={temporal_size}, overlap={t_ov})"
+                )
+                chunk_imgs = []
+                _quiet_prev = getattr(self, "_frame_decode_active", False)
+                self._frame_decode_active = True
+                try:
+                    for t1, t2 in t_chunks:
+                        chunk_samples = dict(samples)
+                        chunk_samples["samples"] = latent[:, :, t1:t2, :, :].contiguous()
+                        chunk_img, _, _ = self.decode(
+                            chunk_samples,
+                            vae=vae,
+                            target_space=target_space,
+                            tile_size=tile_size,
+                            overlap=overlap,
+                            exposure_adjust=exposure_adjust,
+                            alpha=None,
+                            hdr_mode=hdr_mode,
+                            display_tonemap=display_tonemap,
+                            inverse_tonemap=inverse_tonemap,
+                            target_stops=target_stops,
+                            crop_padding="",
+                            export_rhdr=False,
+                            rhdr_precision=rhdr_precision,
+                            source_space=source_space,
+                            processing_mode=processing_mode,
+                            force_hdr_decode=force_hdr_decode,
+                            hdr_output=hdr_output,
+                            turbo_decoder=turbo_decoder,
+                            decode_noise_scale=decode_noise_scale,
+                            temporal_size=0,
+                            temporal_overlap=0,
+                        )
+                        chunk_imgs.append((t1, t2, chunk_img))
+                finally:
+                    self._frame_decode_active = _quiet_prev
+
+                if t_ov > 0 and len(chunk_imgs) > 1:
+                    f1_t1, f1_t2, f1_img = chunk_imgs[0]
+                    pix_per_lat = f1_img.shape[0] / max(1, f1_t2 - f1_t1)
+                    pix_ov = max(1, round(t_ov * pix_per_lat))
+                    trimmed = []
+                    for i, (t1, t2, ch) in enumerate(chunk_imgs):
+                        trimmed.append(ch[:max(1, ch.shape[0] - pix_ov)] if i < len(chunk_imgs) - 1 else ch)
+                    img_out = torch.cat(trimmed, dim=0)
+                else:
+                    img_out = torch.cat([ch for _, _, ch in chunk_imgs], dim=0)
+
+                return (img_out, json.dumps({"temporal_chunks": len(t_chunks)}), latent_fmt)
+
         logger.info(
             f"[Radiance 4K Decode v2.3] Latent: {lat_w}×{lat_h} → "
             f"Output: {pix_w}×{pix_h} ({b} frames, factor={vae_factor}, fmt={latent_fmt})"
@@ -2890,7 +2902,6 @@ class RadianceVAE4KDecode:
                 img, _tiled_video_frames = self._tiled_decode(
                     samples, vae, ts_px, overlap, pbar,
                     vae_factor=vae_factor, turbo_decoder=turbo_decoder,
-                    temporal_size=temporal_size, temporal_overlap=temporal_overlap,
                 )
                 if _tiled_video_frames is not None:
                     decoded_video_frames = _tiled_video_frames

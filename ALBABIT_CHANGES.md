@@ -410,21 +410,29 @@ the warning were removed; the function now returns `"sdxl"` unconditionally for
 - **`temporal_overlap`** (INT, default 0): overlap in latent frames between
   consecutive chunks.
 
-When `temporal_size > 0` and the latent is 5D (video), `_tiled_decode()` splits
-the T axis into smaller chunks before VAE decode. Each chunk is decoded
-independently with the full spatial tiling logic applied within it. For
-non-overlapping chunks the results are concatenated directly; for overlapping
-chunks, the overlapping frames at the end of each non-last chunk are trimmed
-(the next chunk's start provides a fresher decode of those frames).
+**Architecture:** Temporal chunking is handled in `decode()`, *before* the
+`pix_h <= ts_px` spatial decision. This is deliberate: for 3D-native VAEs like
+Mochi (848×480), the spatial footprint fits within one tile, so `_tiled_decode()`
+is never called — placing temporal chunking inside `_tiled_decode()` (initial
+approach) caused it to be silently bypassed, resulting in an OOM crash during
+testing. Moving it to `decode()` ensures it fires for all 5D latents regardless
+of spatial size or tiling mode.
 
-The `RadianceHDRVAEDecode` node inherits the new inputs automatically (via
-`INPUT_TYPES` inheritance) and forwards them through `**safe_kwargs` without
-any changes to `engine.py`.
+When `temporal_size > 0` and the latent is 5D with `T > temporal_size`, `decode()`
+splits the T axis into chunks and calls itself recursively with `temporal_size=0`
+per chunk (to prevent infinite recursion). Each chunk independently chooses tiled
+or direct decode based on its spatial size. For overlapping chunks, the
+overlapping pixel frames at the end of each non-last chunk are trimmed (the next
+chunk's start covers those frames with more intra-chunk context). `_tiled_decode()`
+has no temporal params — temporal and spatial concerns are fully orthogonal.
+
+The `RadianceHDRVAEDecode` node inherits the new inputs automatically via
+`**safe_kwargs`; no changes to `engine.py` were required.
 
 **Use case:** Mochi OOM at 848×480 / 49 frames — the full (1, 12, 9, 53, 60)
 latent exhausts 32GB VRAM when decoded in one shot alongside bf16 models.
 Setting `temporal_size=5` splits the 9 latent T frames into two chunks of 5
-and 4 frames, roughly halving the peak activation memory during VAE decode.
+and 4 frames, roughly halving peak activation memory during VAE decode.
 
 ---
 
