@@ -391,6 +391,16 @@ while inference receives multi-frame causal video latents from LTX 2.3. This
 mismatch causes abstract noise; the decoder needs retraining on real LTX 2.3
 video data.
 
+### 4ch spurious warning removed (`detect_rudra_model_type`)
+
+`detect_rudra_model_type()` previously tried to confirm SDXL architecture via
+the VAE class name (`"xl" in _vae_cls`), then emitted a warning when the check
+failed. In practice, ComfyUI wraps every VAE — SDXL and SD 1.5 alike — in the
+same generic `comfy.sd.VAE` class, so the check could never succeed. Since
+`"sdxl"` is the only 4ch RUDRA checkpoint that exists, the VAE-class check and
+the warning were removed; the function now returns `"sdxl"` unconditionally for
+4ch latents.
+
 ---
 
 Tests: 1382 pass (41 unrelated gsplat/splatting tests excluded — CUDA DLL not
