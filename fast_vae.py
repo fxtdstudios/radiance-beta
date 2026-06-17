@@ -43,11 +43,32 @@ logger = logging.getLogger("radiance.fast_vae")
 # Operators can override via: export RADIANCE_TURBO_DECODER=/path/to/ckpt.pth
 _ENV_CKPT = os.environ.get("RADIANCE_TURBO_DECODER", "")
 
-# Module-level decoder cache keyed on (latent_channels, is_full_model).
-# A dict allows flux (16ch) and sdxl (4ch) models, and turbo vs full
-# variants, to coexist in memory — switching model types no longer
-# invalidates and reloads the previously-loaded decoder.
+# Module-level decoder cache keyed on (latent_channels, n_upsample, is_full_model).
+# A dict allows flux (16ch) and sdxl (4ch) models, turbo vs full variants, and
+# same-channel-count architectures with different upsample factors (e.g. 128ch
+# ltx-video vs flux2-klein) to coexist in memory without collisions.
+# ALBABIT-FIX: a cached value of None means "no compatible RUDRA checkpoint"
+# (FiLM architecture, missing file, or failed strict load) — so repeated calls
+# don't repeat the same failing filesystem lookup / warning log.
 _TRAINED_DECODER_CACHE: dict = {}
+
+# ALBABIT-FIX: canonical model_types whose RUDRA checkpoint uses a
+# FiLM-conditioned architecture (film_in/film_out/projection) not yet
+# supported by RadianceTurboDecoder/RadianceFullDecoder. Gracefully skip
+# RUDRA for these until upstream's dr_dim integration (stage 2/3) lands.
+_FILM_CONDITIONED_MODEL_TYPES: set[str] = {"flux2"}
+
+# ALBABIT-FIX: additional model_type tokens to try for checkpoint filenames
+# when the primary model_type has no matching file on disk — covers both
+# filename inconsistencies (ltx-video's turbo checkpoint is named
+# "..._ltx_ema..." without "-video") and documented cross-model decoder reuse
+# (RUDRA README: "Z-Image: use the Flux decoder").
+_DECODER_TYPE_FALLBACKS: dict[str, list[str]] = {
+    "flux": ["wan"], "wan": ["flux"],
+    "ltx-video": ["ltx"],
+    "chroma": ["flux"], "cosmos": ["flux"], "sd3": ["flux"], "lumina2": ["flux"],
+    "cogvideox": ["wan"], "hunyuanvideo": ["wan"],
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -299,28 +320,82 @@ def decode_to_linear_realtime(
 #                      WEIGHT LOADING
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ALBABIT-FIX: shared model_type detection for RUDRA decoder selection — single
+# source of truth for RadianceHDRVAEDecode and RadianceNDISender, replacing the
+# previous "_ch == 16 -> wan/flux else -> sdxl" heuristics that misclassified
+# any 12ch (mochi) or 128ch (ltx-video, flux2/flux2-klein) latent as 4ch sdxl.
+def detect_rudra_model_type(latent_channels: int, is_video: bool, vae=None) -> str:
+    """
+    Map a latent's channel count (+ video/image shape) to the closest
+    MODEL_VAE_CONFIG canonical model_type for RUDRA decoder selection.
+
+    Raises ValueError for channel counts with no RUDRA-compatible config.
+    """
+    _vae_cls = type(getattr(vae, "first_stage_model", vae)).__name__.lower() if vae is not None else ""
+
+    if latent_channels == 128:
+        # Only ltx-video (8x VAE, 5D) and flux2/flux2-klein (16x VAE, 4D) are 128ch.
+        return "ltx-video" if is_video else "flux2-klein"
+    if latent_channels == 16:
+        if is_video:
+            if "cogvideo" in _vae_cls:
+                return "cogvideox"
+            if "cosmos" in _vae_cls:
+                return "cosmos"
+            return "wan"  # WanVAE, or HunyuanVideo's generic AutoencodingEngine
+        return "flux"  # Chroma/Z-Image/Qwen/SD3/Lumina2 share Flux's 16ch VAE shape
+    if latent_channels == 12:
+        return "mochi"  # only 12ch entry in MODEL_VAE_CONFIG
+    if latent_channels == 4:
+        # ALBABIT-FIX: SDXL and SD 1.5 share the same VAE architecture (4ch,
+        # identical structure) — ComfyUI wraps both in the same generic class,
+        # so no VAE-level signal can distinguish them. "sdxl" is the only
+        # 4ch RUDRA checkpoint that exists, so return it unconditionally.
+        return "sdxl"
+    raise ValueError(f"RUDRA decoder: unsupported latent channel count {latent_channels}.")
+
+
 def load_radiance_decoder_weights(
     model_type: str = "flux",
     model_size: str = "turbo",
     checkpoint_path: Optional[str] = None,
-) -> nn.Module:
+) -> Optional[nn.Module]:
     """
-    Load Radiance Decoder (Turbo or Full) with trained or random weights.
+    Load a trained Radiance Decoder (Turbo or Full) checkpoint.
 
     Priority order for weight source:
       1. explicit `checkpoint_path` argument
       2. RADIANCE_TURBO_DECODER environment variable
       3. Default locations (ComfyUI models/radiance/ directory)
-      4. Random initialisation with a clear warning
 
     Args:
-        model_type:       "flux" (16ch) or "sdxl" (4ch).
-        model_size:       "turbo" (lightweight) or "full" (production).
-        checkpoint_path:  Optional explicit path to .pth checkpoint.
+        model_type:       Canonical MODEL_VAE_CONFIG key, e.g. "flux", "sdxl",
+                           "wan", "mochi", "ltx-video", "flux2-klein" — see
+                           detect_rudra_model_type().
+        model_size:       "rudra_turbo"/"turbo" (lightweight) or
+                           "rudra_full"/"full" (production).
+        checkpoint_path:  Optional explicit path to a checkpoint file.
 
-    Returns initialised nn.Module in eval mode.
+    Returns the loaded nn.Module in eval mode, or None if no compatible
+    checkpoint is available (FiLM-conditioned architecture, no checkpoint on
+    disk, or a strict state_dict load failure) — callers should fall back to
+    the standard VAE decode in that case.
     """
     import math as _math
+
+    # ALBABIT-FIX: rudra_turbo_decoder_flux2_ema.safetensors (Flux.2 non-Klein)
+    # uses a FiLM-conditioned architecture (film_in/film_out/projection) that
+    # RadianceTurboDecoder/RadianceFullDecoder cannot load. Skip cleanly until
+    # upstream's dr_dim integration (stage 2/3) lands a matching decoder class.
+    if model_type.strip().lower() in _FILM_CONDITIONED_MODEL_TYPES:
+        logger.info(
+            f"[Radiance {model_size.upper()}] model_type={model_type!r} uses a "
+            f"FiLM-conditioned RUDRA checkpoint (film_in/film_out/projection) "
+            f"not yet supported by RadianceTurboDecoder/RadianceFullDecoder. "
+            f"Falling back to the standard VAE decoder."
+        )
+        return None
+
     cfg = resolve_model_vae_config(model_type)
     expected_channels = cfg.get("latent_channels", 16) if cfg else 16
     # Number of ×2 upsample stages = log2(VAE spatial factor). 8× → 3, 16× → 4.
@@ -330,12 +405,16 @@ def load_radiance_decoder_weights(
     # an exact "== full" check silently built the Turbo arch for rudra_full and
     # then failed the strict load of full-decoder weights.
     request_is_full = ("full" in str(model_size).lower())
-    cache_key = (expected_channels, request_is_full)
+    # ALBABIT-FIX: n_upsample added to the cache key — 128ch ltx-video (8x VAE,
+    # n_upsample=3) and flux2-klein (16x VAE, n_upsample=4) would otherwise
+    # collide on (channels, is_full) alone and could return a wrong-shape decoder.
+    cache_key = (expected_channels, n_upsample, request_is_full)
 
-    # Fast path: return already-loaded model for this (channels, size) pair.
-    # Multiple entries coexist so switching between flux/sdxl or turbo/full
-    # does not evict the previously-loaded decoder.
-    if _TRAINED_DECODER_CACHE and cache_key in _TRAINED_DECODER_CACHE:
+    # Fast path: return already-loaded model (or a cached "unavailable" None)
+    # for this (channels, n_upsample, size) combination. Multiple entries
+    # coexist so switching between model types or turbo/full does not evict
+    # previously-loaded decoders.
+    if cache_key in _TRAINED_DECODER_CACHE:
         return _TRAINED_DECODER_CACHE[cache_key]
 
     if request_is_full:
@@ -351,9 +430,11 @@ def load_radiance_decoder_weights(
         try:
             import folder_paths
             models_dir = folder_paths.models_dir
-            _types = [model_type]
-            if model_type == "flux": _types.append("wan")
-            elif model_type == "wan": _types.append("flux")
+            # ALBABIT-FIX: generalised fallback table (was a hardcoded flux<->wan
+            # if/elif) — also covers the "ltx-video" -> "ltx" filename mismatch
+            # and the RUDRA README's documented cross-model decoder reuse
+            # (e.g. "Z-Image: use the Flux decoder").
+            _types = [model_type] + _DECODER_TYPE_FALLBACKS.get(model_type, [])
 
             candidates = []
             for t in _types:
@@ -363,7 +444,6 @@ def load_radiance_decoder_weights(
                     candidates.extend([
                         os.path.join(models_dir, "radiance", f"{model_size}_decoder_{t}_ema{ext}"),
                         os.path.join(models_dir, "radiance", f"{model_size}_decoder_{t}{ext}"),
-                        os.path.join(models_dir, "radiance", f"turbo_decoder_{t}_ema{ext}") if model_size == "turbo" else None,
                     ])
             for c in candidates:
                 if c and os.path.exists(c):
@@ -391,26 +471,44 @@ def load_radiance_decoder_weights(
                 f"[Radiance {model_size.upper()}] Loaded trained decoder: {ckpt_path} "
                 f"({expected_channels}ch / {model_type})"
             )
+            if model_type == "ltx-video":
+                logger.warning(
+                    "[Radiance RUDRA] LTX-Video decoder was trained on isolated still "
+                    "images encoded as 1-frame videos via ltx_vae.safetensors (LTX v1). "
+                    "At inference, LTX 2.3 video latents carry full causal temporal "
+                    "context across 81 frames — a distribution the decoder was never "
+                    "trained on. Output quality may be severely degraded (abstract noise). "
+                    "Retrain the decoder on actual LTX 2.3 video latents for correct results."
+                )
         except Exception as e:
+            # ALBABIT-FIX: previously fell through and returned the model with
+            # random weights ("output will be garbage"). Cache and return None
+            # so callers fall back to the standard VAE decoder instead.
             logger.error(
                 f"[Radiance {model_size.upper()}] Failed to load checkpoint {ckpt_path}: {e}\n"
-                f"Falling back to random weights."
+                f"Falling back to the standard VAE decoder."
             )
+            _TRAINED_DECODER_CACHE[cache_key] = None
+            return None
     else:
-        msg = (
-            f"[Radiance {model_size.upper()}] No trained checkpoint found. "
-            f"Decoder is randomly initialised — output will be garbage.\n"
+        # ALBABIT-FIX: previously returned a randomly-initialised decoder
+        # ("output will be garbage"). Cache and return None so callers fall
+        # back to the standard VAE decoder instead of producing noise.
+        logger.warning(
+            f"[Radiance {model_size.upper()}] No trained checkpoint found for "
+            f"model_type={model_type!r}. Falling back to the standard VAE decoder.\n"
             f"Train a decoder with: python training/train_turbo_decoder.py --model_size {model_size}\n"
             f"Then set: export RADIANCE_TURBO_DECODER=/path/to/checkpoint.pth\n"
             f"Or place checkpoint at: models/radiance/{model_size}_decoder_{model_type}_ema.pth"
         )
-        logger.warning(msg)
+        _TRAINED_DECODER_CACHE[cache_key] = None
+        return None
 
     model.eval()
     _TRAINED_DECODER_CACHE[cache_key] = model
     return model
 
 
-def load_turbo_weights(model_type: str = "flux", checkpoint_path: Optional[str] = None) -> nn.Module:
+def load_turbo_weights(model_type: str = "flux", checkpoint_path: Optional[str] = None) -> Optional[nn.Module]:
     """Legacy alias for backward compatibility."""
     return load_radiance_decoder_weights(model_type=model_type, model_size="turbo", checkpoint_path=checkpoint_path)
