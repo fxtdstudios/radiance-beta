@@ -158,6 +158,16 @@ CLIP_DTYPES   = ["default", "fp16", "bf16", "fp8_e4m3fn", "fp32"]
 OFFLOAD_MODES = ["none", "cpu_offload", "sequential"]
 
 
+def _find_wan_moe_companion(unet_name):
+    # ALBABIT-FIX: WAN 2.2 uses two expert UNETs (high_noise + low_noise).
+    # Derive the companion filename by swapping the noise tag.
+    name_lower = unet_name.lower()
+    for tag, companion_tag in (("high_noise", "low_noise"), ("low_noise", "high_noise")):
+        idx = name_lower.find(tag)
+        if idx != -1:
+            return unet_name[:idx] + companion_tag + unet_name[idx + len(tag):]
+    return None
+
 
 class RadianceUnifiedLoader:
     """
@@ -259,7 +269,7 @@ class RadianceUnifiedLoader:
         }
 
     RETURN_TYPES  = ("MODEL", "CLIP", "VAE", "LORA_STACK", "STRING")
-    RETURN_NAMES  = ("MODEL", "CLIP", "VAE", "lora_stack", "model_meta")
+    RETURN_NAMES  = ("model", "clip", "vae", "lora_stack", "model_meta")
     FUNCTION      = "load_radiance_stack"
     CATEGORY      = "FXTD STUDIOS/Radiance/◎ Generate"
     DESCRIPTION   = (
@@ -457,6 +467,16 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
     def INPUT_TYPES(cls):
         types = super().INPUT_TYPES()
 
+        # ALBABIT-FIX: update unet_name tooltip to document WAN 2.2 dual-expert auto-detect.
+        types["required"]["unet_name"][1]["tooltip"] = (
+            "Main diffusion model (UNET / DiT / Transformer).\n"
+            "For WAN 2.2, select either the high_noise or low_noise file — "
+            "the companion expert is detected automatically. "
+            "The 'model' output always carries the high_noise expert "
+            "and 'model_low_noise' always carries the low_noise expert, "
+            "regardless of which file is selected."
+        )
+
         # ALBABIT-FIX: video loader only lists video-model presets
         # (image presets are exclusive to RadianceUnifiedLoader).
         _, preset_kwargs = types["required"]["preset"]
@@ -510,8 +530,10 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
 
         return types
 
-    RETURN_TYPES  = ("MODEL", "CLIP", "VAE", "VAE", "LORA_STACK", "LATENT_UPSCALE_MODEL", "STRING")
-    RETURN_NAMES  = ("MODEL", "CLIP", "VAE", "AUDIO_VAE", "lora_stack", "upscale_model", "model_meta")
+    # ALBABIT-FIX: MODEL_LOW_NOISE slot reserved for WAN 2.2 dual-expert (MoE) support.
+    # Returns None until the loading strategy is confirmed with upstream dev.
+    RETURN_TYPES  = ("MODEL", "MODEL", "CLIP", "VAE", "VAE", "LORA_STACK", "LATENT_UPSCALE_MODEL", "STRING")
+    RETURN_NAMES  = ("model", "model_low_noise", "clip", "vae", "audio_vae", "lora_stack", "upscale_model", "model_meta")
     DESCRIPTION   = (
         "Video loader v3.3 — for LTX 2.3, Wan, HunyuanVideo, etc. "
         "Supports Baked/standalone VAE, optional Audio VAE, and optional "
@@ -584,8 +606,11 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
         # 3. VRAM ESTIMATION
         # ════════════════════════════════════════════════════════════════
         has_loras = bool(lora_stack)
+        # Detect companion early so VRAM estimate accounts for both UNETs.
+        companion_name = _find_wan_moe_companion(unet_name)
         est, avail, total = estimate_vram_for_load(
-            resolved_type, weight_dtype, clip_dtype, has_loras, check_vram, divider, info_lines
+            resolved_type, weight_dtype, clip_dtype, has_loras, check_vram, divider, info_lines,
+            extra_unet_count=1 if companion_name else 0,
         )
 
         # ════════════════════════════════════════════════════════════════
@@ -595,6 +620,27 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
             unet_path, unet_name, weight_dtype, offload_mode, vae_name, audio_vae_name,
             caching, divider, info_lines
         )
+
+        # ════════════════════════════════════════════════════════════════
+        # 4b. LOAD WAN 2.2 MoE COMPANION UNET (auto-detect high/low_noise pair)
+        # ════════════════════════════════════════════════════════════════
+        model_low_noise = None
+        # companion_name already computed above for VRAM estimate accuracy.
+        if companion_name:
+            companion_path = _ensure_model_exists(companion_name, "diffusion_models", auto_download)
+            if companion_path:
+                model_low_noise, _, _, _, _, _, _ = load_unet_and_baked_vae(
+                    companion_path, companion_name, weight_dtype, offload_mode,
+                    "None", "None", caching, divider, info_lines
+                )
+            else:
+                logger.warning(f"WAN 2.2 companion UNET not found: '{companion_name}'")
+                info_lines.append(f"COMPANION UNET: '{companion_name}' not found — MODEL_LOW_NOISE will be None")
+
+        # ALBABIT-FIX: ensure model = high_noise expert, model_low_noise = low_noise expert,
+        # regardless of which file the user picked in the unet_name widget.
+        if model_low_noise is not None and "low_noise" in unet_name.lower():
+            model, model_low_noise = model_low_noise, model
 
         # ════════════════════════════════════════════════════════════════
         # 5. LOAD CLIP  (named slots → ordered paths → mtime cache key)
@@ -776,12 +822,14 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
             "loras":         applied_loras,
             "audio_vae":     audio_vae_name if audio_vae is not None else None,
             "upscale_model": upscale_model_name if upscale_model is not None else None,
+            "wan_moe_companion": companion_name if model_low_noise is not None else None,
             "load_ms":       total_ms,
             "cached_unet":   unet_cache_hit,
         }
 
         return (
             model,
+            model_low_noise,
             clip,
             vae,
             audio_vae,

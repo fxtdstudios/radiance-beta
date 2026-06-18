@@ -28,6 +28,8 @@ from radiance.model.detect import (
     estimate_vram_usage,
     LATENT_CHANNELS,
     CLIP_SLOT_ORDER,
+    _BASE_VRAM,
+    _DTYPE_MULT,
 )
 from radiance.model.cache import get_model_cache, _unet_cache, _clip_cache, _vae_cache, _audio_vae_cache
 from radiance.core.logging import supports_unicode
@@ -249,9 +251,17 @@ def estimate_vram_for_load(
     check_vram: str,
     divider: str,
     info_lines: list[str],
+    extra_unet_count: int = 0,
 ) -> tuple[float, float, float]:
-    """Estimate VRAM usage and, if check_vram=="On", log available/total VRAM."""
+    """Estimate VRAM usage and, if check_vram=="On", log available/total VRAM.
+
+    extra_unet_count: additional UNETs beyond the primary (e.g. 1 for WAN 2.2 MoE companion).
+    """
     est = estimate_vram_usage(resolved_type, weight_dtype, clip_dtype, has_loras, False)
+    if extra_unet_count > 0:
+        # Companion UNETs add UNET memory only (same type/dtype, no extra CLIP).
+        unet_gb = _BASE_VRAM.get(resolved_type, 8.0) * _DTYPE_MULT.get(weight_dtype, 1.0)
+        est = round(est + unet_gb * extra_unet_count, 1)
 
     if check_vram == "On":
         avail = get_available_vram()

@@ -23,6 +23,7 @@ const PRESET_SLOTS = {
     "HunyuanVideo": ["clip_l", "llm_encoder"],
     "Wan 2.1": ["t5xxl"],
     "Wan 2.2": ["t5xxl"],
+    "Wan 2.2 TI2V": ["t5xxl"],
     "LTX Video": ["llm_encoder", "text_projection"],
     "LTX Video 13B": ["llm_encoder", "text_projection"],
     "LTX Video 2.3": ["llm_encoder", "text_projection"],
@@ -138,8 +139,25 @@ const PRESET_CONFIGS = {
         },
     },
     "Wan 2.2": {
-        "unet_hints":    ["wan2.2", "wan_2.2", "wan-2.2", "Wan2.2"],
-        "vae_hints":     ["wan2.2_vae", "wan_2.2_vae", "wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
+        "unet_hints":    [
+            "wan2.2_t2v_high_noise_14B_fp8_scaled",
+            "wan2.2_i2v_high_noise_14B_fp8_scaled",
+            "wan2.2_t2v_high_noise",
+            "wan2.2_i2v_high_noise",
+            "wan2.2_high_noise",
+            "wan2.2",
+            "wan_2.2",
+            "wan-2.2",
+            "Wan2.2",
+        ],
+        "vae_hints":     ["wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
+        "clip_hints":    {
+            "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
+        },
+    },
+    "Wan 2.2 TI2V": {
+        "unet_hints":    ["wan2.2_ti2v_5B_fp16", "wan2.2_ti2v_5B", "wan2.2_ti2v"],
+        "vae_hints":     ["wan2.2_vae", "wan_2.2_vae"],
         "clip_hints":    {
             "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
         },
