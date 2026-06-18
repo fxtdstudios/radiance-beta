@@ -513,6 +513,13 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "default",
     },
+    # ALBABIT-FIX: TI2V-5B is a single-UNET WAN 2.2 variant (no high/low_noise pair)
+    # and requires wan2.2_vae.safetensors (48ch), not wan_2.1_vae (16ch).
+    "Wan 2.2 TI2V": {
+        "model_type": "wan",
+        "weight_dtype": "default",
+        "clip_dtype": "default",
+    },
     "LTX Video": {
         "model_type": "ltx",
         "weight_dtype": "fp16",
@@ -588,6 +595,7 @@ VIDEO_PRESET_NAMES: set = {
     "HunyuanVideo",
     "Wan 2.1",
     "Wan 2.2",
+    "Wan 2.2 TI2V",
     "LTX Video",
     "LTX Video 13B",
     "LTX Video 2.3",

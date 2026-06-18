@@ -175,8 +175,14 @@ widgets when switching back to "Custom".
   `upscale_model_name`.
 - **Wan 2.1**: fixed `t5xxl` hints to `umt5_xxl_*`; corrected `vae_name` to
   `wan_2.1_vae.safetensors`.
-- **Wan 2.2** (new preset): own `unet_hints`/`vae_hints` (`wan2.2_vae`,
-  fallback `wan_2.1_vae`); MoE multi-file UNETs / t2v-i2v variants deferred.
+- **Wan 2.2** (new preset): own `unet_hints`/`vae_hints`; vae_hints prioritize
+  `wan_2.1_vae` (16ch, correct for t2v/i2v 14B models); `wan2.2_vae` excluded —
+  it is for WAN2.2-TI2V-5B (different 48ch architecture, incompatible with 14B
+  t2v/i2v models).
+- **Wan 2.2 TI2V** (new preset): single-UNET variant (`wan2.2_ti2v_5B_*`); no
+  high/low_noise companion (companion auto-detect is a no-op for this filename);
+  vae_hints prioritize `wan2.2_vae` (48ch, `vae2_2.py` code path, required for
+  TI2V-5B); weight_dtype `default` (native fp16).
 - **PixArt Sigma**: corrected `vae_name` to the SDXL-based VAE.
 - **Lumina2**: text encoder → `gemma_2_2b_fp16.safetensors` on `llm_encoder`
   (not `t5xxl`); `vae_name` → `ae.safetensors`.
@@ -248,6 +254,39 @@ to `model/cache.py` alongside `_unet_cache`/`_clip_cache`/`_vae_cache`
 unique sections (baked/standalone Audio VAE, Latent Upscale Model). No
 behavior change — `nodes_loader.py` shrank from 1389 to 882 lines; the
 extracted logic was verified byte-for-byte against the pre-refactor superset.
+
+### WAN 2.2 — Dual-UNET (MoE) companion auto-detect
+
+WAN 2.2 (t2v, i2v, fun_camera, fun_inhance, vace, ...) uses a two-expert UNET
+architecture (Mixture of Experts): a `high_noise` expert for the early denoising
+phase and a `low_noise` expert for the late phase, used in sequence via two
+KSamplerAdvanced nodes.
+
+- **Auto-detect companion file**: `_find_wan_moe_companion()` (module-level
+  helper in `nodes_loader.py`) swaps the `high_noise`/`low_noise` tag in the
+  selected filename (case-insensitive detection, case-preserving replacement) to
+  derive the companion path. The user selects either file in `unet_name`; the
+  companion is resolved automatically.
+- **`model_low_noise` output slot**: `RadianceVideoLoader` gains a second
+  `MODEL` output (`model_low_noise`). If the companion file is found it is
+  loaded and returned; if not found, `model_low_noise` is `None` (a warning is
+  logged).
+- **Guaranteed semantic ordering**: regardless of which expert file the user
+  picks, after companion loading the outputs are swapped if necessary so that
+  `model` (first output) always carries the `high_noise` expert and
+  `model_low_noise` always carries the `low_noise` expert. This matches the
+  expected wire-up: first KSampler <- `model`, second KSampler <- `model_low_noise`.
+- **VAE note**: WAN 2.2 t2v/i2v 14B models use `wan_2.1_vae.safetensors` (16ch).
+  `wan2.2_vae.safetensors` is for WAN2.2-TI2V-5B (48ch latents, `vae2_2.py`
+  code path) and is incompatible with the 14B t2v/i2v models.
+
+### Lowercase output slot names
+
+`RadianceVideoLoader.RETURN_NAMES` and `RadianceUnifiedLoader.RETURN_NAMES`
+now use lowercase for the primary type slots (`model`, `model_low_noise`,
+`clip`, `vae`, `audio_vae`) to match the convention of other ComfyUI nodes.
+Technical/internal slots (`lora_stack`, `upscale_model`, `model_meta`) were
+already lowercase and are unchanged.
 
 ---
 
