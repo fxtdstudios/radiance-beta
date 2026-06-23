@@ -206,6 +206,14 @@ const LTX_INCOMPATIBLE_WIDGETS = [
     "tile_blend"
 ];
 
+// ALBABIT-FIX: widgets that become inert when an active sigmas_override is connected.
+// start_step/end_step are intentionally excluded — in v3 they still control the
+// sigmas_remaining slice window even when the override is active.
+const SIGMA_OVERRIDE_WIDGETS = [
+    "steps", "denoise", "scheduler", "scheduler_mode", "flux_shift",
+    "terminal_sigma_to_zero", "ays_schedule", "custom_ays_anchors", "force_exact_steps",
+];
+
 // ── 1. Widget visibility helpers ──
 // ALBABIT-FIX: three-mechanism pattern for Nodes 2.0 + Legacy LiteGraph:
 //   1. widget.options.hidden  — Nodes 2.0 Vue filter
@@ -432,6 +440,8 @@ function applyFolding(node) {
     // 3.6. Preset info text box is shown for named presets.
     setWidgetVisible(find("preset_info"), true, node);
 
+    // ALBABIT-FIX: update disabled state for sigmas_override-dependent widgets.
+    updateSigmaLocks(node);
     refreshNodeSize(node);
 }
 
@@ -462,6 +472,37 @@ function updateUILocks(node, presetName) {
                     widget.inputEl.style.pointerEvents = "auto";
                 }
             }
+        }
+    });
+
+    node.setDirtyCanvas(true, true);
+}
+
+// ALBABIT-FIX: returns true when sigmas_override has an active (non-muted, non-bypassed) link.
+function isSigmaOverrideActive(node) {
+    const sigmasInput = node.inputs?.find(inp => inp.name === "sigmas_override");
+    if (!sigmasInput || !sigmasInput.link) return false;
+    const link = app.graph.links[sigmasInput.link];
+    if (!link) return false;
+    const originNode = app.graph.getNodeById(link.origin_id);
+    // mode 2 = Muted, mode 4 = Bypassed — treat as inactive
+    return originNode && originNode.mode !== 2 && originNode.mode !== 4;
+}
+
+// ALBABIT-FIX: disable/re-enable the widgets that become inert when sigmas_override is active.
+// Uses the same disabled + inputEl styling as updateUILocks().
+// start_step/end_step are NOT in the list — they still slice the override to produce sigmas_remaining.
+function updateSigmaLocks(node) {
+    if (!node.widgets) return;
+    const locked = isSigmaOverrideActive(node);
+
+    node.widgets.forEach(widget => {
+        if (!SIGMA_OVERRIDE_WIDGETS.includes(widget.name)) return;
+        widget.disabled = locked;
+        if (widget.inputEl) {
+            widget.inputEl.disabled = locked;
+            widget.inputEl.style.opacity = locked ? "0.4" : "1.0";
+            widget.inputEl.style.pointerEvents = locked ? "none" : "auto";
         }
     });
 
@@ -867,6 +908,18 @@ app.registerExtension({
             this.onConnectionsChange = function (...args) {
                 if (origConnect) origConnect.apply(this, args);
                 toggleFields(this);
+            };
+
+            // ALBABIT-FIX: poll for upstream mute/bypass changes. onConnectionsChange only
+            // fires on this node — it does not fire when the upstream node is muted/bypassed.
+            this._sigmaCheckInterval = setInterval(() => updateSigmaLocks(self), 250);
+            const origOnRemoved = this.onRemoved;
+            this.onRemoved = function () {
+                if (self._sigmaCheckInterval) {
+                    clearInterval(self._sigmaCheckInterval);
+                    self._sigmaCheckInterval = null;
+                }
+                if (origOnRemoved) origOnRemoved.apply(this, arguments);
             };
 
             // Initialize UI state immediately (safe — no widget visibility changes)

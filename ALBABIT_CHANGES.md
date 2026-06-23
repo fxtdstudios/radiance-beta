@@ -372,7 +372,22 @@ auto-toggles `enable_video`, sets `model_type`, resets `scale_factor` to 1.0.
 
 ---
 
-## Radiance Sampler (js/radiance_sampler.js)
+## Radiance Sampler (js/radiance_sampler.js, nodes_sampler.py)
+
+- **`sigmas_override` widget-greying regression**: the v3 JS rewrite dropped
+  `checkSigmaConnection()` entirely — connecting an active `sigmas_override`
+  no longer greyed out the now-inert widgets. Fixed: added `SIGMA_OVERRIDE_WIDGETS`
+  constant (`steps`, `denoise`, `scheduler`, `scheduler_mode`, `flux_shift`,
+  `terminal_sigma_to_zero`, `ays_schedule`, `custom_ays_anchors`,
+  `force_exact_steps` — `start_step`/`end_step` intentionally excluded as they
+  still slice the override to produce the v3 `sigmas_remaining` output);
+  `isSigmaOverrideActive()` checks the upstream node's mode (Muted=2,
+  Bypassed=4); `updateSigmaLocks()` follows the same `disabled`/`inputEl`
+  pattern as `updateUILocks()`; called from `toggleFields()` (covers all
+  existing event paths) and via `setInterval(250ms)` in `onNodeCreated` (needed
+  for upstream mute/bypass, which don't fire `onConnectionsChange` on this
+  node). Also restored the `logger.info` warning in `_prepare_sigmas()` that
+  disappeared alongside the JS regression.
 
 - **Empty spaces in Custom mode after a named preset**: `resolveModelType`
   trusted the backend's `model_type="ltxav"` default for *every* preset
