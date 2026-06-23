@@ -460,6 +460,11 @@ class RadianceSamplerPro:
                         force_exact_steps, sigmas_override, device,
                         custom_ays_anchors=None):
         if sigmas_override is not None:
+            # ALBABIT-FIX: restore informational log when sigmas_override is active
+            logger.info(
+                "[Radiance] sigmas_override active — bypassing internal sigma computation. "
+                "steps / denoise / scheduler / flux_shift / AYS and related settings are ignored."
+            )
             sigmas = sigmas_override.to(device)
             sigmas = correct_sigma_end(sigmas)
             target_steps = max(1, len(sigmas) - 1)
