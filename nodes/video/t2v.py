@@ -1435,28 +1435,6 @@ class RadianceVideoExport:
         return gif_path
 
 
-# ===========================================================================
-# Registration
-# ===========================================================================
-
-NODE_CLASS_MAPPINGS = {
-    "RadianceVideoModelInfo":    RadianceVideoModelInfo,
-    "RadianceVideoLatentNoise":  RadianceVideoLatentNoise,
-    "RadianceVideoCondMerge":    RadianceVideoCondMerge,
-    "RadianceVideoSampler":      RadianceVideoSampler,
-    "RadianceT2VPipeline":       RadianceT2VPipeline,
-    "RadianceI2VPipeline":       RadianceI2VPipeline,
-    "RadianceVideoBatchDecode":  RadianceVideoBatchDecode,
-    "RadianceVideoExport":       RadianceVideoExport,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceVideoModelInfo":    "◎ Radiance Video Model Info",
-    "RadianceVideoLatentNoise":  "◎ Radiance Video Latent Noise",
-    "RadianceVideoCondMerge":    "◎ Radiance Video Cond Merge",
-    "RadianceVideoSampler":      "◎ Radiance Video Sampler",
-    "RadianceT2VPipeline":       "◎ Radiance T2V Pipeline",
-    "RadianceI2VPipeline":       "◎ Radiance I2V Pipeline",
-    "RadianceVideoBatchDecode":  "◎ Radiance Video Batch Decode",
-    "RadianceVideoExport":       "◎ Radiance Video Export",
-}
+# ALBABIT-FIX: NODE_CLASS_MAPPINGS / NODE_DISPLAY_NAME_MAPPINGS removed.
+# Live registry is nodes/video/__init__.py — this file's mappings were never
+# read by ComfyUI and had drifted (stale display names, missing 4 HDR nodes).
