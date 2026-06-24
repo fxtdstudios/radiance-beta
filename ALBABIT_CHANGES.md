@@ -419,6 +419,13 @@ auto-toggles `enable_video`, sets `model_type`, resets `scale_factor` to 1.0.
 
 ## Radiance Video Sampler (nodes/video/t2v.py)
 
+- **Dead `NODE_CLASS_MAPPINGS`/`NODE_DISPLAY_NAME_MAPPINGS` removed from
+  `t2v.py`**: same trap as the Loader audit — the live registry is
+  `nodes/video/__init__.py`; `t2v.py`'s block was never read by ComfyUI and
+  had drifted (display names used "◎ Radiance Video ..." prefix instead of
+  "◎ Video ...", 4 HDR nodes missing). Replaced with a one-line comment
+  pointing to the authoritative registry.
+
 - **`cfg_schedule_json` silent failure + misleading report fixed**: when the
   JSON was invalid or malformed, the `except Exception: pass` block silently
   fell back to the static CFG value — no warning, no indication of failure.
