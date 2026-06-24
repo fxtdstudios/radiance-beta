@@ -419,6 +419,14 @@ auto-toggles `enable_video`, sets `model_type`, resets `scale_factor` to 1.0.
 
 ## Radiance Video Sampler (nodes/video/t2v.py)
 
+- **`cfg_schedule_json` silent failure + misleading report fixed**: when the
+  JSON was invalid or malformed, the `except Exception: pass` block silently
+  fell back to the static CFG value — no warning, no indication of failure.
+  Worse, the sampler report still showed `(from schedule)` regardless. Fixed:
+  added `logger.warning` on parse failure; introduced `_cfg_from_schedule`
+  boolean to gate the report label on actual parse success, not just on
+  whether the string was non-empty.
+
 - **NaN/Inf guard added to `_comfy_sample()`**: `RadianceSamplerPro` already
   sanitizes non-finite values after sampling; `RadianceVideoSampler` had no
   equivalent. CFG blowups, fp16/bf16 overflow, or a degenerate schedule can
