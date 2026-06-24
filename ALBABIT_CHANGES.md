@@ -389,6 +389,16 @@ auto-toggles `enable_video`, sets `model_type`, resets `scale_factor` to 1.0.
   node). Also restored the `logger.info` warning in `_prepare_sigmas()` that
   disappeared alongside the JS regression.
 
+- **`sigma_report`/`latent_meta` dead computation removed**: both were computed
+  on every `sample()` call (`nodes_sampler.py`) but never included in the v3
+  return tuple — leftover from v2 `RETURN_TYPES ("LATENT","SIGMAS","STRING","STRING")`,
+  replaced by `sigmas_remaining`/`sigma_plot` without removing the old
+  computation. Removed both call sites and `_build_latent_meta` from the
+  `nodes_sampler.py` imports (still defined in `sampler_utils.py`, still
+  tested via `test_sdr_conditioning.py` which now imports it directly from
+  `sys.modules["sampler_utils"]`). `build_sigma_report` import retained —
+  it has a second live call site (trivial sigma schedule warning, line ~807).
+
 - **Empty spaces in Custom mode after a named preset**: `resolveModelType`
   trusted the backend's `model_type="ltxav"` default for *every* preset
   (hiding LTX-only widgets even for Flux); `applyPreset` never updated

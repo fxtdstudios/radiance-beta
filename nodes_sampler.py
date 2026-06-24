@@ -45,8 +45,8 @@ try:
         build_sigma_report, _temporally_correlate, _perlin_noise, _perlin_noise_2d, 
         _spectral_noise, _get_freq_grid, _spectral_noise_2d, _brownian_noise, 
         _simplex_noise, _voronoi_noise, _curl_noise, generate_noise, 
-        merge_conditionings, route_conditioning, tile_sample, _build_latent_meta, 
-        MODEL_DEFAULTS, PRESET_CONFIGS, 
+        merge_conditionings, route_conditioning, tile_sample,
+        MODEL_DEFAULTS, PRESET_CONFIGS,
     )
 except (ImportError, ValueError):
     from sampler_utils import (
@@ -70,8 +70,8 @@ except (ImportError, ValueError):
         build_sigma_report, _temporally_correlate, _perlin_noise, _perlin_noise_2d, 
         _spectral_noise, _get_freq_grid, _spectral_noise_2d, _brownian_noise, 
         _simplex_noise, _voronoi_noise, _curl_noise, generate_noise, 
-        merge_conditionings, route_conditioning, tile_sample, _build_latent_meta, 
-        MODEL_DEFAULTS, PRESET_CONFIGS, 
+        merge_conditionings, route_conditioning, tile_sample,
+        MODEL_DEFAULTS, PRESET_CONFIGS,
     )
 
 logger = logging.getLogger("radiance.sampler")
@@ -1489,43 +1489,6 @@ class RadianceSamplerPro:
         # ── sigmas_remaining: the unused schedule tail after effective_end ───
         _eff_end_idx = min(effective_end, len(output_sigmas))
         sigmas_remaining = output_sigmas[_eff_end_idx:] if _eff_end_idx < len(output_sigmas) else torch.tensor([0.0])
-
-        sigma_report = build_sigma_report(
-            detected_type,
-            target_total_steps,
-            scheduler,
-            flux_shift,
-            denoise,
-            output_sigmas,
-            sampler_mode,
-            sorted_splits,
-            stage_timings,
-            total_time,
-            ays_active=ays_schedule,
-            frames=frames,
-        )
-
-        latent_meta = _build_latent_meta(
-            detected_type=detected_type,
-            steps=target_total_steps,
-            scheduler=scheduler,
-            flux_shift=flux_shift,
-            denoise=denoise,
-            sigmas=output_sigmas,
-            ays_active=ays_schedule,
-            pag_active=(pag_scale > 0),
-            noise_type=noise_type,
-            tile_mode=tile_mode,
-            multi_cond_mode="Off",
-            clip_target=conditioning_clip_target,
-            seed=seed,
-            total_time_ms=int(total_time * 1000),
-            latent_format=latent_format,
-            frames=frames,
-            sdr_blend=sdr_blend,
-            sdr_inject_steps=sdr_inject_steps,
-            sdr_decay=sdr_decay,
-        )
 
         # ── Non-finite guard ───────────────────────────────────────────────────
         # CFG blowups, fp16/bf16 overflow, or a degenerate schedule can produce
