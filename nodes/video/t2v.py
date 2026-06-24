@@ -574,20 +574,26 @@ class RadianceVideoSampler:
 
         # Parse CFG schedule
         cfg_eff = cfg
+        _cfg_from_schedule = False  # ALBABIT-FIX: track actual parse success for the report label
         if cfg_schedule_json.strip():
             try:
                 parsed = json.loads(cfg_schedule_json)
                 if isinstance(parsed, (list, tuple)) and len(parsed) > 0:
                     cfg_eff = float(parsed[0])
-            except Exception:
-                pass
+                    _cfg_from_schedule = True
+            except Exception as _cfg_err:
+                # ALBABIT-FIX: warn instead of silently falling back to static CFG
+                logger.warning(
+                    "[RadianceVideoSampler] cfg_schedule_json parse failed (%s) — "
+                    "using static CFG value %.2f.", _cfg_err, cfg,
+                )
 
         report = [
             f"=== RadianceVideoSampler v{__version__} ===",
             f"Sampler  : {sampler_name}",
             f"Scheduler: {scheduler}",
             f"Steps    : {steps}",
-            f"CFG      : {cfg_eff}{' (from schedule)' if cfg_schedule_json.strip() else ''}",
+            f"CFG      : {cfg_eff}{' (from schedule)' if _cfg_from_schedule else ''}",
             f"Denoise  : {denoise}",
             f"Seed     : {seed}",
         ]
