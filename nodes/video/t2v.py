@@ -129,15 +129,41 @@ def _comfy_sample(model, noise, steps, cfg, sampler_name, scheduler,
         samples = sampler.sample(noise, positive, negative,
                                   cfg=cfg, latent_image=latent_image,
                                   force_full_denoise=True, seed=seed)
+        # ALBABIT-FIX: guard against NaN/Inf that silently produce black/corrupt frames.
+        # Mirrors the same guard in RadianceSamplerPro.sample().
+        try:
+            if not torch.isfinite(samples).all():
+                _bad = int((~torch.isfinite(samples)).sum().item())
+                logger.warning(
+                    "[RadianceVideoSampler] %d non-finite value(s) (NaN/Inf) in sampled "
+                    "latent — sanitizing via nan_to_num. Check CFG, scheduler, and precision.",
+                    _bad,
+                )
+                samples = torch.nan_to_num(samples, nan=0.0, posinf=0.0, neginf=0.0)
+        except Exception as _nf_err:
+            logger.debug("[RadianceVideoSampler] finite-check skipped: %s", _nf_err)
         return samples
     except Exception:
         # Alternate API (older ComfyUI builds)
         try:
-            return comfy.sample.sample(
+            samples = comfy.sample.sample(
                 model, noise, steps, cfg, sampler_name, scheduler,
                 positive, negative, latent_image,
                 denoise=denoise, seed=seed,
             )
+            # ALBABIT-FIX: same NaN/Inf guard on the fallback path
+            try:
+                if not torch.isfinite(samples).all():
+                    _bad = int((~torch.isfinite(samples)).sum().item())
+                    logger.warning(
+                        "[RadianceVideoSampler] %d non-finite value(s) (NaN/Inf) in sampled "
+                        "latent — sanitizing via nan_to_num. Check CFG, scheduler, and precision.",
+                        _bad,
+                    )
+                    samples = torch.nan_to_num(samples, nan=0.0, posinf=0.0, neginf=0.0)
+            except Exception as _nf_err:
+                logger.debug("[RadianceVideoSampler] finite-check skipped: %s", _nf_err)
+            return samples
         except Exception as exc:
             logger.warning(f"[RadianceT2V] sampling fallback failed: {exc}")
             return noise

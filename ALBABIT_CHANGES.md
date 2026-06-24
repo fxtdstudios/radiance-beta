@@ -417,6 +417,18 @@ auto-toggles `enable_video`, sets `model_type`, resets `scale_factor` to 1.0.
 
 ---
 
+## Radiance Video Sampler (nodes/video/t2v.py)
+
+- **NaN/Inf guard added to `_comfy_sample()`**: `RadianceSamplerPro` already
+  sanitizes non-finite values after sampling; `RadianceVideoSampler` had no
+  equivalent. CFG blowups, fp16/bf16 overflow, or a degenerate schedule can
+  produce NaN/Inf that silently decode to black or corrupt frames with no error.
+  Added the same guard on both the primary (KSampler) and fallback
+  (`comfy.sample.sample`) return paths: detects non-finite values, logs a
+  warning with the count, and sanitizes via `torch.nan_to_num`.
+
+---
+
 ## Radiance HDR VAE Decode (hdr/vae.py, fast_vae.py, nodes/generate/engine.py)
 
 ### RUDRA model_type detection + graceful fallback (PR #12 — fix/rudra-model-detection)
