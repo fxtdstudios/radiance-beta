@@ -492,17 +492,24 @@ auto-toggles `enable_video`, sets `model_type`, resets `scale_factor` to 1.0.
   three callers: `RadianceVideoSampler`, `RadianceT2VPipeline`,
   `RadianceI2VPipeline`.
 
-- **`dit_config` now active in `RadianceVideoSampler`** (`t2v.py`): previously
-  `dit_config` was accepted as a required input but never read — all four sampling
-  parameters (`steps`, `cfg`, `sampler_name`, `scheduler`) always came from the
-  manual widgets. Promoted `dit_config` to optional. When connected (a
-  `RadianceVideoModelInfo` node always sets a `"model_name"` key),
-  `_resolve_dit_config()` derives all four parameters from the model-specific
-  defaults in `_MODEL_DEFAULTS`; the manual widgets are effectively overridden
-  (the JS counterpart will grey them out accordingly once implemented).
-  When `dit_config` is absent or empty (`{}`), widget values are used as-is —
-  no behaviour change for existing workflows. Sampler report now labels CFG
-  source as `(dit_config)` or `(schedule)` for traceability.
+- **`dit_config` hard-override in all three video sampling nodes** (`t2v.py`,
+  `js/radiance_video.js`): previously `dit_config` was either dead
+  (`RadianceVideoSampler` — required but never read) or soft-override
+  (`RadianceT2VPipeline`/`RadianceI2VPipeline` — widget values won as long as
+  they were non-zero, so `sampler_name` and `scheduler` could never be driven by
+  the model spec). All three nodes now use hard-override logic: when `dit_config`
+  carries a `"model_name"` key (i.e. a `RadianceVideoModelInfo` node is wired
+  in), `_resolve_dit_config()` derives `steps/cfg/sampler/scheduler` from
+  `_MODEL_DEFAULTS` and ignores the manual widgets entirely; when `dit_config` is
+  absent or empty (`{}`), widget values apply unchanged — no behaviour change for
+  existing workflows. `dit_config` promoted from required to optional in
+  `RadianceVideoSampler`. Reports now label the CFG source as `(dit_config)` or
+  `(schedule)`. JS (`radiance_video.js`): widget-greying for the four affected
+  widgets on all three nodes when the `dit_config` input is connected and active;
+  polling every 250 ms catches upstream mute/bypass changes. `RadianceVideoLatentNoise`
+  and `RadianceVideoBatchDecode` are intentionally excluded — their `dit_config`
+  provides compression ratios / latent scale, not sampling params, so no widgets
+  are overridden.
 
 ---
 
