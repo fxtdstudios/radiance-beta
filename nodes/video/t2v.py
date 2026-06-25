@@ -664,14 +664,9 @@ class RadianceT2VPipeline:
     """
     Full Text-to-Video pipeline — one node from prompt to video IMAGE batch.
 
-    Internally chains:
-      RadianceVideoPromptBuilder  (HDR token injection)
-      RadianceVideoLatentNoise    (correctly-shaped noise)
-      RadianceVideoSampler        (ComfyUI denoising loop)
-      RadianceVideoBatchDecode    (VAE decode → IMAGE frames)
-
-    All per-model defaults (sampler, scheduler, steps, CFG) are applied
-    automatically based on the dit_config from RadianceVideoModelInfo.
+    Sampling is performed via _comfy_sample() — the same module-level helper
+    used by RadianceVideoSampler. Per-model defaults (sampler, scheduler,
+    steps, CFG) are resolved from dit_config via _resolve_dit_config().
     You can override every parameter explicitly.
     """
 
@@ -737,8 +732,24 @@ class RadianceT2VPipeline:
         spec, model_name, eff_steps, eff_cfg, eff_sampler, eff_sched = _resolve_dit_config(
             dit_config, steps, cfg, sampler_name, scheduler)
 
+        # ALBABIT-FIX: cfg_schedule_json was accepted but silently ignored — mirrors
+        # RadianceVideoSampler.sample() parsing logic.
+        cfg_eff = eff_cfg
+        _cfg_from_schedule = False
+        if cfg_schedule_json.strip():
+            try:
+                _parsed = json.loads(cfg_schedule_json)
+                if isinstance(_parsed, (list, tuple)) and len(_parsed) > 0:
+                    cfg_eff = float(_parsed[0])
+                    _cfg_from_schedule = True
+            except Exception as _cfg_err:
+                logger.warning(
+                    "[RadianceT2VPipeline] cfg_schedule_json parse failed (%s) — "
+                    "using static CFG %.2f.", _cfg_err, eff_cfg,
+                )
+
         report.append(f"Model  : {model_name}")
-        report.append(f"Steps={eff_steps}  CFG={eff_cfg}  {eff_sampler}/{eff_sched}")
+        report.append(f"Steps={eff_steps}  CFG={cfg_eff}{' (schedule)' if _cfg_from_schedule else ''}  {eff_sampler}/{eff_sched}")
 
         # --- Build positive conditioning ---
         hdr_tokens = self._hdr_tokens(peak_nits, target_gamut, hdr_eotf, hdr_strength)
@@ -768,7 +779,7 @@ class RadianceT2VPipeline:
 
         # --- Sample ---
         samples = _comfy_sample(
-            model, noise, eff_steps, eff_cfg, eff_sampler, eff_sched,
+            model, noise, eff_steps, cfg_eff, eff_sampler, eff_sched,
             pos_cond or [], neg_cond or [], noise_latent,
             denoise=1.0, seed=seed,
         )
@@ -858,6 +869,9 @@ class RadianceI2VPipeline:
     """
     Full Image-to-Video pipeline — one reference image → video IMAGE batch.
 
+    Sampling is performed via _comfy_sample() — the same module-level helper
+    used by RadianceVideoSampler and RadianceT2VPipeline.
+
     I2V conditioning strategy (applied automatically by model type)
     ---------------------------------------------------------------
     LTX-Video      — reference image injected via model's img2vid API;
@@ -946,6 +960,22 @@ class RadianceI2VPipeline:
         spec, model_name, eff_steps, eff_cfg, eff_sampler, eff_sched = _resolve_dit_config(
             dit_config, steps, cfg, sampler_name, scheduler)
 
+        # ALBABIT-FIX: cfg_schedule_json was accepted but silently ignored — mirrors
+        # RadianceVideoSampler.sample() parsing logic.
+        cfg_eff = eff_cfg
+        _cfg_from_schedule = False
+        if cfg_schedule_json.strip():
+            try:
+                _parsed = json.loads(cfg_schedule_json)
+                if isinstance(_parsed, (list, tuple)) and len(_parsed) > 0:
+                    cfg_eff = float(_parsed[0])
+                    _cfg_from_schedule = True
+            except Exception as _cfg_err:
+                logger.warning(
+                    "[RadianceI2VPipeline] cfg_schedule_json parse failed (%s) — "
+                    "using static CFG %.2f.", _cfg_err, eff_cfg,
+                )
+
         report.append(f"Model  : {model_name}")
 
         # Resolve I2V strategy
@@ -1013,7 +1043,7 @@ class RadianceI2VPipeline:
         # --- Sample ---
         denoise = 1.0 - (image_strength * 0.4)   # stronger image → less denoising
         samples = _comfy_sample(
-            model, motion_noise, eff_steps, eff_cfg, eff_sampler, eff_sched,
+            model, motion_noise, eff_steps, cfg_eff, eff_sampler, eff_sched,
             pos_cond, neg_cond, start_latent,
             denoise=denoise, seed=seed,
         )
