@@ -492,6 +492,18 @@ auto-toggles `enable_video`, sets `model_type`, resets `scale_factor` to 1.0.
   three callers: `RadianceVideoSampler`, `RadianceT2VPipeline`,
   `RadianceI2VPipeline`.
 
+- **`dit_config` now active in `RadianceVideoSampler`** (`t2v.py`): previously
+  `dit_config` was accepted as a required input but never read — all four sampling
+  parameters (`steps`, `cfg`, `sampler_name`, `scheduler`) always came from the
+  manual widgets. Promoted `dit_config` to optional. When connected (a
+  `RadianceVideoModelInfo` node always sets a `"model_name"` key),
+  `_resolve_dit_config()` derives all four parameters from the model-specific
+  defaults in `_MODEL_DEFAULTS`; the manual widgets are effectively overridden
+  (the JS counterpart will grey them out accordingly once implemented).
+  When `dit_config` is absent or empty (`{}`), widget values are used as-is —
+  no behaviour change for existing workflows. Sampler report now labels CFG
+  source as `(dit_config)` or `(schedule)` for traceability.
+
 ---
 
 ## Radiance HDR VAE Decode (hdr/vae.py, fast_vae.py, nodes/generate/engine.py)

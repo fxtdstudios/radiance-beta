@@ -572,7 +572,6 @@ class RadianceVideoSampler:
                 "positive": ("CONDITIONING",),
                 "negative": ("CONDITIONING",),
                 "latent_noise": ("LATENT",),
-                "dit_config": ("STRING", {"default": "{}"}),
                 "steps": ("INT", {"default": 25, "min": 1, "max": 200}),
                 "cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 30.0, "step": 0.1}),
                 "sampler_name": (_SAMPLERS, {"default": "euler"}),
@@ -580,6 +579,14 @@ class RadianceVideoSampler:
                 "seed": ("INT", {"default": 0, "min": 0, "max": 2**31}),
             },
             "optional": {
+                # ALBABIT-FIX: dit_config promoted from required to optional.
+                # When connected (RadianceVideoModelInfo), model-specific defaults
+                # (steps/cfg/sampler/scheduler) override the manual widgets.
+                # When absent, widget values are used as-is.
+                "dit_config": ("STRING", {
+                    "default": "{}",
+                    "tooltip": "JSON from RadianceVideoModelInfo — when connected, overrides steps/cfg/sampler/scheduler with model-specific defaults.",
+                }),
                 "cfg_schedule_json": ("STRING", {
                     "default": "",
                     "tooltip": "JSON float array from RadianceAudioCFGSchedule — first value overrides CFG",
@@ -596,12 +603,30 @@ class RadianceVideoSampler:
     RETURN_NAMES = ("samples", "sampler_report")
     FUNCTION = "sample"
 
-    def sample(self, model, positive, negative, latent_noise, dit_config,
+    def sample(self, model, positive, negative, latent_noise,
                steps, cfg, sampler_name, scheduler, seed,
-               cfg_schedule_json="", denoise=1.0, tiling=False):
+               dit_config="{}", cfg_schedule_json="", denoise=1.0, tiling=False):
 
-        # Parse CFG schedule
-        cfg_eff = cfg
+        # ALBABIT-FIX: resolve effective sampling params — dit_config wins when connected.
+        # A real dit_config always carries a "model_name" key from RadianceVideoModelInfo.
+        # An absent/empty dit_config ("{}") means the node is not connected → use widgets.
+        try:
+            _dc = json.loads(dit_config) if dit_config.strip() not in ("", "{}") else {}
+        except Exception:
+            _dc = {}
+
+        if _dc.get("model_name"):
+            _, model_name, eff_steps, eff_cfg, eff_sampler, eff_sched = _resolve_dit_config(
+                dit_config, 0, 0.0, "", "",
+            )
+            _from_dit_config = True
+        else:
+            eff_steps, eff_cfg, eff_sampler, eff_sched = steps, cfg, sampler_name, scheduler
+            model_name = "manual"
+            _from_dit_config = False
+
+        # Parse CFG schedule — applied on top of whichever source won above
+        cfg_eff = eff_cfg
         _cfg_from_schedule = False  # ALBABIT-FIX: track actual parse success for the report label
         if cfg_schedule_json.strip():
             try:
@@ -613,15 +638,17 @@ class RadianceVideoSampler:
                 # ALBABIT-FIX: warn instead of silently falling back to static CFG
                 logger.warning(
                     "[RadianceVideoSampler] cfg_schedule_json parse failed (%s) — "
-                    "using static CFG value %.2f.", _cfg_err, cfg,
+                    "using static CFG value %.2f.", _cfg_err, eff_cfg,
                 )
 
+        _cfg_src = " (schedule)" if _cfg_from_schedule else (" (dit_config)" if _from_dit_config else "")
         report = [
             f"=== RadianceVideoSampler v{__version__} ===",
-            f"Sampler  : {sampler_name}",
-            f"Scheduler: {scheduler}",
-            f"Steps    : {steps}",
-            f"CFG      : {cfg_eff}{' (from schedule)' if _cfg_from_schedule else ''}",
+            f"Model    : {model_name}",
+            f"Sampler  : {eff_sampler}",
+            f"Scheduler: {eff_sched}",
+            f"Steps    : {eff_steps}",
+            f"CFG      : {cfg_eff}{_cfg_src}",
             f"Denoise  : {denoise}",
             f"Seed     : {seed}",
         ]
@@ -638,7 +665,7 @@ class RadianceVideoSampler:
 
             noise = _to_tensor(latent_noise)
             samples = _comfy_sample(
-                model, noise, steps, cfg_eff, sampler_name, scheduler,
+                model, noise, eff_steps, cfg_eff, eff_sampler, eff_sched,
                 positive, negative, latent_noise, denoise=denoise, seed=seed,
             )
             report.append(f"Output shape: {list(samples.shape) if HAS_TORCH else 'N/A'}")
