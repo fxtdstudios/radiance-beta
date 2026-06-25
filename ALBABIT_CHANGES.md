@@ -456,6 +456,17 @@ auto-toggles `enable_video`, sets `model_type`, resets `scale_factor` to 1.0.
   Added the same guard: detects non-finite values, logs a warning with the
   count, and sanitizes via `torch.nan_to_num`.
 
+- **Doc/impl drift fixed + `cfg_schedule_json` implemented in T2V/I2V pipelines**
+  (`t2v.py`): `RadianceT2VPipeline` docstring falsely claimed to chain through
+  "RadianceVideoSampler (ComfyUI denoising loop)" — both pipelines call
+  `_comfy_sample()` directly, same as `RadianceVideoSampler` itself. Corrected
+  both docstrings. Separately, `cfg_schedule_json` was accepted as an optional
+  input on both pipelines but silently ignored (parameter received, never read).
+  Added the same parse-and-warn logic used by `RadianceVideoSampler.sample()`:
+  first value of the schedule array replaces the static CFG; parse failures log
+  a warning and fall back to the static value; the `pipeline_report` line now
+  appends `(schedule)` when the schedule value is actually applied.
+
 - **`_comfy_sample()` migrated from `KSampler` to `sample_custom`** (`t2v.py`):
   fixes `'dict' has no attribute is_nested'` crash with LTX 2.3 on ComfyUI
   v0.26.0. Root cause: `_comfy_sample()` was passing a LATENT dict
