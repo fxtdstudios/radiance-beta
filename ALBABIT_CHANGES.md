@@ -421,6 +421,26 @@ auto-toggles `enable_video`, sets `model_type`, resets `scale_factor` to 1.0.
   calls `inferModelTypeForPreset` to write the correct family; switching to
   None/Custom resets `model_type` to `"auto"`.
 
+- **`model_type` vocabulary fragmentation fixed** (`sampler_utils.py`,
+  `js/radiance_sampler.js`, `config/model_map.py`): three inconsistencies
+  between the Sampler, the Loader, and `model/detect.py`:
+  1. **`"sd35"` → `"sd3.5"`** — `sampler_utils.py` and `radiance_sampler.js`
+     used `"sd35"` (no period) while every other file (Loader, `detect.py`,
+     `prompt.py`) used `"sd3.5"`. Renamed throughout the Sampler: `MODEL_TYPES`,
+     `MODEL_DEFAULTS`, `CFG_GUIDED_MODELS`, `detect_by_architecture`,
+     `get_ays_sigmas`; JS: `CFG_GUIDED_MODELS`, both `inferModelTypeForPreset`
+     returns. **Migration note**: workflows with `model_type = "sd35"` saved
+     prior to this fix need to re-select `"sd3.5"` manually.
+  2. **`flux2` / `flux2-klein` added to Sampler** — Loader and `detect.py`
+     already recognised both types, but `sampler_utils.py` had `"Flux2": "flux"`
+     in `detect_by_config` (silently merged into Flux.1) and neither type in
+     `MODEL_TYPES`, `MODEL_DEFAULTS`, or `GUIDANCE_EMBED_MODELS`. Added both;
+     `detect_by_config` now returns `"flux2"` for `Flux2` models. Both types use
+     `guidance_embed` like Flux.1 (same scheduler/sampler defaults).
+  3. **`"ltx"` → `"ltxv"` + `"stepvideo"` in `config/model_map.py`
+     `VIDEO_MODEL_TYPES`** — this set used `"ltx"` where `sampler_utils.py` uses
+     `"ltxv"`; `"stepvideo"` was also absent. Both corrected.
+
 ---
 
 ## Radiance Video Sampler (nodes/video/t2v.py)

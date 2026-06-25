@@ -609,7 +609,8 @@ VIDEO_PRESET_NAMES: set = {
 # ALBABIT-FIX: model_type analog of VIDEO_PRESET_NAMES — used by
 # RadianceVideoLoader / RadianceUnifiedLoader to filter the "model_type"
 # dropdown (Custom mode + Auto-Detect) the same way "preset" is filtered.
+# ALBABIT-FIX: "ltx" renamed to "ltxv" to match sampler_utils.py; "stepvideo" added
 VIDEO_MODEL_TYPES: set = {
-    "hunyuan_video", "wan", "ltx", "ltxav",
-    "cosmos", "cogvideox", "mochi",
+    "hunyuan_video", "wan", "ltxv", "ltxav",
+    "cosmos", "cogvideox", "mochi", "stepvideo",
 }
