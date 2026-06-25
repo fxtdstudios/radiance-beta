@@ -265,16 +265,10 @@ class RadianceSamplerPro:
 
                 # ── Workflow-compat absorbers (positions 38/39/40 in old saves) ─
                 # Old workflow JSONs serialised two JS button widgets (null, null)
-                # and the preset_info text widget at these positions. Registering
-                # them as STRING optional inputs absorbs those values safely so
-                # the new feature inputs below land at positions 41/42/43 where
-                # they are absent from old JSON → ComfyUI uses their defaults.
-                # These three entries must stay here at widget positions 38/39/40.
-                # Old workflow JSON serialised two JS button widgets (null, null)
-                # and the preset_info text widget at these positions. The STRING
-                # type accepts null/any-string without a validation error, so the
-                # new feature inputs below fall at 41/42/43 where they are absent
-                # from the old JSON → ComfyUI falls back to their defaults.
+                # and the preset_info text widget at these positions. STRING type
+                # absorbs null/any-string without a validation error, so the new
+                # feature inputs below land at 41/42/43 where they are absent
+                # from old JSON → ComfyUI falls back to their defaults.
                 "_js_export_btn": ("STRING", {"default": "", "multiline": False,
                     "tooltip": "JS serialization placeholder (not user-editable)."}),
                 "_js_import_btn": ("STRING", {"default": "", "multiline": False,

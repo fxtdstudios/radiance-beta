@@ -456,6 +456,18 @@ auto-toggles `enable_video`, sets `model_type`, resets `scale_factor` to 1.0.
   Added the same guard: detects non-finite values, logs a warning with the
   count, and sanitizes via `torch.nan_to_num`.
 
+- **Cosmetic debt cleared** (`t2v.py`, `nodes_sampler.py`): stale file-header
+  comment (`# nodes_t2v_pipeline.py` → `# t2v.py`); misplaced class docstrings
+  on `RadianceVideoSampler`, `RadianceT2VPipeline`, `RadianceI2VPipeline`
+  (were placed after `CATEGORY`/`DESCRIPTION` class vars — Python treated them
+  as floating string literals rather than `__doc__`; moved to first statement);
+  duplicate `CATEGORY` assignment in `RadianceVideoSampler` removed (was set
+  twice: once before `INPUT_TYPES`, once after `FUNCTION`); stale
+  "not supported by KSampler directly" wording in `RadianceVideoSampler`
+  docstring updated to reflect `_comfy_sample()` migration; duplicated
+  workflow-compat absorber comment in `nodes_sampler.py` (lines 266-277, same
+  explanation copy-pasted twice) collapsed into a single paragraph.
+
 - **Doc/impl drift fixed + `cfg_schedule_json` implemented in T2V/I2V pipelines**
   (`t2v.py`): `RadianceT2VPipeline` docstring falsely claimed to chain through
   "RadianceVideoSampler (ComfyUI denoising loop)" — both pipelines call

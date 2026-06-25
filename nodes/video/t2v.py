@@ -1,6 +1,6 @@
 # ============================================================
 # FXTD STUDIOS — Radiance v3.0.0
-# nodes_t2v_pipeline.py  —  Text-to-Video & Image-to-Video Wrappers
+# t2v.py  —  Text-to-Video & Image-to-Video Wrappers
 # ============================================================
 # Unified wrapper layer over any DiT video model loaded in ComfyUI.
 # Supports: LTX-Video 2.x, HunyuanVideo, Wan2.1, CogVideoX, Mochi-1.
@@ -552,17 +552,17 @@ class RadianceVideoCondMerge:
 # ===========================================================================
 
 class RadianceVideoSampler:
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
-    DESCRIPTION = "Run the diffusion sampler to generate video latents from pre-built noise and conditioning."
     """
     Low-level video sampler — shared engine behind T2V and I2V pipelines.
 
     Accepts pre-built noise + conditioning and runs the ComfyUI sampling
-    loop.  An optional cfg_schedule_json (from RadianceAudioCFGSchedule)
-    overrides the static CFG value with the first frame's schedule value;
-    deeper frame-by-frame modulation is not supported by KSampler directly.
-    Tiling is automatically restored after sampling.
+    loop via _comfy_sample(). An optional cfg_schedule_json (from
+    RadianceAudioCFGSchedule) overrides the static CFG value with the
+    first frame's schedule value. Tiling is automatically restored after
+    sampling.
     """
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
+    DESCRIPTION = "Run the diffusion sampler to generate video latents from pre-built noise and conditioning."
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -595,7 +595,6 @@ class RadianceVideoSampler:
     RETURN_TYPES = ("LATENT", "STRING")
     RETURN_NAMES = ("samples", "sampler_report")
     FUNCTION = "sample"
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
 
     def sample(self, model, positive, negative, latent_noise, dit_config,
                steps, cfg, sampler_name, scheduler, seed,
@@ -659,8 +658,6 @@ class RadianceVideoSampler:
 # ===========================================================================
 
 class RadianceT2VPipeline:
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
-    DESCRIPTION = "End-to-end text-to-video generation pipeline with HDR support."
     """
     Full Text-to-Video pipeline — one node from prompt to video IMAGE batch.
 
@@ -669,6 +666,8 @@ class RadianceT2VPipeline:
     steps, CFG) are resolved from dit_config via _resolve_dit_config().
     You can override every parameter explicitly.
     """
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
+    DESCRIPTION = "End-to-end text-to-video generation pipeline with HDR support."
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -864,8 +863,6 @@ class RadianceT2VPipeline:
 # ===========================================================================
 
 class RadianceI2VPipeline:
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
-    DESCRIPTION = "End-to-end image-to-video generation pipeline with motion control."
     """
     Full Image-to-Video pipeline — one reference image → video IMAGE batch.
 
@@ -887,6 +884,8 @@ class RadianceI2VPipeline:
     preview_frames — quick VAE-decoded IMAGE batch
     pipeline_report — diagnostic text
     """
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
+    DESCRIPTION = "End-to-end image-to-video generation pipeline with motion control."
 
     I2V_STRATEGIES = [
         "auto", "first_frame_lock", "concat_channels", "clip_vision_inject",
