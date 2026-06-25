@@ -399,6 +399,12 @@ auto-toggles `enable_video`, sets `model_type`, resets `scale_factor` to 1.0.
   `sys.modules["sampler_utils"]`). `build_sigma_report` import retained —
   it has a second live call site (trivial sigma schedule warning, line ~807).
 
+- **Dead imports `MULTI_COND_MODES` / `merge_conditionings` removed**
+  (`nodes_sampler.py`): multi-conditioning (`positive_2`, `cond_weight_b`,
+  `multi_cond_mode`) was intentionally dropped in v3 (confirmed by
+  fxtdstudios). Both imports had zero call sites in `RadianceSamplerPro`.
+  `route_conditioning` retained — live call site at `sample()` line ~827.
+
 - **Empty spaces in Custom mode after a named preset**: `resolveModelType`
   trusted the backend's `model_type="ltxav"` default for *every* preset
   (hiding LTX-only widgets even for Flux); `applyPreset` never updated
@@ -447,9 +453,21 @@ auto-toggles `enable_video`, sets `model_type`, resets `scale_factor` to 1.0.
   sanitizes non-finite values after sampling; `RadianceVideoSampler` had no
   equivalent. CFG blowups, fp16/bf16 overflow, or a degenerate schedule can
   produce NaN/Inf that silently decode to black or corrupt frames with no error.
-  Added the same guard on both the primary (KSampler) and fallback
-  (`comfy.sample.sample`) return paths: detects non-finite values, logs a
-  warning with the count, and sanitizes via `torch.nan_to_num`.
+  Added the same guard: detects non-finite values, logs a warning with the
+  count, and sanitizes via `torch.nan_to_num`.
+
+- **`_comfy_sample()` migrated from `KSampler` to `sample_custom`** (`t2v.py`):
+  fixes `'dict' has no attribute is_nested'` crash with LTX 2.3 on ComfyUI
+  v0.26.0. Root cause: `_comfy_sample()` was passing a LATENT dict
+  `{"samples": tensor}` as `latent_image` to the legacy `KSampler` API;
+  ComfyUI v0.26.0 now calls `.is_nested` directly on that argument inside
+  `CFGGuider.sample()`, which fails on plain dicts. Fix: dict unwrapped to
+  raw tensor, then migrated to `comfy.samplers.sampler_object()` +
+  `comfy.sample.sample_custom()` — the same modern API used by
+  `RadianceSamplerPro`. Sigma computation replicates `KSampler.set_steps()`
+  logic (penultimate-sigma discard, partial-denoise slicing). Affects all
+  three callers: `RadianceVideoSampler`, `RadianceT2VPipeline`,
+  `RadianceI2VPipeline`.
 
 ---
 

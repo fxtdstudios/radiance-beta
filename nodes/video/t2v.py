@@ -151,21 +151,44 @@ def _build_noise_shape(spec, width, height, frames, batch_size=1):
 def _comfy_sample(model, noise, steps, cfg, sampler_name, scheduler,
                    positive, negative, latent_image, denoise=1.0, seed=0):
     """
-    Thin wrapper around comfy.sample.sample / KSampler.
+    Thin wrapper around comfy.sample.sample_custom (modern ComfyUI API).
     Falls back to returning the noise unchanged when ComfyUI unavailable.
     """
     if not HAS_COMFY or not HAS_TORCH:
         return noise   # test / no-ComfyUI path
 
+    # ALBABIT-FIX: migrate from legacy KSampler to sample_custom, matching
+    # RadianceSamplerPro. ComfyUI v0.26.0 CFGGuider.sample() calls .is_nested
+    # directly on the latent — LATENT dicts lack this attribute, raw tensors do not.
+    if isinstance(latent_image, dict):
+        latent_image = latent_image.get("samples", noise)
+
     try:
-        sampler = comfy.samplers.KSampler(
-            model, steps=steps, device=noise.device,
-            sampler=sampler_name, scheduler=scheduler,
-            denoise=denoise,
+        # Sigma computation replicates KSampler.set_steps() / calculate_sigmas(),
+        # including penultimate-sigma discard and partial-denoise slicing.
+        _DISCARD_PENULTIMATE = {"dpm_2", "dpm_2_ancestral", "uni_pc", "uni_pc_bh2"}
+        sampler_obj = comfy.samplers.sampler_object(sampler_name)
+        model_sampling = model.get_model_object("model_sampling")
+
+        def _calc_sigmas(n):
+            _n = n + (1 if sampler_name in _DISCARD_PENULTIMATE else 0)
+            sigs = comfy.samplers.calculate_sigmas(model_sampling, scheduler, _n)
+            if sampler_name in _DISCARD_PENULTIMATE:
+                sigs = torch.cat([sigs[:-2], sigs[-1:]])
+            return sigs
+
+        if denoise <= 0.0:
+            sigmas = torch.FloatTensor([])
+        elif denoise >= 0.9999:
+            sigmas = _calc_sigmas(steps)
+        else:
+            sigmas = _calc_sigmas(int(steps / denoise))[-(steps + 1):]
+        sigmas = sigmas.to(noise.device)
+
+        samples = comfy.sample.sample_custom(
+            model, noise, cfg, sampler_obj, sigmas,
+            positive, negative, latent_image, seed=seed,
         )
-        samples = sampler.sample(noise, positive, negative,
-                                  cfg=cfg, latent_image=latent_image,
-                                  force_full_denoise=True, seed=seed)
         # ALBABIT-FIX: guard against NaN/Inf that silently produce black/corrupt frames.
         # Mirrors the same guard in RadianceSamplerPro.sample().
         try:
@@ -180,30 +203,9 @@ def _comfy_sample(model, noise, steps, cfg, sampler_name, scheduler,
         except Exception as _nf_err:
             logger.debug("[RadianceVideoSampler] finite-check skipped: %s", _nf_err)
         return samples
-    except Exception:
-        # Alternate API (older ComfyUI builds)
-        try:
-            samples = comfy.sample.sample(
-                model, noise, steps, cfg, sampler_name, scheduler,
-                positive, negative, latent_image,
-                denoise=denoise, seed=seed,
-            )
-            # ALBABIT-FIX: same NaN/Inf guard on the fallback path
-            try:
-                if not torch.isfinite(samples).all():
-                    _bad = int((~torch.isfinite(samples)).sum().item())
-                    logger.warning(
-                        "[RadianceVideoSampler] %d non-finite value(s) (NaN/Inf) in sampled "
-                        "latent — sanitizing via nan_to_num. Check CFG, scheduler, and precision.",
-                        _bad,
-                    )
-                    samples = torch.nan_to_num(samples, nan=0.0, posinf=0.0, neginf=0.0)
-            except Exception as _nf_err:
-                logger.debug("[RadianceVideoSampler] finite-check skipped: %s", _nf_err)
-            return samples
-        except Exception as exc:
-            logger.warning(f"[RadianceT2V] sampling fallback failed: {exc}")
-            return noise
+    except Exception as exc:
+        logger.warning("[RadianceT2V] sampling failed: %s", exc)
+        return noise
 
 
 def _make_noise(shape, seed: int = 0) -> "torch.Tensor":
