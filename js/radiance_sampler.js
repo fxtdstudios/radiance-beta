@@ -142,9 +142,10 @@ const LTX_PRESETS = [
 // Model taxonomy — mirrors sampler_utils.py so the UI folds the same way the
 // backend resolves models. GUIDANCE_EMBED models use flux_guidance; CFG_GUIDED
 // models drive denoising with plain CFG and ignore the guidance-embed widgets.
-const GUIDANCE_EMBED_MODELS = new Set(["flux", "lumina2", "z_image", "ltxv"]);
+// ALBABIT-FIX: flux2/flux2-klein use guidance_embed like flux; "sd35" renamed to "sd3.5"
+const GUIDANCE_EMBED_MODELS = new Set(["flux", "flux2", "flux2-klein", "lumina2", "z_image", "ltxv"]);
 const CFG_GUIDED_MODELS = new Set([
-    "wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd35",
+    "wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd3.5",
     "ltxav", "cogvideox", "stepvideo"
 ]);
 const LTX_MODEL_TYPES = new Set(["ltxv", "ltxav"]);
@@ -185,7 +186,8 @@ function resolveModelType(presetVal, modelTypeVal) {
     if (p.includes("hunyuan"))  return "hunyuan_video";
     if (p.includes("z_image"))  return "z_image";
     if (p.includes("lumina"))   return "lumina2";
-    if (p.includes("sd3.5") || p.includes("sd35")) return "sd35";
+    // ALBABIT-FIX: return "sd3.5" (canonical form, matches Loader/detect.py)
+    if (p.includes("sd3.5") || p.includes("sd35")) return "sd3.5";
     if (p.includes("flux") || p.includes("schnell") || p.includes("draft") ||
         p.includes("fast")    || p.includes("balanced") || p.includes("quality") ||
         p.includes("cinema")  || p.includes("txt2img")  || p.includes("img2img") ||
@@ -521,7 +523,8 @@ function inferModelTypeForPreset(presetName) {
     if (p.includes("hunyuan"))  return "hunyuan_video";
     if (p.includes("z_image"))  return "z_image";
     if (p.includes("lumina"))   return "lumina2";
-    if (p.includes("sd3.5") || p.includes("sd35")) return "sd35";
+    // ALBABIT-FIX: return "sd3.5" (canonical form, matches Loader/detect.py)
+    if (p.includes("sd3.5") || p.includes("sd35")) return "sd3.5";
     if (p.includes("flux") || p.includes("draft") || p.includes("fast") ||
         p.includes("balanced") || p.includes("quality") || p.includes("cinema")) return "flux";
     return null;  // unknown, leave unchanged

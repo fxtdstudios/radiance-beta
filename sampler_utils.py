@@ -48,13 +48,16 @@ DYNAMIC_CFG_LATE_THRESHOLD = 0.85
 MODEL_TYPES = [
     "auto",
     "flux",
+    # ALBABIT-FIX: flux2 / flux2-klein were absent — Loader uses them, Sampler silently fell back to "flux"
+    "flux2", "flux2-klein",
     "sd3",
-    "sd35",
+    # ALBABIT-FIX: renamed "sd35" → "sd3.5" to match Loader, model/detect.py, prompt.py
+    "sd3.5",
     "sdxl",
     "sd15",
     "wan",
     "ltxv",
-    "ltxav",                                     
+    "ltxav",
     "hunyuan_video",
     "lumina2",
     "z_image",
@@ -67,12 +70,32 @@ MODEL_TYPES = [
 
 VIDEO_MODEL_TYPES = {"wan", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "stepvideo", "mochi"}
 
-GUIDANCE_EMBED_MODELS = {"flux", "lumina2", "z_image", "ltxv"}
+# ALBABIT-FIX: flux2/flux2-klein use guidance_embed like flux (not external CFG)
+GUIDANCE_EMBED_MODELS = {"flux", "flux2", "flux2-klein", "lumina2", "z_image", "ltxv"}
 
-CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd35", "ltxav", "cogvideox", "stepvideo", "mochi"}
+# ALBABIT-FIX: "sd35" renamed to "sd3.5" for consistency with Loader/detect.py
+CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd3.5", "ltxav", "cogvideox", "stepvideo", "mochi"}
 
 MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "flux": {
+        "cfg": 1.0,
+        "scheduler": "simple",
+        "guidance": 3.5,
+        "shift": 1.0,
+        "sampler": "euler",
+        "denoise_range": (0.3, 1.0),
+    },
+    # ALBABIT-FIX: Flux.2 Dev and Flux.2 Klein — guidance_embed models like Flux.1,
+    # same sampling defaults (scheduler=simple, cfg=1.0, guidance_embed).
+    "flux2": {
+        "cfg": 1.0,
+        "scheduler": "simple",
+        "guidance": 3.5,
+        "shift": 1.0,
+        "sampler": "euler",
+        "denoise_range": (0.3, 1.0),
+    },
+    "flux2-klein": {
         "cfg": 1.0,
         "scheduler": "simple",
         "guidance": 3.5,
@@ -88,7 +111,8 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "sampler": "dpmpp_2m",
         "denoise_range": (0.2, 1.0),
     },
-    "sd35": {
+    # ALBABIT-FIX: renamed from "sd35" to "sd3.5" for consistency with Loader/detect.py
+    "sd3.5": {
         "cfg": 4.5,
         "scheduler": "sgm_uniform",
         "guidance": 0.0,
@@ -340,7 +364,8 @@ def detect_by_config(model) -> Optional[str]:
             "HunyuanVideo": "hunyuan_video",
             "Lumina2": "lumina2", "ZImage": "z_image",
             "Chroma": "chroma", "ChromaRadiance": "chroma",
-            "Flux": "flux", "FluxSchnell": "flux", "FluxInpaint": "flux", "Flux2": "flux",
+            # ALBABIT-FIX: Flux2 config class maps to "flux2", not "flux"
+            "Flux": "flux", "FluxSchnell": "flux", "FluxInpaint": "flux", "Flux2": "flux2",
             "CogVideoX": "cogvideox", "CogVideo": "cogvideox",
             "StepVideo": "stepvideo",
             "Mochi": "mochi",  # ALBABIT-FIX: Mochi-1 config class detection
@@ -379,8 +404,9 @@ def detect_by_architecture(model) -> Optional[str]:
         if "chroma" in full_path: return "chroma"
         
         if "mmdit" in model_cls or "sd3" in model_cls:
+            # ALBABIT-FIX: renamed to "sd3.5" for consistency with Loader/detect.py
             if hasattr(diffusion_model, "in_channels") and diffusion_model.in_channels >= 16:
-                return "sd35"
+                return "sd3.5"
             return "sd3"
         
         if "sdxl" in model_cls or hasattr(diffusion_model, "label_emb"): return "sdxl"
@@ -1044,7 +1070,8 @@ def get_ays_sigmas(model_type: str, steps: int) -> Optional[torch.Tensor]:
     key = model_type if model_type in AYS_ANCHORS else None
     if key is None:
 
-        if model_type in ("sd35",):
+        # ALBABIT-FIX: renamed from "sd35" to "sd3.5"
+        if model_type in ("sd3.5",):
             key = "sd3"
         elif model_type in ("chroma",):
             key = "flux"
