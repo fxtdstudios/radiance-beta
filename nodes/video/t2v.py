@@ -755,8 +755,20 @@ class RadianceT2VPipeline:
                   f"Prompt : {positive_prompt[:80]}...",
                   f"Size   : {width}×{height}  {frames}f  seed={seed}"]
 
-        spec, model_name, eff_steps, eff_cfg, eff_sampler, eff_sched = _resolve_dit_config(
-            dit_config, steps, cfg, sampler_name, scheduler)
+        # ALBABIT-FIX: dit_config wins when connected (model_name key present),
+        # mirroring RadianceVideoSampler.sample() — JS greys out manual widgets.
+        try:
+            _dc = json.loads(dit_config) if dit_config.strip() not in ("", "{}") else {}
+        except Exception:
+            _dc = {}
+        if _dc.get("model_name"):
+            spec, model_name, eff_steps, eff_cfg, eff_sampler, eff_sched = _resolve_dit_config(
+                dit_config, 0, 0.0, "", "")
+            _from_dit_config = True
+        else:
+            spec, model_name, eff_steps, eff_cfg, eff_sampler, eff_sched = _resolve_dit_config(
+                dit_config, steps, cfg, sampler_name, scheduler)
+            _from_dit_config = False
 
         # ALBABIT-FIX: cfg_schedule_json was accepted but silently ignored — mirrors
         # RadianceVideoSampler.sample() parsing logic.
@@ -774,8 +786,9 @@ class RadianceT2VPipeline:
                     "using static CFG %.2f.", _cfg_err, eff_cfg,
                 )
 
+        _cfg_src = " (schedule)" if _cfg_from_schedule else (" (dit_config)" if _from_dit_config else "")
         report.append(f"Model  : {model_name}")
-        report.append(f"Steps={eff_steps}  CFG={cfg_eff}{' (schedule)' if _cfg_from_schedule else ''}  {eff_sampler}/{eff_sched}")
+        report.append(f"Steps={eff_steps}  CFG={cfg_eff}{_cfg_src}  {eff_sampler}/{eff_sched}")
 
         # --- Build positive conditioning ---
         hdr_tokens = self._hdr_tokens(peak_nits, target_gamut, hdr_eotf, hdr_strength)
@@ -983,8 +996,20 @@ class RadianceI2VPipeline:
                   f"Motion strength: {motion_strength}",
                   f"Frames         : {frames}  seed={seed}"]
 
-        spec, model_name, eff_steps, eff_cfg, eff_sampler, eff_sched = _resolve_dit_config(
-            dit_config, steps, cfg, sampler_name, scheduler)
+        # ALBABIT-FIX: dit_config wins when connected (model_name key present),
+        # mirroring RadianceVideoSampler.sample() — JS greys out manual widgets.
+        try:
+            _dc = json.loads(dit_config) if dit_config.strip() not in ("", "{}") else {}
+        except Exception:
+            _dc = {}
+        if _dc.get("model_name"):
+            spec, model_name, eff_steps, eff_cfg, eff_sampler, eff_sched = _resolve_dit_config(
+                dit_config, 0, 0.0, "", "")
+            _from_dit_config = True
+        else:
+            spec, model_name, eff_steps, eff_cfg, eff_sampler, eff_sched = _resolve_dit_config(
+                dit_config, steps, cfg, sampler_name, scheduler)
+            _from_dit_config = False
 
         # ALBABIT-FIX: cfg_schedule_json was accepted but silently ignored — mirrors
         # RadianceVideoSampler.sample() parsing logic.
@@ -1002,7 +1027,9 @@ class RadianceI2VPipeline:
                     "using static CFG %.2f.", _cfg_err, eff_cfg,
                 )
 
+        _cfg_src = " (schedule)" if _cfg_from_schedule else (" (dit_config)" if _from_dit_config else "")
         report.append(f"Model  : {model_name}")
+        report.append(f"Steps={eff_steps}  CFG={cfg_eff}{_cfg_src}  {eff_sampler}/{eff_sched}")
 
         # Resolve I2V strategy
         strategy = i2v_strategy
