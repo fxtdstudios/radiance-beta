@@ -419,6 +419,15 @@ auto-toggles `enable_video`, sets `model_type`, resets `scale_factor` to 1.0.
 
 ## Radiance Video Sampler (nodes/video/t2v.py)
 
+- **Triplicated noise-shape + model-defaults logic factored out**: the 12-line
+  noise shape calculation (`sc`/`tc`/`ch`/`temp` → `(B,C,T,H,W)`) and the
+  14-line `dit_config` parsing + sampling defaults resolution were copy-pasted
+  across `RadianceVideoLatentNoise.generate()`, `RadianceT2VPipeline.generate()`,
+  and `RadianceI2VPipeline.generate()`. Extracted into two module-level helpers
+  in `t2v.py`: `_resolve_dit_config()` (T2V + I2V) and `_build_noise_shape()`
+  (all three). No behaviour change — each `generate()` now calls the helpers
+  instead of inlining the logic.
+
 - **Dead `NODE_CLASS_MAPPINGS`/`NODE_DISPLAY_NAME_MAPPINGS` removed from
   `t2v.py`**: same trap as the Loader audit — the live registry is
   `nodes/video/__init__.py`; `t2v.py`'s block was never read by ComfyUI and

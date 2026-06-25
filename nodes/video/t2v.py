@@ -108,6 +108,43 @@ _MODEL_DEFAULTS: Dict[str, Dict] = {
 
 
 # ===========================================================================
+# ALBABIT-FIX: shared dit_config / noise-shape helpers (were triplicated
+# across RadianceVideoLatentNoise, RadianceT2VPipeline, RadianceI2VPipeline)
+# ===========================================================================
+
+def _resolve_dit_config(dit_config, steps=0, cfg=0.0,
+                        sampler_name="euler", scheduler="normal"):
+    """Parse dit_config JSON and resolve model spec + effective sampling params."""
+    try:
+        cfg_dict = json.loads(dit_config) if dit_config.strip() not in ("", "{}") else {}
+    except Exception:
+        cfg_dict = {}
+    spec        = _get_spec(cfg_dict.get("model_name", "")) if cfg_dict else _get_spec("LTX-Video (128ch)")
+    spec.update(cfg_dict)
+    model_name  = spec.get("model_name", "LTX-Video (128ch)")
+    defaults    = _MODEL_DEFAULTS.get(model_name, {})
+    eff_steps   = steps        if steps   > 0   else defaults.get("steps",    25)
+    eff_cfg     = cfg          if cfg     > 0.0  else defaults.get("cfg",     7.0)
+    eff_sampler = sampler_name or defaults.get("sampler",    "euler")
+    eff_sched   = scheduler    or defaults.get("scheduler",  "normal")
+    return spec, model_name, eff_steps, eff_cfg, eff_sampler, eff_sched
+
+
+def _build_noise_shape(spec, width, height, frames, batch_size=1):
+    """Compute latent noise tensor shape from model spec and pixel dimensions."""
+    sc   = spec.get("spatial_compression", 8)
+    tc   = spec.get("temporal_compression", 4)
+    ch   = spec.get("channels", 16)
+    temp = spec.get("temporal", True)
+    lh   = max(1, height // sc)
+    lw   = max(1, width  // sc)
+    lt   = max(1, math.ceil(frames / tc)) if temp else 1
+    if temp and lt > 1:
+        return (batch_size, ch, lt, lh, lw)
+    return (batch_size, ch, lh, lw)
+
+
+# ===========================================================================
 # Shared sampling helper
 # ===========================================================================
 
@@ -344,19 +381,9 @@ class RadianceVideoLatentNoise:
         if cfg:
             spec.update(cfg)
 
-        sc   = spec.get("spatial_compression", 8)
-        tc   = spec.get("temporal_compression", 4)
-        ch   = spec.get("channels", 16)
-        temp = spec.get("temporal", True)
-
-        lh = max(1, height // sc)
-        lw = max(1, width  // sc)
-        lt = max(1, math.ceil(frames / tc)) if temp else 1
-
-        if temp and lt > 1:
-            shape = (batch_size, ch, lt, lh, lw)
-        else:
-            shape = (batch_size, ch, lh, lw)
+        shape = _build_noise_shape(spec, width, height, frames, batch_size)
+        sc = spec.get("spatial_compression", 8)  # for report
+        tc = spec.get("temporal_compression", 4)  # for report
 
         noise = _make_noise(shape, seed)
         if noise is not None:
@@ -705,21 +732,8 @@ class RadianceT2VPipeline:
                   f"Prompt : {positive_prompt[:80]}...",
                   f"Size   : {width}×{height}  {frames}f  seed={seed}"]
 
-        # Resolve model spec and defaults
-        try:
-            cfg_dict = json.loads(dit_config) if dit_config.strip() not in ("", "{}") else {}
-        except Exception:
-            cfg_dict = {}
-
-        spec = _get_spec(cfg_dict.get("model_name", "")) if cfg_dict else _get_spec("LTX-Video (128ch)")
-        spec.update(cfg_dict)
-        model_name = spec.get("model_name", "LTX-Video (128ch)")
-        defaults = _MODEL_DEFAULTS.get(model_name, {})
-
-        eff_steps   = steps   if steps   > 0   else defaults.get("steps", 25)
-        eff_cfg     = cfg     if cfg     > 0.0  else defaults.get("cfg",   7.0)
-        eff_sampler = sampler_name or defaults.get("sampler",    "euler")
-        eff_sched   = scheduler    or defaults.get("scheduler",  "normal")
+        spec, model_name, eff_steps, eff_cfg, eff_sampler, eff_sched = _resolve_dit_config(
+            dit_config, steps, cfg, sampler_name, scheduler)
 
         report.append(f"Model  : {model_name}")
         report.append(f"Steps={eff_steps}  CFG={eff_cfg}  {eff_sampler}/{eff_sched}")
@@ -738,19 +752,7 @@ class RadianceT2VPipeline:
             pos_cond = self._merge_cond(pos_cond, character_conditioning, 0.75)
 
         # --- Generate noise ---
-        sc = spec.get("spatial_compression", 8)
-        tc = spec.get("temporal_compression", 4)
-        ch = spec.get("channels", 16)
-        temp = spec.get("temporal", True)
-
-        lh = max(1, height // sc)
-        lw = max(1, width  // sc)
-        lt = max(1, math.ceil(frames / tc)) if temp else 1
-
-        if temp and lt > 1:
-            noise_shape = (1, ch, lt, lh, lw)
-        else:
-            noise_shape = (1, ch, lh, lw)
+        noise_shape = _build_noise_shape(spec, width, height, frames)
 
         noise = _make_noise(noise_shape, seed)
         if noise is None:
@@ -939,21 +941,8 @@ class RadianceI2VPipeline:
                   f"Motion strength: {motion_strength}",
                   f"Frames         : {frames}  seed={seed}"]
 
-        # Model spec
-        try:
-            cfg_dict = json.loads(dit_config) if dit_config.strip() not in ("", "{}") else {}
-        except Exception:
-            cfg_dict = {}
-
-        spec = _get_spec(cfg_dict.get("model_name", "")) if cfg_dict else _get_spec("LTX-Video (128ch)")
-        spec.update(cfg_dict)
-        model_name = spec.get("model_name", "LTX-Video (128ch)")
-        defaults = _MODEL_DEFAULTS.get(model_name, {})
-
-        eff_steps   = steps   if steps   > 0   else defaults.get("steps", 25)
-        eff_cfg     = cfg     if cfg     > 0.0  else defaults.get("cfg",   7.0)
-        eff_sampler = sampler_name or defaults.get("sampler",    "euler")
-        eff_sched   = scheduler    or defaults.get("scheduler",  "normal")
+        spec, model_name, eff_steps, eff_cfg, eff_sampler, eff_sched = _resolve_dit_config(
+            dit_config, steps, cfg, sampler_name, scheduler)
 
         report.append(f"Model  : {model_name}")
 
@@ -978,21 +967,9 @@ class RadianceI2VPipeline:
             report.append(f"Image latent: {list(img_latent.shape) if img_latent is not None else 'N/A'}")
 
         # --- Build noise ---
-        sc   = spec.get("spatial_compression", 8)
-        tc   = spec.get("temporal_compression", 4)
-        ch   = spec.get("channels", 16)
-        temp = spec.get("temporal", True)
-
-        # Derive spatial dims from reference image
         _, img_h, img_w, _ = reference_image.shape
-        lh = max(1, img_h // sc)
-        lw = max(1, img_w // sc)
-        lt = max(1, math.ceil(frames / tc)) if temp else 1
-
-        if temp and lt > 1:
-            noise_shape = (1, ch, lt, lh, lw)
-        else:
-            noise_shape = (1, ch, lh, lw)
+        noise_shape = _build_noise_shape(spec, img_w, img_h, frames)
+        ch = spec.get("channels", 16)  # needed by _first_frame_lock / _concat_channels
 
         noise = _make_noise(noise_shape, seed)
         if noise is None:
