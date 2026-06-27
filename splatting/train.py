@@ -40,16 +40,32 @@ class TrainConfig:
     preview_every: int = 0
 
 
+_SSIM_WIN = 11
+_SSIM_KERNEL_CACHE: dict = {}
+
+
+def _ssim_kernel(device, dtype):
+    """Build (and cache per device/dtype) the separable Gaussian window for SSIM."""
+    key = (str(device), str(dtype))
+    kernel = _SSIM_KERNEL_CACHE.get(key)
+    if kernel is None:
+        import torch
+        win = _SSIM_WIN
+        coords = torch.arange(win, dtype=dtype, device=device) - win // 2
+        g = torch.exp(-(coords ** 2) / (2 * 1.5 ** 2))
+        g = g / g.sum()
+        kernel = (g[:, None] @ g[None, :])[None, None].expand(3, 1, win, win).contiguous()
+        _SSIM_KERNEL_CACHE[key] = kernel
+    return kernel
+
+
 def _ssim(pred, target):
     """Lightweight SSIM on (B,3,H,W) tensors in 0..1."""
     import torch
     import torch.nn.functional as F
     c1, c2 = 0.01 ** 2, 0.03 ** 2
-    win = 11
-    coords = torch.arange(win, dtype=torch.float32, device=pred.device) - win // 2
-    g = torch.exp(-(coords ** 2) / (2 * 1.5 ** 2))
-    g = (g / g.sum())
-    kernel = (g[:, None] @ g[None, :])[None, None].expand(3, 1, win, win)
+    win = _SSIM_WIN
+    kernel = _ssim_kernel(pred.device, pred.dtype)
 
     def filt(x):
         return F.conv2d(x, kernel, padding=win // 2, groups=3)

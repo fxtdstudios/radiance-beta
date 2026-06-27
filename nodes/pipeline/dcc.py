@@ -1,4 +1,5 @@
 import os
+import ast
 import json
 import socket
 import threading
@@ -28,21 +29,63 @@ _SAFE_BUILTINS = {
     "enumerate": enumerate, "zip": zip, "map": map, "filter": filter,
 }
 
-_BLOCKED_PATTERNS = [
-    "import os", "import sys", "import subprocess", "__import__",
-    "os.system", "os.popen", "open(", "eval(", "exec(",
-    "__builtins__", "__class__", "__subclasses__",
-]
-
 _SERVER: Optional[socket.socket] = None
 _SERVER_THREAD: Optional[threading.Thread] = None
 _SERVER_RUNNING = False
+_BOUND_LOOPBACK = True  # set at bind time; gates the exec command
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+# Attribute access is the classic sandbox-escape vector, so it is allowed only on
+# this short list of names and never on dunder/private attributes.
+_ALLOWED_ATTR_OWNERS = {"json"}
+_ALLOWED_CALL_NAMES = set(_SAFE_BUILTINS) | {"json"}
+
+# AST node types permitted in bridge code. Anything outside this set — imports,
+# function/lambda defs, loops, with-blocks, etc. — is rejected before execution.
+_ALLOWED_AST_NODES: tuple = (
+    ast.Module, ast.Expr, ast.Expression,
+    ast.Constant, ast.List, ast.Tuple, ast.Dict, ast.Set,
+    ast.Name, ast.Load, ast.Store,
+    ast.BinOp, ast.UnaryOp, ast.BoolOp, ast.Compare,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow,
+    ast.USub, ast.UAdd, ast.Not, ast.And, ast.Or,
+    ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.In, ast.NotIn,
+    ast.Call, ast.keyword, ast.Subscript, ast.Slice,
+    ast.IfExp, ast.comprehension,
+    ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp,
+    ast.Attribute, ast.Assign, ast.AugAssign,
+)
+
+
+def _remote_bridge_allowed() -> bool:
+    return os.environ.get("RADIANCE_ALLOW_REMOTE_BRIDGE", "").strip().lower() in {"1", "true", "yes"}
 
 
 def _validate(code: str) -> Tuple[bool, str]:
-    for p in _BLOCKED_PATTERNS:
-        if p in code.lower():
-            return False, f"blocked: {p}"
+    """AST allowlist: reject anything that isn't simple, side-effect-free expression code."""
+    try:
+        tree = ast.parse(code, mode="exec")
+    except SyntaxError as exc:
+        return False, f"syntax error: {exc}"
+    for node in ast.walk(tree):
+        if not isinstance(node, _ALLOWED_AST_NODES):
+            return False, f"blocked construct: {type(node).__name__}"
+        if isinstance(node, ast.Name) and node.id.startswith("__"):
+            return False, f"blocked name: {node.id}"
+        if isinstance(node, ast.Attribute):
+            if node.attr.startswith("_"):
+                return False, f"blocked attribute: {node.attr}"
+            owner = node.value
+            if not (isinstance(owner, ast.Name) and owner.id in _ALLOWED_ATTR_OWNERS):
+                return False, "blocked attribute access (only json.* permitted)"
+        if isinstance(node, ast.Call):
+            fn = node.func
+            if isinstance(fn, ast.Name):
+                if fn.id not in _ALLOWED_CALL_NAMES:
+                    return False, f"blocked call: {fn.id}"
+            elif not isinstance(fn, ast.Attribute):
+                return False, "blocked call form"
     return True, "ok"
 
 
@@ -75,7 +118,8 @@ def _exec_sandbox(code: str) -> str:
         return json.dumps({"ok": False, "error": str(e)})
 
 
-def _handle(conn):
+def _handle(conn, addr=None):
+    peer_loopback = bool(addr) and str(addr[0]) in _LOOPBACK_HOSTS
     try:
         conn.settimeout(15.0)
         buf = b""
@@ -99,6 +143,12 @@ def _handle(conn):
                 elif cmd == "status":
                     conn.sendall((json.dumps({"ok": True, "result": {"mode": "bridge", "running": True}}) + "\n").encode())
                 elif cmd == "exec":
+                    if not (peer_loopback and _BOUND_LOOPBACK):
+                        conn.sendall((json.dumps({
+                            "ok": False,
+                            "error": "exec is restricted to loopback connections only.",
+                        }) + "\n").encode())
+                        continue
                     code = msg.get("code", "")
                     safe, reason = _validate(code)
                     if not safe:
@@ -143,19 +193,29 @@ def start_server(port: int = None, host: str = None) -> str:
     _SERVER_RUNNING = True
 
     def _run():
-        global _SERVER
+        global _SERVER, _BOUND_LOOPBACK
+        bind_host = host
+        loopback = bind_host in _LOOPBACK_HOSTS
+        if not loopback and not _remote_bridge_allowed():
+            logger.warning(
+                "MCP Bridge: refusing non-loopback bind %r without RADIANCE_ALLOW_REMOTE_BRIDGE=1; "
+                "falling back to 127.0.0.1", bind_host,
+            )
+            bind_host = "127.0.0.1"
+            loopback = True
+        _BOUND_LOOPBACK = loopback
         _SERVER = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         _SERVER.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         _SERVER.settimeout(0.5)
         try:
-            _SERVER.bind((host, port))
+            _SERVER.bind((bind_host, port))
             _SERVER.listen(5)
-            logger.info(f"MCP Bridge listening on {host}:{port}")
+            logger.info(f"MCP Bridge listening on {bind_host}:{port}")
             while _SERVER_RUNNING:
                 try:
                     conn, addr = _SERVER.accept()
                     logger.debug(f"MCP connection from {addr}")
-                    threading.Thread(target=_handle, args=(conn,), daemon=True).start()
+                    threading.Thread(target=_handle, args=(conn, addr), daemon=True).start()
                 except socket.timeout:
                     continue
                 except Exception as e:
