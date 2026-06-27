@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en">
 <head>
+<<<<<<< Updated upstream
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Radiance Documentation</title>
@@ -20,10 +21,186 @@
       <a href="#workflows">Workflows</a>
       <a href="#developer">Development</a>
       <a href="#troubleshooting">Support</a>
+=======
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Radiance — Professional HDR Suite for ComfyUI</title>
+    <meta name="description"
+        content="Radiance is a 72-node professional HDR image processing suite for ComfyUI. GPU-accelerated color grading, film effects, temporal smoothing, and the industry-grade Radiance Viewer.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="wiki.css">
+    <style>
+        /* ── HOME PAGE OVERRIDES ── */
+        html,
+        body {
+            height: 100%;
+        }
+
+        body.home-page {
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+        }
+
+        body.home-page .wiki-nav {
+            justify-content: center;
+            padding: 2rem 1rem;
+            position: relative; /* Not absolute! */
+            background: rgba(10, 11, 13, 0.4);
+            backdrop-filter: blur(8px);
+            border-bottom: 2px solid rgba(229, 185, 96, 0.1);
+            z-index: 1000;
+        }
+
+        body.home-page .brand, 
+        body.home-page .nav-spacer,
+        body.home-page #themeToggle {
+            display: none !important;
+        }
+
+        body.home-page .nav-links {
+            margin: 0;
+            gap: 1.2rem;
+        }
+
+        /* Full-viewport hero wrapper */
+        .hero-wrapper {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center; /* True vertical centering */
+            text-align: center;
+            width: 100%;
+            padding: 80px 2rem 120px; /* Benchmark padding */
+            box-sizing: border-box;
+            position: relative;
+            z-index: 10;
+            background: radial-gradient(circle at center, rgba(229, 185, 96, 0.05) 0%, transparent 70%);
+        }
+
+        .portal-footer {
+            position: absolute;
+            bottom: 2rem;
+            left: 0;
+            right: 0;
+            width: 100%;
+            z-index: 100;
+        }
+
+        .hero-logo {
+            width: 100%;
+            max-width: 420px;
+            height: auto;
+            margin-bottom: 2rem;
+            display: block;
+            filter: drop-shadow(0 0 30px rgba(229, 185, 96, 0.1));
+        }
+
+        .hero-tagline {
+            font-size: clamp(1rem, 2.5vw, 1.5rem);
+            font-weight: 300;
+            color: var(--accent);
+            margin-bottom: 2rem;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+
+        .hero-badges {
+            display: flex;
+            gap: 0.6rem;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin-bottom: 2.25rem;
+        }
+
+        .hero-desc {
+            font-size: 1.1rem;
+            color: var(--text-secondary);
+            max-width: 600px;
+            margin: 0 auto 2.5rem;
+            line-height: 1.75;
+        }
+
+        .hero-cta {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        /* ANIMATIONS */
+        .animate-in {
+            opacity: 0;
+            transform: translateY(20px);
+            transition: opacity 0.8s cubic-bezier(0.16, 1, 0.3, 1), 
+                        transform 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .animate-in.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .hero-logo img {
+            max-width: 100%;
+            height: auto;
+            image-rendering: -webkit-optimize-contrast;
+        }
+
+        @media (max-width: 600px) {
+            .hero-tagline {
+                white-space: normal;
+                font-size: 0.95rem;
+            }
+
+            body.home-page .wiki-nav {
+                justify-content: center;
+                padding: 1rem;
+            }
+
+            body.home-page #themeToggle {
+                display: none;
+            }
+        }
+    </style>
+</head>
+
+<body class="home-page">
+    <div class="nebula-bg"></div>
+    <div class="nebula-bg"></div>
+
+    <!-- TOP NAV -->
+    <nav class="wiki-nav">
+        <a href="index.html" class="brand">◎ <span>Radiance</span></a>
+        <div class="nav-links">
+            <a href="index.html" class="active">Home</a>
+            <a href="installation.html">Install</a>
+            <a href="node_reference.html">Nodes</a>
+            <a href="radiance_viewer.html">Viewer</a>
+            
+            <a href="scripting.html">Scripting</a>
+            <a href="tutorials.html">Tutorials</a>
+            <a href="faq.html">FAQ</a>
+            <a href="changelog.html">Changelog</a>
+            <a href="architecture.html">Architecture</a>
+        </div>
+        <div class="nav-spacer"></div>
+        
+        <button class="nav-hamburger" id="navHamburger" aria-label="Open menu" style="display:none">
+            <span></span><span></span><span></span>
+        </button>
+>>>>>>> Stashed changes
     </nav>
     <a class="download-link" href="../README.md">Repository</a>
   </header>
 
+<<<<<<< Updated upstream
   <div class="site-shell">
     <aside class="sidebar" aria-label="Documentation navigation">
       <div class="brand">
@@ -31,9 +208,24 @@
         <div>
           <div class="brand-title">Radiance Docs</div>
           <div class="brand-subtitle">ComfyUI custom nodes</div>
+=======
+
+    <!-- HERO -->
+    <div class="hero-wrapper">
+
+        <a href="index.html" class="hero-logo animate-in">
+            <img src="RADIANCE.png" alt="Radiance Logo">
+        </a>
+
+        <div class="hero-badges animate-in" style="margin: 1rem 0;">
+            <p class="feature-text">Comprehensive ecosystem of 78 nodes for end-to-end production.</p>
+            <span class="badge badge-teal">78 Nodes</span>
+            <span class="badge badge-coral">32-bit Linear Pipeline</span>
+>>>>>>> Stashed changes
         </div>
       </div>
 
+<<<<<<< Updated upstream
       <label class="search">
         <span>Search...</span>
         <input id="searchInput" type="search" placeholder="HDR, Nuke, Sampler..." autocomplete="off">
@@ -89,5 +281,67 @@
   </div>
 
   <script src="app.js"></script>
+=======
+        <p class="hero-tagline animate-in" style="font-size: 0.9rem; opacity: 0.8; margin-top: 0.5rem; text-transform: none; font-weight: 500;">
+            Professional VFX - AI Ecosystem for ComfyUI
+        </p>
+
+        <p class="hero-desc animate-in">
+            Built for artists who bridge the gap between generative AI and professional film pipelines.
+        </p>
+
+        <div class="hero-cta animate-in">
+            <a href="node_reference.html" class="btn btn-primary">
+                Browse Nodes ◎
+            </a>
+            <a href="installation.html" class="btn btn-outline">
+                Installation
+            </a>
+            <a href="https://github.com/fxtdstudios/radiance" class="btn btn-discord-fxtd" target="_blank" rel="noopener">
+                GitHub Repo
+            </a>
+        </div>
+
+    <footer class="portal-footer animate-in" style="text-align: center;">
+        <div class="footer-links" style="justify-content: center;">
+            <a href="https://radiance.fxtd.org" target="_blank" rel="noopener">Website</a>
+            <a href="https://github.com/fxtdstudios/radiance" target="_blank" rel="noopener">GitHub</a>
+            <a href="https://linkedin.com/company/fxtdstudios" target="_blank" rel="noopener">LinkedIn</a>
+            <a href="https://instagram.com/fxtdstudios" target="_blank" rel="noopener">Instagram</a>
+            <a href="https://vimeo.com/fxtdstudios" target="_blank" rel="noopener">Vimeo</a>
+            <a href="https://discord.gg/m82sRer7mf" target="_blank" rel="noopener">Discord</a>
+            <a href="https://facebook.com/fxtdstudios" target="_blank" rel="noopener">Facebook</a>
+        </div>
+        <p class="footer-copyright" style="margin-top: 1rem;">
+            <span class="version-highlight">Radiance v2.2.1</span> · © FXTD Studios
+        </p>
+    </footer>
+
+    <script>
+        // Theme toggle
+        function applyTheme(isLight) {
+            document.body.classList.toggle('light', isLight);
+            const label = isLight ? '◎ Dark' : '◎ Light';
+            document.querySelectorAll('#themeToggle, #mobileThemeToggle').forEach(b => b && (b.textContent = label));
+            localStorage.setItem('radiance-theme', isLight ? 'light' : 'dark');
+        }
+        applyTheme(localStorage.getItem('radiance-theme') === 'light');
+        document.getElementById('themeToggle').addEventListener('click', () => applyTheme(!document.body.classList.contains('light')));
+        const mobileThemeBtn = document.getElementById('mobileThemeToggle');
+        if (mobileThemeBtn) mobileThemeBtn.addEventListener('click', () => applyTheme(!document.body.classList.contains('light')));
+
+        // Mobile nav toggle
+        const hamburger = document.getElementById('navHamburger');
+        const mobileDrawer = document.getElementById('mobileNavDrawer');
+        const mobileOverlay = document.getElementById('mobileNavOverlay');
+        function openMenu() { hamburger.classList.add('open'); mobileDrawer.classList.add('open'); }
+        function closeMenu() { hamburger.classList.remove('open'); mobileDrawer.classList.remove('open'); }
+        hamburger.addEventListener('click', () => mobileDrawer.classList.contains('open') ? closeMenu() : openMenu());
+        mobileOverlay.addEventListener('click', closeMenu);
+        // Close drawer when a link is tapped
+        document.querySelectorAll('.mobile-nav-panel a').forEach(a => a.addEventListener('click', closeMenu));
+    </script>
+    <script src="radiance_docs.js"></script>
+>>>>>>> Stashed changes
 </body>
 </html>
