@@ -3,7 +3,7 @@ imageio>=2.31.0
 Pillow>=10.0.0
 numpy>=1.22
 OpenEXR>=3.2.0
-Imath>=3.1.0
+# Imath ships inside the OpenEXR wheel — do NOT add a separate Imath dependency (PyPI imath maxes at 0.0.2).
 opencolorio>=2.3.0
 colour-science>=0.4.4
 transformers>=4.36.0
@@ -13,7 +13,7 @@ imageio-ffmpeg>=0.4.9
 tqdm>=4.66.0
 aiohttp>=3.8.0
 einops>=0.7.0
-torchsde>=0.3.8
+torchsde>=0.2.5,<1.0.0
 
 # Optional — Gaussian Splatting render/train (NVIDIA CUDA only).
 # .ply/.splat IO and COLMAP import work without these; uncomment to enable GPU render/train.
