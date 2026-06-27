@@ -42,6 +42,12 @@ import math
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    import PIL  # noqa: F401
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+
 # ---------------------------------------------------------------------------
 # ComfyUI runtime imports (graceful fallback)
 # ---------------------------------------------------------------------------
