@@ -1,6 +1,6 @@
 # ============================================================
 # FXTD STUDIOS — Radiance v3.0.0
-# nodes_t2v_pipeline.py  —  Text-to-Video & Image-to-Video Wrappers
+# t2v.py  —  Text-to-Video & Image-to-Video Wrappers
 # ============================================================
 # Unified wrapper layer over any DiT video model loaded in ComfyUI.
 # Supports: LTX-Video 2.x, HunyuanVideo, Wan2.1, CogVideoX, Mochi-1.
@@ -108,39 +108,104 @@ _MODEL_DEFAULTS: Dict[str, Dict] = {
 
 
 # ===========================================================================
+# ALBABIT-FIX: shared dit_config / noise-shape helpers (were triplicated
+# across RadianceVideoLatentNoise, RadianceT2VPipeline, RadianceI2VPipeline)
+# ===========================================================================
+
+def _resolve_dit_config(dit_config, steps=0, cfg=0.0,
+                        sampler_name="euler", scheduler="normal"):
+    """Parse dit_config JSON and resolve model spec + effective sampling params."""
+    try:
+        cfg_dict = json.loads(dit_config) if dit_config.strip() not in ("", "{}") else {}
+    except Exception:
+        cfg_dict = {}
+    spec        = _get_spec(cfg_dict.get("model_name", "")) if cfg_dict else _get_spec("LTX-Video (128ch)")
+    spec.update(cfg_dict)
+    model_name  = spec.get("model_name", "LTX-Video (128ch)")
+    defaults    = _MODEL_DEFAULTS.get(model_name, {})
+    eff_steps   = steps        if steps   > 0   else defaults.get("steps",    25)
+    eff_cfg     = cfg          if cfg     > 0.0  else defaults.get("cfg",     7.0)
+    eff_sampler = sampler_name or defaults.get("sampler",    "euler")
+    eff_sched   = scheduler    or defaults.get("scheduler",  "normal")
+    return spec, model_name, eff_steps, eff_cfg, eff_sampler, eff_sched
+
+
+def _build_noise_shape(spec, width, height, frames, batch_size=1):
+    """Compute latent noise tensor shape from model spec and pixel dimensions."""
+    sc   = spec.get("spatial_compression", 8)
+    tc   = spec.get("temporal_compression", 4)
+    ch   = spec.get("channels", 16)
+    temp = spec.get("temporal", True)
+    lh   = max(1, height // sc)
+    lw   = max(1, width  // sc)
+    lt   = max(1, math.ceil(frames / tc)) if temp else 1
+    if temp and lt > 1:
+        return (batch_size, ch, lt, lh, lw)
+    return (batch_size, ch, lh, lw)
+
+
+# ===========================================================================
 # Shared sampling helper
 # ===========================================================================
 
 def _comfy_sample(model, noise, steps, cfg, sampler_name, scheduler,
                    positive, negative, latent_image, denoise=1.0, seed=0):
     """
-    Thin wrapper around comfy.sample.sample / KSampler.
+    Thin wrapper around comfy.sample.sample_custom (modern ComfyUI API).
     Falls back to returning the noise unchanged when ComfyUI unavailable.
     """
     if not HAS_COMFY or not HAS_TORCH:
         return noise   # test / no-ComfyUI path
 
+    # ALBABIT-FIX: migrate from legacy KSampler to sample_custom, matching
+    # RadianceSamplerPro. ComfyUI v0.26.0 CFGGuider.sample() calls .is_nested
+    # directly on the latent — LATENT dicts lack this attribute, raw tensors do not.
+    if isinstance(latent_image, dict):
+        latent_image = latent_image.get("samples", noise)
+
     try:
-        sampler = comfy.samplers.KSampler(
-            model, steps=steps, device=noise.device,
-            sampler=sampler_name, scheduler=scheduler,
-            denoise=denoise,
+        # Sigma computation replicates KSampler.set_steps() / calculate_sigmas(),
+        # including penultimate-sigma discard and partial-denoise slicing.
+        _DISCARD_PENULTIMATE = {"dpm_2", "dpm_2_ancestral", "uni_pc", "uni_pc_bh2"}
+        sampler_obj = comfy.samplers.sampler_object(sampler_name)
+        model_sampling = model.get_model_object("model_sampling")
+
+        def _calc_sigmas(n):
+            _n = n + (1 if sampler_name in _DISCARD_PENULTIMATE else 0)
+            sigs = comfy.samplers.calculate_sigmas(model_sampling, scheduler, _n)
+            if sampler_name in _DISCARD_PENULTIMATE:
+                sigs = torch.cat([sigs[:-2], sigs[-1:]])
+            return sigs
+
+        if denoise <= 0.0:
+            sigmas = torch.FloatTensor([])
+        elif denoise >= 0.9999:
+            sigmas = _calc_sigmas(steps)
+        else:
+            sigmas = _calc_sigmas(int(steps / denoise))[-(steps + 1):]
+        sigmas = sigmas.to(noise.device)
+
+        samples = comfy.sample.sample_custom(
+            model, noise, cfg, sampler_obj, sigmas,
+            positive, negative, latent_image, seed=seed,
         )
-        samples = sampler.sample(noise, positive, negative,
-                                  cfg=cfg, latent_image=latent_image,
-                                  force_full_denoise=True, seed=seed)
-        return samples
-    except Exception:
-        # Alternate API (older ComfyUI builds)
+        # ALBABIT-FIX: guard against NaN/Inf that silently produce black/corrupt frames.
+        # Mirrors the same guard in RadianceSamplerPro.sample().
         try:
-            return comfy.sample.sample(
-                model, noise, steps, cfg, sampler_name, scheduler,
-                positive, negative, latent_image,
-                denoise=denoise, seed=seed,
-            )
-        except Exception as exc:
-            logger.warning(f"[RadianceT2V] sampling fallback failed: {exc}")
-            return noise
+            if not torch.isfinite(samples).all():
+                _bad = int((~torch.isfinite(samples)).sum().item())
+                logger.warning(
+                    "[RadianceVideoSampler] %d non-finite value(s) (NaN/Inf) in sampled "
+                    "latent — sanitizing via nan_to_num. Check CFG, scheduler, and precision.",
+                    _bad,
+                )
+                samples = torch.nan_to_num(samples, nan=0.0, posinf=0.0, neginf=0.0)
+        except Exception as _nf_err:
+            logger.debug("[RadianceVideoSampler] finite-check skipped: %s", _nf_err)
+        return samples
+    except Exception as exc:
+        logger.warning("[RadianceT2V] sampling failed: %s", exc)
+        return noise
 
 
 def _make_noise(shape, seed: int = 0) -> "torch.Tensor":
@@ -318,19 +383,9 @@ class RadianceVideoLatentNoise:
         if cfg:
             spec.update(cfg)
 
-        sc   = spec.get("spatial_compression", 8)
-        tc   = spec.get("temporal_compression", 4)
-        ch   = spec.get("channels", 16)
-        temp = spec.get("temporal", True)
-
-        lh = max(1, height // sc)
-        lw = max(1, width  // sc)
-        lt = max(1, math.ceil(frames / tc)) if temp else 1
-
-        if temp and lt > 1:
-            shape = (batch_size, ch, lt, lh, lw)
-        else:
-            shape = (batch_size, ch, lh, lw)
+        shape = _build_noise_shape(spec, width, height, frames, batch_size)
+        sc = spec.get("spatial_compression", 8)  # for report
+        tc = spec.get("temporal_compression", 4)  # for report
 
         noise = _make_noise(shape, seed)
         if noise is not None:
@@ -497,17 +552,17 @@ class RadianceVideoCondMerge:
 # ===========================================================================
 
 class RadianceVideoSampler:
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
-    DESCRIPTION = "Run the diffusion sampler to generate video latents from pre-built noise and conditioning."
     """
     Low-level video sampler — shared engine behind T2V and I2V pipelines.
 
     Accepts pre-built noise + conditioning and runs the ComfyUI sampling
-    loop.  An optional cfg_schedule_json (from RadianceAudioCFGSchedule)
-    overrides the static CFG value with the first frame's schedule value;
-    deeper frame-by-frame modulation is not supported by KSampler directly.
-    Tiling is automatically restored after sampling.
+    loop via _comfy_sample(). An optional cfg_schedule_json (from
+    RadianceAudioCFGSchedule) overrides the static CFG value with the
+    first frame's schedule value. Tiling is automatically restored after
+    sampling.
     """
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
+    DESCRIPTION = "Run the diffusion sampler to generate video latents from pre-built noise and conditioning."
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -517,7 +572,6 @@ class RadianceVideoSampler:
                 "positive": ("CONDITIONING",),
                 "negative": ("CONDITIONING",),
                 "latent_noise": ("LATENT",),
-                "dit_config": ("STRING", {"default": "{}"}),
                 "steps": ("INT", {"default": 25, "min": 1, "max": 200}),
                 "cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 30.0, "step": 0.1}),
                 "sampler_name": (_SAMPLERS, {"default": "euler"}),
@@ -525,6 +579,14 @@ class RadianceVideoSampler:
                 "seed": ("INT", {"default": 0, "min": 0, "max": 2**31}),
             },
             "optional": {
+                # ALBABIT-FIX: dit_config promoted from required to optional.
+                # When connected (RadianceVideoModelInfo), model-specific defaults
+                # (steps/cfg/sampler/scheduler) override the manual widgets.
+                # When absent, widget values are used as-is.
+                "dit_config": ("STRING", {
+                    "default": "{}",
+                    "tooltip": "JSON from RadianceVideoModelInfo — when connected, overrides steps/cfg/sampler/scheduler with model-specific defaults.",
+                }),
                 "cfg_schedule_json": ("STRING", {
                     "default": "",
                     "tooltip": "JSON float array from RadianceAudioCFGSchedule — first value overrides CFG",
@@ -540,28 +602,53 @@ class RadianceVideoSampler:
     RETURN_TYPES = ("LATENT", "STRING")
     RETURN_NAMES = ("samples", "sampler_report")
     FUNCTION = "sample"
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
 
-    def sample(self, model, positive, negative, latent_noise, dit_config,
+    def sample(self, model, positive, negative, latent_noise,
                steps, cfg, sampler_name, scheduler, seed,
-               cfg_schedule_json="", denoise=1.0, tiling=False):
+               dit_config="{}", cfg_schedule_json="", denoise=1.0, tiling=False):
 
-        # Parse CFG schedule
-        cfg_eff = cfg
+        # ALBABIT-FIX: resolve effective sampling params — dit_config wins when connected.
+        # A real dit_config always carries a "model_name" key from RadianceVideoModelInfo.
+        # An absent/empty dit_config ("{}") means the node is not connected → use widgets.
+        try:
+            _dc = json.loads(dit_config) if dit_config.strip() not in ("", "{}") else {}
+        except Exception:
+            _dc = {}
+
+        if _dc.get("model_name"):
+            _, model_name, eff_steps, eff_cfg, eff_sampler, eff_sched = _resolve_dit_config(
+                dit_config, 0, 0.0, "", "",
+            )
+            _from_dit_config = True
+        else:
+            eff_steps, eff_cfg, eff_sampler, eff_sched = steps, cfg, sampler_name, scheduler
+            model_name = "manual"
+            _from_dit_config = False
+
+        # Parse CFG schedule — applied on top of whichever source won above
+        cfg_eff = eff_cfg
+        _cfg_from_schedule = False  # ALBABIT-FIX: track actual parse success for the report label
         if cfg_schedule_json.strip():
             try:
                 parsed = json.loads(cfg_schedule_json)
                 if isinstance(parsed, (list, tuple)) and len(parsed) > 0:
                     cfg_eff = float(parsed[0])
-            except Exception:
-                pass
+                    _cfg_from_schedule = True
+            except Exception as _cfg_err:
+                # ALBABIT-FIX: warn instead of silently falling back to static CFG
+                logger.warning(
+                    "[RadianceVideoSampler] cfg_schedule_json parse failed (%s) — "
+                    "using static CFG value %.2f.", _cfg_err, eff_cfg,
+                )
 
+        _cfg_src = " (schedule)" if _cfg_from_schedule else (" (dit_config)" if _from_dit_config else "")
         report = [
             f"=== RadianceVideoSampler v{__version__} ===",
-            f"Sampler  : {sampler_name}",
-            f"Scheduler: {scheduler}",
-            f"Steps    : {steps}",
-            f"CFG      : {cfg_eff}{' (from schedule)' if cfg_schedule_json.strip() else ''}",
+            f"Model    : {model_name}",
+            f"Sampler  : {eff_sampler}",
+            f"Scheduler: {eff_sched}",
+            f"Steps    : {eff_steps}",
+            f"CFG      : {cfg_eff}{_cfg_src}",
             f"Denoise  : {denoise}",
             f"Seed     : {seed}",
         ]
@@ -578,7 +665,7 @@ class RadianceVideoSampler:
 
             noise = _to_tensor(latent_noise)
             samples = _comfy_sample(
-                model, noise, steps, cfg_eff, sampler_name, scheduler,
+                model, noise, eff_steps, cfg_eff, eff_sampler, eff_sched,
                 positive, negative, latent_noise, denoise=denoise, seed=seed,
             )
             report.append(f"Output shape: {list(samples.shape) if HAS_TORCH else 'N/A'}")
@@ -598,21 +685,16 @@ class RadianceVideoSampler:
 # ===========================================================================
 
 class RadianceT2VPipeline:
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
-    DESCRIPTION = "End-to-end text-to-video generation pipeline with HDR support."
     """
     Full Text-to-Video pipeline — one node from prompt to video IMAGE batch.
 
-    Internally chains:
-      RadianceVideoPromptBuilder  (HDR token injection)
-      RadianceVideoLatentNoise    (correctly-shaped noise)
-      RadianceVideoSampler        (ComfyUI denoising loop)
-      RadianceVideoBatchDecode    (VAE decode → IMAGE frames)
-
-    All per-model defaults (sampler, scheduler, steps, CFG) are applied
-    automatically based on the dit_config from RadianceVideoModelInfo.
+    Sampling is performed via _comfy_sample() — the same module-level helper
+    used by RadianceVideoSampler. Per-model defaults (sampler, scheduler,
+    steps, CFG) are resolved from dit_config via _resolve_dit_config().
     You can override every parameter explicitly.
     """
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
+    DESCRIPTION = "End-to-end text-to-video generation pipeline with HDR support."
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -673,24 +755,40 @@ class RadianceT2VPipeline:
                   f"Prompt : {positive_prompt[:80]}...",
                   f"Size   : {width}×{height}  {frames}f  seed={seed}"]
 
-        # Resolve model spec and defaults
+        # ALBABIT-FIX: dit_config wins when connected (model_name key present),
+        # mirroring RadianceVideoSampler.sample() — JS greys out manual widgets.
         try:
-            cfg_dict = json.loads(dit_config) if dit_config.strip() not in ("", "{}") else {}
+            _dc = json.loads(dit_config) if dit_config.strip() not in ("", "{}") else {}
         except Exception:
-            cfg_dict = {}
+            _dc = {}
+        if _dc.get("model_name"):
+            spec, model_name, eff_steps, eff_cfg, eff_sampler, eff_sched = _resolve_dit_config(
+                dit_config, 0, 0.0, "", "")
+            _from_dit_config = True
+        else:
+            spec, model_name, eff_steps, eff_cfg, eff_sampler, eff_sched = _resolve_dit_config(
+                dit_config, steps, cfg, sampler_name, scheduler)
+            _from_dit_config = False
 
-        spec = _get_spec(cfg_dict.get("model_name", "")) if cfg_dict else _get_spec("LTX-Video (128ch)")
-        spec.update(cfg_dict)
-        model_name = spec.get("model_name", "LTX-Video (128ch)")
-        defaults = _MODEL_DEFAULTS.get(model_name, {})
+        # ALBABIT-FIX: cfg_schedule_json was accepted but silently ignored — mirrors
+        # RadianceVideoSampler.sample() parsing logic.
+        cfg_eff = eff_cfg
+        _cfg_from_schedule = False
+        if cfg_schedule_json.strip():
+            try:
+                _parsed = json.loads(cfg_schedule_json)
+                if isinstance(_parsed, (list, tuple)) and len(_parsed) > 0:
+                    cfg_eff = float(_parsed[0])
+                    _cfg_from_schedule = True
+            except Exception as _cfg_err:
+                logger.warning(
+                    "[RadianceT2VPipeline] cfg_schedule_json parse failed (%s) — "
+                    "using static CFG %.2f.", _cfg_err, eff_cfg,
+                )
 
-        eff_steps   = steps   if steps   > 0   else defaults.get("steps", 25)
-        eff_cfg     = cfg     if cfg     > 0.0  else defaults.get("cfg",   7.0)
-        eff_sampler = sampler_name or defaults.get("sampler",    "euler")
-        eff_sched   = scheduler    or defaults.get("scheduler",  "normal")
-
+        _cfg_src = " (schedule)" if _cfg_from_schedule else (" (dit_config)" if _from_dit_config else "")
         report.append(f"Model  : {model_name}")
-        report.append(f"Steps={eff_steps}  CFG={eff_cfg}  {eff_sampler}/{eff_sched}")
+        report.append(f"Steps={eff_steps}  CFG={cfg_eff}{_cfg_src}  {eff_sampler}/{eff_sched}")
 
         # --- Build positive conditioning ---
         hdr_tokens = self._hdr_tokens(peak_nits, target_gamut, hdr_eotf, hdr_strength)
@@ -706,19 +804,7 @@ class RadianceT2VPipeline:
             pos_cond = self._merge_cond(pos_cond, character_conditioning, 0.75)
 
         # --- Generate noise ---
-        sc = spec.get("spatial_compression", 8)
-        tc = spec.get("temporal_compression", 4)
-        ch = spec.get("channels", 16)
-        temp = spec.get("temporal", True)
-
-        lh = max(1, height // sc)
-        lw = max(1, width  // sc)
-        lt = max(1, math.ceil(frames / tc)) if temp else 1
-
-        if temp and lt > 1:
-            noise_shape = (1, ch, lt, lh, lw)
-        else:
-            noise_shape = (1, ch, lh, lw)
+        noise_shape = _build_noise_shape(spec, width, height, frames)
 
         noise = _make_noise(noise_shape, seed)
         if noise is None:
@@ -732,7 +818,7 @@ class RadianceT2VPipeline:
 
         # --- Sample ---
         samples = _comfy_sample(
-            model, noise, eff_steps, eff_cfg, eff_sampler, eff_sched,
+            model, noise, eff_steps, cfg_eff, eff_sampler, eff_sched,
             pos_cond or [], neg_cond or [], noise_latent,
             denoise=1.0, seed=seed,
         )
@@ -817,10 +903,11 @@ class RadianceT2VPipeline:
 # ===========================================================================
 
 class RadianceI2VPipeline:
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
-    DESCRIPTION = "End-to-end image-to-video generation pipeline with motion control."
     """
     Full Image-to-Video pipeline — one reference image → video IMAGE batch.
+
+    Sampling is performed via _comfy_sample() — the same module-level helper
+    used by RadianceVideoSampler and RadianceT2VPipeline.
 
     I2V conditioning strategy (applied automatically by model type)
     ---------------------------------------------------------------
@@ -837,6 +924,8 @@ class RadianceI2VPipeline:
     preview_frames — quick VAE-decoded IMAGE batch
     pipeline_report — diagnostic text
     """
+    CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
+    DESCRIPTION = "End-to-end image-to-video generation pipeline with motion control."
 
     I2V_STRATEGIES = [
         "auto", "first_frame_lock", "concat_channels", "clip_vision_inject",
@@ -907,23 +996,40 @@ class RadianceI2VPipeline:
                   f"Motion strength: {motion_strength}",
                   f"Frames         : {frames}  seed={seed}"]
 
-        # Model spec
+        # ALBABIT-FIX: dit_config wins when connected (model_name key present),
+        # mirroring RadianceVideoSampler.sample() — JS greys out manual widgets.
         try:
-            cfg_dict = json.loads(dit_config) if dit_config.strip() not in ("", "{}") else {}
+            _dc = json.loads(dit_config) if dit_config.strip() not in ("", "{}") else {}
         except Exception:
-            cfg_dict = {}
+            _dc = {}
+        if _dc.get("model_name"):
+            spec, model_name, eff_steps, eff_cfg, eff_sampler, eff_sched = _resolve_dit_config(
+                dit_config, 0, 0.0, "", "")
+            _from_dit_config = True
+        else:
+            spec, model_name, eff_steps, eff_cfg, eff_sampler, eff_sched = _resolve_dit_config(
+                dit_config, steps, cfg, sampler_name, scheduler)
+            _from_dit_config = False
 
-        spec = _get_spec(cfg_dict.get("model_name", "")) if cfg_dict else _get_spec("LTX-Video (128ch)")
-        spec.update(cfg_dict)
-        model_name = spec.get("model_name", "LTX-Video (128ch)")
-        defaults = _MODEL_DEFAULTS.get(model_name, {})
+        # ALBABIT-FIX: cfg_schedule_json was accepted but silently ignored — mirrors
+        # RadianceVideoSampler.sample() parsing logic.
+        cfg_eff = eff_cfg
+        _cfg_from_schedule = False
+        if cfg_schedule_json.strip():
+            try:
+                _parsed = json.loads(cfg_schedule_json)
+                if isinstance(_parsed, (list, tuple)) and len(_parsed) > 0:
+                    cfg_eff = float(_parsed[0])
+                    _cfg_from_schedule = True
+            except Exception as _cfg_err:
+                logger.warning(
+                    "[RadianceI2VPipeline] cfg_schedule_json parse failed (%s) — "
+                    "using static CFG %.2f.", _cfg_err, eff_cfg,
+                )
 
-        eff_steps   = steps   if steps   > 0   else defaults.get("steps", 25)
-        eff_cfg     = cfg     if cfg     > 0.0  else defaults.get("cfg",   7.0)
-        eff_sampler = sampler_name or defaults.get("sampler",    "euler")
-        eff_sched   = scheduler    or defaults.get("scheduler",  "normal")
-
+        _cfg_src = " (schedule)" if _cfg_from_schedule else (" (dit_config)" if _from_dit_config else "")
         report.append(f"Model  : {model_name}")
+        report.append(f"Steps={eff_steps}  CFG={cfg_eff}{_cfg_src}  {eff_sampler}/{eff_sched}")
 
         # Resolve I2V strategy
         strategy = i2v_strategy
@@ -946,21 +1052,9 @@ class RadianceI2VPipeline:
             report.append(f"Image latent: {list(img_latent.shape) if img_latent is not None else 'N/A'}")
 
         # --- Build noise ---
-        sc   = spec.get("spatial_compression", 8)
-        tc   = spec.get("temporal_compression", 4)
-        ch   = spec.get("channels", 16)
-        temp = spec.get("temporal", True)
-
-        # Derive spatial dims from reference image
         _, img_h, img_w, _ = reference_image.shape
-        lh = max(1, img_h // sc)
-        lw = max(1, img_w // sc)
-        lt = max(1, math.ceil(frames / tc)) if temp else 1
-
-        if temp and lt > 1:
-            noise_shape = (1, ch, lt, lh, lw)
-        else:
-            noise_shape = (1, ch, lh, lw)
+        noise_shape = _build_noise_shape(spec, img_w, img_h, frames)
+        ch = spec.get("channels", 16)  # needed by _first_frame_lock / _concat_channels
 
         noise = _make_noise(noise_shape, seed)
         if noise is None:
@@ -1002,7 +1096,7 @@ class RadianceI2VPipeline:
         # --- Sample ---
         denoise = 1.0 - (image_strength * 0.4)   # stronger image → less denoising
         samples = _comfy_sample(
-            model, motion_noise, eff_steps, eff_cfg, eff_sampler, eff_sched,
+            model, motion_noise, eff_steps, cfg_eff, eff_sampler, eff_sched,
             pos_cond, neg_cond, start_latent,
             denoise=denoise, seed=seed,
         )
@@ -1403,28 +1497,6 @@ class RadianceVideoExport:
         return gif_path
 
 
-# ===========================================================================
-# Registration
-# ===========================================================================
-
-NODE_CLASS_MAPPINGS = {
-    "RadianceVideoModelInfo":    RadianceVideoModelInfo,
-    "RadianceVideoLatentNoise":  RadianceVideoLatentNoise,
-    "RadianceVideoCondMerge":    RadianceVideoCondMerge,
-    "RadianceVideoSampler":      RadianceVideoSampler,
-    "RadianceT2VPipeline":       RadianceT2VPipeline,
-    "RadianceI2VPipeline":       RadianceI2VPipeline,
-    "RadianceVideoBatchDecode":  RadianceVideoBatchDecode,
-    "RadianceVideoExport":       RadianceVideoExport,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceVideoModelInfo":    "◎ Radiance Video Model Info",
-    "RadianceVideoLatentNoise":  "◎ Radiance Video Latent Noise",
-    "RadianceVideoCondMerge":    "◎ Radiance Video Cond Merge",
-    "RadianceVideoSampler":      "◎ Radiance Video Sampler",
-    "RadianceT2VPipeline":       "◎ Radiance T2V Pipeline",
-    "RadianceI2VPipeline":       "◎ Radiance I2V Pipeline",
-    "RadianceVideoBatchDecode":  "◎ Radiance Video Batch Decode",
-    "RadianceVideoExport":       "◎ Radiance Video Export",
-}
+# ALBABIT-FIX: NODE_CLASS_MAPPINGS / NODE_DISPLAY_NAME_MAPPINGS removed.
+# Live registry is nodes/video/__init__.py — this file's mappings were never
+# read by ComfyUI and had drifted (stale display names, missing 4 HDR nodes).

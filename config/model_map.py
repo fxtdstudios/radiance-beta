@@ -513,6 +513,13 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "default",
     },
+    # ALBABIT-FIX: TI2V-5B is a single-UNET WAN 2.2 variant (no high/low_noise pair)
+    # and requires wan2.2_vae.safetensors (48ch), not wan_2.1_vae (16ch).
+    "Wan 2.2 TI2V": {
+        "model_type": "wan",
+        "weight_dtype": "default",
+        "clip_dtype": "default",
+    },
     "LTX Video": {
         "model_type": "ltx",
         "weight_dtype": "fp16",
@@ -588,6 +595,7 @@ VIDEO_PRESET_NAMES: set = {
     "HunyuanVideo",
     "Wan 2.1",
     "Wan 2.2",
+    "Wan 2.2 TI2V",
     "LTX Video",
     "LTX Video 13B",
     "LTX Video 2.3",
@@ -601,7 +609,8 @@ VIDEO_PRESET_NAMES: set = {
 # ALBABIT-FIX: model_type analog of VIDEO_PRESET_NAMES — used by
 # RadianceVideoLoader / RadianceUnifiedLoader to filter the "model_type"
 # dropdown (Custom mode + Auto-Detect) the same way "preset" is filtered.
+# ALBABIT-FIX: "ltx" renamed to "ltxv" to match sampler_utils.py; "stepvideo" added
 VIDEO_MODEL_TYPES: set = {
-    "hunyuan_video", "wan", "ltx", "ltxav",
-    "cosmos", "cogvideox", "mochi",
+    "hunyuan_video", "wan", "ltxv", "ltxav",
+    "cosmos", "cogvideox", "mochi", "stepvideo",
 }
