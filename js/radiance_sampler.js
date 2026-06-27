@@ -142,9 +142,10 @@ const LTX_PRESETS = [
 // Model taxonomy — mirrors sampler_utils.py so the UI folds the same way the
 // backend resolves models. GUIDANCE_EMBED models use flux_guidance; CFG_GUIDED
 // models drive denoising with plain CFG and ignore the guidance-embed widgets.
-const GUIDANCE_EMBED_MODELS = new Set(["flux", "lumina2", "z_image", "ltxv"]);
+// ALBABIT-FIX: flux2/flux2-klein use guidance_embed like flux; "sd35" renamed to "sd3.5"
+const GUIDANCE_EMBED_MODELS = new Set(["flux", "flux2", "flux2-klein", "lumina2", "z_image", "ltxv"]);
 const CFG_GUIDED_MODELS = new Set([
-    "wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd35",
+    "wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd3.5",
     "ltxav", "cogvideox", "stepvideo"
 ]);
 const LTX_MODEL_TYPES = new Set(["ltxv", "ltxav"]);
@@ -185,7 +186,8 @@ function resolveModelType(presetVal, modelTypeVal) {
     if (p.includes("hunyuan"))  return "hunyuan_video";
     if (p.includes("z_image"))  return "z_image";
     if (p.includes("lumina"))   return "lumina2";
-    if (p.includes("sd3.5") || p.includes("sd35")) return "sd35";
+    // ALBABIT-FIX: return "sd3.5" (canonical form, matches Loader/detect.py)
+    if (p.includes("sd3.5") || p.includes("sd35")) return "sd3.5";
     if (p.includes("flux") || p.includes("schnell") || p.includes("draft") ||
         p.includes("fast")    || p.includes("balanced") || p.includes("quality") ||
         p.includes("cinema")  || p.includes("txt2img")  || p.includes("img2img") ||
@@ -204,6 +206,14 @@ const LTX_INCOMPATIBLE_WIDGETS = [
     "tile_overlap",
     "tile_stride",
     "tile_blend"
+];
+
+// ALBABIT-FIX: widgets that become inert when an active sigmas_override is connected.
+// start_step/end_step are intentionally excluded — in v3 they still control the
+// sigmas_remaining slice window even when the override is active.
+const SIGMA_OVERRIDE_WIDGETS = [
+    "steps", "denoise", "scheduler", "scheduler_mode", "flux_shift",
+    "terminal_sigma_to_zero", "ays_schedule", "custom_ays_anchors", "force_exact_steps",
 ];
 
 // ── 1. Widget visibility helpers ──
@@ -432,6 +442,8 @@ function applyFolding(node) {
     // 3.6. Preset info text box is shown for named presets.
     setWidgetVisible(find("preset_info"), true, node);
 
+    // ALBABIT-FIX: update disabled state for sigmas_override-dependent widgets.
+    updateSigmaLocks(node);
     refreshNodeSize(node);
 }
 
@@ -468,6 +480,37 @@ function updateUILocks(node, presetName) {
     node.setDirtyCanvas(true, true);
 }
 
+// ALBABIT-FIX: returns true when sigmas_override has an active (non-muted, non-bypassed) link.
+function isSigmaOverrideActive(node) {
+    const sigmasInput = node.inputs?.find(inp => inp.name === "sigmas_override");
+    if (!sigmasInput || !sigmasInput.link) return false;
+    const link = app.graph.links[sigmasInput.link];
+    if (!link) return false;
+    const originNode = app.graph.getNodeById(link.origin_id);
+    // mode 2 = Muted, mode 4 = Bypassed — treat as inactive
+    return originNode && originNode.mode !== 2 && originNode.mode !== 4;
+}
+
+// ALBABIT-FIX: disable/re-enable the widgets that become inert when sigmas_override is active.
+// Uses the same disabled + inputEl styling as updateUILocks().
+// start_step/end_step are NOT in the list — they still slice the override to produce sigmas_remaining.
+function updateSigmaLocks(node) {
+    if (!node.widgets) return;
+    const locked = isSigmaOverrideActive(node);
+
+    node.widgets.forEach(widget => {
+        if (!SIGMA_OVERRIDE_WIDGETS.includes(widget.name)) return;
+        widget.disabled = locked;
+        if (widget.inputEl) {
+            widget.inputEl.disabled = locked;
+            widget.inputEl.style.opacity = locked ? "0.4" : "1.0";
+            widget.inputEl.style.pointerEvents = locked ? "none" : "auto";
+        }
+    });
+
+    node.setDirtyCanvas(true, true);
+}
+
 // ALBABIT-FIX: infer the model_type that best matches the preset name, used when
 // the preset config doesn't explicitly include model_type. Mirrors resolveModelType
 // so the UI widget reflects the model family the preset targets.
@@ -480,7 +523,8 @@ function inferModelTypeForPreset(presetName) {
     if (p.includes("hunyuan"))  return "hunyuan_video";
     if (p.includes("z_image"))  return "z_image";
     if (p.includes("lumina"))   return "lumina2";
-    if (p.includes("sd3.5") || p.includes("sd35")) return "sd35";
+    // ALBABIT-FIX: return "sd3.5" (canonical form, matches Loader/detect.py)
+    if (p.includes("sd3.5") || p.includes("sd35")) return "sd3.5";
     if (p.includes("flux") || p.includes("draft") || p.includes("fast") ||
         p.includes("balanced") || p.includes("quality") || p.includes("cinema")) return "flux";
     return null;  // unknown, leave unchanged
@@ -867,6 +911,18 @@ app.registerExtension({
             this.onConnectionsChange = function (...args) {
                 if (origConnect) origConnect.apply(this, args);
                 toggleFields(this);
+            };
+
+            // ALBABIT-FIX: poll for upstream mute/bypass changes. onConnectionsChange only
+            // fires on this node — it does not fire when the upstream node is muted/bypassed.
+            this._sigmaCheckInterval = setInterval(() => updateSigmaLocks(self), 250);
+            const origOnRemoved = this.onRemoved;
+            this.onRemoved = function () {
+                if (self._sigmaCheckInterval) {
+                    clearInterval(self._sigmaCheckInterval);
+                    self._sigmaCheckInterval = null;
+                }
+                if (origOnRemoved) origOnRemoved.apply(this, arguments);
             };
 
             // Initialize UI state immediately (safe — no widget visibility changes)

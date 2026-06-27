@@ -33,45 +33,45 @@ try:
         DYNAMIC_CFG_EARLY_MULTIPLIER, DYNAMIC_CFG_LATE_MULTIPLIER, 
         DYNAMIC_CFG_EARLY_THRESHOLD, DYNAMIC_CFG_LATE_THRESHOLD, MODEL_TYPES, 
         VIDEO_MODEL_TYPES, GUIDANCE_EMBED_MODELS, CFG_GUIDED_MODELS, 
-        PREVIEW_METHODS, NOISE_TYPES, CLIP_TARGETS, MULTI_COND_MODES, 
-        TILE_BLEND_MODES, SamplerMode, SigmaCache, _sigma_cache, 
-        RadianceModelRegistry, detect_by_config, detect_by_architecture, 
-        detect_by_sampling, detect_model_type, get_model_defaults, 
-        gradual_sigma_blend, log_tensor, SigmaIndexer, SamplingStage, 
-        apply_flux_guidance, compute_dynamic_guidance, compute_dynamic_cfg, 
-        compute_base_sigmas, WORKFLOW_PRESETS, flux_shift_sigmas, get_flux_sigmas, 
-        validate_step_range, apply_pag_to_model, AYS_ANCHORS, get_ays_sigmas, 
-        guidance_rescale_cfg, correct_sigma_end, apply_cfg_plus_plus, 
-        build_sigma_report, _temporally_correlate, _perlin_noise, _perlin_noise_2d, 
-        _spectral_noise, _get_freq_grid, _spectral_noise_2d, _brownian_noise, 
-        _simplex_noise, _voronoi_noise, _curl_noise, generate_noise, 
-        merge_conditionings, route_conditioning, tile_sample, _build_latent_meta, 
-        MODEL_DEFAULTS, PRESET_CONFIGS, 
+        PREVIEW_METHODS, NOISE_TYPES, CLIP_TARGETS,
+        TILE_BLEND_MODES, SamplerMode, SigmaCache, _sigma_cache,
+        RadianceModelRegistry, detect_by_config, detect_by_architecture,
+        detect_by_sampling, detect_model_type, get_model_defaults,
+        gradual_sigma_blend, log_tensor, SigmaIndexer, SamplingStage,
+        apply_flux_guidance, compute_dynamic_guidance, compute_dynamic_cfg,
+        compute_base_sigmas, WORKFLOW_PRESETS, flux_shift_sigmas, get_flux_sigmas,
+        validate_step_range, apply_pag_to_model, AYS_ANCHORS, get_ays_sigmas,
+        guidance_rescale_cfg, correct_sigma_end, apply_cfg_plus_plus,
+        build_sigma_report, _temporally_correlate, _perlin_noise, _perlin_noise_2d,
+        _spectral_noise, _get_freq_grid, _spectral_noise_2d, _brownian_noise,
+        _simplex_noise, _voronoi_noise, _curl_noise, generate_noise,
+        route_conditioning, tile_sample,
+        MODEL_DEFAULTS, PRESET_CONFIGS,
     )
 except (ImportError, ValueError):
     from sampler_utils import (
-        DYNAMIC_GUIDANCE_EARLY_MULTIPLIER, DYNAMIC_GUIDANCE_LATE_MULTIPLIER, 
-        DYNAMIC_GUIDANCE_EARLY_THRESHOLD, DYNAMIC_GUIDANCE_LATE_THRESHOLD, 
-        DYNAMIC_GUIDANCE_RAMP_WIDTH, GUIDANCE_RESCALE_PHI, 
-        SIGMA_DISCONTINUITY_THRESHOLD, PAG_DEFAULT_SCALE, PAG_LAYER_NAMES, 
-        CFG_PLUS_PLUS_DEFAULT_SCALE, CFG_GUIDANCE_MODELS, 
-        DYNAMIC_CFG_EARLY_MULTIPLIER, DYNAMIC_CFG_LATE_MULTIPLIER, 
-        DYNAMIC_CFG_EARLY_THRESHOLD, DYNAMIC_CFG_LATE_THRESHOLD, MODEL_TYPES, 
-        VIDEO_MODEL_TYPES, GUIDANCE_EMBED_MODELS, CFG_GUIDED_MODELS, 
-        PREVIEW_METHODS, NOISE_TYPES, CLIP_TARGETS, MULTI_COND_MODES, 
-        TILE_BLEND_MODES, SamplerMode, SigmaCache, _sigma_cache, 
-        RadianceModelRegistry, detect_by_config, detect_by_architecture, 
-        detect_by_sampling, detect_model_type, get_model_defaults, 
-        gradual_sigma_blend, log_tensor, SigmaIndexer, SamplingStage, 
-        apply_flux_guidance, compute_dynamic_guidance, compute_dynamic_cfg, 
-        compute_base_sigmas, WORKFLOW_PRESETS, flux_shift_sigmas, get_flux_sigmas, 
-        validate_step_range, apply_pag_to_model, AYS_ANCHORS, get_ays_sigmas, 
-        guidance_rescale_cfg, correct_sigma_end, apply_cfg_plus_plus, 
-        build_sigma_report, _temporally_correlate, _perlin_noise, _perlin_noise_2d, 
-        _spectral_noise, _get_freq_grid, _spectral_noise_2d, _brownian_noise, 
-        _simplex_noise, _voronoi_noise, _curl_noise, generate_noise, 
-        merge_conditionings, route_conditioning, tile_sample, _build_latent_meta, 
-        MODEL_DEFAULTS, PRESET_CONFIGS, 
+        DYNAMIC_GUIDANCE_EARLY_MULTIPLIER, DYNAMIC_GUIDANCE_LATE_MULTIPLIER,
+        DYNAMIC_GUIDANCE_EARLY_THRESHOLD, DYNAMIC_GUIDANCE_LATE_THRESHOLD,
+        DYNAMIC_GUIDANCE_RAMP_WIDTH, GUIDANCE_RESCALE_PHI,
+        SIGMA_DISCONTINUITY_THRESHOLD, PAG_DEFAULT_SCALE, PAG_LAYER_NAMES,
+        CFG_PLUS_PLUS_DEFAULT_SCALE, CFG_GUIDANCE_MODELS,
+        DYNAMIC_CFG_EARLY_MULTIPLIER, DYNAMIC_CFG_LATE_MULTIPLIER,
+        DYNAMIC_CFG_EARLY_THRESHOLD, DYNAMIC_CFG_LATE_THRESHOLD, MODEL_TYPES,
+        VIDEO_MODEL_TYPES, GUIDANCE_EMBED_MODELS, CFG_GUIDED_MODELS,
+        PREVIEW_METHODS, NOISE_TYPES, CLIP_TARGETS,
+        TILE_BLEND_MODES, SamplerMode, SigmaCache, _sigma_cache,
+        RadianceModelRegistry, detect_by_config, detect_by_architecture,
+        detect_by_sampling, detect_model_type, get_model_defaults,
+        gradual_sigma_blend, log_tensor, SigmaIndexer, SamplingStage,
+        apply_flux_guidance, compute_dynamic_guidance, compute_dynamic_cfg,
+        compute_base_sigmas, WORKFLOW_PRESETS, flux_shift_sigmas, get_flux_sigmas,
+        validate_step_range, apply_pag_to_model, AYS_ANCHORS, get_ays_sigmas,
+        guidance_rescale_cfg, correct_sigma_end, apply_cfg_plus_plus,
+        build_sigma_report, _temporally_correlate, _perlin_noise, _perlin_noise_2d,
+        _spectral_noise, _get_freq_grid, _spectral_noise_2d, _brownian_noise,
+        _simplex_noise, _voronoi_noise, _curl_noise, generate_noise,
+        route_conditioning, tile_sample,
+        MODEL_DEFAULTS, PRESET_CONFIGS,
     )
 
 logger = logging.getLogger("radiance.sampler")
@@ -265,16 +265,10 @@ class RadianceSamplerPro:
 
                 # ── Workflow-compat absorbers (positions 38/39/40 in old saves) ─
                 # Old workflow JSONs serialised two JS button widgets (null, null)
-                # and the preset_info text widget at these positions. Registering
-                # them as STRING optional inputs absorbs those values safely so
-                # the new feature inputs below land at positions 41/42/43 where
-                # they are absent from old JSON → ComfyUI uses their defaults.
-                # These three entries must stay here at widget positions 38/39/40.
-                # Old workflow JSON serialised two JS button widgets (null, null)
-                # and the preset_info text widget at these positions. The STRING
-                # type accepts null/any-string without a validation error, so the
-                # new feature inputs below fall at 41/42/43 where they are absent
-                # from the old JSON → ComfyUI falls back to their defaults.
+                # and the preset_info text widget at these positions. STRING type
+                # absorbs null/any-string without a validation error, so the new
+                # feature inputs below land at 41/42/43 where they are absent
+                # from old JSON → ComfyUI falls back to their defaults.
                 "_js_export_btn": ("STRING", {"default": "", "multiline": False,
                     "tooltip": "JS serialization placeholder (not user-editable)."}),
                 "_js_import_btn": ("STRING", {"default": "", "multiline": False,
@@ -460,6 +454,11 @@ class RadianceSamplerPro:
                         force_exact_steps, sigmas_override, device,
                         custom_ays_anchors=None):
         if sigmas_override is not None:
+            # ALBABIT-FIX: restore informational log when sigmas_override is active
+            logger.info(
+                "[Radiance] sigmas_override active — bypassing internal sigma computation. "
+                "steps / denoise / scheduler / flux_shift / AYS and related settings are ignored."
+            )
             sigmas = sigmas_override.to(device)
             sigmas = correct_sigma_end(sigmas)
             target_steps = max(1, len(sigmas) - 1)
@@ -1484,43 +1483,6 @@ class RadianceSamplerPro:
         # ── sigmas_remaining: the unused schedule tail after effective_end ───
         _eff_end_idx = min(effective_end, len(output_sigmas))
         sigmas_remaining = output_sigmas[_eff_end_idx:] if _eff_end_idx < len(output_sigmas) else torch.tensor([0.0])
-
-        sigma_report = build_sigma_report(
-            detected_type,
-            target_total_steps,
-            scheduler,
-            flux_shift,
-            denoise,
-            output_sigmas,
-            sampler_mode,
-            sorted_splits,
-            stage_timings,
-            total_time,
-            ays_active=ays_schedule,
-            frames=frames,
-        )
-
-        latent_meta = _build_latent_meta(
-            detected_type=detected_type,
-            steps=target_total_steps,
-            scheduler=scheduler,
-            flux_shift=flux_shift,
-            denoise=denoise,
-            sigmas=output_sigmas,
-            ays_active=ays_schedule,
-            pag_active=(pag_scale > 0),
-            noise_type=noise_type,
-            tile_mode=tile_mode,
-            multi_cond_mode="Off",
-            clip_target=conditioning_clip_target,
-            seed=seed,
-            total_time_ms=int(total_time * 1000),
-            latent_format=latent_format,
-            frames=frames,
-            sdr_blend=sdr_blend,
-            sdr_inject_steps=sdr_inject_steps,
-            sdr_decay=sdr_decay,
-        )
 
         # ── Non-finite guard ───────────────────────────────────────────────────
         # CFG blowups, fp16/bf16 overflow, or a degenerate schedule can produce
