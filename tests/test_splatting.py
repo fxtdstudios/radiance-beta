@@ -145,7 +145,9 @@ def test_render_smoke():
     import torch
     if not torch.cuda.is_available():
         pytest.skip("no CUDA GPU")
-    from radiance.splatting.backend import render
+    from radiance.splatting.backend import render, _gsplat_cuda_ready
+    if not _gsplat_cuda_ready():
+        pytest.skip("gsplat CUDA backend not compiled in this environment")
     s = _make(n=200, degree=0)
     cams = orbit(num_frames=2, width=64, height=48)
     image, depth, alpha = render(s, cams)
@@ -254,6 +256,9 @@ def test_train_smoke():
     import torch
     if not torch.cuda.is_available():
         pytest.skip("no CUDA GPU")
+    from radiance.splatting.backend import _gsplat_cuda_ready
+    if not _gsplat_cuda_ready():
+        pytest.skip("gsplat CUDA backend not compiled in this environment")
     from radiance.splatting.train import train
     pts = np.random.default_rng(0).standard_normal((500, 3)).astype(np.float32)
     init = init_from_points(pts, sh_degree=0)
