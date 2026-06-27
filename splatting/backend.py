@@ -28,12 +28,27 @@ _GSPLAT_DISABLED_HINT = (
 
 
 def _gsplat_cuda_ready() -> bool:
-    """True only if gsplat's compiled CUDA backend actually loaded."""
-    try:  # private path, guarded: fall through to normal behaviour if it moves
-        from gsplat.cuda._wrapper import _C
-        return _C is not None
+    """True only if gsplat's compiled CUDA backend actually loaded.
+
+    gsplat keeps the compiled extension as ``_C`` in ``gsplat.cuda._backend`` and
+    sets it to ``None`` when no CUDA toolkit was found at build/import time
+    ("gsplat will be disabled"). We probe that directly; if the private layout
+    changes we fall back to a tiny live call so a broken backend never slips
+    through as a hard crash mid-render.
+    """
+    try:
+        from gsplat.cuda import _backend as _gb
+        if hasattr(_gb, "_C"):
+            return _gb._C is not None
     except Exception:
-        return True  # can't tell — let the real call surface any error
+        pass
+    # Fallback: force the lazy loader and see if the native object resolves.
+    try:
+        from gsplat.cuda._wrapper import _make_lazy_cuda_obj
+        _make_lazy_cuda_obj("CameraModelType")
+        return True
+    except Exception:
+        return False
 
 
 def _require_backend():
@@ -65,32 +80,34 @@ def render(splat: Splat, cameras: Cameras,
     splat.validate()
     dev = "cuda"
 
-    means = torch.from_numpy(np.ascontiguousarray(splat.means)).to(dev)
-    quats = torch.from_numpy(np.ascontiguousarray(splat.quats)).to(dev)
-    # 3DGS .ply stores log-scale and logit-opacity; activate for the rasterizer.
-    scales = torch.exp(torch.from_numpy(np.ascontiguousarray(splat.scales)).to(dev))
-    opac = torch.sigmoid(torch.from_numpy(np.ascontiguousarray(splat.opacities)).to(dev))
-    colors = torch.from_numpy(np.ascontiguousarray(splat.sh)).to(dev)      # (N,K,3) SH
-    viewmats = torch.from_numpy(np.ascontiguousarray(cameras.viewmats)).to(dev)
-    Ks = torch.from_numpy(np.ascontiguousarray(cameras.Ks)).to(dev)
-    bg = torch.tensor([background], dtype=torch.float32, device=dev).expand(len(cameras), 3)
+    # Rendering is inference-only: skip autograd bookkeeping for speed/memory.
+    with torch.inference_mode():
+        means = torch.from_numpy(np.ascontiguousarray(splat.means)).to(dev)
+        quats = torch.from_numpy(np.ascontiguousarray(splat.quats)).to(dev)
+        # 3DGS .ply stores log-scale and logit-opacity; activate for the rasterizer.
+        scales = torch.exp(torch.from_numpy(np.ascontiguousarray(splat.scales)).to(dev))
+        opac = torch.sigmoid(torch.from_numpy(np.ascontiguousarray(splat.opacities)).to(dev))
+        colors = torch.from_numpy(np.ascontiguousarray(splat.sh)).to(dev)      # (N,K,3) SH
+        viewmats = torch.from_numpy(np.ascontiguousarray(cameras.viewmats)).to(dev)
+        Ks = torch.from_numpy(np.ascontiguousarray(cameras.Ks)).to(dev)
+        bg = torch.tensor([background], dtype=torch.float32, device=dev).expand(len(cameras), 3)
 
-    render_colors, render_alphas, _ = rasterization(
-        means=means, quats=quats, scales=scales, opacities=opac, colors=colors,
-        viewmats=viewmats, Ks=Ks, width=cameras.width, height=cameras.height,
-        sh_degree=int(splat.sh_degree), render_mode="RGB+D", backgrounds=bg,
-    )
+        render_colors, render_alphas, _ = rasterization(
+            means=means, quats=quats, scales=scales, opacities=opac, colors=colors,
+            viewmats=viewmats, Ks=Ks, width=cameras.width, height=cameras.height,
+            sh_degree=int(splat.sh_degree), render_mode="RGB+D", backgrounds=bg,
+        )
 
-    # RGB+D packs depth as the 4th channel; fall back gracefully if RGB-only.
-    if render_colors.shape[-1] >= 4:
-        image = render_colors[..., :3]
-        depth = render_colors[..., 3:4]
-    else:
-        image = render_colors[..., :3]
-        depth = torch.zeros(*image.shape[:3], 1, device=dev)
-    image = image.clamp(0.0, 1.0).contiguous().cpu()
-    depth = depth.contiguous().cpu()
-    alpha = render_alphas.contiguous().cpu()
+        # RGB+D packs depth as the 4th channel; fall back gracefully if RGB-only.
+        if render_colors.shape[-1] >= 4:
+            image = render_colors[..., :3]
+            depth = render_colors[..., 3:4]
+        else:
+            image = render_colors[..., :3]
+            depth = torch.zeros(*image.shape[:3], 1, device=dev)
+        image = image.clamp(0.0, 1.0).contiguous().cpu()
+        depth = depth.contiguous().cpu()
+        alpha = render_alphas.contiguous().cpu()
     return image, depth, alpha
 
 
