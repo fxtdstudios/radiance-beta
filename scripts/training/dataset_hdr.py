@@ -537,18 +537,36 @@ def load_vae_standalone(path: str, model_type: str = "flux", device: str = "cuda
                         ).to(dev)
                         self.backend = "diffusers_auto"
                 elif m_type in ("ltx-video", "ltx", "ltxav"):
+                    # Prefer LTX-2 / LTX-2.3 VAE (AutoencoderKLLTX2Video, 32x/8x/128ch).
+                    # 1) load the user's local downloaded VAE folder (real 2.3 weights),
+                    # 2) else pull LTX-2 from the hub, 3) else fall back to 0.9.x,
+                    # 4) else generic AutoModel. All are 32x spatial so geometry matches.
+                    loaded = False
+                    local_dir = os.path.dirname(path)
                     try:
-                        from diffusers import AutoencoderKLLTXVideo
-                        self.vae_obj = AutoencoderKLLTXVideo.from_pretrained(
-                            "Lightricks/LTX-Video", subfolder="vae",
-                            torch_dtype=torch.bfloat16
-                        ).to(dev)
-                        self.backend = "diffusers_ltx"
-                    except (ImportError, Exception):
-                        self.vae_obj = AutoModel.from_pretrained(
-                            os.path.dirname(path), torch_dtype=torch.bfloat16
-                        ).to(dev)
-                        self.backend = "diffusers_auto"
+                        from diffusers import AutoencoderKLLTX2Video
+                        if os.path.exists(os.path.join(local_dir, "config.json")):
+                            self.vae_obj = AutoencoderKLLTX2Video.from_pretrained(
+                                local_dir, torch_dtype=torch.bfloat16).to(dev)
+                        else:
+                            self.vae_obj = AutoencoderKLLTX2Video.from_pretrained(
+                                "Lightricks/LTX-2", subfolder="vae",
+                                torch_dtype=torch.bfloat16).to(dev)
+                        self.backend = "diffusers_ltx2"
+                        loaded = True
+                    except (ImportError, Exception) as _e_ltx2:
+                        logger.warning(f"[VAE Loader] LTX-2 VAE load failed: {_e_ltx2}. Trying LTX 0.9.x…")
+                    if not loaded:
+                        try:
+                            from diffusers import AutoencoderKLLTXVideo
+                            self.vae_obj = AutoencoderKLLTXVideo.from_pretrained(
+                                "Lightricks/LTX-Video", subfolder="vae",
+                                torch_dtype=torch.bfloat16).to(dev)
+                            self.backend = "diffusers_ltx"
+                        except (ImportError, Exception):
+                            self.vae_obj = AutoModel.from_pretrained(
+                                local_dir, torch_dtype=torch.bfloat16).to(dev)
+                            self.backend = "diffusers_auto"
                 elif m_type in ("hunyuanvideo", "hunyuan", "hyvideo"):
                     try:
                         from diffusers import AutoencoderKLHunyuanVideo
@@ -583,13 +601,21 @@ def load_vae_standalone(path: str, model_type: str = "flux", device: str = "cuda
             t = pixels.permute(0, 3, 1, 2).to(self.device)
             if "wan" not in self.backend and "ltx" not in self.backend:
                 t = t * 2.0 - 1.0  # [0,1] -> [-1,1]
-            
+
+            # Video VAEs (LTX-2/2.3, Wan, Hunyuan) take a 5D tensor (B,C,T,H,W).
+            # For a single still HDR frame T=1; add and later remove that axis so
+            # the produced latent stays (B, C_lat, h, w) for the 2D decoder pairs.
+            is_video = any(k in self.backend for k in ("ltx", "wan", "hunyuan"))
+            if is_video and t.dim() == 4:
+                t = t.unsqueeze(2)  # (B,C,H,W) -> (B,C,1,H,W)
+
             with torch.no_grad():
                 res = self.vae_obj.encode(t)
                 latent = getattr(res, "latent_dist", res)
-                if hasattr(latent, "sample"):
-                    return latent.sample()
-                return latent
+                z = latent.sample() if hasattr(latent, "sample") else latent
+                if is_video and hasattr(z, "dim") and z.dim() == 5:
+                    z = z.squeeze(2)  # (B,C,1,h,w) -> (B,C,h,w)
+                return z
 
     return StandaloneVAE(state_dict, model_type, device)
 
