@@ -319,7 +319,8 @@ except Exception:
     pass   # some comfy internals may fail — we only need the classes we test
 
 RadianceSamplerPro = _ns_mod.RadianceSamplerPro
-_build_latent_meta = _ns_mod._build_latent_meta
+# ALBABIT-FIX: _build_latent_meta is no longer re-exported via nodes_sampler — import from sampler_utils
+_build_latent_meta = sys.modules["sampler_utils"]._build_latent_meta
 
 
 # ── Numpy-based sigmas helper ─────────────────────────────────────────────────

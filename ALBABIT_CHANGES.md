@@ -372,7 +372,38 @@ auto-toggles `enable_video`, sets `model_type`, resets `scale_factor` to 1.0.
 
 ---
 
-## Radiance Sampler (js/radiance_sampler.js)
+## Radiance Sampler (js/radiance_sampler.js, nodes_sampler.py)
+
+- **`sigmas_override` widget-greying regression**: the v3 JS rewrite dropped
+  `checkSigmaConnection()` entirely — connecting an active `sigmas_override`
+  no longer greyed out the now-inert widgets. Fixed: added `SIGMA_OVERRIDE_WIDGETS`
+  constant (`steps`, `denoise`, `scheduler`, `scheduler_mode`, `flux_shift`,
+  `terminal_sigma_to_zero`, `ays_schedule`, `custom_ays_anchors`,
+  `force_exact_steps` — `start_step`/`end_step` intentionally excluded as they
+  still slice the override to produce the v3 `sigmas_remaining` output);
+  `isSigmaOverrideActive()` checks the upstream node's mode (Muted=2,
+  Bypassed=4); `updateSigmaLocks()` follows the same `disabled`/`inputEl`
+  pattern as `updateUILocks()`; called from `toggleFields()` (covers all
+  existing event paths) and via `setInterval(250ms)` in `onNodeCreated` (needed
+  for upstream mute/bypass, which don't fire `onConnectionsChange` on this
+  node). Also restored the `logger.info` warning in `_prepare_sigmas()` that
+  disappeared alongside the JS regression.
+
+- **`sigma_report`/`latent_meta` dead computation removed**: both were computed
+  on every `sample()` call (`nodes_sampler.py`) but never included in the v3
+  return tuple — leftover from v2 `RETURN_TYPES ("LATENT","SIGMAS","STRING","STRING")`,
+  replaced by `sigmas_remaining`/`sigma_plot` without removing the old
+  computation. Removed both call sites and `_build_latent_meta` from the
+  `nodes_sampler.py` imports (still defined in `sampler_utils.py`, still
+  tested via `test_sdr_conditioning.py` which now imports it directly from
+  `sys.modules["sampler_utils"]`). `build_sigma_report` import retained —
+  it has a second live call site (trivial sigma schedule warning, line ~807).
+
+- **Dead imports `MULTI_COND_MODES` / `merge_conditionings` removed**
+  (`nodes_sampler.py`): multi-conditioning (`positive_2`, `cond_weight_b`,
+  `multi_cond_mode`) was intentionally dropped in v3 (confirmed by
+  fxtdstudios). Both imports had zero call sites in `RadianceSamplerPro`.
+  `route_conditioning` retained — live call site at `sample()` line ~827.
 
 - **Empty spaces in Custom mode after a named preset**: `resolveModelType`
   trusted the backend's `model_type="ltxav"` default for *every* preset
@@ -389,6 +420,116 @@ auto-toggles `enable_video`, sets `model_type`, resets `scale_factor` to 1.0.
 - **`model_type` showed "ltxav" for non-LTX presets**: `applyPreset` now
   calls `inferModelTypeForPreset` to write the correct family; switching to
   None/Custom resets `model_type` to `"auto"`.
+
+- **`model_type` vocabulary fragmentation fixed** (`sampler_utils.py`,
+  `js/radiance_sampler.js`, `config/model_map.py`): three inconsistencies
+  between the Sampler, the Loader, and `model/detect.py`:
+  1. **`"sd35"` → `"sd3.5"`** — `sampler_utils.py` and `radiance_sampler.js`
+     used `"sd35"` (no period) while every other file (Loader, `detect.py`,
+     `prompt.py`) used `"sd3.5"`. Renamed throughout the Sampler: `MODEL_TYPES`,
+     `MODEL_DEFAULTS`, `CFG_GUIDED_MODELS`, `detect_by_architecture`,
+     `get_ays_sigmas`; JS: `CFG_GUIDED_MODELS`, both `inferModelTypeForPreset`
+     returns. **Migration note**: workflows with `model_type = "sd35"` saved
+     prior to this fix need to re-select `"sd3.5"` manually.
+  2. **`flux2` / `flux2-klein` added to Sampler** — Loader and `detect.py`
+     already recognised both types, but `sampler_utils.py` had `"Flux2": "flux"`
+     in `detect_by_config` (silently merged into Flux.1) and neither type in
+     `MODEL_TYPES`, `MODEL_DEFAULTS`, or `GUIDANCE_EMBED_MODELS`. Added both;
+     `detect_by_config` now returns `"flux2"` for `Flux2` models. Both types use
+     `guidance_embed` like Flux.1 (same scheduler/sampler defaults).
+  3. **`"ltx"` → `"ltxv"` + `"stepvideo"` in `config/model_map.py`
+     `VIDEO_MODEL_TYPES`** — this set used `"ltx"` where `sampler_utils.py` uses
+     `"ltxv"`; `"stepvideo"` was also absent. Both corrected.
+
+---
+
+## Radiance Video Sampler (nodes/video/t2v.py)
+
+- **Triplicated noise-shape + model-defaults logic factored out**: the 12-line
+  noise shape calculation (`sc`/`tc`/`ch`/`temp` → `(B,C,T,H,W)`) and the
+  14-line `dit_config` parsing + sampling defaults resolution were copy-pasted
+  across `RadianceVideoLatentNoise.generate()`, `RadianceT2VPipeline.generate()`,
+  and `RadianceI2VPipeline.generate()`. Extracted into two module-level helpers
+  in `t2v.py`: `_resolve_dit_config()` (T2V + I2V) and `_build_noise_shape()`
+  (all three). No behaviour change — each `generate()` now calls the helpers
+  instead of inlining the logic.
+
+- **Dead `NODE_CLASS_MAPPINGS`/`NODE_DISPLAY_NAME_MAPPINGS` removed from
+  `t2v.py`**: same trap as the Loader audit — the live registry is
+  `nodes/video/__init__.py`; `t2v.py`'s block was never read by ComfyUI and
+  had drifted (display names used "◎ Radiance Video ..." prefix instead of
+  "◎ Video ...", 4 HDR nodes missing). Replaced with a one-line comment
+  pointing to the authoritative registry.
+
+- **`cfg_schedule_json` silent failure + misleading report fixed**: when the
+  JSON was invalid or malformed, the `except Exception: pass` block silently
+  fell back to the static CFG value — no warning, no indication of failure.
+  Worse, the sampler report still showed `(from schedule)` regardless. Fixed:
+  added `logger.warning` on parse failure; introduced `_cfg_from_schedule`
+  boolean to gate the report label on actual parse success, not just on
+  whether the string was non-empty.
+
+- **NaN/Inf guard added to `_comfy_sample()`**: `RadianceSamplerPro` already
+  sanitizes non-finite values after sampling; `RadianceVideoSampler` had no
+  equivalent. CFG blowups, fp16/bf16 overflow, or a degenerate schedule can
+  produce NaN/Inf that silently decode to black or corrupt frames with no error.
+  Added the same guard: detects non-finite values, logs a warning with the
+  count, and sanitizes via `torch.nan_to_num`.
+
+- **Cosmetic debt cleared** (`t2v.py`, `nodes_sampler.py`): stale file-header
+  comment (`# nodes_t2v_pipeline.py` → `# t2v.py`); misplaced class docstrings
+  on `RadianceVideoSampler`, `RadianceT2VPipeline`, `RadianceI2VPipeline`
+  (were placed after `CATEGORY`/`DESCRIPTION` class vars — Python treated them
+  as floating string literals rather than `__doc__`; moved to first statement);
+  duplicate `CATEGORY` assignment in `RadianceVideoSampler` removed (was set
+  twice: once before `INPUT_TYPES`, once after `FUNCTION`); stale
+  "not supported by KSampler directly" wording in `RadianceVideoSampler`
+  docstring updated to reflect `_comfy_sample()` migration; duplicated
+  workflow-compat absorber comment in `nodes_sampler.py` (lines 266-277, same
+  explanation copy-pasted twice) collapsed into a single paragraph.
+
+- **Doc/impl drift fixed + `cfg_schedule_json` implemented in T2V/I2V pipelines**
+  (`t2v.py`): `RadianceT2VPipeline` docstring falsely claimed to chain through
+  "RadianceVideoSampler (ComfyUI denoising loop)" — both pipelines call
+  `_comfy_sample()` directly, same as `RadianceVideoSampler` itself. Corrected
+  both docstrings. Separately, `cfg_schedule_json` was accepted as an optional
+  input on both pipelines but silently ignored (parameter received, never read).
+  Added the same parse-and-warn logic used by `RadianceVideoSampler.sample()`:
+  first value of the schedule array replaces the static CFG; parse failures log
+  a warning and fall back to the static value; the `pipeline_report` line now
+  appends `(schedule)` when the schedule value is actually applied.
+
+- **`_comfy_sample()` migrated from `KSampler` to `sample_custom`** (`t2v.py`):
+  fixes `'dict' has no attribute is_nested'` crash with LTX 2.3 on ComfyUI
+  v0.26.0. Root cause: `_comfy_sample()` was passing a LATENT dict
+  `{"samples": tensor}` as `latent_image` to the legacy `KSampler` API;
+  ComfyUI v0.26.0 now calls `.is_nested` directly on that argument inside
+  `CFGGuider.sample()`, which fails on plain dicts. Fix: dict unwrapped to
+  raw tensor, then migrated to `comfy.samplers.sampler_object()` +
+  `comfy.sample.sample_custom()` — the same modern API used by
+  `RadianceSamplerPro`. Sigma computation replicates `KSampler.set_steps()`
+  logic (penultimate-sigma discard, partial-denoise slicing). Affects all
+  three callers: `RadianceVideoSampler`, `RadianceT2VPipeline`,
+  `RadianceI2VPipeline`.
+
+- **`dit_config` hard-override in all three video sampling nodes** (`t2v.py`,
+  `js/radiance_video.js`): previously `dit_config` was either dead
+  (`RadianceVideoSampler` — required but never read) or soft-override
+  (`RadianceT2VPipeline`/`RadianceI2VPipeline` — widget values won as long as
+  they were non-zero, so `sampler_name` and `scheduler` could never be driven by
+  the model spec). All three nodes now use hard-override logic: when `dit_config`
+  carries a `"model_name"` key (i.e. a `RadianceVideoModelInfo` node is wired
+  in), `_resolve_dit_config()` derives `steps/cfg/sampler/scheduler` from
+  `_MODEL_DEFAULTS` and ignores the manual widgets entirely; when `dit_config` is
+  absent or empty (`{}`), widget values apply unchanged — no behaviour change for
+  existing workflows. `dit_config` promoted from required to optional in
+  `RadianceVideoSampler`. Reports now label the CFG source as `(dit_config)` or
+  `(schedule)`. JS (`radiance_video.js`): widget-greying for the four affected
+  widgets on all three nodes when the `dit_config` input is connected and active;
+  polling every 250 ms catches upstream mute/bypass changes. `RadianceVideoLatentNoise`
+  and `RadianceVideoBatchDecode` are intentionally excluded — their `dit_config`
+  provides compression ratios / latent scale, not sampling params, so no widgets
+  are overridden.
 
 ---
 
