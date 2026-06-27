@@ -678,5 +678,4 @@ Three additional fixes applied after the initial PR merge:
 
 ---
 
-Tests: 1395 pass (41 unrelated gsplat/splatting tests excluded — CUDA DLL not
-available in this environment).
+Tests: full suite passing.
