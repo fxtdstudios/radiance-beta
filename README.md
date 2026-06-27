@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/version-3.1.1-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
-[![Nodes](https://img.shields.io/badge/nodes-115-c8a96e?style=for-the-badge)](#node-map)
+[![Nodes](https://img.shields.io/badge/nodes-104-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
 [![Hugging Face](https://img.shields.io/badge/Hugging_Face-RUDRA_models-ffd21e?style=for-the-badge)](https://huggingface.co/fxtdstudios/RUDRA)
 
@@ -31,7 +31,6 @@ Artists get 32-bit, HDR, and ACES image tools, professional viewers, and VFX nod
 - A full-featured **Viewer** and a lightweight **Lite Viewer** with scopes, frame review, and keyboard shortcuts.
 - HDR VAE decoders (Turbo and Full) and HDR LoRA tooling for scene-linear generation.
 - Dynamic Gizmos — collapse any group of nodes into a single reusable custom node.
-- Gaussian Splatting — load, render, and train 3D Gaussian Splatting scenes; renders feed the color/HDR/finishing pipeline.
 - Secure-by-default handoff to Nuke and DaVinci Resolve.
 
 ## Studio Dashboards
@@ -106,14 +105,6 @@ pip install -U "huggingface_hub[cli]"
 huggingface-cli download fxtdstudios/RUDRA --local-dir "ComfyUI/models/radiance"
 ```
 
-### Optional: Gaussian Splatting
-
-Loading, inspecting, editing, and exporting splats (`.ply` / `.splat`) and COLMAP import work out of the box. **Rendering and training** require [`gsplat`](https://github.com/nerfstudio-project/gsplat) and an NVIDIA CUDA GPU:
-
-```bash
-pip install gsplat plyfile
-```
-
 ## Feature Spotlights
 
 ### Viewers
@@ -152,11 +143,10 @@ FXTD STUDIOS/Radiance
 ├─ Video
 ├─ Upscale
 ├─ Review
-├─ Pipeline
-└─ Gaussian Splatting
+└─ Pipeline
 ```
 
-Radiance provides **115 nodes** (plus any Gizmos you create). Some nodes depend on optional packages and your ComfyUI environment.
+Radiance provides **104 nodes** (plus any Gizmos you create). Some nodes depend on optional packages and your ComfyUI environment.
 
 Node names follow standard compositing vocabulary under the **Radiance** menu — `Grade`, `CDL`, `OCIO ColorSpace`, `Roto`, `Defocus`, `Viewer`, `Read`/`Write` — so they read the way they do in Nuke or Flame. AI and generation nodes keep a `Radiance` prefix (`Radiance Sampler`, `Radiance VAE Decode`) to mark the diffusion layer. You can still find any node by typing "radiance" in the search.
 
@@ -172,7 +162,6 @@ Node names follow standard compositing vocabulary under the **Radiance** menu �
 | Upscale | Image and video upscale (HDR and color aware), tiling, face restoration |
 | Review | Viewer, Lite Viewer, scopes, focus peaking, contact sheets, flipbook, preview server |
 | Pipeline | Project Manager, Send to Nuke, DaVinci Resolve handoff |
-| Gaussian Splatting | Splat Load/Info/Export, Transform, Crop, Merge, Camera Orbit, Splat Render, Splat Viewer 3D, COLMAP Load, Splat Train |
 
 ## DCC Handoff
 

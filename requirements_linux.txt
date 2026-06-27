@@ -11,7 +11,3 @@ defusedxml>=0.7.1,<1.0.0
 einops>=0.7.0,<1.0.0
 torchsde>=0.2.5,<1.0.0
 
-# Optional — Gaussian Splatting render/train (NVIDIA CUDA only).
-# .ply/.splat IO and COLMAP import work without these; uncomment to enable GPU render/train.
-# gsplat>=1.0
-# plyfile>=1.0
