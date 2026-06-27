@@ -313,3 +313,85 @@ jobs:
                   errors.append(p.name)
           sys.exit(1 if errors else 0)
           EOF
+
+  # ── Clean wheel build + completeness check ──────────────────────────────────
+  # Builds the wheel and verifies every importable package on disk actually made
+  # it into the artifact — catches the "new sub-package not added to pyproject"
+  # bug that source-tree tests cannot see.
+  build-install:
+    name: "Build wheel + verify packaging"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Build the wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+
+      - name: Verify wheel contains every source package
+        run: |
+          python - << 'EOF'
+          import os, glob, zipfile, sys
+
+          # Packages present on disk (dirs with __init__.py), as radiance.<dotted>.
+          exclude = {"tests", "docs", "build", "dist", "scripts", "examples", "__pycache__"}
+          disk = set()
+          for dp, dns, fns in os.walk("."):
+              dns[:] = [d for d in dns if d not in exclude and not d.startswith(".")]
+              rel = os.path.relpath(dp, ".").replace("\\", "/")
+              if rel == ".":
+                  if "__init__.py" in fns:
+                      disk.add("radiance")
+                  continue
+              if rel.split("/")[0] in exclude:
+                  continue
+              if "__init__.py" in fns:
+                  disk.add("radiance." + rel.replace("/", "."))
+
+          # Packages actually inside the built wheel.
+          whl = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(whl).namelist()
+          in_wheel = set()
+          for n in names:
+              if n.endswith("/__init__.py"):
+                  in_wheel.add(n[:-len("/__init__.py")].replace("/", "."))
+
+          missing = sorted(p for p in disk if p not in in_wheel)
+          if missing:
+              print("Packages on disk but MISSING from the built wheel:")
+              for p in missing:
+                  print(f"  {p}")
+              sys.exit(1)
+          print(f"OK — all {len(disk)} source packages are present in {os.path.basename(whl)}")
+          EOF
+
+  # ── Python lint (high-signal: undefined names + syntax) ─────────────────────
+  # Advisory for now (continue-on-error) — surfaces real bugs (undefined names,
+  # syntax) in the shipped package without blocking merges. Once the existing
+  # findings in scripts/ are triaged, drop continue-on-error to make it gating.
+  lint:
+    name: "Ruff lint (advisory)"
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Ruff (syntax errors + undefined names; skip tests & dev scripts)
+        run: ruff check --isolated --select E9,F82,F63,F7 --exclude tests,scripts .
