@@ -58,18 +58,57 @@ The Project Manager node keeps its launchers (open, save, and links) in a single
 
 Search for **Radiance** in ComfyUI Manager, or install it from the Comfy Registry.
 
-### Manual install
+Install into the **same Python environment as ComfyUI** — Radiance relies on ComfyUI's existing PyTorch. Dependencies are pure Python (no CUDA toolkit or compiler required).
+
+### Windows
+
+```bat
+cd ComfyUI\custom_nodes
+git clone https://github.com/fxtdstudios/radiance.git
+cd radiance
+pip install -r requirements_windows.txt
+```
+
+### Ubuntu / Linux
+
+Install the system libraries OpenCV needs (OpenEXR and OCIO ship as self-contained wheels):
+
+```bash
+sudo apt update
+sudo apt install -y git python3-venv build-essential libgl1 libglib2.0-0 ffmpeg
+```
+
+> On Ubuntu 22.04 the package is `libgl1-mesa-glx`; on 24.04+ it's `libgl1`.
+
+Then, inside ComfyUI's environment:
 
 ```bash
 cd ComfyUI/custom_nodes
 git clone https://github.com/fxtdstudios/radiance.git
 cd radiance
-pip install -r requirements.txt
+pip install -r requirements_linux.txt
 ```
 
-Windows users can use `requirements_windows.txt`; Apple Silicon users can use `requirements_mac_silicon.txt`.
+### WSL (Ubuntu on Windows)
 
-Radiance relies on the same PyTorch installation that ComfyUI uses, so install it inside the same Python environment as ComfyUI.
+WSL2 is Ubuntu with GPU passthrough, so follow the Ubuntu steps above, plus:
+
+- Install the NVIDIA driver on the **Windows host only** — never a Linux NVIDIA driver inside WSL. Verify with `nvidia-smi` inside WSL.
+- No CUDA Toolkit needed — PyTorch's bundled CUDA runtime handles the GPU.
+- Keep ComfyUI on the Linux filesystem (`~/ComfyUI`), not `/mnt/c/...`, for speed; open the UI from Windows at `http://localhost:8188`.
+
+### macOS (Apple Silicon)
+
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/fxtdstudios/radiance.git
+cd radiance
+pip install -r requirements_mac_silicon.txt
+```
+
+### Verify
+
+Start ComfyUI and look for `Radiance: successfully loaded 102 nodes` in the log.
 
 ### Example workflow
 
