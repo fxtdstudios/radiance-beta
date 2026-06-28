@@ -1,3 +1,8 @@
+# ruff: noqa: F821
+# Many names (image_video_type, MAX_IMAGE_DIMENSION, apply_grading, the LUT/IDT
+# helpers, etc.) are injected into this module's globals at runtime via
+# `globals().update({... getattr(_viewer_utils, name) ...})` below. Static linters
+# cannot see through that, so F821 (undefined name) is disabled for this file.
 import json
 import struct
 import torch

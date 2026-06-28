@@ -315,7 +315,7 @@ def _render_preview_card(
     vram_est: float = 0.0,
     align_label: str = "8px",
     spatial_scale: int = 8,
-) -> "PIL.Image.Image":
+) -> "PIL.Image.Image":  # noqa: F821  (forward-ref; PIL imported lazily in body)
     """
     Radiance HUD-style resolution preview card.
 
