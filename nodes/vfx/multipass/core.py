@@ -927,6 +927,27 @@ def _reflection_mask(specular: torch.Tensor, colorfulness: torch.Tensor) -> torc
     return _to_3ch_image((refl / mx).clamp(0.0, 1.0))
 
 
+def _metallic_mask(img: torch.Tensor, specular: torch.Tensor,
+                   colorfulness: torch.Tensor) -> torch.Tensor:
+    """Metallic heuristic: strong specular response with low chroma reads as metal
+    (metals show bright, near-achromatic highlights; dielectrics keep base colour).
+    Returns (B,H,W,3) normalized to 0..1."""
+    spec_luma = specular.float().mean(dim=-1)
+    metal = spec_luma * (1.0 - colorfulness.clamp(0.0, 1.0))
+    B = metal.shape[0]
+    mx = metal.view(B, -1).max(dim=1).values.view(B, 1, 1).clamp(min=1e-8)
+    return _to_3ch_image((metal / mx).clamp(0.0, 1.0))
+
+
+def _highpass_filter(img: torch.Tensor, radius: float = 3.0, strength: float = 1.0,
+                     contrast: float = 1.0) -> torch.Tensor:
+    """High-pass detail pass: image minus a blurred copy, scaled and re-centered to
+    mid-grey. Returns (B,H,W,3) in 0..1."""
+    low = _gaussian_blur_bhwc(img.float(), max(0.1, float(radius)))
+    high = (img.float() - low) * float(strength) * float(contrast)
+    return (high + 0.5).clamp(0.0, 1.0)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  MATERIAL — v2.1 PASSES
 # ─────────────────────────────────────────────────────────────────────────────
