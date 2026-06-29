@@ -570,6 +570,12 @@ def register_ocio_routes():
         logger.warning("[Radiance OCIO] Cannot register routes — server not available")
         return
 
+    # Idempotent: re-running this (duplicate import) would crash ComfyUI startup
+    # with "method HEAD is already registered". Register the OCIO routes once.
+    if getattr(PromptServer.instance, "_radiance_ocio_routes_registered", False):
+        return
+    PromptServer.instance._radiance_ocio_routes_registered = True
+
     @PromptServer.instance.routes.get("/radiance/ocio/config")
     async def ocio_config_endpoint(request):
         """Return full OCIO config info for the frontend HUD."""

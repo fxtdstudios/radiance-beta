@@ -575,6 +575,18 @@ def _route(method: str, path: str):
     """Decorator: register an aiohttp route only when PromptServer is present."""
     if not _WORKSPACE_AVAILABLE:
         return lambda f: f
+    # Idempotent: the module can be imported under two names (radiance.X and X),
+    # which would otherwise register every route twice and crash ComfyUI startup
+    # with "method HEAD is already registered". Track (method, path) on the
+    # PromptServer singleton so a duplicate import re-uses the first registration.
+    _reg = getattr(PromptServer.instance, "_radiance_registered_routes", None)
+    if _reg is None:
+        _reg = set()
+        setattr(PromptServer.instance, "_radiance_registered_routes", _reg)
+    _key = (method.lower(), path)
+    if _key in _reg:
+        return lambda f: f
+    _reg.add(_key)
     return getattr(PromptServer.instance.routes, method)(path)
 
 

@@ -31,6 +31,15 @@ def _route(method: str, path: str):
     """Decorator: register an aiohttp route only when PromptServer is present."""
     if not _SERVER_AVAILABLE or PromptServer is None:
         return lambda f: f
+    # Idempotent across duplicate module imports — see nodes_workspace._route.
+    _reg = getattr(PromptServer.instance, "_radiance_registered_routes", None)
+    if _reg is None:
+        _reg = set()
+        setattr(PromptServer.instance, "_radiance_registered_routes", _reg)
+    _key = (method.lower(), path)
+    if _key in _reg:
+        return lambda f: f
+    _reg.add(_key)
     return getattr(PromptServer.instance.routes, method)(path)
 
 # Ensure local gizmos folder exists
