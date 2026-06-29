@@ -60,10 +60,11 @@ _ARCH_HEURISTICS = [
     (lambda ks, f: any("patch_embedding" in k for k in ks)
      and any("time_embedding" in k for k in ks)
      and not any("joint_blocks" in k for k in ks), "wan"),
-    (lambda ks, f: any("patchify_proj" in k for k in ks), "ltx"),
+    # ALBABIT-FIX: return "ltxv" (not "ltx") — matches sampler_utils.py vocabulary
+    (lambda ks, f: any("patchify_proj" in k for k in ks), "ltxv"),
     (lambda ks, f: any("patch_embedding" in k for k in ks)
      and any("adaln_single" in k for k in ks)
-     and not any("time_embedding" in k for k in ks), "ltx"),
+     and not any("time_embedding" in k for k in ks), "ltxv"),
     (lambda ks, f: any("adaln_single" in k for k in ks)
      and not any("patchify_proj" in k for k in ks), "pixart"),
     (lambda ks, f: any("down_blocks.0" in k for k in ks)
@@ -74,7 +75,7 @@ _ARCH_HEURISTICS = [
 
 LATENT_CHANNELS = {
     # ALBABIT-FIX: LTX-Video VAE (incl. LTX 2.3) uses 128 latent channels, not 16
-    "flux": 16, "sd3": 16, "sd3.5": 16, "ltx": 128, "ltxav": 128,
+    "flux": 16, "sd3": 16, "sd3.5": 16, "ltxv": 128, "ltxav": 128,  # ALBABIT-FIX: "ltx" → "ltxv"
     "hunyuan_video": 16, "wan": 16, "lumina2": 16, "z_image": 16,
     "sdxl": 4, "sd1.5": 4, "pixart": 4, "aura_flow": 4, "kolors": 4,
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi latent channels
@@ -85,7 +86,7 @@ LATENT_CHANNELS = {
 
 _FORMAT_MAP = {
     "flux": "flux_16ch", "sd3": "sd3_16ch", "sd3.5": "sd3_16ch",
-    "ltx": "ltx_128ch", "ltxav": "ltx_128ch",  # ALBABIT-FIX: match 128ch VAE
+    "ltxv": "ltx_128ch", "ltxav": "ltx_128ch",  # ALBABIT-FIX: "ltx" → "ltxv"; match 128ch VAE
     "hunyuan_video": "hunyuan_16ch", "wan": "wan_16ch",
     "lumina2": "lumina_16ch", "z_image": "z_image_16ch",
     "sdxl": "sd_4ch", "sd1.5": "sd_4ch", "pixart": "sd_4ch",
@@ -104,7 +105,7 @@ CLIP_SLOT_ORDER = {
     "sd1.5": ["clip_l"],
     "hunyuan_video": ["llm_encoder", "clip_l"],
     "wan": ["t5xxl"],
-    "ltx": ["llm_encoder", "text_projection"],
+    "ltxv": ["llm_encoder", "text_projection"],  # ALBABIT-FIX: "ltx" → "ltxv"
     "ltxav": ["llm_encoder", "text_projection"],
     # ALBABIT-FIX: Lumina2 (Gemma-2 2B) and Z-Image (Qwen3-4B) are routed to
     # llm_encoder by their presets, not t5xxl — fixes "No CLIP encoders
@@ -122,7 +123,7 @@ CLIP_SLOT_ORDER = {
 }
 
 _CLIP_TYPE_VARIANTS = {
-    "ltx": ["LTX_VIDEO", "LTXV", "LTX"],
+    "ltxv": ["LTX_VIDEO", "LTXV", "LTX"],   # ALBABIT-FIX: "ltx" → "ltxv"
     "ltxav": ["LTX_VIDEO", "LTXV", "LTX"],
     "hunyuan_video": ["HUNYUAN_VIDEO", "HUNYUANVIDEO"],
     "wan": ["WAN", "WAN2", "WAN_VIDEO"],
@@ -134,7 +135,7 @@ _CLIP_TYPE_VARIANTS = {
 
 _BASE_CLIP_VRAM = {
     "flux": 4.5, "sd3": 3.0, "sd3.5": 3.5, "sdxl": 1.5, "sd1.5": 0.8,
-    "hunyuan_video": 4.5, "wan": 3.0, "ltx": 2.5, "ltxav": 8.0,
+    "hunyuan_video": 4.5, "wan": 3.0, "ltxv": 2.5, "ltxav": 8.0,  # ALBABIT-FIX: "ltx" → "ltxv"
     "pixart": 2.0, "aura_flow": 2.0, "kolors": 3.0, "lumina2": 3.0, "z_image": 3.0,
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi — single T5XXL encoder, similar to Wan
     "cosmos": 3.0, "cogvideox": 3.0, "mochi": 3.0,
@@ -156,7 +157,7 @@ _CLIP_DTYPE_MULT = {
 _BASE_VRAM = {
     "flux": 12.0, "sd3": 10.0, "sd3.5": 12.0,
     "sdxl": 6.5, "sd1.5": 3.5,
-    "hunyuan_video": 20.0, "wan": 14.0, "ltx": 11.0, "ltxav": 15.0,
+    "hunyuan_video": 20.0, "wan": 14.0, "ltxv": 11.0, "ltxav": 15.0,  # ALBABIT-FIX: "ltx" → "ltxv"
     "pixart": 6.0, "aura_flow": 8.0, "kolors": 8.0,
     "lumina2": 12.0, "z_image": 14.0,
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi base VRAM estimates
@@ -230,7 +231,7 @@ def get_clip_type_enum(model_type: str):
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi resolve via CLIPType.{COSMOS,COGVIDEOX,MOCHI}.
     # Chroma -> CLIPType.CHROMA, Flux.2 -> CLIPType.FLUX2 (Flux.2 Klein via
     # _CLIP_TYPE_VARIANTS override above, since "FLUX2-KLEIN" isn't a real enum).
-    for name in ("hunyuan_video", "wan", "ltx", "ltxav", "pixart", "aura_flow", "kolors", "lumina2", "z_image",
+    for name in ("hunyuan_video", "wan", "ltxv", "ltxav", "pixart", "aura_flow", "kolors", "lumina2", "z_image",  # ALBABIT-FIX: "ltx" → "ltxv"
                   "cosmos", "cogvideox", "mochi", "chroma", "flux2", "flux2-klein"):
         enum_name = name.upper().replace(".", "_")
         auto_variants = [enum_name, name.upper(), name.title().replace("_", "")]

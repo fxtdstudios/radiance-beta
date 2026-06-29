@@ -831,12 +831,12 @@ DEFAULT_YEAR: int = int(os.environ.get("RADIANCE_DEFAULT_YEAR",
 
 # These architectures use T5/LLM encoders that prefer natural language prose.
 # Comma-separated keyword chains perform significantly worse on them.
-PROSE_ARCHS = {"flux", "sd3", "sd3.5", "wan", "ltx", "ltxav", "pixart", "kolors",
+PROSE_ARCHS = {"flux", "sd3", "sd3.5", "wan", "ltxv", "ltxav", "pixart", "kolors",  # ALBABIT-FIX: "ltx" → "ltxv"
                "hunyuan_video", "aura_flow"}
 
 # Architectures where negative prompts have near-zero practical effect.
 # (CFG guidance in these models operates differently; negatives waste token budget.)
-_WEAK_NEG_ARCHS = {"flux", "wan", "ltx", "ltxav", "hunyuan_video", "kolors"}
+_WEAK_NEG_ARCHS = {"flux", "wan", "ltxv", "ltxav", "hunyuan_video", "kolors"}  # ALBABIT-FIX: "ltx" → "ltxv"
 
 
 @functools.lru_cache(maxsize=4)
@@ -927,7 +927,7 @@ def _detect_arch_from_clip(clip, target_arch: str,
 
     # LTX 2.3 / Gemma — distinct key names
     if any(k in keys for k in ("gemma", "ltxv", "ltx")):
-        return "ltx"
+        return "ltxv"  # ALBABIT-FIX: "ltx" → "ltxv" — matches sampler_utils.py
     # SD3/SD3.5: all three encoders simultaneously
     if "t5xxl" in keys and "g" in keys and "l" in keys:
         return "sd3"
