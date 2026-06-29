@@ -1009,7 +1009,25 @@ import radiance.delivery.handler as _delivery_handler
 
 
 
-@PromptServer.instance.routes.get('/radiance/progress')
+def _radiance_route_once(method, path):
+    """Idempotent route decorator — prevents double-registration of this module's
+    routes when it is imported under two names (avoids the ComfyUI startup crash
+    'method HEAD is already registered')."""
+    try:
+        _reg = getattr(PromptServer.instance, "_radiance_registered_routes", None)
+        if _reg is None:
+            _reg = set()
+            setattr(PromptServer.instance, "_radiance_registered_routes", _reg)
+        _key = (method.lower(), path)
+        if _key in _reg:
+            return lambda fn: fn
+        _reg.add(_key)
+        return getattr(PromptServer.instance.routes, method)(path)
+    except Exception:
+        return lambda fn: fn
+
+
+@_radiance_route_once('get', '/radiance/progress')
 async def radiance_progress_endpoint(request):
     """Returns active delivery progress for a node instance."""
     instance_id = request.query.get('id')
