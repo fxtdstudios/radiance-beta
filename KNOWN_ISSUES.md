@@ -30,8 +30,6 @@ clear backlog.
 
 ## Minor
 
-- **Dead code:** an orphaned `RadianceGradeApply` class exists in `viewer.py`
-  (registered nowhere). Harmless; slated for removal in the viewer refactor.
 - **Naming overlap:** `Grade` / `Grade Apply` / `Apply Grade Info` read similarly;
   to be clarified during the Color cleanup.
 

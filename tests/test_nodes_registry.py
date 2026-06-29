@@ -23,6 +23,16 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
+# Build/packaging artifacts that contain *copies* of the package source.
+# Scanning them would report every node as a cross-module duplicate of itself.
+_IGNORE_DIRS = {"__pycache__", "build", "dist", ".git"}
+
+
+def _is_ignored_path(fpath: str) -> bool:
+    segs = fpath.replace("\\", "/").split("/")
+    return any(s in _IGNORE_DIRS or s.endswith(".egg-info") for s in segs)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Collect registry directly from AST (no imports needed)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -153,7 +163,7 @@ def _collect_node_class_mapping_keys():
     seen = []
 
     for fpath in sorted(glob.glob(os.path.join(root, "**", "*.py"), recursive=True)):
-        if "__pycache__" in fpath:
+        if _is_ignored_path(fpath):
             continue
         try:
             src = open(fpath, encoding="utf-8").read()
@@ -301,7 +311,7 @@ def test_logger_hierarchy_all_lowercase():
     pattern = re.compile(r'getLogger\("Radiance[^a-z]')  # uppercase R followed by non-lowercase
 
     for fpath in sorted(glob.glob(os.path.join(root, "**", "*.py"), recursive=True)):
-        if "__pycache__" in fpath:
+        if _is_ignored_path(fpath):
             continue
         src = open(fpath, encoding="utf-8").read()
         for i, line in enumerate(src.splitlines(), 1):
