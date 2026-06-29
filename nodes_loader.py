@@ -139,8 +139,8 @@ MODEL_TYPES = [
     "Auto-Detect",
     "flux", "sd3", "sd3.5",
     "sdxl", "sd1.5",
-    "hunyuan_video", "wan", "ltx",
-    # ALBABIT-FIX: LTX 2.3 (audio) — distinct VRAM profile from "ltx" (LTX
+    "hunyuan_video", "wan", "ltxv",  # ALBABIT-FIX: "ltx" → "ltxv" — matches sampler_utils.py
+    # ALBABIT-FIX: LTX 2.3 (audio) — distinct VRAM profile from "ltxv" (LTX
     # Video 2B/13B). Was only present in a dead duplicate MODEL_TYPES list
     # above, never in the active one, so "ltxav" was unselectable in Custom
     # mode despite being used by the "LTX Video 2.3" presets.
