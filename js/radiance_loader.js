@@ -181,7 +181,8 @@ const PRESET_CONFIGS = {
         "upscale_hints": ["ltxv-13b", "ltx_13b", "latent_upsampler", "upsampler"],
     },
     "LTX Video 2.3": {
-        "unet_hints":    ["ltx-2.3-22b-dev.safetensors", "ltx-2.3-22b-dev", "ltx-2.3", "ltx_2.3"],
+        // ALBABIT-FIX: distilled-1.1 added in second position — auto-matches if user has it
+        "unet_hints":    ["ltx-2.3-22b-dev.safetensors", "ltx-2.3-22b-distilled-1.1.safetensors", "ltx-2.3-22b-distilled.safetensors", "ltx-2.3-22b-dev", "ltx-2.3", "ltx_2.3"],
         "vae_hints":     ["LTX23_video_vae_bf16.safetensors", "LTX23_video_vae", "ltx23_video", "ltx_23_video", "Baked VAE (from UNET)"],
         "audio_vae_hints": ["LTX23_audio_vae_bf16.safetensors", "LTX23_audio_vae", "ltx23_audio", "ltx_23_audio"],
         "clip_hints":    {
@@ -194,7 +195,8 @@ const PRESET_CONFIGS = {
         "upscale_hints": ["ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "ltx-2.3-spatial-upscaler-x2-1.0.safetensors", "ltx-2.3", "ltx_2.3", "latent_upsampler", "upsampler"],
     },
     "LTX Video 2.3 (Low VRAM)": {
-        "unet_hints":    ["ltx-2.3-22b-dev-fp8.safetensors", "ltx-2.3-22b-dev-fp8", "ltx-2.3", "ltx_2.3"],
+        // ALBABIT-FIX: distilled-1.1 replaces dev-fp8 as primary Low VRAM model
+        "unet_hints":    ["ltx-2.3-22b-distilled-1.1.safetensors", "ltx-2.3-22b-distilled.safetensors", "ltx-2.3-22b-distilled-1.1", "ltx-2.3-22b-distilled", "ltx-2.3-22b-dev-fp8.safetensors", "ltx-2.3-22b-dev-fp8", "ltx-2.3", "ltx_2.3"],
         "vae_hints":     ["Baked VAE (from UNET)", "LTX23_video_vae", "ltx23_video", "ltx_23_video"],
         // ALBABIT-FIX: without this, autoFillPresetFiles() falls back to
         // audio_vae_name = "None" (no hints), so extract_audio_vae is False
