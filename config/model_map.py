@@ -35,8 +35,8 @@ RADIANCE_MODEL_MAP: dict = {
         "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-dev.safetensors",
         "type": "diffusion_models",
     },
-    "ltx-2.3-22b-distilled.safetensors": {
-        "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled.safetensors",
+    "ltx-2.3-22b-distilled-1.1.safetensors": {  # ALBABIT-FIX: v1.1 — better audio + aesthetics over original distilled
+        "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled-1.1.safetensors",
         "type": "diffusion_models",
     },
     # LTX-2 Video-VAE (AutoencoderKLLTX2Video, 32x/8x/128ch, 2.44 GB) — shared by LTX-2
@@ -535,12 +535,12 @@ CHECKPOINT_PRESETS: dict = {
         "clip_dtype": "default",
     },
     "LTX Video": {
-        "model_type": "ltx",
+        "model_type": "ltxv",  # ALBABIT-FIX: "ltx" → "ltxv" — matches sampler_utils.py
         "weight_dtype": "fp16",
         "clip_dtype": "default",
     },
     "LTX Video 13B": {
-        "model_type": "ltx",
+        "model_type": "ltxv",  # ALBABIT-FIX: "ltx" → "ltxv" — matches sampler_utils.py
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "default",
     },
