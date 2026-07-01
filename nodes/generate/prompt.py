@@ -99,7 +99,7 @@ from typing import Optional
 
 logger = logging.getLogger("radiance.prompt")
 
-__version__ = "3.2.1"
+__version__ = "3.2.2"
 
 
 class CinematicDatasets:
@@ -925,9 +925,14 @@ def _detect_arch_from_clip(clip, target_arch: str,
             _detect_arch_from_clip._key_cache[_clip_id] = frozenset()
     keys = _detect_arch_from_clip._key_cache[_clip_id]
 
-    # LTX 2.3 / Gemma — distinct key names
-    if any(k in keys for k in ("gemma", "ltxv", "ltx")):
-        return "ltxv"  # ALBABIT-FIX: "ltx" → "ltxv" — matches sampler_utils.py
+    # ALBABIT-FIX: LTXAVGemmaTokenizer registers as "gemma3_12b" — exact key match.
+    # The old check used substring "gemma" which never matched "gemma3_12b" in a frozenset.
+    # Without this, LTX-AV fell through to "sdxl" fallback (wrong arch, wrong prompt path).
+    if "gemma3_12b" in keys:
+        return "ltxav"
+    # LTX-V (pre-2.3, T5-based) — still matched by key fragments
+    if any(k in keys for k in ("ltxv", "ltx")):
+        return "ltxv"
     # SD3/SD3.5: all three encoders simultaneously
     if "t5xxl" in keys and "g" in keys and "l" in keys:
         return "sd3"
@@ -1671,6 +1676,12 @@ class RadianceCinematicPromptEncoder:
             settings = apply_style_preset(style_preset, settings)
 
         # ── Build prompt ────────────────────────────────────────────────────
+        # ALBABIT-FIX: ltxav uses the same _build_prose_prompt path as Flux/WAN.
+        # Gemma3-12B understands visual descriptors (camera, lens, aperture, lighting)
+        # for video; the DualLinearProjection audio head has learned weights that
+        # map purely visual gear terms to near-zero audio influence — no corruption.
+        # Note: quoted dialogue in base_prompt (e.g. 'says "Hello!"') WILL generate
+        # audible speech — this is intended LTX-AV behaviour, not a bug.
         final_prompt, negative_prompt, _ = build_cinematic_prompt_v3(
             base_prompt=base_prompt,
             base_prompt_b="",
