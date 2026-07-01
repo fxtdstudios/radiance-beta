@@ -484,7 +484,7 @@ class RadianceContactSheet:
                 sheet[y0 + th: y0 + th + label_h, x0: x0 + tw] = \
                     np.array(lbl_pil, dtype=np.float32) / 255.0
 
-        log.info("ContactSheet: %d frames → %dx%d grid (%dpx thumbs)", B, cols, rows, tw)
+        log.info("ContactSheet: %d frames -> %dx%d grid (%dpx thumbs)", B, cols, rows, tw)
         return (_to_tensor(sheet), cols, rows)
 
 
@@ -828,7 +828,7 @@ class RadianceFrameStamp:
 # Global frame buffer — shared between node instances and the HTTP handler
 _PREVIEW_BUFFER: dict[str, bytes] = {}    # stream_name → JPEG bytes
 _PREVIEW_META:   dict[str, dict] = {}     # stream_name → metadata dict
-_SERVERS:        dict[int, HTTPServer] = {}  # port → running HTTPServer
+_SERVERS:        dict[int, HTTPServer] = {}  # port -> running HTTPServer
 _SERVER_LOCK     = threading.Lock()
 
 _HTML_PAGE = """\
@@ -899,11 +899,11 @@ def _ensure_server(port: int, stream_name: str):
             return
         try:
             handler  = _make_handler(stream_name)
-            server   = HTTPServer(("0.0.0.0", port), handler)
+            server   = HTTPServer(("127.0.0.1", port), handler)
             thread   = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             _SERVERS[port] = server
-            log.info("PreviewServer started on http://localhost:%d", port)
+            log.info("PreviewServer started on http://127.0.0.1:%d", port)
         except OSError as exc:
             log.error("PreviewServer: cannot bind port %d — %s", port, exc)
 
@@ -922,7 +922,7 @@ def _frame_to_jpeg(arr: np.ndarray, quality: int = 85) -> bytes:
 class RadiancePreviewServer:
     """
     HTTP preview server — serve the most recent processed frame as JPEG to
-    any browser or monitoring tool on the local network.
+    any browser or monitoring tool on the local workstation.
 
     After the node executes, open:
         http://localhost:<port>/

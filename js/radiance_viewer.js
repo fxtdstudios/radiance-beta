@@ -5099,23 +5099,7 @@ else:
             }
 
             default: {
-                this._termLog('event', '[Terminal] Executing Python on backend...');
-                api.fetchApi('/radiance/terminal', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ code: cmd })
-                }).then(r => r.json()).then(data => {
-                    if (data.status === 'success') {
-                        if (data.output && data.output.trim() !== "") {
-                            this._termLog('result', data.output.trim());
-                        }
-                    } else {
-                        if (data.output) this._termLog('error', data.output.trim());
-                        else this._termLog('error', 'Execution failed.');
-                    }
-                }).catch(e => {
-                    this._termLog('error', `[Terminal API] Network error: ${e.message}`);
-                });
+                this._termLog('warn', `[Terminal] Unknown local command: ${cmd}`);
                 break;
             }
         }
@@ -16477,12 +16461,11 @@ else:
             return b;
         };
 
-        const runBtn = mkBtn('▶ RUN', 'Run script  (Ctrl+Enter)', t.accent);
+        const saveBtn = mkBtn('SAVE', 'Save scratchpad  (Ctrl+Enter)', t.accent);
         const clearBtn = mkBtn('⌫ CLEAR', 'Clear output  (Ctrl+L)', '#888');
-        const resetBtn = mkBtn('↺ RESET', 'Reset Python namespace', '#e87');
 
-        runBtn.style.borderColor = t.accent + '33';
-        runBtn.style.color = t.accent;
+        saveBtn.style.borderColor = t.accent + '33';
+        saveBtn.style.color = t.accent;
 
         // Snippet presets
         const snippets = [
@@ -16504,9 +16487,8 @@ else:
         snipSelect.onmouseenter = () => snipSelect.style.borderColor = 'rgba(255,255,255,0.3)';
         snipSelect.onmouseleave = () => snipSelect.style.borderColor = 'rgba(255,255,255,0.1)';
 
-        toolbar.appendChild(runBtn);
+        toolbar.appendChild(saveBtn);
         toolbar.appendChild(clearBtn);
-        toolbar.appendChild(resetBtn);
 
         // Spacer
         const spacer = document.createElement('div');
@@ -16526,7 +16508,7 @@ else:
 
         const editor = document.createElement('textarea');
         editor.spellcheck = false;
-        editor.placeholder = '# Python script — Ctrl+Enter to run\nprint("Hello from Radiance Terminal")';
+        editor.placeholder = '# Local scratchpad — Ctrl+Enter to save';
         editor.value = localStorage.getItem(STORAGE_SCRIPT) || '';
         editor.style.cssText = `width:100%;height:100%;box-sizing:border-box;padding:8px 8px 8px 40px;background:rgba(0,0,0,0.45);color:#e2e2f0;border:none;outline:none;resize:none;font-size:12px;font-family:'JetBrains Mono','Fira Code',monospace;line-height:1.6;tab-size:4;`;
 
@@ -16607,9 +16589,9 @@ else:
         statusBar.style.cssText = `display:flex;justify-content:space-between;padding:4px 10px;background:rgba(10,10,15,0.8);font-size:9px;color:rgba(255,255,255,0.3);letter-spacing:0.5px;flex-shrink:0;border-top:1px solid rgba(255,255,255,0.05);`;
         statusBar.innerHTML = `
             <div style="display:flex;gap:15px;align-items:center;">
-                <span style="color:#666;font-weight:600;">PYTHON 3.11 REPL</span>
+                <span style="color:#666;font-weight:600;">LOCAL SCRATCHPAD</span>
                 <span id="rad-term-copy" style="cursor:pointer;color:${t.accent};opacity:0.6;transition:opacity 0.2s;">[COPY OUTPUT]</span>
-                <span id="rad-term-clean" style="cursor:pointer;color:#e87;opacity:0.6;transition:opacity 0.2s;">[CLEAN MEM]</span>
+                <span id="rad-term-clean" style="cursor:pointer;color:#e87;opacity:0.6;transition:opacity 0.2s;">[CLEAR OUTPUT]</span>
             </div>
             <div style="display:flex;gap:12px;align-items:center;">
                 <a href="https://radiance.fxtd.org/" target="_blank" style="color:rgba(0,168,255,0.5);text-decoration:none;" onmouseover="this.style.color='#00a8ff'" onmouseout="this.style.color='rgba(0,168,255,0.5)'">📖 DOCS</a>
@@ -16633,7 +16615,7 @@ else:
         cleanBtn.onmouseleave = () => cleanBtn.style.opacity = '0.6';
         cleanBtn.onclick = () => {
             outputPanel.innerHTML = '';
-            resetNamespace();
+            setStatus('READY');
         };
 
         const setStatus = (msg, color) => {
@@ -16644,15 +16626,13 @@ else:
             }
         };
 
-        // ── Run script ─────────────────────────────────────────────────────
-        const runScript = async () => {
+        // ── Save scratchpad ────────────────────────────────────────────────
+        const saveScratchpad = () => {
             const code = editor.value.trim();
             if (!code) return;
 
-            // Persist script
             localStorage.setItem(STORAGE_SCRIPT, editor.value);
 
-            // Add to history
             if (history[history.length - 1] !== code) {
                 history.push(code);
                 if (history.length > MAX_HIST) history.shift();
@@ -16660,44 +16640,8 @@ else:
             }
             histIdx = history.length;
 
-            setStatus('EXECUTING...', t.accent);
-            runBtn.style.opacity = '0.5';
-
-            try {
-                const resp = await fetch('/radiance/terminal', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ code })
-                });
-                const data = await resp.json();
-                appendOutput(data.output || '', data.status === 'error', code);
-                setStatus(data.status === 'error' ? '✗ ERROR' : '✓ OK', data.status === 'error' ? '#ff7070' : '#80e080');
-            } catch (e) {
-                appendOutput(`Network error: ${e.message}`, true, code);
-                setStatus('✗ NET ERROR', '#ff7070');
-            } finally {
-                runBtn.style.opacity = '1';
-            }
-        };
-
-        // ── Reset namespace ────────────────────────────────────────────────
-        const resetNamespace = async () => {
-            try {
-                const resp = await fetch('/radiance/terminal', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ code: '__radiance_reset__ = True', _reset: true })
-                });
-                const data = await resp.json();
-                const msg = document.createElement('div');
-                msg.style.cssText = `color:#e87;font-size:10px;margin-top:8px;font-style:italic;opacity:0.8;`;
-                msg.textContent = '— SYSTEM: PYTHON NAMESPACE RESET COMPLETE —';
-                outputPanel.appendChild(msg);
-                outputPanel.scrollTop = outputPanel.scrollHeight;
-                setStatus('RESET OK', '#e87');
-            } catch (e) {
-                setStatus('RESET FAILED', '#ff7070');
-            }
+            appendOutput('Saved locally. Backend Python execution is not available.', false, code);
+            setStatus('SAVED', '#80e080');
         };
 
         // ── Event wiring ────────────────────────────────────────────────────
@@ -16711,8 +16655,8 @@ else:
         });
 
         editor.addEventListener('keydown', e => {
-            // Ctrl+Enter → Run
-            if (e.ctrlKey && e.key === 'Enter') { e.preventDefault(); runScript(); return; }
+            // Ctrl+Enter -> Save
+            if (e.ctrlKey && e.key === 'Enter') { e.preventDefault(); saveScratchpad(); return; }
             // Ctrl+L → Clear output
             if (e.ctrlKey && e.key === 'l') { e.preventDefault(); outputPanel.innerHTML = ''; setStatus('READY'); return; }
 
@@ -16757,13 +16701,8 @@ else:
             }
         });
 
-        runBtn.onclick = () => runScript();
+        saveBtn.onclick = () => saveScratchpad();
         clearBtn.onclick = () => { outputPanel.innerHTML = ''; setStatus('READY'); };
-        resetBtn.onclick = async () => {
-            if (await this._confirmAction('Reset Python namespace and clear all variables?', 'Reset')) {
-                resetNamespace();
-            }
-        };
 
         snipSelect.onchange = () => {
             const idx = parseInt(snipSelect.value);
@@ -19938,5 +19877,4 @@ class RadianceCurveEditor {
         this.draw();
     }
 }
-
 

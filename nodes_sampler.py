@@ -3,6 +3,7 @@ import time
 import math
 import logging
 import gc
+import errno
 from typing import Tuple, Dict, Any, Optional, List
 from dataclasses import dataclass, field
 
@@ -75,6 +76,42 @@ except (ImportError, ValueError):
     )
 
 logger = logging.getLogger("radiance.sampler")
+
+
+def _is_invalid_progress_stream_error(exc: BaseException) -> bool:
+    """Detect Windows/tqdm/wandb progress-stream failures without hiding model errors."""
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OSError):
+            err_no = getattr(current, "errno", None)
+            msg = str(current)
+            if err_no == errno.EINVAL or "Errno 22" in msg or "Invalid argument" in msg:
+                return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _sample_custom_progress_safe(context: str, **kwargs):
+    """Run Comfy sampling, retrying once with progress output disabled if stderr is broken."""
+
+    try:
+        return comfy.sample.sample_custom(**kwargs)
+    except Exception as exc:
+        if not _is_invalid_progress_stream_error(exc) or kwargs.get("disable_pbar"):
+            raise
+
+        retry_kwargs = dict(kwargs)
+        retry_kwargs["disable_pbar"] = True
+        retry_kwargs["callback"] = None
+        logger.warning(
+            "[%s] Comfy progress output failed with OSError(22). "
+            "Retrying with progress display disabled; sampling settings are unchanged.",
+            context,
+        )
+        return comfy.sample.sample_custom(**retry_kwargs)
 
 class RadianceSamplerPro:
     """
@@ -558,8 +595,6 @@ class RadianceSamplerPro:
         denoising steps from that level down to the next sigma in the
         main schedule.
         """
-        import comfy.sample as cs
-
         if restart_count <= 0 or len(restart_schedule) == 0 or len(sigmas) < 2:
             return latent
 
@@ -587,13 +622,20 @@ class RadianceSamplerPro:
                 noise = torch.randn_like(result) * r_val
                 noisy = result + noise
                 try:
-                    result = cs.sample_custom(
-                        model, noisy, cfg=cfg, sampler=sampler_obj,
+                    result = _sample_custom_progress_safe(
+                        "RadianceSamplerPro restart",
+                        model=model,
+                        noise=noisy,
+                        cfg=cfg,
+                        sampler=sampler_obj,
                         sigmas=sub_sigmas,
-                        positive=positive, negative=negative,
+                        positive=positive,
+                        negative=negative,
                         latent_image=result,
-                        noise_mask=None, callback=None,
-                        disable_pbar=True, seed=seed,
+                        noise_mask=None,
+                        callback=None,
+                        disable_pbar=True,
+                        seed=seed,
                     )
                 except Exception as e:
                     logger.warning(f"Restart sampling failed at sigma={r_val:.4f}: {e}")
@@ -730,6 +772,20 @@ class RadianceSamplerPro:
         if is_video:
             latent_samples = ensure_5d(latent_samples, "RadianceSamplerPro")
             frames = latent_samples.shape[2]
+            logger.warning(
+                "[RadianceSamplerPro] Video model '%s' detected. "
+                "For native video-model parity, especially LTX/LTX 2.3, prefer "
+                "RadianceVideoSampler. SamplerPro remains a universal/experimental "
+                "sampler and may differ because guidance, noise, callbacks, and "
+                "staged sampling are still Radiance-controlled.",
+                detected_type,
+            )
+            if sigmas_override is not None:
+                logger.warning(
+                    "[RadianceSamplerPro] sigmas_override only replaces the sigma "
+                    "schedule. It does not make SamplerPro identical to the native "
+                    "video sampler path."
+                )
         else:
             latent_samples = ensure_4d(latent_samples, "RadianceSamplerPro")
             frames = None
@@ -1339,15 +1395,16 @@ class RadianceSamplerPro:
                     # RADIANCE-AUDIT v2.6.0 [IMPORTANT]: removed redundant
                     # load_model_gpu() - comfy.sample.sample_custom
                     # prepares and loads the model via prepare_sampling.
-                    result = comfy.sample.sample_custom(
-                        current_model,
-                        stage_noise,
-                        effective_cfg,
-                        sampler_obj,
-                        stage_sigmas,
-                        stage_positive,
-                        negative,
-                        stage_latent,
+                    result = _sample_custom_progress_safe(
+                        f"RadianceSamplerPro stage {i+1}",
+                        model=current_model,
+                        noise=stage_noise,
+                        cfg=effective_cfg,
+                        sampler=sampler_obj,
+                        sigmas=stage_sigmas,
+                        positive=stage_positive,
+                        negative=negative,
+                        latent_image=stage_latent,
                         noise_mask=noise_mask,
                         callback=create_phase_callback(s_start),
                         disable_pbar=use_custom_preview,

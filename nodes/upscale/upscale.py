@@ -218,15 +218,15 @@ def _verify_or_report_sha256(dest: str, info: Dict[str, Any], key: str) -> bool:
         return True
     if actual.lower() != expected:
         logger.error(
-            f"[Radiance/Upscale] ✗ CHECKSUM MISMATCH for {key}: expected {expected}, got {actual}. "
-            f"Deleting {dest} — possible corruption or tampering."
+            f"[Radiance/Upscale] CHECKSUM MISMATCH for {key}: expected {expected}, got {actual}. "
+            f"Deleting {dest}; possible corruption or tampering."
         )
         try:
             os.remove(dest)
         except OSError:
             pass
         return False
-    logger.info(f"[Radiance/Upscale] ✓ sha256 verified for {key}")
+    logger.info(f"[Radiance/Upscale] sha256 verified for {key}")
     return True
 
 
@@ -308,12 +308,12 @@ def _download_upscale_model(key: str, force: bool = False) -> Optional[str]:
             shutil.copy2(local, dest)
         if not _verify_or_report_sha256(dest, info, key):
             return None
-        logger.info(f"[Radiance/Upscale] ✓ huggingface_hub → {dest}")
+        logger.info(f"[Radiance/Upscale] OK huggingface_hub -> {dest}")
         return dest
     except ImportError:
         pass
     except Exception as e:
-        logger.warning(f"[Radiance/Upscale] hf_hub failed: {e} — falling back to urllib")
+        logger.warning(f"[Radiance/Upscale] hf_hub failed: {e}; falling back to urllib")
 
     # Path 2: urllib + atomic rename
     tmp  = dest + ".part"
@@ -331,10 +331,10 @@ def _download_upscale_model(key: str, force: bool = False) -> Optional[str]:
         os.replace(tmp, dest)
         if not _verify_or_report_sha256(dest, info, key):
             return None
-        logger.info(f"[Radiance/Upscale] ✓ urllib → {dest}")
+        logger.info(f"[Radiance/Upscale] OK urllib -> {dest}")
         return dest
     except Exception as e:
-        logger.error(f"[Radiance/Upscale] ✗ Download failed: {e}")
+        logger.error(f"[Radiance/Upscale] Download failed: {e}")
         for f in (tmp, dest):
             if os.path.isfile(f) and os.path.getsize(f) < 1024:
                 os.remove(f)
@@ -472,7 +472,7 @@ def tiled_upscale(
         x_starts.append(W - tile_size)
 
     n_tiles = len(y_starts) * len(x_starts)
-    logger.info(f"[Radiance/Upscale] Tiling: {H}×{W} → {oH}×{oW}  "
+    logger.info(f"[Radiance/Upscale] Tiling: {H}x{W} -> {oH}x{oW}  "
                 f"tiles={n_tiles}  tile={tile_size}px  overlap={overlap}px")
 
     for ti, y0 in enumerate(y_starts):
@@ -634,7 +634,7 @@ def _load_realesrgan(model_key: str, scale: int, device: torch.device) -> nn.Mod
     net.load_state_dict(state, strict=False)
     net.eval().to(device)
     _MODEL_CACHE[cache_id] = net
-    logger.info(f"[Radiance/Upscale] Loaded {model_key} (nb={nb}, scale={scale}×)")
+    logger.info(f"[Radiance/Upscale] Loaded {model_key} (nb={nb}, scale={scale}x)")
     return net
 
 
@@ -693,7 +693,7 @@ def _load_spandrel(ckpt_path: str, device: torch.device) -> Any:
         model.eval()
         _SPANDREL_CACHE[cache_id] = model
         arch = getattr(model, "architecture", type(model).__name__)
-        logger.info(f"[Radiance/Upscale] ✓ spandrel loaded [{arch}]: {ckpt_path}")
+        logger.info(f"[Radiance/Upscale] spandrel loaded [{arch}]: {ckpt_path}")
         return model
     except ImportError:
         raise RuntimeError(
@@ -751,7 +751,7 @@ def _load_tier2(model_key: str, scale: int, device: torch.device) -> Any:
         )
         net.load_state_dict(state, strict=False)
         net.eval().to(device)
-        logger.info(f"[Radiance/Upscale] ✓ basicsr SwinIR loaded: {ckpt_path}")
+        logger.info(f"[Radiance/Upscale] basicsr SwinIR loaded: {ckpt_path}")
         return net
     except ImportError:
         pass
@@ -796,7 +796,7 @@ def _load_sd_x4_pipeline(device: torch.device) -> Any:
             except Exception as exc:
                 logger.warning("[nodes_upscale] _load_sd_x4_pipeline: %s", exc)
         _DIFFUSION_PIPE_CACHE[cache_key] = pipe
-        logger.info("[Radiance/Upscale] ✓ SD x4 upscaler pipeline ready")
+        logger.info("[Radiance/Upscale] SD x4 upscaler pipeline ready")
         return pipe
     except ImportError:
         raise RuntimeError(
@@ -869,7 +869,7 @@ def _load_seedvr2_pipeline(device: torch.device) -> Any:
         import seedvr2  # type: ignore
         pipe = seedvr2.load_pipeline(device=str(device))
         _DIFFUSION_PIPE_CACHE[cache_key] = pipe
-        logger.info("[Radiance/Upscale] ✓ SeedVR2 pipeline loaded")
+        logger.info("[Radiance/Upscale] SeedVR2 pipeline loaded")
         return pipe
     except ImportError:
         pass
@@ -885,7 +885,7 @@ def _load_seedvr2_pipeline(device: torch.device) -> Any:
         )
         pipe = pipe.to(device)
         _DIFFUSION_PIPE_CACHE[cache_key] = pipe
-        logger.info("[Radiance/Upscale] ✓ SeedVR2 (diffusers) pipeline loaded")
+        logger.info("[Radiance/Upscale] SeedVR2 (diffusers) pipeline loaded")
         return pipe
     except Exception as e:
         raise RuntimeError(
@@ -1927,8 +1927,8 @@ class RadianceUpscaleVideo:
         prev_window_end_up: Optional[torch.Tensor] = None  # last `overlap_temporal` upscaled frames
 
         n_windows = len(w_starts)
-        logger.info(f"[Radiance/Upscale] Video: {B} frames → {n_windows} windows "
-                    f"(size={window_size}, overlap={overlap_temporal}, scale={scale_int}×)")
+        logger.info(f"[Radiance/Upscale] Video: {B} frames -> {n_windows} windows "
+                    f"(size={window_size}, overlap={overlap_temporal}, scale={scale_int}x)")
 
         for wi, f0 in enumerate(w_starts):
             f1     = min(f0 + window_size, B)
@@ -2294,7 +2294,7 @@ def _load_face_restore_model(model_key: str, device: torch.device) -> Any:
             net.load_state_dict(state, strict=False)
             net.eval().to(device)
             _FACE_MODEL_CACHE[cache_id] = net
-            logger.info(f"[Radiance/FaceRestore] ✓ basicsr CodeFormer loaded")
+            logger.info("[Radiance/FaceRestore] basicsr CodeFormer loaded")
             return net
         except (ImportError, Exception) as e:
             logger.debug(f"[Radiance/FaceRestore] basicsr CodeFormer: {e}")
@@ -2308,7 +2308,7 @@ def _load_face_restore_model(model_key: str, device: torch.device) -> Any:
                 bg_upsampler=None, device=device,
             )
             _FACE_MODEL_CACHE[cache_id] = restorer
-            logger.info(f"[Radiance/FaceRestore] ✓ gfpgan GFPGANer loaded")
+            logger.info("[Radiance/FaceRestore] gfpgan GFPGANer loaded")
             return restorer
         except (ImportError, Exception) as e:
             logger.debug(f"[Radiance/FaceRestore] gfpgan package: {e}")

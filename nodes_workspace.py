@@ -36,6 +36,8 @@ MAX_WORKFLOW_SIZE_BYTES = MAX_WORKFLOW_SIZE_MB * 1024 * 1024
 MAX_FILENAME_LENGTH = 200
 ALLOWED_EXTENSIONS = {".rad"}
 MAX_VERSIONS = 50
+MAX_RAD_ZIP_ENTRIES = 256
+MAX_RAD_UNCOMPRESSED_BYTES = MAX_WORKFLOW_SIZE_BYTES
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -467,7 +469,17 @@ def _unpack_rad_v3(data: bytes) -> tuple[str, dict, dict]:
         raise ValueError(f"Corrupt .rad v3 ZIP: {e}")
 
     with zf:
-        names = zf.namelist()
+        infos = zf.infolist()
+        if len(infos) > MAX_RAD_ZIP_ENTRIES:
+            raise ValueError(".rad v3: too many ZIP entries")
+
+        total_uncompressed = sum(info.file_size for info in infos)
+        if total_uncompressed > MAX_RAD_UNCOMPRESSED_BYTES:
+            raise ValueError(
+                f".rad v3: uncompressed payload exceeds {MAX_WORKFLOW_SIZE_MB}MB limit"
+            )
+
+        names = [info.filename for info in infos]
 
         if "workflow.json" not in names:
             raise ValueError(".rad v3: missing workflow.json")
@@ -484,6 +496,8 @@ def _unpack_rad_v3(data: bytes) -> tuple[str, dict, dict]:
         for n in names:
             if n.startswith("assets/") and not n.endswith("/"):
                 asset_name = n[len("assets/"):]
+                if Path(asset_name).name != asset_name or any(ord(c) < 32 for c in asset_name):
+                    raise ValueError(".rad v3: unsafe asset name")
                 assets[asset_name] = zf.read(n)
 
     return graph_json, metadata, assets
@@ -991,7 +1005,14 @@ async def unpack_workflow_api(request):
     graph JSON and metadata. Handles v1, v2, and v3.
     """
     try:
-        body = await request.read()
+        content_length = request.content_length
+        if content_length is not None and content_length > MAX_WORKFLOW_SIZE_BYTES:
+            return web.json_response({"error": f"Payload exceeds {MAX_WORKFLOW_SIZE_MB}MB limit"}, status=413)
+
+        body = await request.content.read(MAX_WORKFLOW_SIZE_BYTES + 1)
+        if len(body) > MAX_WORKFLOW_SIZE_BYTES:
+            return web.json_response({"error": f"Payload exceeds {MAX_WORKFLOW_SIZE_MB}MB limit"}, status=413)
+
         ver  = _detect_rad_version(body)
 
         if ver == 3:

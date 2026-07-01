@@ -47,7 +47,8 @@ Install into the **same Python environment as ComfyUI** — Radiance relies on C
 
 ```bat
 cd ComfyUI\custom_nodes
-git clone https://github.com/fxtdstudios/radiance.git
+git clone https://github.com/fxtdstudios/radiance-beta.git
+
 cd radiance
 pip install -r requirements_windows.txt
 ```
