@@ -831,10 +831,10 @@ PRESET_CONFIGS: Dict[str, Dict[str, Any]] = {
     },
 
     "[V] LTX 2.3 LowRes (20 steps)": {
-        "steps": 20, 
+        "steps": 20,
         "cfg": 3.0,
         "sampler": "euler",
-        "scheduler": "beta",
+        "scheduler": "simple",  # ALBABIT-FIX: simple matches LTXVScheduler's linspace base; beta was incorrect
         "denoise": 1.0,
         "flux_shift": 3.0,
         "flux_guidance": 0.0,
@@ -846,7 +846,7 @@ PRESET_CONFIGS: Dict[str, Dict[str, Any]] = {
         "steps": 40,
         "cfg": 3.0,
         "sampler": "euler",
-        "scheduler": "beta",
+        "scheduler": "simple",  # ALBABIT-FIX: idem
         "denoise": 0.45,
         "flux_shift": 6.0,
         "flux_guidance": 0.0,

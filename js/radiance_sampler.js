@@ -68,7 +68,7 @@ const PRESET_CONFIGS = {
     },
     "▶ LTX 2.3 LowRes (20 steps)": {
         steps: 20, start_step: 0, end_step: 0, cfg: 3.0, sampler: "euler",
-        sampler_mode: "Standard", phase_split: 0.0, scheduler: "beta",
+        sampler_mode: "Standard", phase_split: 0.0, scheduler: "simple", // ALBABIT-FIX: simple matches LTXVScheduler linspace base; beta was incorrect
         scheduler_mode: "Manual", denoise: 1.0, flux_shift: 3.0,
         flux_guidance: 0.0, flux_guidance_profile: "Static", add_noise: true,
         return_with_leftover_noise: false, seed: 0, control_after_generate: "fixed",
@@ -81,7 +81,7 @@ const PRESET_CONFIGS = {
     },
     "▶ LTX 2.3 HighRes (40 steps)": {
         steps: 40, start_step: 0, end_step: 0, cfg: 3.0, sampler: "euler",
-        sampler_mode: "Standard", phase_split: 0.0, scheduler: "beta",
+        sampler_mode: "Standard", phase_split: 0.0, scheduler: "simple", // ALBABIT-FIX: idem
         scheduler_mode: "Manual", denoise: 0.45, flux_shift: 6.0,
         flux_guidance: 0.0, flux_guidance_profile: "Static", add_noise: true,
         return_with_leftover_noise: false, seed: 0, control_after_generate: "fixed",
