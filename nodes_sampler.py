@@ -1375,9 +1375,19 @@ class RadianceSamplerPro:
                     ):
                         try:
                             new_noises = []
-                            for sub_t in current_latent.tensors:
+                            for idx, sub_t in enumerate(current_latent.tensors):
                                 if is_first_stage and add_noise:
-                                    if noise_type.lower() == "gaussian":
+                                    # ALBABIT-FIX: use pre-seeded noise sub-tensor from
+                                    # _prepare_noise instead of torch.randn_like, which
+                                    # ignores the seed and produces non-deterministic noise
+                                    # mismatched from native RandomNoise — root cause of
+                                    # black bars in LTX-AV NestedTensor inference.
+                                    if (
+                                        isinstance(noise, _NestedTensor)
+                                        and idx < len(noise.tensors)
+                                    ):
+                                        sub_noise = noise.tensors[idx]
+                                    elif noise_type.lower() == "gaussian":
                                         sub_noise = torch.randn_like(sub_t)
                                     else:
                                         sub_noise = generate_noise(
