@@ -803,8 +803,8 @@ class TileEngine:
         tile = (tile // 8) * 8
 
         logger.info(
-            f"[Radiance 4K] VRAM budget: {vram_budget_gb:.1f}GB → "
-            f"tile size: {tile}px (image: {image_w}×{image_h})"
+            f"[Radiance 4K] VRAM budget: {vram_budget_gb:.1f}GB -> "
+            f"tile size: {tile}px (image: {image_w}x{image_h})"
         )
         return tile
 
@@ -2767,7 +2767,7 @@ class RadianceVAE4KDecode:
                     else [(t, min(t + temporal_size, _T)) for t in range(0, _T, temporal_size)]
                 )
                 logger.info(
-                    f"[Radiance Temporal Decode] {_T} latent frames → "
+                    f"[Radiance Temporal Decode] {_T} latent frames -> "
                     f"{len(t_chunks)} chunks (chunk_size={temporal_size}, overlap={t_ov})"
                 )
                 chunk_imgs = []
@@ -2824,8 +2824,8 @@ class RadianceVAE4KDecode:
                 return (img_out, json.dumps({"temporal_chunks": len(t_chunks)}), latent_fmt)
 
         logger.info(
-            f"[Radiance 4K Decode v2.3] Latent: {lat_w}×{lat_h} → "
-            f"Output: {pix_w}×{pix_h} ({b} frames, factor={vae_factor}, fmt={latent_fmt})"
+            f"[Radiance 4K Decode v2.3] Latent: {lat_w}x{lat_h} -> "
+            f"Output: {pix_w}x{pix_h} ({b} frames, factor={vae_factor}, fmt={latent_fmt})"
         )
 
         target_device = comfy.model_management.get_torch_device()
@@ -3005,7 +3005,7 @@ class RadianceVAE4KDecode:
             crop_h = img.shape[1] - pad_h
             crop_w = img.shape[2] - pad_w
             img = img[:, :crop_h, :crop_w, :]
-            logger.info(f"[Radiance 4K v2.3] Cropped padding: {pad_h}h, {pad_w}w → {crop_w}×{crop_h}")
+            logger.info(f"[Radiance 4K v2.3] Cropped padding: {pad_h}h, {pad_w}w -> {crop_w}x{crop_h}")
 
         # Restore alpha
         if alpha is not None:
@@ -3269,6 +3269,4 @@ class RadianceVAE4KRoundtrip:
         }
 
         return (img, latent, json.dumps(combined_meta, indent=2))
-
-
 

@@ -823,7 +823,7 @@ Burn timecode, frame number, and label overlay into images.
 
 ### RadiancePreviewServer
 
-Ephemeral HTTP daemon serving the last processed frame as JPEG over LAN.
+Ephemeral HTTP daemon serving the last processed frame as JPEG on the local workstation.
 
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -832,7 +832,7 @@ Ephemeral HTTP daemon serving the last processed frame as JPEG over LAN.
 | `quality` | INT | 85 | JPEG quality [1, 100] |
 | `enabled` | BOOLEAN | True | Enable/disable server |
 
-Outputs: `IMAGE` (passthrough), `url` (STRING `http://0.0.0.0:{port}/frame`).
+Outputs: `IMAGE` (passthrough), `url` (STRING `http://127.0.0.1:{port}/frame`).
 
 ---
 

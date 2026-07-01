@@ -201,46 +201,41 @@
             </section>
 
             <section id="python" class="doc-section">
-                <h2>Backend Python Execution</h2>
-                <p>If you type any command that is not captured by the viewer natively, the Javascript client serializes
-                    your input and fires an API POST request to the <code>/radiance/terminal</code> endpoint configured
-                    on the ComfyUI <code>PromptServer</code>.</p>
+                <h2>Local Viewer Commands</h2>
+                <p>The viewer terminal now handles native viewer commands locally. The script editor is a local
+                    scratchpad for notes and snippets; backend Python execution is not exposed through Radiance.</p>
                 <div class="terminal-block">
-                    <div><span class="terminal-prompt">FXTD ❯</span>print("Hello from the Radiance Terminal!")</div>
-                    <div style="color: #8cf;"> ← Hello from the Radiance Terminal!</div>
+                    <div><span class="terminal-prompt">FXTD ❯</span>help</div>
+                    <div style="color: #8cf;"> ← Lists available local commands</div>
                     <br>
-                    <div><span class="terminal-prompt">FXTD ❯</span>import sys; print(f"Python Version:
-                        {sys.version.split()[0]}")</div>
-                    <div style="color: #8cf;"> ← Python Version: 3.10.12</div>
+                    <div><span class="terminal-prompt">FXTD ❯</span>frame next</div>
+                    <div style="color: #8cf;"> ← Advances the viewer frame</div>
                 </div>
 
                 <div class="info-box"
                     style="background: rgba(100, 150, 255, 0.1); border-left: 4px solid #6af; padding: 1rem; margin: 1.5rem 0;">
-                    <h4 style="margin-top:0; color:#6af;">Tracebacks & Safety</h4>
-                    <p style="margin-bottom:0">The terminal catches exceptions. If you execute malformed Python or throw
+                    <h4 style="margin-top:0; color:#6af;">Safety</h4>
+                    <p style="margin-bottom:0">The terminal rejects unknown commands instead of forwarding them to a
+                        server-side Python runner. If a native command fails or throws
                         an exception, the traceback will be safely captured and dumped to the viewer console in red
-                        text, rather than crashing your ComfyUI sever.</p>
+                        text, rather than crashing your ComfyUI server.</p>
                 </div>
             </section>
 
             <section id="context" class="doc-section">
-                <h2>Execution Context</h2>
-                <p>To save time, the <code>exec()</code> namespace comes pre-loaded with access to several useful
-                    libraries that are common in Visual FX workflows. You do not need to import them.</p>
+                <h2>Scratchpad Context</h2>
+                <p>The scratchpad stores notes and snippets in browser local storage. It does not create a Python
+                    namespace, import libraries, or execute code on the ComfyUI server.</p>
 
                 <ul>
-                    <li><code>math</code> — The standard Python math library.</li>
-                    <li><code>os</code> — The standard Python OS interaction library.</li>
-                    <li><code>np</code> — Globally imported <code>numpy</code>.</li>
-                    <li><code>torch</code> — PyTorch library for manipulating tensors.</li>
-                    <li><code>json</code> — JSON parsing and serialization (New in v2.2.1).</li>
-                    <li><code>folder_paths</code> — ComfyUI path management.</li>
+                    <li><code>Ctrl+Enter</code> — Save the scratchpad locally.</li>
+                    <li><code>Ctrl+L</code> — Clear the output panel.</li>
+                    <li><code>Alt+Up</code> / <code>Alt+Down</code> — Browse saved snippet history.</li>
                 </ul>
 
                 <div class="terminal-block">
-                    <div><span class="terminal-comment"># We can use np and math out of the box</span></div>
-                    <div><span class="terminal-prompt">FXTD ❯</span>print(math.pi * np.random.rand())</div>
-                    <div style="color: #8cf;"> ← 2.14159265...</div>
+                    <div><span class="terminal-comment"># Local note, not executed</span></div>
+                    <div><span class="terminal-prompt">FXTD ❯</span>Shot sq010_sh020: check HDR highlight rolloff before delivery.</div>
                 </div>
             </section>
 
@@ -416,5 +411,3 @@
 </body>
 
 </html>
-
-
