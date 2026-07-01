@@ -205,7 +205,13 @@ const LTX_INCOMPATIBLE_WIDGETS = [
     "tile_size",
     "tile_overlap",
     "tile_stride",
-    "tile_blend"
+    "tile_blend",
+    // ALBABIT-FIX: hide widgets that have no effect under LTX — single unified encoder,
+    // no AYS table, no CFG rescale, no PAG self-attention.
+    "conditioning_clip_target",
+    "ays_schedule",
+    "guidance_rescale_phi",
+    "pag_scale"
 ];
 
 // ALBABIT-FIX: widgets that become inert when an active sigmas_override is connected.
