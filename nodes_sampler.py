@@ -1151,16 +1151,15 @@ class RadianceSamplerPro:
 
         def create_phase_callback(phase_start_step):
             def callback(step, x0, x1, total_steps):
-
                 global_step = step + phase_start_step
-
                 if pbar_ref:
                     pbar_ref.update_absolute(global_step + 1, total_steps, (x0,))
-
             return callback
 
         current_latent = work_latent
-        prev_stage_sigmas: Optional[torch.Tensor] = None                      
+        prev_stage_sigmas: Optional[torch.Tensor] = None
+        _ltxav_mr_base = None
+        _ltxav_mr_orig = None
 
         # RADIANCE-AUDIT v2.6.0 [IMPORTANT]: removed dead pre-seed cache
         # block. It wrote under (primary_scheduler, target_total_steps)
@@ -1264,9 +1263,25 @@ class RadianceSamplerPro:
                     f"[v3.0.0] Tile sampling done in {timings['tile_sampling']:.2f}s"
                 )
 
+            # ALBABIT-FIX: LTX-AV NestedTensor is packed to (B, 1, flat_N) by
+            # KSampler.sample() before reaching _calc_cond_batch. The memory_required
+            # formula computes area = B * flat_N (~16M) instead of B * true_spatial
+            # (~63K), inflating the estimate 128× and causing the memory check to
+            # exceed free VRAM → sequential conditioning evaluation (2 forward passes
+            # per step) instead of one batched pass → ×2.5 slowdown at HighRes.
+            # Patch the BaseModel instance to correct the area estimate.
+            if is_ltx_av and hasattr(model, "model"):
+                _ltxav_mr_base = model.model
+                _ltxav_mr_orig = _ltxav_mr_base.memory_required
+                def _ltxav_memory_required(input_shape, cond_shapes={}):
+                    if len(input_shape) == 3 and input_shape[1] == 1 and input_shape[2] > 500_000:
+                        return _ltxav_mr_orig([input_shape[0], 1, input_shape[2] // 128], cond_shapes)
+                    return _ltxav_mr_orig(input_shape, cond_shapes)
+                _ltxav_mr_base.memory_required = _ltxav_memory_required
+
             for plan_idx, stage in enumerate(planned_stages):
                 if tile_mode and latent_samples.ndim == 4:
-                    break  
+                    break
                 t_stage = time.time()
                 i = stage.index
                 s_start = stage.global_start
@@ -1404,9 +1419,8 @@ class RadianceSamplerPro:
                                 f"[Radiance] LTX-AV NestedTensor noise rebuild failed: {_ne}. "
                             )
 
-                    # RADIANCE-AUDIT v2.6.0 [IMPORTANT]: removed redundant
-                    # load_model_gpu() - comfy.sample.sample_custom
-                    # prepares and loads the model via prepare_sampling.
+                    comfy.model_management.load_model_gpu(current_model)
+
                     result = _sample_custom_progress_safe(
                         f"RadianceSamplerPro stage {i+1}",
                         model=current_model,
@@ -1470,6 +1484,9 @@ class RadianceSamplerPro:
                 )
 
         finally:
+
+            if _ltxav_mr_base is not None and _ltxav_mr_orig is not None:
+                _ltxav_mr_base.memory_required = _ltxav_mr_orig
 
             if "noise" in locals():
                 try: del noise

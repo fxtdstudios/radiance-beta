@@ -844,7 +844,7 @@ PRESET_CONFIGS: Dict[str, Dict[str, Any]] = {
     },
     "[V] LTX 2.3 HighRes (40 steps)": {
         "steps": 40,
-        "cfg": 3.0,
+        "cfg": 1.0,  # ALBABIT-FIX: HighRes pass — cfg=1 matches old Radiance and skips the negative-prompt forward pass
         "sampler": "euler",
         "scheduler": "simple",  # ALBABIT-FIX: idem
         "denoise": 0.45,

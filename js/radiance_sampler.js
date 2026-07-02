@@ -80,7 +80,8 @@ const PRESET_CONFIGS = {
         description: "LTX 2.3 LowRes. Optimal settings for 720p base generation.",
     },
     "▶ LTX 2.3 HighRes (40 steps)": {
-        steps: 40, start_step: 0, end_step: 0, cfg: 3.0, sampler: "euler",
+        // ALBABIT-FIX: cfg=1 matches old Radiance and skips the negative-prompt forward pass
+        steps: 40, start_step: 0, end_step: 0, cfg: 1.0, sampler: "euler",
         sampler_mode: "Standard", phase_split: 0.0, scheduler: "simple", // ALBABIT-FIX: idem
         scheduler_mode: "Manual", denoise: 0.45, flux_shift: 6.0,
         flux_guidance: 0.0, flux_guidance_profile: "Static", add_noise: true,
