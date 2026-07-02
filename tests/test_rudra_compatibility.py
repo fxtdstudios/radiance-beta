@@ -11,6 +11,14 @@ from radiance.model.vae import (
     load_radiance_decoder_weights,
 )
 
+HAS_TORCH = isinstance(getattr(torch, "__version__", None), str)
+
+pytestmark = pytest.mark.skipif(
+    not HAS_TORCH,
+    reason="RUDRA decoder compatibility tests require real torch, not the CI import stub.",
+)
+
+
 def test_decoder_instantiation():
     """Verify that decoders instantiate with correct channels and have RUDRA structure."""
     turbo = RadianceTurboDecoder(latent_channels=16, dr_dim=64)

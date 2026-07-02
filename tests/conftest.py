@@ -74,8 +74,36 @@ def _make_torch_stub():
     class _FakeTensor:
         pass
 
+    class _FakeModule:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __call__(self, *args, **kwargs):
+            return MagicMock()
+
+        def eval(self):
+            return self
+
+        def to(self, *args, **kwargs):
+            return self
+
+        def state_dict(self):
+            return {}
+
+    class _FakeSequential(_FakeModule):
+        def __init__(self, *layers):
+            super().__init__()
+            self.layers = layers
+
     class _FakeNN(types.ModuleType):
-        Module = MagicMock
+        Module = _FakeModule
+        Sequential = _FakeSequential
+        Conv2d = MagicMock
+        ReLU = MagicMock
+        Upsample = MagicMock
+        Linear = MagicMock
+        SiLU = MagicMock
+        AdaptiveAvgPool2d = MagicMock
         functional = MagicMock()
 
     torch_mod.Tensor      = _FakeTensor
