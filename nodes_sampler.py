@@ -424,18 +424,20 @@ class RadianceSamplerPro:
     def _apply_presets(self, preset, **kwargs):
         if preset in ("None", "Custom"):
             return kwargs
-        
+
         conf = PRESET_CONFIGS.get(preset, {})
         if not conf:
             logger.warning(f"[Radiance] Preset '{preset}' not found.")
             return kwargs
 
-        # Override kwargs with preset values
-        for k, v in conf.items():
-            if k in kwargs:
-                kwargs[k] = v
-        
-        logger.info(f"[Radiance] Applied preset '{preset}' parameters.")
+        # ALBABIT-FIX: presets no longer overwrite UI widget values (parity
+        # with old Radiance "relying strictly on UI parameters"). The JS
+        # applyPreset fills the widgets when a preset is selected and flags
+        # any user-edited widget with a divergence marker. Forcing preset
+        # values here silently overrode user edits (e.g. cfg 1.0 -> 3.0 on
+        # the LTX HighRes pass: negative prompt evaluated -> 2 forward
+        # passes per step instead of 1 -> x2.5 slower + different render).
+        logger.info(f"[Radiance] Preset '{preset}' active — relying strictly on UI parameters.")
         return kwargs
 
     def _configure_model_and_defaults(self, model, model_type, preset, **kwargs):
