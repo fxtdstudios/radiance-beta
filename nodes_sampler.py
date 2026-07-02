@@ -47,7 +47,7 @@ try:
         _spectral_noise, _get_freq_grid, _spectral_noise_2d, _brownian_noise,
         _simplex_noise, _voronoi_noise, _curl_noise, generate_noise,
         route_conditioning, tile_sample,
-        MODEL_DEFAULTS, PRESET_CONFIGS,
+        MODEL_DEFAULTS,
     )
 except (ImportError, ValueError):
     from sampler_utils import (
@@ -72,7 +72,7 @@ except (ImportError, ValueError):
         _spectral_noise, _get_freq_grid, _spectral_noise_2d, _brownian_noise,
         _simplex_noise, _voronoi_noise, _curl_noise, generate_noise,
         route_conditioning, tile_sample,
-        MODEL_DEFAULTS, PRESET_CONFIGS,
+        MODEL_DEFAULTS,
     )
 
 logger = logging.getLogger("radiance.sampler")
@@ -425,8 +425,7 @@ class RadianceSamplerPro:
         if preset in ("None", "Custom"):
             return kwargs
 
-        conf = PRESET_CONFIGS.get(preset, {})
-        if not conf:
+        if preset not in WORKFLOW_PRESETS:
             logger.warning(f"[Radiance] Preset '{preset}' not found.")
             return kwargs
 
