@@ -1495,14 +1495,22 @@ def build_cinematic_prompt_v3(
     return (final_prompt, negative_prompt, token_count)
 
 
+# ALBABIT-FIX: fields with a live node widget. apply_style_preset() used to
+# overwrite these unconditionally on every execution -- the docstring's
+# "partial overrides... intentional" claim never held, since every preset
+# defines all 9 fields. Widgets are now respected; js/radiance_prompt.js
+# fills them on selection and flags later edits with a "●" marker.
+_WIDGET_BACKED_PRESET_FIELDS = frozenset({
+    "framing", "camera_type", "lens_focal", "aperture_dof",
+    "lighting", "style_aesthetic", "color_grading",
+})
+
+
 def apply_style_preset(preset_name, current_settings):
     """
-    Apply a style preset to the current settings.
-    Returns updated settings dict.
-
-    Note: Presets do partial overrides — fields not in the preset config
-    retain their current (manual) values. This is intentional so users can
-    select a preset and still tweak individual parameters.
+    Apply a style preset's widget-less fields (film_stock/shutter_speed/
+    aspect_ratio — no corresponding node widget exists for them) to the
+    current settings. Returns updated settings dict.
     """
     if (
         preset_name == "None (Custom)"
@@ -1512,7 +1520,9 @@ def apply_style_preset(preset_name, current_settings):
 
     preset = CinematicDatasets.PRESET_CONFIGS[preset_name]
     updated = current_settings.copy()
-    updated.update(preset)
+    for key, value in preset.items():
+        if key not in _WIDGET_BACKED_PRESET_FIELDS:
+            updated[key] = value
     return updated
 
 
@@ -1561,34 +1571,39 @@ class RadianceCinematicPromptEncoder:
                     {"multiline": True, "default": "A cinematic scene...",
                      "tooltip": "Primary subject/scene description."},
                 ),
+                # ALBABIT-FIX: default to "None (Custom)" so a freshly-added node starts
+                # blank rather than silently pre-loaded with "→ Classic Hollywood"'s
+                # look. The 7 style widget defaults below are set to "None" to match --
+                # js/radiance_prompt.js's resetToCustomDefaults() keeps them in sync
+                # whenever "None (Custom)" is (re)selected.
                 "style_preset": (
                     cls.STYLE_PRESETS,
-                    {"default": "→ Classic Hollywood",
+                    {"default": "None (Custom)",
                      "tooltip": "One-click style preset."},
                 ),
                 "framing": (
                     cls.FRAMING,
-                    {"default": "Medium Shot (MS)", "tooltip": "Shot framing type."},
+                    {"default": "None", "tooltip": "Shot framing type."},
                 ),
                 "camera_type": (
                     cls.CAMERAS,
-                    {"default": "ARRI Alexa 35", "tooltip": "Camera body."},
+                    {"default": "None", "tooltip": "Camera body."},
                 ),
                 "lens_focal": (
                     cls.LENSES,
-                    {"default": "50mm Standard Prime", "tooltip": "Lens + focal length."},
+                    {"default": "None", "tooltip": "Lens + focal length."},
                 ),
                 "aperture_dof": (
                     cls.APERTURES,
-                    {"default": "f/2.8 (Cinematic Separation)", "tooltip": "Depth of field."},
+                    {"default": "None", "tooltip": "Depth of field."},
                 ),
                 "lighting": (
                     cls.LIGHTING,
-                    {"default": "Cinematic Haze / Volumetric Fog", "tooltip": "Lighting style."},
+                    {"default": "None", "tooltip": "Lighting style."},
                 ),
                 "style_aesthetic": (
                     cls.STYLES,
-                    {"default": "Photorealistic (Raw)", "tooltip": "Visual aesthetic."},
+                    {"default": "None", "tooltip": "Visual aesthetic."},
                 ),
                 "color_grading": (
                     cls.COLOR_GRADING,
@@ -1641,13 +1656,13 @@ class RadianceCinematicPromptEncoder:
         self,
         clip,
         base_prompt="A cinematic scene...",
-        style_preset="→ Classic Hollywood",
-        framing="Medium Shot (MS)",
-        camera_type="ARRI Alexa 35",
-        lens_focal="50mm Standard Prime",
-        aperture_dof="f/2.8 (Cinematic Separation)",
-        lighting="Cinematic Haze / Volumetric Fog",
-        style_aesthetic="Photorealistic (Raw)",
+        style_preset="None (Custom)",
+        framing="None",
+        camera_type="None",
+        lens_focal="None",
+        aperture_dof="None",
+        lighting="None",
+        style_aesthetic="None",
         color_grading="None",
         negative_strength="Standard",
         negative_prompt="",
