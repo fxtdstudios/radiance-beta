@@ -621,7 +621,6 @@ def _ensure_stubs() -> None:
                                           "tile_sample",
                                           "_build_latent_meta",
                                           "MODEL_DEFAULTS",
-                                          "PRESET_CONFIGS",
                                           "DYNAMIC_CFG_EARLY_MULTIPLIER",
                                           "DYNAMIC_CFG_LATE_MULTIPLIER",
                                           "DYNAMIC_CFG_EARLY_THRESHOLD",
@@ -681,7 +680,6 @@ def _ensure_stubs() -> None:
         "WORKFLOW_PRESETS":                  ["None", "Custom"],
         "AYS_ANCHORS":                       {},
         "MODEL_DEFAULTS":                    {},
-        "PRESET_CONFIGS":                    {},
     }
 
     for _sub_name, _attrs in _radiance_sub_stubs.items():
