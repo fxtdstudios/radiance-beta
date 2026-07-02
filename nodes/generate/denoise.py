@@ -1,133 +1,11 @@
+from __future__ import annotations
+
 import logging
+import math
 import torch
-import numpy as np
-import cv2
+import torch.nn.functional as F
 
 logger = logging.getLogger("radiance")
-
-
-def rgb_to_ycrcb(rgb: np.ndarray) -> np.ndarray:
-    """
-    Convert (H, W, 3) linear float32 RGB to YCrCb space.
-    Y = 0.2126 * R + 0.7152 * G + 0.0722 * B
-    Cr = (R - Y) / 1.5748
-    Cb = (B - Y) / 1.8556
-    """
-    r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
-    y = 0.2126 * r + 0.7152 * g + 0.0722 * b
-    cr = (r - y) / 1.5748
-    cb = (b - y) / 1.8556
-    return np.stack([y, cr, cb], axis=-1)
-
-
-def ycrcb_to_rgb(ycrcb: np.ndarray) -> np.ndarray:
-    """
-    Convert (H, W, 3) linear float32 YCrCb back to RGB.
-    Inverse of the above using analytical coefficients.
-    R = Y + 1.5748 * Cr
-    B = Y + 1.8556 * Cb
-    G = Y - 0.468124273 * Cr - 0.187324273 * Cb
-    """
-    y, cr, cb = ycrcb[..., 0], ycrcb[..., 1], ycrcb[..., 2]
-    r = y + 1.5748 * cr
-    b = y + 1.8556 * cb
-    g = y - 0.468124273 * cr - 0.187324273 * cb
-    return np.stack([r, g, b], axis=-1)
-
-
-def guided_filter_2d(I: np.ndarray, p: np.ndarray, r: int, eps: float) -> np.ndarray:
-    """
-    Fast Guided Filter using OpenCV boxFilter.
-    I: guidance image (H, W), float32
-    p: input image to be filtered (H, W), float32
-    r: local window radius
-    eps: regularization parameter
-    """
-    ksize = (2 * r + 1, 2 * r + 1)
-    mean_I = cv2.boxFilter(I, -1, ksize, borderType=cv2.BORDER_REFLECT)
-    mean_p = cv2.boxFilter(p, -1, ksize, borderType=cv2.BORDER_REFLECT)
-    mean_Ip = cv2.boxFilter(I * p, -1, ksize, borderType=cv2.BORDER_REFLECT)
-    cov_Ip = mean_Ip - mean_I * mean_p
-
-    mean_II = cv2.boxFilter(I * I, -1, ksize, borderType=cv2.BORDER_REFLECT)
-    var_I = mean_II - mean_I * mean_I
-
-    a = cov_Ip / (var_I + eps)
-    b = mean_p - a * mean_I
-
-    mean_a = cv2.boxFilter(a, -1, ksize, borderType=cv2.BORDER_REFLECT)
-    mean_b = cv2.boxFilter(b, -1, ksize, borderType=cv2.BORDER_REFLECT)
-
-    return mean_a * I + mean_b
-
-
-def motion_compensate_frame(frame: np.ndarray, neighbor: np.ndarray, search_radius: int = 1) -> np.ndarray:
-    """
-    Highly optimized, vectorized block-matching motion compensation.
-    Compares 9 spatial shifts of 'neighbor' against 'frame' (H, W, C)
-    and selects the shift per-pixel that minimizes Sum of Absolute Differences (SAD).
-    """
-    H, W, C = frame.shape
-    best_sad = np.full((H, W), np.inf, dtype=np.float32)
-    compensated = neighbor.copy()
-    
-    active_frame = frame[..., :3] if C >= 3 else frame
-    active_neighbor = neighbor[..., :3] if C >= 3 else neighbor
-    
-    for dy in [-1, 0, 1]:
-        for dx in [-1, 0, 1]:
-            shifted = np.roll(active_neighbor, shift=(dy, dx), axis=(0, 1))
-            diff = np.abs(active_frame - shifted)
-            sad = diff.sum(axis=-1) if diff.ndim == 3 else diff
-            
-            mask = sad < best_sad
-            best_sad[mask] = sad[mask]
-            
-            shifted_full = np.roll(neighbor, shift=(dy, dx), axis=(0, 1))
-            compensated[mask] = shifted_full[mask]
-            
-    return compensated
-
-
-def estimate_noise_profile(image_y: np.ndarray, patch_size: int = 32) -> float:
-    """
-    Scans the Luma (Y) channel for the flatest region to estimate pure camera noise.
-    Splits the image into patch_size x patch_size blocks, calculates the standard
-    deviation of each block, and returns the minimum standard deviation found.
-    This minimum represents the noise floor of the sensor on a flat, detail-free area.
-    """
-    H, W = image_y.shape
-    num_y = H // patch_size
-    num_x = W // patch_size
-    
-    # Crop to exact multiple of patch_size to avoid index errors
-    cropped_y = image_y[:num_y * patch_size, :num_x * patch_size]
-    
-    # Reshape into blocks: (num_y, patch_size, num_x, patch_size)
-    # Then swap axes to get: (num_y, num_x, patch_size, patch_size)
-    blocks = cropped_y.reshape(num_y, patch_size, num_x, patch_size).transpose(0, 2, 1, 3)
-    
-    # Flatten blocks to compute std per block: shape (num_blocks, patch_size * patch_size)
-    flattened_blocks = blocks.reshape(-1, patch_size * patch_size)
-    
-    # Calculate standard deviation along the block pixels
-    block_stds = np.std(flattened_blocks, axis=-1)
-    
-    # Filter out blocks that have zero standard deviation (padded black margins or absolute zeros)
-    valid_stds = block_stds[block_stds > 1e-4]
-    
-    if len(valid_stds) == 0:
-        return 0.015  # Robust default noise floor fallback (1.5% noise)
-        
-    min_std = float(np.min(valid_stds))
-    
-    # Find coordinates for diagnostic logging
-    min_idx = np.argmin(block_stds)
-    min_y = int((min_idx // num_x) * patch_size)
-    min_x = int((min_idx % num_x) * patch_size)
-    logger.debug(f"[RadianceDenoise] Auto-Profile: Measured noise floor sigma={min_std:.5f} at flat patch coordinate ({min_y}, {min_x})")
-    
-    return min_std
 
 
 class RadianceDenoise:
@@ -254,6 +132,267 @@ class RadianceDenoise:
         "and implements multi-frame block-matching motion-compensated temporal stabilization."
     )
 
+    @staticmethod
+    def _rgb_to_ycrcb_t(rgb: torch.Tensor) -> torch.Tensor:
+        r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+        y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        cr = (r - y) / 1.5748
+        cb = (b - y) / 1.8556
+        return torch.stack([y, cr, cb], dim=-1)
+
+    @staticmethod
+    def _ycrcb_to_rgb_t(ycrcb: torch.Tensor) -> torch.Tensor:
+        y, cr, cb = ycrcb[..., 0], ycrcb[..., 1], ycrcb[..., 2]
+        r = y + 1.5748 * cr
+        b = y + 1.8556 * cb
+        g = y - 0.468124273 * cr - 0.187324273 * cb
+        return torch.stack([r, g, b], dim=-1)
+
+    @staticmethod
+    def _box_blur(x_bchw: torch.Tensor, radius: int) -> torch.Tensor:
+        radius = max(1, int(radius))
+        kernel = 2 * radius + 1
+        return F.avg_pool2d(
+            x_bchw,
+            kernel_size=kernel,
+            stride=1,
+            padding=radius,
+            count_include_pad=False,
+        )
+
+    @classmethod
+    def _guided_filter_t(cls, guide: torch.Tensor, src: torch.Tensor, radius: int, eps: float) -> torch.Tensor:
+        mean_i = cls._box_blur(guide, radius)
+        mean_p = cls._box_blur(src, radius)
+        corr_i = cls._box_blur(guide * guide, radius)
+        corr_ip = cls._box_blur(guide * src, radius)
+        var_i = corr_i - mean_i * mean_i
+        cov_ip = corr_ip - mean_i * mean_p
+        a = cov_ip / (var_i + eps)
+        b = mean_p - a * mean_i
+        return cls._box_blur(a, radius) * guide + cls._box_blur(b, radius)
+
+    @classmethod
+    def _bilateral_filter_t(cls, src: torch.Tensor, radius: int, sigma_color: float, sigma_space: float) -> torch.Tensor:
+        radius = max(1, min(int(radius), 8))
+        sigma_color = max(float(sigma_color), 1e-6)
+        sigma_space = max(float(sigma_space), 1e-6)
+        padded = F.pad(src, (radius, radius, radius, radius), mode="reflect")
+        acc = torch.zeros_like(src)
+        wsum = torch.zeros_like(src)
+        center = src
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                shifted = padded[
+                    :,
+                    :,
+                    radius + dy : radius + dy + src.shape[-2],
+                    radius + dx : radius + dx + src.shape[-1],
+                ]
+                spatial = math.exp(-float(dx * dx + dy * dy) / (2.0 * sigma_space * sigma_space))
+                range_w = torch.exp(-((shifted - center) ** 2) / (2.0 * sigma_color * sigma_color))
+                weight = range_w * spatial
+                acc = acc + shifted * weight
+                wsum = wsum + weight
+        return acc / wsum.clamp(min=1e-8)
+
+    @classmethod
+    def _denoise_band_t(
+        cls,
+        band_bchw: torch.Tensor,
+        strength: float,
+        filter_type: str,
+        radius: int,
+        sigma_color: float,
+        sigma_space: float,
+        guidance_bchw: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if strength <= 0.0:
+            return band_bchw
+        if filter_type == "Guided":
+            guide = guidance_bchw if guidance_bchw is not None else band_bchw
+            filtered = cls._guided_filter_t(guide, band_bchw, max(1, radius), max(1e-6, sigma_color * sigma_color))
+        else:
+            filtered = cls._bilateral_filter_t(band_bchw, max(1, radius), sigma_color, sigma_space)
+        return band_bchw + float(strength) * (filtered - band_bchw)
+
+    @staticmethod
+    def _noise_profile_t(luma: torch.Tensor, patch_size: int = 32) -> float:
+        # luma: (B,1,H,W)
+        B, _, H, W = luma.shape
+        if H < patch_size or W < patch_size:
+            return float(luma.std().clamp(min=0.015).item())
+        patches = F.unfold(luma, kernel_size=patch_size, stride=patch_size)
+        if patches.numel() == 0:
+            return 0.015
+        stds = patches.std(dim=1)
+        valid = stds[stds > 1e-4]
+        if valid.numel() == 0:
+            return 0.015
+        return float(valid.min().item())
+
+    @staticmethod
+    def _motion_compensate_t(frame: torch.Tensor, neighbor: torch.Tensor) -> torch.Tensor:
+        active_frame = frame[..., :3] if frame.shape[-1] >= 3 else frame
+        active_neighbor = neighbor[..., :3] if neighbor.shape[-1] >= 3 else neighbor
+        best_sad = torch.full(frame.shape[:-1], float("inf"), device=frame.device, dtype=frame.dtype)
+        compensated = neighbor.clone()
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                shifted = torch.roll(active_neighbor, shifts=(dy, dx), dims=(0, 1))
+                sad = (active_frame - shifted).abs().sum(dim=-1)
+                mask = sad < best_sad
+                best_sad = torch.where(mask, sad, best_sad)
+                shifted_full = torch.roll(neighbor, shifts=(dy, dx), dims=(0, 1))
+                compensated = torch.where(mask.unsqueeze(-1), shifted_full, compensated)
+        return compensated
+
+    def _denoise_gpu(
+        self,
+        image: torch.Tensor,
+        d: int,
+        sigmaColor: float,
+        sigmaSpace: float,
+        hdr_auto_sigma: bool,
+        filter_type: str,
+        auto_profiling: bool,
+        profile_multiplier: float,
+        luma_strength: float,
+        chroma_strength: float,
+        high_freq_denoise: float,
+        mid_freq_denoise: float,
+        low_freq_denoise: float,
+        joint_chroma_guidance: bool,
+        temporal_blend: float,
+        temporal_radius: int,
+        temporal_threshold: float,
+        motion_compensation: bool,
+        detail_recovery: float,
+        sharpen_strength: float,
+        view_mode: str,
+    ):
+        img = image.float()
+        original = img
+        B, H, W, C = img.shape
+
+        if B > 1 and temporal_blend > 0.0:
+            temporal = []
+            for i in range(B):
+                frame = img[i]
+                blended = frame.clone()
+                total = torch.ones_like(frame[..., :3] if C >= 3 else frame)
+                neighbors = []
+                for dist in range(1, temporal_radius + 1):
+                    if i - dist >= 0:
+                        neighbors.append((img[i - dist], dist))
+                    if i + dist < B:
+                        neighbors.append((img[i + dist], dist))
+                for neighbor, dist in neighbors:
+                    aligned = self._motion_compensate_t(frame, neighbor) if motion_compensation else neighbor
+                    active_frame = frame[..., :3] if C >= 3 else frame
+                    active_neighbor = aligned[..., :3] if C >= 3 else aligned
+                    diff = (active_frame - active_neighbor).abs()
+                    weight = torch.exp(-((diff / max(temporal_threshold, 1e-6)) ** 2))
+                    weight = weight * (temporal_blend / max(len(neighbors), 1) / float(dist))
+                    if C >= 3:
+                        blended_rgb = blended[..., :3] + weight * active_neighbor
+                        blended = torch.cat([blended_rgb, blended[..., 3:]], dim=-1) if C == 4 else blended_rgb
+                    else:
+                        blended = blended + weight * aligned
+                    total = total + weight
+                if neighbors:
+                    if C >= 3:
+                        rgb = blended[..., :3] / total.clamp(min=1e-8)
+                        blended = torch.cat([rgb, blended[..., 3:]], dim=-1) if C == 4 else rgb
+                    else:
+                        blended = blended / total.clamp(min=1e-8)
+                temporal.append(blended)
+            img = torch.stack(temporal, dim=0)
+
+        if C >= 3:
+            ycrcb = self._rgb_to_ycrcb_t(img[..., :3])
+            y = ycrcb[..., 0].unsqueeze(1)
+            cr = ycrcb[..., 1].unsqueeze(1)
+            cb = ycrcb[..., 2].unsqueeze(1)
+            frame_max = float(img[..., :3].amax().item())
+            base_sigma = self._noise_profile_t(y) * profile_multiplier if auto_profiling else sigmaColor
+            if hdr_auto_sigma and frame_max > 1.01:
+                base_sigma *= frame_max
+
+            r_mid = max(1, d // 2)
+            r_low = max(2, int(d * 1.5))
+
+            def _bands(ch: torch.Tensor):
+                low = self._box_blur(ch, r_low)
+                mid_raw = self._box_blur(ch, r_mid)
+                return low, mid_raw - low, ch - mid_raw
+
+            y_low, y_mid, y_high = _bands(y)
+            y_high_d = self._denoise_band_t(y_high, high_freq_denoise, filter_type, max(1, d // 4), base_sigma * luma_strength, sigmaSpace)
+            y_mid_d = self._denoise_band_t(y_mid, mid_freq_denoise, filter_type, max(1, d // 2), base_sigma * luma_strength, sigmaSpace)
+            y_low_d = self._denoise_band_t(y_low, low_freq_denoise, filter_type, max(1, d), base_sigma * luma_strength, sigmaSpace)
+            denoised_y = y_high_d + y_mid_d + y_low_d
+
+            guide_high = y_high_d if joint_chroma_guidance else None
+            guide_mid = y_mid_d if joint_chroma_guidance else None
+            guide_low = y_low_d if joint_chroma_guidance else None
+
+            chroma_out = []
+            for chroma in (cr, cb):
+                c_low, c_mid, c_high = _bands(chroma)
+                c_high_d = self._denoise_band_t(c_high, high_freq_denoise, filter_type, max(1, d // 4), base_sigma * chroma_strength, sigmaSpace, guide_high)
+                c_mid_d = self._denoise_band_t(c_mid, mid_freq_denoise, filter_type, max(1, d // 2), base_sigma * chroma_strength, sigmaSpace, guide_mid)
+                c_low_d = self._denoise_band_t(c_low, low_freq_denoise, filter_type, max(1, d), base_sigma * chroma_strength, sigmaSpace, guide_low)
+                chroma_out.append(c_high_d + c_mid_d + c_low_d)
+
+            denoised_ycrcb = torch.cat([denoised_y, chroma_out[0], chroma_out[1]], dim=1).permute(0, 2, 3, 1)
+            denoised_rgb = self._ycrcb_to_rgb_t(denoised_ycrcb)
+            denoised = torch.cat([denoised_rgb, img[..., 3:]], dim=-1) if C == 4 else denoised_rgb
+        else:
+            gray = img.permute(0, 3, 1, 2)
+            frame_max = float(gray.amax().item())
+            base_sigma = self._noise_profile_t(gray) * profile_multiplier if auto_profiling else sigmaColor
+            if hdr_auto_sigma and frame_max > 1.01:
+                base_sigma *= frame_max
+            r_mid = max(1, d // 2)
+            r_low = max(2, int(d * 1.5))
+            low = self._box_blur(gray, r_low)
+            mid_raw = self._box_blur(gray, r_mid)
+            mid = mid_raw - low
+            high = gray - mid_raw
+            denoised = (
+                self._denoise_band_t(high, high_freq_denoise, filter_type, max(1, d // 4), base_sigma * luma_strength, sigmaSpace)
+                + self._denoise_band_t(mid, mid_freq_denoise, filter_type, max(1, d // 2), base_sigma * luma_strength, sigmaSpace)
+                + self._denoise_band_t(low, low_freq_denoise, filter_type, max(1, d), base_sigma * luma_strength, sigmaSpace)
+            ).permute(0, 2, 3, 1)
+
+        if detail_recovery > 0.0:
+            denoised = denoised + detail_recovery * (original - denoised)
+
+        if sharpen_strength > 0.0:
+            rgb_or_gray = denoised[..., :3] if C >= 3 else denoised
+            blurred = self._box_blur(rgb_or_gray.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1)
+            sharp = rgb_or_gray + sharpen_strength * (rgb_or_gray - blurred)
+            denoised = torch.cat([sharp, denoised[..., 3:]], dim=-1) if C == 4 else sharp
+
+        if view_mode == "Noise Residual":
+            final = original - denoised + 0.5
+        elif view_mode == "Luma (Y)" and C >= 3:
+            yv = self._rgb_to_ycrcb_t(denoised[..., :3])[..., :1]
+            final = yv.expand(-1, -1, -1, 3)
+            if C == 4:
+                final = torch.cat([final, original[..., 3:]], dim=-1)
+        elif view_mode == "Chroma (Cb/Cr)" and C >= 3:
+            yc = self._rgb_to_ycrcb_t(denoised[..., :3])
+            chroma = torch.cat([torch.full_like(yc[..., :1], 0.5), yc[..., 1:2], yc[..., 2:3]], dim=-1)
+            final = self._ycrcb_to_rgb_t(chroma)
+            if C == 4:
+                final = torch.cat([final, original[..., 3:]], dim=-1)
+        else:
+            final = denoised
+
+        return (final,)
+
     def denoise(
         self,
         image,
@@ -278,277 +417,14 @@ class RadianceDenoise:
         sharpen_strength=0.0,
         view_mode="Denoised"
     ):
-        # Support fp16 and float32 by casting to float32
-        img_np = image.cpu().float().numpy()
-
-        output_batch = []
-        batch_size, height, width, channels = img_np.shape
-
-        # Stage 1: Motion-Compensated Temporal Denoising (Long Range)
-        if batch_size > 1 and temporal_blend > 0.0:
-            temporal_denoised = []
-            for i in range(batch_size):
-                frame = img_np[i]
-                blended_frame = frame.copy()
-                
-                # Determine neighbor indices within temporal_radius
-                neighbors_with_dist = []
-                for dist in range(1, temporal_radius + 1):
-                    if i - dist >= 0:
-                        neighbors_with_dist.append((img_np[i - dist], dist))
-                    if i + dist < batch_size:
-                        neighbors_with_dist.append((img_np[i + dist], dist))
-                
-                if neighbors_with_dist:
-                    if channels >= 3:
-                        total_weight = np.ones_like(frame[..., :3])
-                        for neighbor, dist in neighbors_with_dist:
-                            if motion_compensation:
-                                neighbor_aligned = motion_compensate_frame(frame, neighbor, search_radius=1)
-                            else:
-                                neighbor_aligned = neighbor
-                                
-                            diff = np.abs(frame[..., :3] - neighbor_aligned[..., :3])
-                            # Decays based on both absolute difference and temporal distance
-                            dist_factor = 1.0 / float(dist)
-                            w = np.exp(- (diff / temporal_threshold) ** 2) * (temporal_blend * dist_factor / len(neighbors_with_dist))
-                            
-                            blended_frame[..., :3] += w * neighbor_aligned[..., :3]
-                            total_weight += w
-                        blended_frame[..., :3] /= total_weight
-                    else:
-                        total_weight = np.ones_like(frame)
-                        for neighbor, dist in neighbors_with_dist:
-                            if motion_compensation:
-                                neighbor_aligned = motion_compensate_frame(frame, neighbor, search_radius=1)
-                            else:
-                                neighbor_aligned = neighbor
-                                
-                            diff = np.abs(frame - neighbor_aligned)
-                            dist_factor = 1.0 / float(dist)
-                            w = np.exp(- (diff / temporal_threshold) ** 2) * (temporal_blend * dist_factor / len(neighbors_with_dist))
-                            
-                            blended_frame += w * neighbor_aligned
-                            total_weight += w
-                        blended_frame /= total_weight
-                        
-                temporal_denoised.append(blended_frame)
-            img_np = np.stack(temporal_denoised, axis=0)
-
-        # Stage 2: Spatial Denoising via 3-Band Frequency Decomposition & Auto Profiling
-        for i in range(batch_size):
-            original_frame = image[i].cpu().float().numpy() if batch_size == image.shape[0] else img_np[i]
-            frame = img_np[i]
-            frame_max = float(frame.max())
-            
-            try:
-                if channels >= 3:
-                    rgb = frame[..., :3]
-                    ycrcb = rgb_to_ycrcb(rgb)
-                    y = ycrcb[..., 0]
-                    cr = ycrcb[..., 1]
-                    cb = ycrcb[..., 2]
-                    
-                    # 2.1 Measure Noise Floor via Grid Search if enabled
-                    if auto_profiling:
-                        measured_sigma = estimate_noise_profile(y, patch_size=32)
-                        base_sigma = measured_sigma * profile_multiplier
-                    else:
-                        base_sigma = sigmaColor
-                    
-                    # Radii definitions for L/M/H bands
-                    r_mid = max(1, d // 2)
-                    r_low = max(2, int(d * 1.5))
-                    
-                    # 2.2 Frequency decomposition on Luma (Y)
-                    y_low = cv2.boxFilter(y, -1, (2 * r_low + 1, 2 * r_low + 1), borderType=cv2.BORDER_REFLECT)
-                    y_mid_raw = cv2.boxFilter(y, -1, (2 * r_mid + 1, 2 * r_mid + 1), borderType=cv2.BORDER_REFLECT)
-                    y_mid = y_mid_raw - y_low
-                    y_high = y - y_mid_raw
-                    
-                    eff_sigma_y = base_sigma * luma_strength
-                    if hdr_auto_sigma and frame_max > 1.01:
-                        eff_sigma_y *= frame_max
-                        
-                    # Filter Y bands
-                    y_high_denoised = self._denoise_band(y_high, high_freq_denoise, filter_type, max(3, d // 2), eff_sigma_y, sigmaSpace)
-                    y_mid_denoised = self._denoise_band(y_mid, mid_freq_denoise, filter_type, d, eff_sigma_y, sigmaSpace)
-                    y_low_denoised = self._denoise_band(y_low, low_freq_denoise, filter_type, d * 2, eff_sigma_y, sigmaSpace)
-                    
-                    denoised_y = y_high_denoised + y_mid_denoised + y_low_denoised
-                    
-                    # 2.3 Frequency decomposition on Chroma (Cr, Cb)
-                    cr_low = cv2.boxFilter(cr, -1, (2 * r_low + 1, 2 * r_low + 1), borderType=cv2.BORDER_REFLECT)
-                    cr_mid_raw = cv2.boxFilter(cr, -1, (2 * r_mid + 1, 2 * r_mid + 1), borderType=cv2.BORDER_REFLECT)
-                    cr_mid = cr_mid_raw - cr_low
-                    cr_high = cr - cr_mid_raw
-                    
-                    cb_low = cv2.boxFilter(cb, -1, (2 * r_low + 1, 2 * r_low + 1), borderType=cv2.BORDER_REFLECT)
-                    cb_mid_raw = cv2.boxFilter(cb, -1, (2 * r_mid + 1, 2 * r_mid + 1), borderType=cv2.BORDER_REFLECT)
-                    cb_mid = cb_mid_raw - cb_low
-                    cb_high = cb - cb_mid_raw
-                    
-                    eff_sigma_c = base_sigma * chroma_strength
-                    if hdr_auto_sigma and frame_max > 1.01:
-                        eff_sigma_c *= frame_max
-                        
-                    # Joint cross-guidance settings
-                    guide_high = y_high_denoised if joint_chroma_guidance else None
-                    guide_mid = y_mid_denoised if joint_chroma_guidance else None
-                    guide_low = y_low_denoised if joint_chroma_guidance else None
-                    
-                    cr_high_denoised = self._denoise_band(cr_high, high_freq_denoise, filter_type, max(3, d // 2), eff_sigma_c, sigmaSpace, guide_high)
-                    cr_mid_denoised = self._denoise_band(cr_mid, mid_freq_denoise, filter_type, d, eff_sigma_c, sigmaSpace, guide_mid)
-                    cr_low_denoised = self._denoise_band(cr_low, low_freq_denoise, filter_type, d * 2, eff_sigma_c, sigmaSpace, guide_low)
-                    
-                    cb_high_denoised = self._denoise_band(cb_high, high_freq_denoise, filter_type, max(3, d // 2), eff_sigma_c, sigmaSpace, guide_high)
-                    cb_mid_denoised = self._denoise_band(cb_mid, mid_freq_denoise, filter_type, d, eff_sigma_c, sigmaSpace, guide_mid)
-                    cb_low_denoised = self._denoise_band(cb_low, low_freq_denoise, filter_type, d * 2, eff_sigma_c, sigmaSpace, guide_low)
-                    
-                    denoised_cr = cr_high_denoised + cr_mid_denoised + cr_low_denoised
-                    denoised_cb = cb_high_denoised + cb_mid_denoised + cb_low_denoised
-                    
-                    # Reconstruct RGB
-                    denoised_ycrcb = np.stack([denoised_y, denoised_cr, denoised_cb], axis=-1)
-                    denoised_rgb = ycrcb_to_rgb(denoised_ycrcb)
-                    
-                    if channels == 4:
-                        denoised_frame = np.concatenate([denoised_rgb, frame[..., 3:]], axis=-1)
-                    else:
-                        denoised_frame = denoised_rgb
-                else:
-                    # Grayscale single band frequency decomposition & auto profiling
-                    gray = frame.squeeze(-1)
-                    
-                    if auto_profiling:
-                        measured_sigma = estimate_noise_profile(gray, patch_size=32)
-                        base_sigma = measured_sigma * profile_multiplier
-                    else:
-                        base_sigma = sigmaColor
-                        
-                    r_mid = max(1, d // 2)
-                    r_low = max(2, int(d * 1.5))
-                    
-                    gray_low = cv2.boxFilter(gray, -1, (2 * r_low + 1, 2 * r_low + 1), borderType=cv2.BORDER_REFLECT)
-                    gray_mid_raw = cv2.boxFilter(gray, -1, (2 * r_mid + 1, 2 * r_mid + 1), borderType=cv2.BORDER_REFLECT)
-                    gray_mid = gray_mid_raw - gray_low
-                    gray_high = gray - gray_mid_raw
-                    
-                    eff_sigma = base_sigma * luma_strength
-                    if hdr_auto_sigma and frame_max > 1.01:
-                        eff_sigma *= frame_max
-                        
-                    gray_high_denoised = self._denoise_band(gray_high, high_freq_denoise, filter_type, max(3, d // 2), eff_sigma, sigmaSpace)
-                    gray_mid_denoised = self._denoise_band(gray_mid, mid_freq_denoise, filter_type, d, eff_sigma, sigmaSpace)
-                    gray_low_denoised = self._denoise_band(gray_low, low_freq_denoise, filter_type, d * 2, eff_sigma, sigmaSpace)
-                    
-                    denoised_gray = gray_high_denoised + gray_mid_denoised + gray_low_denoised
-                    denoised_frame = denoised_gray[..., np.newaxis]
-                        
-            except cv2.error as e:
-                logger.warning(
-                    f"[RadianceDenoise] Filtering failed on frame {i} ({filter_type}, d={d}, "
-                    f"sigmaColor={sigmaColor:.3f}): {e}. Returning unfiltered frame."
-                )
-                denoised_frame = frame
-
-            # Stage 3: Detail Recovery
-            if detail_recovery > 0.0:
-                if channels >= 3:
-                    high_freq = original_frame[..., :3] - denoised_frame[..., :3]
-                    denoised_frame[..., :3] += detail_recovery * high_freq
-                else:
-                    high_freq = original_frame - denoised_frame
-                    denoised_frame += detail_recovery * high_freq
-
-            # Stage 4: Post-Sharpening
-            if sharpen_strength > 0.0:
-                try:
-                    if channels >= 3:
-                        rgb_part = denoised_frame[..., :3]
-                        blurred = cv2.GaussianBlur(rgb_part, (5, 5), 1.0)
-                        denoised_frame[..., :3] += sharpen_strength * (rgb_part - blurred)
-                    else:
-                        blurred = cv2.GaussianBlur(denoised_frame, (5, 5), 1.0)
-                        if blurred.ndim == 2 and denoised_frame.ndim == 3:
-                            blurred = blurred[..., np.newaxis]
-                        denoised_frame += sharpen_strength * (denoised_frame - blurred)
-                except Exception as e:
-                    logger.warning(f"[RadianceDenoise] Post-sharpening failed: {e}")
-
-            # Stage 5: View Diagnostics
-            if view_mode == "Noise Residual":
-                if channels >= 3:
-                    res_rgb = original_frame[..., :3] - denoised_frame[..., :3] + 0.5
-                    if channels == 4:
-                        final_frame = np.concatenate([res_rgb, original_frame[..., 3:]], axis=-1)
-                    else:
-                        final_frame = res_rgb
-                else:
-                    final_frame = original_frame - denoised_frame + 0.5
-            elif view_mode == "Luma (Y)" and channels >= 3:
-                y_val = denoised_ycrcb[..., 0] if 'denoised_ycrcb' in locals() else rgb_to_ycrcb(denoised_frame[..., :3])[..., 0]
-                y_rgb = np.stack([y_val, y_val, y_val], axis=-1)
-                if channels == 4:
-                    final_frame = np.concatenate([y_rgb, original_frame[..., 3:]], axis=-1)
-                else:
-                    final_frame = y_rgb
-            elif view_mode == "Chroma (Cb/Cr)" and channels >= 3:
-                cr_val = denoised_ycrcb[..., 1] if 'denoised_ycrcb' in locals() else rgb_to_ycrcb(denoised_frame[..., :3])[..., 1]
-                cb_val = denoised_ycrcb[..., 2] if 'denoised_ycrcb' in locals() else rgb_to_ycrcb(denoised_frame[..., :3])[..., 2]
-                chroma_ycrcb = np.stack([np.full_like(cr_val, 0.5), cr_val, cb_val], axis=-1)
-                chroma_rgb = ycrcb_to_rgb(chroma_ycrcb)
-                if channels == 4:
-                    final_frame = np.concatenate([chroma_rgb, original_frame[..., 3:]], axis=-1)
-                else:
-                    final_frame = chroma_rgb
-            else:
-                final_frame = denoised_frame
-
-            output_batch.append(final_frame)
-
-        output_np = np.stack(output_batch, axis=0)
-        output_tensor = torch.from_numpy(output_np)
-
-        return (output_tensor,)
-
-    def _denoise_band(
-        self,
-        band: np.ndarray,
-        strength: float,
-        filter_type: str,
-        d_band: int,
-        sigmaColor: float,
-        sigmaSpace: float,
-        guidance: np.ndarray = None
-    ) -> np.ndarray:
-        """Denoises a specific frequency band and blends based on user strength."""
-        if strength <= 0.0:
-            return band
-        
-        denoised = self._apply_filter(band, filter_type, d_band, sigmaColor, sigmaSpace, guidance)
-        return band + strength * (denoised - band)
-
-    def _apply_filter(
-        self,
-        channel_2d: np.ndarray,
-        filter_type: str,
-        d: int,
-        sigmaColor: float,
-        sigmaSpace: float,
-        guidance: np.ndarray = None
-    ) -> np.ndarray:
-        """Applies Bilateral or Joint/Self Guided Filter on a single 2D float32 channel."""
-        arr = channel_2d if channel_2d.flags["C_CONTIGUOUS"] else np.ascontiguousarray(channel_2d)
-        
-        if filter_type == "Guided":
-            r = max(1, d // 2)
-            eps = max(1e-6, float(sigmaColor) ** 2)
-            guide = guidance if guidance is not None else arr
-            guide = guide if guide.flags["C_CONTIGUOUS"] else np.ascontiguousarray(guide)
-            return guided_filter_2d(guide, arr, r, eps)
-        else:
-            return cv2.bilateralFilter(arr, d, sigmaColor, sigmaSpace)
+        return self._denoise_gpu(
+            image, d, sigmaColor, sigmaSpace, hdr_auto_sigma, filter_type,
+            auto_profiling, profile_multiplier, luma_strength, chroma_strength,
+            high_freq_denoise, mid_freq_denoise, low_freq_denoise,
+            joint_chroma_guidance, temporal_blend, temporal_radius,
+            temporal_threshold, motion_compensation, detail_recovery,
+            sharpen_strength, view_mode,
+        )
 
 
 NODE_CLASS_MAPPINGS = {"RadianceDenoise": RadianceDenoise}

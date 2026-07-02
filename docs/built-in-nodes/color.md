@@ -2,7 +2,7 @@
 
 # Color
 
-Primary grading, CDL exchange, curves, white balance, color-space conversion, OCIO context, and QC policy checks.
+Primary grading, CDL exchange, curves, white balance, color-space conversion, OCIO context, and QC checks.
 
 ## Typical workflow
 
@@ -26,7 +26,6 @@ Radiance Read -> Color Space Convert / OCIO Context -> Grade / Curves / CDL -> Q
 | [◎ Radiance White Balance](#radiance-white-balance) | `RadianceWhiteBalance` | Adjusts image color, tone, or grading metadata in a production-friendly way. |
 | [◎ Radiance Colorspace Convert](#radiance-colorspace-convert) | `RadianceColorSpaceConvert` | Performs the Radiance operation described by its inputs and outputs in the selected workflow group. |
 | [◎ Radiance ACES Transform](#radiance-aces-transform) | `RadianceACESTransform` | Performs the Radiance operation described by its inputs and outputs in the selected workflow group. |
-| [◎ Radiance Bit Depth Degrade](#radiance-bit-depth-degrade) | `RadianceBitDepthDegrade` | Adjusts image color, tone, or grading metadata in a production-friendly way. |
 | [◎ Radiance Hue Curves](#radiance-hue-curves) | `RadianceHueCurves` | Adjusts image color, tone, or grading metadata in a production-friendly way. |
 | [◎ Radiance Curves](#radiance-curves) | `RadianceCurves` | Adjusts image color, tone, or grading metadata in a production-friendly way. |
 | [◎ Radiance Grade](#radiance-grade) | `RadianceGrade` | Adjusts image color, tone, or grading metadata in a production-friendly way. |
@@ -34,7 +33,6 @@ Radiance Read -> Color Space Convert / OCIO Context -> Grade / Curves / CDL -> Q
 | [◎ Radiance Grade Match](#radiance-grade-match) | `RadianceGradeMatch` | Adjusts image color, tone, or grading metadata in a production-friendly way. |
 | [◎ Radiance OCIO Context](#radiance-ocio-context) | `RadianceOCIOContext` | Performs the Radiance operation described by its inputs and outputs in the selected workflow group. |
 | [◎ Radiance QC](#radiance-qc) | `RadianceQC` | Analyzes the image or workflow state and returns reports that help catch delivery problems. |
-| [◎ Policy Guard](#policy-guard) | `RadiancePolicyGuard` | Analyzes the image or workflow state and returns reports that help catch delivery problems. |
 
 ## ◎ Radiance CDL Transform
 
@@ -283,46 +281,6 @@ Use `◎ Radiance ACES Transform` when the graph reaches the ACES Transform step
 ### Practical notes
 
 - The node returns `image` (`IMAGE`), `aces_info` (`STRING`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
-
-## ◎ Radiance Bit Depth Degrade
-
-**Internal key:** `RadianceBitDepthDegrade`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Color`  
-**Source:** `nodes/color/colorspace.py`
-**Function:** `degrade`
-
-### What it does
-
-Adjusts image color, tone, or grading metadata in a production-friendly way.
-
-### When to use it
-
-Use `◎ Radiance Bit Depth Degrade` when the graph reaches the Bit Depth Degrade step in a color workflow.
-
-### Inputs
-
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `image` | Yes | `IMAGE` | - | - |
-| `bit_depth` | Yes | `INT` | `8` | - |
-| `dither_mode` | Yes | `ENUM: none, triangular, floyd-steinberg` | `triangular` | - |
-| `delta_gain` | Optional | `FLOAT` | `10.0` | - |
-| `banding_threshold` | Optional | `FLOAT` | `0.004` | - |
-| `restore_from_quantized` | Optional | `BOOLEAN` | `False` | - |
-
-### Outputs
-
-| Output | Type | Description |
-| :--- | :--- | :--- |
-| `quantized` | `IMAGE` | Output produced by the `quantized` socket. |
-| `delta_amplified` | `IMAGE` | Output produced by the `delta_amplified` socket. |
-| `banding_mask` | `IMAGE` | Output produced by the `banding_mask` socket. |
-| `metrics` | `STRING` | Output produced by the `metrics` socket. |
-
-### Practical notes
-
-- The node returns `quantized` (`IMAGE`), `delta_amplified` (`IMAGE`), `banding_mask` (`IMAGE`), `metrics` (`STRING`).
 - If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
 
 ## ◎ Radiance Hue Curves
@@ -602,54 +560,4 @@ Use `◎ Radiance QC` before final output or when debugging an unexpected result
 ### Practical notes
 
 - The node returns `image` (`IMAGE`), `text_report` (`STRING`), `json_report` (`STRING`), `status` (`STRING`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
-
-## ◎ Policy Guard
-
-**Internal key:** `RadiancePolicyGuard`  
-**Category:** `FXTD STUDIOS/Radiance/◎ QC & Debug`  
-**Source:** `nodes/color/qc.py`
-**Function:** `run`
-
-### What it does
-
-Analyzes the image or workflow state and returns reports that help catch delivery problems.
-
-### When to use it
-
-Use `◎ Policy Guard` before final output or when debugging an unexpected result.
-
-### Inputs
-
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `mode` | Yes | `(cls.MODES, {'default': 'Guard'})` | - | - |
-| `image` | Yes | `IMAGE` | - | - |
-| `preset` | Optional | `(list(_PRESETS.keys()), {'default': 'Broadcast SDR'})` | - | - |
-| `policy_file` | Optional | `STRING` | `` | - |
-| `custom_max_peak_nits` | Optional | `FLOAT` | `1000.0` | - |
-| `custom_max_clipping` | Optional | `FLOAT` | `0.01` | - |
-| `custom_max_black_crush` | Optional | `FLOAT` | `0.05` | - |
-| `custom_max_saturation` | Optional | `FLOAT` | `1.0` | - |
-| `policy` | Optional | `STRING` | - | - |
-| `max_clipping` | Optional | `FLOAT` | `0.01` | - |
-| `max_black_crush` | Optional | `FLOAT` | `0.05` | - |
-| `max_saturation` | Optional | `FLOAT` | `1.0` | - |
-| `max_peak_nits` | Optional | `FLOAT` | `1000.0` | - |
-| `require_metadata` | Optional | `STRING` | `` | - |
-| `metadata_present` | Optional | `STRING` | `` | - |
-
-### Outputs
-
-| Output | Type | Description |
-| :--- | :--- | :--- |
-| `image` | `IMAGE` | Output produced by the `image` socket. |
-| `passed` | `BOOLEAN` | Output produced by the `passed` socket. |
-| `data1` | `STRING` | Output produced by the `data1` socket. |
-| `data2` | `STRING` | Output produced by the `data2` socket. |
-| `score` | `INT` | Output produced by the `score` socket. |
-
-### Practical notes
-
-- The node returns `image` (`IMAGE`), `passed` (`BOOLEAN`), `data1` (`STRING`), `data2` (`STRING`), `score` (`INT`).
 - If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.

@@ -1,39 +1,39 @@
 from __future__ import annotations
 
 import torch
-import numpy as np
 import logging
 from typing import Tuple, Dict, Any
 
 # Local imports
 from .utils import (
     tensor_srgb_to_linear,
-    tensor_to_numpy_float32,
-    numpy_to_tensor_float32,
 )
 
 logger = logging.getLogger("radiance.hdr.tonemap")
 
 # ─── AgX working space matrices (Blender/Troy Sobotka, BSD-licensed) ─────────
-# sRGB linear → AgX working space
-_AGX_M_IN = np.array([
-    [0.842479062253094, 0.0784335999999992, 0.0792237451477643],
-    [0.0423282422610123, 0.878468636469772, 0.0791661274605434],
-    [0.0423756549057051, 0.0784336000000002, 0.879142973793104],
-], dtype=np.float32).T  # (3,3)
-
-# AgX working space → sRGB linear
-_AGX_M_OUT = np.linalg.inv(_AGX_M_IN)
+# sRGB linear -> AgX working space, transposed for einsum('ij,...j->...i').
+_AGX_M_IN_VALUES = (
+    (0.842479062253094, 0.0423282422610123, 0.0423756549057051),
+    (0.0784335999999992, 0.878468636469772, 0.0784336000000002),
+    (0.0792237451477643, 0.0791661274605434, 0.879142973793104),
+)
 
 # PyTorch versions (lazy-init to avoid device conflict)
-_AGX_M_IN_T:  torch.Tensor | None = None
+_AGX_M_IN_T: torch.Tensor | None = None
 _AGX_M_OUT_T: torch.Tensor | None = None
 
-def _agx_matrices_gpu(device) -> Tuple[torch.Tensor, torch.Tensor]:
+
+def _agx_matrices_gpu(device, dtype: torch.dtype = torch.float32) -> Tuple[torch.Tensor, torch.Tensor]:
     global _AGX_M_IN_T, _AGX_M_OUT_T
-    if _AGX_M_IN_T is None or _AGX_M_IN_T.device != device:
-        _AGX_M_IN_T  = torch.from_numpy(_AGX_M_IN).to(device)
-        _AGX_M_OUT_T = torch.from_numpy(_AGX_M_OUT).to(device)
+    if (
+        _AGX_M_IN_T is None
+        or _AGX_M_OUT_T is None
+        or _AGX_M_IN_T.device != device
+        or _AGX_M_IN_T.dtype != dtype
+    ):
+        _AGX_M_IN_T = torch.tensor(_AGX_M_IN_VALUES, device=device, dtype=dtype)
+        _AGX_M_OUT_T = torch.linalg.inv(_AGX_M_IN_T)
     return _AGX_M_IN_T, _AGX_M_OUT_T
 
 
@@ -420,11 +420,11 @@ class HDRToneMap:
                     (v * (A * v + C * B) + D * E) / (v * (A * v + B) + D * F)
                 ) - E / F
 
-            white_scale = 1.0 / curve(torch.tensor(white_point, device=x.device))
+            white_scale = 1.0 / curve(torch.tensor(white_point, device=x.device, dtype=x.dtype))
             return curve(x) * white_scale
         elif operator == "agx":
             # Full AgX pipeline: sRGB → AgX gamut → log-sigmoid → AgX⁻¹ → sRGB
-            m_in, m_out = _agx_matrices_gpu(x.device)
+            m_in, m_out = _agx_matrices_gpu(x.device, x.dtype)
             # 1. Transform to AgX working space
             x_agx = torch.einsum('ij,...j->...i', m_in, x.clamp(min=0))
             # 2. Log2 inset: working range →  AgX scene (−10 … +6.5 EV)
@@ -440,68 +440,6 @@ class HDRToneMap:
             return torch.clamp(x / white_point, 0, 1)
         else:  # exposure_only
             return torch.clamp(x, 0, 1)
-
-    def _reinhard(self, x: np.ndarray, white: float = 1.0) -> np.ndarray:
-        """Simple Reinhard tone mapping."""
-        return x / (1.0 + x)
-
-    def _reinhard_extended(self, x: np.ndarray, white: float = 4.0) -> np.ndarray:
-        """Extended Reinhard with white point."""
-        numerator = x * (1.0 + x / (white * white))
-        return numerator / (1.0 + x)
-
-    def _reinhard_luminance(self, rgb: np.ndarray, white: float = 4.0) -> np.ndarray:
-        """Reinhard applied to luminance only."""
-        luma = 0.2126 * rgb[..., 0] + 0.7152 * rgb[..., 1] + 0.0722 * rgb[..., 2]
-        luma = np.maximum(luma, 1e-6)
-
-        luma_tm = self._reinhard_extended(luma, white)
-        scale = luma_tm / luma
-
-        return rgb * scale[..., np.newaxis]
-
-    def _filmic_aces(self, x: np.ndarray, white_point: float = 1.0) -> np.ndarray:
-        """ACES filmic tone mapping approximation.
-        FIX #12: white_point now used as input pre-scale (was silently ignored).
-        """
-        a = 2.51
-        b = 0.03
-        c = 2.43
-        d = 0.59
-        e = 0.14
-        x = x / (white_point + 1e-8)
-        return np.clip((x * (a * x + b)) / (x * (c * x + d) + e), 0, 1)
-
-    def _filmic_uncharted2(self, x: np.ndarray) -> np.ndarray:
-        """Uncharted 2 filmic curve."""
-        A = 0.15  # Shoulder strength
-        B = 0.50  # Linear strength
-        C = 0.10  # Linear angle
-        D = 0.20  # Toe strength
-        E = 0.02  # Toe numerator
-        F = 0.30  # Toe denominator
-
-        return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F
-
-    def _agx(self, x: np.ndarray) -> np.ndarray:
-        """
-        Full AgX tone mapping (Blender/Troy Sobotka, BSD-licensed).
-
-        Pipeline:
-          sRGB linear → AgX working space → log inset (-10…+6.5 EV)
-          → sigmoid contrast → AgX⁻¹ → sRGB display
-        """
-        # 1. Gamut conversion: sRGB → AgX working space
-        x_agx = np.einsum('ij,...j->...i', _AGX_M_IN, np.maximum(x, 0))
-        # 2. Log2 inset
-        x_log = (np.log2(np.maximum(x_agx, 1e-10)) - (-10.0)) / (6.5 - (-10.0))
-        x_log = np.clip(x_log, 0.0, 1.0)
-        # 3. Sigmoid contrast curve
-        x_sig = x_log / (1.0 + np.abs(x_log - 0.5) * 2.0)
-        x_sig = (x_sig - 0.5) * 1.5 + 0.5
-        x_sig = np.clip(x_sig, 0.0, 1.0)
-        # 4. AgX⁻¹ → sRGB
-        return np.clip(np.einsum('ij,...j->...i', _AGX_M_OUT, x_sig), 0, 1)
 
     def tonemap(
         self,
@@ -532,70 +470,10 @@ class HDRToneMap:
             )
             shadow_lift = config.get("shadow_lift", shadow_lift)
 
-        # Try GPU path
-        if use_gpu and torch.cuda.is_available():
-            try:
-                device = torch.device("cuda")
-                img = image.to(device).float()
-
-                # Apply exposure
-                img = img * (2.0**exposure)
-
-                # Apply highlight compression (before tone mapping)
-                if highlight_compression > 0:
-                    # Soft knee compression for highlights
-                    threshold = 1.0 - highlight_compression * 0.5
-                    highlight_mask = img > threshold
-                    compressed = threshold + (img - threshold) / (
-                        1.0 + (img - threshold) * highlight_compression * 2
-                    )
-                    img = torch.where(highlight_mask, compressed, img)
-
-                # Apply shadow lift
-                if shadow_lift > 0:
-                    img = img + shadow_lift * (1.0 - img)
-
-                # Apply tone mapping
-                result = self._gpu_tonemap(img, operator, white_point)
-
-                # Apply contrast (linear space, before gamma encoding)
-                # FIX #10: contrast was applied after gamma, causing nonlinear colour
-                # shifts because the 0.5 midpoint has different physical meaning in
-                # gamma-encoded space. Now applied in linear tone-mapped space.
-                if contrast != 1.0:
-                    result = (result - 0.5) * contrast + 0.5
-
-                # Apply saturation (linear space, before gamma encoding)
-                if saturation != 1.0 and result.shape[-1] >= 3:
-                    luma = (
-                        0.2126 * result[..., 0]
-                        + 0.7152 * result[..., 1]
-                        + 0.0722 * result[..., 2]
-                    )
-                    luma = luma.unsqueeze(-1)
-                    result = luma + saturation * (result - luma)
-
-                # Apply gamma (display encoding — must be last)
-                result = torch.clamp(result, 0, 1)
-                result = torch.pow(result, 1.0 / gamma)
-
-                # IMPORTANT: Move result to CPU before returning to prevent VRAM accumulation
-                cpu_result = result.cpu()
-                return (cpu_result,)
-
-            except RuntimeError as e:
-                logger.warning(f"GPU tone mapping failed: {e}. Falling back to CPU.")
-            finally:
-                # FIX #8: guard empty_cache — unconditional call crashes on MPS / CPU-only.
-                # FIX #9: removed non-functional gpu_tensors list; only img was appended to
-                #         it, and del on the list never freed the tensors it contained since
-                #         Python's reference count kept them alive. empty_cache() is the
-                #         real cleanup and is all that is needed here.
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-        # CPU fallback
-        img = tensor_to_numpy_float32(image)
+        if use_gpu and image.device.type == "cpu" and torch.cuda.is_available():
+            img = image.to(torch.device("cuda"), non_blocking=True).float()
+        else:
+            img = image.float()
 
         # Apply exposure
         img = img * (2.0**exposure)
@@ -607,30 +485,14 @@ class HDRToneMap:
             compressed = threshold + (img - threshold) / (
                 1.0 + (img - threshold) * highlight_compression * 2
             )
-            img = np.where(highlight_mask, compressed, img)
+            img = torch.where(highlight_mask, compressed, img)
 
         # Apply shadow lift
         if shadow_lift > 0:
             img = img + shadow_lift * (1.0 - img)
 
         # Apply tone mapping operator
-        if operator == "reinhard":
-            result = self._reinhard(img, white_point)
-        elif operator == "reinhard_extended":
-            result = self._reinhard_extended(img, white_point)
-        elif operator == "reinhard_luminance":
-            result = self._reinhard_luminance(img, white_point)
-        elif operator == "filmic_aces":
-            result = self._filmic_aces(img, white_point)
-        elif operator == "filmic_uncharted2":
-            white_scale = 1.0 / self._filmic_uncharted2(np.array([white_point]))[0]
-            result = self._filmic_uncharted2(img) * white_scale
-        elif operator == "agx":
-            result = self._agx(img)
-        elif operator == "linear_clamp":
-            result = np.clip(img / white_point, 0, 1)
-        else:  # exposure_only
-            result = np.clip(img, 0, 1)
+        result = self._gpu_tonemap(img, operator, white_point)
 
         # FIX #10: apply contrast and saturation BEFORE gamma encoding.
         # Previous code applied them after gamma, causing nonlinear colour shifts
@@ -646,14 +508,14 @@ class HDRToneMap:
                 + 0.7152 * result[..., 1]
                 + 0.0722 * result[..., 2]
             )
-            luma = luma[..., np.newaxis]
+            luma = luma.unsqueeze(-1)
             result = luma + saturation * (result - luma)
 
         # Apply gamma (display encoding — must be the final step)
-        result = np.clip(result, 0, 1)
-        result = np.power(result, 1.0 / gamma)
+        result = torch.clamp(result, 0, 1)
+        result = torch.pow(result, 1.0 / gamma)
 
-        return (numpy_to_tensor_float32(result),)
+        return (result,)
 
 
 # =============================================================================

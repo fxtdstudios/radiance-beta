@@ -348,6 +348,9 @@ _MODEL_VAE_ALIASES: dict[str, str] = {
     "flux.1":      "flux",
     "flux-dev":    "flux",
     "flux-schnell":"flux",
+    # Z-Image variants
+    "z_image":     "zimage",
+    "z-image":     "zimage",
     # CogVideoX variants
     "cogvideo":    "cogvideox",
     "cogvideox5b": "cogvideox",

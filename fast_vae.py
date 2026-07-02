@@ -33,8 +33,6 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
 from radiance.config.model_map import resolve_model_vae_config
 
 logger = logging.getLogger("radiance.fast_vae")
@@ -52,12 +50,6 @@ _ENV_CKPT = os.environ.get("RADIANCE_TURBO_DECODER", "")
 # don't repeat the same failing filesystem lookup / warning log.
 _TRAINED_DECODER_CACHE: dict = {}
 
-# ALBABIT-FIX: canonical model_types whose RUDRA checkpoint uses a
-# FiLM-conditioned architecture (film_in/film_out/projection) not yet
-# supported by RadianceTurboDecoder/RadianceFullDecoder. Gracefully skip
-# RUDRA for these until upstream's dr_dim integration (stage 2/3) lands.
-_FILM_CONDITIONED_MODEL_TYPES: set[str] = {"flux2"}
-
 # ALBABIT-FIX: additional model_type tokens to try for checkpoint filenames
 # when the primary model_type has no matching file on disk — covers both
 # filename inconsistencies (ltx-video's turbo checkpoint is named
@@ -66,8 +58,10 @@ _FILM_CONDITIONED_MODEL_TYPES: set[str] = {"flux2"}
 _DECODER_TYPE_FALLBACKS: dict[str, list[str]] = {
     "flux": ["wan"], "wan": ["flux"],
     "ltx-video": ["ltx"],
-    "chroma": ["flux"], "cosmos": ["flux"], "sd3": ["flux"], "lumina2": ["flux"],
-    "cogvideox": ["wan"],
+    "chroma": ["flux"], "zimage": ["flux"], "z_image": ["flux"], "qwen": ["flux"],
+    "cosmos": ["flux"], "sd3": ["flux"], "lumina2": ["flux"],
+    "hunyuanvideo": ["wan"], "cogvideox": ["wan"],
+    "sd15": ["sdxl"], "pixart": ["sdxl"], "kolors": ["sdxl"], "aura_flow": ["sdxl"],
 }
 
 
@@ -113,7 +107,99 @@ class BlockFull(nn.Module):
         return x + self.conv(x)
 
 
-class RadianceTurboDecoder(nn.Module):
+class DynamicRangePredictor(nn.Module):
+    """Predict a compact dynamic-range conditioning vector from latent stats."""
+
+    def __init__(self, latent_channels: int, dr_dim: int):
+        super().__init__()
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.net = nn.Sequential(
+            nn.Linear(latent_channels * 2, dr_dim),
+            nn.SiLU(),
+            nn.Linear(dr_dim, dr_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        mean = self.pool(x).flatten(1)
+        std = torch.sqrt(self.pool((x - mean[..., None, None]) ** 2).flatten(1) + 1e-6)
+        return self.net(torch.cat([mean, std], dim=1))
+
+
+class _RUDRAConditionedDecoderMixin:
+    dr_dim: int | None
+    projection: nn.Module | None
+    film_in: nn.Module | None
+    film_out: nn.Module | None
+    predictor: nn.Module | None
+
+    def _init_rudra_conditioning(
+        self,
+        latent_channels: int,
+        output_channels: int,
+        dr_dim: int | None,
+    ) -> None:
+        self.dr_dim = dr_dim
+        if dr_dim is None:
+            self.projection = None
+            self.film_in = None
+            self.film_out = None
+            self.predictor = None
+            return
+
+        self.projection = nn.Sequential(
+            nn.Linear(dr_dim, dr_dim),
+            nn.SiLU(),
+            nn.Linear(dr_dim, dr_dim),
+        )
+        self.film_in = nn.Linear(dr_dim, latent_channels * 2)
+        self.film_out = nn.Linear(dr_dim, output_channels * 2)
+        self.predictor = DynamicRangePredictor(latent_channels, dr_dim)
+
+    def _condition_vector(
+        self,
+        x: torch.Tensor,
+        dr_proj: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if self.dr_dim is None:
+            return None
+
+        if dr_proj is None:
+            if self.predictor is None:
+                raise RuntimeError("RUDRA decoder is missing its predictor module.")
+            dr_proj = self.predictor(x)
+
+        if dr_proj.ndim == 1:
+            dr_proj = dr_proj.unsqueeze(0)
+        dr_proj = dr_proj.to(device=x.device, dtype=x.dtype)
+        if dr_proj.shape[0] != x.shape[0]:
+            if x.shape[0] % dr_proj.shape[0] != 0:
+                raise ValueError(
+                    f"RUDRA dr_proj batch {dr_proj.shape[0]} cannot condition latent batch {x.shape[0]}."
+                )
+            dr_proj = dr_proj.repeat_interleave(x.shape[0] // dr_proj.shape[0], dim=0)
+
+        if self.projection is None:
+            return dr_proj
+        return self.projection(dr_proj)
+
+    def _apply_input_film(self, x: torch.Tensor, cond: torch.Tensor | None) -> torch.Tensor:
+        if cond is None or self.film_in is None:
+            return x
+        scale, bias = self.film_in(cond).chunk(2, dim=-1)
+        scale = 1.0 + 0.05 * torch.tanh(scale).view(x.shape[0], x.shape[1], 1, 1)
+        bias = 0.05 * bias.view(x.shape[0], x.shape[1], 1, 1)
+        return x * scale + bias
+
+    def _apply_output_film(self, x: torch.Tensor, cond: torch.Tensor | None) -> torch.Tensor:
+        if cond is None or self.film_out is None:
+            return x
+        scale, bias = self.film_out(cond).chunk(2, dim=-1)
+        scale = 1.0 + 0.05 * torch.tanh(scale).view(x.shape[0], x.shape[1], 1, 1)
+        bias = 0.05 * bias.view(x.shape[0], x.shape[1], 1, 1)
+        return x * scale + bias
+
+
+class RadianceTurboDecoder(_RUDRAConditionedDecoderMixin, nn.Module):
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Utilities"
     """
     Distilled HDR VAE Decoder.
@@ -127,10 +213,17 @@ class RadianceTurboDecoder(nn.Module):
     Inference: ~4ms on A100 for a 64×64 latent → 512×512 output (fp16)
     """
 
-    def __init__(self, latent_channels: int = 16, output_channels: int = 3, n_upsample: int = 3):
+    def __init__(
+        self,
+        latent_channels: int = 16,
+        output_channels: int = 3,
+        n_upsample: int = 3,
+        dr_dim: int | None = None,
+    ):
         super().__init__()
         self.latent_channels = latent_channels
         self.n_upsample = n_upsample
+        self._init_rudra_conditioning(latent_channels, output_channels, dr_dim)
         # n_upsample stages of ×2 → total upscale 2**n_upsample. Default 3 = 8×
         # (reproduces the original fixed layer order, so old checkpoints load).
         # Klein etc. (16× VAE) use n_upsample=4.
@@ -141,11 +234,14 @@ class RadianceTurboDecoder(nn.Module):
         layers += [nn.Conv2d(64, output_channels, 3, padding=1)]
         self.layers = nn.Sequential(*layers)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.layers(x)
+    def forward(self, x: torch.Tensor, dr_proj: torch.Tensor | None = None) -> torch.Tensor:
+        cond = self._condition_vector(x, dr_proj)
+        x = self._apply_input_film(x, cond)
+        out = self.layers(x)
+        return self._apply_output_film(out, cond)
 
 
-class RadianceFullDecoder(nn.Module):
+class RadianceFullDecoder(_RUDRAConditionedDecoderMixin, nn.Module):
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Utilities"
     """
     High-Fidelity Production HDR VAE Decoder.
@@ -156,10 +252,17 @@ class RadianceFullDecoder(nn.Module):
     Parameters: ~32M (flux 16ch), ~28M (sdxl 4ch)
     """
 
-    def __init__(self, latent_channels: int = 16, output_channels: int = 3, n_upsample: int = 3):
+    def __init__(
+        self,
+        latent_channels: int = 16,
+        output_channels: int = 3,
+        n_upsample: int = 3,
+        dr_dim: int | None = None,
+    ):
         super().__init__()
         self.latent_channels = latent_channels
         self.n_upsample = n_upsample
+        self._init_rudra_conditioning(latent_channels, output_channels, dr_dim)
         # Default 3 = 8× and reproduces the original layer order (old checkpoints
         # load). 16× backbones (Flux.2 Klein) use n_upsample=4.
         layers = [nn.Conv2d(latent_channels, 128, 3, padding=1), BlockFull(128, 128)]
@@ -169,8 +272,11 @@ class RadianceFullDecoder(nn.Module):
         layers += [nn.Conv2d(128, output_channels, 3, padding=1)]
         self.layers = nn.Sequential(*layers)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.layers(x)
+    def forward(self, x: torch.Tensor, dr_proj: torch.Tensor | None = None) -> torch.Tensor:
+        cond = self._condition_vector(x, dr_proj)
+        x = self._apply_input_film(x, cond)
+        out = self.layers(x)
+        return self._apply_output_film(out, cond)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -227,6 +333,16 @@ def _apply_inverse_log(
     return fn(log_coded)
 
 
+def _decode_with_optional_conditioning(
+    decoder: nn.Module,
+    x: torch.Tensor,
+    dr_proj: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if getattr(decoder, "dr_dim", None) is not None:
+        return decoder(x, dr_proj)
+    return decoder(x)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #                      INFERENCE ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -243,6 +359,7 @@ def decode_to_linear_realtime(
     tiled: bool = False,
     tile_size: int = 512,
     overlap: int = 64,
+    dr_proj: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     High-speed decode: latent → scene-linear.
@@ -272,33 +389,40 @@ def decode_to_linear_realtime(
     with torch.no_grad():
         with torch.autocast(device_type=device.type, dtype=dtype, enabled=(dtype != torch.float32)):
             if not tiled:
-                log_coded_bchw = decoder(x)
+                log_coded_bchw = _decode_with_optional_conditioning(decoder, x, dr_proj)
             else:
                 # Tiled inference
                 B, C, H, W = x.shape
-                # Output will be 8x the latent size (standard VAE upsample)
-                # But our decoder has 3 upsample stages (2x each) => 8x
-                log_coded_bchw = torch.zeros((B, 3, H * 8, W * 8), device=device, dtype=dtype)
+                spatial_scale = int(2 ** getattr(decoder, "n_upsample", 3))
+                latent_tile = max(1, tile_size // spatial_scale)
+                latent_overlap = max(0, overlap // spatial_scale)
+                log_coded_bchw = torch.zeros(
+                    (B, 3, H * spatial_scale, W * spatial_scale),
+                    device=device,
+                    dtype=dtype,
+                )
                 
-                # We need to account for the 8x upsampling in tile coordinates
-                for i in range(0, H, tile_size // 8):
-                    for j in range(0, W, tile_size // 8):
+                # Account for the model-specific VAE spatial factor in tile coordinates.
+                for i in range(0, H, latent_tile):
+                    for j in range(0, W, latent_tile):
                         # Extract tile with overlap
-                        si = max(0, i - overlap // 8)
-                        sj = max(0, j - overlap // 8)
-                        ei = min(H, i + tile_size // 8 + overlap // 8)
-                        ej = min(W, j + tile_size // 8 + overlap // 8)
+                        si = max(0, i - latent_overlap)
+                        sj = max(0, j - latent_overlap)
+                        ei = min(H, i + latent_tile + latent_overlap)
+                        ej = min(W, j + latent_tile + latent_overlap)
                         
                         tile = x[:, :, si:ei, sj:ej]
-                        tile_out = decoder(tile)
+                        tile_out = _decode_with_optional_conditioning(decoder, tile, dr_proj)
                         
                         # Calculate crop for overlap
-                        oi = (i - si) * 8
-                        oj = (j - sj) * 8
-                        wi = min(tile_size, (ei - i) * 8)
-                        wj = min(tile_size, (ej - j) * 8)
+                        oi = (i - si) * spatial_scale
+                        oj = (j - sj) * spatial_scale
+                        wi = min(tile_size, (ei - i) * spatial_scale)
+                        wj = min(tile_size, (ej - j) * spatial_scale)
                         
-                        log_coded_bchw[:, :, i*8:i*8+wi, j*8:j*8+wj] = tile_out[:, :, oi:oi+wi, oj:oj+wj]
+                        out_i = i * spatial_scale
+                        out_j = j * spatial_scale
+                        log_coded_bchw[:, :, out_i:out_i+wi, out_j:out_j+wj] = tile_out[:, :, oi:oi+wi, oj:oj+wj]
 
     # 3. Convert (B, 3, H, W) → (B, H, W, 3) float32
     log_coded = log_coded_bchw.permute(0, 2, 3, 1).float()
@@ -355,6 +479,25 @@ def detect_rudra_model_type(latent_channels: int, is_video: bool, vae=None) -> s
     raise ValueError(f"RUDRA decoder: unsupported latent channel count {latent_channels}.")
 
 
+def _infer_rudra_dr_dim(state_dict: dict) -> int | None:
+    """Infer the dynamic-range conditioning size from a RUDRA checkpoint."""
+    if not isinstance(state_dict, dict):
+        return None
+
+    for key, tensor in state_dict.items():
+        name = key[7:] if key.startswith("module.") else key
+        shape = getattr(tensor, "shape", None)
+        if shape is None or len(shape) != 2:
+            continue
+        if name.endswith("film_in.weight") or name.endswith("film_out.weight"):
+            return int(shape[1])
+        if name.endswith("projection.0.weight") or name.endswith("projection.weight"):
+            return int(shape[1])
+        if name.endswith("predictor.net.0.weight"):
+            return int(shape[0])
+    return None
+
+
 def load_radiance_decoder_weights(
     model_type: str = "flux",
     model_size: str = "turbo",
@@ -383,19 +526,6 @@ def load_radiance_decoder_weights(
     """
     import math as _math
 
-    # ALBABIT-FIX: rudra_turbo_decoder_flux2_ema.safetensors (Flux.2 non-Klein)
-    # uses a FiLM-conditioned architecture (film_in/film_out/projection) that
-    # RadianceTurboDecoder/RadianceFullDecoder cannot load. Skip cleanly until
-    # upstream's dr_dim integration (stage 2/3) lands a matching decoder class.
-    if model_type.strip().lower() in _FILM_CONDITIONED_MODEL_TYPES:
-        logger.info(
-            f"[Radiance {model_size.upper()}] model_type={model_type!r} uses a "
-            f"FiLM-conditioned RUDRA checkpoint (film_in/film_out/projection) "
-            f"not yet supported by RadianceTurboDecoder/RadianceFullDecoder. "
-            f"Falling back to the standard VAE decoder."
-        )
-        return None
-
     cfg = resolve_model_vae_config(model_type)
     expected_channels = cfg.get("latent_channels", 16) if cfg else 16
     # Number of ×2 upsample stages = log2(VAE spatial factor). 8× → 3, 16× → 4.
@@ -405,22 +535,6 @@ def load_radiance_decoder_weights(
     # an exact "== full" check silently built the Turbo arch for rudra_full and
     # then failed the strict load of full-decoder weights.
     request_is_full = ("full" in str(model_size).lower())
-    # ALBABIT-FIX: n_upsample added to the cache key — 128ch ltx-video (8x VAE,
-    # n_upsample=3) and flux2-klein (16x VAE, n_upsample=4) would otherwise
-    # collide on (channels, is_full) alone and could return a wrong-shape decoder.
-    cache_key = (expected_channels, n_upsample, request_is_full)
-
-    # Fast path: return already-loaded model (or a cached "unavailable" None)
-    # for this (channels, n_upsample, size) combination. Multiple entries
-    # coexist so switching between model types or turbo/full does not evict
-    # previously-loaded decoders.
-    if cache_key in _TRAINED_DECODER_CACHE:
-        return _TRAINED_DECODER_CACHE[cache_key]
-
-    if request_is_full:
-        model = RadianceFullDecoder(latent_channels=expected_channels, n_upsample=n_upsample)
-    else:
-        model = RadianceTurboDecoder(latent_channels=expected_channels, n_upsample=n_upsample)
 
     # Resolve checkpoint path
     ckpt_path = checkpoint_path or _ENV_CKPT
@@ -452,6 +566,18 @@ def load_radiance_decoder_weights(
         except ImportError:
             pass
 
+    # ALBABIT-FIX: checkpoint path is part of the cache identity. This prevents
+    # a prior "no checkpoint" lookup from hiding an explicit checkpoint load.
+    cache_key = (
+        expected_channels,
+        n_upsample,
+        request_is_full,
+        os.path.abspath(ckpt_path) if ckpt_path else "",
+        model_type,
+    )
+    if cache_key in _TRAINED_DECODER_CACHE:
+        return _TRAINED_DECODER_CACHE[cache_key]
+
     if ckpt_path and os.path.exists(ckpt_path):
         try:
             if ckpt_path.endswith(".safetensors"):
@@ -466,6 +592,19 @@ def load_radiance_decoder_weights(
                     state_dict = ckpt["model"]
                 else:
                     state_dict = ckpt
+            dr_dim = _infer_rudra_dr_dim(state_dict)
+            if request_is_full:
+                model = RadianceFullDecoder(
+                    latent_channels=expected_channels,
+                    n_upsample=n_upsample,
+                    dr_dim=dr_dim,
+                )
+            else:
+                model = RadianceTurboDecoder(
+                    latent_channels=expected_channels,
+                    n_upsample=n_upsample,
+                    dr_dim=dr_dim,
+                )
             model.load_state_dict(state_dict, strict=True)
             logger.info(
                 f"[Radiance {model_size.upper()}] Loaded trained decoder: {ckpt_path} "

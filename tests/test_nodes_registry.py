@@ -240,6 +240,8 @@ _KNOWN_CROSS_MODULE_DUPLICATES: dict = {
     "RadianceOCIOContext": frozenset(["nodes", "nodes_ocio"]),
     "RadianceQC": frozenset(["nodes", "nodes_qc"]),
     "RadiancePolicyGuard": frozenset(["nodes", "nodes_qc"]),
+    "RadianceHDRExpandDynamicRange": frozenset(["hdr", "nodes"]),
+    "RadianceHDRToneMap": frozenset(["hdr", "nodes"]),
     "RadianceSamplerPro": frozenset(["nodes", "nodes_sampler"]),
     "RadianceLoraStack": frozenset(["nodes", "nodes_loader"]),
     "RadianceUnifiedLoader": frozenset(["nodes", "nodes_loader"]),

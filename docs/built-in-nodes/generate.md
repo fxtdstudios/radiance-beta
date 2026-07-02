@@ -25,7 +25,6 @@ Read Models -> Cinematic Prompt Encoder -> Resolution -> Sampler Pro -> HDR VAE 
 | [◎ LoRA Stack](#lora-stack) | `RadianceLoraStack` | Compose up to 5 LoRAs into a LORA_STACK for use with RadianceUnifiedLoader. |
 | [◎ Radiance Read Models](#radiance-read-models) | `RadianceUnifiedLoader` | Main Radiance model loader for model, CLIP, VAE, LoRA stack, and metadata. |
 | [◎ Video Loader](#video-loader) | `RadianceVideoLoader` | Alias — identical to RadianceUnifiedLoader. Kept for backward compatibility. |
-| [◎ ControlNet Apply](#controlnet-apply) | `RadianceControlNetApply` | Advanced ControlNet application node for the Radiance suite. |
 | [◎ HDR LoRA Loader](#hdr-lora-loader) | `RadianceHDRLoRALoader` | Load a Radiance HDR LoRA .safetensors file. |
 | [◎ HDR LoRA Apply](#hdr-lora-apply) | `RadianceHDRLoRAApply` | Performs the Radiance operation described by its inputs and outputs in the selected workflow group. |
 | [◎ Cinematic Prompt Encoder](#cinematic-prompt-encoder) | `RadianceCinematicPromptEncoder` | Encodes image or latent data into the representation expected by the next processing stage. |
@@ -275,44 +274,6 @@ This node does not declare named runtime outputs in the source catalog.
 ### Practical notes
 
 - Keep frame count and latent shape metadata consistent through the video graph.
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
-
-## ◎ ControlNet Apply
-
-**Internal key:** `RadianceControlNetApply`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Generate`  
-**Source:** `nodes_loader.py`
-**Function:** `apply_controlnet`
-
-### What it does
-
-Advanced ControlNet application node for the Radiance suite.
-
-### When to use it
-
-Use `◎ ControlNet Apply` when the graph reaches the ControlNet Apply step in a generate, loaders, and sampling workflow.
-
-### Inputs
-
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `conditioning` | Yes | `CONDITIONING` | - | - |
-| `control_net` | Yes | `CONTROL_NET` | - | - |
-| `image` | Yes | `IMAGE` | - | - |
-| `strength` | Yes | `FLOAT` | `1.0` | Global strength of the control effect. |
-| `start_percent` | Yes | `FLOAT` | `0.0` | Percentage of the generation where control starts (0.0 = beginning). |
-| `end_percent` | Yes | `FLOAT` | `1.0` | Percentage of the generation where control ends (1.0 = end). |
-| `control_type` | Yes | `(['auto'] + list(UNION_CONTROLNET_TYPES.keys()), {'default': 'auto', 'tooltip': 'For Union ControlNets (like Flux), select the specific control mode (Canny, Depth, etc.).'})` | - | - |
-
-### Outputs
-
-| Output | Type | Description |
-| :--- | :--- | :--- |
-| `conditioning` | `CONDITIONING` | Output produced by the `conditioning` socket. |
-
-### Practical notes
-
-- The node returns `conditioning` (`CONDITIONING`).
 - If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
 
 ## ◎ HDR LoRA Loader

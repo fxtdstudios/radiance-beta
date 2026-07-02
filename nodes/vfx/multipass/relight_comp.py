@@ -1,13 +1,16 @@
 import json
+import logging
 import math
 from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 
+from ....performance import perf_finish, perf_start
 
 _NORMAL_INPUTS = ["OpenGL (Y-Up)", "DirectX (Y-Down)"]
 _LIGHT_TYPES = ["Directional", "Point"]
+logger = logging.getLogger("radiance.vfx.multipass.relight_comp")
 
 
 def _resize_bhwc(x: torch.Tensor, height: int, width: int) -> torch.Tensor:
@@ -112,8 +115,11 @@ def _view_positions(
 def _blur_bhwc(x: torch.Tensor, radius: int) -> torch.Tensor:
     if radius <= 0:
         return x
-    k = radius * 2 + 1
     b, h, w, c = x.shape
+    radius = min(int(radius), max(0, h - 1), max(0, w - 1))
+    if radius <= 0:
+        return x
+    k = radius * 2 + 1
     x4 = x.permute(0, 3, 1, 2).reshape(b * c, 1, h, w)
     x4 = F.pad(x4, (radius, radius, radius, radius), mode="reflect")
     x4 = F.avg_pool2d(x4, kernel_size=k, stride=1)
@@ -187,6 +193,7 @@ class RadianceMultipassRelight:
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str]:
         batch, height, width, _ = albedo.shape
         device = albedo.device
+        _perf = perf_start(device)
         base = _match_image(albedo, batch, height, width, 3).to(device=device).clamp(min=0.0)
         normals = _decode_normal_map(
             _match_image(normal_map, batch, height, width, 3).to(device=device),
@@ -255,6 +262,7 @@ class RadianceMultipassRelight:
         if beauty is not None and mix_with_beauty > 0.0:
             src = _match_image(beauty, batch, height, width, 3).to(device=device).clamp(min=0.0)
             mix = float(max(0.0, min(1.0, mix_with_beauty)))
+            src = src * alpha_s.unsqueeze(-1)
             relit = relit * (1.0 - mix) + src * mix
 
         lighting = (diffuse_light + ambient_light + specular_light).clamp(min=0.0)
@@ -285,12 +293,13 @@ class RadianceMultipassRelight:
             "note": "This node consumes supplied utility/PBR passes; it does not extract or hallucinate missing passes from beauty.",
         }
 
+        perf_finish(logger, "Multipass Relight", _perf, device)
         return (
-            relit.cpu(),
-            diffuse_light.cpu(),
-            specular_light.cpu(),
-            lighting.cpu(),
-            alpha_img.cpu(),
+            relit.contiguous(),
+            diffuse_light.contiguous(),
+            specular_light.contiguous(),
+            lighting.contiguous(),
+            alpha_img.contiguous(),
             json.dumps(info, indent=2),
         )
 
@@ -344,6 +353,7 @@ class RadianceMultipassComposite:
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str]:
         batch, height, width, _ = foreground.shape
         device = foreground.device
+        _perf = perf_start(device)
         fg_src = relit_foreground if relit_foreground is not None else foreground
         fg = _match_image(fg_src, batch, height, width, 3).to(device=device).clamp(min=0.0)
         matte = _scalar_pass(alpha, batch, height, width, 1.0, device)
@@ -390,11 +400,12 @@ class RadianceMultipassComposite:
             "note": "Composite uses supplied alpha/depth/shadow data only; it does not infer hidden mattes or object IDs.",
         }
 
+        perf_finish(logger, "Multipass Composite", _perf, device)
         return (
-            composite.cpu(),
-            premult.cpu(),
-            holdout.cpu(),
-            depth_matte.cpu(),
+            composite.contiguous(),
+            premult.contiguous(),
+            holdout.contiguous(),
+            depth_matte.contiguous(),
             json.dumps(info, indent=2),
         )
 

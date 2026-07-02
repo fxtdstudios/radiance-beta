@@ -2,7 +2,7 @@
 
 # Pipeline and Studio
 
-Project containers, audio cut data, blend composites, cinema prompt setup, local MCP bridge, Nuke send, Resolve handoff, and parameter history tracking.
+Project containers, blend composites, local MCP bridge, Nuke send, and Resolve handoff.
 
 ## Typical workflow
 
@@ -20,56 +20,11 @@ Project Manager -> processing graph -> Write -> Nuke Send / DaVinci Send / MCP B
 
 | Node | Internal key | Purpose |
 | :--- | :--- | :--- |
-| [◎ Audio Cut](#audio-cut) | `RadianceAudioCut` | Performs the Radiance operation described by its inputs and outputs in the selected workflow group. |
 | [◎ Project Manager](#project-manager) | `RadianceProjectManager` | Pipeline project manager — save, list, load, delete, and inspect .rad workflow containers. |
 | [◎ Blend Composite](#blend-composite) | `RadianceBlendComposite` | Composite two images using industry-standard blend modes. |
-| [◎ Cinema Studio](#cinema-studio) | `RadianceCinemaStudio` | Performs the Radiance operation described by its inputs and outputs in the selected workflow group. |
 | [◎ Radiance MCP Bridge](#radiance-mcp-bridge) | `RadianceMCP` | Local bridge node for pipeline and DCC handoff actions. |
 | [◎ Radiance Send to Nuke](#radiance-send-to-nuke) | `RadianceNukeSend` | Exports and sends media to a local Nuke listener. |
 | [◎ Radiance Send to DaVinci Resolve](#radiance-send-to-davinci-resolve) | `RadianceDaVinciSend` | Exports media into a DaVinci Resolve handoff folder. |
-| [◎ Parameter History Tracker](#parameter-history-tracker) | `RadianceParamHistoryTracker` | Parameter History Tracker. |
-
-## ◎ Audio Cut
-
-**Internal key:** `RadianceAudioCut`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Video`  
-**Source:** `nodes/pipeline/audio.py`
-**Function:** `detect_cuts`
-
-### What it does
-
-Performs the Radiance operation described by its inputs and outputs in the selected workflow group.
-
-### When to use it
-
-Use `◎ Audio Cut` when the graph reaches the Audio Cut step in a pipeline and studio workflow.
-
-### Inputs
-
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `audio_filepath` | Yes | `STRING` | `/path/to/audio.wav` | Absolute path to audio file (WAV, MP3, FLAC, AAC, etc.) |
-| `fps` | Yes | `FLOAT` | `24.0` | Frame rate of the target video sequence |
-| `method` | Yes | `(cls.METHODS, {'default': 'beats'})` | - | - |
-| `sensitivity` | Yes | `FLOAT` | `0.5` | 0 = only strong peaks, 1 = detect all micro-variations |
-| `min_interval_frames` | Yes | `INT` | `12` | Minimum frames between consecutive cut points |
-| `backend` | Yes | `(cls.BACKENDS, {'default': 'Auto'})` | - | - |
-| `frame_offset` | Optional | `INT` | `0` | Add this value to every returned frame index (useful when audio starts mid-sequence) |
-| `max_cuts` | Optional | `INT` | `0` | If > 0, keep only the strongest N cut points |
-
-### Outputs
-
-| Output | Type | Description |
-| :--- | :--- | :--- |
-| `cut_frames_json` | `STRING` | Output produced by the `cut_frames_json` socket. |
-| `cut_times_json` | `STRING` | Output produced by the `cut_times_json` socket. |
-| `cut_count` | `INT` | Output produced by the `cut_count` socket. |
-| `analysis_report` | `STRING` | Output produced by the `analysis_report` socket. |
-
-### Practical notes
-
-- The node returns `cut_frames_json` (`STRING`), `cut_times_json` (`STRING`), `cut_count` (`INT`), `analysis_report` (`STRING`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
 
 ## ◎ Project Manager
 
@@ -137,47 +92,6 @@ Use `◎ Blend Composite` when the graph reaches the Blend Composite step in a p
 ### Practical notes
 
 - The node returns `image` (`IMAGE`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
-
-## ◎ Cinema Studio
-
-**Internal key:** `RadianceCinemaStudio`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Generate`  
-**Source:** `nodes/pipeline/studio.py`
-**Function:** `generate_cinema_prompt`
-
-### What it does
-
-Performs the Radiance operation described by its inputs and outputs in the selected workflow group.
-
-### When to use it
-
-Use `◎ Cinema Studio` when the graph reaches the Cinema Studio step in a pipeline and studio workflow.
-
-### Inputs
-
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `base_prompt` | Yes | `STRING` | `A cinematic shot of...` | - |
-| `camera` | Yes | `(cls.CAMERA_LIST, {'default': cls.CAMERA_LIST[1] if len(cls.CAMERA_LIST) > 1 else 'None'})` | - | - |
-| `lens_series` | Yes | `(cls.LENS_LIST, {'default': cls.LENS_LIST[1] if len(cls.LENS_LIST) > 1 else 'None'})` | - | - |
-| `focal_length` | Yes | `(cls.FOCAL_LENGTHS, {'default': '50mm Standard'})` | - | - |
-| `aperture` | Yes | `(APERTURES, {'default': 'T2.0 (Cinematic Separation)'})` | - | - |
-| `shutter` | Yes | `(SHUTTER_ANGLES, {'default': '180° (Standard Motion - 1/48s)'})` | - | - |
-| `iso` | Yes | `(ISO_SETTINGS, {'default': '800 ISO (Native Digital)'})` | - | - |
-| `shot_type` | Optional | `ENUM: None, Extreme Wide Shot, Wide Shot, Full Shot, Medium Wide Shot, Medium Shot, Medium Close-Up, Close-Up...` | `Medium Shot` | - |
-| `camera_movement` | Optional | `ENUM: None, Static Tripod, Handheld Shake, Steadicam Smooth, Dolly In, Dolly Out, Truck Left, Truck Right...` | `None` | - |
-
-### Outputs
-
-| Output | Type | Description |
-| :--- | :--- | :--- |
-| `prompt` | `STRING` | Output produced by the `prompt` socket. |
-| `technical_data_str` | `STRING` | Output produced by the `technical_data_str` socket. |
-
-### Practical notes
-
-- The node returns `prompt` (`STRING`), `technical_data_str` (`STRING`).
 - If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
 
 ## ◎ Radiance MCP Bridge
@@ -304,39 +218,4 @@ Use `◎ Radiance Send to DaVinci Resolve` near the end of the graph after the i
 
 - The node returns `status` (`STRING`), `render_path` (`STRING`).
 - Confirm host, port, output path, and token settings before running bridge actions.
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
-
-## ◎ Parameter History Tracker
-
-**Internal key:** `RadianceParamHistoryTracker`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Infrastructure`  
-**Source:** `core/param_memory.py`
-**Function:** `record`
-
-### What it does
-
-Parameter History Tracker.
-
-### When to use it
-
-Use `◎ Parameter History Tracker` when the graph reaches the Parameter History Tracker step in a pipeline and studio workflow.
-
-### Inputs
-
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `node_name` | Yes | `STRING` | `RadianceHDREncoder` | - |
-| `parameters_json` | Yes | `STRING` | `{}` | - |
-| `trigger` | Optional | `*` | - | - |
-
-### Outputs
-
-| Output | Type | Description |
-| :--- | :--- | :--- |
-| `history_summary` | `STRING` | Output produced by the `history_summary` socket. |
-| `parameter_diff` | `STRING` | Output produced by the `parameter_diff` socket. |
-
-### Practical notes
-
-- The node returns `history_summary` (`STRING`), `parameter_diff` (`STRING`).
 - If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.

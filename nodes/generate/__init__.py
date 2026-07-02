@@ -11,7 +11,6 @@ from radiance.nodes_loader import (
     RadianceLoraStack,
     RadianceUnifiedLoader,
     RadianceVideoLoader,
-    RadianceControlNetApply,
 )
 from radiance.nodes.generate.lora import RadianceHDRLoRALoader, RadianceHDRLoRAApply
 from radiance.nodes.generate.prompt import (
@@ -29,7 +28,6 @@ NODE_CLASS_MAPPINGS = {
     "RadianceLoraStack": RadianceLoraStack,
     "RadianceUnifiedLoader": RadianceUnifiedLoader,
     "RadianceVideoLoader": RadianceVideoLoader,
-    "RadianceControlNetApply": RadianceControlNetApply,
     "RadianceHDRLoRALoader": RadianceHDRLoRALoader,
     "RadianceHDRLoRAApply": RadianceHDRLoRAApply,
     "RadianceCinematicPromptEncoder": RadianceCinematicPromptEncoder,
@@ -45,7 +43,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceLoraStack": "◎ LoRA Stack",
     "RadianceUnifiedLoader": "◎ Radiance Read Models",
     "RadianceVideoLoader": "◎ Video Loader",
-    "RadianceControlNetApply": "◎ ControlNet Apply",
     "RadianceHDRLoRALoader": "◎ HDR LoRA Loader",
     "RadianceHDRLoRAApply": "◎ HDR LoRA Apply",
     "RadianceCinematicPromptEncoder": "◎ Cinematic Prompt Encoder",

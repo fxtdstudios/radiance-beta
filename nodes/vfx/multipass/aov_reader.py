@@ -64,6 +64,114 @@ def _norm_layer_name(name: str) -> str:
     return name.strip().lower().replace(".", "_").replace(" ", "_").replace("-", "_")
 
 
+def _suffix_rank(suf: str) -> Tuple[int, str]:
+    order = {
+        "R": 0, "G": 1, "B": 2, "A": 3,
+        "X": 0, "Y": 1, "Z": 2,
+        "NX": 0, "NY": 1, "NZ": 2,
+    }
+    s = suf.upper()
+    return (order.get(s, 99), suf)
+
+
+def _layer_key_for_channel(channel_name: str, default_layer: str = "") -> Tuple[str, str]:
+    if "." in channel_name:
+        return channel_name.rsplit(".", 1)
+    return default_layer, channel_name
+
+
+def _layers_from_channel_groups(
+    groups: Dict[str, Dict[str, np.ndarray]],
+    h: int,
+    w: int,
+) -> Dict[str, np.ndarray]:
+    layers: Dict[str, np.ndarray] = {}
+    for layer, suffices in groups.items():
+        ordered = sorted(suffices.items(), key=lambda kv: _suffix_rank(kv[0]))
+        planes = [np.asarray(plane, dtype=np.float32).reshape(h, w) for _suf, plane in ordered]
+        if planes:
+            layers[layer] = np.stack(planes, axis=-1)
+    return layers
+
+
+def _read_multipart_exr(OpenEXR, Imath, path: str) -> Tuple[Dict[str, np.ndarray], int, int]:
+    if not hasattr(OpenEXR, "MultiPartInputFile"):
+        raise RuntimeError("OpenEXR binding does not expose MultiPartInputFile")
+
+    f = OpenEXR.MultiPartInputFile(path)
+    try:
+        part_count = None
+        for attr in ("parts", "numParts", "num_parts"):
+            value = getattr(f, attr, None)
+            if value is None:
+                continue
+            part_count = int(value() if callable(value) else value)
+            break
+        if part_count is None:
+            raise RuntimeError("OpenEXR MultiPartInputFile did not expose a part count")
+
+        pt = Imath.PixelType(Imath.PixelType.FLOAT)
+        groups: Dict[str, Dict[str, np.ndarray]] = {}
+        first_h = first_w = 0
+
+        for part_index in range(part_count):
+            hdr = f.header(part_index)
+            dw = hdr["dataWindow"]
+            w = dw.max.x - dw.min.x + 1
+            h = dw.max.y - dw.min.y + 1
+            if part_index == 0:
+                first_h, first_w = h, w
+            elif h != first_h or w != first_w:
+                raise RuntimeError("Multipart EXR parts have different dataWindow sizes")
+
+            part_name = str(hdr.get("name", f"part{part_index}"))
+            for chname in list(hdr["channels"].keys()):
+                buf = None
+                last_error: Optional[Exception] = None
+                for args in (
+                    (part_index, chname, pt),
+                    (part_index, chname),
+                    (chname, pt, part_index),
+                    (chname, pt),
+                ):
+                    try:
+                        buf = f.channel(*args)
+                        break
+                    except Exception as exc:
+                        last_error = exc
+                        continue
+                if buf is None:
+                    raise RuntimeError(f"Could not read channel '{chname}' from part '{part_name}': {last_error}")
+
+                layer, suffix = _layer_key_for_channel(chname, default_layer=part_name)
+                groups.setdefault(layer, {})[suffix] = np.frombuffer(buf, dtype=np.float32).reshape(h, w)
+
+        return _layers_from_channel_groups(groups, first_h, first_w), first_h, first_w
+    finally:
+        close = getattr(f, "close", None)
+        if callable(close):
+            close()
+
+
+def _read_singlepart_exr(OpenEXR, Imath, path: str) -> Tuple[Dict[str, np.ndarray], int, int]:
+    f = OpenEXR.InputFile(path)
+    try:
+        hdr = f.header()
+        dw = hdr["dataWindow"]
+        w = dw.max.x - dw.min.x + 1
+        h = dw.max.y - dw.min.y + 1
+        pt = Imath.PixelType(Imath.PixelType.FLOAT)
+
+        groups: Dict[str, Dict[str, np.ndarray]] = {}
+        for chname in list(hdr["channels"].keys()):
+            layer, suffix = _layer_key_for_channel(chname)
+            buf = f.channel(chname, pt)
+            groups.setdefault(layer, {})[suffix] = np.frombuffer(buf, dtype=np.float32).reshape(h, w)
+        return _layers_from_channel_groups(groups, h, w), h, w
+    finally:
+        f.close()
+
+
 def _read_multilayer_exr(path: str) -> Tuple[Dict[str, np.ndarray], int, int]:
     """Return ({layer_name: (H,W,C) float32}, H, W) for a multilayer EXR.
 
@@ -84,41 +192,13 @@ def _read_multilayer_exr(path: str) -> Tuple[Dict[str, np.ndarray], int, int]:
     if not os.path.isfile(path):
         raise RuntimeError(f"EXR not found: {path}")
 
-    f = OpenEXR.InputFile(path)
-    try:
-        hdr = f.header()
-        dw = hdr["dataWindow"]
-        w = dw.max.x - dw.min.x + 1
-        h = dw.max.y - dw.min.y + 1
-        pt = Imath.PixelType(Imath.PixelType.FLOAT)
-        channels = list(hdr["channels"].keys())
+    if hasattr(OpenEXR, "MultiPartInputFile"):
+        try:
+            return _read_multipart_exr(OpenEXR, Imath, path)
+        except Exception as exc:
+            logger.debug("[Radiance AOV Reader] Multipart read path skipped: %s", exc)
 
-        # Group channels by layer prefix.
-        groups: Dict[str, Dict[str, str]] = {}
-        for ch in channels:
-            if "." in ch:
-                layer, suffix = ch.rsplit(".", 1)
-            else:
-                layer, suffix = "", ch
-            groups.setdefault(layer, {})[suffix] = ch
-
-        def _suffix_rank(suf: str) -> Tuple[int, str]:
-            order = {"R": 0, "G": 1, "B": 2, "A": 3, "X": 0, "Y": 1, "Z": 2}
-            s = suf.upper()
-            return (order.get(s, 99), suf)
-
-        layers: Dict[str, np.ndarray] = {}
-        for layer, suffices in groups.items():
-            ordered = sorted(suffices.items(), key=lambda kv: _suffix_rank(kv[0]))
-            planes = []
-            for _suf, chname in ordered:
-                buf = f.channel(chname, pt)
-                planes.append(np.frombuffer(buf, dtype=np.float32).reshape(h, w))
-            arr = np.stack(planes, axis=-1)  # (H, W, C)
-            layers[layer] = arr
-        return layers, h, w
-    finally:
-        f.close()
+    return _read_singlepart_exr(OpenEXR, Imath, path)
 
 
 def _to_image_tensor(arr: Optional[np.ndarray], h: int, w: int) -> torch.Tensor:
@@ -237,14 +317,12 @@ class RadianceMultipassAOVReader:
                 resolved[slot] = None
                 report.append(f"{slot} <- (none, black)")
 
-        # Beauty fallback: if no beauty layer matched, use the first colour layer.
         if resolved["beauty"] is None:
-            for raw, arr in layers.items():
-                if arr.shape[-1] >= 3:
-                    resolved["beauty"] = arr
-                    used_layers.add(raw)
-                    report[0] = f"beauty <- '{raw or 'RGBA'}' (fallback)"
-                    break
+            logger.warning(
+                "[Radiance AOV Reader] No beauty/RGBA layer matched in %s; beauty output is black. "
+                "Set beauty_layer explicitly if your renderer uses a custom name.",
+                os.path.basename(exr_path),
+            )
 
         unmapped = sorted(set(layers) - used_layers)
         logger.info(
