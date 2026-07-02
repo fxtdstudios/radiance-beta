@@ -148,9 +148,12 @@ def _make_torch_stub():
 
 
 _torch_stub = _make_torch_stub()
-if "torch" not in sys.modules:
-    sys.modules["torch"] = _torch_stub
-sys.modules.setdefault("torch.nn", getattr(_torch_stub, "nn", MagicMock()))
+_torch_mod = sys.modules.setdefault("torch", _torch_stub)
+if not hasattr(_torch_mod, "Generator"):
+    _torch_mod.Generator = MagicMock
+if not hasattr(_torch_mod, "nn"):
+    _torch_mod.nn = getattr(_torch_stub, "nn", MagicMock())
+sys.modules.setdefault("torch.nn", getattr(_torch_mod, "nn", MagicMock()))
 # Ensure torch.nn.functional exists so `import torch.nn.functional as F` succeeds
 if "torch.nn.functional" not in sys.modules:
     _nn_functional = types.ModuleType("torch.nn.functional")
