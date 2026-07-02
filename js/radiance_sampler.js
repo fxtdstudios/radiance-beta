@@ -563,7 +563,59 @@ function applyPreset(node, presetName) {
         }
     }
 
+    // ALBABIT-FIX: widgets now match the preset again — clear any "●" markers.
+    updatePresetDivergenceMarkers(node);
     node.setDirtyCanvas(true);
+}
+
+// ── Preset divergence markers ──
+// ALBABIT-FIX: Python no longer force-applies preset values (_apply_presets is
+// UI-first again, matching old Radiance behavior). Instead of silently
+// overriding user edits — or switching the combo to "Custom", which would
+// unfold every hidden widget — append a "●" to the label of each widget whose
+// value no longer matches the selected preset (VSCode-style modified-setting
+// indicator). State-based and driven by the existing 250ms poll, so it covers
+// manual edits, undo/redo, preset import and workflow loads, in both the
+// legacy canvas and the Vue Nodes 2.0 frontends (widget.label works in both).
+const PRESET_MARKER_EXCLUDED = new Set([
+    "seed", "control_after_generate", "description", "preset", "preset_info",
+]);
+const PRESET_MARKER = " ●";
+
+function presetValuesEqual(a, b) {
+    if (typeof a === "number" || typeof b === "number") {
+        const na = Number(a), nb = Number(b);
+        if (!Number.isNaN(na) && !Number.isNaN(nb)) return Math.abs(na - nb) < 1e-6;
+    }
+    return String(a) === String(b);
+}
+
+function updatePresetDivergenceMarkers(node) {
+    if (!node.widgets) return;
+    const presetW = node.widgets.find(w => w.name === "preset");
+    const presetVal = presetW ? presetW.value : "None";
+    const config = (presetVal === "None" || presetVal === "Custom")
+        ? null
+        : getPresetConfig(presetVal);
+
+    let changed = false;
+    for (const w of node.widgets) {
+        if (!w || !w.name) continue;
+        let marked = false;
+        if (config && config[w.name] !== undefined && !PRESET_MARKER_EXCLUDED.has(w.name)) {
+            marked = !presetValuesEqual(w.value, config[w.name]);
+        }
+        // Never touch the label of a widget that was never marked, so the
+        // default label (undefined → name is displayed) stays untouched.
+        if (w._radOrigLabel === undefined && !marked) continue;
+        if (w._radOrigLabel === undefined) w._radOrigLabel = w.label ?? w.name;
+        const wanted = marked ? w._radOrigLabel + PRESET_MARKER : w._radOrigLabel;
+        if (w.label !== wanted) {
+            w.label = wanted;
+            changed = true;
+        }
+    }
+    if (changed) node.setDirtyCanvas(true, true);
 }
 
 // Safely extract tracking values
@@ -792,7 +844,6 @@ app.registerExtension({
         if (nodeData.name !== "RadianceSamplerPro") return;
 
         const onNodeCreated = nodeType.prototype.onNodeCreated;
-        const onPropertyChanged = nodeType.prototype.onPropertyChanged;
 
         nodeType.prototype.onNodeCreated = function () {
             if (onNodeCreated) onNodeCreated.apply(this, arguments);
@@ -870,33 +921,12 @@ app.registerExtension({
                 }
             };
 
-            // Hook manual widget changes to toggle Custom and refresh fields
-            this.onPropertyChanged = function (property, value, prevValue) {
-                if (onPropertyChanged) onPropertyChanged.apply(this, arguments);
-
-                // Ignore backend-only or system properties
-                if (window.app && window.app.configuringGraph) return;
-
-                const pWidget = this.widgets?.find(wd => wd.name === "preset");
-                if (!pWidget || pWidget.value === "Custom" || pWidget.value === "None") return;
-
-                // If it's a property managed by the preset, verify if it diverges
-                const currentPreset = getPresetConfig(pWidget.value);
-                if (currentPreset && currentPreset[property] !== undefined) {
-                    if (currentPreset[property] != value) {
-                        console.log(`[Radiance Sampler] Manual override detected on '${property}'. Switching to Custom.`);
-                        pWidget.value = "Custom";
-                        lastPresetValue = "Custom";
-                        // ALBABIT-FIX: reset model_type to "auto" on auto-switch to Custom
-                        const modelTypeW = this.widgets?.find(w => w.name === "model_type");
-                        if (modelTypeW) modelTypeW.value = "auto";
-                        updateUILocks(this, "Custom");
-                        updateDescription("Custom");
-                        toggleFields(this);
-                        this.setDirtyCanvas(true);
-                    }
-                }
-            };
+            // ALBABIT-FIX: removed the onPropertyChanged auto-switch to "Custom" on
+            // manual widget edits. It relied on onPropertyChanged, which LiteGraph
+            // only fires for node properties (not widgets), so it was effectively
+            // dead — and switching to Custom would unfold every hidden widget.
+            // Divergence from the preset is now shown per-widget with a "●" label
+            // marker (updatePresetDivergenceMarkers, polled below).
 
             // Wire up callbacks for dynamic folding on change
             const foldTriggers = ["preset", "tile_mode", "restart_count", "ays_schedule", "model_type", "sampler_mode"];
@@ -921,7 +951,13 @@ app.registerExtension({
 
             // ALBABIT-FIX: poll for upstream mute/bypass changes. onConnectionsChange only
             // fires on this node — it does not fire when the upstream node is muted/bypassed.
-            this._sigmaCheckInterval = setInterval(() => updateSigmaLocks(self), 250);
+            // Also refresh the preset "●" divergence markers here: state-based polling
+            // covers every mutation path (manual edit, undo/redo, import, workflow load)
+            // without wrapping every widget callback. Only dirties the canvas on change.
+            this._sigmaCheckInterval = setInterval(() => {
+                updateSigmaLocks(self);
+                updatePresetDivergenceMarkers(self);
+            }, 250);
             const origOnRemoved = this.onRemoved;
             this.onRemoved = function () {
                 if (self._sigmaCheckInterval) {
@@ -972,6 +1008,9 @@ app.registerExtension({
                 const presetW = self.widgets?.find(w => w.name === "preset");
                 if (presetW) updateUILocks(self, presetW.value);
                 toggleFields(self);
+                // ALBABIT-FIX: flag widgets already diverging from the preset in
+                // the loaded workflow (e.g. cfg edited before saving).
+                updatePresetDivergenceMarkers(self);
             };
             // ALBABIT-FIX: 150ms for Vue's first layout pass; 600ms safety net for
             // heavy workflows where graph.configure() stalls the main thread > 100ms.
