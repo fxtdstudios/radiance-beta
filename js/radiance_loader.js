@@ -390,6 +390,71 @@ function autoFillPresetFiles(node, cleanPreset) {
     }
 }
 
+// ALBABIT-FIX: unet_name/vae_name/CLIP slots/audio_vae_name/upscale_model_name
+// stay visible and editable while a preset is active (unlike model_type/
+// weight_dtype/clip_dtype, hidden by design — loader_utils.py). Flag any that
+// no longer match what autoFillPresetFiles() would pick right now, with a "●"
+// label marker (same pattern as radiance_sampler.js/radiance_prompt.js).
+// Marks even a switch between two equally-valid variants (e.g. "-distilled"
+// vs "-dev-fp8") — the marker means "touched since the preset loaded", not
+// "still an acceptable choice".
+const PRESET_MARKER = " ●";
+
+// unet_name/vae_name are left untouched by autoFillPresetFiles() on no
+// match; CLIP slots/audio_vae/upscale fall back to "None" instead.
+const NO_NONE_FALLBACK_FIELDS = new Set(["unet_name", "vae_name"]);
+
+function _markFileWidget(widget, marked) {
+    if (!widget) return false;
+    if (widget._radOrigLabel === undefined && !marked) return false;
+    if (widget._radOrigLabel === undefined) widget._radOrigLabel = widget.label ?? widget.name;
+    const wanted = marked ? widget._radOrigLabel + PRESET_MARKER : widget._radOrigLabel;
+    if (widget.label === wanted) return false;
+    widget.label = wanted;
+    return true;
+}
+
+function updatePresetDivergenceMarkers(node) {
+    if (!node.widgets) return;
+    const presetW = getWidget(node, "preset");
+    const presetVal = presetW ? presetW.value : "Custom";
+    const cleanPreset = presetVal ? presetVal.replace("→ ", "").replace("▶ ", "").replace("◈ ", "").trim() : "Custom";
+    const config = cleanPreset === "Custom" ? null : PRESET_CONFIGS[cleanPreset];
+    const activeSlots = config ? (PRESET_SLOTS[cleanPreset] || ALL_CLIP_WIDGETS) : [];
+
+    let changed = false;
+
+    const check = (widgetName, hints) => {
+        const w = getWidget(node, widgetName);
+        if (!w) return;
+        let marked = false;
+        if (config) {
+            if (!hints || hints.length === 0) {
+                marked = String(w.value) !== "None";
+            } else {
+                const matched = findMatchingFile(hints, w.options?.values);
+                if (matched !== null) {
+                    marked = String(w.value) !== String(matched);
+                } else if (!NO_NONE_FALLBACK_FIELDS.has(widgetName)) {
+                    marked = String(w.value) !== "None";
+                }
+            }
+        }
+        if (_markFileWidget(w, marked)) changed = true;
+    };
+
+    check("unet_name", config?.unet_hints);
+    check("vae_name", config?.vae_hints);
+    for (const wName of ALL_CLIP_WIDGETS) {
+        if (config && !activeSlots.includes(wName)) continue; // hidden slot
+        check(wName, config?.clip_hints?.[wName]);
+    }
+    check("audio_vae_name", config?.audio_vae_hints);
+    check("upscale_model_name", config?.upscale_hints);
+
+    if (changed) node.setDirtyCanvas(true, true);
+}
+
 /**
  * ALBABIT-FIX: Vue 3's virtual-DOM differ reuses the existing widget component
  * instance when the same object reference stays in node.widgets — a plain
@@ -500,6 +565,7 @@ function updateLoaderUI(node, forceAutoFill = false) {
             setWidgetVisible(w, true, node);
         });
         refreshNodeSize(node);
+        updatePresetDivergenceMarkers(node);
         return;
     }
 
@@ -528,6 +594,7 @@ function updateLoaderUI(node, forceAutoFill = false) {
     });
 
     refreshNodeSize(node);
+    updatePresetDivergenceMarkers(node);
 }
 
 // ALBABIT-FIX: app.registerExtension({ nodeCreated, loadedGraphNode }) wraps
@@ -576,6 +643,20 @@ app.registerExtension({
                 if (node._configuredByLoad) return;
                 updateLoaderUI(node, false);
             }, 50);
+
+            // File widgets aren't individually wrapped, so poll for manual
+            // edits (same pattern as radiance_sampler.js/radiance_prompt.js).
+            // Calls only the lightweight marker check, never updateLoaderUI()
+            // itself, which remounts every widget on each call.
+            node._presetMarkerInterval = setInterval(() => updatePresetDivergenceMarkers(node), 250);
+            const origOnRemoved = node.onRemoved;
+            node.onRemoved = function () {
+                if (node._presetMarkerInterval) {
+                    clearInterval(node._presetMarkerInterval);
+                    node._presetMarkerInterval = null;
+                }
+                if (origOnRemoved) origOnRemoved.apply(this, arguments);
+            };
 
             return r;
         };

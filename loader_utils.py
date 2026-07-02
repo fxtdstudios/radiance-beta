@@ -172,6 +172,13 @@ def _apply_preset_field(cfg, field, key, cur, overrides):
     return new
 
 
+# ALBABIT-FIX: these 3 fields are hidden while a preset is active, so every
+# preset must define them all -- a missing key would silently fall back to
+# the hidden widget's (possibly stale) value via _apply_preset_field's
+# cfg.get(key, cur).
+_REQUIRED_PRESET_FIELDS = ("model_type", "weight_dtype", "clip_dtype")
+
+
 def apply_checkpoint_preset(
     preset: str,
     model_type: str,
@@ -183,6 +190,14 @@ def apply_checkpoint_preset(
     overrides: list[str] = []
     if preset not in ("Custom",) and preset in CHECKPOINT_PRESETS:
         cfg = CHECKPOINT_PRESETS[preset]
+
+        missing = [k for k in _REQUIRED_PRESET_FIELDS if k not in cfg]
+        if missing:
+            logger.warning(
+                f"[Radiance] Preset '{preset}' is missing {missing} in CHECKPOINT_PRESETS "
+                "-- falling back to the current (hidden, possibly stale) widget value "
+                "for those fields instead of a preset-defined one."
+            )
 
         model_type   = _apply_preset_field(cfg, "model_type",   "model_type",   model_type,   overrides)
         weight_dtype = _apply_preset_field(cfg, "weight_dtype",  "weight_dtype", weight_dtype, overrides)
