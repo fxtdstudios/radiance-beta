@@ -32,6 +32,10 @@ from radiance.nodes.hdr.synthesis import (
     RadianceHDRSynthesisEngine,
     RadianceRelightEngine,
 )
+from radiance.nodes.hdr.tonemap import (
+    HDRExpandDynamicRange,
+    HDRToneMap,
+)
 from radiance.nodes.hdr.vae import (
     RadianceNativeHDREncoder,
 )
@@ -51,6 +55,8 @@ NODE_CLASS_MAPPINGS = {
     "RadianceSDRToHDRPrepare": RadianceSDRToHDRPrepare,
     "RadianceHDRHighlightComposite": RadianceHDRHighlightComposite,
     "RadianceSDRtoHDRExpand": RadianceSDRtoHDRExpand,
+    "RadianceHDRExpandDynamicRange": HDRExpandDynamicRange,
+    "RadianceHDRToneMap": HDRToneMap,
     "RadianceHDRSynthesisEngine": RadianceHDRSynthesisEngine,
     "RadianceRelightEngine": RadianceRelightEngine,
     "RadianceHDRLatentEncoder": RadianceHDRLatentEncoder,
@@ -69,6 +75,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceSDRToHDRPrepare": "◎ SDR to HDR Prepare",
     "RadianceHDRHighlightComposite": "◎ HDR Highlight Composite",
     "RadianceSDRtoHDRExpand": "◎ SDR to HDR Expand",
+    "RadianceHDRExpandDynamicRange": "◎ HDR Expand Dynamic Range",
+    "RadianceHDRToneMap": "◎ HDR Tone Map",
     "RadianceHDRSynthesisEngine": "◎ HDR Synthesis Engine",
     "RadianceRelightEngine": "◎ Relight Engine",
     "RadianceHDRLatentEncoder": "◎ HDR Latent Encoder",

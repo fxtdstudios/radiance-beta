@@ -6,6 +6,8 @@ import torch.nn.functional as F
 from typing import Dict, Any, Optional, Tuple, List
 import numpy as np
 
+from ....performance import perf_finish, perf_start
+
 # Core library imports
 from .core import (
     _to_3ch_image, _luminance, _LUMA_WEIGHTS, _threshold_mask,
@@ -23,11 +25,11 @@ logger = logging.getLogger("radiance.vfx.multipass.master")
 
 # Try importing EXR writer utilities from io/hdr
 try:
-    from ....hdr.io import write_exr_multipart, check_openexr_available
+    from ....hdr.io import write_exr_multipart, write_exr_openexr, check_openexr_available
     _HAS_EXR = True
 except ImportError:
     try:
-        from hdr.io import write_exr_multipart, check_openexr_available  # type: ignore[import]
+        from hdr.io import write_exr_multipart, write_exr_openexr, check_openexr_available  # type: ignore[import]
         _HAS_EXR = True
     except ImportError:
         _HAS_EXR = False
@@ -60,6 +62,60 @@ def _generate_cryptomatte_manifest(K: int) -> str:
         hex_color = f"{int(round(r*255)):02x}{int(round(g*255)):02x}{int(round(b*255)):02x}"
         manifest[f"cluster_{k}"] = hex_color
     return json.dumps(manifest)
+
+
+def _image_to_3ch(image: torch.Tensor) -> torch.Tensor:
+    x = image.float()
+    if x.shape[-1] == 3:
+        return x.contiguous()
+    if x.shape[-1] > 3:
+        return x[..., :3].contiguous()
+    if x.shape[-1] == 1:
+        return x.expand(-1, -1, -1, 3).contiguous()
+    pad = x[..., -1:].expand(-1, -1, -1, 3 - x.shape[-1])
+    return torch.cat([x, pad], dim=-1).contiguous()
+
+
+def _pass_channels_for_multilayer(name: str, image: np.ndarray) -> Dict[str, np.ndarray]:
+    arr = np.asarray(image, dtype=np.float32)
+    if arr.ndim == 2:
+        arr = arr[..., np.newaxis]
+
+    channels: Dict[str, np.ndarray] = {}
+    count = arr.shape[2] if arr.ndim == 3 else 1
+    if name == "beauty":
+        names = ["R", "G", "B", "A"][:count]
+    elif name == "depth":
+        names = ["depth.Z"] if count == 1 else [f"depth.{ch}" for ch in ["R", "G", "B", "A"][:count]]
+    elif name == "normal":
+        names = ["normal.NX", "normal.NY", "normal.NZ", "normal.A"][:count]
+    else:
+        names = [f"{name}.{ch}" for ch in ["R", "G", "B", "A"][:count]]
+
+    for idx, channel_name in enumerate(names):
+        channels[channel_name] = arr[..., idx if idx < count else 0]
+    return channels
+
+
+def _write_exr_singlepart_multilayer(
+    filepath: str,
+    parts: Dict[str, np.ndarray],
+    bit_depth: str,
+    compression: str,
+    metadata: Dict[str, Any],
+) -> bool:
+    channels: Dict[str, np.ndarray] = {}
+    for name, image in parts.items():
+        if image is None:
+            continue
+        channels.update(_pass_channels_for_multilayer(name, image))
+
+    if not channels:
+        return False
+
+    pixel_type = "HALF" if "16" in bit_depth else "FLOAT"
+    write_exr_openexr(filepath, channels, compression, pixel_type, metadata)
+    return True
 
 
 class RadianceMultipassMaster:
@@ -168,10 +224,11 @@ class RadianceMultipassMaster:
         object_id_segments: int = 16,
         object_id_spatial_weight: float = 0.25,
     ) -> Tuple:
-        B, H, W, C = beauty.shape
+        img = _image_to_3ch(beauty)
+        B, H, W, _ = img.shape
         device = beauty.device
+        _perf = perf_start(device)
         weights = _LUMA_WEIGHTS.get(luma_weights, _LUMA_WEIGHTS["Rec.709 / sRGB"])
-        img = beauty.float()
         luma = _luminance(img, weights)
 
         # ── 1. Depth Map ──────────────────────────────────────────────────────
@@ -277,28 +334,16 @@ class RadianceMultipassMaster:
                 smooth_u = torch.zeros_like(flow_u)
                 smooth_v = torch.zeros_like(flow_v)
                 
-                # Check for historical persistent state from previous queue run
-                last_u = getattr(self, "_last_flow_u", None)
-                last_v = getattr(self, "_last_flow_v", None)
-                
                 for b in range(B):
                     if b == 0:
-                        if last_u is not None and last_u.shape == flow_u[0].shape and last_u.device == flow_u.device:
-                            smooth_u[0] = flow_u[0] * (1.0 - motion_coherence) + last_u * motion_coherence
-                            smooth_v[0] = flow_v[0] * (1.0 - motion_coherence) + last_v * motion_coherence
-                        else:
-                            smooth_u[0] = flow_u[0]
-                            smooth_v[0] = flow_v[0]
+                        smooth_u[0] = flow_u[0]
+                        smooth_v[0] = flow_v[0]
                     else:
                         smooth_u[b] = flow_u[b] * (1.0 - motion_coherence) + smooth_u[b-1] * motion_coherence
                         smooth_v[b] = flow_v[b] * (1.0 - motion_coherence) + smooth_v[b-1] * motion_coherence
                 
                 flow_u = smooth_u
                 flow_v = smooth_v
-                
-                # Update persistent state (detached to prevent memory leaks)
-                self._last_flow_u = flow_u[-1].detach().clone()
-                self._last_flow_v = flow_v[-1].detach().clone()
                 
             pass_motion = _flow_to_hsv_image(flow_u, flow_v)
         else:
@@ -307,26 +352,25 @@ class RadianceMultipassMaster:
         # ── 11. Object ID / Cryptomatte ───────────────────────────────────────
         pass_object_id = _object_id_matte(img, luma, n_segments=object_id_segments, spatial_weight=object_id_spatial_weight)
 
-        # CPU Tensors for stable ComfyUI output
-        out_beauty = beauty.cpu()
-        out_albedo = pass_albedo.cpu()
-        out_normal = pass_normal.cpu()
-        out_depth = pass_depth.cpu()
-        out_roughness = pass_roughness.cpu()
-        out_specular = pass_specular.cpu()
-        out_metallic = pass_metallic.cpu()
-        out_ao = pass_ao.cpu()
-        out_emission = pass_emission.cpu()
-        out_transmission = pass_transmission.cpu()
-        out_highpass = pass_highpass.cpu()
-        out_world_pos = pass_world_pos.cpu()
-        out_curvature = pass_curvature.cpu()
-        out_shadow = pass_shadow.cpu()
-        out_midtone = pass_midtone.cpu()
-        out_highlight = pass_highlight.cpu()
-        out_reflection = pass_reflection.cpu()
-        out_motion = pass_motion.cpu()
-        out_object_id = pass_object_id.cpu()
+        out_beauty = img.contiguous()
+        out_albedo = pass_albedo.contiguous()
+        out_normal = pass_normal.contiguous()
+        out_depth = pass_depth.contiguous()
+        out_roughness = pass_roughness.contiguous()
+        out_specular = pass_specular.contiguous()
+        out_metallic = pass_metallic.contiguous()
+        out_ao = pass_ao.contiguous()
+        out_emission = pass_emission.contiguous()
+        out_transmission = pass_transmission.contiguous()
+        out_highpass = pass_highpass.contiguous()
+        out_world_pos = pass_world_pos.contiguous()
+        out_curvature = pass_curvature.contiguous()
+        out_shadow = pass_shadow.contiguous()
+        out_midtone = pass_midtone.contiguous()
+        out_highlight = pass_highlight.contiguous()
+        out_reflection = pass_reflection.contiguous()
+        out_motion = pass_motion.contiguous()
+        out_object_id = pass_object_id.contiguous()
 
         # ── Bundle dictionary ──
         passes_dict = {
@@ -351,6 +395,7 @@ class RadianceMultipassMaster:
             "object_id": out_object_id,
         }
 
+        perf_finish(logger, "Multipass Extract", _perf, device)
         return (
             passes_dict, out_beauty, out_albedo, out_normal, out_depth, out_roughness, out_specular,
             out_metallic, out_ao, out_emission, out_transmission, out_highpass, out_world_pos,
@@ -360,7 +405,7 @@ class RadianceMultipassMaster:
 
 class RadianceEXRPassesWriter:
     CATEGORY = "FXTD STUDIOS/Radiance/Load & Save"
-    DESCRIPTION = "Write all passes inside the RADIANCE_PASSES bundle into a standard multi-part EXR v2 file fully compatible with Nuke, Resolve, and Fusion."
+    DESCRIPTION = "Write all passes inside the RADIANCE_PASSES bundle into a single-part multilayer or true multi-part OpenEXR file."
     FUNCTION = "write_passes"
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("output_path",)
@@ -383,6 +428,7 @@ class RadianceEXRPassesWriter:
                 "output_path": ("STRING", {"default": ""}),
                 "remote_path": ("STRING", {"default": ""}),
                 "frame_index": ("INT", {"default": 1001, "min": 0, "max": 999999}),
+                "exr_layout": (["Single-part multilayer", "Multi-part"], {"default": "Single-part multilayer"}),
                 "custom_metadata": ("STRING", {"default": "", "multiline": True}),
             }
         }
@@ -396,6 +442,7 @@ class RadianceEXRPassesWriter:
         output_path: str = "",
         remote_path: str = "",
         frame_index: int = 1001,
+        exr_layout: str = "Single-part multilayer",
         custom_metadata: str = "",
     ) -> Tuple[str]:
         import datetime
@@ -454,14 +501,16 @@ class RadianceEXRPassesWriter:
                 parts[name] = _get_frame(tensor, b)
 
             # Normalise compression label
-            comp = "NO_COMPRESSION" if compression.lower() == "uncompressed" else compression
+            comp = "None" if compression.lower() == "uncompressed" else compression
 
             # Write the EXR file
-            if _HAS_EXR and write_exr_multipart is not None:
+            if _HAS_EXR and exr_layout == "Single-part multilayer":
+                ok = _write_exr_singlepart_multilayer(filepath, parts, bit_depth, comp, meta)
+            elif _HAS_EXR and write_exr_multipart is not None:
                 ok = write_exr_multipart(filepath, parts, bit_depth, comp, meta)
             else:
                 raise RuntimeError(
-                    "[EXR Passes Writer] EXR writing module write_exr_multipart not found or import failed."
+                    "[EXR Passes Writer] EXR writing modules not found or import failed."
                 )
 
             if not ok:

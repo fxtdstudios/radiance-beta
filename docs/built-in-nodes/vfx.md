@@ -850,7 +850,7 @@ Use `◎ Multipass: Master VFX Extractor` when the graph reaches the Multipass: 
 
 ### What it does
 
-Writes or hands off the current result to a file, folder, preview, or DCC destination.
+Writes the current `RADIANCE_PASSES` bundle to OpenEXR. The default layout is single-part multilayer for reliable Radiance AOV Reader round-trips; true multi-part output remains available for DCCs that prefer it.
 
 ### When to use it
 
@@ -867,6 +867,7 @@ Use `◎ Radiance EXR Passes Writer` near the end of the graph after the image, 
 | `output_path` | Optional | `STRING` | `` | - |
 | `remote_path` | Optional | `STRING` | `` | - |
 | `frame_index` | Optional | `INT` | `1001` | - |
+| `exr_layout` | Optional | `ENUM: Single-part multilayer, Multi-part` | `Single-part multilayer` | Use `Multi-part` for Nuke/Fusion-style part separation; use the default for easiest Radiance round-trip. |
 | `custom_metadata` | Optional | `STRING` | `` | - |
 
 ### Outputs

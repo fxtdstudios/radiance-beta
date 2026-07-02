@@ -2,19 +2,18 @@
 
 # Review, Viewer, and Preview
 
-Interactive viewer, lightweight viewer, focus peaking, contact sheets, flipbook GIFs, frame stamps, and local preview server outputs.
+Interactive viewer, lightweight viewer, focus peaking, contact sheets, and frame stamps.
 
 ## Typical workflow
 
 ```text
-Processed image batch -> Viewer / Contact Sheet / Frame Stamp / Flipbook GIF / Preview Server
+Processed image batch -> Viewer / Contact Sheet / Frame Stamp
 ```
 
 ## Before you use these nodes
 
 - Use review nodes on copies or branches so stamped/proxy outputs do not overwrite masters.
-- Contact sheets and GIFs are for approval; use EXR sequences for final comp review.
-- Keep preview servers local unless the workstation network policy says otherwise.
+- Contact sheets are for approval; use EXR sequences for final comp review.
 
 ## Nodes in this section
 
@@ -24,9 +23,7 @@ Processed image batch -> Viewer / Contact Sheet / Frame Stamp / Flipbook GIF / P
 | [◎ Radiance Viewer](#radiance-viewer) | `RadianceViewer` | Production review viewer with image passthrough and viewer tooling. |
 | [◎ Focus Peaking](#focus-peaking) | `RadianceFocusPeaking` | Focus peaking monitor — highlight in-focus (sharp) regions with a. |
 | [◎ Contact Sheet](#contact-sheet) | `RadianceContactSheet` | Generate a thumbnail contact sheet from an IMAGE batch. |
-| [◎ Flipbook GIF](#flipbook-gif) | `RadianceFlipbookGIF` | Export an IMAGE batch as an animated GIF for quick preview sharing. |
 | [◎ Frame Stamp](#frame-stamp) | `RadianceFrameStamp` | Burn timecode, frame number, and custom text into frames. |
-| [◎ Preview Server](#preview-server) | `RadiancePreviewServer` | HTTP preview server — serve the most recent processed frame as JPEG to. |
 
 ## ◎ Radiance Lite Viewer
 
@@ -169,44 +166,6 @@ Use `◎ Contact Sheet` when the graph reaches the Contact Sheet step in a revie
 - The node returns `contact_sheet` (`IMAGE`), `grid_cols` (`INT`), `grid_rows` (`INT`).
 - If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
 
-## ◎ Flipbook GIF
-
-**Internal key:** `RadianceFlipbookGIF`  
-**Category:** `FXTD STUDIOS/Radiance/◎ QC & Debug`  
-**Source:** `nodes_realtime_preview.py`
-**Function:** `export_gif`
-
-### What it does
-
-Export an IMAGE batch as an animated GIF for quick preview sharing.
-
-### When to use it
-
-Use `◎ Flipbook GIF` when the graph reaches the Flipbook GIF step in a review, viewer, and preview workflow.
-
-### Inputs
-
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `images` | Yes | `IMAGE` | - | - |
-| `save_path` | Yes | `STRING` | `preview/flipbook.gif` | Output .gif path. Directory is created automatically. |
-| `fps` | Yes | `FLOAT` | `12.0` | Playback speed. GIF frame delay = 1000/fps ms. |
-| `max_width` | Yes | `INT` | `480` | Resize frames to this width (preserves aspect ratio). Smaller = smaller file. |
-| `loop` | Optional | `BOOLEAN` | `True` | Loop the animation indefinitely. |
-| `dither` | Optional | `BOOLEAN` | `True` | Enable Floyd-Steinberg dithering for smoother gradients. |
-
-### Outputs
-
-| Output | Type | Description |
-| :--- | :--- | :--- |
-| `passthrough` | `IMAGE` | Output produced by the `passthrough` socket. |
-| `status` | `STRING` | Output produced by the `status` socket. |
-
-### Practical notes
-
-- The node returns `passthrough` (`IMAGE`), `status` (`STRING`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
-
 ## ◎ Frame Stamp
 
 **Internal key:** `RadianceFrameStamp`  
@@ -246,42 +205,4 @@ Use `◎ Frame Stamp` when the graph reaches the Frame Stamp step in a review, v
 ### Practical notes
 
 - The node returns `stamped` (`IMAGE`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
-
-## ◎ Preview Server
-
-**Internal key:** `RadiancePreviewServer`  
-**Category:** `FXTD STUDIOS/Radiance/◎ QC & Debug`  
-**Source:** `nodes_realtime_preview.py`
-**Function:** `serve`
-
-### What it does
-
-HTTP preview server — serve the most recent processed frame as JPEG to.
-
-### When to use it
-
-Use `◎ Preview Server` on a review branch so you can inspect output without changing the master path.
-
-### Inputs
-
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `images` | Yes | `IMAGE` | - | - |
-| `port` | Yes | `INT` | `8765` | TCP port for the preview HTTP server. |
-| `stream_name` | Yes | `STRING` | `radiance` | Stream identifier. Access at /frame/<stream_name>. |
-| `jpeg_quality` | Optional | `INT` | `85` | JPEG compression quality (20=small, 99=lossless-ish). |
-| `resize_width` | Optional | `INT` | `0` | Resize frame before serving (0 = original size). Smaller = faster over network. |
-| `enabled` | Optional | `BOOLEAN` | `True` | - |
-
-### Outputs
-
-| Output | Type | Description |
-| :--- | :--- | :--- |
-| `passthrough` | `IMAGE` | Output produced by the `passthrough` socket. |
-| `server_url` | `STRING` | Output produced by the `server_url` socket. |
-
-### Practical notes
-
-- The node returns `passthrough` (`IMAGE`), `server_url` (`STRING`).
 - If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.

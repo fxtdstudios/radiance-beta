@@ -2,6 +2,27 @@
 
 All notable changes to FXTD Radiance will be documented in this file.
 
+## [3.1.2] - 2026-07-02 ("GPU-First Release Candidate")
+
+GPU-first completion pass for HDR, RUDRA decode, denoise, motion/flow, upscale, and VFX finishing paths, plus the missing HDR tone-map node migration.
+
+### Fixed
+
+- **HDR Tone Map now loads from the organized HDR package.** `RadianceHDRToneMap` and `RadianceHDRExpandDynamicRange` are registered through `nodes/hdr/`, so saved workflows and the HDR menu can resolve the tone-map node again.
+- **HDR Tone Map is GPU-first end to end.** The implementation no longer falls back to NumPy or forces CUDA results back to CPU; tone mapping now stays on the selected Torch device.
+- **RUDRA compatibility restored on the public decoder API.** `radiance.model.vae` now reuses the maintained fast decoder implementation, including dynamic-range conditioning (`dr_dim` / `dr_proj`), predictor fallback, checkpoint inference, and hardened explicit-checkpoint loading.
+- **Version metadata synchronized.** Python package metadata, runtime constants, README badge, and `package.json` now agree on `3.1.2`.
+
+### Changed
+
+- ACES/HDR color operations, denoise, optical-flow motion blur, multipass helpers, and upscale inference paths were tightened to prefer Torch/GPU execution and avoid unnecessary CPU transfers.
+- The node-key snapshot was updated for the intentional HDR tone-map registry restoration.
+
+### Testing
+
+- Restored and enabled the RUDRA compatibility tests that were previously skipped.
+- Release verification run performed with real Torch, OpenEXR, OpenColorIO, and colour-science dependencies.
+
 ## [3.1.1] - 2026-06-02 ("Fidelity and Trust Release")
 
 Correctness, safety, and delivery-trust fixes for the 32-bit / HDR / EXR pipeline, plus real-AOV ingestion and hardened model loading. Closes the critical data-integrity and security findings from the pre-release engineering review.

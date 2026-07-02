@@ -11,12 +11,12 @@ Each group page includes the node purpose, when to use it, source category, inpu
 | Section | Nodes | Start here when you need to... |
 | :--- | ---: | :--- |
 | [IO and Delivery](built-in-nodes/io-delivery.md) | 4 | Load, inspect, save, and package production media. These nodes are the safest entry and exit points for EXR, sequences, masks, and delivery files. |
-| [Generate, Loaders, and Sampling](built-in-nodes/generate.md) | 13 | Model loading, LoRA stacks, prompt conditioning, resolution setup, denoising, and sampling controls for Radiance generation workflows. |
-| [Color](built-in-nodes/color.md) | 15 | Primary grading, CDL exchange, curves, white balance, color-space conversion, OCIO context, and QC policy checks. |
+| [Generate, Loaders, and Sampling](built-in-nodes/generate.md) | 12 | Model loading, LoRA stacks, prompt conditioning, resolution setup, denoising, and sampling controls for Radiance generation workflows. |
+| [Color](built-in-nodes/color.md) | 13 | Primary grading, CDL exchange, curves, white balance, color-space conversion, OCIO context, and QC checks. |
 | [HDR and ACES](built-in-nodes/hdr-aces.md) | 15 | HDR analysis, tone mapping, ACES 2.0 transforms, SDR-to-HDR preparation, highlight recovery, relighting, and HDR latent support. |
-| [VFX, Masks, Optics, and Multipass](built-in-nodes/vfx.md) | 23 | Depth, optical flow, motion blur, lens effects, SAM masking, matting, inpaint crop/stitch, roto, video mask propagation, multipass extraction, relight, composite, and EXR pass writing. |
-| [Pipeline and Studio](built-in-nodes/pipeline.md) | 8 | Project containers, audio cut data, blend composites, cinema prompt setup, local MCP bridge, Nuke send, Resolve handoff, and parameter history tracking. |
-| [Review, Viewer, and Preview](built-in-nodes/review.md) | 7 | Interactive viewer, lightweight viewer, focus peaking, contact sheets, flipbook GIFs, frame stamps, and local preview server outputs. |
+| [VFX, Masks, Optics, and Multipass](built-in-nodes/vfx.md) | 24 | Depth, optical flow, motion blur, lens effects, SAM masking, matting, inpaint crop/stitch, roto, video mask propagation, multipass extraction, relight, composite, and EXR pass writing. |
+| [Pipeline and Studio](built-in-nodes/pipeline.md) | 5 | Project containers, blend composites, local MCP bridge, Nuke send, and Resolve handoff. |
+| [Review, Viewer, and Preview](built-in-nodes/review.md) | 5 | Interactive viewer, lightweight viewer, focus peaking, contact sheets, and frame stamps. |
 | [Upscale](built-in-nodes/upscale.md) | 4 | Image and video upscaling, tiling, confidence outputs, and face restoration for high-resolution finishing workflows. |
 | [Video](built-in-nodes/video.md) | 12 | Video model inspection, latent noise, conditioning merge, sampling, T2V/I2V pipelines, batch decode, HDR video decode, frame routing, assembly, and export. |
 | [AI Assist](built-in-nodes/ai-assist.md) | 2 | Scene cut detection and shot splitting for per-shot processing and grade routing. |
@@ -31,7 +31,7 @@ Each group page includes the node purpose, when to use it, source category, inpu
 
 ## Catalog coverage
 
-This reference covers **103 registered nodes** from the grouped Radiance catalog. User-generated `.gizmo` nodes are dynamic and should be documented with the studio workflow that creates them.
+This reference covers **96 registered nodes** from the grouped Radiance catalog. User-generated `.gizmo` nodes are dynamic and should be documented with the studio workflow that creates them.
 
 ## Fast lookup
 
@@ -46,7 +46,6 @@ This reference covers **103 registered nodes** from the grouped Radiance catalog
 | `◎ LoRA Stack` / `RadianceLoraStack` | [Generate, Loaders, and Sampling](built-in-nodes/generate.md) |
 | `◎ Radiance Read Models` / `RadianceUnifiedLoader` | [Generate, Loaders, and Sampling](built-in-nodes/generate.md) |
 | `◎ Video Loader` / `RadianceVideoLoader` | [Generate, Loaders, and Sampling](built-in-nodes/generate.md) |
-| `◎ ControlNet Apply` / `RadianceControlNetApply` | [Generate, Loaders, and Sampling](built-in-nodes/generate.md) |
 | `◎ HDR LoRA Loader` / `RadianceHDRLoRALoader` | [Generate, Loaders, and Sampling](built-in-nodes/generate.md) |
 | `◎ HDR LoRA Apply` / `RadianceHDRLoRAApply` | [Generate, Loaders, and Sampling](built-in-nodes/generate.md) |
 | `◎ Cinematic Prompt Encoder` / `RadianceCinematicPromptEncoder` | [Generate, Loaders, and Sampling](built-in-nodes/generate.md) |
@@ -60,7 +59,6 @@ This reference covers **103 registered nodes** from the grouped Radiance catalog
 | `◎ Radiance White Balance` / `RadianceWhiteBalance` | [Color](built-in-nodes/color.md) |
 | `◎ Radiance Colorspace Convert` / `RadianceColorSpaceConvert` | [Color](built-in-nodes/color.md) |
 | `◎ Radiance ACES Transform` / `RadianceACESTransform` | [Color](built-in-nodes/color.md) |
-| `◎ Radiance Bit Depth Degrade` / `RadianceBitDepthDegrade` | [Color](built-in-nodes/color.md) |
 | `◎ Radiance Hue Curves` / `RadianceHueCurves` | [Color](built-in-nodes/color.md) |
 | `◎ Radiance Curves` / `RadianceCurves` | [Color](built-in-nodes/color.md) |
 | `◎ Radiance Grade` / `RadianceGrade` | [Color](built-in-nodes/color.md) |
@@ -68,7 +66,6 @@ This reference covers **103 registered nodes** from the grouped Radiance catalog
 | `◎ Radiance Grade Match` / `RadianceGradeMatch` | [Color](built-in-nodes/color.md) |
 | `◎ Radiance OCIO Context` / `RadianceOCIOContext` | [Color](built-in-nodes/color.md) |
 | `◎ Radiance QC` / `RadianceQC` | [Color](built-in-nodes/color.md) |
-| `◎ Policy Guard` / `RadiancePolicyGuard` | [Color](built-in-nodes/color.md) |
 | `◎ ACES 2.0 Tonescale` / `RadianceACES2Tonescale` | [HDR and ACES](built-in-nodes/hdr-aces.md) |
 | `◎ ACES 2.0 Gamut Compress` / `RadianceACES2ReachGamutCompress` | [HDR and ACES](built-in-nodes/hdr-aces.md) |
 | `◎ ACES 2.0 Output Transform` / `RadianceACES2OutputTransformFull` | [HDR and ACES](built-in-nodes/hdr-aces.md) |
@@ -107,21 +104,16 @@ This reference covers **103 registered nodes** from the grouped Radiance catalog
 | `◎ Radiance EXR Passes Writer` / `RadianceEXRPassesWriter` | [VFX, Masks, Optics, and Multipass](built-in-nodes/vfx.md) |
 | `◎ Multipass: Real PBR Relight` / `RadianceMultipassRelight` | [VFX, Masks, Optics, and Multipass](built-in-nodes/vfx.md) |
 | `◎ Multipass: VFX Composite` / `RadianceMultipassComposite` | [VFX, Masks, Optics, and Multipass](built-in-nodes/vfx.md) |
-| `◎ Audio Cut` / `RadianceAudioCut` | [Pipeline and Studio](built-in-nodes/pipeline.md) |
 | `◎ Project Manager` / `RadianceProjectManager` | [Pipeline and Studio](built-in-nodes/pipeline.md) |
 | `◎ Blend Composite` / `RadianceBlendComposite` | [Pipeline and Studio](built-in-nodes/pipeline.md) |
-| `◎ Cinema Studio` / `RadianceCinemaStudio` | [Pipeline and Studio](built-in-nodes/pipeline.md) |
 | `◎ Radiance MCP Bridge` / `RadianceMCP` | [Pipeline and Studio](built-in-nodes/pipeline.md) |
 | `◎ Radiance Send to Nuke` / `RadianceNukeSend` | [Pipeline and Studio](built-in-nodes/pipeline.md) |
 | `◎ Radiance Send to DaVinci Resolve` / `RadianceDaVinciSend` | [Pipeline and Studio](built-in-nodes/pipeline.md) |
-| `◎ Parameter History Tracker` / `RadianceParamHistoryTracker` | [Pipeline and Studio](built-in-nodes/pipeline.md) |
 | `◎ Radiance Lite Viewer` / `RadianceLiteViewer` | [Review, Viewer, and Preview](built-in-nodes/review.md) |
 | `◎ Radiance Viewer` / `RadianceViewer` | [Review, Viewer, and Preview](built-in-nodes/review.md) |
 | `◎ Focus Peaking` / `RadianceFocusPeaking` | [Review, Viewer, and Preview](built-in-nodes/review.md) |
 | `◎ Contact Sheet` / `RadianceContactSheet` | [Review, Viewer, and Preview](built-in-nodes/review.md) |
-| `◎ Flipbook GIF` / `RadianceFlipbookGIF` | [Review, Viewer, and Preview](built-in-nodes/review.md) |
 | `◎ Frame Stamp` / `RadianceFrameStamp` | [Review, Viewer, and Preview](built-in-nodes/review.md) |
-| `◎ Preview Server` / `RadiancePreviewServer` | [Review, Viewer, and Preview](built-in-nodes/review.md) |
 | `◎ Upscale Tiler` / `RadianceUpscaleTiler` | [Upscale](built-in-nodes/upscale.md) |
 | `◎ Upscale Image` / `RadianceUpscaleImage` | [Upscale](built-in-nodes/upscale.md) |
 | `◎ Upscale Video` / `RadianceUpscaleVideo` | [Upscale](built-in-nodes/upscale.md) |

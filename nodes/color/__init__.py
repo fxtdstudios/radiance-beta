@@ -12,7 +12,6 @@ from radiance.nodes.color.colorspace import (
     RadianceWhiteBalance,
     RadianceColorSpaceConvert,
     RadianceACESTransform,
-    RadianceBitDepthDegrade,
 )
 from radiance.nodes.color.curves import (
     RadianceHueCurves,
@@ -28,7 +27,6 @@ from radiance.nodes.color.ocio import (
 )
 from radiance.nodes.color.qc import (
     RadianceQC,
-    RadiancePolicyGuard,
     RadianceQCExport,
 )
 
@@ -41,7 +39,6 @@ NODE_CLASS_MAPPINGS = {
     "RadianceWhiteBalance": RadianceWhiteBalance,
     "RadianceColorSpaceConvert": RadianceColorSpaceConvert,
     "RadianceACESTransform": RadianceACESTransform,
-    "RadianceBitDepthDegrade": RadianceBitDepthDegrade,
     "RadianceHueCurves": RadianceHueCurves,
     "RadianceCurves": RadianceCurves,
     "RadianceGrade": RadianceGrade,
@@ -49,7 +46,6 @@ NODE_CLASS_MAPPINGS = {
     "RadianceGradeMatch": RadianceGradeMatch,
     "RadianceOCIOContext": RadianceOCIOContext,
     "RadianceQC": RadianceQC,
-    "RadiancePolicyGuard": RadiancePolicyGuard,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -59,7 +55,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceWhiteBalance": "◎ Radiance White Balance",
     "RadianceColorSpaceConvert": "◎ Radiance Colorspace Convert",
     "RadianceACESTransform": "◎ Radiance ACES Transform",
-    "RadianceBitDepthDegrade": "◎ Radiance Bit Depth Degrade",
     "RadianceHueCurves": "◎ Radiance Hue Curves",
     "RadianceCurves": "◎ Radiance Curves",
     "RadianceGrade": "◎ Radiance Grade",
@@ -67,7 +62,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceGradeMatch": "◎ Radiance Grade Match",
     "RadianceOCIOContext": "◎ Radiance OCIO Context",
     "RadianceQC": "◎ Radiance QC",
-    "RadiancePolicyGuard": "◎ Policy Guard",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

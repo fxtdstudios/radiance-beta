@@ -658,7 +658,7 @@ def _realesrgan_infer(net: nn.Module, tile_bhwc: torch.Tensor,
                                  align_corners=False).clamp(0, 1)
         y = torch.cat([y, alpha_up], dim=1)
 
-    return y.permute(0, 2, 3, 1).cpu()
+    return y.permute(0, 2, 3, 1)
 
 
 def _bicubic_upscale(tile_bhwc: torch.Tensor, scale: int) -> torch.Tensor:
@@ -713,7 +713,7 @@ def _spandrel_infer(model: Any, tile_bhwc: torch.Tensor,
         # spandrel wraps the raw nn.Module in a ModelDescriptor; call .model for it
         inner = getattr(model, "model", model)
         y     = inner(x).clamp(0, 1)
-    return y.permute(0, 2, 3, 1).cpu()
+    return y.permute(0, 2, 3, 1)
 
 
 def _load_tier2(model_key: str, scale: int, device: torch.device) -> Any:
@@ -916,7 +916,7 @@ def _seedvr2_infer(
                 prompt=eff_prompt,
                 num_inference_steps=steps,
             )
-        return result.cpu().clamp(0, 1)
+        return result.clamp(0, 1)
 
     # diffusers DiffusionPipeline generic path
     results = []
@@ -1078,7 +1078,7 @@ def _build_upscale_fn(
                 upscale_amount=scale_int,
                 pbar=None,
             )
-            return up.permute(0, 2, 3, 1).cpu()
+            return up.permute(0, 2, 3, 1)
         return _fn_ext, "external UPSCALE_MODEL"
 
     tier = model_tier.lower()
@@ -1129,7 +1129,7 @@ def _build_upscale_fn(
                 x = tile[:, :, :, :3].permute(0, 3, 1, 2).to(device)
                 with torch.no_grad():
                     y = _m(x).clamp(0, 1)
-                return y.permute(0, 2, 3, 1).cpu()
+                return y.permute(0, 2, 3, 1)
 
             return _fn_t2, label2
         except RuntimeError as e:

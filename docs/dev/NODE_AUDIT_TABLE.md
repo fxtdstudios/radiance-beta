@@ -8,8 +8,9 @@ This report reviews the Radiance node catalog from a ComfyUI and VFX artist pers
 
 | Count | Meaning |
 |---:|---|
-| 104 | Expected full Radiance node catalog from `tests/node_keys_snapshot.json`. |
-| 57 | Nodes loaded in a headless audit import on this machine. The local shell import is missing ComfyUI runtime modules such as `folder_paths` and `aiohttp`, so UI/server and Comfy-dependent nodes are skipped outside a real ComfyUI session. |
+| 96 | Active Radiance node catalog from `tests/node_keys_snapshot.json` after removing the weak / less-useful nodes. |
+| 8 | Removed from the active ComfyUI catalog: AudioCut, BitDepthDegrade, CinemaStudio, ControlNetApply, FlipbookGIF, ParamHistoryTracker, PolicyGuard, and PreviewServer. |
+| 57 | Nodes loaded in an earlier headless audit import on this machine. The local shell import was missing ComfyUI runtime modules such as `folder_paths` and `aiohttp`, so UI/server and Comfy-dependent nodes were skipped outside a real ComfyUI session. |
 
 ## Rating Key
 
@@ -21,7 +22,9 @@ This report reviews the Radiance node catalog from a ComfyUI and VFX artist pers
 | Weak | Low production value, duplicate behavior, debug-only, or needs stronger reason to exist. |
 | Risky | Powerful but needs careful security, dependency, path, or network handling. |
 
-## Full Node Table
+## Full Audit Table
+
+Rows marked `Removed` are no longer registered in the active ComfyUI node catalog.
 
 | # | Node | Area | Artist explanation | Value |
 |---:|---|---|---|---|
@@ -31,19 +34,19 @@ This report reviews the Radiance node catalog from a ComfyUI and VFX artist pers
 | 4 | `RadianceACESTransform` | HDR / Color | General ACES transform utility for color-managed workflows. | Strong |
 | 5 | `RadianceAnamorphicStreaks` | Film / VFX | Adds horizontal lens streaks and bloom-style flare accents. | Useful |
 | 6 | `RadianceApplyGradeInfo` | Color | Applies a saved or passed grade description to images. | Useful |
-| 7 | `RadianceAudioCut` | Video / Editorial | Uses audio timing/cuts as workflow metadata. | Niche |
-| 8 | `RadianceBitDepthDegrade` | Lookdev / QC | Simulates lower bit depth, banding, and delivery damage. | Niche |
+| 7 | `RadianceAudioCut` | Video / Editorial | Uses audio timing/cuts as workflow metadata. | Removed |
+| 8 | `RadianceBitDepthDegrade` | Lookdev / QC | Simulates lower bit depth, banding, and delivery damage. | Removed |
 | 9 | `RadianceBlendComposite` | Composite | Blends foreground/background with artist controls. | Useful |
 | 10 | `RadianceCDLExport` | Color | Exports ASC CDL-style grades for handoff. | Strong |
 | 11 | `RadianceCDLImport` | Color | Imports CDL values from grading pipelines. | Strong |
 | 12 | `RadianceCDLTransform` | Color | Applies slope/offset/power/saturation transforms. | Strong |
 | 13 | `RadianceChromaticAberration` | Film / VFX | Adds lens color fringing. Best used lightly. | Useful |
-| 14 | `RadianceCinemaStudio` | Workflow | Higher-level studio/workflow wrapper. Needs clear UX to shine. | Niche |
+| 14 | `RadianceCinemaStudio` | Workflow | Higher-level studio/workflow wrapper. Needs clear UX to shine. | Removed |
 | 15 | `RadianceCinematicPromptEncoder` | Generate | Builds more cinematic prompt conditioning. | Useful |
 | 16 | `RadianceClipDetector` | HDR / QC | Finds clipped highlights for SDR-to-HDR repair. | Strong |
 | 17 | `RadianceColorSpaceConvert` | Color | Converts between common color spaces. | Strong |
 | 18 | `RadianceContactSheet` | Review | Creates contact sheets for comparison and client review. | Useful |
-| 19 | `RadianceControlNetApply` | Generate | Applies ControlNet-style conditioning. May duplicate common Comfy nodes. | Weak |
+| 19 | `RadianceControlNetApply` | Generate | Applies ControlNet-style conditioning. May duplicate common Comfy nodes. | Removed |
 | 20 | `RadianceCurves` | Color | Curve adjustment for contrast and channel shaping. | Strong |
 | 21 | `RadianceDaVinciSend` | Pipeline | Sends frames/grades to DaVinci-oriented workflows. | Risky |
 | 22 | `RadianceDenoise` | Generate / Cleanup | 32-bit-aware denoise for image cleanup. | Useful |
@@ -51,7 +54,7 @@ This report reviews the Radiance node catalog from a ComfyUI and VFX artist pers
 | 24 | `RadianceEXRMultiPart` | IO / EXR | Multi-part EXR handling for production passes. | Strong |
 | 25 | `RadianceEXRPassesWriter` | IO / EXR | Writes AOV/pass EXRs for Nuke and comp handoff. | Strong |
 | 26 | `RadianceFilmGrain` | Film / VFX | Adds controlled film grain. Important for final integration. | Strong |
-| 27 | `RadianceFlipbookGIF` | Review | Quick GIF flipbooks for preview. Limited for high-end review. | Weak |
+| 27 | `RadianceFlipbookGIF` | Review | Quick GIF flipbooks for preview. Limited for high-end review. | Removed |
 | 28 | `RadianceFocusPeaking` | QC / Display | Visualizes sharpness/focus areas. | Useful |
 | 29 | `RadianceFrameStamp` | Review / Editorial | Adds frame/time/version metadata stamps. | Useful |
 | 30 | `RadianceGrade` | Color | Primary color grade controls. | Strong |
@@ -87,9 +90,9 @@ This report reviews the Radiance node catalog from a ComfyUI and VFX artist pers
 | 60 | `RadianceNukeSend` | Pipeline | Sends material to Nuke pipeline tooling. | Risky |
 | 61 | `RadianceOCIOContext` | Color | Provides OCIO config/context awareness. | Strong |
 | 62 | `RadianceOpticalFlow` | Video / VFX | Calculates motion vectors for retime, masks, and stabilization. | Strong |
-| 63 | `RadianceParamHistoryTracker` | Debug / Utility | Tracks parameter history. More dev/debug than artist-facing. | Weak |
-| 64 | `RadiancePolicyGuard` | Pipeline / Safety | Enforces policy/compliance rules. Studio-only value. | Niche |
-| 65 | `RadiancePreviewServer` | Review / Server | Local preview daemon. Useful, but viewer nodes are cleaner. | Niche |
+| 63 | `RadianceParamHistoryTracker` | Debug / Utility | Tracks parameter history. More dev/debug than artist-facing. | Removed |
+| 64 | `RadiancePolicyGuard` | Pipeline / Safety | Enforces policy/compliance rules. Studio-only value. | Removed |
+| 65 | `RadiancePreviewServer` | Review / Server | Local preview daemon. Useful, but viewer nodes are cleaner. | Removed |
 | 66 | `RadianceProjectManager` | Pipeline | Manages project paths/state. Good if hardened. | Useful |
 | 67 | `RadianceQC` | QC | General quality-control and diagnostic node. | Strong |
 | 68 | `RadianceRead` | IO | Reads production images/sequences. Core pipeline node. | Strong |
@@ -140,18 +143,18 @@ This report reviews the Radiance node catalog from a ComfyUI and VFX artist pers
 | Video pipeline | T2V/I2V, video sampler, HDR conditioning/decode, loader/export, scene cuts, and stabilization form a coherent video workflow. |
 | Upscale | Image/video upscale plus tiling and face restore are practical and easy for artists to understand. |
 
-## Weak Or Low-Value Nodes
+## Removed Weak Or Low-Value Nodes
 
-| Node | Why it is weak or less useful | Recommendation |
+| Node | Why it was weak or less useful | Status |
 |---|---|---|
-| `RadianceParamHistoryTracker` | Mostly developer/debug value; not a natural artist node. | Hide behind debug category or remove from normal menus. |
-| `RadianceFlipbookGIF` | GIF preview is convenient but weak for HDR, color accuracy, and serious review. | Keep as quick-share utility, not core selling point. |
-| `RadianceControlNetApply` | Likely duplicates established ComfyUI ControlNet nodes. | Keep only if Radiance adds HDR/video-specific behavior. |
-| `RadiancePreviewServer` | A server node is heavier than viewer nodes and needs maintenance/security care. | Keep local-only and secondary to `RadianceViewer`. |
-| `RadianceAudioCut` | Useful only for video/editorial cases and not central to image/VFX workflows. | Keep as niche video utility. |
-| `RadianceBitDepthDegrade` | Mostly testing/lookdev; not a daily finishing tool. | Keep under QC/lookdev, not primary. |
-| `RadiancePolicyGuard` | Studio compliance value, but weak for independent artists. | Make optional/studio-profile only. |
-| `RadianceCinemaStudio` | Sounds broad; value depends on whether it is polished and clearly better than smaller nodes. | Simplify or document the exact workflow it owns. |
+| `RadianceParamHistoryTracker` | Mostly developer/debug value; not a natural artist node. | Removed from active ComfyUI catalog. |
+| `RadianceFlipbookGIF` | GIF preview is convenient but weak for HDR, color accuracy, and serious review. | Removed from active ComfyUI catalog. |
+| `RadianceControlNetApply` | Likely duplicates established ComfyUI ControlNet nodes. | Removed from active ComfyUI catalog. |
+| `RadiancePreviewServer` | A server node is heavier than viewer nodes and needs maintenance/security care. | Removed from active ComfyUI catalog. |
+| `RadianceAudioCut` | Useful only for video/editorial cases and not central to image/VFX workflows. | Removed from active ComfyUI catalog. |
+| `RadianceBitDepthDegrade` | Mostly testing/lookdev; not a daily finishing tool. | Removed from active ComfyUI catalog. |
+| `RadiancePolicyGuard` | Studio compliance value, but weak for independent artists. | Removed from active ComfyUI catalog. |
+| `RadianceCinemaStudio` | Sounds broad; value depends on whether it is polished and clearly better than smaller nodes. | Removed from active ComfyUI catalog. |
 
 ## Risky But Valuable Nodes
 
@@ -161,7 +164,6 @@ This report reviews the Radiance node catalog from a ComfyUI and VFX artist pers
 | `RadianceNukeSend` | Pipeline bridge can touch files/processes outside ComfyUI. Needs safe paths and auth/token behavior if networked. |
 | `RadianceDaVinciSend` | Same class of risk as Nuke handoff: useful in studio workflows, but should be explicit and local-first. |
 | `RadianceProjectManager` | Project/path managers can become file-system risk points. Needs strict path validation. |
-| `RadiancePreviewServer` | Server behavior must stay `127.0.0.1` by default and avoid broad LAN exposure. |
 
 ## Overall Verdict
 

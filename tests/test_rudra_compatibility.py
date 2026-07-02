@@ -1,21 +1,14 @@
 import os
+import math
 import torch
 import pytest
+import radiance.fast_vae as fast_vae_mod
+from radiance.config.model_map import MODEL_VAE_CONFIG, resolve_model_vae_config
 from radiance.model.vae import (
     RadianceTurboDecoder,
     RadianceFullDecoder,
     decode_to_linear_realtime,
     load_radiance_decoder_weights,
-)
-
-# NOTE (v3.1): The RUDRA dynamic-range-conditioned decoder (dr_dim / dr_proj
-# conditioning + predictor fallback) is NOT shipped in this release. Its
-# implementation lived only in an uncommitted working-tree edit that was lost to
-# file truncation; git contains the older baseline decoder, which is what ships.
-# These tests assert the newer API and are skipped until that decoder is
-# restored. Remove this skip once model/vae.py regains the dr_dim architecture.
-pytestmark = pytest.mark.skip(
-    reason="RUDRA dr_dim decoder not in v3.1 (impl lost in truncation; baseline decoder restored)."
 )
 
 def test_decoder_instantiation():
@@ -77,4 +70,114 @@ def test_mock_rudra_checkpoint_load(tmp_path):
     )
     
     assert isinstance(loaded, RadianceTurboDecoder)
+    assert loaded.dr_dim == 64
+
+
+@pytest.mark.parametrize("model_type,cfg", sorted(MODEL_VAE_CONFIG.items()))
+@pytest.mark.parametrize(
+    "decoder_cls",
+    [RadianceTurboDecoder, RadianceFullDecoder],
+    ids=["turbo", "full"],
+)
+def test_rudra_turbo_full_forward_all_model_configs(model_type, cfg, decoder_cls):
+    """Every configured VAE family must have a matching Turbo/Full RUDRA shape."""
+    latent_channels = cfg.get("latent_channels", 16)
+    spatial_scale = cfg.get("vae_spatial_factor", 8)
+    n_upsample = max(1, int(round(math.log2(spatial_scale))))
+    latent_size = 2 if spatial_scale > 8 else 4
+
+    decoder = decoder_cls(
+        latent_channels=latent_channels,
+        n_upsample=n_upsample,
+        dr_dim=64,
+    ).eval()
+    latent = torch.randn(1, latent_channels, latent_size, latent_size)
+    dr_proj = torch.randn(1, 64)
+
+    with torch.no_grad():
+        raw = decoder(latent, dr_proj)
+        decoded = decode_to_linear_realtime(
+            latent=latent,
+            decoder=decoder,
+            model_type=model_type,
+            precision="fp32",
+            return_log_coded=True,
+            tiled=False,
+        )
+
+    expected_hw = latent_size * spatial_scale
+    assert raw.shape == (1, 3, expected_hw, expected_hw)
+    assert decoded.shape == (1, expected_hw, expected_hw, 3)
+
+
+@pytest.mark.parametrize("model_type", ["flux2-klein", "ltx-video"])
+def test_rudra_tiled_decode_uses_model_spatial_scale(model_type):
+    """Tiled decode must not hard-code the legacy 8x VAE scale."""
+    cfg = resolve_model_vae_config(model_type)
+    latent_channels = cfg["latent_channels"]
+    spatial_scale = cfg["vae_spatial_factor"]
+    n_upsample = max(1, int(round(math.log2(spatial_scale))))
+
+    decoder = RadianceTurboDecoder(
+        latent_channels=latent_channels,
+        n_upsample=n_upsample,
+        dr_dim=64,
+    ).eval()
+    latent = torch.randn(1, latent_channels, 2, 2)
+
+    with torch.no_grad():
+        decoded = decode_to_linear_realtime(
+            latent=latent,
+            decoder=decoder,
+            model_type=model_type,
+            precision="fp32",
+            return_log_coded=True,
+            tiled=True,
+            tile_size=spatial_scale,
+            overlap=0,
+        )
+
+    expected_hw = 2 * spatial_scale
+    assert decoded.shape == (1, expected_hw, expected_hw, 3)
+
+
+@pytest.mark.parametrize("model_type,cfg", sorted(MODEL_VAE_CONFIG.items()))
+@pytest.mark.parametrize(
+    "model_size,decoder_cls",
+    [("rudra_turbo", RadianceTurboDecoder), ("rudra_full", RadianceFullDecoder)],
+    ids=["turbo", "full"],
+)
+def test_mock_rudra_checkpoint_loads_for_all_model_configs(
+    tmp_path,
+    monkeypatch,
+    model_type,
+    cfg,
+    model_size,
+    decoder_cls,
+):
+    """The loader must accept Turbo/Full checkpoints for every configured model family."""
+    latent_channels = cfg.get("latent_channels", 16)
+    spatial_scale = cfg.get("vae_spatial_factor", 8)
+    n_upsample = max(1, int(round(math.log2(spatial_scale))))
+    source = decoder_cls(
+        latent_channels=latent_channels,
+        n_upsample=n_upsample,
+        dr_dim=64,
+    )
+    state_dict = source.state_dict()
+    ckpt_path = tmp_path / f"{model_type}_{model_size}.pth"
+    ckpt_path.write_bytes(b"mock")
+
+    fast_vae_mod._TRAINED_DECODER_CACHE.clear()
+    monkeypatch.setattr(fast_vae_mod.torch, "load", lambda *args, **kwargs: state_dict)
+
+    loaded = load_radiance_decoder_weights(
+        model_type=model_type,
+        model_size=model_size,
+        checkpoint_path=str(ckpt_path),
+    )
+
+    assert isinstance(loaded, decoder_cls)
+    assert loaded.latent_channels == latent_channels
+    assert loaded.n_upsample == n_upsample
     assert loaded.dr_dim == 64
