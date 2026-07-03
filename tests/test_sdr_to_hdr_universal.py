@@ -46,6 +46,13 @@ class TestContract(unittest.TestCase):
         self.assertIn("HLG", req["output_encoding"][0])
         self.assertIn("Linear", req["output_encoding"][0])
 
+    def test_optional_rudra_inputs(self):
+        opt = self.mod.RadianceSDRToHDRUniversal.INPUT_TYPES()["optional"]
+        self.assertEqual(opt["vae"][0], "VAE")
+        self.assertIn("rudra_turbo", opt["rudra_size"][0])
+        self.assertIn("rudra_full", opt["rudra_size"][0])
+        self.assertIn("rudra_blend", opt)
+
     def test_node_metadata(self):
         cls = self.mod.RadianceSDRToHDRUniversal
         self.assertEqual(cls.RETURN_TYPES, ("IMAGE", "MASK"))
@@ -151,6 +158,86 @@ class TestMath(unittest.TestCase):
         out, _ = self.node.convert(img, "None", 1000.0, "manual", 0.75, 1.6,
                                    0.0, "Linear")
         self.assertTrue(self.torch.allclose(out[..., 3], alpha))
+
+
+@skip_no_torch
+class TestRudraPath(unittest.TestCase):
+    """RUDRA integration — VAE/decoder mocked, real torch math."""
+
+    def setUp(self):
+        import torch
+        import radiance.fast_vae as fv
+        self.torch = torch
+        self.fv = fv
+        self.mod = importlib.import_module("radiance.nodes.hdr.uplift_universal")
+        self.node = self.mod.RadianceSDRToHDRUniversal()
+        self._orig = (fv.load_radiance_decoder_weights,
+                      fv.decode_to_linear_realtime,
+                      fv.detect_rudra_model_type)
+
+    def tearDown(self):
+        (self.fv.load_radiance_decoder_weights,
+         self.fv.decode_to_linear_realtime,
+         self.fv.detect_rudra_model_type) = self._orig
+
+    class _FakeVAE:
+        scale_factor = 0.18215
+        def encode(self, pixels):
+            import torch
+            b, h, w, _ = pixels.shape
+            return torch.randn(b, 16, max(h // 8, 1), max(w // 8, 1))
+
+    def _img(self):
+        t = self.torch.linspace(0.0, 1.0, 64).reshape(1, 8, 8, 1)
+        return t.expand(1, 8, 8, 3).contiguous()
+
+    def test_fallback_when_no_checkpoint(self):
+        """loader returns None → identical to pure-math output, no exception."""
+        self.fv.load_radiance_decoder_weights = lambda **kw: None
+        self.fv.detect_rudra_model_type = lambda *a, **kw: "flux"
+        img = self._img()
+        base, _ = self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
+                                    0.0, "Linear")
+        out, _ = self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
+                                   0.0, "Linear", vae=self._FakeVAE())
+        self.assertTrue(self.torch.allclose(out, base))
+
+    def test_rudra_blended_into_highlights(self):
+        """decoder available → highlight region differs from math, shadows don't."""
+        torch = self.torch
+        rec_value = 7.0
+        self.fv.detect_rudra_model_type = lambda *a, **kw: "flux"
+        self.fv.load_radiance_decoder_weights = (
+            lambda **kw: torch.nn.Identity())
+        def fake_decode(latent, decoder, **kw):
+            b = latent.shape[0]
+            h, w = latent.shape[-2] * 8, latent.shape[-1] * 8
+            return torch.full((b, h, w, 3), rec_value)
+        self.fv.decode_to_linear_realtime = fake_decode
+
+        img = self._img()
+        base, mask = self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
+                                       0.0, "Linear")
+        out, _ = self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
+                                   0.0, "Linear", vae=self._FakeVAE(),
+                                   rudra_blend=1.0)
+        shadows = mask < 1e-6
+        highlights = mask > 0.2
+        self.assertTrue(torch.allclose(out[..., 0][shadows],
+                                       base[..., 0][shadows], atol=1e-4))
+        self.assertTrue(bool((out[..., 0][highlights]
+                              != base[..., 0][highlights]).any()))
+
+    def test_blend_zero_disables_rudra(self):
+        called = {"n": 0}
+        def loader(**kw):
+            called["n"] += 1
+            return None
+        self.fv.load_radiance_decoder_weights = loader
+        img = self._img()
+        self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
+                          0.0, "Linear", vae=self._FakeVAE(), rudra_blend=0.0)
+        self.assertEqual(called["n"], 0)
 
 
 if __name__ == "__main__":
