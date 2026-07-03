@@ -19,14 +19,22 @@ Works on IMAGE tensors of shape [B,H,W,C]; a video is simply a batch of
 frames, so the same node handles stills, batches, and footage. B == 1
 automatically behaves as a still image (temporal smoothing is a no-op).
 
-No model checkpoints required — pure GPU math.
+Pure GPU math by default — no checkpoints required. Optionally, connect a
+VAE to enable RUDRA learned highlight reconstruction: the SDR input is
+VAE-encoded and decoded through a trained RUDRA decoder (fast_vae.py), and
+the reconstructed highlights are blended into the mask region. If no RUDRA
+checkpoint is available the node silently falls back to the math path.
 """
 
 from __future__ import annotations
 
+import logging
+
 import torch
 
 from radiance.nodes.hdr.aces2 import _torch_pq_encode, _torch_hlg_encode
+
+logger = logging.getLogger("radiance.nodes.hdr.uplift_universal")
 
 _EPS = 1e-6
 
@@ -136,12 +144,79 @@ class RadianceSDRToHDRUniversal:
                 "output_encoding": (["Linear", "PQ (HDR10)", "HLG"], {"default": "Linear",
                     "tooltip": "Linear: scene-linear floats (EXR/delivery-ready, 1.0 = 100 nits). PQ: ST.2084 for HDR10. HLG: ARIB STD-B67."}),
             },
+            "optional": {
+                "vae": ("VAE", {"tooltip":
+                    "Optional: connect a VAE to enable RUDRA learned highlight "
+                    "reconstruction (encode → RUDRA decode). Needs a trained "
+                    "RUDRA checkpoint (RADIANCE_TURBO_DECODER or models/radiance/). "
+                    "Falls back to math expansion if unavailable."}),
+                "rudra_size": (["rudra_turbo", "rudra_full"], {"default": "rudra_turbo",
+                    "tooltip": "RUDRA decoder variant: turbo (fast, ~2M params) or full (production quality)."}),
+                "rudra_blend": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "How strongly RUDRA-reconstructed highlights replace the math expansion inside the highlight mask. 0 disables the learned path."}),
+            },
         }
+
+    # ── RUDRA learned-reconstruction path ────────────────────────────────────
+    @staticmethod
+    def _rudra_reconstruct(sdr_pixels: torch.Tensor, base_hdr: torch.Tensor,
+                           mask: torch.Tensor, vae, rudra_size: str,
+                           blend: float) -> torch.Tensor:
+        """
+        SDR pixels → VAE encode → RUDRA decode → scene-linear reconstruction,
+        gain-matched to `base_hdr` in well-exposed regions and blended into the
+        highlight mask. Raises on any failure — caller falls back to math.
+        """
+        import torch.nn.functional as F
+        from radiance.fast_vae import (
+            decode_to_linear_realtime,
+            detect_rudra_model_type,
+            load_radiance_decoder_weights,
+        )
+
+        latent = vae.encode(sdr_pixels[..., :3])
+        if isinstance(latent, dict):                       # some wrappers
+            latent = latent.get("samples", next(iter(latent.values())))
+
+        model_type = detect_rudra_model_type(latent.shape[1], latent.ndim == 5, vae)
+        decoder = load_radiance_decoder_weights(model_type=model_type,
+                                                model_size=rudra_size)
+        if decoder is None:
+            raise RuntimeError(f"no RUDRA checkpoint for model_type={model_type!r}")
+        decoder = decoder.to(latent.device)
+
+        scale_factor = getattr(vae, "scale_factor", None)
+        if not isinstance(scale_factor, (int, float)) or scale_factor == 0:
+            scale_factor = None                            # resolve from config
+        rec = decode_to_linear_realtime(
+            latent=latent, decoder=decoder, model_type=model_type,
+            scale_factor=scale_factor, precision="bf16",
+        ).float().to(base_hdr.device).clamp(min=0.0)
+
+        # VAE rounding can shift resolution — match the base exactly.
+        if rec.shape[1:3] != base_hdr.shape[1:3]:
+            rec = F.interpolate(rec.permute(0, 3, 1, 2), size=base_hdr.shape[1:3],
+                                mode="bilinear", align_corners=False
+                                ).permute(0, 2, 3, 1)
+        if rec.shape[0] != base_hdr.shape[0]:
+            raise RuntimeError(f"RUDRA frame count {rec.shape[0]} != input {base_hdr.shape[0]}")
+
+        # Gain-match in well-exposed, non-highlight regions so the two paths
+        # agree on exposure before blending.
+        base_l, rec_l = _luma(base_hdr), _luma(rec)
+        ref = (mask < 0.05) & (base_l > 0.05) & (base_l < 0.8)
+        if ref.any():
+            gain = (base_l[ref].median() / rec_l[ref].median().clamp(min=_EPS)).clamp(0.1, 10.0)
+            rec = rec * gain
+
+        w = (mask * float(blend)).unsqueeze(-1)
+        return base_hdr * (1.0 - w) + rec * w
 
     @torch.no_grad()
     def convert(self, image: torch.Tensor, inverse_oetf: str, peak_nits: float,
                 knee_mode: str, knee: float, shoulder_gamma: float,
-                temporal_smoothing: float, output_encoding: str):
+                temporal_smoothing: float, output_encoding: str,
+                vae=None, rudra_size: str = "rudra_turbo", rudra_blend: float = 1.0):
         img = image.clone().float()
         if img.dim() == 3:                      # single HWC frame → batch of 1
             img = img.unsqueeze(0)
@@ -166,6 +241,17 @@ class RadianceSDRToHDRUniversal:
         hdr = lin * gain.unsqueeze(-1)
 
         mask = ((luma_exp - luma) / max(peak_scale - 1.0, _EPS)).clamp(0.0, 1.0)
+
+        # 3b ── optional RUDRA learned highlight reconstruction
+        if vae is not None and rudra_blend > 0.0:
+            try:
+                hdr = self._rudra_reconstruct(rgb, hdr, mask, vae,
+                                              str(rudra_size), float(rudra_blend))
+            except Exception as exc:  # noqa: BLE001 — never fail a render
+                logger.warning(
+                    "RUDRA reconstruction unavailable (%s) — using math expansion only.",
+                    exc,
+                )
 
         # 4 ── output encoding
         if output_encoding.startswith("PQ"):
