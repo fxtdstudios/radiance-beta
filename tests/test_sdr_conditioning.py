@@ -256,55 +256,70 @@ class _TorchStub:
 
 
 if not _HAS_REAL_TORCH:
+    # CRITICAL: do NOT replace sys.modules["torch"] here. This file is imported
+    # at pytest COLLECTION time; swapping in a fresh module would evict the
+    # conftest torch stub (which carries Generator, nn, no_grad, dtypes, …) for
+    # every module imported afterwards — e.g. test_node_load_completeness
+    # importing radiance.film.grain, whose `generator: torch.Generator`
+    # signature is evaluated at import. That was CI failure
+    # "AttributeError: module 'torch' has no attribute 'Generator'".
+    # Instead, AUGMENT the already-installed stub in place so its identity —
+    # and every attribute other tests rely on — is preserved.
     _stub = _TorchStub()
-    sys.modules["torch"] = _stub          # ensure the stub is what we get
-    # also patch into the already-imported stub used by other modules
+    _torch_mod = sys.modules.get("torch")
+    if _torch_mod is None:  # standalone run without conftest
+        import importlib as _il2
+        _torch_mod = _il2.util.module_from_spec(
+            _il2.util.spec_from_loader("torch", loader=None)
+        )
+        sys.modules["torch"] = _torch_mod
     for _attr in dir(_stub):
         if not _attr.startswith("__"):
             try:
-                setattr(sys.modules.get("torch", _stub), _attr, getattr(_stub, _attr))
-            except (AttributeError, TypeError):
-                pass
-    import importlib as _il2
-    _fake_torch = _il2.util.module_from_spec(
-        _il2.util.spec_from_loader("torch", loader=None)
-    )
-    for _attr in dir(_stub):
-        if not _attr.startswith("__"):
-            try:
-                setattr(_fake_torch, _attr, getattr(_stub, _attr))
+                setattr(_torch_mod, _attr, getattr(_stub, _attr))
             except Exception:
                 pass
-    sys.modules["torch"] = _fake_torch
 
 # Now import torch — gets real torch or the augmented stub
 import torch   # noqa: E402  (used in test bodies below)
 
-# ── comfy stubs ───────────────────────────────────────────────────────────────
-_comfy = types.ModuleType("comfy")
-_comfy_samplers = types.ModuleType("comfy.samplers")
-_comfy_samplers.KSampler = types.SimpleNamespace(
-    SAMPLERS=["euler"], SCHEDULERS=["simple", "normal"]
-)
-_comfy_sample = types.ModuleType("comfy.sample")
+# ── comfy stubs ───────────────────────────────────────────────────────────────────
+# Augment — never replace — comfy stubs already installed by conftest.py.
+# Replacing sys.modules entries at collection time evicts the conftest stubs
+# (which carry get_free_memory, soft_empty_cache, …) for every module imported
+# afterwards, breaking e.g. radiance.nodes.generate.denoise in
+# test_node_load_completeness.
+
+def _ensure_mod(name, parent=None, attr=None):
+    mod = sys.modules.get(name)
+    if mod is None:
+        mod = types.ModuleType(name)
+        sys.modules[name] = mod
+    if parent is not None and getattr(parent, attr, None) is None:
+        setattr(parent, attr, mod)
+    return mod
+
+_comfy = _ensure_mod("comfy")
+_comfy_samplers = _ensure_mod("comfy.samplers", _comfy, "samplers")
+if getattr(_comfy_samplers, "KSampler", None) is None:
+    _comfy_samplers.KSampler = types.SimpleNamespace()
+_comfy_samplers.KSampler.SAMPLERS = ["euler"]
+_comfy_samplers.KSampler.SCHEDULERS = ["simple", "normal"]
+
+_comfy_sample = _ensure_mod("comfy.sample", _comfy, "sample")
 _comfy_sample.prepare_noise = lambda lat, seed, _: _NpTensor(np.zeros_like(_data(lat)))
 _comfy_sample.sample_custom = lambda *a, **kw: a[4]   # returns latent unchanged
-_comfy_mm = types.ModuleType("comfy.model_management")
+
+_comfy_mm = _ensure_mod("comfy.model_management", _comfy, "model_management")
 _comfy_mm.get_torch_device = lambda: "cpu"
-_comfy_utils = types.ModuleType("comfy.utils")
-_comfy_utils.ProgressBar = lambda n: types.SimpleNamespace(update_absolute=lambda *a: None)
+if not hasattr(_comfy_mm, "get_free_memory"):   # standalone run without conftest
+    _comfy_mm.get_free_memory = lambda *a, **kw: 8 * 1024**3
 
-_comfy.samplers = _comfy_samplers
-_comfy.sample = _comfy_sample
-_comfy.model_management = _comfy_mm
-_comfy.utils = _comfy_utils
+_comfy_utils = _ensure_mod("comfy.utils", _comfy, "utils")
+_comfy_utils.ProgressBar = lambda n: types.SimpleNamespace(
+    update_absolute=lambda *a, **kw: None, update=lambda *a, **kw: None
+)
 
-for _name, _mod in [
-    ("comfy", _comfy), ("comfy.samplers", _comfy_samplers),
-    ("comfy.sample", _comfy_sample), ("comfy.model_management", _comfy_mm),
-    ("comfy.utils", _comfy_utils),
-]:
-    sys.modules[_name] = _mod
 if "folder_paths" not in sys.modules:
     sys.modules["folder_paths"] = types.ModuleType("folder_paths")
 
