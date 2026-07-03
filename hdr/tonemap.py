@@ -192,89 +192,6 @@ class HDRToneMap:
         "◎ High Key / Bright",
     ]
 
-    PRESET_CONFIGS = {
-        "◎ Cinematic Film": {
-            "operator": "filmic_aces",
-            "exposure": 0.0,
-            "gamma": 2.2,
-            "white_point": 1.0,
-            "contrast": 1.1,
-            "saturation": 0.95,
-            "highlight_compression": 0.8,
-            "shadow_lift": 0.02,
-        },
-        "◎ HDR Display": {
-            "operator": "agx",
-            "exposure": 0.3,
-            "gamma": 2.2,
-            "white_point": 2.0,
-            "contrast": 1.0,
-            "saturation": 1.1,
-            "highlight_compression": 0.5,
-            "shadow_lift": 0.0,
-        },
-        "◎ Web / Social": {
-            "operator": "filmic_aces",
-            "exposure": 0.2,
-            "gamma": 2.2,
-            "white_point": 1.0,
-            "contrast": 1.15,
-            "saturation": 1.1,
-            "highlight_compression": 0.9,
-            "shadow_lift": 0.01,
-        },
-        "◎ Print Ready": {
-            "operator": "reinhard_luminance",
-            "exposure": -0.2,
-            "gamma": 2.2,
-            "white_point": 1.0,
-            "contrast": 0.95,
-            "saturation": 0.9,
-            "highlight_compression": 0.7,
-            "shadow_lift": 0.03,
-        },
-        "◎ Game Engine": {
-            "operator": "filmic_uncharted2",
-            "exposure": 0.0,
-            "gamma": 2.2,
-            "white_point": 4.0,
-            "contrast": 1.05,
-            "saturation": 1.0,
-            "highlight_compression": 0.6,
-            "shadow_lift": 0.0,
-        },
-        "◎ Photography": {
-            "operator": "reinhard_extended",
-            "exposure": 0.0,
-            "gamma": 2.2,
-            "white_point": 2.0,
-            "contrast": 1.0,
-            "saturation": 1.0,
-            "highlight_compression": 0.5,
-            "shadow_lift": 0.0,
-        },
-        "◎ Low Key / Dark": {
-            "operator": "filmic_aces",
-            "exposure": -0.5,
-            "gamma": 2.4,
-            "white_point": 1.0,
-            "contrast": 1.2,
-            "saturation": 0.85,
-            "highlight_compression": 0.9,
-            "shadow_lift": 0.0,
-        },
-        "◎ High Key / Bright": {
-            "operator": "reinhard",
-            "exposure": 0.5,
-            "gamma": 2.0,
-            "white_point": 1.5,
-            "contrast": 0.9,
-            "saturation": 1.05,
-            "highlight_compression": 0.4,
-            "shadow_lift": 0.05,
-        },
-    }
-
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
@@ -456,19 +373,10 @@ class HDRToneMap:
         use_gpu: bool = True,
     ) -> Tuple[torch.Tensor]:
 
-        # Apply preset if selected
-        if preset != "None (Custom)" and preset in self.PRESET_CONFIGS:
-            config = self.PRESET_CONFIGS[preset]
-            operator = config.get("operator", operator)
-            exposure = config.get("exposure", exposure)
-            gamma = config.get("gamma", gamma)
-            white_point = config.get("white_point", white_point)
-            contrast = config.get("contrast", contrast)
-            saturation = config.get("saturation", saturation)
-            highlight_compression = config.get(
-                "highlight_compression", highlight_compression
-            )
-            shadow_lift = config.get("shadow_lift", shadow_lift)
+        # ALBABIT-FIX: preset used to overwrite operator/exposure/gamma/...
+        # unconditionally on every execution, regardless of what the widgets
+        # showed. js/radiance_tonemap.js now fills them on selection and
+        # flags manual edits with a "●" marker; the widgets are authoritative.
 
         if use_gpu and image.device.type == "cpu" and torch.cuda.is_available():
             img = image.to(torch.device("cuda"), non_blocking=True).float()
