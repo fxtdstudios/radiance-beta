@@ -173,12 +173,9 @@ function refreshNodeSize(node) {
     app.graph.setDirtyCanvas(true, true);
 }
 
-// ALBABIT-FIX: "📐" flags scale_factor/width/height when scale_factor≠1 --
-// onExecuted writes width/height directly (no callback), so the existing
-// Custom-switch never catches this. "✎" flags orientation/latent_channels
-// when off their neutral default ("As Preset" / 0). Distinct from the "●"
-// preset-divergence marker used elsewhere since neither case is a real
-// divergence from this node's own preset combo.
+// ALBABIT-FIX: "📐" = scale_factor/mp_target/width/height, either modifier
+// active (both apply regardless of preset). "✎" = orientation/latent_channels
+// off their neutral default. Distinct from "●" (preset-divergence) elsewhere.
 function _setLabelMarker(widget, marked, marker) {
     if (!widget) return;
     if (widget._radOrigLabel === undefined && !marked) return;
@@ -188,19 +185,20 @@ function _setLabelMarker(widget, marked, marker) {
 }
 
 function updateResolutionMarkers(node) {
-    const presetW        = node.widgets?.find(w => w.name === "preset");
-    const scaleFactorW   = node.widgets?.find(w => w.name === "scale_factor");
-    const widthW         = node.widgets?.find(w => w.name === "width");
-    const heightW        = node.widgets?.find(w => w.name === "height");
-    const orientationW   = node.widgets?.find(w => w.name === "orientation");
-    const latentChW      = node.widgets?.find(w => w.name === "latent_channels");
+    const scaleFactorW = node.widgets?.find(w => w.name === "scale_factor");
+    const mpTargetW    = node.widgets?.find(w => w.name === "mp_target");
+    const widthW       = node.widgets?.find(w => w.name === "width");
+    const heightW      = node.widgets?.find(w => w.name === "height");
+    const orientationW = node.widgets?.find(w => w.name === "orientation");
+    const latentChW    = node.widgets?.find(w => w.name === "latent_channels");
 
-    if (presetW && scaleFactorW) {
-        const scaled = presetW.value !== "Custom" && parseFloat(scaleFactorW.value) !== 1.0;
-        _setLabelMarker(scaleFactorW, scaled, " 📐");
-        _setLabelMarker(widthW, scaled, " 📐");
-        _setLabelMarker(heightW, scaled, " 📐");
-    }
+    const scaleActive = scaleFactorW && parseFloat(scaleFactorW.value) !== 1.0;
+    const mpActive     = mpTargetW && parseFloat(mpTargetW.value) > 0;
+
+    _setLabelMarker(scaleFactorW, scaleActive, " 📐");
+    _setLabelMarker(mpTargetW, mpActive, " 📐");
+    _setLabelMarker(widthW, scaleActive || mpActive, " 📐");
+    _setLabelMarker(heightW, scaleActive || mpActive, " 📐");
 
     _setLabelMarker(orientationW, orientationW && orientationW.value !== "As Preset", " ✎");
     _setLabelMarker(latentChW, latentChW && parseInt(latentChW.value, 10) !== 0, " ✎");

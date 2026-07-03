@@ -773,9 +773,13 @@ class RadianceResolution:
                     "FLOAT",
                     {
                         "default": 1.0,
-                        "min": 0.25,
+                        # ALBABIT-FIX: ComfyUI derives display precision from step's order
+                        # of magnitude, not its decimal count -- 0.25 wrongly got precision=1
+                        # ("0.3" instead of "0.25"). 0.1 has no such loss. min=0.1 (not 0) to
+                        # avoid a literal 0x scale zeroing out width/height.
+                        "min": 0.1,
                         "max": 4.0,
-                        "step": 0.25,
+                        "step": 0.1,
                         "tooltip": (
                             "Scale the resolution by this factor after preset/custom. "
                             "0.5 = half res, 2.0 = double res. Applied before alignment."
@@ -802,7 +806,9 @@ class RadianceResolution:
                         "default": 0.0,
                         "min": 0.0,
                         "max": 64.0,
-                        "step": 0.25,
+                        # ALBABIT-FIX: same ComfyUI precision-derivation bug as
+                        # scale_factor -- 0.25 truncated to 1 displayed decimal.
+                        "step": 0.1,
                         "tooltip": (
                             "MEGAPIXEL TARGET: When > 0, auto-calculates W×H from this MP target "
                             "and mp_aspect_ratio. Overrides preset and custom W/H. "
