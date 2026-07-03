@@ -5,12 +5,13 @@ import numpy as np
 class RadianceSDRtoHDRExpand:
     """
     ◎ Radiance SDR to HDR Expand
-    
-    Reconstructs high dynamic range from clipped or squashed SDR footage.
-    Includes an inverse OETF pass and a mathematical highlight expansion.
+
+    Expands dynamic range from SDR footage via an inverse OETF pass and a
+    mathematical highlight expansion. Does not reconstruct clipped detail.
     """
     CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
-    DESCRIPTION = "Expand an SDR image into HDR headroom using learned reconstruction."
+    DESCRIPTION = ("Expand an SDR image into HDR headroom via inverse OETF and "
+                   "mathematical highlight expansion. Does not reconstruct clipped detail.")
     FUNCTION = "apply"
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
