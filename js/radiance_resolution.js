@@ -175,7 +175,7 @@ function refreshNodeSize(node) {
 
 // ALBABIT-FIX: "📐" = scale_factor/mp_target/width/height, either modifier
 // active (both apply regardless of preset). "✎" = orientation/latent_channels
-// off their neutral default. Distinct from "●" (preset-divergence) elsewhere.
+// off their neutral default.
 function _setLabelMarker(widget, marked, marker) {
     if (!widget) return;
     if (widget._radOrigLabel === undefined && !marked) return;

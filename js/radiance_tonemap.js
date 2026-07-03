@@ -4,7 +4,7 @@ import { app } from "../../scripts/app.js";
 // unconditionally on every execution, regardless of what they showed (same
 // bug class as the Sampler's _apply_presets — see radiance_sampler.js).
 // Python now respects the live widget values; this file fills them on
-// selection and flags a later edit with a "●" marker.
+// selection and flags a later edit with a "✎" marker.
 const PRESET_CONFIGS = {
     "◎ Cinematic Film": {
         operator: "filmic_aces",
@@ -88,7 +88,7 @@ const PRESET_CONFIGS = {
     },
 };
 
-const PRESET_MARKER = " ●";
+const PRESET_MARKER = " ✎";
 const TRACKED_FIELDS = [
     "operator", "exposure", "gamma", "white_point",
     "contrast", "saturation", "highlight_compression", "shadow_lift",

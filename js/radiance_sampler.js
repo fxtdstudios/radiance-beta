@@ -564,7 +564,7 @@ function applyPreset(node, presetName) {
         }
     }
 
-    // ALBABIT-FIX: widgets now match the preset again — clear any "●" markers.
+    // ALBABIT-FIX: widgets now match the preset again — clear any "✎" markers.
     updatePresetDivergenceMarkers(node);
     node.setDirtyCanvas(true);
 }
@@ -573,7 +573,7 @@ function applyPreset(node, presetName) {
 // ALBABIT-FIX: Python no longer force-applies preset values (_apply_presets is
 // UI-first again, matching old Radiance behavior). Instead of silently
 // overriding user edits — or switching the combo to "Custom", which would
-// unfold every hidden widget — append a "●" to the label of each widget whose
+// unfold every hidden widget — append a "✎" to the label of each widget whose
 // value no longer matches the selected preset (VSCode-style modified-setting
 // indicator). State-based and driven by the existing 250ms poll, so it covers
 // manual edits, undo/redo, preset import and workflow loads, in both the
@@ -581,7 +581,7 @@ function applyPreset(node, presetName) {
 const PRESET_MARKER_EXCLUDED = new Set([
     "seed", "control_after_generate", "description", "preset", "preset_info",
 ]);
-const PRESET_MARKER = " ●";
+const PRESET_MARKER = " ✎";
 
 function presetValuesEqual(a, b) {
     if (typeof a === "number" || typeof b === "number") {
@@ -926,7 +926,7 @@ app.registerExtension({
             // manual widget edits. It relied on onPropertyChanged, which LiteGraph
             // only fires for node properties (not widgets), so it was effectively
             // dead — and switching to Custom would unfold every hidden widget.
-            // Divergence from the preset is now shown per-widget with a "●" label
+            // Divergence from the preset is now shown per-widget with a "✎" label
             // marker (updatePresetDivergenceMarkers, polled below).
 
             // Wire up callbacks for dynamic folding on change
@@ -952,7 +952,7 @@ app.registerExtension({
 
             // ALBABIT-FIX: poll for upstream mute/bypass changes. onConnectionsChange only
             // fires on this node — it does not fire when the upstream node is muted/bypassed.
-            // Also refresh the preset "●" divergence markers here: state-based polling
+            // Also refresh the preset "✎" divergence markers here: state-based polling
             // covers every mutation path (manual edit, undo/redo, import, workflow load)
             // without wrapping every widget callback. Only dirties the canvas on change.
             this._sigmaCheckInterval = setInterval(() => {
