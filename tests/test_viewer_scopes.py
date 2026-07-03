@@ -84,36 +84,11 @@ def _install_stubs():
 
 _install_stubs()
 
-# ── Patch torch stub if a prior test left it without nn / nn.functional ───────
-# test_sdr_conditioning.py replaces sys.modules["torch"] with a _TorchStub that
-# has no .nn attribute.  nodes_radiance_viewer's transitive imports do
-# `import torch.nn.functional as F`, which fails.  Patch defensively here.
-import types as _types_patch
-_torch_in_sys = sys.modules.get("torch")
-if _torch_in_sys is not None and not hasattr(_torch_in_sys, "nn"):
-    _nn_mod = sys.modules.get("torch.nn") or _types_patch.ModuleType("torch.nn")
-    _nn_mod.Module = getattr(_nn_mod, "Module", type("Module", (), {}))
-    _nn_functional = sys.modules.get("torch.nn.functional") or _types_patch.ModuleType("torch.nn.functional")
-    for _fn in ("grid_sample", "pad", "interpolate", "conv2d", "relu",
-                "softmax", "normalize", "avg_pool2d", "max_pool2d"):
-        if not hasattr(_nn_functional, _fn):
-            setattr(_nn_functional, _fn, lambda *a, **kw: None)
-    _nn_mod.functional = _nn_functional
-    try:
-        setattr(_torch_in_sys, "nn", _nn_mod)
-    except (AttributeError, TypeError):
-        pass
-    sys.modules.setdefault("torch.nn", _nn_mod)
-    sys.modules.setdefault("torch.nn.functional", _nn_functional)
-# Also ensure common torch attrs that hdr/* needs
-for _attr, _val in [("bfloat16", "bfloat16"), ("float16", "float16"),
-                     ("float32", "float32"), ("float64", "float64"),
-                     ("Tensor", type("Tensor", (), {}))]:
-    if _torch_in_sys is not None and not hasattr(_torch_in_sys, _attr):
-        try:
-            setattr(_torch_in_sys, _attr, _val)
-        except (AttributeError, TypeError):
-            pass
+# NOTE: this file used to carry a defensive re-patch of the torch stub because
+# test_sdr_conditioning.py replaced sys.modules["torch"] at collection time.
+# That root cause is fixed (stubs are now augmented in place, never replaced),
+# so the workaround has been removed. All shared stubbing lives in conftest.py —
+# test files must never replace sys.modules entries, only add missing ones.
 
 # Load nodes_radiance_viewer fresh from disk, bypassing any stale sys.modules
 # cache left behind by tests that ran before us with stub torch environments.
