@@ -68,6 +68,7 @@
   "RadianceSAMGenerator",
   "RadianceSAMModelLoader",
   "RadianceSDRToHDRPrepare",
+  "RadianceSDRToHDRUniversal",
   "RadianceSDRtoHDRExpand",
   "RadianceSamplerPro",
   "RadianceSceneCutDetect",

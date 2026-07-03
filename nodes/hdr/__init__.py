@@ -27,6 +27,9 @@ from radiance.nodes.hdr.uplift import (
     RadianceSDRToHDRPrepare,
     RadianceHDRHighlightComposite,
 )
+from radiance.nodes.hdr.uplift_universal import (
+    RadianceSDRToHDRUniversal,
+)
 from radiance.nodes.hdr.synthesis import (
     RadianceSDRtoHDRExpand,
     RadianceHDRSynthesisEngine,
@@ -55,6 +58,7 @@ NODE_CLASS_MAPPINGS = {
     "RadianceSDRToHDRPrepare": RadianceSDRToHDRPrepare,
     "RadianceHDRHighlightComposite": RadianceHDRHighlightComposite,
     "RadianceSDRtoHDRExpand": RadianceSDRtoHDRExpand,
+    "RadianceSDRToHDRUniversal": RadianceSDRToHDRUniversal,
     "RadianceHDRExpandDynamicRange": HDRExpandDynamicRange,
     "RadianceHDRToneMap": HDRToneMap,
     "RadianceHDRSynthesisEngine": RadianceHDRSynthesisEngine,
@@ -75,6 +79,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceSDRToHDRPrepare": "◎ SDR to HDR Prepare",
     "RadianceHDRHighlightComposite": "◎ HDR Highlight Composite",
     "RadianceSDRtoHDRExpand": "◎ SDR to HDR Expand",
+    "RadianceSDRToHDRUniversal": "◎ SDR → HDR Universal",
     "RadianceHDRExpandDynamicRange": "◎ HDR Expand Dynamic Range",
     "RadianceHDRToneMap": "◎ HDR Tone Map",
     "RadianceHDRSynthesisEngine": "◎ HDR Synthesis Engine",
