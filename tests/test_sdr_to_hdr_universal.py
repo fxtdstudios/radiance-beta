@@ -228,6 +228,35 @@ class TestRudraPath(unittest.TestCase):
         self.assertTrue(bool((out[..., 0][highlights]
                               != base[..., 0][highlights]).any()))
 
+    def test_multiframe_input_skips_rudra_before_any_compute(self):
+        """Video (B>1) + VAE → no encode, no loader call, math output returned.
+        Regression: WAN's video VAE compresses 81 frames → 21; the old code ran
+        the full encode+decode before discovering the mismatch."""
+        encode_calls = {"n": 0}
+        loader_calls = {"n": 0}
+
+        class _CountingVAE:
+            scale_factor = 0.18215
+            def encode(self, pixels):
+                encode_calls["n"] += 1
+                import torch
+                b, h, w, _ = pixels.shape
+                return torch.randn(b, 16, max(h // 8, 1), max(w // 8, 1))
+
+        def loader(**kw):
+            loader_calls["n"] += 1
+            return None
+        self.fv.load_radiance_decoder_weights = loader
+
+        video = self._img().expand(5, 8, 8, 3).contiguous()   # 5 frames
+        base, _ = self.node.convert(video, "None", 1000.0, "manual", 0.5, 1.6,
+                                    0.0, "Linear")
+        out, _ = self.node.convert(video, "None", 1000.0, "manual", 0.5, 1.6,
+                                   0.0, "Linear", vae=_CountingVAE())
+        self.assertEqual(encode_calls["n"], 0)
+        self.assertEqual(loader_calls["n"], 0)
+        self.assertTrue(self.torch.allclose(out, base))
+
     def test_blend_zero_disables_rudra(self):
         called = {"n": 0}
         def loader(**kw):

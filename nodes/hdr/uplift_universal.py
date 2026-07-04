@@ -24,6 +24,10 @@ VAE to enable RUDRA learned highlight reconstruction: the SDR input is
 VAE-encoded and decoded through a trained RUDRA decoder (fast_vae.py), and
 the reconstructed highlights are blended into the mask region. If no RUDRA
 checkpoint is available the node silently falls back to the math path.
+The learned path currently applies to SINGLE FRAMES only: video VAEs compress
+time (WAN: 81 frames → 21 latent frames) and the shipped wan/ltx/hunyuan RUDRA
+checkpoints were trained on T=1 stills, so multi-frame input skips RUDRA
+early — before any VAE compute — and uses the math expansion.
 """
 
 from __future__ import annotations
@@ -149,7 +153,9 @@ class RadianceSDRToHDRUniversal:
                     "Optional: connect a VAE to enable RUDRA learned highlight "
                     "reconstruction (encode → RUDRA decode). Needs a trained "
                     "RUDRA checkpoint (RADIANCE_TURBO_DECODER or models/radiance/). "
-                    "Falls back to math expansion if unavailable."}),
+                    "SINGLE FRAMES ONLY for now — multi-frame input skips the "
+                    "learned path (video VAE temporal compression + still-frame "
+                    "training domain). Falls back to math expansion if unavailable."}),
                 "rudra_size": (["rudra_turbo", "rudra_full"], {"default": "rudra_turbo",
                     "tooltip": "RUDRA decoder variant: turbo (fast, ~2M params) or full (production quality)."}),
                 "rudra_blend": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
@@ -167,6 +173,12 @@ class RadianceSDRToHDRUniversal:
         gain-matched to `base_hdr` in well-exposed regions and blended into the
         highlight mask. Raises on any failure — caller falls back to math.
         """
+        if base_hdr.shape[0] > 1:
+            raise RuntimeError(
+                "RUDRA reconstruction supports single frames only — video VAEs "
+                "compress time (frame counts cannot be matched 1:1) and current "
+                "video checkpoints were trained on stills."
+            )
         import torch.nn.functional as F
         from radiance.fast_vae import (
             decode_to_linear_realtime,
@@ -242,16 +254,35 @@ class RadianceSDRToHDRUniversal:
 
         mask = ((luma_exp - luma) / max(peak_scale - 1.0, _EPS)).clamp(0.0, 1.0)
 
-        # 3b ── optional RUDRA learned highlight reconstruction
+        # 3b ── optional RUDRA learned highlight reconstruction (stills only)
         if vae is not None and rudra_blend > 0.0:
-            try:
-                hdr = self._rudra_reconstruct(rgb, hdr, mask, vae,
-                                              str(rudra_size), float(rudra_blend))
-            except Exception as exc:  # noqa: BLE001 — never fail a render
-                logger.warning(
-                    "RUDRA reconstruction unavailable (%s) — using math expansion only.",
-                    exc,
+            if img.shape[0] > 1:
+                # Skip video/frame batches BEFORE any VAE work:
+                # 1) video VAEs compress time (e.g. WAN encodes 81 frames into
+                #    21 latent frames), so the reconstruction cannot be mapped
+                #    1:1 back onto the input frames;
+                # 2) the current wan/ltx/hunyuan RUDRA checkpoints were trained
+                #    on T=1 stills (scripts/training/dataset_hdr.py pads video
+                #    VAEs to a single frame), so multi-frame input is outside
+                #    the training domain regardless.
+                # Checking here avoids minutes of wasted encode+decode per
+                # generation for a result that would be discarded anyway.
+                logger.info(
+                    "RUDRA reconstruction skipped for %d-frame input — the "
+                    "learned path currently supports single frames only "
+                    "(video RUDRA checkpoints pending retraining on real "
+                    "temporal latents). Using math expansion.",
+                    img.shape[0],
                 )
+            else:
+                try:
+                    hdr = self._rudra_reconstruct(rgb, hdr, mask, vae,
+                                                  str(rudra_size), float(rudra_blend))
+                except Exception as exc:  # noqa: BLE001 — never fail a render
+                    logger.warning(
+                        "RUDRA reconstruction unavailable (%s) — using math expansion only.",
+                        exc,
+                    )
 
         # 4 ── output encoding
         if output_encoding.startswith("PQ"):
