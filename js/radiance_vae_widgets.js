@@ -21,6 +21,16 @@
  *   sRGB/Raw) -- both make the ComfyUI preview look overexposed/wrong
  *   (intentional for VFX pipelines that consume the raw tensor downstream).
  *
+ *   temporal_overlap is hidden unless temporal_size > 0 (its own tooltip:
+ *   "Only active when temporal_size > 0").
+ *
+ *   Post-execution: rudra_decoder gets a warning when RUDRA fell all the way
+ *   back to the standard VAE (no compatible checkpoint at all), or a shorter
+ *   note when a cross-architecture checkpoint was silently substituted (e.g.
+ *   wan -> flux, fast_vae.py's _DECODER_TYPE_FALLBACKS) -- both read from
+ *   engine.py's "ui" channel via onExecuted, since only knowable once decode
+ *   actually runs.
+ *
  * INSTALL:
  *   Place this file in the same folder as radiance_bootstrap.js (the custom
  *   node's web/js directory). ComfyUI auto-loads all .js files from that dir.
@@ -52,6 +62,8 @@ const W_TARGET_SPACE     = "target_space";
 const W_SOURCE_SPACE     = "source_space";
 const W_DECODE_NOISE_SCALE = "decode_noise_scale";
 const W_HDR_SCALE_FACTOR   = "hdr_scale_factor";
+const W_TEMPORAL_SIZE      = "temporal_size";
+const W_TEMPORAL_OVERLAP   = "temporal_overlap";
 
 // ALBABIT-FIX: mirrors nodes/generate/engine.py's _SCENE_REFERRED complement --
 // only these 2 of the 12 target_space options are display-ready [0,1] sRGB;
@@ -64,6 +76,11 @@ const DISPLAY_READY_SPACES = new Set(["sRGB", "Raw"]);
 // split off the widest label in the node). display_tonemap's own tooltip
 // already explains the Compress(Log) dependency on hover.
 const BLOWOUT_MARKER = " ⚠ overexp risk";
+
+// ALBABIT-FIX: post-execution only -- set from onExecuted's "ui.rudra_fallback"
+// (engine.py), since whether a compatible RUDRA checkpoint exists is only
+// known once decode actually runs, not from any widget's static value.
+const RUDRA_FALLBACK_MARKER = " ⚠ VAE fallback";
 
 /** Return widget by name from a node, or null. */
 function getWidget(node, name) {
@@ -159,6 +176,8 @@ function syncWidgets(node) {
     const sourceSpaceW    = getWidget(node, W_SOURCE_SPACE);
     const decodeNoiseW    = getWidget(node, W_DECODE_NOISE_SCALE);
     const hdrScaleW       = getWidget(node, W_HDR_SCALE_FACTOR);
+    const temporalSizeW   = getWidget(node, W_TEMPORAL_SIZE);
+    const temporalOverlapW = getWidget(node, W_TEMPORAL_OVERLAP);
 
     if (!hdrOutputW) return;
 
@@ -202,6 +221,11 @@ function syncWidgets(node) {
     setWidgetVisible(inverseTmW, !isCompressLog, node);
     setWidgetVisible(hdrScaleW, !DISPLAY_READY_SPACES.has(targetSpaceVal), node);
 
+    // ALBABIT-FIX: temporal_overlap is only read inside `if latent.ndim == 5
+    // and temporal_size > 0:` (hdr/vae.py:2763) -- matches its own tooltip
+    // ("Only active when temporal_size > 0").
+    setWidgetVisible(temporalOverlapW, (parseInt(temporalSizeW?.value, 10) || 0) > 0, node);
+
     refreshNodeSize(node);
 }
 
@@ -227,7 +251,9 @@ app.registerExtension({
                 getWidget(this, W_INVERSE_TONEMAP),
                 getWidget(this, W_EXPORT_RHDR),
                 getWidget(this, W_RUDRA_DECODER),
+                getWidget(this, W_DECODER_SIZE),
                 getWidget(this, W_TARGET_SPACE),
+                getWidget(this, W_TEMPORAL_SIZE),
             ]
                 .forEach(w => {
                     if (!w) return;
@@ -235,6 +261,12 @@ app.registerExtension({
                     w.callback = function (...args) {
                         const res = origCallback ? origCallback.apply(this, args) : undefined;
                         syncWidgets(self);
+                        // ALBABIT-FIX: the RUDRA fallback marker only reflects
+                        // the last completed execution -- stale as soon as
+                        // either setting that affects checkpoint lookup changes.
+                        if (w.name === W_RUDRA_DECODER || w.name === W_DECODER_SIZE) {
+                            _setLabelMarker(getWidget(self, W_RUDRA_DECODER), null);
+                        }
                         return res;
                     };
                 });
@@ -264,6 +296,26 @@ app.registerExtension({
             const self = this;
             setTimeout(() => syncWidgets(self), 150);
             setTimeout(() => syncWidgets(self), 600);
+        };
+
+        // ALBABIT-FIX: flag a silent RUDRA→standard-VAE fallback, or a
+        // cross-architecture checkpoint substitution (fast_vae.py's
+        // _DECODER_TYPE_FALLBACKS, e.g. wan -> flux when no wan-specific
+        // checkpoint exists), post-execution. Both are only knowable once
+        // decode actually runs (engine.py's "ui.rudra_fallback"/
+        // "ui.rudra_substituted_type", same "ui" side-channel convention as
+        // resolution.js's computed_width) -- a console-only log is easy to
+        // miss, this puts it on the node itself.
+        const onExecuted = nodeType.prototype.onExecuted;
+        nodeType.prototype.onExecuted = function (message) {
+            if (onExecuted) onExecuted.apply(this, arguments);
+            const fellBack = !!message?.rudra_fallback?.[0];
+            const substitutedType = message?.rudra_substituted_type?.[0] || "";
+            let marker = null;
+            if (fellBack) marker = RUDRA_FALLBACK_MARKER;
+            else if (substitutedType) marker = ` ⚠ ${substitutedType} ckpt`;
+            _setLabelMarker(getWidget(this, W_RUDRA_DECODER), marker);
+            this.setDirtyCanvas?.(true, true);
         };
     },
 });
