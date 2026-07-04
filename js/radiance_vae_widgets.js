@@ -5,17 +5,21 @@
  * WHAT THIS FIXES:
  *
  *   Caveat 2 (Compress Log-only controls):
- *     display_tonemap only applies to Compress(Log) decode output -- hidden
- *     otherwise. hdr_output remains active in every hdr_mode (verified in
- *     hdr/vae.py) so it stays visible and unmarked. export_rhdr only captures
- *     genuinely extra (pre-tonemap) data in Compress(Log) + an active tonemap
- *     curve -- outside that it would just duplicate the image output, so it's
- *     forced off and hidden there too.
+ *     display_tonemap/source_space/decode_noise_scale only apply to
+ *     Compress(Log) decode output -- hidden otherwise. inverse_tonemap is the
+ *     reverse (hidden IN Compress(Log), where its own block never runs).
+ *     hdr_scale_factor is hidden unless target_space is scene-referred (else
+ *     silently ignored). hdr_output remains active in every hdr_mode
+ *     (verified in hdr/vae.py) so it stays visible and unmarked. export_rhdr
+ *     only captures genuinely extra (pre-tonemap) data in Compress(Log) + an
+ *     active tonemap curve -- outside that it would just duplicate the image
+ *     output, so it's forced off and hidden there too.
  *
- *   Additional: hdr_output=True + display_tonemap=None + Compress(Log) shows
- *   a warning on hdr_output's label so the user knows the ComfyUI preview
- *   will look overexposed (intentional for VFX pipelines — the tensor
- *   carries raw scene-linear values).
+ *   Additional: hdr_output=True shows a warning on hdr_output's label when
+ *   either (a) hdr_mode=Compress(Log) + display_tonemap=None (no tonemap
+ *   applied, unbounded values) or (b) target_space is scene-referred (not
+ *   sRGB/Raw) -- both make the ComfyUI preview look overexposed/wrong
+ *   (intentional for VFX pipelines that consume the raw tensor downstream).
  *
  * INSTALL:
  *   Place this file in the same folder as radiance_bootstrap.js (the custom
@@ -44,6 +48,16 @@ const W_TARGET_STOPS     = "target_stops";
 const W_RHDR_PRECISION   = "rhdr_precision";
 const W_RUDRA_DECODER    = "rudra_decoder";
 const W_DECODER_SIZE     = "decoder_size";
+const W_TARGET_SPACE     = "target_space";
+const W_SOURCE_SPACE     = "source_space";
+const W_DECODE_NOISE_SCALE = "decode_noise_scale";
+const W_HDR_SCALE_FACTOR   = "hdr_scale_factor";
+
+// ALBABIT-FIX: mirrors nodes/generate/engine.py's _SCENE_REFERRED complement --
+// only these 2 of the 12 target_space options are display-ready [0,1] sRGB;
+// the other 10 (Linear, ACEScg, ACES 2065-1, Rec.2020 Linear, and the 6 log
+// spaces) are scene-referred and will look wrong in ComfyUI's native preview.
+const DISPLAY_READY_SPACES = new Set(["sRGB", "Raw"]);
 
 // ALBABIT-FIX: kept short -- a long label suffix widens the whole node and
 // squeezes every other widget's value column (Vue sizes the label/value
@@ -71,9 +85,13 @@ function _setLabelMarker(widget, marker) {
 // ALBABIT-FIX: hidden unless their condition holds (verified against
 // hdr/vae.py): target_stops needs `inverse_tonemap and hdr_mode !=
 // "Compress (Log)"`; rhdr_precision needs `export_rhdr`; decoder_size needs
-// `rudra_decoder=="Enabled"`; display_tonemap's tonemap only fires in
-// `hdr_mode == "Compress (Log)"`. hdr_output is NOT hidden -- it's active in
-// every hdr_mode (no guard on its final clamp), unlike v1.0's incorrect
+// `rudra_decoder=="Enabled"`; display_tonemap/source_space/decode_noise_scale
+// all need `hdr_mode == "Compress (Log)"` (tonemap block, log decompression
+// curve, and noise-injection gate are each individually conditioned on it);
+// inverse_tonemap needs the OPPOSITE (`hdr_mode != "Compress (Log)"` --
+// its own block never runs otherwise); hdr_scale_factor needs target_space to
+// be scene-referred (silently ignored-with-warning otherwise). hdr_output is
+// NOT hidden -- it's active in every hdr_mode, unlike v1.0's incorrect
 // "Compress-Log only" grouping. export_rhdr's condition is below (separate,
 // since it's also forced off, not just hidden).
 function _forceWidgetReinsert(widget, node) {
@@ -137,6 +155,10 @@ function syncWidgets(node) {
     const rhdrPrecisionW  = getWidget(node, W_RHDR_PRECISION);
     const rudraDecoderW   = getWidget(node, W_RUDRA_DECODER);
     const decoderSizeW    = getWidget(node, W_DECODER_SIZE);
+    const targetSpaceW    = getWidget(node, W_TARGET_SPACE);
+    const sourceSpaceW    = getWidget(node, W_SOURCE_SPACE);
+    const decodeNoiseW    = getWidget(node, W_DECODE_NOISE_SCALE);
+    const hdrScaleW       = getWidget(node, W_HDR_SCALE_FACTOR);
 
     if (!hdrOutputW) return;
 
@@ -144,12 +166,21 @@ function syncWidgets(node) {
     const hdrMode = hdrModeW?.value ?? "";
     const isCompressLog = hdrMode === "Compress (Log)";
 
-    // Guaranteed-overexposure warning: hdr_output=True + display_tonemap=None
-    // + Compress(Log) passes raw scene-linear values straight to the ComfyUI
-    // preview. hdr_output itself is otherwise never marked -- it's active in
-    // every hdr_mode, nothing to flag.
+    // Guaranteed-overexposure warning: hdr_output=True skips the final [0,1]
+    // clamp in every hdr_mode, so the preview looks wrong for two independent
+    // reasons -- (a) hdr_mode=Compress(Log) + display_tonemap=None applies no
+    // tonemap at all, so raw decompressed HDR values pass through unbounded;
+    // (b) target_space is scene-referred (anything but sRGB/Raw), which
+    // ComfyUI's native preview always misinterprets as sRGB regardless of
+    // tonemap -- confirmed by target_space's own tooltip ("Requires
+    // hdr_output=True for true linear passthrough... Log/ACEScg/Rec.2020
+    // spaces are scene-referred — connect to a tonemap node before SaveImage").
     const displayTmVal = displayTmW?.value ?? "ACES Filmic";
-    const willBlowOut = hdrOut && displayTmVal === "None" && isCompressLog;
+    const targetSpaceVal = targetSpaceW?.value ?? "sRGB";
+    const willBlowOut = hdrOut && (
+        (isCompressLog && displayTmVal === "None") ||
+        !DISPLAY_READY_SPACES.has(targetSpaceVal)
+    );
     _setLabelMarker(hdrOutputW, willBlowOut ? BLOWOUT_MARKER : null);
 
     setWidgetVisible(displayTmW, isCompressLog, node);
@@ -166,6 +197,10 @@ function syncWidgets(node) {
     setWidgetVisible(targetStopsW, !!inverseTmW?.value && !isCompressLog, node);
     setWidgetVisible(rhdrPrecisionW, !!exportRhdrW?.value, node);
     setWidgetVisible(decoderSizeW, rudraDecoderW?.value === "Enabled", node);
+    setWidgetVisible(sourceSpaceW, isCompressLog, node);
+    setWidgetVisible(decodeNoiseW, isCompressLog, node);
+    setWidgetVisible(inverseTmW, !isCompressLog, node);
+    setWidgetVisible(hdrScaleW, !DISPLAY_READY_SPACES.has(targetSpaceVal), node);
 
     refreshNodeSize(node);
 }
@@ -192,6 +227,7 @@ app.registerExtension({
                 getWidget(this, W_INVERSE_TONEMAP),
                 getWidget(this, W_EXPORT_RHDR),
                 getWidget(this, W_RUDRA_DECODER),
+                getWidget(this, W_TARGET_SPACE),
             ]
                 .forEach(w => {
                     if (!w) return;
