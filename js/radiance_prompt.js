@@ -4,7 +4,7 @@ import { app } from "../../scripts/app.js";
 // every execution, not just on selection (same bug class as the Sampler's
 // _apply_presets — see radiance_sampler.js). Python now respects the live
 // widget values; this file fills them once on selection and flags a later
-// edit with a "●" marker. film_stock/shutter_speed/aspect_ratio have no
+// edit with a "✎" marker. film_stock/shutter_speed/aspect_ratio have no
 // widget here, so Python keeps applying the preset for those.
 const PRESET_CONFIGS = {
     "→ Classic Hollywood": {
@@ -261,7 +261,7 @@ const PRESET_CONFIGS = {
     },
 };
 
-const PRESET_MARKER = " ●";
+const PRESET_MARKER = " ✎";
 const TRACKED_FIELDS = [
     "framing", "camera_type", "lens_focal", "aperture_dof",
     "lighting", "style_aesthetic", "color_grading",
@@ -284,7 +284,7 @@ function applyPreset(node, presetName) {
         }
     }
 
-    // Widgets now match the preset again — clear any "●" markers.
+    // Widgets now match the preset again — clear any "✎" markers.
     updatePresetDivergenceMarkers(node);
     node.setDirtyCanvas(true);
 }

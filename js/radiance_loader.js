@@ -393,12 +393,12 @@ function autoFillPresetFiles(node, cleanPreset) {
 // ALBABIT-FIX: unet_name/vae_name/CLIP slots/audio_vae_name/upscale_model_name
 // stay visible and editable while a preset is active (unlike model_type/
 // weight_dtype/clip_dtype, hidden by design — loader_utils.py). Flag any that
-// no longer match what autoFillPresetFiles() would pick right now, with a "●"
+// no longer match what autoFillPresetFiles() would pick right now, with a "✎"
 // label marker (same pattern as radiance_sampler.js/radiance_prompt.js).
 // Marks even a switch between two equally-valid variants (e.g. "-distilled"
 // vs "-dev-fp8") — the marker means "touched since the preset loaded", not
 // "still an acceptable choice".
-const PRESET_MARKER = " ●";
+const PRESET_MARKER = " ✎";
 
 // unet_name/vae_name are left untouched by autoFillPresetFiles() on no
 // match; CLIP slots/audio_vae/upscale fall back to "None" instead.
