@@ -538,6 +538,11 @@ def load_radiance_decoder_weights(
 
     # Resolve checkpoint path
     ckpt_path = checkpoint_path or _ENV_CKPT
+    # ALBABIT-FIX: track which _types entry actually resolved, so callers can
+    # tell "used model_type's own checkpoint" from "silently substituted a
+    # cross-architecture one" (e.g. wan -> flux) -- stays None when
+    # checkpoint_path/_ENV_CKPT was given explicitly (nothing to substitute).
+    resolved_type = None
 
     if not ckpt_path:
         # Try default ComfyUI models directory
@@ -550,18 +555,23 @@ def load_radiance_decoder_weights(
             # (e.g. "Z-Image: use the Flux decoder").
             _types = [model_type] + _DECODER_TYPE_FALLBACKS.get(model_type, [])
 
-            candidates = []
             for t in _types:
                 # v3.1.2: Expanded candidates to handle common user naming errors (double extensions)
                 # and added support for more specific model identifiers.
+                found = None
                 for ext in [".safetensors", ".pth", ".pth.pth", ".st"]:
-                    candidates.extend([
+                    for cand in (
                         os.path.join(models_dir, "radiance", f"{model_size}_decoder_{t}_ema{ext}"),
                         os.path.join(models_dir, "radiance", f"{model_size}_decoder_{t}{ext}"),
-                    ])
-            for c in candidates:
-                if c and os.path.exists(c):
-                    ckpt_path = c
+                    ):
+                        if os.path.exists(cand):
+                            found = cand
+                            break
+                    if found:
+                        break
+                if found:
+                    ckpt_path = found
+                    resolved_type = t
                     break
         except ImportError:
             pass
@@ -610,6 +620,18 @@ def load_radiance_decoder_weights(
                 f"[Radiance {model_size.upper()}] Loaded trained decoder: {ckpt_path} "
                 f"({expected_channels}ch / {model_type})"
             )
+            # ALBABIT-FIX: resolved_type != model_type means no checkpoint was
+            # found for the requested architecture and a cross-model one was
+            # substituted (_DECODER_TYPE_FALLBACKS) -- warn explicitly (the INFO
+            # log above doesn't make the substitution obvious) and tag the
+            # model so RadianceHDRVAEDecode can surface it to the UI.
+            if resolved_type and resolved_type != model_type:
+                logger.warning(
+                    f"[Radiance {model_size.upper()}] No RUDRA checkpoint for "
+                    f"model_type={model_type!r} — substituting the {resolved_type!r} "
+                    f"checkpoint instead ({ckpt_path})."
+                )
+                model._radiance_resolved_type = resolved_type
             if model_type == "ltx-video":
                 logger.warning(
                     "[Radiance RUDRA] LTX-Video decoder was trained on isolated still "
