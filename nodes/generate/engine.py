@@ -327,6 +327,12 @@ class RadianceHDRVAEDecode:
                 )
                 turbo_decoder = None
 
+        # ALBABIT-FIX: track whether RUDRA was actually used (vs merely
+        # requested) — rudra_decoder/decoder_size below reported the request
+        # even on silent fallback (no checkpoint, load error), misleading the
+        # metadata JSON about what actually produced the image.
+        rudra_actually_used = turbo_decoder is not None
+
         result = engine.decode(
             samples=samples,
             vae=vae,
@@ -379,8 +385,8 @@ class RadianceHDRVAEDecode:
             "display_tonemap": display_tonemap,
             "exposure_adjust": exposure_adjust,
             "hdr_scale_factor": hdr_scale_factor if scale_applied else "N/A (display-referred)",
-            "rudra_decoder": rudra_decoder,
-            "decoder_size": decoder_size if rudra_decoder == "Enabled" else "N/A",
+            "rudra_decoder": rudra_decoder if rudra_actually_used else f"{rudra_decoder} (fallback: standard VAE used)",
+            "decoder_size": decoder_size if rudra_actually_used else "N/A",
             "force_hdr_decode": force_hdr_decode,
             "alpha_restored": alpha_provided,
             "hdr_output": hdr_output,
