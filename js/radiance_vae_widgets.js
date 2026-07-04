@@ -41,6 +41,11 @@ const W_HDR_OUTPUT       = "hdr_output";
 const W_DISPLAY_TONEMAP  = "display_tonemap";
 const W_HDR_MODE         = "hdr_mode";
 const W_EXPORT_RHDR      = "export_rhdr";
+const W_INVERSE_TONEMAP  = "inverse_tonemap";
+const W_TARGET_STOPS     = "target_stops";
+const W_RHDR_PRECISION   = "rhdr_precision";
+const W_RUDRA_DECODER    = "rudra_decoder";
+const W_DECODER_SIZE     = "decoder_size";
 
 const NOT_APPLICABLE_MARKER = " (n/a: not Compress-Log)";
 const BLOWOUT_MARKER        = " ⚠ PREVIEW WILL BLOW OUT";
@@ -61,14 +66,73 @@ function _setLabelMarker(widget, marker) {
     if (widget.label !== wanted) widget.label = wanted;
 }
 
+// ── Widget visibility helpers (same pattern as radiance_sampler.js) ──
+// ALBABIT-FIX: target_stops/rhdr_precision/decoder_size only have an effect
+// under their respective toggle — hide them otherwise instead of leaving
+// them visible-but-inert (verified in hdr/vae.py: target_stops only used
+// inside `if inverse_tonemap and hdr_mode != "Compress (Log)"`; rhdr_precision
+// only inside `if export_rhdr`; decoder_size only when rudra_decoder=="Enabled").
+function _forceWidgetReinsert(widget, node) {
+    if (!node?.widgets) return;
+    const idx = node.widgets.indexOf(widget);
+    if (idx === -1) return;
+    node.widgets.splice(idx, 1);
+    node.widgets.splice(idx, 0, widget);
+}
+
+function setWidgetVisible(widget, visible, node) {
+    if (!widget) return;
+
+    if (!widget.options) widget.options = {};
+    widget.options.hidden = !visible;
+    widget.hidden = !visible;
+
+    if (visible) {
+        if (widget.type === "hidden") {
+            widget.type = widget._origType || "number";
+            if (widget._origComputeSize !== undefined) {
+                widget.computeSize = widget._origComputeSize;
+            } else {
+                delete widget.computeSize;
+            }
+            delete widget._origComputeSize;
+            widget.computedHeight = widget._origComputedHeight ?? 32;
+            delete widget._origComputedHeight;
+        }
+    } else {
+        if (widget.type !== "hidden") {
+            widget._origType = widget.type;
+            widget._origComputeSize = widget.computeSize;
+            widget._origComputedHeight = widget.computedHeight;
+            widget.type = "hidden";
+            widget.computeSize = () => [0, -4];
+            widget.computedHeight = 4;
+        }
+    }
+
+    _forceWidgetReinsert(widget, node);
+}
+
+function refreshNodeSize(node) {
+    if (!node.computeSize) return;
+    const sz = node.computeSize();
+    node.setSize([Math.max(node.size[0], sz[0]), sz[1]]);
+    node.setDirtyCanvas(true, true);
+}
+
 /**
  * Sync all dependent widget states based on current hdr_output + hdr_mode.
  */
 function syncWidgets(node) {
-    const hdrOutputW    = getWidget(node, W_HDR_OUTPUT);
-    const displayTmW    = getWidget(node, W_DISPLAY_TONEMAP);
-    const hdrModeW      = getWidget(node, W_HDR_MODE);
-    const exportRhdrW   = getWidget(node, W_EXPORT_RHDR);
+    const hdrOutputW      = getWidget(node, W_HDR_OUTPUT);
+    const displayTmW      = getWidget(node, W_DISPLAY_TONEMAP);
+    const hdrModeW        = getWidget(node, W_HDR_MODE);
+    const exportRhdrW     = getWidget(node, W_EXPORT_RHDR);
+    const inverseTmW      = getWidget(node, W_INVERSE_TONEMAP);
+    const targetStopsW    = getWidget(node, W_TARGET_STOPS);
+    const rhdrPrecisionW  = getWidget(node, W_RHDR_PRECISION);
+    const rudraDecoderW   = getWidget(node, W_RUDRA_DECODER);
+    const decoderSizeW    = getWidget(node, W_DECODER_SIZE);
 
     if (!hdrOutputW) return;
 
@@ -86,7 +150,11 @@ function syncWidgets(node) {
     _setLabelMarker(displayTmW, !isCompressLog ? NOT_APPLICABLE_MARKER : null);
     _setLabelMarker(exportRhdrW, !isCompressLog ? NOT_APPLICABLE_MARKER : null);
 
-    node.setDirtyCanvas(true, true);
+    setWidgetVisible(targetStopsW, !!inverseTmW?.value && !isCompressLog, node);
+    setWidgetVisible(rhdrPrecisionW, !!exportRhdrW?.value, node);
+    setWidgetVisible(decoderSizeW, rudraDecoderW?.value === "Enabled", node);
+
+    refreshNodeSize(node);
 }
 
 app.registerExtension({
@@ -104,7 +172,14 @@ app.registerExtension({
             if (!hdrOutputW) return;
 
             // Wire callbacks for instant feedback on the driver widgets.
-            [hdrOutputW, getWidget(this, W_HDR_MODE), getWidget(this, W_DISPLAY_TONEMAP)]
+            [
+                hdrOutputW,
+                getWidget(this, W_HDR_MODE),
+                getWidget(this, W_DISPLAY_TONEMAP),
+                getWidget(this, W_INVERSE_TONEMAP),
+                getWidget(this, W_EXPORT_RHDR),
+                getWidget(this, W_RUDRA_DECODER),
+            ]
                 .forEach(w => {
                     if (!w) return;
                     const origCallback = w.callback;
