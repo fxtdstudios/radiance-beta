@@ -5,9 +5,12 @@
  * WHAT THIS FIXES:
  *
  *   Caveat 2 (Compress Log-only controls):
- *     display_tonemap only applies to Compress(Log) decode output. This
- *     extension flags HDR display/export widgets for other HDR modes so
- *     their scope is visually clear.
+ *     display_tonemap only applies to Compress(Log) decode output -- hidden
+ *     otherwise. hdr_output remains active in every hdr_mode (verified in
+ *     hdr/vae.py) so it stays visible and unmarked. export_rhdr only captures
+ *     genuinely extra (pre-tonemap) data in Compress(Log) + an active tonemap
+ *     curve -- outside that it would just duplicate the image output, so it's
+ *     forced off and hidden there too.
  *
  *   Additional: hdr_output=True + display_tonemap=None + Compress(Log) shows
  *   a warning on hdr_output's label so the user knows the ComfyUI preview
@@ -22,18 +25,13 @@
 
 import { app } from "../../scripts/app.js";
 
-// ALBABIT-FIX: v1.0 matched node.type/comfyClass against the display-name
-// string "◎ Radiance HDR VAE Decode" (renamed since to "VAE Decode (HDR)"
-// via nodes/branding.py). node.type is always the class registration key
-// ("RadianceHDRVAEDecode"), never the display name -- confirmed live via
-// browser console this session (app.graph._nodes.find(n=>n.type===...)
-// matches class keys, not display titles). This condition never matched,
-// so the whole extension was dead code since v3.1 (never grayed the
-// widgets, never showed the amber badge). Also replaced the ctx.globalAlpha
-// draw-override dimming and the raw node.element DOM badge (both
-// LiteGraph-canvas-only techniques that don't render on the Vue "Nodes 2.0"
-// frontend) with the widget.label marker convention already validated on
-// Sampler/Loader/Prompt/Tonemap/Resolution this session.
+// ALBABIT-FIX: v1.0 matched node.type against the display-name string
+// "◎ Radiance HDR VAE Decode" instead of the class key ("RadianceHDRVAEDecode")
+// -- confirmed via live browser console that node.type is always the class
+// key, so this never matched and the extension was dead code since v3.1.
+// Also replaced the canvas ctx.globalAlpha dimming + raw node.element DOM
+// badge (LiteGraph-only, inert on Vue) with the widget.label marker
+// convention already used on Sampler/Loader/Prompt/Tonemap/Resolution.
 const TARGET_NODE = "RadianceHDRVAEDecode";
 
 // Widget name constants
@@ -47,8 +45,11 @@ const W_RHDR_PRECISION   = "rhdr_precision";
 const W_RUDRA_DECODER    = "rudra_decoder";
 const W_DECODER_SIZE     = "decoder_size";
 
-const NOT_APPLICABLE_MARKER = " (n/a: not Compress-Log)";
-const BLOWOUT_MARKER        = " ⚠ PREVIEW WILL BLOW OUT";
+// ALBABIT-FIX: kept short -- a long label suffix widens the whole node and
+// squeezes every other widget's value column (Vue sizes the label/value
+// split off the widest label in the node). display_tonemap's own tooltip
+// already explains the Compress(Log) dependency on hover.
+const BLOWOUT_MARKER = " ⚠ overexp risk";
 
 /** Return widget by name from a node, or null. */
 function getWidget(node, name) {
@@ -67,11 +68,14 @@ function _setLabelMarker(widget, marker) {
 }
 
 // ── Widget visibility helpers (same pattern as radiance_sampler.js) ──
-// ALBABIT-FIX: target_stops/rhdr_precision/decoder_size only have an effect
-// under their respective toggle — hide them otherwise instead of leaving
-// them visible-but-inert (verified in hdr/vae.py: target_stops only used
-// inside `if inverse_tonemap and hdr_mode != "Compress (Log)"`; rhdr_precision
-// only inside `if export_rhdr`; decoder_size only when rudra_decoder=="Enabled").
+// ALBABIT-FIX: hidden unless their condition holds (verified against
+// hdr/vae.py): target_stops needs `inverse_tonemap and hdr_mode !=
+// "Compress (Log)"`; rhdr_precision needs `export_rhdr`; decoder_size needs
+// `rudra_decoder=="Enabled"`; display_tonemap's tonemap only fires in
+// `hdr_mode == "Compress (Log)"`. hdr_output is NOT hidden -- it's active in
+// every hdr_mode (no guard on its final clamp), unlike v1.0's incorrect
+// "Compress-Log only" grouping. export_rhdr's condition is below (separate,
+// since it's also forced off, not just hidden).
 function _forceWidgetReinsert(widget, node) {
     if (!node?.widgets) return;
     const idx = node.widgets.indexOf(widget);
@@ -140,15 +144,24 @@ function syncWidgets(node) {
     const hdrMode = hdrModeW?.value ?? "";
     const isCompressLog = hdrMode === "Compress (Log)";
 
-    // Guaranteed-overexposure warning takes priority over the plain
-    // not-applicable marker on hdr_output (mutually exclusive: blowout
-    // only fires when isCompressLog is true).
+    // Guaranteed-overexposure warning: hdr_output=True + display_tonemap=None
+    // + Compress(Log) passes raw scene-linear values straight to the ComfyUI
+    // preview. hdr_output itself is otherwise never marked -- it's active in
+    // every hdr_mode, nothing to flag.
     const displayTmVal = displayTmW?.value ?? "ACES Filmic";
     const willBlowOut = hdrOut && displayTmVal === "None" && isCompressLog;
+    _setLabelMarker(hdrOutputW, willBlowOut ? BLOWOUT_MARKER : null);
 
-    _setLabelMarker(hdrOutputW, willBlowOut ? BLOWOUT_MARKER : (!isCompressLog ? NOT_APPLICABLE_MARKER : null));
-    _setLabelMarker(displayTmW, !isCompressLog ? NOT_APPLICABLE_MARKER : null);
-    _setLabelMarker(exportRhdrW, !isCompressLog ? NOT_APPLICABLE_MARKER : null);
+    setWidgetVisible(displayTmW, isCompressLog, node);
+
+    // ALBABIT-FIX: force export_rhdr off before reading its value below, so
+    // rhdr_precision's visibility (which depends on it) reflects the forced
+    // state in the same pass instead of lagging one sync behind.
+    const rhdrRedundant = !isCompressLog || displayTmVal === "None";
+    if (rhdrRedundant && exportRhdrW?.value) {
+        exportRhdrW.value = false;
+    }
+    setWidgetVisible(exportRhdrW, !rhdrRedundant, node);
 
     setWidgetVisible(targetStopsW, !!inverseTmW?.value && !isCompressLog, node);
     setWidgetVisible(rhdrPrecisionW, !!exportRhdrW?.value, node);
