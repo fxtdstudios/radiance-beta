@@ -173,6 +173,39 @@ function refreshNodeSize(node) {
     app.graph.setDirtyCanvas(true, true);
 }
 
+// ALBABIT-FIX: "📐" = scale_factor/mp_target/width/height, either modifier
+// active (both apply regardless of preset). "✎" = orientation/latent_channels
+// off their neutral default.
+function _setLabelMarker(widget, marked, marker) {
+    if (!widget) return;
+    if (widget._radOrigLabel === undefined && !marked) return;
+    if (widget._radOrigLabel === undefined) widget._radOrigLabel = widget.label ?? widget.name;
+    const wanted = marked ? widget._radOrigLabel + marker : widget._radOrigLabel;
+    if (widget.label !== wanted) widget.label = wanted;
+}
+
+function updateResolutionMarkers(node) {
+    const scaleFactorW = node.widgets?.find(w => w.name === "scale_factor");
+    const mpTargetW    = node.widgets?.find(w => w.name === "mp_target");
+    const widthW       = node.widgets?.find(w => w.name === "width");
+    const heightW      = node.widgets?.find(w => w.name === "height");
+    const orientationW = node.widgets?.find(w => w.name === "orientation");
+    const latentChW    = node.widgets?.find(w => w.name === "latent_channels");
+
+    const scaleActive = scaleFactorW && parseFloat(scaleFactorW.value) !== 1.0;
+    const mpActive     = mpTargetW && parseFloat(mpTargetW.value) > 0;
+
+    _setLabelMarker(scaleFactorW, scaleActive, " 📐");
+    _setLabelMarker(mpTargetW, mpActive, " 📐");
+    _setLabelMarker(widthW, scaleActive || mpActive, " 📐");
+    _setLabelMarker(heightW, scaleActive || mpActive, " 📐");
+
+    _setLabelMarker(orientationW, orientationW && orientationW.value !== "As Preset", " ✎");
+    _setLabelMarker(latentChW, latentChW && parseInt(latentChW.value, 10) !== 0, " ✎");
+
+    node.setDirtyCanvas(true, true);
+}
+
 app.registerExtension({
     name: "FXTD.Radiance.Resolution",
     // FIX 6: beforeRegisterNodeDef is the correct hook — targets our node only,
@@ -433,6 +466,14 @@ app.registerExtension({
             // pass before any widget is hidden. If we hide immediately, widget.computedHeight is
             // undefined — the restore path falls back to 32, creating ghost space on re-show.
             setTimeout(() => toggleFields(), 100);
+
+            // Poll for manual edits (onExecuted bypasses callbacks entirely).
+            node._resMarkerInterval = setInterval(() => updateResolutionMarkers(node), 250);
+            const origOnRemoved = node.onRemoved;
+            node.onRemoved = function () {
+                if (node._resMarkerInterval) clearInterval(node._resMarkerInterval);
+                if (origOnRemoved) origOnRemoved.apply(this, arguments);
+            };
 
             return r;
         };
