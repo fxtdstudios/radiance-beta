@@ -1,17 +1,18 @@
 /**
  * radiance_vae_widgets.js
- * v1.0 — Radiance VAE Decode / Roundtrip widget sync
+ * v2.0 — Radiance HDR VAE Decode widget sync (Compress(Log)-only controls)
  *
  * WHAT THIS FIXES:
  *
  *   Caveat 2 (Compress Log-only controls):
  *     display_tonemap only applies to Compress(Log) decode output. This
- *     extension grays HDR display/export widgets out for other HDR modes so
+ *     extension flags HDR display/export widgets for other HDR modes so
  *     their scope is visually clear.
  *
- *   Additional: hdr_output=True shows an amber warning badge on the node
- *   so the user knows the ComfyUI preview will look overexposed (intentional
- *   for VFX pipelines — the tensor carries raw scene-linear values).
+ *   Additional: hdr_output=True + display_tonemap=None + Compress(Log) shows
+ *   a warning on hdr_output's label so the user knows the ComfyUI preview
+ *   will look overexposed (intentional for VFX pipelines — the tensor
+ *   carries raw scene-linear values).
  *
  * INSTALL:
  *   Place this file in the same folder as radiance_bootstrap.js (the custom
@@ -21,8 +22,19 @@
 
 import { app } from "../../scripts/app.js";
 
-// Nodes this extension manages
-const HDR_DECODE_NODE  = "◎ Radiance HDR VAE Decode";
+// ALBABIT-FIX: v1.0 matched node.type/comfyClass against the display-name
+// string "◎ Radiance HDR VAE Decode" (renamed since to "VAE Decode (HDR)"
+// via nodes/branding.py). node.type is always the class registration key
+// ("RadianceHDRVAEDecode"), never the display name -- confirmed live via
+// browser console this session (app.graph._nodes.find(n=>n.type===...)
+// matches class keys, not display titles). This condition never matched,
+// so the whole extension was dead code since v3.1 (never grayed the
+// widgets, never showed the amber badge). Also replaced the ctx.globalAlpha
+// draw-override dimming and the raw node.element DOM badge (both
+// LiteGraph-canvas-only techniques that don't render on the Vue "Nodes 2.0"
+// frontend) with the widget.label marker convention already validated on
+// Sampler/Loader/Prompt/Tonemap/Resolution this session.
+const TARGET_NODE = "RadianceHDRVAEDecode";
 
 // Widget name constants
 const W_HDR_OUTPUT       = "hdr_output";
@@ -30,77 +42,23 @@ const W_DISPLAY_TONEMAP  = "display_tonemap";
 const W_HDR_MODE         = "hdr_mode";
 const W_EXPORT_RHDR      = "export_rhdr";
 
+const NOT_APPLICABLE_MARKER = " (n/a: not Compress-Log)";
+const BLOWOUT_MARKER        = " ⚠ PREVIEW WILL BLOW OUT";
+
 /** Return widget by name from a node, or null. */
 function getWidget(node, name) {
     return node.widgets?.find(w => w.name === name) ?? null;
 }
 
-/**
- * Apply or remove the "disabled" visual state on a widget.
- * ComfyUI doesn't have a built-in disabled state, so we:
- *  - Store the original draw function
- *  - Override it to draw grayed-out text
- *  - Set a .disabled flag that the node can check
- */
-function setWidgetDisabled(widget, disabled) {
+// Same convention as radiance_resolution.js's _setLabelMarker: cache the
+// original label once, then swap between origLabel and origLabel+marker.
+// Renders identically on the legacy LiteGraph canvas and the Vue frontend.
+function _setLabelMarker(widget, marker) {
     if (!widget) return;
-    widget.disabled = disabled;
-
-    if (disabled) {
-        // Save original draw if not already saved
-        if (!widget._origDraw) widget._origDraw = widget.draw;
-        widget.draw = function(ctx, node, width, y) {
-            ctx.save();
-            ctx.globalAlpha = 0.35;
-            if (widget._origDraw) widget._origDraw.call(this, ctx, node, width, y);
-            ctx.restore();
-        };
-    } else {
-        // Restore original draw
-        if (widget._origDraw) {
-            widget.draw = widget._origDraw;
-            delete widget._origDraw;
-        }
-    }
-}
-
-/**
- * Show or hide the amber "HDR OUTPUT: ComfyUI preview will be overexposed"
- * badge on the node title bar.
- */
-function setHDROutputBadge(node, show) {
-    // Use node.badges array if available (ComfyUI 0.3+), else use title suffix
-    if (!node._radianceHDRBadge) {
-        const badge = document.createElement("div");
-        badge.textContent = "⚠ HDR OUT";
-        badge.title = (
-            "display_tonemap='None' + hdr_output=True + Compress(Log): " +
-            "raw scene-linear values far above 1.0 pass through — guaranteed overexposure " +
-            "in ComfyUI preview. " +
-            "Set display_tonemap='ACES Filmic' or 'Reinhard' to fix. " +
-            "Use 'None' only when feeding an OCIO-aware viewer (Nuke, Resolve)."
-        );
-        badge.style.cssText = [
-            "display:none",
-            "position:absolute",
-            "top:2px",
-            "right:4px",
-            "background:rgba(251,146,22,0.15)",
-            "border:1px solid rgba(251,146,22,0.5)",
-            "border-radius:3px",
-            "font-size:8px",
-            "font-weight:800",
-            "letter-spacing:0.8px",
-            "color:#fb9216",
-            "padding:1px 5px",
-            "pointer-events:auto",
-            "z-index:10",
-        ].join(";");
-        node._radianceHDRBadge = badge;
-        // Attach to node DOM element if available
-        node.element?.appendChild(badge);
-    }
-    node._radianceHDRBadge.style.display = show ? "inline-block" : "none";
+    if (widget._radOrigLabel === undefined && !marker) return;
+    if (widget._radOrigLabel === undefined) widget._radOrigLabel = widget.label ?? widget.name;
+    const wanted = marker ? widget._radOrigLabel + marker : widget._radOrigLabel;
+    if (widget.label !== wanted) widget.label = wanted;
 }
 
 /**
@@ -118,69 +76,70 @@ function syncWidgets(node) {
     const hdrMode = hdrModeW?.value ?? "";
     const isCompressLog = hdrMode === "Compress (Log)";
 
-    // HDR-only widgets are only relevant when Compress(Log) is active.
-    // When the user switches to Clip(SDR) / Soft Clip / Passthrough, these
-    // settings have no effect — gray them out to reduce confusion.
-    setWidgetDisabled(hdrOutputW,     !isCompressLog);
-    setWidgetDisabled(displayTmW,     !isCompressLog);
-    setWidgetDisabled(exportRhdrW,    !isCompressLog);
-
-    // Amber badge when hdr_output=True AND display_tonemap=None (guaranteed blown)
+    // Guaranteed-overexposure warning takes priority over the plain
+    // not-applicable marker on hdr_output (mutually exclusive: blowout
+    // only fires when isCompressLog is true).
     const displayTmVal = displayTmW?.value ?? "ACES Filmic";
     const willBlowOut = hdrOut && displayTmVal === "None" && isCompressLog;
-    setHDROutputBadge(node, willBlowOut);
 
-    // Force canvas redraw so graying appears immediately
-    app.graph.setDirtyCanvas(true, false);
+    _setLabelMarker(hdrOutputW, willBlowOut ? BLOWOUT_MARKER : (!isCompressLog ? NOT_APPLICABLE_MARKER : null));
+    _setLabelMarker(displayTmW, !isCompressLog ? NOT_APPLICABLE_MARKER : null);
+    _setLabelMarker(exportRhdrW, !isCompressLog ? NOT_APPLICABLE_MARKER : null);
+
+    node.setDirtyCanvas(true, true);
 }
 
 app.registerExtension({
     name: "Radiance.VAEWidgetSync",
 
-    nodeCreated(node) {
-        // ComfyUI uses node.type in newer versions (Vue-based frontend).
-        // Older versions used node.comfyClass. Check both for compatibility.
-        const nodeId = node.type ?? node.comfyClass ?? "";
-        if (nodeId !== HDR_DECODE_NODE) {
-            return;
-        }
+    async beforeRegisterNodeDef(nodeType, nodeData) {
+        if (nodeData.name !== TARGET_NODE) return;
 
-        const hdrOutputW    = getWidget(node, W_HDR_OUTPUT);
-        const displayTmW    = getWidget(node, W_DISPLAY_TONEMAP);
-        const hdrModeW      = getWidget(node, W_HDR_MODE);
+        const onNodeCreated = nodeType.prototype.onNodeCreated;
+        nodeType.prototype.onNodeCreated = function () {
+            if (onNodeCreated) onNodeCreated.apply(this, arguments);
+            const self = this;
 
-        if (!hdrOutputW) return;
+            const hdrOutputW = getWidget(this, W_HDR_OUTPUT);
+            if (!hdrOutputW) return;
 
-        // Hook hdr_output changes
-        const origHDRCallback = hdrOutputW.callback;
-        hdrOutputW.callback = function(value) {
-            syncWidgets(node);
-            if (origHDRCallback) origHDRCallback.call(this, value);
+            // Wire callbacks for instant feedback on the driver widgets.
+            [hdrOutputW, getWidget(this, W_HDR_MODE), getWidget(this, W_DISPLAY_TONEMAP)]
+                .forEach(w => {
+                    if (!w) return;
+                    const origCallback = w.callback;
+                    w.callback = function (...args) {
+                        const res = origCallback ? origCallback.apply(this, args) : undefined;
+                        syncWidgets(self);
+                        return res;
+                    };
+                });
+
+            // ALBABIT-FIX: poll as a state-based fallback (undo/redo, preset
+            // import, workflow load) — same pattern as radiance_sampler.js's
+            // preset divergence markers, covers mutation paths that bypass
+            // the wrapped callbacks above.
+            this._vaeSyncInterval = setInterval(() => syncWidgets(self), 250);
+            const origOnRemoved = this.onRemoved;
+            this.onRemoved = function () {
+                if (self._vaeSyncInterval) {
+                    clearInterval(self._vaeSyncInterval);
+                    self._vaeSyncInterval = null;
+                }
+                if (origOnRemoved) origOnRemoved.apply(this, arguments);
+            };
+
+            setTimeout(() => syncWidgets(self), 150);
         };
 
-        // Hook hdr_mode changes (display_tonemap also depends on this)
-        if (hdrModeW) {
-            const origModeCallback = hdrModeW.callback;
-            hdrModeW.callback = function(value) {
-                syncWidgets(node);
-                if (origModeCallback) origModeCallback.call(this, value);
-            };
-        }
-
-        // Apply initial state (respects saved workflow values)
-        // Use setTimeout to let ComfyUI finish constructing the node first
-        setTimeout(() => syncWidgets(node), 0);
-    },
-
-    /**
-     * After a workflow is loaded, re-sync all Radiance VAE nodes.
-     * Required because widget values are restored before nodeCreated fires.
-     */
-    loadedGraphNode(node) {
-        const nodeId = node.type ?? node.comfyClass ?? "";
-        if (nodeId !== HDR_DECODE_NODE) {
-            return;
-        }
-        setTimeout(() => syncWidgets(node), 50);
+        // Re-apply after a saved workflow restores this node — onNodeCreated
+        // runs before ComfyUI deserializes widget values.
+        const onConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function (info) {
+            if (onConfigure) onConfigure.apply(this, arguments);
+            const self = this;
+            setTimeout(() => syncWidgets(self), 150);
+            setTimeout(() => syncWidgets(self), 600);
+        };
     },
 });
