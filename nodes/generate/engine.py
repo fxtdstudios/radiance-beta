@@ -332,6 +332,11 @@ class RadianceHDRVAEDecode:
         # even on silent fallback (no checkpoint, load error), misleading the
         # metadata JSON about what actually produced the image.
         rudra_actually_used = turbo_decoder is not None
+        # ALBABIT-FIX: set by fast_vae.py when no checkpoint existed for the
+        # detected model_type and a cross-architecture one was substituted
+        # (_DECODER_TYPE_FALLBACKS, e.g. wan -> flux) -- distinct from a full
+        # fallback to the standard VAE (rudra_actually_used=False above).
+        rudra_substituted_type = getattr(turbo_decoder, "_radiance_resolved_type", None)
 
         result = engine.decode(
             samples=samples,
@@ -385,7 +390,11 @@ class RadianceHDRVAEDecode:
             "display_tonemap": display_tonemap,
             "exposure_adjust": exposure_adjust,
             "hdr_scale_factor": hdr_scale_factor if scale_applied else "N/A (display-referred)",
-            "rudra_decoder": rudra_decoder if rudra_actually_used else f"{rudra_decoder} (fallback: standard VAE used)",
+            "rudra_decoder": (
+                f"{rudra_decoder} (fallback: standard VAE used)" if not rudra_actually_used
+                else f"{rudra_decoder} (substituted {rudra_substituted_type!r} checkpoint for {model_type!r})" if rudra_substituted_type
+                else rudra_decoder
+            ),
             "decoder_size": decoder_size if rudra_actually_used else "N/A",
             "force_hdr_decode": force_hdr_decode,
             "alpha_restored": alpha_provided,
@@ -393,7 +402,18 @@ class RadianceHDRVAEDecode:
             "timestamp": datetime.datetime.now(_tz.utc).isoformat(timespec="seconds"),
         }, indent=2)
 
-        return (image, meta)
+        # ALBABIT-FIX: surface the RUDRA fallback to the frontend via the "ui"
+        # channel (same convention as resolution.py's computed_width/height) so
+        # radiance_vae_widgets.js can flag it on rudra_decoder post-execution --
+        # the console log alone is easy to miss.
+        rudra_fallback = rudra_decoder == "Enabled" and not rudra_actually_used
+        return {
+            "ui": {
+                "rudra_fallback": [rudra_fallback],
+                "rudra_substituted_type": [rudra_substituted_type or ""],
+            },
+            "result": (image, meta),
+        }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
