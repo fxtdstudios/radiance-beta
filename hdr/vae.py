@@ -1618,7 +1618,10 @@ class RadianceVAE4KDecode:
                         "max": 256,
                         "step": 1,
                         "tooltip": (
-                            "Temporal chunk size in latent frames. 0 = disabled (full video decoded at once). "
+                            "Temporal chunk size in LATENT frames (not pixel frames — unlike "
+                            "ComfyUI's native 'VAE Decode (Tiled)', which counts pixel frames and "
+                            "divides internally by the VAE's temporal compression). "
+                            "0 = disabled (full video decoded at once). "
                             "Splits video latents along the time axis to reduce peak VRAM during VAE decode. "
                             "Useful when hitting OOM on long videos. "
                             "For Mochi: try 4–6. For LTX-Video: try 8–16. "
