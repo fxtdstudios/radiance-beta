@@ -69,13 +69,15 @@ except ImportError:
         write_exr_multipart = None   # type: ignore[assignment]
 
 try:
-    from .path_utils import get_safe_output_dir
+    from .path_utils import get_safe_output_dir, strip_path_quotes
 except ImportError:
     try:
-        from path_utils import get_safe_output_dir  # type: ignore[import]
+        from path_utils import get_safe_output_dir, strip_path_quotes  # type: ignore[import]
     except ImportError:
         def get_safe_output_dir(base, override="", **_):  # type: ignore[misc]
             return override.strip() or base
+        def strip_path_quotes(path):  # type: ignore[misc]
+            return path.strip().strip('"').strip("'")
 
 log = logging.getLogger("radiance.io_unified")
 
@@ -1000,7 +1002,7 @@ class RadianceRead:
         reload: int = 0,
     ):
         # ── Resolve path: browse takes priority over manual path ──────────
-        resolved = _resolve_browse(browse) or path.strip()
+        resolved = _resolve_browse(browse) or strip_path_quotes(path)
         path = resolved
 
         if not path:
@@ -1117,6 +1119,14 @@ class RadianceWrite:
     FUNCTION     = "write"
     RETURN_TYPES = ()
     RETURN_NAMES = ()
+    # ALBABIT-FIX: without this, ComfyUI never schedules this node -- it has
+    # no outputs for anything else to depend on, and OUTPUT_NODE is the only
+    # other way the executor knows to run it. Lost when nodes_io.py was
+    # recovered from the working-tree truncation (RadianceDigitalCinemaWrite's
+    # docstring nearby references the same incident); the old Radiance
+    # registered "◎ Radiance Write" under that shim class instead, which does
+    # have this flag, masking the gap here.
+    OUTPUT_NODE = True
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1340,6 +1350,7 @@ class RadianceWrite:
         prompt:         Any   = None,
         extra_pnginfo:  Any   = None,
     ):
+        output_path = strip_path_quotes(output_path)
         frames, detected_fps = self._coerce_to_frames(image)   # (N, H, W, C)
         # Use fps from the incoming data when the user hasn't overridden
         if detected_fps is not None and fps == 24.0:
@@ -1568,6 +1579,9 @@ class RadianceEXRMultiPart:
         custom_metadata: str = "",
     ) -> Tuple[str]:
         import datetime, re as _re
+
+        output_path = strip_path_quotes(output_path)
+        remote_path = strip_path_quotes(remote_path)
 
         _fp = _folder_paths if _HAS_FOLDER_PATHS else None
         base_dir = _fp.get_output_directory() if _fp else tempfile.gettempdir()
