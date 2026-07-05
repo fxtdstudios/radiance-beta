@@ -5,6 +5,13 @@ import os
 import re
 
 
+# ALBABIT-FIX: restored from radiance.disabled. Windows "Copy as path"
+# (Shift+Right-click) wraps paths in double-quotes; users also sometimes
+# paste single-quoted paths. Strip both so path widgets accept either form.
+def strip_path_quotes(path: str) -> str:
+    return path.strip().strip('"').strip("'")
+
+
 def safe_join(base: str, *paths: str) -> str:
     base = os.path.normpath(os.path.abspath(base))
     full_path = os.path.normpath(os.path.abspath(os.path.join(base, *paths)))
