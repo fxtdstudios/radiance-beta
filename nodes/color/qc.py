@@ -9,7 +9,7 @@ import torch
 import numpy as np
 
 from radiance.image import defects
-from radiance.path_utils import get_safe_output_dir
+from radiance.path_utils import get_safe_output_dir, strip_path_quotes
 from radiance.color.luma import luma_bt709 as _luma
 
 try:
@@ -337,6 +337,7 @@ class RadianceQC:
                 filename_prefix: str, export_format: str) -> str:
         try:
             from pathlib import Path
+            output_path = strip_path_quotes(output_path)
             report = json.loads(qc_report_json)
             try:
                 output_dir = Path(get_safe_output_dir(_OUTPUT_DIR, output_path, allow_absolute=True))
