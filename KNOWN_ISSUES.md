@@ -28,6 +28,23 @@ clear backlog.
   into menu sections; edge cases can misfile. Mitigated by `SECTION_OVERRIDES`.
   *Planned fix:* Phase 3 — explicit per-node section declaration.
 
+- **RUDRA video checkpoints trained on stills (wan / ltx-video / hunyuanvideo).**
+  `scripts/training/dataset_hdr.py` pads every video model to T=1 before VAE
+  encoding, so the shipped video-model RUDRA decoders never saw real multi-frame
+  temporal latents. Symptom: abstract-noise output on real video (confirmed on
+  LTX 2.3; wan/hunyuan share the code path). Multi-frame input therefore skips
+  the learned path (SDR → HDR Universal falls back to math expansion, no VAE
+  compute wasted). *Planned fix:* retrain the video checkpoints on real
+  multi-frame sequences.
+
+- **`rudra_full_decoder_ltx-video_ema.safetensors` truncated at the source.**
+  The distributed file is 23,044,260 bytes while its header declares
+  ~36,035,756 (45 of 124 tensors out of bounds) — confirmed identical across
+  independent downloads. The loader now detects this before deserialization
+  and falls back to the standard VAE decode with a clear log message.
+  *Planned fix:* re-export the checkpoint from the training environment and
+  re-upload (expected size ≈ 36.0 MB).
+
 ## Minor
 
 - **Naming overlap:** `Grade` / `Grade Apply` / `Apply Grade Info` read similarly;

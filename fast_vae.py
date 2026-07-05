@@ -524,6 +524,62 @@ def _infer_rudra_dr_dim(state_dict: dict) -> int | None:
     return None
 
 
+def _validate_safetensors_size(path: str) -> Optional[str]:
+    """
+    Cheap integrity check for a .safetensors file BEFORE attempting to load it.
+
+    A safetensors file is: 8-byte little-endian header length, JSON header,
+    then the tensor data blob. The header declares every tensor's
+    [start, end) data_offsets, so the expected total file size is knowable
+    without reading the data. A truncated upload/download (e.g. the
+    ltx-video full-decoder checkpoint shipped at 23 MB when its header
+    declares ~36 MB) otherwise fails deep inside deserialization with a
+    cryptic out-of-bounds error.
+
+    Returns a human-readable problem description, or None if the file looks
+    structurally sound.
+    """
+    import json as _json
+    import struct as _struct
+
+    try:
+        actual = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            head = fh.read(8)
+            if len(head) < 8:
+                return f"file is only {actual} bytes — not a safetensors file"
+            header_len = _struct.unpack("<Q", head)[0]
+            if header_len <= 0 or 8 + header_len > actual:
+                return (f"header length {header_len:,} exceeds file size "
+                        f"{actual:,} — file is corrupt")
+            header = _json.loads(fh.read(header_len))
+    except Exception as exc:  # noqa: BLE001 — any parse failure means corrupt
+        return f"unreadable safetensors header ({exc})"
+
+    data_start = 8 + header_len
+    declared_end = 0
+    n_tensors = 0
+    n_oob = 0
+    for key, meta in header.items():
+        if key == "__metadata__" or not isinstance(meta, dict):
+            continue
+        offsets = meta.get("data_offsets")
+        if not offsets or len(offsets) != 2:
+            continue
+        n_tensors += 1
+        declared_end = max(declared_end, int(offsets[1]))
+        if data_start + int(offsets[1]) > actual:
+            n_oob += 1
+
+    expected = data_start + declared_end
+    if expected > actual:
+        return (f"truncated: {actual:,} bytes on disk but header declares "
+                f"{expected:,} ({n_oob} of {n_tensors} tensors out of bounds). "
+                f"The file is incomplete at its source — re-export/re-upload "
+                f"a full ~{expected / 1e6:.1f} MB checkpoint")
+    return None
+
+
 def load_radiance_decoder_weights(
     model_type: str = "flux",
     model_size: str = "turbo",
@@ -617,6 +673,17 @@ def load_radiance_decoder_weights(
     if ckpt_path and os.path.exists(ckpt_path):
         try:
             if ckpt_path.endswith(".safetensors"):
+                # Fail fast with a precise message on truncated/corrupt files
+                # instead of a cryptic tensor-out-of-bounds error mid-load.
+                _corrupt = _validate_safetensors_size(ckpt_path)
+                if _corrupt:
+                    logger.error(
+                        f"[Radiance {model_size.upper()}] Checkpoint "
+                        f"{ckpt_path} is unusable — {_corrupt}. "
+                        f"Falling back to the standard VAE decode."
+                    )
+                    _TRAINED_DECODER_CACHE[cache_key] = None
+                    return None
                 import safetensors.torch
                 state_dict = safetensors.torch.load_file(ckpt_path, device="cpu")
             else:
