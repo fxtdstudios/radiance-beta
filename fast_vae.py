@@ -208,8 +208,9 @@ class RadianceTurboDecoder(_RUDRAConditionedDecoderMixin, nn.Module):
     The inverse log curve (applied externally or by decode_to_linear_realtime)
     converts the output to scene-linear.
 
-    Architecture: 4 × (upsample + conv + residual block)
-    Parameters: ~2.1M (flux 16ch), ~1.6M (sdxl 4ch)
+    Architecture: stem + n_upsample × (upsample + conv + residual block), 64ch
+    Parameters (measured from deployed checkpoints, 2026-07-03 review):
+      ~0.57M (flux 16ch, 3 stages), ~0.56M (sdxl 4ch), ~0.78M (klein 128ch, 4 stages)
     Inference: ~4ms on A100 for a 64×64 latent → 512×512 output (fp16)
     """
 
@@ -247,9 +248,11 @@ class RadianceFullDecoder(_RUDRAConditionedDecoderMixin, nn.Module):
     High-Fidelity Production HDR VAE Decoder.
 
     Optimised for visual accuracy and texture preservation.
-    Architecture: 4 × (upsample + conv + 2x deep blocks)
+    Architecture: stem + n_upsample × (upsample + conv + 2× deep blocks)
     Channels: 128 (vs 64 in Turbo)
-    Parameters: ~32M (flux 16ch), ~28M (sdxl 4ch)
+    Parameters (measured from deployed checkpoints, 2026-07-03 review):
+      ~5.63M (flux 16ch, 3 stages), ~9.01M (ltx-video 128ch, 5 stages)
+      — NOT the ~32M previously claimed here (see DECODER_CHEATSHEET.md).
     """
 
     def __init__(
@@ -360,10 +363,30 @@ def decode_to_linear_realtime(
     tile_size: int = 512,
     overlap: int = 64,
     dr_proj: torch.Tensor | None = None,
+    latent_space: str = "raw",
 ) -> torch.Tensor:
     """
     High-speed decode: latent → scene-linear.
     Supports tiled inference for high-resolution images.
+
+    LATENT CONVENTION (2026-07-03 review, empirically verified):
+    The decoders were trained on RAW VAE latents — pair generation stored
+    `vae.encode(...)`/`latent_dist.sample()` output with NO scale/shift
+    (dataset_hdr.py), and train_turbo_decoder.py fed them unchanged. Decoding
+    stored flux training pairs through the deployed turbo checkpoint measures:
+        raw           ~29-34 dB PSNR(log)   <-- training convention
+        latent/scale  ~23 dB                 (the old behavior of this function)
+        latent*scale  ~22-25 dB
+    So the previous unconditional `x = x / scale_factor` was a train/inference
+    mismatch that degraded every decode (its symptom — a global gain error —
+    was being compensated downstream by uplift_universal's gain-match).
+
+    Args:
+        latent_space: "raw" (default) — the latent is already in the VAE's
+            native (unscaled) space; it is fed to the decoder unchanged.
+            "scaled" — the latent is in scaled/model space; it is divided by
+            the per-model scale_factor first (the legacy behavior; only for
+            callers that verified their latents really are scaled).
     """
     # Resolve per-model defaults from unified config when not overridden
     cfg = resolve_model_vae_config(model_type) or {}
@@ -382,8 +405,11 @@ def decode_to_linear_realtime(
     else:
         x = latent
 
-    # 2. De-scale latent
-    x = (x / _scale).to(dtype)
+    # 2. Map the latent into the decoder's training space (raw VAE latents).
+    if latent_space == "scaled":
+        x = (x / _scale).to(dtype)   # legacy path for verified scaled-space callers
+    else:
+        x = x.to(dtype)              # raw: the space the decoders were trained on
 
     # 2. Distilled decode pass
     with torch.no_grad():
