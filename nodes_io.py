@@ -57,6 +57,15 @@ try:
 except ImportError:
     _HAS_FOLDER_PATHS = False
 
+# ALBABIT-FIX: DPX has no Pillow plugin at all (neither read nor write) --
+# "DPX" was offered in the format dropdown since v3.1 but never actually
+# worked. OpenImageIO is the VFX-industry-standard library for this format.
+try:
+    import OpenImageIO as _oiio
+    _HAS_OIIO = True
+except ImportError:
+    _HAS_OIIO = False
+
 from . import color_utils
 
 try:
@@ -344,6 +353,24 @@ def _read_image(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
             raise RuntimeError(f"Cannot read HDR file '{path}' (unreadable, truncated, or unsupported).")
         # Radiance .hdr is scene-linear float; keep values as-is (may exceed 1.0).
         arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB).astype(np.float32)
+        return _np_to_tensor(arr), None
+
+    if ext == ".dpx":
+        # ALBABIT-FIX: Pillow has no DPX plugin at all; use OpenImageIO, the
+        # VFX-industry-standard library for this format.
+        if not _HAS_OIIO:
+            raise ImportError("Reading DPX requires OpenImageIO (pip install OpenImageIO).")
+        inp = _oiio.ImageInput.open(path)
+        if inp is None:
+            raise RuntimeError(f"Cannot read DPX '{path}': {_oiio.geterror()}")
+        try:
+            spec = inp.spec()
+            pixels = inp.read_image(format=_oiio.FLOAT)
+        finally:
+            inp.close()
+        # read_image() auto-normalises integer DPX samples (e.g. 10-bit) to [0, 1] float.
+        arr = np.array(pixels, dtype=np.float32).reshape(spec.height, spec.width, spec.nchannels)
+        arr = arr[..., :3] if spec.nchannels >= 3 else np.repeat(arr[..., :1], 3, axis=-1)
         return _np_to_tensor(arr), None
 
     if not _HAS_PIL:
@@ -660,16 +687,30 @@ def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str, quality: int = 18
     if not _HAS_PIL:
         raise ImportError("Pillow required for image writing.")
 
-    if "16-bit" in fmt or "TIFF" in fmt:
+    # ALBABIT-FIX: was `"16-bit" in fmt or "TIFF" in fmt`, which also matched
+    # "TIFF (32-bit float)" (the substring "TIFF" is in both TIFF formats) --
+    # every 32-bit TIFF request was silently written as 16-bit instead, and
+    # its own dedicated `"32-bit" in fmt` branch below was never reached.
+    # "SEQ │ TIFF" (bare, no depth suffix) is still meant to land here.
+    if "16-bit" in fmt or ("TIFF" in fmt and "32-bit" not in fmt):
         arr_u16 = (np.clip(arr_f32, 0, 1) * 65535).astype(np.uint16)
-        pil = _PIL.fromarray(arr_u16, mode="I;16" if arr_f32.ndim == 2 else "RGB")
-        # Pillow can't do 16-bit RGB directly; use tifffile if available
+        # ALBABIT-FIX: this used to also do
+        # `_PIL.fromarray(arr_u16, mode="I;16" if arr_f32.ndim == 2 else "RGB")`
+        # here, whose result was never used (the real write is via tifffile
+        # below) -- with Pillow 12.2.0, that dead call raises TypeError for
+        # any RGB (ndim==3) array, crashing every 16-bit PNG/TIFF write before
+        # tifffile was ever reached. Pillow can't do 16-bit RGB directly
+        # anyway; tifffile handles both 2D and 3D arrays natively.
         try:
             import tifffile  # type: ignore
             tifffile.imwrite(str(path), arr_u16)
             return
         except ImportError:
-            # Fallback: save 8-bit
+            # Fallback: save 8-bit. Not silent -- a 16-bit request quietly
+            # becoming 8-bit is exactly the kind of downgrade this module's
+            # EXR writer refuses to do (see _save_exr's docstring).
+            log.warning("16-bit write requested for '%s' but tifffile is not installed; "
+                        "falling back to 8-bit.", path)
             arr_f32 = np.clip(arr_f32, 0, 1)
     if "32-bit" in fmt:
         try:
@@ -793,6 +834,37 @@ def _save_exr(arr_f32: np.ndarray, path: Path, half: bool) -> None:
         f"or OpenCV built with EXR support. Details: " + "; ".join(errors)
     )
 
+
+def _save_dpx(arr_f32: np.ndarray, path: Path) -> None:
+    """Write a float32 (H, W, 3) array to 10-bit DPX via OpenImageIO.
+
+    ALBABIT-FIX: DPX has no Pillow plugin at all -- "DPX" was offered in the
+    format dropdown since v3.1 but never actually worked (write raised
+    "unknown file extension: .dpx"; read fell through to the same Pillow
+    path and failed identically). 10-bit is the traditional DPX bit depth
+    for film/VFX intermediates (SMPTE 268M). write_image()/read_image()
+    auto-convert between float32 [0,1] and the packed integer sample format.
+    """
+    if not _HAS_OIIO:
+        raise RuntimeError(
+            f"Failed to write DPX '{path}'. Install OpenImageIO (pip install OpenImageIO)."
+        )
+    arr = np.ascontiguousarray(np.clip(arr_f32, 0, 1), dtype=np.float32)
+    h, w = arr.shape[:2]
+    c = arr.shape[2] if arr.ndim == 3 else 1
+
+    spec = _oiio.ImageSpec(w, h, c, _oiio.UINT16)
+    spec.attribute("oiio:BitsPerSample", 10)
+    out = _oiio.ImageOutput.create(str(path))
+    if out is None:
+        raise RuntimeError(f"No DPX writer available for '{path}': {_oiio.geterror()}")
+    try:
+        if not out.open(str(path), spec):
+            raise RuntimeError(f"Failed to open DPX '{path}' for writing: {_oiio.geterror()}")
+        if not out.write_image(arr):
+            raise RuntimeError(f"Failed to write DPX pixels to '{path}': {_oiio.geterror()}")
+    finally:
+        out.close()
 
 
 def _coerce_mask_to_alpha(mask: Any, n: int, h: int, w: int) -> Optional[np.ndarray]:
@@ -1509,6 +1581,8 @@ class RadianceWrite:
             path = self._out_path(output_path, ext, overwrite)
             if "EXR" in stem:
                 _save_exr(frames[0], path, half="16-bit" in stem)
+            elif "DPX" in stem:
+                _save_dpx(frames[0], path)
             else:
                 _save_pil_image(frames[0], path, stem, quality)
             return str(path), 1
@@ -1555,6 +1629,8 @@ class RadianceWrite:
                     path = _unique_path(path)
                 if is_exr:
                     _save_exr(fr, path, half=half_exr)
+                elif is_dpx:
+                    _save_dpx(fr, path)
                 else:
                     _save_pil_image(fr, path, stem, quality)
                 saved_paths.append(str(path))
