@@ -350,6 +350,18 @@ def _is_16bit_rgb_source(path: str, ext: str) -> bool:
     return False
 
 
+def _is_float32_tiff(path: str) -> bool:
+    """Cheaply detect a 32-bit float TIFF via tifffile page metadata (no
+    full pixel decode) -- Pillow's standard build cannot open this sample
+    format at all."""
+    try:
+        import tifffile  # type: ignore
+        with tifffile.TiffFile(path) as tf:
+            return tf.pages[0].dtype == np.float32
+    except Exception:
+        return False
+
+
 def _read_image(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Return (IMAGE, MASK) tensors from a single image file."""
     ext = Path(path).suffix.lower()
@@ -405,6 +417,23 @@ def _read_image(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
             return img_t16, mask_t16
         # else: fall through to Pillow below -- defensive, shouldn't normally
         # happen since _is_16bit_rgb_source() already confirmed 16-bit RGB(A).
+
+    # ALBABIT-FIX: a 32-bit float TIFF (the format RadianceWrite's own "TIFF
+    # (32-bit float)" option produces) can't be opened by Pillow at all --
+    # "cannot identify image file" -- caught by RadianceRead.read()'s outer
+    # handler and surfaced as a silent black image, not even a clear error.
+    # Found by test_io_functional.py's round-trip test. tifffile (already used
+    # to write this format) reads it back correctly.
+    if ext in (".tif", ".tiff") and _is_float32_tiff(path):
+        import tifffile  # type: ignore
+        arr = tifffile.imread(path).astype(np.float32)
+        if arr.ndim == 2:
+            arr = arr[..., np.newaxis]
+        if arr.shape[-1] == 1:
+            arr = np.repeat(arr, 3, axis=-1)
+        rgb32 = arr[..., :3]
+        mask32 = arr[..., 3] if arr.shape[-1] == 4 else None
+        return _np_to_tensor(rgb32), (_np_to_tensor(mask32) if mask32 is not None else None)
 
     if not _HAS_PIL:
         raise ImportError("Pillow is required to read image files.")
