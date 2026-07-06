@@ -4,6 +4,8 @@ Pillow>=10.0.0
 numpy>=1.22
 OpenEXR>=3.2.0
 # Imath ships inside the OpenEXR wheel — do NOT add a separate Imath dependency (PyPI imath maxes at 0.0.2).
+OpenImageIO>=3.0.0
+# DPX has no Pillow plugin; OpenImageIO is the VFX-industry-standard library for it.
 opencolorio>=2.3.0
 colour-science>=0.4.4
 transformers>=4.36.0
