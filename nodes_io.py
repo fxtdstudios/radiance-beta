@@ -341,6 +341,32 @@ def _path_kind(path: str) -> str:
 
 # ── Image read ────────────────────────────────────────────────────────────
 
+def _is_16bit_rgb_source(path: str, ext: str) -> bool:
+    """Cheaply detect a genuine 16-bit-per-channel RGB(A) PNG/TIFF source,
+    without a full pixel decode. Returns False (safe default -- existing
+    Pillow path) if detection isn't possible or the source isn't 16-bit RGB(A).
+    """
+    try:
+        if ext == ".png":
+            # PNG IHDR chunk has a fixed layout: 8-byte signature + 4-byte
+            # length + 4-byte "IHDR" + 4-byte width + 4-byte height + 1-byte
+            # bit depth + 1-byte color type (2=RGB, 6=RGBA) -- no decode needed.
+            with open(path, "rb") as f:
+                header = f.read(26)
+            if len(header) < 26 or header[:8] != b"\x89PNG\r\n\x1a\n":
+                return False
+            bit_depth, color_type = header[24], header[25]
+            return bit_depth == 16 and color_type in (2, 6)
+        if ext in (".tif", ".tiff"):
+            import tifffile  # type: ignore
+            with tifffile.TiffFile(path) as tf:
+                page = tf.pages[0]
+                return page.dtype == np.uint16 and page.samplesperpixel in (3, 4)
+    except Exception:
+        pass
+    return False
+
+
 def _read_image(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Return (IMAGE, MASK) tensors from a single image file."""
     ext = Path(path).suffix.lower()
@@ -374,6 +400,28 @@ def _read_image(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         arr = np.array(pixels, dtype=np.float32).reshape(spec.height, spec.width, spec.nchannels)
         arr = arr[..., :3] if spec.nchannels >= 3 else np.repeat(arr[..., :1], 3, axis=-1)
         return _np_to_tensor(arr), None
+
+    # ALBABIT-FIX: a genuine 16-bit-per-channel RGB(A) PNG/TIFF is silently
+    # collapsed to 8-bit by Pillow's .convert("RGB"/"RGBA") below -- Pillow has
+    # no internal 16-bit RGB mode, and pil.mode reports "RGB" either way, so
+    # there is no way to detect the loss after opening. cv2 preserves full
+    # precision (confirmed via round-trip: 0 error vs the source array).
+    # Grayscale 16-bit is untouched -- Pillow's "I"/"I;16" mode already
+    # preserves it losslessly until the explicit RGB convert (see below).
+    if ext in (".png", ".tif", ".tiff") and _is_16bit_rgb_source(path, ext):
+        import cv2  # type: ignore
+        arr16 = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if arr16 is not None and arr16.dtype == np.uint16 and arr16.ndim == 3 and arr16.shape[-1] in (3, 4):
+            has_alpha16 = arr16.shape[-1] == 4
+            arr16 = cv2.cvtColor(arr16, cv2.COLOR_BGRA2RGBA if has_alpha16 else cv2.COLOR_BGR2RGB)
+            arr16 = arr16.astype(np.float32)
+            rgb16  = arr16[..., :3] / 65535.0
+            mask16 = arr16[..., 3:4] / 65535.0 if has_alpha16 else None
+            img_t16  = _np_to_tensor(rgb16)
+            mask_t16 = _np_to_tensor(mask16[..., 0]) if mask16 is not None else None
+            return img_t16, mask_t16
+        # else: fall through to Pillow below -- defensive, shouldn't normally
+        # happen since _is_16bit_rgb_source() already confirmed 16-bit RGB(A).
 
     if not _HAS_PIL:
         raise ImportError("Pillow is required to read image files.")
