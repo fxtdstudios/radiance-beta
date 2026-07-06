@@ -90,23 +90,6 @@ except ImportError:
 
 log = logging.getLogger("radiance.io_unified")
 
-def _resolve_portable_path(path: str, project_root: str = "") -> str:
-    """
-    Resolves portable paths (starting with ./) relative to the project root.
-    """
-    if not path:
-        return path
-        
-    path = path.strip()
-    if path.startswith("./") and project_root:
-        # Resolve ./ relative to project_root
-        root = Path(project_root).resolve()
-        relative = path[2:] # Strip ./
-        resolved = root / relative
-        return str(resolved)
-        
-    return path
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # § 0  Constants
@@ -450,6 +433,16 @@ def _read_exr_single(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         import OpenEXR, Imath  # type: ignore
         f    = OpenEXR.InputFile(path)
         hdr  = f.header()
+        # ALBABIT-FIX: a depth/data-only EXR (e.g. just "Z", no R/G/B) used to
+        # raise TypeError: "There is no channel 'R' in the image" here, caught
+        # by RadianceRead.read()'s outer try/except and surfaced as a silent
+        # black image instead of a clear message.
+        if not {"R", "G", "B"} <= set(hdr["channels"]):
+            raise ValueError(
+                f"'{path}' has no standard R/G/B channels (found: {sorted(hdr['channels'])}). "
+                "This looks like a depth/data-only or multi-layer AOV file, which "
+                "RadianceRead does not support -- it only reads standard RGB(A) EXR."
+            )
         dw   = hdr["dataWindow"]
         w    = dw.max.x - dw.min.x + 1
         h    = dw.max.y - dw.min.y + 1
@@ -1323,8 +1316,6 @@ class RadianceRead:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class RadianceWrite:
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ IO & Delivery"
-    DESCRIPTION = "Write images or EXR sequences to disk with configurable format options."
     """
     Universal writer — images, EXR, video, numbered sequences.
 
@@ -1361,6 +1352,7 @@ class RadianceWrite:
     """
 
     CATEGORY = "FXTD STUDIOS/Radiance/◎ IO & Delivery"
+    DESCRIPTION = "Write images or EXR sequences to disk with configurable format options."
     FUNCTION     = "write"
     RETURN_TYPES = ()
     RETURN_NAMES = ()
@@ -1419,8 +1411,9 @@ class RadianceWrite:
                 "tooltip": "Apply this color space transform before saving.",
             }),
             "fps": ("FLOAT", {
-                "default": 24.0, "min": 1.0, "max": 240.0, "step": 0.001,
-                "tooltip": "Frame rate for video and sequence outputs.",
+                "default": 0.0, "min": 0.0, "max": 240.0, "step": 0.001,
+                "tooltip": "Frame rate for video and sequence outputs. "
+                           "0 = auto-detect from the source video (falls back to 24 if unavailable).",
             }),
             "quality": ("INT", {
                 "default": 18, "min": 0, "max": 51,
@@ -1582,10 +1575,10 @@ class RadianceWrite:
         filename:       str   = "",
         version:        int   = 1,
         color_space:    str  = "Linear (pass-through)",
-        fps:            float = 24.0,
+        fps:            float = 0.0,
         quality:        int   = 18,
         exr_compression: str  = "ZIP",
-        start_frame:    int   = 1,
+        start_frame:    int   = 1001,
         frame_padding:  int   = 4,
         audio_source:   str   = "",
         broadcast_safe: bool  = False,
@@ -1598,9 +1591,12 @@ class RadianceWrite:
     ):
         output_path = strip_path_quotes(output_path)
         frames, detected_fps = self._coerce_to_frames(image)   # (N, H, W, C)
-        # Use fps from the incoming data when the user hasn't overridden
-        if detected_fps is not None and fps == 24.0:
-            fps = detected_fps
+        # ALBABIT-FIX: fps==24.0 used to mean "auto-detect", indistinguishable
+        # from a user explicitly choosing 24 -- an explicit 24 on a 23.976
+        # source was silently overridden. 0.0 is now the unambiguous "auto"
+        # sentinel; any other value (including 24.0) is respected as-is.
+        if fps <= 0.0:
+            fps = detected_fps if detected_fps is not None else 24.0
 
         # Proxy downscale for faster preview
         if proxy_scale > 0:
@@ -1748,7 +1744,6 @@ class RadianceWrite:
             else:
                 ext = ".png"
 
-            saved_paths = []
             for i, fr in enumerate(frames):
                 fn   = f"{seq_stem}_{(pad_fmt % (start_frame + i))}{ext}"
                 path = out_dir / fn
@@ -1762,7 +1757,6 @@ class RadianceWrite:
                     _save_hdr(fr, path)
                 else:
                     _save_pil_image(fr, path, stem, quality)
-                saved_paths.append(str(path))
 
             return str(out_dir), n
 

@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional, Tuple, List
 import numpy as np
 
 from ....performance import perf_finish, perf_start
+from ....core.system.path_utils import get_safe_output_dir
 
 # Core library imports
 from .core import (
@@ -460,15 +461,11 @@ class RadianceEXRPassesWriter:
         else:
             base_dir = tempfile.gettempdir()
 
-        out_dir = base_dir
-        if output_path.strip():
-            # If absolute path, use it, else append to base
-            if os.path.isabs(output_path.strip()) or output_path.strip().startswith("\\\\"):
-                out_dir = output_path.strip()
-            else:
-                out_dir = os.path.join(base_dir, output_path.strip())
-
-        os.makedirs(out_dir, exist_ok=True)
+        # ALBABIT-FIX: was hand-rolled (os.path.isabs check + manual join),
+        # with no anti-traversal protection for relative output_path values.
+        # get_safe_output_dir() is the same helper RadianceWrite/RadianceEXRMultiPart
+        # already use for this exact pattern.
+        out_dir = get_safe_output_dir(base_dir, output_path.strip(), allow_absolute=True)
 
         # Standard Metadata dictionary
         meta: Dict[str, Any] = {
