@@ -73,7 +73,7 @@ class TestRadianceLoadImageMask:
     def test_api_surface(self):
         """Test signatures of input, outputs, function name, etc."""
         assert self.cls.RETURN_TYPES == ("IMAGE", "MASK")
-        assert self.cls.RETURN_NAMES == ("IMAGE", "MASK")
+        assert self.cls.RETURN_NAMES == ("image", "mask")
         assert self.cls.FUNCTION == "load_image"
 
     def test_validate_inputs(self):

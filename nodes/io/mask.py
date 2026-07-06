@@ -40,7 +40,7 @@ class RadianceLoadImageMask:
     SEARCH_ALIASES = ["◎ Radiance image", "◎ Radiance mask", "◎ Radiance mask editor", "load image mask"]
 
     RETURN_TYPES = ("IMAGE", "MASK")
-    RETURN_NAMES = ("IMAGE", "MASK")
+    RETURN_NAMES = ("image", "mask")
     FUNCTION = "load_image"
     DESCRIPTION = (
         "Load an image with optional non-destructive mask override. "
