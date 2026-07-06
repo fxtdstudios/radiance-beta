@@ -17,10 +17,10 @@ Supported READ
 
 Supported WRITE
 ───────────────
-  Image        PNG (8-bit · 16-bit) · JPEG · TIFF (16 · 32f) · DPX · WEBP
+  Image        PNG (8-bit · 16-bit) · JPEG · TIFF (16 · 32f) · DPX · WEBP · Radiance HDR (.hdr)
   EXR          16-bit half · 32-bit float
   Video        MP4 H.264 · MP4 H.265 10-bit · MOV ProRes 422 / 4444 · MOV DNxHR
-  Sequence     PNG / TIFF / EXR / DPX numbered sequences
+  Sequence     PNG / TIFF / EXR / DPX / Radiance HDR numbered sequences
 """
 
 from __future__ import annotations
@@ -123,6 +123,7 @@ _FMT_IMAGE = [
     "IMG │ WEBP",
     "IMG │ EXR (16-bit half)",
     "IMG │ EXR (32-bit float)",
+    "IMG │ Radiance HDR (.hdr)",
 ]
 _FMT_VIDEO = [
     "VID │ MP4 (H.264)",
@@ -138,6 +139,7 @@ _FMT_SEQ = [
     "SEQ │ EXR (16-bit half)",
     "SEQ │ EXR (32-bit float)",
     "SEQ │ DPX",
+    "SEQ │ Radiance HDR (.hdr)",
 ]
 
 WRITE_FORMATS: List[str] = _FMT_IMAGE + _FMT_SEQ + _FMT_VIDEO
@@ -694,6 +696,22 @@ def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str, quality: int = 18
     if not _HAS_PIL:
         raise ImportError("Pillow required for image writing.")
 
+    # ALBABIT-FIX: tifffile.imwrite() always writes real TIFF bytes -- for
+    # "PNG (16-bit)" (ext=".png") this silently produced a file with a TIFF
+    # magic header (II*) under a .png name, opened only by lenient readers
+    # (PIL sniffs content) but rejected by anything that trusts the
+    # extension. cv2 writes genuine 16-bit PNG (RGB or RGBA), confirmed via
+    # magic-byte + round-trip check, and is what this module already uses to
+    # *read* HDR/DPX -- no new dependency.
+    if fmt == "PNG (16-bit)":
+        import cv2  # type: ignore
+        arr_u16 = (np.clip(arr_f32, 0, 1) * 65535).astype(np.uint16)
+        if arr_u16.shape[-1] == 4:
+            cv2.imwrite(str(path), cv2.cvtColor(arr_u16, cv2.COLOR_RGBA2BGRA))
+        else:
+            cv2.imwrite(str(path), cv2.cvtColor(arr_u16, cv2.COLOR_RGB2BGR))
+        return
+
     # ALBABIT-FIX: was `"16-bit" in fmt or "TIFF" in fmt`, which also matched
     # "TIFF (32-bit float)" (the substring "TIFF" is in both TIFF formats) --
     # every 32-bit TIFF request was silently written as 16-bit instead, and
@@ -877,6 +895,22 @@ def _save_dpx(arr_f32: np.ndarray, path: Path) -> None:
             raise RuntimeError(f"Failed to write DPX pixels to '{path}': {_oiio.geterror()}")
     finally:
         out.close()
+
+
+def _save_hdr(arr_f32: np.ndarray, path: Path) -> None:
+    """Write a float32 (H, W, 3) array to Radiance HDR (.hdr / RGBE) via cv2.
+
+    ALBABIT-FIX: Radiance HDR was a real, working format in the pre-v3 fork
+    (write_hdr_rgbe(), hdr/io.py) but was never wired into RadianceWrite in
+    the Beta -- lost during the v3 rewrite, not abandoned code. write_hdr_rgbe()
+    itself is also confirmed broken (round-trip loses ~1 stop of range: a 4.0
+    scene-linear value reads back as ~2.0), so this uses cv2's native HDR
+    codec instead -- the same one _read_image() already uses for .hdr, and
+    verified via round-trip to be accurate (max error ~0.015 vs ~2.0).
+    """
+    arr = np.ascontiguousarray(arr_f32[..., :3], dtype=np.float32)
+    import cv2  # type: ignore
+    cv2.imwrite(str(path), cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
 
 
 def _coerce_mask_to_alpha(mask: Any, n: int, h: int, w: int) -> Optional[np.ndarray]:
@@ -1378,8 +1412,8 @@ class RadianceWrite:
             }),
             "mask": ("MASK", {
                 "tooltip": (
-                    "Optional alpha/matte. When connected and the format is EXR, it is "
-                    "written as the EXR alpha channel (RGBA). Ignored for non-EXR formats."
+                    "Optional alpha/matte. When connected and the format is EXR or PNG, it is "
+                    "written as the alpha channel (RGBA). Ignored for other formats."
                 ),
             }),
         }, "hidden": {
@@ -1532,8 +1566,13 @@ class RadianceWrite:
             output_path = str(Path(output_path) / f"{filename}_{ver_str}")
         n, h, w, c = frames.shape
 
-        # Optional alpha: written as the EXR alpha channel when an EXR format is chosen.
-        alpha = _coerce_mask_to_alpha(mask, n, h, w) if (mask is not None and "EXR" in format) else None
+        # Optional alpha: written as the alpha channel for EXR and PNG formats.
+        # ALBABIT-FIX: was EXR-only; the old radiance.disabled fork also wrote
+        # alpha for PNG (8-bit via Pillow RGBA, 16-bit via cv2 BGRA) -- both
+        # paths already accept a 4-channel array transparently, so only this
+        # gating condition needed to change.
+        _alpha_fmts = ("EXR" in format or "PNG" in format)
+        alpha = _coerce_mask_to_alpha(mask, n, h, w) if (mask is not None and _alpha_fmts) else None
 
         # Apply color space + broadcast-safe clamp
         out_frames: List[np.ndarray] = []
@@ -1610,6 +1649,7 @@ class RadianceWrite:
                 "WEBP":                ".webp",
                 "EXR (16-bit half)":   ".exr",
                 "EXR (32-bit float)":  ".exr",
+                "Radiance HDR (.hdr)": ".hdr",
             }
             ext  = ext_map[stem]
             path = self._out_path(output_path, ext, overwrite)
@@ -1617,6 +1657,8 @@ class RadianceWrite:
                 _save_exr(frames[0], path, half="16-bit" in stem)
             elif "DPX" in stem:
                 _save_dpx(frames[0], path)
+            elif "HDR" in stem:
+                _save_hdr(frames[0], path)
             else:
                 _save_pil_image(frames[0], path, stem, quality)
             return str(path), 1
@@ -1644,6 +1686,7 @@ class RadianceWrite:
             is_exr   = "EXR" in stem
             is_tiff  = "TIFF" in stem
             is_dpx   = "DPX" in stem
+            is_hdr   = "HDR" in stem
             half_exr = "16-bit" in stem
 
             if is_exr:
@@ -1652,6 +1695,8 @@ class RadianceWrite:
                 ext = ".tiff"
             elif is_dpx:
                 ext = ".dpx"
+            elif is_hdr:
+                ext = ".hdr"
             else:
                 ext = ".png"
 
@@ -1665,6 +1710,8 @@ class RadianceWrite:
                     _save_exr(fr, path, half=half_exr)
                 elif is_dpx:
                     _save_dpx(fr, path)
+                elif is_hdr:
+                    _save_hdr(fr, path)
                 else:
                     _save_pil_image(fr, path, stem, quality)
                 saved_paths.append(str(path))
