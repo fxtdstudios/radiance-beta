@@ -785,24 +785,29 @@ def _save_exr(arr_f32: np.ndarray, path: Path, half: bool) -> None:
 
     # ── Primary: OpenEXR ──────────────────────────────────────────────────
     try:
-        import OpenEXR, Imath  # type: ignore
-        h, w = arr_f32.shape[:2]
-        pixel_type = Imath.PixelType(Imath.PixelType.HALF if half else Imath.PixelType.FLOAT)
-        hdr = OpenEXR.Header(w, h)
-        try:
-            hdr["rad_version"] = _RADIANCE_VERSION
-            hdr["software"] = f"Radiance v{_RADIANCE_VERSION}"
-        except Exception:
-            pass  # header stamp is best-effort; never block the EXR write
-        hdr["channels"] = {name: Imath.Channel(pixel_type) for name, _ in channels}
-        out = OpenEXR.OutputFile(str(path), hdr)
-        try:
-            out.writePixels({
-                name: np.ascontiguousarray(plane).astype(np_dtype).tobytes()
-                for name, plane in channels
-            })
-        finally:
-            out.close()
+        import OpenEXR  # type: ignore
+        # ALBABIT-FIX: was OpenEXR.Header()/OutputFile()/writePixels() (the
+        # legacy dict-based API). That API only recognises a fixed, small set
+        # of attribute names internally -- rad_version/software (and even
+        # genuinely standard attributes like "comments") were silently
+        # rejected with a C-level "unknown attribute" stderr print, never a
+        # Python exception, so they never actually reached disk. Confirmed
+        # live: 0 of 12 metadata keys survived a round trip. The modern
+        # OpenEXR.File(header_dict, channels_dict) API (same installed
+        # version) persists arbitrary string/int/float attributes correctly,
+        # and infers HALF vs FLOAT per channel from the numpy dtype directly
+        # -- no Imath.Channel/PixelType wiring needed.
+        header = {
+            "compression": OpenEXR.ZIP_COMPRESSION,
+            "type": OpenEXR.scanlineimage,
+            "rad_version": _RADIANCE_VERSION,
+            "software": f"Radiance v{_RADIANCE_VERSION}",
+        }
+        channels_dict = {
+            name: np.ascontiguousarray(plane, dtype=np_dtype)
+            for name, plane in channels
+        }
+        OpenEXR.File(header, channels_dict).write(str(path))
         return
     except ImportError as exc:
         errors.append(f"OpenEXR module unavailable ({exc})")
