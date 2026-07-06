@@ -19,9 +19,7 @@ __all__ = [
     "write_exr_robust",
     "write_exr_openexr",
     "write_exr_cv2",
-    "write_exr_imageio",
     "check_openexr_available",
-    "write_hdr_rgbe",
     "build_radiance_hdr_metadata",
 ]
 
@@ -182,34 +180,6 @@ def write_exr_openexr(filepath: str, channels: Dict[str, np.ndarray], compressio
     np_dtype = np.float16 if pixel_type == "HALF" else np.float32
     channels_dict = {n: np.ascontiguousarray(d, dtype=np_dtype) for n, d in channels.items()}
     OpenEXR.File(header, channels_dict).write(filepath)
-
-def rgb_to_rgbe(rgb: np.ndarray) -> np.ndarray:
-    max_val = np.maximum(np.max(rgb, axis=-1, keepdims=True), 1e-32)
-    exponent = np.floor(np.log2(max_val)) + 128
-    exponent = np.clip(exponent, 0, 255).astype(np.uint8)
-    mantissa = np.clip((rgb / (2.0**(exponent.astype(np.float32)-128))) * 256.0, 0, 255).astype(np.uint8)
-    return np.concatenate([mantissa, exponent], axis=-1)
-
-def write_hdr_rgbe(filepath: str, image: np.ndarray) -> bool:
-    try:
-        os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
-        h, w = image.shape[:2]
-        with open(filepath, "wb") as f:
-            f.write(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n" + f"-Y {h} +X {w}\n".encode())
-            for y in range(h): f.write(rgb_to_rgbe(image[y]).tobytes())
-        return True
-    except Exception: return False
-
-def write_exr_imageio(filepath: str, image: np.ndarray, pixel_type: str = "HALF") -> bool:
-    """Fallback EXR writer using imageio."""
-    try:
-        import imageio.v3 as iio
-        os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
-        # Note: imageio usually requires freeimage plugin for EXR
-        iio.imwrite(filepath, image.astype(np.float32))
-        return True
-    except Exception:
-        return False
 
 def write_exr_robust(filepath: str, image: np.ndarray, bit_depth: str = "32-bit Float", compression: str = "ZIP", metadata: Optional[Dict[str, Any]] = None) -> bool:
     # ALBABIT-FIX: was cv2 first, OpenEXR second, with a SimpleEXRWriter

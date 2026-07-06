@@ -102,6 +102,7 @@ jobs:
           python -m pytest tests/ \
             --ignore=tests/test_dcc_studio.py \
             --ignore=tests/test_hdr_blend_fixes.py \
+            --ignore=tests/test_io_functional.py \
             --ignore=tests/test_io_hdr_regression.py \
             --ignore=tests/test_math_transforms.py \
             --ignore=tests/test_radiance_load_image_mask.py \

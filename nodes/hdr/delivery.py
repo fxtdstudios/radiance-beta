@@ -31,7 +31,6 @@ from radiance.color.ops import (
     PQ_C1 as _PQ_C1,
     PQ_C2 as _PQ_C2,
     PQ_C3 as _PQ_C3,
-    PQ_REF_WHITE_NITS as _REF_WHITE_NITS,
     M_REC709_TO_BT2020 as _M709_2020,
     linear_to_pq_bt2408 as _linear_to_pq,
     linear_to_hlg as _linear_to_hlg,
@@ -147,7 +146,9 @@ class RadianceHDREncode:
             img = _apply_bt2020(img)
 
         if format == "PQ (HDR10)":
-            out = _linear_to_pq(img, peak_nits=peak_nits)
+            # ALBABIT-FIX: reference_white_nits was accepted but never passed to
+            # _linear_to_pq, which used the hardcoded 203 nits default regardless.
+            out = _linear_to_pq(img, peak_nits=peak_nits, reference_white_nits=reference_white_nits)
             logger.info("HDREncode PQ: peak=%d nits  ref=%.0f  bt2020=%s  peak_in=%.3f",
                         peak_nits, reference_white_nits, apply_bt2020, float(image[..., :3].max()))
         else:  # HLG

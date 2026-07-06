@@ -17,10 +17,10 @@ Supported READ
 
 Supported WRITE
 ───────────────
-  Image        PNG (8-bit · 16-bit) · JPEG · TIFF (16 · 32f) · DPX · WEBP
+  Image        PNG (8-bit · 16-bit) · JPEG · TIFF (16 · 32f) · DPX · WEBP · Radiance HDR (.hdr)
   EXR          16-bit half · 32-bit float
   Video        MP4 H.264 · MP4 H.265 10-bit · MOV ProRes 422 / 4444 · MOV DNxHR
-  Sequence     PNG / TIFF / EXR / DPX numbered sequences
+  Sequence     PNG / TIFF / EXR / DPX / Radiance HDR numbered sequences
 """
 
 from __future__ import annotations
@@ -90,23 +90,6 @@ except ImportError:
 
 log = logging.getLogger("radiance.io_unified")
 
-def _resolve_portable_path(path: str, project_root: str = "") -> str:
-    """
-    Resolves portable paths (starting with ./) relative to the project root.
-    """
-    if not path:
-        return path
-        
-    path = path.strip()
-    if path.startswith("./") and project_root:
-        # Resolve ./ relative to project_root
-        root = Path(project_root).resolve()
-        relative = path[2:] # Strip ./
-        resolved = root / relative
-        return str(resolved)
-        
-    return path
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # § 0  Constants
@@ -123,6 +106,7 @@ _FMT_IMAGE = [
     "IMG │ WEBP",
     "IMG │ EXR (16-bit half)",
     "IMG │ EXR (32-bit float)",
+    "IMG │ Radiance HDR (.hdr)",
 ]
 _FMT_VIDEO = [
     "VID │ MP4 (H.264)",
@@ -138,6 +122,7 @@ _FMT_SEQ = [
     "SEQ │ EXR (16-bit half)",
     "SEQ │ EXR (32-bit float)",
     "SEQ │ DPX",
+    "SEQ │ Radiance HDR (.hdr)",
 ]
 
 WRITE_FORMATS: List[str] = _FMT_IMAGE + _FMT_SEQ + _FMT_VIDEO
@@ -339,6 +324,44 @@ def _path_kind(path: str) -> str:
 
 # ── Image read ────────────────────────────────────────────────────────────
 
+def _is_16bit_rgb_source(path: str, ext: str) -> bool:
+    """Cheaply detect a genuine 16-bit-per-channel RGB(A) PNG/TIFF source,
+    without a full pixel decode. Returns False (safe default -- existing
+    Pillow path) if detection isn't possible or the source isn't 16-bit RGB(A).
+    """
+    try:
+        if ext == ".png":
+            # PNG IHDR chunk has a fixed layout: 8-byte signature + 4-byte
+            # length + 4-byte "IHDR" + 4-byte width + 4-byte height + 1-byte
+            # bit depth + 1-byte color type (2=RGB, 6=RGBA) -- no decode needed.
+            with open(path, "rb") as f:
+                header = f.read(26)
+            if len(header) < 26 or header[:8] != b"\x89PNG\r\n\x1a\n":
+                return False
+            bit_depth, color_type = header[24], header[25]
+            return bit_depth == 16 and color_type in (2, 6)
+        if ext in (".tif", ".tiff"):
+            import tifffile  # type: ignore
+            with tifffile.TiffFile(path) as tf:
+                page = tf.pages[0]
+                return page.dtype == np.uint16 and page.samplesperpixel in (3, 4)
+    except Exception:
+        pass
+    return False
+
+
+def _is_float32_tiff(path: str) -> bool:
+    """Cheaply detect a 32-bit float TIFF via tifffile page metadata (no
+    full pixel decode) -- Pillow's standard build cannot open this sample
+    format at all."""
+    try:
+        import tifffile  # type: ignore
+        with tifffile.TiffFile(path) as tf:
+            return tf.pages[0].dtype == np.float32
+    except Exception:
+        return False
+
+
 def _read_image(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Return (IMAGE, MASK) tensors from a single image file."""
     ext = Path(path).suffix.lower()
@@ -373,6 +396,41 @@ def _read_image(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         arr = arr[..., :3] if spec.nchannels >= 3 else np.repeat(arr[..., :1], 3, axis=-1)
         return _np_to_tensor(arr), None
 
+    # ALBABIT-FIX: a genuine 16-bit-per-channel RGB(A) PNG/TIFF is silently
+    # collapsed to 8-bit by Pillow's .convert("RGB"/"RGBA") below -- Pillow has
+    # no internal 16-bit RGB mode, and pil.mode reports "RGB" regardless of
+    # source depth. cv2 preserves full precision instead. Grayscale 16-bit is
+    # untouched -- Pillow already preserves that losslessly via "I"/"I;16".
+    if ext in (".png", ".tif", ".tiff") and _is_16bit_rgb_source(path, ext):
+        import cv2  # type: ignore
+        arr16 = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if arr16 is not None and arr16.dtype == np.uint16 and arr16.ndim == 3 and arr16.shape[-1] in (3, 4):
+            has_alpha16 = arr16.shape[-1] == 4
+            arr16 = cv2.cvtColor(arr16, cv2.COLOR_BGRA2RGBA if has_alpha16 else cv2.COLOR_BGR2RGB)
+            arr16 = arr16.astype(np.float32)
+            rgb16  = arr16[..., :3] / 65535.0
+            mask16 = arr16[..., 3:4] / 65535.0 if has_alpha16 else None
+            img_t16  = _np_to_tensor(rgb16)
+            mask_t16 = _np_to_tensor(mask16[..., 0]) if mask16 is not None else None
+            return img_t16, mask_t16
+        # else: fall through to Pillow below -- defensive, shouldn't normally
+        # happen since _is_16bit_rgb_source() already confirmed 16-bit RGB(A).
+
+    # ALBABIT-FIX: a 32-bit float TIFF (RadianceWrite's own "TIFF (32-bit
+    # float)" output) can't be opened by Pillow at all -- caught by
+    # RadianceRead.read()'s outer handler and surfaced as a silent black
+    # image. tifffile (already used to write this format) reads it back correctly.
+    if ext in (".tif", ".tiff") and _is_float32_tiff(path):
+        import tifffile  # type: ignore
+        arr = tifffile.imread(path).astype(np.float32)
+        if arr.ndim == 2:
+            arr = arr[..., np.newaxis]
+        if arr.shape[-1] == 1:
+            arr = np.repeat(arr, 3, axis=-1)
+        rgb32 = arr[..., :3]
+        mask32 = arr[..., 3] if arr.shape[-1] == 4 else None
+        return _np_to_tensor(rgb32), (_np_to_tensor(mask32) if mask32 is not None else None)
+
     if not _HAS_PIL:
         raise ImportError("Pillow is required to read image files.")
     pil = _PIL.open(path)
@@ -400,6 +458,16 @@ def _read_exr_single(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         import OpenEXR, Imath  # type: ignore
         f    = OpenEXR.InputFile(path)
         hdr  = f.header()
+        # ALBABIT-FIX: a depth/data-only EXR (e.g. just "Z", no R/G/B) used to
+        # raise TypeError: "There is no channel 'R' in the image" here, caught
+        # by RadianceRead.read()'s outer try/except and surfaced as a silent
+        # black image instead of a clear message.
+        if not {"R", "G", "B"} <= set(hdr["channels"]):
+            raise ValueError(
+                f"'{path}' has no standard R/G/B channels (found: {sorted(hdr['channels'])}). "
+                "This looks like a depth/data-only or multi-layer AOV file, which "
+                "RadianceRead does not support -- it only reads standard RGB(A) EXR."
+            )
         dw   = hdr["dataWindow"]
         w    = dw.max.x - dw.min.x + 1
         h    = dw.max.y - dw.min.y + 1
@@ -694,6 +762,20 @@ def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str, quality: int = 18
     if not _HAS_PIL:
         raise ImportError("Pillow required for image writing.")
 
+    # ALBABIT-FIX: tifffile.imwrite() always writes real TIFF bytes -- for
+    # "PNG (16-bit)" this silently produced a file with a TIFF magic header
+    # under a .png name, rejected by anything that trusts the extension.
+    # cv2 writes a genuine 16-bit PNG instead (confirmed via magic-byte +
+    # round-trip check) -- already used elsewhere in this module for HDR/DPX.
+    if fmt == "PNG (16-bit)":
+        import cv2  # type: ignore
+        arr_u16 = (np.clip(arr_f32, 0, 1) * 65535).astype(np.uint16)
+        if arr_u16.shape[-1] == 4:
+            cv2.imwrite(str(path), cv2.cvtColor(arr_u16, cv2.COLOR_RGBA2BGRA))
+        else:
+            cv2.imwrite(str(path), cv2.cvtColor(arr_u16, cv2.COLOR_RGB2BGR))
+        return
+
     # ALBABIT-FIX: was `"16-bit" in fmt or "TIFF" in fmt`, which also matched
     # "TIFF (32-bit float)" (the substring "TIFF" is in both TIFF formats) --
     # every 32-bit TIFF request was silently written as 16-bit instead, and
@@ -879,6 +961,19 @@ def _save_dpx(arr_f32: np.ndarray, path: Path) -> None:
         out.close()
 
 
+def _save_hdr(arr_f32: np.ndarray, path: Path) -> None:
+    """Write a float32 (H, W, 3) array to Radiance HDR (.hdr / RGBE) via cv2.
+
+    ALBABIT-FIX: restores a format lost in the v3 rewrite. The pre-v3
+    write_hdr_rgbe() (hdr/io.py) is confirmed broken on round-trip (loses
+    ~1 stop of range); cv2's native HDR codec (already used to read .hdr)
+    is accurate instead.
+    """
+    arr = np.ascontiguousarray(arr_f32[..., :3], dtype=np.float32)
+    import cv2  # type: ignore
+    cv2.imwrite(str(path), cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
+
+
 def _coerce_mask_to_alpha(mask: Any, n: int, h: int, w: int) -> Optional[np.ndarray]:
     """Normalize a ComfyUI MASK to an (N, H, W) float32 alpha array.
 
@@ -931,37 +1026,51 @@ def _save_video_ffmpeg(
     crf: int,
     audio_source: str,
 ) -> None:
-    """Encode a frame batch to video via ffmpeg."""
+    """Encode a frame batch to video via ffmpeg, piping raw frames directly
+    (no intermediate 8-bit PNG per frame).
+
+    ALBABIT-FIX: frames used to go through an 8-bit PNG intermediate, so no
+    "10-bit" format ever carried more than 8 bits of real precision. Now
+    piped raw via stdin: ProRes 422 HQ/4444 get a genuine 16-bit source (the
+    formats that benefit); H.264/H.265/DNxHR HQ stay 8-bit, since their
+    "10-bit" is a codec/container property, not source precision.
+    """
     if not _ffmpeg_ok():
         raise RuntimeError("ffmpeg not found.")
 
+    # (codec, src_pix_fmt, dst_pix_fmt, ext, extra ffmpeg args)
     fmt_map = {
-        "MP4 (H.264)":        ("libx264",  "yuv420p",    ".mp4", ["-crf", str(crf), "-preset", "medium"]),
-        "MP4 (H.265 10-bit)": ("libx265",  "yuv420p10le",".mp4", ["-crf", str(crf), "-preset", "medium", "-tag:v", "hvc1"]),
-        "MOV (ProRes 422 HQ)":("prores_ks","yuv422p10le",".mov", ["-profile:v", "3", "-qscale:v", "9"]),
-        "MOV (ProRes 4444)":  ("prores_ks","yuva444p10le",".mov",["-profile:v", "4", "-qscale:v", "9"]),
-        "MOV (DNxHR HQ)":     ("dnxhd",   "yuv422p",    ".mxf", ["-profile:v", "dnxhr_hq"]),
+        "MP4 (H.264)":        ("libx264",  "rgb24",   "yuv420p",     ".mp4", ["-crf", str(crf), "-preset", "medium"]),
+        "MP4 (H.265 10-bit)": ("libx265",  "rgb24",   "yuv420p10le", ".mp4", ["-crf", str(crf), "-preset", "medium", "-tag:v", "hvc1"]),
+        "MOV (ProRes 422 HQ)":("prores_ks","rgb48le", "yuv422p10le", ".mov", ["-profile:v", "3", "-qscale:v", "9"]),
+        "MOV (ProRes 4444)":  ("prores_ks","rgb48le", "yuva444p10le",".mov", ["-profile:v", "4", "-qscale:v", "9"]),
+        "MOV (DNxHR HQ)":     ("dnxhd",    "rgb24",   "yuv422p",     ".mxf", ["-profile:v", "dnxhr_hq"]),
     }
-    codec, pix_fmt, ext, extra = fmt_map.get(fmt, ("libx264", "yuv420p", ".mp4", ["-crf", str(crf)]))
+    codec, src_pix_fmt, dst_pix_fmt, ext, extra = fmt_map.get(
+        fmt, ("libx264", "rgb24", "yuv420p", ".mp4", ["-crf", str(crf)])
+    )
 
     out_path = str(output_path)
     if not out_path.lower().endswith(ext):
         out_path += ext
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        for i, frame in enumerate(frames):
-            fpath = os.path.join(tmpdir, f"{i:06d}.png")
-            _save_pil_image(frame, Path(fpath), "PNG")
+    n, h, w = frames.shape[:3]
+    if src_pix_fmt == "rgb48le":
+        raw = (np.clip(frames, 0, 1) * 65535).astype("<u2").tobytes()
+    else:
+        raw = (np.clip(frames, 0, 1) * 255).astype(np.uint8).tobytes()
 
-        cmd = [
-            "ffmpeg", "-v", "error",
-            "-framerate", str(fps),
-            "-i", os.path.join(tmpdir, "%06d.png"),
-        ]
-        if audio_source and os.path.isfile(audio_source):
-            cmd += ["-i", audio_source, "-c:a", "aac", "-shortest"]
-        cmd += ["-c:v", codec, "-pix_fmt", pix_fmt] + extra + ["-y", out_path]
-        subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+    cmd = [
+        "ffmpeg", "-v", "error", "-y",
+        "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{w}x{h}", "-pix_fmt", src_pix_fmt,
+        "-r", str(fps),
+        "-i", "pipe:0",
+    ]
+    if audio_source and os.path.isfile(audio_source):
+        cmd += ["-i", audio_source, "-c:a", "aac", "-shortest"]
+    cmd += ["-c:v", codec, "-pix_fmt", dst_pix_fmt] + extra + [out_path]
+    subprocess.run(cmd, input=raw, check=True, capture_output=True, timeout=600)
 
     return out_path
 
@@ -1219,8 +1328,6 @@ class RadianceRead:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class RadianceWrite:
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ IO & Delivery"
-    DESCRIPTION = "Write images or EXR sequences to disk with configurable format options."
     """
     Universal writer — images, EXR, video, numbered sequences.
 
@@ -1257,6 +1364,7 @@ class RadianceWrite:
     """
 
     CATEGORY = "FXTD STUDIOS/Radiance/◎ IO & Delivery"
+    DESCRIPTION = "Write images or EXR sequences to disk with configurable format options."
     FUNCTION     = "write"
     RETURN_TYPES = ()
     RETURN_NAMES = ()
@@ -1315,8 +1423,9 @@ class RadianceWrite:
                 "tooltip": "Apply this color space transform before saving.",
             }),
             "fps": ("FLOAT", {
-                "default": 24.0, "min": 1.0, "max": 240.0, "step": 0.001,
-                "tooltip": "Frame rate for video and sequence outputs.",
+                "default": 0.0, "min": 0.0, "max": 240.0, "step": 0.001,
+                "tooltip": "Frame rate for video and sequence outputs. "
+                           "0 = auto-detect from the source video (falls back to 24 if unavailable).",
             }),
             "quality": ("INT", {
                 "default": 18, "min": 0, "max": 51,
@@ -1356,8 +1465,8 @@ class RadianceWrite:
             }),
             "mask": ("MASK", {
                 "tooltip": (
-                    "Optional alpha/matte. When connected and the format is EXR, it is "
-                    "written as the EXR alpha channel (RGBA). Ignored for non-EXR formats."
+                    "Optional alpha/matte. When connected and the format is EXR or PNG, it is "
+                    "written as the alpha channel (RGBA). Ignored for other formats."
                 ),
             }),
         }, "hidden": {
@@ -1478,10 +1587,10 @@ class RadianceWrite:
         filename:       str   = "",
         version:        int   = 1,
         color_space:    str  = "Linear (pass-through)",
-        fps:            float = 24.0,
+        fps:            float = 0.0,
         quality:        int   = 18,
         exr_compression: str  = "ZIP",
-        start_frame:    int   = 1,
+        start_frame:    int   = 1001,
         frame_padding:  int   = 4,
         audio_source:   str   = "",
         broadcast_safe: bool  = False,
@@ -1494,9 +1603,12 @@ class RadianceWrite:
     ):
         output_path = strip_path_quotes(output_path)
         frames, detected_fps = self._coerce_to_frames(image)   # (N, H, W, C)
-        # Use fps from the incoming data when the user hasn't overridden
-        if detected_fps is not None and fps == 24.0:
-            fps = detected_fps
+        # ALBABIT-FIX: fps==24.0 used to mean "auto-detect", indistinguishable
+        # from a user explicitly choosing 24 -- an explicit 24 on a 23.976
+        # source was silently overridden. 0.0 is now the unambiguous "auto"
+        # sentinel; any other value (including 24.0) is respected as-is.
+        if fps <= 0.0:
+            fps = detected_fps if detected_fps is not None else 24.0
 
         # Proxy downscale for faster preview
         if proxy_scale > 0:
@@ -1510,8 +1622,12 @@ class RadianceWrite:
             output_path = str(Path(output_path) / f"{filename}_{ver_str}")
         n, h, w, c = frames.shape
 
-        # Optional alpha: written as the EXR alpha channel when an EXR format is chosen.
-        alpha = _coerce_mask_to_alpha(mask, n, h, w) if (mask is not None and "EXR" in format) else None
+        # Optional alpha: written as the alpha channel for EXR and PNG formats.
+        # ALBABIT-FIX: was EXR-only; the old radiance.disabled fork also wrote
+        # alpha for PNG (8-bit via Pillow RGBA, 16-bit via cv2 BGRA) -- both
+        # paths already accept a 4-channel array transparently, so only this
+        # gating condition needed to change.
+        alpha = _coerce_mask_to_alpha(mask, n, h, w) if mask is not None and ("EXR" in format or "PNG" in format) else None
 
         # Apply color space + broadcast-safe clamp
         out_frames: List[np.ndarray] = []
@@ -1588,6 +1704,7 @@ class RadianceWrite:
                 "WEBP":                ".webp",
                 "EXR (16-bit half)":   ".exr",
                 "EXR (32-bit float)":  ".exr",
+                "Radiance HDR (.hdr)": ".hdr",
             }
             ext  = ext_map[stem]
             path = self._out_path(output_path, ext, overwrite)
@@ -1595,6 +1712,8 @@ class RadianceWrite:
                 _save_exr(frames[0], path, half="16-bit" in stem)
             elif "DPX" in stem:
                 _save_dpx(frames[0], path)
+            elif "HDR" in stem:
+                _save_hdr(frames[0], path)
             else:
                 _save_pil_image(frames[0], path, stem, quality)
             return str(path), 1
@@ -1622,6 +1741,7 @@ class RadianceWrite:
             is_exr   = "EXR" in stem
             is_tiff  = "TIFF" in stem
             is_dpx   = "DPX" in stem
+            is_hdr   = "HDR" in stem
             half_exr = "16-bit" in stem
 
             if is_exr:
@@ -1630,10 +1750,11 @@ class RadianceWrite:
                 ext = ".tiff"
             elif is_dpx:
                 ext = ".dpx"
+            elif is_hdr:
+                ext = ".hdr"
             else:
                 ext = ".png"
 
-            saved_paths = []
             for i, fr in enumerate(frames):
                 fn   = f"{seq_stem}_{(pad_fmt % (start_frame + i))}{ext}"
                 path = out_dir / fn
@@ -1643,9 +1764,10 @@ class RadianceWrite:
                     _save_exr(fr, path, half=half_exr)
                 elif is_dpx:
                     _save_dpx(fr, path)
+                elif is_hdr:
+                    _save_hdr(fr, path)
                 else:
                     _save_pil_image(fr, path, stem, quality)
-                saved_paths.append(str(path))
 
             return str(out_dir), n
 
