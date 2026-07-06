@@ -15,6 +15,14 @@ import { app } from "../../scripts/app.js";
  *          when a saved workflow is restored.
  *  FIX 5: Read node isVideo check extended to include .avi .mkv .webm,
  *          matching the Python reader's accepted extensions exactly.
+ *
+ *  2026-07: RadianceWrite per-format widget visibility rewritten from scratch.
+ *          The previous block targeted "RadianceDigitalCinemaWrite" and its
+ *          pre-v3 write_mode/bit_depth/alpha_mode widgets, none of which exist
+ *          on that class in the Beta (reduced to a 4-parameter shim) -- dead
+ *          code that never matched anything. The full widget set now lives on
+ *          "RadianceWrite" behind a single flat `format` dropdown, so the new
+ *          version derives the group from the format's prefix directly.
  */
 
 // FIX 5: Single source-of-truth for video extensions — mirrors Python read().
@@ -170,6 +178,58 @@ try {
 	console.warn("[Radiance.IO] Failed to patch Element.prototype.setAttribute", e);
 }
 
+// Widget visibility helpers — same pattern as radiance_vae_widgets.js /
+// radiance_sampler.js (three-mechanism: options.hidden for Nodes 2.0 Vue
+// filtering, type="hidden"+computeSize for legacy LiteGraph canvas, splice
+// reinsert to force Vue to re-evaluate options.hidden on show).
+function _forceWidgetReinsert(widget, node) {
+	if (!node?.widgets) return;
+	const idx = node.widgets.indexOf(widget);
+	if (idx === -1) return;
+	node.widgets.splice(idx, 1);
+	node.widgets.splice(idx, 0, widget);
+}
+
+function setWidgetVisible(widget, visible, node) {
+	if (!widget) return;
+
+	if (!widget.options) widget.options = {};
+	widget.options.hidden = !visible;
+	widget.hidden = !visible;
+
+	if (visible) {
+		if (widget.type === "hidden") {
+			widget.type = widget._origType || "number";
+			if (widget._origComputeSize !== undefined) {
+				widget.computeSize = widget._origComputeSize;
+			} else {
+				delete widget.computeSize;
+			}
+			delete widget._origComputeSize;
+			widget.computedHeight = widget._origComputedHeight ?? 32;
+			delete widget._origComputedHeight;
+		}
+	} else {
+		if (widget.type !== "hidden") {
+			widget._origType = widget.type;
+			widget._origComputeSize = widget.computeSize;
+			widget._origComputedHeight = widget.computedHeight;
+			widget.type = "hidden";
+			widget.computeSize = () => [0, -4];
+			widget.computedHeight = 4;
+		}
+	}
+
+	_forceWidgetReinsert(widget, node);
+}
+
+function refreshNodeSize(node) {
+	if (!node.computeSize) return;
+	const sz = node.computeSize();
+	node.setSize([Math.max(node.size[0], sz[0]), sz[1]]);
+	node.setDirtyCanvas(true, true);
+}
+
 app.registerExtension({
 	name: "Radiance.IO",
 	async beforeRegisterNodeDef(nodeType, nodeData, app) {
@@ -220,73 +280,94 @@ app.registerExtension({
 			};
 		}
 
-		// 2. Digital Cinema Write — smart show/hide toggles
-		// FIX 1: was "◎ RadianceDigitalCinemaWrite"
-		if (nodeData.name === "RadianceDigitalCinemaWrite") {
+		// 2. RadianceWrite — per-format widget visibility
+		//
+		// ALBABIT-FIX: this block previously targeted "RadianceDigitalCinemaWrite"
+		// and looked for widgets (write_mode, bit_depth, alpha_mode...) that only
+		// existed on that class in the pre-v3 fork. In the Beta, that class was
+		// reduced to a 4-parameter shim, and all the real widgets live on
+		// "RadianceWrite" itself, behind a single flat `format` dropdown (prefix
+		// "IMG │"/"SEQ │"/"VID │" — no separate write_mode widget). The old code
+		// was dead: it never matched a class that actually has these widgets.
+		// Rewritten from scratch against the current widget set, deriving the
+		// group directly from the format prefix rather than a second widget.
+		if (nodeData.name === "RadianceWrite") {
 			const onNodeCreated = nodeType.prototype.onNodeCreated;
 			nodeType.prototype.onNodeCreated = function () {
 				const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
+				const node = this;
 
-				const writeModeWidget   = this.widgets.find(w => w.name === "write_mode");
-				const formatWidget      = this.widgets.find(w => w.name === "output_format");
-				const qualityWidget     = this.widgets.find(w => w.name === "quality");
-				const fpsWidget         = this.widgets.find(w => w.name === "fps");
-				const startFrameWidget  = this.widgets.find(w => w.name === "start_frame");
-				const bitDepthWidget    = this.widgets.find(w => w.name === "bit_depth");
-				const compressionWidget = this.widgets.find(w => w.name === "compression");
-				const alphaModeWidget   = this.widgets.find(w => w.name === "alpha_mode");
-				const metadataWidget    = this.widgets.find(w => w.name === "custom_metadata");
-
-				// FIX 3: guard against undefined before accessing .type
-				const allWidgets = [
-					writeModeWidget, formatWidget, qualityWidget, fpsWidget,
-					startFrameWidget, bitDepthWidget, compressionWidget,
-					alphaModeWidget, metadataWidget,
-				];
-				allWidgets.forEach(w => { if (w) w.origType = w.type; });
-
-				// FIX 2: helper uses "hidden" (valid ComfyUI token) not "converted-widget"
-				const setVisible = (w, visible) => {
-					if (!w) return;
-					w.type = visible ? (w.origType || "text") : "hidden";
-				};
+				const formatWidget       = node.widgets.find(w => w.name === "format");
+				const fpsWidget          = node.widgets.find(w => w.name === "fps");
+				const qualityWidget      = node.widgets.find(w => w.name === "quality");
+				const exrCompWidget      = node.widgets.find(w => w.name === "exr_compression");
+				const startFrameWidget   = node.widgets.find(w => w.name === "start_frame");
+				const framePaddingWidget = node.widgets.find(w => w.name === "frame_padding");
+				const audioSourceWidget  = node.widgets.find(w => w.name === "audio_source");
 
 				const updateWidgets = () => {
-					const mode   = writeModeWidget ? writeModeWidget.value : "Video";
-					const fmt    = formatWidget    ? formatWidget.value    : "";
-					const is_exr = fmt.includes("EXR");
-					const is_png = fmt.includes("PNG");
-					const is_jpg = fmt.includes("JPEG");
+					const fmt = formatWidget ? formatWidget.value : "";
+					const isImg = fmt.startsWith("IMG");
+					const isSeq = fmt.startsWith("SEQ");
+					const isVid = fmt.startsWith("VID");
+					const isExr = fmt.includes("EXR");
+					// quality only actually does something for video CRF and
+					// JPEG/WEBP images (nodes_io.py::_save_pil_image) -- every
+					// other image/sequence format ignores it entirely.
+					const isJpgWebp = isImg && (fmt.includes("JPEG") || fmt.includes("WEBP"));
 
-					const isVideo    = mode === "Video";
-					const isSequence = mode === "Sequence";
-					const isSingle   = mode === "Single Image";
-					const isSeqLike  = isSequence || isSingle;
-
-					// Quality label context
 					if (qualityWidget) {
-						qualityWidget.label = isVideo ? "QUALITY (CRF)" : is_jpg ? "QUALITY (JPEG %)" : "QUALITY";
+						qualityWidget.label = isVid ? "quality (CRF)"
+							: isJpgWebp ? "quality (JPEG/WEBP)"
+							: "quality";
 					}
 
-					// FPS only relevant for video
-					setVisible(fpsWidget, isVideo);
+					setWidgetVisible(fpsWidget,          isVid, node);
+					setWidgetVisible(qualityWidget,       isVid || isJpgWebp, node);
+					setWidgetVisible(exrCompWidget,       isExr, node);
+					setWidgetVisible(startFrameWidget,    isSeq, node);
+					setWidgetVisible(framePaddingWidget,  isSeq, node);
+					setWidgetVisible(audioSourceWidget,   isVid, node);
 
-					// Start frame only relevant for sequences
-					setVisible(startFrameWidget, isSequence);
-
-					// EXR/PNG-specific controls only in sequence/single modes
-					setVisible(bitDepthWidget,    isSeqLike && (is_exr || is_png));
-					setVisible(compressionWidget, isSeqLike && is_exr);
-					setVisible(alphaModeWidget,   isSeqLike);
-					setVisible(metadataWidget,    isSeqLike);
+					refreshNodeSize(node);
 				};
 
-				if (writeModeWidget) writeModeWidget.callback = updateWidgets;
-				if (formatWidget)    formatWidget.callback    = updateWidgets;
+				if (formatWidget) {
+					const origCallback = formatWidget.callback;
+					formatWidget.callback = function (...args) {
+						const res = origCallback ? origCallback.apply(this, args) : undefined;
+						updateWidgets();
+						return res;
+					};
+				}
 
-				// Initial state — defer one tick so widgets are fully initialised
-				setTimeout(updateWidgets, 20);
+				// Poll as a state-based fallback (undo/redo, workflow load,
+				// upstream mute/bypass) -- same pattern as radiance_vae_widgets.js.
+				node._radianceWriteSyncInterval = setInterval(updateWidgets, 250);
+				const origOnRemoved = node.onRemoved;
+				node.onRemoved = function () {
+					if (node._radianceWriteSyncInterval) {
+						clearInterval(node._radianceWriteSyncInterval);
+						node._radianceWriteSyncInterval = null;
+					}
+					if (origOnRemoved) origOnRemoved.apply(this, arguments);
+				};
 
+				setTimeout(updateWidgets, 150);
+				return r;
+			};
+
+			// Re-apply after a saved workflow restores this node — onNodeCreated
+			// runs before ComfyUI deserializes widget values.
+			const onConfigure = nodeType.prototype.onConfigure;
+			nodeType.prototype.onConfigure = function (info) {
+				const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
+				const node = this;
+				const formatWidget = node.widgets?.find(w => w.name === "format");
+				if (formatWidget && typeof formatWidget.callback === "function") {
+					setTimeout(() => formatWidget.callback(formatWidget.value), 150);
+					setTimeout(() => formatWidget.callback(formatWidget.value), 600);
+				}
 				return r;
 			};
 		}
