@@ -8,8 +8,6 @@ try:
 except ImportError:
     folder_paths = None
 import datetime
-import struct
-import zlib
 from pathlib import Path
 from typing import Tuple, Dict, Any, List, Optional
 
@@ -23,7 +21,6 @@ __all__ = [
     "write_exr_cv2",
     "write_exr_imageio",
     "check_openexr_available",
-    "SimpleEXRWriter",
     "write_hdr_rgbe",
     "build_radiance_hdr_metadata",
 ]
@@ -77,10 +74,6 @@ logger = logging.getLogger("radiance.hdr.io")
 MAX_BATCH_SIZE = 1000
 MAX_IMAGE_DIMENSION = 32768
 
-EXR_COMPRESSION = {
-    "None": 0, "RLE": 1, "ZIPS": 2, "ZIP": 3, "PIZ": 4,
-    "PXR24": 5, "B44": 6, "B44A": 7, "DWAA": 8, "DWAB": 9,
-}
 EXR_PIXEL_TYPE = {"UINT": 0, "HALF": 1, "FLOAT": 2}
 EXR_LINE_ORDER = {"INCREASING_Y": 0, "DECREASING_Y": 1, "RANDOM_Y": 2}
 
@@ -190,53 +183,6 @@ def write_exr_openexr(filepath: str, channels: Dict[str, np.ndarray], compressio
     channels_dict = {n: np.ascontiguousarray(d, dtype=np_dtype) for n, d in channels.items()}
     OpenEXR.File(header, channels_dict).write(filepath)
 
-class SimpleEXRWriter:
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
-    def write(self, filepath: str, channels: Dict[str, np.ndarray], compression: str = "ZIP", pixel_type: str = "HALF", metadata: Optional[Dict[str, Any]] = None):
-        height, width = list(channels.values())[0].shape[:2]
-        ch_list = sorted(channels.keys())
-        os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
-        with open(filepath, "wb") as f:
-            f.write(struct.pack("<I", 20000630)) # Magic
-            f.write(struct.pack("<I", 2)) # Version
-            # Simplified header writer
-            def write_attr(n, t, d):
-                f.write(n.encode() + b"\x00" + t.encode() + b"\x00" + struct.pack("<I", len(d)) + d)
-            
-            ch_data = b""
-            pt = 1 if pixel_type == "HALF" else 2
-            for n in ch_list:
-                ch_data += n.encode() + b"\x00" + struct.pack("<I", pt) + b"\x00\x00\x00\x00" + struct.pack("<ii", 1, 1)
-            ch_data += b"\x00"
-            write_attr("channels", "chlist", ch_data)
-            write_attr("compression", "compression", struct.pack("<B", EXR_COMPRESSION.get(compression, 3)))
-            write_attr("dataWindow", "box2i", struct.pack("<iiii", 0, 0, width-1, height-1))
-            write_attr("displayWindow", "box2i", struct.pack("<iiii", 0, 0, width-1, height-1))
-            write_attr("lineOrder", "lineOrder", b"\x00")
-            write_attr("pixelAspectRatio", "float", struct.pack("<f", 1.0))
-            write_attr("screenWindowCenter", "v2f", struct.pack("<ff", 0.0, 0.0))
-            write_attr("screenWindowWidth", "float", struct.pack("<f", 1.0))
-            f.write(b"\x00") # End header
-            
-            offsets_pos = f.tell()
-            for _ in range(height): f.write(struct.pack("<Q", 0))
-            offsets = []
-            for y in range(height):
-                offsets.append(f.tell())
-                f.write(struct.pack("<iI", y, 0))  # scan-line y + data size (patched below)
-                line = b"".join([channels[n][y].astype(np.float16 if pixel_type == "HALF" else np.float32).tobytes() for n in ch_list])
-                if compression in ["ZIP", "ZIPS"]: line = zlib.compress(line)
-                pos = f.tell()
-                f.seek(offsets[-1] + 4)
-                f.write(struct.pack("<I", len(line)))
-                f.seek(pos)
-                f.write(line)
-            
-            pos = f.tell()
-            f.seek(offsets_pos)
-            for o in offsets: f.write(struct.pack("<Q", o))
-            f.seek(pos)
-
 def rgb_to_rgbe(rgb: np.ndarray) -> np.ndarray:
     max_val = np.maximum(np.max(rgb, axis=-1, keepdims=True), 1e-32)
     exponent = np.floor(np.log2(max_val)) + 128
@@ -266,7 +212,17 @@ def write_exr_imageio(filepath: str, image: np.ndarray, pixel_type: str = "HALF"
         return False
 
 def write_exr_robust(filepath: str, image: np.ndarray, bit_depth: str = "32-bit Float", compression: str = "ZIP", metadata: Optional[Dict[str, Any]] = None) -> bool:
-    if write_exr_cv2(filepath, image, bit_depth, compression): return True
+    # ALBABIT-FIX: was cv2 first, OpenEXR second, with a SimpleEXRWriter
+    # last-resort fallback. Three problems: (1) write_exr_cv2() doesn't accept
+    # a metadata parameter at all, so metadata was silently never attempted
+    # whenever cv2's EXR codec succeeded first -- the opposite priority from
+    # _save_exr() (nodes_io.py), which correctly tries OpenEXR first.
+    # (2) SimpleEXRWriter is a hand-rolled binary EXR writer that produces
+    # structurally invalid files (confirmed live: EXR_ERR_CORRUPT_CHUNK on
+    # read-back) while this function still returned True -- silent success
+    # on a corrupted delivery, the opposite of the "fail loudly" philosophy
+    # this module states elsewhere. (3) OpenEXR>=3.2.0 is a declared hard
+    # dependency, so a real EXR writer is expected to always be available.
     channels = {"R": image[..., 0], "G": image[..., 1], "B": image[..., 2]}
     if image.shape[-1] == 4: channels["A"] = image[..., 3]
     ptype = "HALF" if "16" in str(bit_depth) else "FLOAT"
@@ -274,11 +230,14 @@ def write_exr_robust(filepath: str, image: np.ndarray, bit_depth: str = "32-bit 
         try:
             write_exr_openexr(filepath, channels, compression, ptype, metadata)
             return True
-        except Exception: pass
-    try:
-        SimpleEXRWriter().write(filepath, channels, compression, ptype, metadata)
+        except Exception as exc:
+            logger.warning(f"[write_exr_robust] OpenEXR write failed ({exc}), trying OpenCV fallback.")
+    if write_exr_cv2(filepath, image, bit_depth, compression):
+        if metadata:
+            logger.warning(f"[write_exr_robust] Wrote '{filepath}' via OpenCV -- metadata was NOT embedded (OpenCV's EXR writer doesn't support it).")
         return True
-    except Exception: return False
+    logger.error(f"[write_exr_robust] Failed to write EXR '{filepath}': both OpenEXR and OpenCV failed or are unavailable.")
+    return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
