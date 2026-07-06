@@ -882,6 +882,50 @@ def _save_video_ffmpeg(
     return out_path
 
 
+def _write_audio_temp_wav(audio: Any) -> Optional[str]:
+    """Write a ComfyUI AUDIO dict ({"waveform": tensor, "sample_rate": int}) to a
+    temporary 32-bit float PCM WAV file, so it can be fed into the same
+    `audio_source` mux path `_save_video_ffmpeg()` already uses for on-disk
+    audio files. Returns the temp file path, or None if `audio` isn't a usable
+    AUDIO dict. The caller owns the returned file and must delete it.
+
+    # ALBABIT-FIX: the "audio" (AUDIO-type) input was accepted by write()'s
+    # signature but never referenced anywhere else in this file -- connecting
+    # an AUDIO output here had zero effect. Only the "audio_source" (a STRING
+    # path to an existing file) actually worked. No torchaudio/soundfile
+    # dependency needed: WAV is simple enough to write by hand (matches the
+    # approach radiance.disabled used for the same problem).
+    """
+    if not isinstance(audio, dict):
+        return None
+    waveform = audio.get("waveform")
+    if waveform is None:
+        return None
+
+    import struct
+
+    sr = int(audio.get("sample_rate", 44100))
+    wav_np = waveform.detach().cpu().numpy()
+    if wav_np.ndim == 3:        # (B, C, T) -> first batch item
+        wav_np = wav_np[0]
+    if wav_np.ndim == 1:        # (T,) -> (1, T) mono
+        wav_np = wav_np[np.newaxis, :]
+    n_channels = wav_np.shape[0]
+    raw = np.ascontiguousarray(wav_np.T).astype(np.float32).tobytes()  # interleaved (T, C)
+
+    fd, path = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    block_align = n_channels * 4
+    with open(path, "wb") as f:
+        f.write(
+            b"RIFF" + struct.pack("<I", 36 + len(raw)) +
+            b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 3, n_channels, sr,
+                sr * block_align, block_align, 32) +
+            b"data" + struct.pack("<I", len(raw)) + raw
+        )
+    return path
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # § 3  RadianceRead
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1208,7 +1252,8 @@ class RadianceWrite:
             }),
             "audio_source": ("STRING", {
                 "default": "",
-                "tooltip": "Path to audio file to mux into video output (optional).",
+                "tooltip": "Path to audio file to mux into video output (optional). "
+                           "Takes priority over the 'audio' input when both are set.",
             }),
             "broadcast_safe": ("BOOLEAN", {
                 "default": False,
@@ -1394,12 +1439,25 @@ class RadianceWrite:
                 fr = np.concatenate([fr, alpha[i][..., None]], axis=-1)   # RGB -> RGBA
             out_frames.append(fr)
 
+        # ALBABIT-FIX: "audio" (AUDIO-type input) was accepted but never used --
+        # only "audio_source" (a STRING path to an existing file) actually muxed
+        # into video output. When no explicit audio_source is given, fall back
+        # to writing the connected AUDIO tensor to a temp WAV so it reaches the
+        # same mux path. Only relevant for video output -- image/sequence
+        # formats have no audio track.
+        effective_audio_source = audio_source
+        temp_audio_wav: Optional[str] = None
+        if format in _FMT_VIDEO and not audio_source.strip() and audio is not None:
+            temp_audio_wav = _write_audio_temp_wav(audio)
+            if temp_audio_wav:
+                effective_audio_source = temp_audio_wav
+
         try:
             saved, count = self._dispatch(
                 out_frames, output_path, format,
                 fps, quality, exr_compression,
                 start_frame, frame_padding,
-                audio_source, overwrite,
+                effective_audio_source, overwrite,
             )
             log.info("RadianceWrite: saved %d frame(s) → %s", count, saved)
             return ()
@@ -1409,6 +1467,13 @@ class RadianceWrite:
             # turns red in ComfyUI instead of reporting a phantom success.
             log.error("RadianceWrite failed: %s", e)
             raise
+
+        finally:
+            if temp_audio_wav and os.path.exists(temp_audio_wav):
+                try:
+                    os.unlink(temp_audio_wav)
+                except OSError:
+                    pass
 
     def _dispatch(
         self,
