@@ -398,11 +398,9 @@ def _read_image(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
 
     # ALBABIT-FIX: a genuine 16-bit-per-channel RGB(A) PNG/TIFF is silently
     # collapsed to 8-bit by Pillow's .convert("RGB"/"RGBA") below -- Pillow has
-    # no internal 16-bit RGB mode, and pil.mode reports "RGB" either way, so
-    # there is no way to detect the loss after opening. cv2 preserves full
-    # precision (confirmed via round-trip: 0 error vs the source array).
-    # Grayscale 16-bit is untouched -- Pillow's "I"/"I;16" mode already
-    # preserves it losslessly until the explicit RGB convert (see below).
+    # no internal 16-bit RGB mode, and pil.mode reports "RGB" regardless of
+    # source depth. cv2 preserves full precision instead. Grayscale 16-bit is
+    # untouched -- Pillow already preserves that losslessly via "I"/"I;16".
     if ext in (".png", ".tif", ".tiff") and _is_16bit_rgb_source(path, ext):
         import cv2  # type: ignore
         arr16 = cv2.imread(path, cv2.IMREAD_UNCHANGED)
@@ -418,12 +416,10 @@ def _read_image(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         # else: fall through to Pillow below -- defensive, shouldn't normally
         # happen since _is_16bit_rgb_source() already confirmed 16-bit RGB(A).
 
-    # ALBABIT-FIX: a 32-bit float TIFF (the format RadianceWrite's own "TIFF
-    # (32-bit float)" option produces) can't be opened by Pillow at all --
-    # "cannot identify image file" -- caught by RadianceRead.read()'s outer
-    # handler and surfaced as a silent black image, not even a clear error.
-    # Found by test_io_functional.py's round-trip test. tifffile (already used
-    # to write this format) reads it back correctly.
+    # ALBABIT-FIX: a 32-bit float TIFF (RadianceWrite's own "TIFF (32-bit
+    # float)" output) can't be opened by Pillow at all -- caught by
+    # RadianceRead.read()'s outer handler and surfaced as a silent black
+    # image. tifffile (already used to write this format) reads it back correctly.
     if ext in (".tif", ".tiff") and _is_float32_tiff(path):
         import tifffile  # type: ignore
         arr = tifffile.imread(path).astype(np.float32)
@@ -767,12 +763,10 @@ def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str, quality: int = 18
         raise ImportError("Pillow required for image writing.")
 
     # ALBABIT-FIX: tifffile.imwrite() always writes real TIFF bytes -- for
-    # "PNG (16-bit)" (ext=".png") this silently produced a file with a TIFF
-    # magic header (II*) under a .png name, opened only by lenient readers
-    # (PIL sniffs content) but rejected by anything that trusts the
-    # extension. cv2 writes genuine 16-bit PNG (RGB or RGBA), confirmed via
-    # magic-byte + round-trip check, and is what this module already uses to
-    # *read* HDR/DPX -- no new dependency.
+    # "PNG (16-bit)" this silently produced a file with a TIFF magic header
+    # under a .png name, rejected by anything that trusts the extension.
+    # cv2 writes a genuine 16-bit PNG instead (confirmed via magic-byte +
+    # round-trip check) -- already used elsewhere in this module for HDR/DPX.
     if fmt == "PNG (16-bit)":
         import cv2  # type: ignore
         arr_u16 = (np.clip(arr_f32, 0, 1) * 65535).astype(np.uint16)
@@ -970,13 +964,10 @@ def _save_dpx(arr_f32: np.ndarray, path: Path) -> None:
 def _save_hdr(arr_f32: np.ndarray, path: Path) -> None:
     """Write a float32 (H, W, 3) array to Radiance HDR (.hdr / RGBE) via cv2.
 
-    ALBABIT-FIX: Radiance HDR was a real, working format in the pre-v3 fork
-    (write_hdr_rgbe(), hdr/io.py) but was never wired into RadianceWrite in
-    the Beta -- lost during the v3 rewrite, not abandoned code. write_hdr_rgbe()
-    itself is also confirmed broken (round-trip loses ~1 stop of range: a 4.0
-    scene-linear value reads back as ~2.0), so this uses cv2's native HDR
-    codec instead -- the same one _read_image() already uses for .hdr, and
-    verified via round-trip to be accurate (max error ~0.015 vs ~2.0).
+    ALBABIT-FIX: restores a format lost in the v3 rewrite. The pre-v3
+    write_hdr_rgbe() (hdr/io.py) is confirmed broken on round-trip (loses
+    ~1 stop of range); cv2's native HDR codec (already used to read .hdr)
+    is accurate instead.
     """
     arr = np.ascontiguousarray(arr_f32[..., :3], dtype=np.float32)
     import cv2  # type: ignore
@@ -1038,19 +1029,11 @@ def _save_video_ffmpeg(
     """Encode a frame batch to video via ffmpeg, piping raw frames directly
     (no intermediate 8-bit PNG per frame).
 
-    # ALBABIT-FIX: frames used to be written to individual 8-bit PNGs, then
-    # handed to ffmpeg as an image2 sequence -- every "10-bit" format below
-    # (H.265 10-bit, ProRes 422 HQ, ProRes 4444) therefore never carried more
-    # than 8 bits of real precision, regardless of its pix_fmt. Piping raw
-    # frames via stdin restores genuine precision for ProRes (measured: 256
-    # vs 880 distinct levels across a 1024px ramp for ProRes 422 HQ).
-    # H.264/H.265/DNxHR HQ keep an 8-bit (rgb24) source: H.264/H.265's
-    # "10-bit" here is a codec/container property (reduces re-encode banding),
-    # not extra source precision -- matches the old radiance.disabled fork's
-    # own choice. DNxHR HQ (as opposed to HQX) is hard 8-bit-only in ffmpeg's
-    # dnxhd encoder itself (confirmed: "-profile:v dnxhr_hq" rejects any
-    # 10-bit pix_fmt with "pixel format is incompatible with DNxHR LB/SQ/HQ
-    # profile") -- feeding it 16-bit source would gain nothing.
+    ALBABIT-FIX: frames used to go through an 8-bit PNG intermediate, so no
+    "10-bit" format ever carried more than 8 bits of real precision. Now
+    piped raw via stdin: ProRes 422 HQ/4444 get a genuine 16-bit source (the
+    formats that benefit); H.264/H.265/DNxHR HQ stay 8-bit, since their
+    "10-bit" is a codec/container property, not source precision.
     """
     if not _ffmpeg_ok():
         raise RuntimeError("ffmpeg not found.")
@@ -1644,8 +1627,7 @@ class RadianceWrite:
         # alpha for PNG (8-bit via Pillow RGBA, 16-bit via cv2 BGRA) -- both
         # paths already accept a 4-channel array transparently, so only this
         # gating condition needed to change.
-        _alpha_fmts = ("EXR" in format or "PNG" in format)
-        alpha = _coerce_mask_to_alpha(mask, n, h, w) if (mask is not None and _alpha_fmts) else None
+        alpha = _coerce_mask_to_alpha(mask, n, h, w) if mask is not None and ("EXR" in format or "PNG" in format) else None
 
         # Apply color space + broadcast-safe clamp
         out_frames: List[np.ndarray] = []
