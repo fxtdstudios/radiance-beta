@@ -648,8 +648,15 @@ def _unique_path(path: Path) -> Path:
         i += 1
 
 
-def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str) -> None:
-    """Save a float32 (H, W, 3) array to an image file via Pillow."""
+def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str, quality: int = 18) -> None:
+    """Save a float32 (H, W, 3) array to an image file via Pillow.
+
+    `quality` is the same widget value used for video CRF (0-51, lower = better).
+    JPEG/WEBP use the opposite convention (0-100, higher = better), so it is
+    remapped rather than passed through raw -- matching the widget's own
+    tooltip ("Also JPEG quality 0-100 (remapped)"), which previously had no
+    code behind it at all (see ALBABIT-FIX below).
+    """
     if not _HAS_PIL:
         raise ImportError("Pillow required for image writing.")
 
@@ -674,10 +681,16 @@ def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str) -> None:
 
     arr_u8 = (np.clip(arr_f32, 0, 1) * 255).astype(np.uint8)
     pil = _PIL.fromarray(arr_u8)
-    if "JPEG" in fmt:
-        pil.save(str(path), "JPEG", quality=90)
-    elif "WEBP" in fmt:
-        pil.save(str(path), "WEBP", quality=90, lossless=False)
+    if "JPEG" in fmt or "WEBP" in fmt:
+        # ALBABIT-FIX: quality was hardcoded to 90 here, ignoring the widget
+        # entirely -- the tooltip promised JPEG control but nothing in this
+        # function ever accepted a quality argument. Remap CRF-scale (0-51,
+        # lower = better) to Pillow's JPEG/WEBP scale (0-100, higher = better).
+        pil_quality = max(0, min(100, round((1.0 - quality / 51.0) * 100)))
+        if "JPEG" in fmt:
+            pil.save(str(path), "JPEG", quality=pil_quality)
+        else:
+            pil.save(str(path), "WEBP", quality=pil_quality, lossless=False)
     else:
         pil.save(str(path))
 
@@ -1432,7 +1445,7 @@ class RadianceWrite:
             if "EXR" in stem:
                 _save_exr(frames[0], path, half="16-bit" in stem)
             else:
-                _save_pil_image(frames[0], path, stem)
+                _save_pil_image(frames[0], path, stem, quality)
             return str(path), 1
 
         # ── Video ─────────────────────────────────────────────────────────
@@ -1478,7 +1491,7 @@ class RadianceWrite:
                 if is_exr:
                     _save_exr(fr, path, half=half_exr)
                 else:
-                    _save_pil_image(fr, path, stem)
+                    _save_pil_image(fr, path, stem, quality)
                 saved_paths.append(str(path))
 
             return str(out_dir), n
