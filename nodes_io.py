@@ -379,9 +379,16 @@ def _read_image(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     has_alpha = pil.mode in ("RGBA", "LA", "PA")
     pil_rgb = pil.convert("RGBA") if has_alpha else pil.convert("RGB")
     arr = np.array(pil_rgb, dtype=np.float32)
-    maxv = 65535.0 if pil.mode.endswith("16") or np.array(pil).max() > 255 else 255.0
-    rgb  = arr[..., :3] / maxv
-    mask = (arr[..., 3:4] / maxv) if has_alpha else None
+    # ALBABIT-FIX: maxv used to be chosen from `pil` (pre-convert -- still the
+    # source bit depth, e.g. 65535 for a 16-bit grayscale "I;16" source) but
+    # applied to `arr`, which comes from `pil_rgb` (post-`.convert("RGB"/
+    # "RGBA")`, always 8-bit -- Pillow's RGB/RGBA convert targets are always
+    # 8-bit per channel, there's no 16-bit RGB convert mode). Dividing 8-bit
+    # data by 65535 crushed 16-bit grayscale sources (mattes, depth passes)
+    # to ~1/256th of their real brightness, silently. `arr` is always 8-bit
+    # range here, so maxv is always 255.
+    rgb  = arr[..., :3] / 255.0
+    mask = (arr[..., 3:4] / 255.0) if has_alpha else None
     img_t  = _np_to_tensor(rgb)
     mask_t = _np_to_tensor(mask[..., 0]) if mask is not None else None
     return img_t, mask_t
