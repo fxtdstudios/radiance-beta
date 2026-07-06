@@ -86,7 +86,12 @@ def _pass_channels_for_multilayer(name: str, image: np.ndarray) -> Dict[str, np.
     if name == "beauty":
         names = ["R", "G", "B", "A"][:count]
     elif name == "depth":
-        names = ["depth.Z"] if count == 1 else [f"depth.{ch}" for ch in ["R", "G", "B", "A"][:count]]
+        # ALBABIT-FIX: was ["depth.R","depth.G","depth.B"] since extract() always
+        # triples depth to 3 identical channels for ComfyUI's IMAGE type -- no
+        # compositor auto-recognizes "depth.R/G/B" as a Z-depth buffer. Bare "Z"
+        # (matching write_exr_multipart()'s already-correct convention) is what
+        # Nuke/Fusion look for; the duplicate channels carry no extra data anyway.
+        names = ["Z"]
     elif name == "normal":
         names = ["normal.NX", "normal.NY", "normal.NZ", "normal.A"][:count]
     else:
