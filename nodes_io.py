@@ -931,37 +931,59 @@ def _save_video_ffmpeg(
     crf: int,
     audio_source: str,
 ) -> None:
-    """Encode a frame batch to video via ffmpeg."""
+    """Encode a frame batch to video via ffmpeg, piping raw frames directly
+    (no intermediate 8-bit PNG per frame).
+
+    # ALBABIT-FIX: frames used to be written to individual 8-bit PNGs, then
+    # handed to ffmpeg as an image2 sequence -- every "10-bit" format below
+    # (H.265 10-bit, ProRes 422 HQ, ProRes 4444) therefore never carried more
+    # than 8 bits of real precision, regardless of its pix_fmt. Piping raw
+    # frames via stdin restores genuine precision for ProRes (measured: 256
+    # vs 880 distinct levels across a 1024px ramp for ProRes 422 HQ).
+    # H.264/H.265/DNxHR HQ keep an 8-bit (rgb24) source: H.264/H.265's
+    # "10-bit" here is a codec/container property (reduces re-encode banding),
+    # not extra source precision -- matches the old radiance.disabled fork's
+    # own choice. DNxHR HQ (as opposed to HQX) is hard 8-bit-only in ffmpeg's
+    # dnxhd encoder itself (confirmed: "-profile:v dnxhr_hq" rejects any
+    # 10-bit pix_fmt with "pixel format is incompatible with DNxHR LB/SQ/HQ
+    # profile") -- feeding it 16-bit source would gain nothing.
+    """
     if not _ffmpeg_ok():
         raise RuntimeError("ffmpeg not found.")
 
+    # (codec, src_pix_fmt, dst_pix_fmt, ext, extra ffmpeg args)
     fmt_map = {
-        "MP4 (H.264)":        ("libx264",  "yuv420p",    ".mp4", ["-crf", str(crf), "-preset", "medium"]),
-        "MP4 (H.265 10-bit)": ("libx265",  "yuv420p10le",".mp4", ["-crf", str(crf), "-preset", "medium", "-tag:v", "hvc1"]),
-        "MOV (ProRes 422 HQ)":("prores_ks","yuv422p10le",".mov", ["-profile:v", "3", "-qscale:v", "9"]),
-        "MOV (ProRes 4444)":  ("prores_ks","yuva444p10le",".mov",["-profile:v", "4", "-qscale:v", "9"]),
-        "MOV (DNxHR HQ)":     ("dnxhd",   "yuv422p",    ".mxf", ["-profile:v", "dnxhr_hq"]),
+        "MP4 (H.264)":        ("libx264",  "rgb24",   "yuv420p",     ".mp4", ["-crf", str(crf), "-preset", "medium"]),
+        "MP4 (H.265 10-bit)": ("libx265",  "rgb24",   "yuv420p10le", ".mp4", ["-crf", str(crf), "-preset", "medium", "-tag:v", "hvc1"]),
+        "MOV (ProRes 422 HQ)":("prores_ks","rgb48le", "yuv422p10le", ".mov", ["-profile:v", "3", "-qscale:v", "9"]),
+        "MOV (ProRes 4444)":  ("prores_ks","rgb48le", "yuva444p10le",".mov", ["-profile:v", "4", "-qscale:v", "9"]),
+        "MOV (DNxHR HQ)":     ("dnxhd",    "rgb24",   "yuv422p",     ".mxf", ["-profile:v", "dnxhr_hq"]),
     }
-    codec, pix_fmt, ext, extra = fmt_map.get(fmt, ("libx264", "yuv420p", ".mp4", ["-crf", str(crf)]))
+    codec, src_pix_fmt, dst_pix_fmt, ext, extra = fmt_map.get(
+        fmt, ("libx264", "rgb24", "yuv420p", ".mp4", ["-crf", str(crf)])
+    )
 
     out_path = str(output_path)
     if not out_path.lower().endswith(ext):
         out_path += ext
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        for i, frame in enumerate(frames):
-            fpath = os.path.join(tmpdir, f"{i:06d}.png")
-            _save_pil_image(frame, Path(fpath), "PNG")
+    n, h, w = frames.shape[:3]
+    if src_pix_fmt == "rgb48le":
+        raw = (np.clip(frames, 0, 1) * 65535).astype("<u2").tobytes()
+    else:
+        raw = (np.clip(frames, 0, 1) * 255).astype(np.uint8).tobytes()
 
-        cmd = [
-            "ffmpeg", "-v", "error",
-            "-framerate", str(fps),
-            "-i", os.path.join(tmpdir, "%06d.png"),
-        ]
-        if audio_source and os.path.isfile(audio_source):
-            cmd += ["-i", audio_source, "-c:a", "aac", "-shortest"]
-        cmd += ["-c:v", codec, "-pix_fmt", pix_fmt] + extra + ["-y", out_path]
-        subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+    cmd = [
+        "ffmpeg", "-v", "error", "-y",
+        "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{w}x{h}", "-pix_fmt", src_pix_fmt,
+        "-r", str(fps),
+        "-i", "pipe:0",
+    ]
+    if audio_source and os.path.isfile(audio_source):
+        cmd += ["-i", audio_source, "-c:a", "aac", "-shortest"]
+    cmd += ["-c:v", codec, "-pix_fmt", dst_pix_fmt] + extra + [out_path]
+    subprocess.run(cmd, input=raw, check=True, capture_output=True, timeout=600)
 
     return out_path
 
