@@ -57,6 +57,15 @@ try:
 except ImportError:
     _HAS_FOLDER_PATHS = False
 
+# ALBABIT-FIX: DPX has no Pillow plugin at all (neither read nor write) --
+# "DPX" was offered in the format dropdown since v3.1 but never actually
+# worked. OpenImageIO is the VFX-industry-standard library for this format.
+try:
+    import OpenImageIO as _oiio
+    _HAS_OIIO = True
+except ImportError:
+    _HAS_OIIO = False
+
 from . import color_utils
 
 try:
@@ -346,15 +355,40 @@ def _read_image(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB).astype(np.float32)
         return _np_to_tensor(arr), None
 
+    if ext == ".dpx":
+        # ALBABIT-FIX: Pillow has no DPX plugin at all; use OpenImageIO, the
+        # VFX-industry-standard library for this format.
+        if not _HAS_OIIO:
+            raise ImportError("Reading DPX requires OpenImageIO (pip install OpenImageIO).")
+        inp = _oiio.ImageInput.open(path)
+        if inp is None:
+            raise RuntimeError(f"Cannot read DPX '{path}': {_oiio.geterror()}")
+        try:
+            spec = inp.spec()
+            pixels = inp.read_image(format=_oiio.FLOAT)
+        finally:
+            inp.close()
+        # read_image() auto-normalises integer DPX samples (e.g. 10-bit) to [0, 1] float.
+        arr = np.array(pixels, dtype=np.float32).reshape(spec.height, spec.width, spec.nchannels)
+        arr = arr[..., :3] if spec.nchannels >= 3 else np.repeat(arr[..., :1], 3, axis=-1)
+        return _np_to_tensor(arr), None
+
     if not _HAS_PIL:
         raise ImportError("Pillow is required to read image files.")
     pil = _PIL.open(path)
     has_alpha = pil.mode in ("RGBA", "LA", "PA")
     pil_rgb = pil.convert("RGBA") if has_alpha else pil.convert("RGB")
     arr = np.array(pil_rgb, dtype=np.float32)
-    maxv = 65535.0 if pil.mode.endswith("16") or np.array(pil).max() > 255 else 255.0
-    rgb  = arr[..., :3] / maxv
-    mask = (arr[..., 3:4] / maxv) if has_alpha else None
+    # ALBABIT-FIX: maxv used to be chosen from `pil` (pre-convert -- still the
+    # source bit depth, e.g. 65535 for a 16-bit grayscale "I;16" source) but
+    # applied to `arr`, which comes from `pil_rgb` (post-`.convert("RGB"/
+    # "RGBA")`, always 8-bit -- Pillow's RGB/RGBA convert targets are always
+    # 8-bit per channel, there's no 16-bit RGB convert mode). Dividing 8-bit
+    # data by 65535 crushed 16-bit grayscale sources (mattes, depth passes)
+    # to ~1/256th of their real brightness, silently. `arr` is always 8-bit
+    # range here, so maxv is always 255.
+    rgb  = arr[..., :3] / 255.0
+    mask = (arr[..., 3:4] / 255.0) if has_alpha else None
     img_t  = _np_to_tensor(rgb)
     mask_t = _np_to_tensor(mask[..., 0]) if mask is not None else None
     return img_t, mask_t
@@ -648,21 +682,42 @@ def _unique_path(path: Path) -> Path:
         i += 1
 
 
-def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str) -> None:
-    """Save a float32 (H, W, 3) array to an image file via Pillow."""
+def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str, quality: int = 18) -> None:
+    """Save a float32 (H, W, 3) array to an image file via Pillow.
+
+    `quality` is the same widget value used for video CRF (0-51, lower = better).
+    JPEG/WEBP use the opposite convention (0-100, higher = better), so it is
+    remapped rather than passed through raw -- matching the widget's own
+    tooltip ("Also JPEG quality 0-100 (remapped)"), which previously had no
+    code behind it at all (see ALBABIT-FIX below).
+    """
     if not _HAS_PIL:
         raise ImportError("Pillow required for image writing.")
 
-    if "16-bit" in fmt or "TIFF" in fmt:
+    # ALBABIT-FIX: was `"16-bit" in fmt or "TIFF" in fmt`, which also matched
+    # "TIFF (32-bit float)" (the substring "TIFF" is in both TIFF formats) --
+    # every 32-bit TIFF request was silently written as 16-bit instead, and
+    # its own dedicated `"32-bit" in fmt` branch below was never reached.
+    # "SEQ │ TIFF" (bare, no depth suffix) is still meant to land here.
+    if "16-bit" in fmt or ("TIFF" in fmt and "32-bit" not in fmt):
         arr_u16 = (np.clip(arr_f32, 0, 1) * 65535).astype(np.uint16)
-        pil = _PIL.fromarray(arr_u16, mode="I;16" if arr_f32.ndim == 2 else "RGB")
-        # Pillow can't do 16-bit RGB directly; use tifffile if available
+        # ALBABIT-FIX: this used to also do
+        # `_PIL.fromarray(arr_u16, mode="I;16" if arr_f32.ndim == 2 else "RGB")`
+        # here, whose result was never used (the real write is via tifffile
+        # below) -- with Pillow 12.2.0, that dead call raises TypeError for
+        # any RGB (ndim==3) array, crashing every 16-bit PNG/TIFF write before
+        # tifffile was ever reached. Pillow can't do 16-bit RGB directly
+        # anyway; tifffile handles both 2D and 3D arrays natively.
         try:
             import tifffile  # type: ignore
             tifffile.imwrite(str(path), arr_u16)
             return
         except ImportError:
-            # Fallback: save 8-bit
+            # Fallback: save 8-bit. Not silent -- a 16-bit request quietly
+            # becoming 8-bit is exactly the kind of downgrade this module's
+            # EXR writer refuses to do (see _save_exr's docstring).
+            log.warning("16-bit write requested for '%s' but tifffile is not installed; "
+                        "falling back to 8-bit.", path)
             arr_f32 = np.clip(arr_f32, 0, 1)
     if "32-bit" in fmt:
         try:
@@ -674,10 +729,16 @@ def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str) -> None:
 
     arr_u8 = (np.clip(arr_f32, 0, 1) * 255).astype(np.uint8)
     pil = _PIL.fromarray(arr_u8)
-    if "JPEG" in fmt:
-        pil.save(str(path), "JPEG", quality=90)
-    elif "WEBP" in fmt:
-        pil.save(str(path), "WEBP", quality=90, lossless=False)
+    if "JPEG" in fmt or "WEBP" in fmt:
+        # ALBABIT-FIX: quality was hardcoded to 90 here, ignoring the widget
+        # entirely -- the tooltip promised JPEG control but nothing in this
+        # function ever accepted a quality argument. Remap CRF-scale (0-51,
+        # lower = better) to Pillow's JPEG/WEBP scale (0-100, higher = better).
+        pil_quality = max(0, min(100, round((1.0 - quality / 51.0) * 100)))
+        if "JPEG" in fmt:
+            pil.save(str(path), "JPEG", quality=pil_quality)
+        else:
+            pil.save(str(path), "WEBP", quality=pil_quality, lossless=False)
     else:
         pil.save(str(path))
 
@@ -724,24 +785,29 @@ def _save_exr(arr_f32: np.ndarray, path: Path, half: bool) -> None:
 
     # ── Primary: OpenEXR ──────────────────────────────────────────────────
     try:
-        import OpenEXR, Imath  # type: ignore
-        h, w = arr_f32.shape[:2]
-        pixel_type = Imath.PixelType(Imath.PixelType.HALF if half else Imath.PixelType.FLOAT)
-        hdr = OpenEXR.Header(w, h)
-        try:
-            hdr["rad_version"] = _RADIANCE_VERSION
-            hdr["software"] = f"Radiance v{_RADIANCE_VERSION}"
-        except Exception:
-            pass  # header stamp is best-effort; never block the EXR write
-        hdr["channels"] = {name: Imath.Channel(pixel_type) for name, _ in channels}
-        out = OpenEXR.OutputFile(str(path), hdr)
-        try:
-            out.writePixels({
-                name: np.ascontiguousarray(plane).astype(np_dtype).tobytes()
-                for name, plane in channels
-            })
-        finally:
-            out.close()
+        import OpenEXR  # type: ignore
+        # ALBABIT-FIX: was OpenEXR.Header()/OutputFile()/writePixels() (the
+        # legacy dict-based API). That API only recognises a fixed, small set
+        # of attribute names internally -- rad_version/software (and even
+        # genuinely standard attributes like "comments") were silently
+        # rejected with a C-level "unknown attribute" stderr print, never a
+        # Python exception, so they never actually reached disk. Confirmed
+        # live: 0 of 12 metadata keys survived a round trip. The modern
+        # OpenEXR.File(header_dict, channels_dict) API (same installed
+        # version) persists arbitrary string/int/float attributes correctly,
+        # and infers HALF vs FLOAT per channel from the numpy dtype directly
+        # -- no Imath.Channel/PixelType wiring needed.
+        header = {
+            "compression": OpenEXR.ZIP_COMPRESSION,
+            "type": OpenEXR.scanlineimage,
+            "rad_version": _RADIANCE_VERSION,
+            "software": f"Radiance v{_RADIANCE_VERSION}",
+        }
+        channels_dict = {
+            name: np.ascontiguousarray(plane, dtype=np_dtype)
+            for name, plane in channels
+        }
+        OpenEXR.File(header, channels_dict).write(str(path))
         return
     except ImportError as exc:
         errors.append(f"OpenEXR module unavailable ({exc})")
@@ -780,6 +846,37 @@ def _save_exr(arr_f32: np.ndarray, path: Path, half: bool) -> None:
         f"or OpenCV built with EXR support. Details: " + "; ".join(errors)
     )
 
+
+def _save_dpx(arr_f32: np.ndarray, path: Path) -> None:
+    """Write a float32 (H, W, 3) array to 10-bit DPX via OpenImageIO.
+
+    ALBABIT-FIX: DPX has no Pillow plugin at all -- "DPX" was offered in the
+    format dropdown since v3.1 but never actually worked (write raised
+    "unknown file extension: .dpx"; read fell through to the same Pillow
+    path and failed identically). 10-bit is the traditional DPX bit depth
+    for film/VFX intermediates (SMPTE 268M). write_image()/read_image()
+    auto-convert between float32 [0,1] and the packed integer sample format.
+    """
+    if not _HAS_OIIO:
+        raise RuntimeError(
+            f"Failed to write DPX '{path}'. Install OpenImageIO (pip install OpenImageIO)."
+        )
+    arr = np.ascontiguousarray(np.clip(arr_f32, 0, 1), dtype=np.float32)
+    h, w = arr.shape[:2]
+    c = arr.shape[2] if arr.ndim == 3 else 1
+
+    spec = _oiio.ImageSpec(w, h, c, _oiio.UINT16)
+    spec.attribute("oiio:BitsPerSample", 10)
+    out = _oiio.ImageOutput.create(str(path))
+    if out is None:
+        raise RuntimeError(f"No DPX writer available for '{path}': {_oiio.geterror()}")
+    try:
+        if not out.open(str(path), spec):
+            raise RuntimeError(f"Failed to open DPX '{path}' for writing: {_oiio.geterror()}")
+        if not out.write_image(arr):
+            raise RuntimeError(f"Failed to write DPX pixels to '{path}': {_oiio.geterror()}")
+    finally:
+        out.close()
 
 
 def _coerce_mask_to_alpha(mask: Any, n: int, h: int, w: int) -> Optional[np.ndarray]:
@@ -867,6 +964,50 @@ def _save_video_ffmpeg(
         subprocess.run(cmd, check=True, capture_output=True, timeout=600)
 
     return out_path
+
+
+def _write_audio_temp_wav(audio: Any) -> Optional[str]:
+    """Write a ComfyUI AUDIO dict ({"waveform": tensor, "sample_rate": int}) to a
+    temporary 32-bit float PCM WAV file, so it can be fed into the same
+    `audio_source` mux path `_save_video_ffmpeg()` already uses for on-disk
+    audio files. Returns the temp file path, or None if `audio` isn't a usable
+    AUDIO dict. The caller owns the returned file and must delete it.
+
+    # ALBABIT-FIX: the "audio" (AUDIO-type) input was accepted by write()'s
+    # signature but never referenced anywhere else in this file -- connecting
+    # an AUDIO output here had zero effect. Only the "audio_source" (a STRING
+    # path to an existing file) actually worked. No torchaudio/soundfile
+    # dependency needed: WAV is simple enough to write by hand (matches the
+    # approach radiance.disabled used for the same problem).
+    """
+    if not isinstance(audio, dict):
+        return None
+    waveform = audio.get("waveform")
+    if waveform is None:
+        return None
+
+    import struct
+
+    sr = int(audio.get("sample_rate", 44100))
+    wav_np = waveform.detach().cpu().numpy()
+    if wav_np.ndim == 3:        # (B, C, T) -> first batch item
+        wav_np = wav_np[0]
+    if wav_np.ndim == 1:        # (T,) -> (1, T) mono
+        wav_np = wav_np[np.newaxis, :]
+    n_channels = wav_np.shape[0]
+    raw = np.ascontiguousarray(wav_np.T).astype(np.float32).tobytes()  # interleaved (T, C)
+
+    fd, path = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    block_align = n_channels * 4
+    with open(path, "wb") as f:
+        f.write(
+            b"RIFF" + struct.pack("<I", 36 + len(raw)) +
+            b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 3, n_channels, sr,
+                sr * block_align, block_align, 32) +
+            b"data" + struct.pack("<I", len(raw)) + raw
+        )
+    return path
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1195,7 +1336,8 @@ class RadianceWrite:
             }),
             "audio_source": ("STRING", {
                 "default": "",
-                "tooltip": "Path to audio file to mux into video output (optional).",
+                "tooltip": "Path to audio file to mux into video output (optional). "
+                           "Takes priority over the 'audio' input when both are set.",
             }),
             "broadcast_safe": ("BOOLEAN", {
                 "default": False,
@@ -1381,12 +1523,25 @@ class RadianceWrite:
                 fr = np.concatenate([fr, alpha[i][..., None]], axis=-1)   # RGB -> RGBA
             out_frames.append(fr)
 
+        # ALBABIT-FIX: "audio" (AUDIO-type input) was accepted but never used --
+        # only "audio_source" (a STRING path to an existing file) actually muxed
+        # into video output. When no explicit audio_source is given, fall back
+        # to writing the connected AUDIO tensor to a temp WAV so it reaches the
+        # same mux path. Only relevant for video output -- image/sequence
+        # formats have no audio track.
+        effective_audio_source = audio_source
+        temp_audio_wav: Optional[str] = None
+        if format in _FMT_VIDEO and not audio_source.strip() and audio is not None:
+            temp_audio_wav = _write_audio_temp_wav(audio)
+            if temp_audio_wav:
+                effective_audio_source = temp_audio_wav
+
         try:
             saved, count = self._dispatch(
                 out_frames, output_path, format,
                 fps, quality, exr_compression,
                 start_frame, frame_padding,
-                audio_source, overwrite,
+                effective_audio_source, overwrite,
             )
             log.info("RadianceWrite: saved %d frame(s) → %s", count, saved)
             return ()
@@ -1396,6 +1551,13 @@ class RadianceWrite:
             # turns red in ComfyUI instead of reporting a phantom success.
             log.error("RadianceWrite failed: %s", e)
             raise
+
+        finally:
+            if temp_audio_wav and os.path.exists(temp_audio_wav):
+                try:
+                    os.unlink(temp_audio_wav)
+                except OSError:
+                    pass
 
     def _dispatch(
         self,
@@ -1431,8 +1593,10 @@ class RadianceWrite:
             path = self._out_path(output_path, ext, overwrite)
             if "EXR" in stem:
                 _save_exr(frames[0], path, half="16-bit" in stem)
+            elif "DPX" in stem:
+                _save_dpx(frames[0], path)
             else:
-                _save_pil_image(frames[0], path, stem)
+                _save_pil_image(frames[0], path, stem, quality)
             return str(path), 1
 
         # ── Video ─────────────────────────────────────────────────────────
@@ -1477,8 +1641,10 @@ class RadianceWrite:
                     path = _unique_path(path)
                 if is_exr:
                     _save_exr(fr, path, half=half_exr)
+                elif is_dpx:
+                    _save_dpx(fr, path)
                 else:
-                    _save_pil_image(fr, path, stem)
+                    _save_pil_image(fr, path, stem, quality)
                 saved_paths.append(str(path))
 
             return str(out_dir), n
