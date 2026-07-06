@@ -153,23 +153,25 @@ def apply_matrix_3x3(
 def linear_to_pq_bt2408(
     y: torch.Tensor,
     peak_nits: float = 1000.0,
+    reference_white_nits: float = PQ_REF_WHITE_NITS,
 ) -> torch.Tensor:
     """
     Scene-linear → ST.2084 PQ signal, BT.2408 reference-white model.
 
-    Scene-linear 1.0 = 203 cd/m² (PQ_REF_WHITE_NITS).
+    Scene-linear 1.0 = ``reference_white_nits`` cd/m² (BT.2408 recommends 203).
     The signal is clipped to [0, 1] before encoding, so values above
-    ``peak_nits / 203`` are clipped to white.
+    ``peak_nits / reference_white_nits`` are clipped to white.
 
     Args:
-        y:          Scene-linear tensor, non-negative.
-        peak_nits:  Mastering-display peak luminance in cd/m².
+        y:                      Scene-linear tensor, non-negative.
+        peak_nits:              Mastering-display peak luminance in cd/m².
+        reference_white_nits:   Nits where scene-linear 1.0 maps.
 
     Returns:
         PQ-encoded signal in [0, 1].
     """
     # Normalise scene-linear to absolute display luminance, then to [0, 1].
-    L = (y.clamp(min=0.0) * PQ_REF_WHITE_NITS / peak_nits).clamp(0.0, 1.0)
+    L = (y.clamp(min=0.0) * reference_white_nits / peak_nits).clamp(0.0, 1.0)
     Lm1 = L ** PQ_M1
     return ((PQ_C1 + PQ_C2 * Lm1) / (1.0 + PQ_C3 * Lm1)) ** PQ_M2
 
