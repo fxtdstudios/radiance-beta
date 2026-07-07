@@ -28,6 +28,7 @@ TRAINING:
 from __future__ import annotations
 
 import os
+import json
 import logging
 from typing import Optional, Tuple
 
@@ -503,6 +504,30 @@ def detect_rudra_model_type(latent_channels: int, is_video: bool, vae=None) -> s
         # 4ch RUDRA checkpoint that exists, so return it unconditionally.
         return "sdxl"
     raise ValueError(f"RUDRA decoder: unsupported latent channel count {latent_channels}.")
+
+
+def resolve_rudra_model_type(
+    latent_channels: int, is_video: bool, vae=None, model_meta: str = "",
+) -> str:
+    """
+    Determine the RUDRA model_type, preferring the Loader's model_meta JSON
+    (unambiguous) over latent-shape auto-detection when it's connected.
+
+    ALBABIT-FIX: detect_rudra_model_type() can't distinguish Flux.2 Dev
+    ("flux2") from Flux.2 Klein ("flux2-klein") -- both share the identical
+    128ch/16x VAE, so the latent shape alone always resolved to "flux2-klein"
+    even when the model actually running was Flux.2 Dev. When model_meta is
+    connected, its "arch" field (set by RadianceUnifiedLoader) is the exact
+    canonical model_type and is used directly instead of guessing.
+    """
+    if model_meta:
+        try:
+            arch = json.loads(model_meta).get("arch", "")
+            if arch and arch != "unknown":
+                return arch.lower()
+        except Exception:
+            pass
+    return detect_rudra_model_type(latent_channels, is_video, vae=vae)
 
 
 def _infer_rudra_dr_dim(state_dict: dict) -> int | None:
