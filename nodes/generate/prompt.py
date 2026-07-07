@@ -1621,7 +1621,10 @@ class RadianceCinematicPromptEncoder:
                 ),
                 "model_meta": (
                     "STRING",
-                    {"multiline": True, "default": "",
+                    # ALBABIT-FIX: forceInput -- this is always a wired value from the
+                    # Loader, never hand-typed; matches the other model_meta inputs
+                    # added to RUDRA-capable nodes (engine.py, uplift_universal.py).
+                    {"default": "", "forceInput": True,
                      "tooltip": "Optional JSON metadata from Radiance Read Models. "
                                 "When connected, architecture detection uses this before "
                                 "tokenizer heuristics."},

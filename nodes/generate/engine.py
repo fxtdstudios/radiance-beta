@@ -75,7 +75,7 @@ import torch
 import numpy as np
 
 from radiance.hdr.vae import RadianceVAE4KDecode
-from radiance.fast_vae import decode_to_linear_realtime, detect_rudra_model_type, load_radiance_decoder_weights
+from radiance.fast_vae import decode_to_linear_realtime, load_radiance_decoder_weights, resolve_rudra_model_type
 from radiance.color.transfer import (
     tensor_linear_to_logc4,
     tensor_linear_to_slog3,
@@ -201,6 +201,24 @@ class RadianceHDRVAEDecode:
                 ),
             },
         )
+        # ALBABIT-FIX: RUDRA model_type auto-detection can't tell apart models that
+        # share the same VAE (e.g. Flux.2 Dev vs Flux.2 Klein, both 128ch) -- connect
+        # RadianceUnifiedLoader's model_meta output here to resolve it exactly instead
+        # of guessing from latent shape. Only read when rudra_decoder="Enabled".
+        types["optional"]["model_meta"] = (
+            "STRING",
+            {
+                "default": "",
+                "forceInput": True,  # always a socket -- this is a wired value, never hand-typed
+                "tooltip": (
+                    "Optional: connect RadianceUnifiedLoader's model_meta output to "
+                    "resolve the exact model architecture for RUDRA, instead of guessing "
+                    "from the latent/VAE shape (which can't distinguish models that share "
+                    "the same VAE, e.g. Flux.2 Dev vs Flux.2 Klein). Only used when "
+                    "rudra_decoder='Enabled'."
+                ),
+            },
+        )
         return types
 
     @torch.no_grad()   # FIX (Low): explicit no_grad — makes intent clear, guards future paths
@@ -227,6 +245,7 @@ class RadianceHDRVAEDecode:
         hdr_scale_factor: float = 1.0,
         rudra_decoder: str = "Disabled",
         decoder_size: str = "rudra_turbo",
+        model_meta: str = "",
         **kwargs,                           # BUG 8 FIX: forward remaining params
     ):
         # Lazily instantiate once; RadianceVAE4KDecode is stateless so one
@@ -269,7 +288,7 @@ class RadianceHDRVAEDecode:
         # before model_type was assigned — the except block then raised NameError,
         # masking the real error entirely.
         # ALBABIT-FIX: model_type detection (including the 4ch SD1.x/2.x/SDXL
-        # disambiguation) now lives in detect_rudra_model_type() (fast_vae.py) —
+        # disambiguation) lives in resolve_rudra_model_type() (fast_vae.py) —
         # single source of truth shared with RadianceNDISender.
         turbo_decoder = None
         if rudra_decoder == "Enabled":
@@ -282,7 +301,7 @@ class RadianceHDRVAEDecode:
                         "ensure a LATENT is connected to this node."
                     )
                 _ch = _samples.shape[1]
-                model_type = detect_rudra_model_type(_ch, _samples.ndim == 5, vae=vae)
+                model_type = resolve_rudra_model_type(_ch, _samples.ndim == 5, vae=vae, model_meta=model_meta)
 
                 turbo_decoder = load_radiance_decoder_weights(
                     model_type=model_type,
@@ -632,6 +651,22 @@ class RadianceNDISender:
                         ),
                     },
                 ),
+                # ALBABIT-FIX: same RUDRA model_type disambiguation as
+                # RadianceHDRVAEDecode -- see its model_meta tooltip. Only read
+                # when turbo_mode is enabled.
+                "model_meta": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "forceInput": True,  # always a socket, never hand-typed
+                        "tooltip": (
+                            "Optional: connect RadianceUnifiedLoader's model_meta output "
+                            "to resolve the exact model architecture for the turbo decoder, "
+                            "instead of guessing from the latent/VAE shape. Only used when "
+                            "turbo_mode is enabled."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -645,6 +680,7 @@ class RadianceNDISender:
         latent_in=None,
         vae=None,
         turbo_mode: bool = False,
+        model_meta: str = "",
     ):
         if not enable_streaming:
             return (image, False)
@@ -684,10 +720,10 @@ class RadianceNDISender:
                 # Direct fast decode via fast_vae library
                 latent = latent_in["samples"]
                 ch = latent.shape[1]
-                # ALBABIT-FIX: shared detect_rudra_model_type() (fast_vae.py) replaces
+                # ALBABIT-FIX: shared resolve_rudra_model_type() (fast_vae.py) replaces
                 # "ch >= 16 -> flux else sdxl", which misclassified 12ch (mochi) and
                 # 128ch (ltx-video, flux2/flux2-klein) latents as 4ch sdxl.
-                model_type = detect_rudra_model_type(ch, latent.ndim == 5, vae=vae)
+                model_type = resolve_rudra_model_type(ch, latent.ndim == 5, vae=vae, model_meta=model_meta)
                 compute_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                 # ALBABIT-FIX: model_size="turbo" never matched on-disk
                 # "rudra_turbo_decoder_*_ema.safetensors" filenames — aligned to

@@ -160,6 +160,16 @@ class RadianceSDRToHDRUniversal:
                     "tooltip": "RUDRA decoder variant: turbo (fast, ~2M params) or full (production quality)."}),
                 "rudra_blend": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
                     "tooltip": "How strongly RUDRA-reconstructed highlights replace the math expansion inside the highlight mask. 0 disables the learned path."}),
+                # ALBABIT-FIX: RUDRA model_type auto-detection can't tell apart
+                # models sharing the same VAE (e.g. Flux.2 Dev vs Flux.2 Klein,
+                # both 128ch) -- connect RadianceUnifiedLoader's model_meta
+                # output here to resolve it exactly. Only read when the
+                # learned RUDRA path above actually runs (vae connected and
+                # rudra_blend > 0).
+                "model_meta": ("STRING", {"default": "", "forceInput": True, "tooltip":
+                    "Optional: connect RadianceUnifiedLoader's model_meta output to "
+                    "resolve the exact model architecture for RUDRA reconstruction, "
+                    "instead of guessing from the latent/VAE shape."}),
             },
         }
 
@@ -167,7 +177,7 @@ class RadianceSDRToHDRUniversal:
     @staticmethod
     def _rudra_reconstruct(sdr_pixels: torch.Tensor, base_hdr: torch.Tensor,
                            mask: torch.Tensor, vae, rudra_size: str,
-                           blend: float) -> torch.Tensor:
+                           blend: float, model_meta: str = "") -> torch.Tensor:
         """
         SDR pixels → VAE encode → RUDRA decode → scene-linear reconstruction,
         gain-matched to `base_hdr` in well-exposed regions and blended into the
@@ -182,15 +192,15 @@ class RadianceSDRToHDRUniversal:
         import torch.nn.functional as F
         from radiance.fast_vae import (
             decode_to_linear_realtime,
-            detect_rudra_model_type,
             load_radiance_decoder_weights,
+            resolve_rudra_model_type,
         )
 
         latent = vae.encode(sdr_pixels[..., :3])
         if isinstance(latent, dict):                       # some wrappers
             latent = latent.get("samples", next(iter(latent.values())))
 
-        model_type = detect_rudra_model_type(latent.shape[1], latent.ndim == 5, vae)
+        model_type = resolve_rudra_model_type(latent.shape[1], latent.ndim == 5, vae, model_meta=model_meta)
         decoder = load_radiance_decoder_weights(model_type=model_type,
                                                 model_size=rudra_size)
         if decoder is None:
@@ -228,7 +238,8 @@ class RadianceSDRToHDRUniversal:
     def convert(self, image: torch.Tensor, inverse_oetf: str, peak_nits: float,
                 knee_mode: str, knee: float, shoulder_gamma: float,
                 temporal_smoothing: float, output_encoding: str,
-                vae=None, rudra_size: str = "rudra_turbo", rudra_blend: float = 1.0):
+                vae=None, rudra_size: str = "rudra_turbo", rudra_blend: float = 1.0,
+                model_meta: str = ""):
         img = image.clone().float()
         if img.dim() == 3:                      # single HWC frame → batch of 1
             img = img.unsqueeze(0)
@@ -277,7 +288,8 @@ class RadianceSDRToHDRUniversal:
             else:
                 try:
                     hdr = self._rudra_reconstruct(rgb, hdr, mask, vae,
-                                                  str(rudra_size), float(rudra_blend))
+                                                  str(rudra_size), float(rudra_blend),
+                                                  model_meta=model_meta)
                 except Exception as exc:  # noqa: BLE001 — never fail a render
                     logger.warning(
                         "RUDRA reconstruction unavailable (%s) — using math expansion only.",
