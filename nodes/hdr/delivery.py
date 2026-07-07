@@ -116,8 +116,8 @@ class RadianceHDREncode:
             },
             "optional": {
                 "peak_nits": (
-                    [100, 1000, 4000, 10000],
-                    {"default": 1000,
+                    ["100", "1000", "4000", "10000"],
+                    {"default": "1000",
                      "tooltip": "[PQ] Mastering display peak luminance. "
                                 "1000 = HDR10, 4000/10000 = Dolby Vision grade."},
                 ),
@@ -138,8 +138,11 @@ class RadianceHDREncode:
         }
 
     def encode(self, image: torch.Tensor, format: str = "PQ (HDR10)",
-               peak_nits: int = 1000, reference_white_nits: float = 203.0,
+               peak_nits="1000", reference_white_nits: float = 203.0,
                scene_linear_gain: float = 1.0, apply_bt2020: bool = False):
+        # ALBABIT-FIX: peak_nits is a string combo (ComfyUI sends dropdown
+        # values as strings) -- convert here, same pattern as nodes/video/hdr.py.
+        peak_nits = int(peak_nits)
         img = image[..., :3].clamp(min=0.0).float()
 
         if apply_bt2020:
