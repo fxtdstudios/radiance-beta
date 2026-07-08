@@ -326,6 +326,7 @@ function toggleFields(node) {
     if (!node.widgets) return;
     applyFolding(node);
     auditSamplerWidgets(node);
+    updateModelMetaDefaults(node);
     // ALBABIT-FIX: after Vue processes this render cycle, clear the synthetic
     // computedHeight = 32 we set so Vue can recompute the real per-widget height.
     // The 32 was needed as a safe initial value for the _forceWidgetReinsert mount;
@@ -591,6 +592,87 @@ function updatePresetDivergenceMarkers(node) {
             changed = true;
         }
     }
+    if (changed) node.setDirtyCanvas(true, true);
+}
+
+// ALBABIT-FIX: Flux.2 Klein Base (undistilled, ~50 steps/guidance=4.0) and Klein
+// distilled (4 steps/guidance~1.0) are architecturally identical -- the loaded
+// MODEL alone can't tell them apart. The exact filename can, so when model_meta
+// is wired to a Radiance Loader, follow the link back (same technique as
+// isSigmaOverrideActive) and read its unet_name widget live, instantly --
+// no execution needed. "🧲" marks the derived widgets instead of "✎", matching
+// the same convention already used in js/radiance_loader.js for Flux.2 Klein.
+const LINKED_MARKER = " 🧲";
+
+function _findModelMetaSourceUnetName(node) {
+    const input = node.inputs?.find(i => i.name === "model_meta");
+    if (!input || !input.link) return null;
+    const link = app.graph.links[input.link];
+    if (!link) return null;
+    const originNode = app.graph.getNodeById(link.origin_id);
+    if (!originNode || originNode.mode === 2 || originNode.mode === 4) return null;
+    return originNode.widgets?.find(w => w.name === "unet_name")?.value ?? null;
+}
+
+function _deriveKleinDefaultsFromUnet(filename) {
+    if (!filename) return null;
+    const f = filename.toLowerCase();
+    if (!f.includes("klein")) return null;
+    const isBase = f.includes("base");
+    return isBase ? { flux_guidance: 4.0, steps: 50 } : { flux_guidance: 1.0, steps: 4 };
+}
+
+// ALBABIT-FIX: a poll-driven mechanism can't just check "is the widget still
+// at its generic default" -- after the first auto-write the value IS the
+// derived one, not the default, so a later Loader change would never apply
+// again. _radAutoValue tracks what WE last wrote; if the live value still
+// matches it, the user hasn't touched it since and it's safe to update again.
+// No prior tracking (e.g. right after a named preset left an unrelated value
+// behind) is NOT "user touched" -- apply unconditionally in that case, same
+// as the very first activation.
+function _syncAutoValue(widget, newValue) {
+    if (!widget || newValue === undefined) {
+        if (widget) widget._radAutoValue = undefined;
+        return false;
+    }
+    const userTouched = widget._radAutoValue !== undefined && widget.value !== widget._radAutoValue;
+    widget._radAutoValue = newValue;
+    if (userTouched || widget.value === newValue) return false;
+    widget.value = newValue;
+    return true;
+}
+
+function _markLinkedWidget(widget, linked, inSync) {
+    if (!widget) return false;
+    const markerText = linked ? (inSync ? LINKED_MARKER : PRESET_MARKER) : null;
+    if (widget._radOrigLabel === undefined && !markerText) return false;
+    if (widget._radOrigLabel === undefined) widget._radOrigLabel = widget.label ?? widget.name;
+    const wanted = markerText ? widget._radOrigLabel + markerText : widget._radOrigLabel;
+    if (widget.label === wanted) return false;
+    widget.label = wanted;
+    return true;
+}
+
+function updateModelMetaDefaults(node) {
+    if (!node.widgets) return;
+    const presetW = node.widgets.find(w => w.name === "preset");
+    const modelTypeW = node.widgets.find(w => w.name === "model_type");
+    const presetVal = presetW ? presetW.value : "None";
+    const eligible = (presetVal === "None" || presetVal === "Custom") &&
+        (!modelTypeW || modelTypeW.value === "auto");
+
+    const guidanceW = node.widgets.find(w => w.name === "flux_guidance");
+    const stepsW = node.widgets.find(w => w.name === "steps");
+    const derived = eligible ? _deriveKleinDefaultsFromUnet(_findModelMetaSourceUnetName(node)) : null;
+
+    let changed = false;
+    if (_syncAutoValue(guidanceW, derived?.flux_guidance)) changed = true;
+    if (_syncAutoValue(stepsW, derived?.steps)) changed = true;
+
+    const guidanceInSync = !!derived && guidanceW && guidanceW.value === derived.flux_guidance;
+    const stepsInSync = !!derived && stepsW && stepsW.value === derived.steps;
+    if (_markLinkedWidget(guidanceW, !!derived, guidanceInSync)) changed = true;
+    if (_markLinkedWidget(stepsW, !!derived, stepsInSync)) changed = true;
     if (changed) node.setDirtyCanvas(true, true);
 }
 
@@ -930,6 +1012,7 @@ app.registerExtension({
             this._sigmaCheckInterval = setInterval(() => {
                 updateSigmaLocks(self);
                 updatePresetDivergenceMarkers(self);
+                updateModelMetaDefaults(self);
             }, 250);
             const origOnRemoved = this.onRemoved;
             this.onRemoved = function () {
@@ -989,6 +1072,32 @@ app.registerExtension({
             // heavy workflows where graph.configure() stalls the main thread > 100ms.
             setTimeout(reapply, 150);
             setTimeout(reapply, 600);
+        };
+
+        // ALBABIT-FIX: sync cfg/flux_guidance/flux_shift/sampler/steps to the
+        // values actually used (sample() can silently adjust them -- MODEL_DEFAULTS
+        // auto-adapt or the model_meta-driven Flux.2 Klein refinement). Same
+        // "ui" dict + onExecuted pattern as radiance_resolution.js's
+        // computed_width/height. Runs regardless of preset/model_meta -- a no-op
+        // when nothing was adjusted (values already match).
+        const onExecuted = nodeType.prototype.onExecuted;
+        nodeType.prototype.onExecuted = function (message) {
+            if (onExecuted) onExecuted.apply(this, arguments);
+
+            const sync = (name, msgKey) => {
+                const val = message?.[msgKey]?.[0];
+                const w = this.widgets?.find(wg => wg.name === name);
+                if (val != null && w && w.value !== val) {
+                    w.value = val;
+                    if (w.inputEl) w.inputEl.value = val;
+                }
+            };
+            sync("cfg", "resolved_cfg");
+            sync("flux_guidance", "resolved_flux_guidance");
+            sync("flux_shift", "resolved_flux_shift");
+            sync("sampler", "resolved_sampler");
+            sync("steps", "resolved_steps");
+            this.setDirtyCanvas?.(true, true);
         };
     }
 });
