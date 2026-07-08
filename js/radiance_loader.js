@@ -33,10 +33,9 @@ const PRESET_SLOTS = {
     "Kolors": ["llm_encoder"],
     "Lumina2": ["llm_encoder"],
     "Z-Image": ["llm_encoder"],
-    // ALBABIT-FIX: Chroma, Flux.2 Dev/Klein, Cosmos World, CogVideoX, Mochi
+    // ALBABIT-FIX: Chroma, Flux.2 (Dev+Klein merged), Cosmos World, CogVideoX, Mochi
     "Chroma": ["t5xxl"],
-    "Flux.2 Dev": ["llm_encoder"],
-    "Flux.2 Klein": ["llm_encoder"],
+    "Flux.2": ["llm_encoder"],
     "Cosmos World": ["t5xxl"],
     "CogVideoX": ["t5xxl"],
     "Mochi": ["t5xxl"],
@@ -154,6 +153,10 @@ const PRESET_CONFIGS = {
         "clip_hints":    {
             "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
         },
+        // ALBABIT-FIX: either the high_noise or low_noise UNET works --
+        // _find_wan_moe_companion() (nodes_loader.py) auto-loads the other
+        // one server-side regardless of which one is picked here.
+        "companion_linked": true,
     },
     "Wan 2.2 TI2V": {
         "unet_hints":    ["wan2.2_ti2v_5B_fp16", "wan2.2_ti2v_5B", "wan2.2_ti2v"],
@@ -249,7 +252,7 @@ const PRESET_CONFIGS = {
             "llm_encoder": ["qwen_3_4b", "qwen3_4b", "qwen_3"],
         },
     },
-    // ALBABIT-FIX: Chroma, Flux.2 Dev/Klein, Cosmos World, CogVideoX, Mochi —
+    // ALBABIT-FIX: Chroma, Flux.2, Cosmos World, CogVideoX, Mochi —
     // mirrors CHECKPOINT_PRESETS in config/model_map.py.
     "Chroma": {
         "unet_hints":    ["chroma-unlocked", "chroma_unlocked", "chroma"],
@@ -258,18 +261,35 @@ const PRESET_CONFIGS = {
             "t5xxl": ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
     },
-    "Flux.2 Dev": {
-        "unet_hints":    ["flux2-dev", "flux2_dev", "flux.2-dev"],
-        "vae_hints":     ["flux2-vae", "flux2_vae", "flux2_ae"],
+    // ALBABIT-FIX: Dev and Klein merged into one preset now that Auto-Detect
+    // can tell them apart on its own (model/detect.py, single_blocks count).
+    // unet_hints cover both families -- Dev first (flagship, quality-first),
+    // then Klein's sizes/distillation states (4B/9B, Base/distilled).
+    "Flux.2": {
+        "unet_hints": [
+            "flux2-dev.safetensors", "flux2_dev_fp8mixed.safetensors",
+            "flux-2-klein-9b.safetensors",
+            "flux-2-klein-base-4b.safetensors",
+            "flux-2-klein-base-9b-fp8.safetensors",
+            "klein-9b-kv", "klein-base", "klein-9b", "klein-4b",
+            "flux2-dev", "flux2_dev", "flux.2-dev",
+            "flux2-klein", "flux2_klein", "flux.2-klein", "klein",
+        ],
+        // full_encoder_small_decoder is a lighter/faster decoder (same
+        // encoder) -- only used if the full-quality flux2-vae isn't present.
+        "vae_hints":     ["flux2-vae", "flux2_vae", "flux2_ae", "full_encoder_small_decoder"],
         "clip_hints":    {
+            // Dev's encoder (Mistral) -- also the fallback when unet_name
+            // isn't a recognized Klein size (see clip_size_hints, which
+            // takes priority whenever a Klein 4B/9B file is detected).
             "llm_encoder": ["mistral_3_small_flux2_bf16", "mistral_3_small_flux2_fp8", "mistral_3_small_flux2", "mistral_3", "mistral"],
         },
-    },
-    "Flux.2 Klein": {
-        "unet_hints":    ["flux2-klein", "flux2_klein", "flux.2-klein", "klein"],
-        "vae_hints":     ["flux2-vae", "flux2_vae", "flux2_ae"],
-        "clip_hints":    {
-            "llm_encoder": ["qwen_3_4b", "qwen3_4b", "qwen_3"],
+        // ALBABIT-FIX: Klein's encoder (Qwen) must match its size (4B->qwen_3_4b,
+        // 9B->qwen_3_8b*) -- resolved dynamically from the size token detected
+        // in unet_name. Quality-first: bf16 before fp8/fp4mixed.
+        "clip_size_hints": {
+            "9b": ["qwen_3_8b.safetensors", "qwen_3_8b", "qwen_3_8b_fp8mixed", "qwen_3_8b_fp4mixed", "qwen3_8b"],
+            "4b": ["qwen_3_4b.safetensors", "qwen_3_4b", "qwen3_4b"],
         },
     },
     "Cosmos World": {
@@ -322,6 +342,49 @@ function findMatchingFile(hints, values) {
 }
 
 /**
+ * Extract a size token like "4b"/"9b" from a filename (e.g. Flux.2 Klein
+ * variants), used to pick a differently-sized paired text encoder.
+ */
+function _detectSizeToken(filename) {
+    const m = /(?:^|[-_])(\d+b)(?:[-_.]|$)/i.exec((filename || "").toLowerCase());
+    return m ? m[1] : null;
+}
+
+/**
+ * Like _detectSizeToken, but only returns a token the preset actually knows
+ * about (config.clip_size_hints) -- an unrelated UNET (e.g. Cosmos "...7B...")
+ * can contain a size-shaped substring without being a real Klein size.
+ */
+function _knownSizeToken(config, filename) {
+    const token = _detectSizeToken(filename);
+    return (token && config?.clip_size_hints?.[token]) ? token : null;
+}
+
+/**
+ * Resolve the CLIP hint list for a given slot, applying a preset's
+ * clip_size_hints (size-aware override) when present, falling back to its
+ * static clip_hints otherwise.
+ */
+function _resolveClipHints(node, config, wName) {
+    if (wName === "llm_encoder" && config?.clip_size_hints) {
+        const sizeToken = _knownSizeToken(config, getWidget(node, "unet_name")?.value || "");
+        if (sizeToken) {
+            return config.clip_size_hints[sizeToken];
+        }
+    }
+    return config?.clip_hints?.[wName];
+}
+
+/**
+ * Resolve which file (if any) currently matches a CLIP slot's hints.
+ */
+function _resolveClipMatch(node, config, wName) {
+    const w = getWidget(node, wName);
+    const hints = _resolveClipHints(node, config, wName);
+    return (w && hints && w.options?.values) ? findMatchingFile(hints, w.options.values) : null;
+}
+
+/**
  * Performs client-side smart auto-fill matching of files based on selected preset
  */
 function autoFillPresetFiles(node, cleanPreset) {
@@ -343,18 +406,14 @@ function autoFillPresetFiles(node, cleanPreset) {
     }
 
     // 3. Match CLIP Slots
-    const clipHints = config.clip_hints || {};
     for (const wName of ALL_CLIP_WIDGETS) {
         const clipW = getWidget(node, wName);
         if (!clipW) continue;
 
-        if (clipHints[wName] && clipW.options?.values) {
-            const matched = findMatchingFile(clipHints[wName], clipW.options.values);
-            if (matched) {
-                clipW.value = matched;
-            } else {
-                clipW.value = "None";
-            }
+        const hints = _resolveClipHints(node, config, wName);
+        if (hints && clipW.options?.values) {
+            const matched = findMatchingFile(hints, clipW.options.values);
+            clipW.value = matched || "None";
         } else {
             clipW.value = "None";
         }
@@ -395,20 +454,25 @@ function autoFillPresetFiles(node, cleanPreset) {
 // weight_dtype/clip_dtype, hidden by design — loader_utils.py). Flag any that
 // no longer match what autoFillPresetFiles() would pick right now, with a "✎"
 // label marker (same pattern as radiance_sampler.js/radiance_prompt.js).
-// Marks even a switch between two equally-valid variants (e.g. "-distilled"
-// vs "-dev-fp8") — the marker means "touched since the preset loaded", not
-// "still an acceptable choice".
 const PRESET_MARKER = " ✎";
+// ALBABIT-FIX: for clip_size_hints presets, llm_encoder is derived from
+// unet_name, not a static default -- "🧲" marks that link instead of "✎"
+// (unet_name: any recognized variant of the preset; llm_encoder: in sync with it).
+const LINKED_MARKER = " 🧲";
+// ALBABIT-FIX: for companion_linked presets (Wan 2.2), either the high_noise
+// or low_noise UNET is a valid pick -- "⛓" marks unet_name instead of "✎"
+// to signal its companion is auto-loaded server-side, not a manual mistake.
+const COMPANION_MARKER = " ⛓";
 
 // unet_name/vae_name are left untouched by autoFillPresetFiles() on no
 // match; CLIP slots/audio_vae/upscale fall back to "None" instead.
 const NO_NONE_FALLBACK_FIELDS = new Set(["unet_name", "vae_name"]);
 
-function _markFileWidget(widget, marked) {
+function _markFileWidget(widget, markerText) {
     if (!widget) return false;
-    if (widget._radOrigLabel === undefined && !marked) return false;
+    if (widget._radOrigLabel === undefined && !markerText) return false;
     if (widget._radOrigLabel === undefined) widget._radOrigLabel = widget.label ?? widget.name;
-    const wanted = marked ? widget._radOrigLabel + PRESET_MARKER : widget._radOrigLabel;
+    const wanted = markerText ? widget._radOrigLabel + markerText : widget._radOrigLabel;
     if (widget.label === wanted) return false;
     widget.label = wanted;
     return true;
@@ -421,33 +485,56 @@ function updatePresetDivergenceMarkers(node) {
     const cleanPreset = presetVal ? presetVal.replace("→ ", "").replace("▶ ", "").replace("◈ ", "").trim() : "Custom";
     const config = cleanPreset === "Custom" ? null : PRESET_CONFIGS[cleanPreset];
     const activeSlots = config ? (PRESET_SLOTS[cleanPreset] || ALL_CLIP_WIDGETS) : [];
+    const unetVal = getWidget(node, "unet_name")?.value || "";
+    // ALBABIT-FIX: llm_encoder's pick depends on unet_name for the whole
+    // preset (Mistral vs Qwen), not just the size-token subset (Klein) --
+    // any recognized file in this preset's own unet_hints counts as linked.
+    const familyLinked = !!(config?.clip_size_hints && findMatchingFile(config.unet_hints, [unetVal]));
+    const companionLinked = !!(config?.companion_linked && findMatchingFile(config.unet_hints, [unetVal]));
 
     let changed = false;
 
     const check = (widgetName, hints) => {
         const w = getWidget(node, widgetName);
         if (!w) return;
-        let marked = false;
+        let markerText = null;
         if (config) {
             if (!hints || hints.length === 0) {
-                marked = String(w.value) !== "None";
+                if (String(w.value) !== "None") markerText = PRESET_MARKER;
             } else {
                 const matched = findMatchingFile(hints, w.options?.values);
                 if (matched !== null) {
-                    marked = String(w.value) !== String(matched);
+                    if (String(w.value) !== String(matched)) markerText = PRESET_MARKER;
                 } else if (!NO_NONE_FALLBACK_FIELDS.has(widgetName)) {
-                    marked = String(w.value) !== "None";
+                    if (String(w.value) !== "None") markerText = PRESET_MARKER;
                 }
             }
         }
-        if (_markFileWidget(w, marked)) changed = true;
+        if (_markFileWidget(w, markerText)) changed = true;
     };
 
-    check("unet_name", config?.unet_hints);
+    // unet_name shows a link marker instead of the divergence marker while
+    // familyLinked/companionLinked -- the point is to signal a relationship
+    // (linked CLIP size, auto-loaded companion), not flag a mistake.
+    if (familyLinked) {
+        if (_markFileWidget(getWidget(node, "unet_name"), LINKED_MARKER)) changed = true;
+    } else if (companionLinked) {
+        if (_markFileWidget(getWidget(node, "unet_name"), COMPANION_MARKER)) changed = true;
+    } else {
+        check("unet_name", config?.unet_hints);
+    }
     check("vae_name", config?.vae_hints);
     for (const wName of ALL_CLIP_WIDGETS) {
         if (config && !activeSlots.includes(wName)) continue; // hidden slot
-        check(wName, config?.clip_hints?.[wName]);
+        if (wName === "llm_encoder" && familyLinked) {
+            const w = getWidget(node, "llm_encoder");
+            const matched = _resolveClipMatch(node, config, "llm_encoder");
+            const markerText = matched === null ? null
+                : (String(w.value) === String(matched) ? LINKED_MARKER : PRESET_MARKER);
+            if (_markFileWidget(w, markerText)) changed = true;
+            continue;
+        }
+        check(wName, config ? _resolveClipHints(node, config, wName) : null);
     }
     check("audio_vae_name", config?.audio_vae_hints);
     check("upscale_model_name", config?.upscale_hints);
@@ -634,6 +721,31 @@ app.registerExtension({
                 modelTypeW.callback = function(value) {
                     if (origModelCallback) origModelCallback.call(this, value);
                     setTimeout(() => updateLoaderUI(node, false), 10);
+                };
+            }
+
+            // ALBABIT-FIX: for clip_size_hints presets (Flux.2 Klein), keep
+            // llm_encoder in sync when the user manually changes unet_name.
+            // No-op for every other preset.
+            const unetW = getWidget(node, "unet_name");
+            if (unetW) {
+                const origUnetCallback = unetW.callback;
+                unetW.callback = function(value) {
+                    if (origUnetCallback) origUnetCallback.call(this, value);
+                    setTimeout(() => {
+                        const presetVal = getWidget(node, "preset")?.value;
+                        const cleanPreset = presetVal ? presetVal.replace("→ ", "").replace("▶ ", "").replace("◈ ", "").trim() : "Custom";
+                        const cfg = PRESET_CONFIGS[cleanPreset];
+                        if (cfg?.clip_size_hints) {
+                            const clipW = getWidget(node, "llm_encoder");
+                            const matched = _resolveClipMatch(node, cfg, "llm_encoder");
+                            if (clipW && matched) {
+                                clipW.value = matched;
+                                node.setDirtyCanvas(true, true);
+                            }
+                        }
+                        updatePresetDivergenceMarkers(node);
+                    }, 10);
                 };
             }
 

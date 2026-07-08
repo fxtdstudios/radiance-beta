@@ -326,6 +326,7 @@ function toggleFields(node) {
     if (!node.widgets) return;
     applyFolding(node);
     auditSamplerWidgets(node);
+    updateModelMetaDefaults(node);
     // ALBABIT-FIX: after Vue processes this render cycle, clear the synthetic
     // computedHeight = 32 we set so Vue can recompute the real per-widget height.
     // The 32 was needed as a safe initial value for the _forceWidgetReinsert mount;
@@ -518,25 +519,6 @@ function updateSigmaLocks(node) {
     node.setDirtyCanvas(true, true);
 }
 
-// ALBABIT-FIX: infer the model_type that best matches the preset name, used when
-// the preset config doesn't explicitly include model_type. Mirrors resolveModelType
-// so the UI widget reflects the model family the preset targets.
-function inferModelTypeForPreset(presetName) {
-    if (LTX_PRESETS.includes(presetName)) return "ltxav";
-    const p = (presetName || "").toLowerCase();
-    if (p.includes("ltx 2.3") || p.includes("ltxav")) return "ltxav";
-    if (p.includes("ltx"))      return "ltxv";
-    if (p.includes("wan"))      return "wan";
-    if (p.includes("hunyuan"))  return "hunyuan_video";
-    if (p.includes("z_image"))  return "z_image";
-    if (p.includes("lumina"))   return "lumina2";
-    // ALBABIT-FIX: return "sd3.5" (canonical form, matches Loader/detect.py)
-    if (p.includes("sd3.5") || p.includes("sd35")) return "sd3.5";
-    if (p.includes("flux") || p.includes("draft") || p.includes("fast") ||
-        p.includes("balanced") || p.includes("quality") || p.includes("cinema")) return "flux";
-    return null;  // unknown, leave unchanged
-}
-
 function applyPreset(node, presetName) {
     if (presetName === "None" || presetName === "Custom") return;
 
@@ -553,16 +535,10 @@ function applyPreset(node, presetName) {
         }
     }
 
-    // ALBABIT-FIX: ensure model_type matches the preset's model family so
-    // resolveModelType (which returns early if model_type != "auto") picks the
-    // correct effective model and doesn't falsely flag Flux presets as isLTX.
-    if (!config.model_type) {
-        const inferred = inferModelTypeForPreset(presetName);
-        if (inferred) {
-            const modelTypeW = widgets.find(w => w.name === "model_type");
-            if (modelTypeW) modelTypeW.value = inferred;
-        }
-    }
+    // ALBABIT-FIX: model_type is left untouched here now -- resolveModelType()
+    // already derives the effective family from the preset name for widget
+    // folding, so forcing it (old inferModelTypeForPreset) only mislabeled
+    // every non-Flux.1 guidance-embedded model as literally "flux".
 
     // ALBABIT-FIX: widgets now match the preset again — clear any "✎" markers.
     updatePresetDivergenceMarkers(node);
@@ -570,14 +546,11 @@ function applyPreset(node, presetName) {
 }
 
 // ── Preset divergence markers ──
-// ALBABIT-FIX: Python no longer force-applies preset values (_apply_presets is
-// UI-first again, matching old Radiance behavior). Instead of silently
-// overriding user edits — or switching the combo to "Custom", which would
-// unfold every hidden widget — append a "✎" to the label of each widget whose
-// value no longer matches the selected preset (VSCode-style modified-setting
-// indicator). State-based and driven by the existing 250ms poll, so it covers
-// manual edits, undo/redo, preset import and workflow loads, in both the
-// legacy canvas and the Vue Nodes 2.0 frontends (widget.label works in both).
+// ALBABIT-FIX: Python no longer force-applies preset values, so instead of
+// silently overriding user edits, append a "✎" to the label of each widget
+// whose value no longer matches the selected preset. State-based, driven by
+// the existing 250ms poll -- covers manual edits, undo/redo, preset import
+// and workflow loads alike.
 const PRESET_MARKER_EXCLUDED = new Set([
     "seed", "control_after_generate", "description", "preset", "preset_info",
 ]);
@@ -615,6 +588,173 @@ function updatePresetDivergenceMarkers(node) {
             w.label = wanted;
             changed = true;
         }
+    }
+    if (changed) node.setDirtyCanvas(true, true);
+}
+
+// ALBABIT-FIX: Flux.2 Klein Base (undistilled, ~50 steps/guidance=4.0) and Klein
+// distilled (4 steps/guidance~1.0) are architecturally identical -- the loaded
+// MODEL alone can't tell them apart. The exact filename can, so when model_meta
+// is wired to a Radiance Loader, follow the link back (same technique as
+// isSigmaOverrideActive) and read its unet_name widget live, instantly --
+// no execution needed. "🧲" marks the derived widgets instead of "✎", matching
+// the same convention already used in js/radiance_loader.js for Flux.2 Klein.
+const LINKED_MARKER = " 🧲";
+
+function _findModelMetaSourceNode(node) {
+    const input = node.inputs?.find(i => i.name === "model_meta");
+    if (!input || !input.link) return null;
+    const link = app.graph.links[input.link];
+    if (!link) return null;
+    const originNode = app.graph.getNodeById(link.origin_id);
+    if (!originNode || originNode.mode === 2 || originNode.mode === 4) return null;
+    return originNode;
+}
+
+// ALBABIT-FIX: some architectures ship multiple checkpoints under one
+// model_type needing very different steps/guidance (distilled vs its
+// undistilled base) -- only the exact filename can tell them apart.
+// Verified against official model cards: Klein Base/distilled (4B/9B) and
+// Flux.1 Dev/Schnell. LTX 2.3 Dev/Distilled deliberately NOT covered --
+// community values are inconsistent/pipeline-dependent; the existing
+// dedicated "LTX 2.3 LowRes/HighRes" presets are the right tool there.
+function _deriveDistillationOverride(filename) {
+    if (!filename) return null;
+    const f = filename.toLowerCase();
+    if (f.includes("klein")) {
+        return f.includes("base") ? { flux_guidance: 4.0, steps: 50 } : { flux_guidance: 1.0, steps: 4 };
+    }
+    if (f.includes("schnell")) return { flux_guidance: 0.0, steps: 4 };
+    return null;
+}
+
+// ALBABIT-FIX: mirrors config/model_map.py's CHECKPOINT_PRESETS[...]["model_type"]
+// -- lets the Sampler resolve the Loader's architecture from its preset name
+// alone, no execution needed. Must be kept in sync by hand (same pattern
+// already used for GUIDANCE_EMBED_MODELS/CFG_GUIDED_MODELS above).
+const LOADER_PRESET_MODEL_TYPE = {
+    "Flux Dev": "flux", "Flux Schnell": "flux", "Flux Dev (Low VRAM)": "flux",
+    "Chroma": "chroma",
+    "SD3.5 Large": "sd3.5", "SD3.5 Medium": "sd3.5", "SD3.5 Turbo": "sd3.5",
+    "SDXL Base": "sdxl", "SDXL Turbo": "sdxl", "SD 1.5": "sd15",
+    "HunyuanVideo": "hunyuan_video",
+    "Wan 2.1": "wan", "Wan 2.2": "wan", "Wan 2.2 TI2V": "wan",
+    "LTX Video": "ltxv", "LTX Video 13B": "ltxv",
+    "LTX Video 2.3": "ltxav", "LTX Video 2.3 (Low VRAM)": "ltxav",
+    "Cosmos World": "cosmos", "CogVideoX": "cogvideox", "Mochi": "mochi",
+    "PixArt Sigma": "pixart", "AuraFlow": "aura_flow", "Kolors": "kolors",
+    "Lumina2": "lumina2", "Z-Image": "z_image",
+};
+
+// ALBABIT-FIX: mirrors sampler_utils.py's MODEL_DEFAULTS. "guidance" here is
+// the architecture-level fallback (e.g. Flux.2 Dev's 4.0) -- a filename-level
+// _deriveDistillationOverride() match (e.g. Klein/Schnell) takes priority over
+// it, same relationship as the Python side's klein_refined/defaults. Kept in
+// sync by hand (same pattern as GUIDANCE_EMBED_MODELS/CFG_GUIDED_MODELS above).
+const MODEL_TYPE_SAMPLING_DEFAULTS = {
+    flux:          { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 3.5 },
+    flux2:         { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 4.0 },
+    "flux2-klein": { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 4.0 },
+    chroma:        { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 0.0 },
+    sd3:           { cfg: 4.5, sampler: "dpmpp_2m", scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0 },
+    "sd3.5":       { cfg: 4.5, sampler: "dpmpp_2m", scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0 },
+    sdxl:          { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "karras",      flux_shift: 1.0,  guidance: 0.0 },
+    sd15:          { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0 },
+    wan:           { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0 },
+    ltxv:          { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 2.37, guidance: 3.5 },
+    ltxav:         { cfg: 3.0, sampler: "euler",    scheduler: "beta",        flux_shift: 3.0,  guidance: 0.0 },
+    hunyuan_video: { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 7.0,  guidance: 0.0 },
+    lumina2:       { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 6.0,  guidance: 3.5 },
+    z_image:       { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 3.0,  guidance: 3.5 },
+    cosmos:        { cfg: 7.0, sampler: "euler",    scheduler: "simple",      flux_shift: 3.0,  guidance: 0.0 },
+    cogvideox:     { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0 },
+    stepvideo:     { cfg: 9.0, sampler: "euler",    scheduler: "simple",      flux_shift: 13.0, guidance: 0.0 },
+    mochi:         { cfg: 4.5, sampler: "euler",    scheduler: "simple",      flux_shift: 6.0,  guidance: 0.0 },
+    // pixart/aura_flow/kolors have no entry in sampler_utils.py's MODEL_DEFAULTS
+    // either -- get_model_defaults() falls back to "sd15" there, mirrored here.
+    pixart:        { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0 },
+    aura_flow:     { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0 },
+    kolors:        { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0 },
+};
+
+function _resolveLoaderModelType(loaderNode) {
+    if (!loaderNode) return null;
+    const presetVal = loaderNode.widgets?.find(w => w.name === "preset")?.value;
+    // ALBABIT-FIX: "Flux.2" covers Dev and Klein in one preset (Auto-Detect
+    // tells them apart at execution time) -- resolve here the same way,
+    // from the Loader's own unet_name, since the preset name alone can't.
+    if (presetVal === "Flux.2") {
+        const unetName = loaderNode.widgets?.find(w => w.name === "unet_name")?.value || "";
+        return unetName.toLowerCase().includes("klein") ? "flux2-klein" : "flux2";
+    }
+    if (presetVal && presetVal !== "Custom" && LOADER_PRESET_MODEL_TYPE[presetVal]) {
+        return LOADER_PRESET_MODEL_TYPE[presetVal];
+    }
+    const modelType = loaderNode.widgets?.find(w => w.name === "model_type")?.value;
+    return (modelType && modelType !== "Auto-Detect") ? modelType : null;
+}
+
+// ALBABIT-FIX: can't just check "is the widget still at its generic default"
+// -- after the first auto-write the value IS the derived one, so a later
+// Loader change would never re-apply. _radAutoValue tracks what WE last
+// wrote instead; no prior tracking (fresh, or right after a named preset)
+// is never "user touched", so it applies unconditionally.
+function _syncAutoValue(widget, newValue) {
+    if (!widget || newValue === undefined) {
+        if (widget) widget._radAutoValue = undefined;
+        return false;
+    }
+    const userTouched = widget._radAutoValue !== undefined && widget.value !== widget._radAutoValue;
+    widget._radAutoValue = newValue;
+    if (userTouched || widget.value === newValue) return false;
+    widget.value = newValue;
+    return true;
+}
+
+function _markLinkedWidget(widget, linked, inSync) {
+    if (!widget) return false;
+    const markerText = linked ? (inSync ? LINKED_MARKER : PRESET_MARKER) : null;
+    if (widget._radOrigLabel === undefined && !markerText) return false;
+    if (widget._radOrigLabel === undefined) widget._radOrigLabel = widget.label ?? widget.name;
+    const wanted = markerText ? widget._radOrigLabel + markerText : widget._radOrigLabel;
+    if (widget.label === wanted) return false;
+    widget.label = wanted;
+    return true;
+}
+
+// ALBABIT-FIX: extends the guidance/steps sync (above) to model_type/cfg/
+// sampler/scheduler/flux_shift, resolved from the linked Loader's preset/
+// model_type. Gated on preset (None/Custom) only -- not model_type=="auto"
+// too, since the per-field checks in _syncAutoValue() already protect any
+// field the user deliberately set (mirrors nodes_sampler.py).
+function updateModelMetaDefaults(node) {
+    if (!node.widgets) return;
+    const presetW = node.widgets.find(w => w.name === "preset");
+    const presetVal = presetW ? presetW.value : "None";
+    const eligible = presetVal === "None" || presetVal === "Custom";
+
+    const sourceNode = eligible ? _findModelMetaSourceNode(node) : null;
+    const unetName = sourceNode?.widgets?.find(w => w.name === "unet_name")?.value ?? null;
+    const override = _deriveDistillationOverride(unetName);
+    const detectedType = _resolveLoaderModelType(sourceNode);
+    const modelDefaults = MODEL_TYPE_SAMPLING_DEFAULTS[detectedType] ?? null;
+
+    const pairs = [
+        [node.widgets.find(w => w.name === "model_type"), detectedType ?? undefined],
+        [node.widgets.find(w => w.name === "flux_guidance"), override?.flux_guidance ?? modelDefaults?.guidance],
+        [node.widgets.find(w => w.name === "steps"), override?.steps],
+        [node.widgets.find(w => w.name === "cfg"), modelDefaults?.cfg],
+        [node.widgets.find(w => w.name === "sampler"), modelDefaults?.sampler],
+        [node.widgets.find(w => w.name === "scheduler"), modelDefaults?.scheduler],
+        [node.widgets.find(w => w.name === "flux_shift"), modelDefaults?.flux_shift],
+    ];
+
+    let changed = false;
+    for (const [widget, derivedVal] of pairs) {
+        if (_syncAutoValue(widget, derivedVal)) changed = true;
+        const linked = derivedVal !== undefined;
+        const inSync = linked && widget && widget.value === derivedVal;
+        if (_markLinkedWidget(widget, linked, inSync)) changed = true;
     }
     if (changed) node.setDirtyCanvas(true, true);
 }
@@ -910,12 +1050,9 @@ app.registerExtension({
                     toggleFields(this);
                 } else if (value !== lastPresetValue) {
                     lastPresetValue = value;
-                    // ALBABIT-FIX: reset model_type to "auto" on manual switch to None/Custom
-                    // (named presets set it via applyPreset/inferModelTypeForPreset above)
-                    if (value === "None" || value === "Custom") {
-                        const modelTypeW = this.widgets?.find(w => w.name === "model_type");
-                        if (modelTypeW) modelTypeW.value = "auto";
-                    }
+                    // ALBABIT-FIX: no longer resets model_type -- named presets
+                    // don't force it anymore (see applyPreset), so there's
+                    // nothing to undo when switching to None/Custom.
                     updateUILocks(this, value);
                     updateDescription(value);
                     toggleFields(this);
@@ -958,6 +1095,7 @@ app.registerExtension({
             this._sigmaCheckInterval = setInterval(() => {
                 updateSigmaLocks(self);
                 updatePresetDivergenceMarkers(self);
+                updateModelMetaDefaults(self);
             }, 250);
             const origOnRemoved = this.onRemoved;
             this.onRemoved = function () {
@@ -1017,6 +1155,32 @@ app.registerExtension({
             // heavy workflows where graph.configure() stalls the main thread > 100ms.
             setTimeout(reapply, 150);
             setTimeout(reapply, 600);
+        };
+
+        // ALBABIT-FIX: sync cfg/flux_guidance/flux_shift/sampler/steps to the
+        // values actually used (sample() can silently adjust them -- MODEL_DEFAULTS
+        // auto-adapt or the model_meta-driven Flux.2 Klein refinement). Same
+        // "ui" dict + onExecuted pattern as radiance_resolution.js's
+        // computed_width/height. Runs regardless of preset/model_meta -- a no-op
+        // when nothing was adjusted (values already match).
+        const onExecuted = nodeType.prototype.onExecuted;
+        nodeType.prototype.onExecuted = function (message) {
+            if (onExecuted) onExecuted.apply(this, arguments);
+
+            const sync = (name, msgKey) => {
+                const val = message?.[msgKey]?.[0];
+                const w = this.widgets?.find(wg => wg.name === name);
+                if (val != null && w && w.value !== val) {
+                    w.value = val;
+                    if (w.inputEl) w.inputEl.value = val;
+                }
+            };
+            sync("cfg", "resolved_cfg");
+            sync("flux_guidance", "resolved_flux_guidance");
+            sync("flux_shift", "resolved_flux_shift");
+            sync("sampler", "resolved_sampler");
+            sync("steps", "resolved_steps");
+            this.setDirtyCanvas?.(true, true);
         };
     }
 });

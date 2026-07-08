@@ -24,6 +24,21 @@ def _tensor_dim0(f, ks: list[str], substr: str) -> int | None:
     return None
 
 
+def _block_count(ks: list[str], prefix: str) -> int:
+    """Count distinct numbered blocks for a key prefix (e.g. "single_blocks.").
+
+    ALBABIT-FIX: used to distinguish architectures that share identical key
+    names but differ by depth (e.g. Flux.2 Dev vs Flux.2 Klein).
+    """
+    indices = set()
+    for k in ks:
+        if k.startswith(prefix):
+            idx = k[len(prefix):].split(".", 1)[0]
+            if idx.isdigit():
+                indices.add(idx)
+    return len(indices)
+
+
 _ARCH_HEURISTICS = [
     # ALBABIT-FIX: Chroma (and Chroma Radiance) share Flux's double_blocks/
     # img_in keys but add a distilled_guidance_layer — must be checked before
@@ -33,8 +48,13 @@ _ARCH_HEURISTICS = [
     (lambda ks, f: any("double_blocks" in k for k in ks)
      and any("distilled_guidance_layer" in k for k in ks)
      and not any("nerf_blocks" in k for k in ks), "chroma"),
-    # ALBABIT-FIX: Flux.2 shares Flux's double_blocks/img_in keys but adds
-    # double_stream_modulation_img — must be checked before "flux".
+    # ALBABIT-FIX: Flux.2 Klein shares Flux.2 Dev's double_stream_modulation_img
+    # key but has far fewer single_blocks (measured: Dev=48, Klein 9B=24,
+    # Klein Base 4B=20) — must be checked before "flux2" (different CLIP:
+    # mistral_3_small vs qwen3). Both share Flux's double_blocks/img_in keys
+    # too, so this whole group must be checked before "flux".
+    (lambda ks, f: any("double_stream_modulation_img" in k for k in ks)
+     and _block_count(ks, "single_blocks.") < 40, "flux2-klein"),
     (lambda ks, f: any("double_stream_modulation_img" in k for k in ks), "flux2"),
     (lambda ks, f: any("double_blocks" in k for k in ks), "flux"),
     (lambda ks, f: any("joint_blocks" in k for k in ks), "sd3"),
