@@ -280,7 +280,9 @@ const PRESET_CONFIGS = {
             "klein-9b-kv", "klein-base", "klein-9b", "klein-4b",
             "flux2-klein", "flux2_klein", "flux.2-klein", "klein",
         ],
-        "vae_hints":     ["flux2-vae", "flux2_vae", "flux2_ae"],
+        // full_encoder_small_decoder is a lighter/faster decoder (same
+        // encoder) -- only used if the full-quality flux2-vae isn't present.
+        "vae_hints":     ["flux2-vae", "flux2_vae", "flux2_ae", "full_encoder_small_decoder"],
         "clip_hints":    {
             // Fallback when no size token is detected in unet_name (see
             // clip_size_hints below, which normally takes priority).
