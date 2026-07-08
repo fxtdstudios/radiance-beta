@@ -604,22 +604,93 @@ function updatePresetDivergenceMarkers(node) {
 // the same convention already used in js/radiance_loader.js for Flux.2 Klein.
 const LINKED_MARKER = " 🧲";
 
-function _findModelMetaSourceUnetName(node) {
+function _findModelMetaSourceNode(node) {
     const input = node.inputs?.find(i => i.name === "model_meta");
     if (!input || !input.link) return null;
     const link = app.graph.links[input.link];
     if (!link) return null;
     const originNode = app.graph.getNodeById(link.origin_id);
     if (!originNode || originNode.mode === 2 || originNode.mode === 4) return null;
-    return originNode.widgets?.find(w => w.name === "unet_name")?.value ?? null;
+    return originNode;
 }
 
-function _deriveKleinDefaultsFromUnet(filename) {
+// ALBABIT-FIX: some architectures ship multiple checkpoints under the same
+// model_type needing very different steps/guidance (a distilled variant vs
+// its undistilled base) -- undetectable from the loaded MODEL/architecture
+// alone, only from the exact filename. Verified against official model cards:
+// Flux.2 Klein Base/distilled (all 4 combinations: 4B/9B x Base/distilled)
+// and Flux.1 Dev/Schnell. LTX Video 2.3 Dev/Distilled deliberately NOT
+// covered -- community guidance for it is inconsistent and multi-stage-
+// pipeline dependent, unlike the single clean numbers found for Flux; the
+// existing dedicated "LTX 2.3 LowRes/HighRes" Sampler presets are the right
+// tool there, not an automatic (and potentially wrong) filename guess.
+function _deriveDistillationOverride(filename) {
     if (!filename) return null;
     const f = filename.toLowerCase();
-    if (!f.includes("klein")) return null;
-    const isBase = f.includes("base");
-    return isBase ? { flux_guidance: 4.0, steps: 50 } : { flux_guidance: 1.0, steps: 4 };
+    if (f.includes("klein")) {
+        return f.includes("base") ? { flux_guidance: 4.0, steps: 50 } : { flux_guidance: 1.0, steps: 4 };
+    }
+    if (f.includes("schnell")) return { flux_guidance: 0.0, steps: 4 };
+    return null;
+}
+
+// ALBABIT-FIX: mirrors config/model_map.py's CHECKPOINT_PRESETS[...]["model_type"]
+// -- lets the Sampler resolve the Loader's architecture from its preset name
+// alone, no execution needed. Must be kept in sync by hand (same pattern
+// already used for GUIDANCE_EMBED_MODELS/CFG_GUIDED_MODELS above).
+const LOADER_PRESET_MODEL_TYPE = {
+    "Flux Dev": "flux", "Flux Schnell": "flux", "Flux Dev (Low VRAM)": "flux",
+    "Chroma": "chroma", "Flux.2 Dev": "flux2", "Flux.2 Klein": "flux2-klein",
+    "SD3.5 Large": "sd3.5", "SD3.5 Medium": "sd3.5", "SD3.5 Turbo": "sd3.5",
+    "SDXL Base": "sdxl", "SDXL Turbo": "sdxl", "SD 1.5": "sd15",
+    "HunyuanVideo": "hunyuan_video",
+    "Wan 2.1": "wan", "Wan 2.2": "wan", "Wan 2.2 TI2V": "wan",
+    "LTX Video": "ltxv", "LTX Video 13B": "ltxv",
+    "LTX Video 2.3": "ltxav", "LTX Video 2.3 (Low VRAM)": "ltxav",
+    "Cosmos World": "cosmos", "CogVideoX": "cogvideox", "Mochi": "mochi",
+    "PixArt Sigma": "pixart", "AuraFlow": "aura_flow", "Kolors": "kolors",
+    "Lumina2": "lumina2", "Z-Image": "z_image",
+};
+
+// ALBABIT-FIX: mirrors sampler_utils.py's MODEL_DEFAULTS. "guidance" here is
+// the architecture-level fallback (e.g. Flux.2 Dev's 4.0) -- a filename-level
+// _deriveDistillationOverride() match (e.g. Klein/Schnell) takes priority over
+// it, same relationship as the Python side's klein_refined/defaults. Kept in
+// sync by hand (same pattern as GUIDANCE_EMBED_MODELS/CFG_GUIDED_MODELS above).
+const MODEL_TYPE_SAMPLING_DEFAULTS = {
+    flux:          { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 3.5 },
+    flux2:         { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 4.0 },
+    "flux2-klein": { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 4.0 },
+    chroma:        { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 0.0 },
+    sd3:           { cfg: 4.5, sampler: "dpmpp_2m", scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0 },
+    "sd3.5":       { cfg: 4.5, sampler: "dpmpp_2m", scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0 },
+    sdxl:          { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "karras",      flux_shift: 1.0,  guidance: 0.0 },
+    sd15:          { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0 },
+    wan:           { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0 },
+    ltxv:          { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 2.37, guidance: 3.5 },
+    ltxav:         { cfg: 3.0, sampler: "euler",    scheduler: "beta",        flux_shift: 3.0,  guidance: 0.0 },
+    hunyuan_video: { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 7.0,  guidance: 0.0 },
+    lumina2:       { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 6.0,  guidance: 3.5 },
+    z_image:       { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 3.0,  guidance: 3.5 },
+    cosmos:        { cfg: 7.0, sampler: "euler",    scheduler: "simple",      flux_shift: 3.0,  guidance: 0.0 },
+    cogvideox:     { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0 },
+    stepvideo:     { cfg: 9.0, sampler: "euler",    scheduler: "simple",      flux_shift: 13.0, guidance: 0.0 },
+    mochi:         { cfg: 4.5, sampler: "euler",    scheduler: "simple",      flux_shift: 6.0,  guidance: 0.0 },
+    // pixart/aura_flow/kolors have no entry in sampler_utils.py's MODEL_DEFAULTS
+    // either -- get_model_defaults() falls back to "sd15" there, mirrored here.
+    pixart:        { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0 },
+    aura_flow:     { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0 },
+    kolors:        { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0 },
+};
+
+function _resolveLoaderModelType(loaderNode) {
+    if (!loaderNode) return null;
+    const presetVal = loaderNode.widgets?.find(w => w.name === "preset")?.value;
+    if (presetVal && presetVal !== "Custom" && LOADER_PRESET_MODEL_TYPE[presetVal]) {
+        return LOADER_PRESET_MODEL_TYPE[presetVal];
+    }
+    const modelType = loaderNode.widgets?.find(w => w.name === "model_type")?.value;
+    return (modelType && modelType !== "Auto-Detect") ? modelType : null;
 }
 
 // ALBABIT-FIX: a poll-driven mechanism can't just check "is the widget still
@@ -653,6 +724,12 @@ function _markLinkedWidget(widget, linked, inSync) {
     return true;
 }
 
+// ALBABIT-FIX: extends the distillation-aware guidance/steps sync (above) to
+// cfg/sampler/scheduler/flux_shift too -- these only need the architecture
+// (not the exact filename), resolved from the linked Loader's preset/
+// model_type, so a value left over from an unrelated Sampler preset (e.g.
+// scheduler="karras" from an SDXL preset, still showing after switching back
+// to "Custom") gets corrected and flagged instead of silently staying wrong.
 function updateModelMetaDefaults(node) {
     if (!node.widgets) return;
     const presetW = node.widgets.find(w => w.name === "preset");
@@ -661,18 +738,29 @@ function updateModelMetaDefaults(node) {
     const eligible = (presetVal === "None" || presetVal === "Custom") &&
         (!modelTypeW || modelTypeW.value === "auto");
 
-    const guidanceW = node.widgets.find(w => w.name === "flux_guidance");
-    const stepsW = node.widgets.find(w => w.name === "steps");
-    const derived = eligible ? _deriveKleinDefaultsFromUnet(_findModelMetaSourceUnetName(node)) : null;
+    const sourceNode = eligible ? _findModelMetaSourceNode(node) : null;
+    const unetName = sourceNode?.widgets?.find(w => w.name === "unet_name")?.value ?? null;
+    const override = _deriveDistillationOverride(unetName);
+    const modelDefaults = MODEL_TYPE_SAMPLING_DEFAULTS[_resolveLoaderModelType(sourceNode)] ?? null;
+
+    const pairs = [
+        [node.widgets.find(w => w.name === "flux_guidance"), override?.flux_guidance ?? modelDefaults?.guidance],
+        [node.widgets.find(w => w.name === "steps"), override?.steps],
+        [node.widgets.find(w => w.name === "cfg"), modelDefaults?.cfg],
+        [node.widgets.find(w => w.name === "sampler"), modelDefaults?.sampler],
+        [node.widgets.find(w => w.name === "scheduler"), modelDefaults?.scheduler],
+        [node.widgets.find(w => w.name === "flux_shift"), modelDefaults?.flux_shift],
+    ];
 
     let changed = false;
-    if (_syncAutoValue(guidanceW, derived?.flux_guidance)) changed = true;
-    if (_syncAutoValue(stepsW, derived?.steps)) changed = true;
-
-    const guidanceInSync = !!derived && guidanceW && guidanceW.value === derived.flux_guidance;
-    const stepsInSync = !!derived && stepsW && stepsW.value === derived.steps;
-    if (_markLinkedWidget(guidanceW, !!derived, guidanceInSync)) changed = true;
-    if (_markLinkedWidget(stepsW, !!derived, stepsInSync)) changed = true;
+    for (const [widget, derivedVal] of pairs) {
+        if (_syncAutoValue(widget, derivedVal)) changed = true;
+    }
+    for (const [widget, derivedVal] of pairs) {
+        const linked = derivedVal !== undefined;
+        const inSync = linked && widget && widget.value === derivedVal;
+        if (_markLinkedWidget(widget, linked, inSync)) changed = true;
+    }
     if (changed) node.setDirtyCanvas(true, true);
 }
 

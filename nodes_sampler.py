@@ -38,7 +38,7 @@ try:
         TILE_BLEND_MODES, SamplerMode, SigmaCache, _sigma_cache,
         RadianceModelRegistry, detect_by_config, detect_by_architecture,
         detect_by_sampling, detect_model_type, get_model_defaults,
-        parse_model_meta, refine_flux2_klein_from_meta,
+        parse_model_meta, refine_distillation_from_meta,
         gradual_sigma_blend, log_tensor, SigmaIndexer, SamplingStage,
         apply_flux_guidance, compute_dynamic_guidance, compute_dynamic_cfg,
         compute_base_sigmas, WORKFLOW_PRESETS, flux_shift_sigmas, get_flux_sigmas,
@@ -64,7 +64,7 @@ except (ImportError, ValueError):
         TILE_BLEND_MODES, SamplerMode, SigmaCache, _sigma_cache,
         RadianceModelRegistry, detect_by_config, detect_by_architecture,
         detect_by_sampling, detect_model_type, get_model_defaults,
-        parse_model_meta, refine_flux2_klein_from_meta,
+        parse_model_meta, refine_distillation_from_meta,
         gradual_sigma_blend, log_tensor, SigmaIndexer, SamplingStage,
         apply_flux_guidance, compute_dynamic_guidance, compute_dynamic_cfg,
         compute_base_sigmas, WORKFLOW_PRESETS, flux_shift_sigmas, get_flux_sigmas,
@@ -480,20 +480,26 @@ class RadianceSamplerPro:
 
         if preset in ("None", "Custom") and model_type == "auto":
             defaults = get_model_defaults(detected_type)
-            klein_refined = refine_flux2_klein_from_meta(detected_type, meta_unet_file)
+            distilled = refine_distillation_from_meta(detected_type, meta_unet_file)
 
             # Apply defaults if user has them at "default" values
             if kwargs.get('cfg') == 1.0 and detected_type != "flux":
                 kwargs['cfg'] = defaults.get("cfg", kwargs['cfg'])
 
-            if kwargs.get('flux_guidance') == 3.5 and detected_type != "flux":
-                model_default_guidance = (klein_refined or {}).get(
+            # ALBABIT-FIX: "detected_type != flux" used to gate this whole block
+            # off for Flux.1 -- harmless when guidance always matched (3.5 ==
+            # the widget's own generic default), but it silently blocked the
+            # Schnell override (0.0) once distillation_refined started covering
+            # Flux.1 too. Removed -- a plain "flux" with no override still
+            # resolves guidance=3.5, an unchanged no-op.
+            if kwargs.get('flux_guidance') == 3.5:
+                model_default_guidance = (distilled or {}).get(
                     "guidance", defaults.get("guidance", kwargs['flux_guidance']))
                 if model_default_guidance > 0 or defaults.get("guidance_type") != "embedding":
                     kwargs['flux_guidance'] = model_default_guidance
 
-            if kwargs.get('steps') == 20 and klein_refined:
-                kwargs['steps'] = klein_refined["steps"]
+            if kwargs.get('steps') == 20 and distilled:
+                kwargs['steps'] = distilled["steps"]
                 logger.info(f"Auto-applied steps={kwargs['steps']} for {detected_type} (from model_meta)")
 
             default_shift = defaults.get("shift", 1.0)

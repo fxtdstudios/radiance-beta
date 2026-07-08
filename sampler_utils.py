@@ -91,7 +91,7 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
     # verified against BFL's own example code (4.0, not Flux.1's 3.5). Klein's
     # value is a fallback for when model_meta isn't connected -- Base (undistilled,
     # guidance=4.0) and distilled (guidance~1.0) are architecturally identical and
-    # only distinguishable via model_meta's unet_file (see refine_flux2_klein_from_meta).
+    # only distinguishable via model_meta's unet_file (see refine_distillation_from_meta).
     "flux2": {
         "cfg": 1.0,
         "scheduler": "simple",
@@ -453,19 +453,28 @@ def parse_model_meta(model_meta: str) -> Tuple[str, str]:
         return "", ""
 
 
-def refine_flux2_klein_from_meta(detected_type: str, unet_file: str) -> Optional[Dict[str, Any]]:
+def refine_distillation_from_meta(detected_type: str, unet_file: str) -> Optional[Dict[str, Any]]:
     """
-    Flux.2 Klein Base (undistilled, ~50 steps / guidance=4.0) and Klein
-    distilled (4 steps / guidance~1.0) are architecturally identical --
-    undetectable from the loaded model alone. model_meta's unet_file (the
-    exact filename the Loader loaded) is the only reliable signal. Returns
-    None when not applicable (not Klein, or no filename available), leaving
-    the generic MODEL_DEFAULTS fallback (Base-like) in place.
+    Some architectures ship multiple checkpoints under one model_type needing
+    very different steps/guidance (a distilled variant vs its undistilled
+    base) -- architecturally identical, undetectable from the loaded model
+    alone. model_meta's unet_file (the exact filename the Loader loaded) is
+    the only reliable signal. Verified against official model cards: Flux.2
+    Klein Base/distilled (~50 steps/guidance=4.0 vs 4 steps/guidance~1.0) and
+    Flux.1 Dev/Schnell (guidance=3.5 vs 0.0, both already correct via
+    MODEL_DEFAULTS/steps left manual for Dev, so only Schnell needs an
+    override here). Returns None when not applicable, leaving the generic
+    MODEL_DEFAULTS fallback in place.
     """
-    if detected_type != "flux2-klein" or not unet_file:
+    if not unet_file:
         return None
-    is_distilled = "base" not in unet_file.lower()
-    return {"guidance": 1.0, "steps": 4} if is_distilled else {"guidance": 4.0, "steps": 50}
+    name = unet_file.lower()
+    if detected_type == "flux2-klein":
+        is_distilled = "base" not in name
+        return {"guidance": 1.0, "steps": 4} if is_distilled else {"guidance": 4.0, "steps": 50}
+    if detected_type == "flux" and "schnell" in name:
+        return {"guidance": 0.0, "steps": 4}
+    return None
 
 def gradual_sigma_blend(
     sigmas_a: torch.Tensor, sigmas_b: torch.Tensor, blend_steps: int = 3
