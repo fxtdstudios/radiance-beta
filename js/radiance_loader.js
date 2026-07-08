@@ -33,10 +33,9 @@ const PRESET_SLOTS = {
     "Kolors": ["llm_encoder"],
     "Lumina2": ["llm_encoder"],
     "Z-Image": ["llm_encoder"],
-    // ALBABIT-FIX: Chroma, Flux.2 Dev/Klein, Cosmos World, CogVideoX, Mochi
+    // ALBABIT-FIX: Chroma, Flux.2 (Dev+Klein merged), Cosmos World, CogVideoX, Mochi
     "Chroma": ["t5xxl"],
-    "Flux.2 Dev": ["llm_encoder"],
-    "Flux.2 Klein": ["llm_encoder"],
+    "Flux.2": ["llm_encoder"],
     "Cosmos World": ["t5xxl"],
     "CogVideoX": ["t5xxl"],
     "Mochi": ["t5xxl"],
@@ -253,7 +252,7 @@ const PRESET_CONFIGS = {
             "llm_encoder": ["qwen_3_4b", "qwen3_4b", "qwen_3"],
         },
     },
-    // ALBABIT-FIX: Chroma, Flux.2 Dev/Klein, Cosmos World, CogVideoX, Mochi —
+    // ALBABIT-FIX: Chroma, Flux.2, Cosmos World, CogVideoX, Mochi —
     // mirrors CHECKPOINT_PRESETS in config/model_map.py.
     "Chroma": {
         "unet_hints":    ["chroma-unlocked", "chroma_unlocked", "chroma"],
@@ -262,35 +261,32 @@ const PRESET_CONFIGS = {
             "t5xxl": ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
     },
-    "Flux.2 Dev": {
-        "unet_hints":    ["flux2-dev", "flux2_dev", "flux.2-dev"],
-        "vae_hints":     ["flux2-vae", "flux2_vae", "flux2_ae"],
-        "clip_hints":    {
-            "llm_encoder": ["mistral_3_small_flux2_bf16", "mistral_3_small_flux2_fp8", "mistral_3_small_flux2", "mistral_3", "mistral"],
-        },
-    },
-    "Flux.2 Klein": {
-        // ALBABIT-FIX: covers all sizes/distillation states (4B/9B, Base/
-        // distilled) -- exact filenames first (bf16 before fp8), generic
-        // patterns as a last resort.
+    // ALBABIT-FIX: Dev and Klein merged into one preset now that Auto-Detect
+    // can tell them apart on its own (model/detect.py, single_blocks count).
+    // unet_hints cover both families -- Dev first (flagship, quality-first),
+    // then Klein's sizes/distillation states (4B/9B, Base/distilled).
+    "Flux.2": {
         "unet_hints": [
+            "flux2-dev.safetensors", "flux2_dev_fp8mixed.safetensors",
             "flux-2-klein-9b.safetensors",
             "flux-2-klein-base-4b.safetensors",
             "flux-2-klein-base-9b-fp8.safetensors",
             "klein-9b-kv", "klein-base", "klein-9b", "klein-4b",
+            "flux2-dev", "flux2_dev", "flux.2-dev",
             "flux2-klein", "flux2_klein", "flux.2-klein", "klein",
         ],
         // full_encoder_small_decoder is a lighter/faster decoder (same
         // encoder) -- only used if the full-quality flux2-vae isn't present.
         "vae_hints":     ["flux2-vae", "flux2_vae", "flux2_ae", "full_encoder_small_decoder"],
         "clip_hints":    {
-            // Fallback when no size token is detected in unet_name (see
-            // clip_size_hints below, which normally takes priority).
-            "llm_encoder": ["qwen_3_4b", "qwen3_4b", "qwen_3"],
+            // Dev's encoder (Mistral) -- also the fallback when unet_name
+            // isn't a recognized Klein size (see clip_size_hints, which
+            // takes priority whenever a Klein 4B/9B file is detected).
+            "llm_encoder": ["mistral_3_small_flux2_bf16", "mistral_3_small_flux2_fp8", "mistral_3_small_flux2", "mistral_3", "mistral"],
         },
-        // ALBABIT-FIX: text encoder size must match the UNET (4B->qwen_3_4b,
-        // 9B->qwen_3_8b*) -- resolved dynamically from the size token
-        // detected in unet_name. Quality-first: bf16 before fp8/fp4mixed.
+        // ALBABIT-FIX: Klein's encoder (Qwen) must match its size (4B->qwen_3_4b,
+        // 9B->qwen_3_8b*) -- resolved dynamically from the size token detected
+        // in unet_name. Quality-first: bf16 before fp8/fp4mixed.
         "clip_size_hints": {
             "9b": ["qwen_3_8b.safetensors", "qwen_3_8b", "qwen_3_8b_fp8mixed", "qwen_3_8b_fp4mixed", "qwen3_8b"],
             "4b": ["qwen_3_4b.safetensors", "qwen_3_4b", "qwen3_4b"],
@@ -461,7 +457,7 @@ function autoFillPresetFiles(node, cleanPreset) {
 const PRESET_MARKER = " ✎";
 // ALBABIT-FIX: for clip_size_hints presets, llm_encoder is derived from
 // unet_name, not a static default -- "🧲" marks that link instead of "✎"
-// (unet_name: any recognized size variant; llm_encoder: in sync with it).
+// (unet_name: any recognized variant of the preset; llm_encoder: in sync with it).
 const LINKED_MARKER = " 🧲";
 // ALBABIT-FIX: for companion_linked presets (Wan 2.2), either the high_noise
 // or low_noise UNET is a valid pick -- "⛓" marks unet_name instead of "✎"
@@ -490,7 +486,10 @@ function updatePresetDivergenceMarkers(node) {
     const config = cleanPreset === "Custom" ? null : PRESET_CONFIGS[cleanPreset];
     const activeSlots = config ? (PRESET_SLOTS[cleanPreset] || ALL_CLIP_WIDGETS) : [];
     const unetVal = getWidget(node, "unet_name")?.value || "";
-    const sizeLinked = !!_knownSizeToken(config, unetVal);
+    // ALBABIT-FIX: llm_encoder's pick depends on unet_name for the whole
+    // preset (Mistral vs Qwen), not just the size-token subset (Klein) --
+    // any recognized file in this preset's own unet_hints counts as linked.
+    const familyLinked = !!(config?.clip_size_hints && findMatchingFile(config.unet_hints, [unetVal]));
     const companionLinked = !!(config?.companion_linked && findMatchingFile(config.unet_hints, [unetVal]));
 
     let changed = false;
@@ -515,9 +514,9 @@ function updatePresetDivergenceMarkers(node) {
     };
 
     // unet_name shows a link marker instead of the divergence marker while
-    // sizeLinked/companionLinked -- the point is to signal a relationship
+    // familyLinked/companionLinked -- the point is to signal a relationship
     // (linked CLIP size, auto-loaded companion), not flag a mistake.
-    if (sizeLinked) {
+    if (familyLinked) {
         if (_markFileWidget(getWidget(node, "unet_name"), LINKED_MARKER)) changed = true;
     } else if (companionLinked) {
         if (_markFileWidget(getWidget(node, "unet_name"), COMPANION_MARKER)) changed = true;
@@ -527,7 +526,7 @@ function updatePresetDivergenceMarkers(node) {
     check("vae_name", config?.vae_hints);
     for (const wName of ALL_CLIP_WIDGETS) {
         if (config && !activeSlots.includes(wName)) continue; // hidden slot
-        if (wName === "llm_encoder" && sizeLinked) {
+        if (wName === "llm_encoder" && familyLinked) {
             const w = getWidget(node, "llm_encoder");
             const matched = _resolveClipMatch(node, config, "llm_encoder");
             const markerText = matched === null ? null

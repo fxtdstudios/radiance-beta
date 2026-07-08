@@ -478,7 +478,11 @@ class RadianceSamplerPro:
         if model_type == "auto" and meta_arch:
             detected_type = meta_arch
 
-        if preset in ("None", "Custom") and model_type == "auto":
+        # ALBABIT-FIX: "and model_type == auto" used to also gate this block --
+        # redundant on top of the per-field "still at generic default" checks
+        # below, which already protect any field the user set by hand,
+        # regardless of how model_type itself was determined.
+        if preset in ("None", "Custom"):
             defaults = get_model_defaults(detected_type)
             distilled = refine_distillation_from_meta(detected_type, meta_unet_file)
 
