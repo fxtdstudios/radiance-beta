@@ -3,6 +3,7 @@ import time
 import math
 import logging
 import gc
+import json
 from typing import Tuple, Dict, Any, Optional, List
 from dataclasses import dataclass, field
 
@@ -86,11 +87,15 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "denoise_range": (0.3, 1.0),
     },
     # ALBABIT-FIX: Flux.2 Dev and Flux.2 Klein — guidance_embed models like Flux.1,
-    # same sampling defaults (scheduler=simple, cfg=1.0, guidance_embed).
+    # same sampling defaults (scheduler=simple, cfg=1.0, guidance_embed). guidance
+    # verified against BFL's own example code (4.0, not Flux.1's 3.5). Klein's
+    # value is a fallback for when model_meta isn't connected -- Base (undistilled,
+    # guidance=4.0) and distilled (guidance~1.0) are architecturally identical and
+    # only distinguishable via model_meta's unet_file (see refine_flux2_klein_from_meta).
     "flux2": {
         "cfg": 1.0,
         "scheduler": "simple",
-        "guidance": 3.5,
+        "guidance": 4.0,
         "shift": 1.0,
         "sampler": "euler",
         "denoise_range": (0.3, 1.0),
@@ -98,7 +103,7 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "flux2-klein": {
         "cfg": 1.0,
         "scheduler": "simple",
-        "guidance": 3.5,
+        "guidance": 4.0,
         "shift": 1.0,
         "sampler": "euler",
         "denoise_range": (0.3, 1.0),
@@ -433,6 +438,34 @@ def detect_model_type(model) -> str:
 def get_model_defaults(model_type: str) -> Dict[str, Any]:
 
     return MODEL_DEFAULTS.get(model_type, MODEL_DEFAULTS["sd15"])
+
+
+def parse_model_meta(model_meta: str) -> Tuple[str, str]:
+    """Parse the Loader's model_meta JSON, returning (arch, unet_file). Empty
+    strings on missing/malformed input -- callers should treat that as
+    "no extra info available", not an error."""
+    if not model_meta:
+        return "", ""
+    try:
+        meta = json.loads(model_meta)
+        return meta.get("arch", "") or "", meta.get("unet_file", "") or ""
+    except Exception:
+        return "", ""
+
+
+def refine_flux2_klein_from_meta(detected_type: str, unet_file: str) -> Optional[Dict[str, Any]]:
+    """
+    Flux.2 Klein Base (undistilled, ~50 steps / guidance=4.0) and Klein
+    distilled (4 steps / guidance~1.0) are architecturally identical --
+    undetectable from the loaded model alone. model_meta's unet_file (the
+    exact filename the Loader loaded) is the only reliable signal. Returns
+    None when not applicable (not Klein, or no filename available), leaving
+    the generic MODEL_DEFAULTS fallback (Base-like) in place.
+    """
+    if detected_type != "flux2-klein" or not unet_file:
+        return None
+    is_distilled = "base" not in unet_file.lower()
+    return {"guidance": 1.0, "steps": 4} if is_distilled else {"guidance": 4.0, "steps": 50}
 
 def gradual_sigma_blend(
     sigmas_a: torch.Tensor, sigmas_b: torch.Tensor, blend_steps: int = 3
