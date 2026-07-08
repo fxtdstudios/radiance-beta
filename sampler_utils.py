@@ -456,15 +456,12 @@ def parse_model_meta(model_meta: str) -> Tuple[str, str]:
 def refine_distillation_from_meta(detected_type: str, unet_file: str) -> Optional[Dict[str, Any]]:
     """
     Some architectures ship multiple checkpoints under one model_type needing
-    very different steps/guidance (a distilled variant vs its undistilled
-    base) -- architecturally identical, undetectable from the loaded model
-    alone. model_meta's unet_file (the exact filename the Loader loaded) is
-    the only reliable signal. Verified against official model cards: Flux.2
-    Klein Base/distilled (~50 steps/guidance=4.0 vs 4 steps/guidance~1.0) and
-    Flux.1 Dev/Schnell (guidance=3.5 vs 0.0, both already correct via
-    MODEL_DEFAULTS/steps left manual for Dev, so only Schnell needs an
-    override here). Returns None when not applicable, leaving the generic
-    MODEL_DEFAULTS fallback in place.
+    very different steps/guidance (distilled vs its undistilled base) --
+    architecturally identical, only unet_file's exact filename can tell them
+    apart. Verified against official model cards: Klein Base/distilled and
+    Flux.1 Dev/Schnell (Dev already matches MODEL_DEFAULTS, so only Schnell
+    needs an override). Returns None when not applicable, leaving the
+    generic MODEL_DEFAULTS fallback in place.
     """
     if not unet_file:
         return None

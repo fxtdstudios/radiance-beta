@@ -546,14 +546,11 @@ function applyPreset(node, presetName) {
 }
 
 // ── Preset divergence markers ──
-// ALBABIT-FIX: Python no longer force-applies preset values (_apply_presets is
-// UI-first again, matching old Radiance behavior). Instead of silently
-// overriding user edits — or switching the combo to "Custom", which would
-// unfold every hidden widget — append a "✎" to the label of each widget whose
-// value no longer matches the selected preset (VSCode-style modified-setting
-// indicator). State-based and driven by the existing 250ms poll, so it covers
-// manual edits, undo/redo, preset import and workflow loads, in both the
-// legacy canvas and the Vue Nodes 2.0 frontends (widget.label works in both).
+// ALBABIT-FIX: Python no longer force-applies preset values, so instead of
+// silently overriding user edits, append a "✎" to the label of each widget
+// whose value no longer matches the selected preset. State-based, driven by
+// the existing 250ms poll -- covers manual edits, undo/redo, preset import
+// and workflow loads alike.
 const PRESET_MARKER_EXCLUDED = new Set([
     "seed", "control_after_generate", "description", "preset", "preset_info",
 ]);
@@ -614,16 +611,13 @@ function _findModelMetaSourceNode(node) {
     return originNode;
 }
 
-// ALBABIT-FIX: some architectures ship multiple checkpoints under the same
-// model_type needing very different steps/guidance (a distilled variant vs
-// its undistilled base) -- undetectable from the loaded MODEL/architecture
-// alone, only from the exact filename. Verified against official model cards:
-// Flux.2 Klein Base/distilled (all 4 combinations: 4B/9B x Base/distilled)
-// and Flux.1 Dev/Schnell. LTX Video 2.3 Dev/Distilled deliberately NOT
-// covered -- community guidance for it is inconsistent and multi-stage-
-// pipeline dependent, unlike the single clean numbers found for Flux; the
-// existing dedicated "LTX 2.3 LowRes/HighRes" Sampler presets are the right
-// tool there, not an automatic (and potentially wrong) filename guess.
+// ALBABIT-FIX: some architectures ship multiple checkpoints under one
+// model_type needing very different steps/guidance (distilled vs its
+// undistilled base) -- only the exact filename can tell them apart.
+// Verified against official model cards: Klein Base/distilled (4B/9B) and
+// Flux.1 Dev/Schnell. LTX 2.3 Dev/Distilled deliberately NOT covered --
+// community values are inconsistent/pipeline-dependent; the existing
+// dedicated "LTX 2.3 LowRes/HighRes" presets are the right tool there.
 function _deriveDistillationOverride(filename) {
     if (!filename) return null;
     const f = filename.toLowerCase();
@@ -640,7 +634,7 @@ function _deriveDistillationOverride(filename) {
 // already used for GUIDANCE_EMBED_MODELS/CFG_GUIDED_MODELS above).
 const LOADER_PRESET_MODEL_TYPE = {
     "Flux Dev": "flux", "Flux Schnell": "flux", "Flux Dev (Low VRAM)": "flux",
-    "Chroma": "chroma", "Flux.2 Dev": "flux2", "Flux.2 Klein": "flux2-klein",
+    "Chroma": "chroma",
     "SD3.5 Large": "sd3.5", "SD3.5 Medium": "sd3.5", "SD3.5 Turbo": "sd3.5",
     "SDXL Base": "sdxl", "SDXL Turbo": "sdxl", "SD 1.5": "sd15",
     "HunyuanVideo": "hunyuan_video",
@@ -686,6 +680,13 @@ const MODEL_TYPE_SAMPLING_DEFAULTS = {
 function _resolveLoaderModelType(loaderNode) {
     if (!loaderNode) return null;
     const presetVal = loaderNode.widgets?.find(w => w.name === "preset")?.value;
+    // ALBABIT-FIX: "Flux.2" covers Dev and Klein in one preset (Auto-Detect
+    // tells them apart at execution time) -- resolve here the same way,
+    // from the Loader's own unet_name, since the preset name alone can't.
+    if (presetVal === "Flux.2") {
+        const unetName = loaderNode.widgets?.find(w => w.name === "unet_name")?.value || "";
+        return unetName.toLowerCase().includes("klein") ? "flux2-klein" : "flux2";
+    }
     if (presetVal && presetVal !== "Custom" && LOADER_PRESET_MODEL_TYPE[presetVal]) {
         return LOADER_PRESET_MODEL_TYPE[presetVal];
     }
@@ -693,14 +694,11 @@ function _resolveLoaderModelType(loaderNode) {
     return (modelType && modelType !== "Auto-Detect") ? modelType : null;
 }
 
-// ALBABIT-FIX: a poll-driven mechanism can't just check "is the widget still
-// at its generic default" -- after the first auto-write the value IS the
-// derived one, not the default, so a later Loader change would never apply
-// again. _radAutoValue tracks what WE last wrote; if the live value still
-// matches it, the user hasn't touched it since and it's safe to update again.
-// No prior tracking (e.g. right after a named preset left an unrelated value
-// behind) is NOT "user touched" -- apply unconditionally in that case, same
-// as the very first activation.
+// ALBABIT-FIX: can't just check "is the widget still at its generic default"
+// -- after the first auto-write the value IS the derived one, so a later
+// Loader change would never re-apply. _radAutoValue tracks what WE last
+// wrote instead; no prior tracking (fresh, or right after a named preset)
+// is never "user touched", so it applies unconditionally.
 function _syncAutoValue(widget, newValue) {
     if (!widget || newValue === undefined) {
         if (widget) widget._radAutoValue = undefined;
@@ -724,26 +722,25 @@ function _markLinkedWidget(widget, linked, inSync) {
     return true;
 }
 
-// ALBABIT-FIX: extends the distillation-aware guidance/steps sync (above) to
-// cfg/sampler/scheduler/flux_shift too -- these only need the architecture
-// (not the exact filename), resolved from the linked Loader's preset/
-// model_type, so a value left over from an unrelated Sampler preset (e.g.
-// scheduler="karras" from an SDXL preset, still showing after switching back
-// to "Custom") gets corrected and flagged instead of silently staying wrong.
+// ALBABIT-FIX: extends the guidance/steps sync (above) to model_type/cfg/
+// sampler/scheduler/flux_shift, resolved from the linked Loader's preset/
+// model_type. Gated on preset (None/Custom) only -- not model_type=="auto"
+// too, since the per-field checks in _syncAutoValue() already protect any
+// field the user deliberately set (mirrors nodes_sampler.py).
 function updateModelMetaDefaults(node) {
     if (!node.widgets) return;
     const presetW = node.widgets.find(w => w.name === "preset");
-    const modelTypeW = node.widgets.find(w => w.name === "model_type");
     const presetVal = presetW ? presetW.value : "None";
-    const eligible = (presetVal === "None" || presetVal === "Custom") &&
-        (!modelTypeW || modelTypeW.value === "auto");
+    const eligible = presetVal === "None" || presetVal === "Custom";
 
     const sourceNode = eligible ? _findModelMetaSourceNode(node) : null;
     const unetName = sourceNode?.widgets?.find(w => w.name === "unet_name")?.value ?? null;
     const override = _deriveDistillationOverride(unetName);
-    const modelDefaults = MODEL_TYPE_SAMPLING_DEFAULTS[_resolveLoaderModelType(sourceNode)] ?? null;
+    const detectedType = _resolveLoaderModelType(sourceNode);
+    const modelDefaults = MODEL_TYPE_SAMPLING_DEFAULTS[detectedType] ?? null;
 
     const pairs = [
+        [node.widgets.find(w => w.name === "model_type"), detectedType ?? undefined],
         [node.widgets.find(w => w.name === "flux_guidance"), override?.flux_guidance ?? modelDefaults?.guidance],
         [node.widgets.find(w => w.name === "steps"), override?.steps],
         [node.widgets.find(w => w.name === "cfg"), modelDefaults?.cfg],
@@ -755,8 +752,6 @@ function updateModelMetaDefaults(node) {
     let changed = false;
     for (const [widget, derivedVal] of pairs) {
         if (_syncAutoValue(widget, derivedVal)) changed = true;
-    }
-    for (const [widget, derivedVal] of pairs) {
         const linked = derivedVal !== undefined;
         const inSync = linked && widget && widget.value === derivedVal;
         if (_markLinkedWidget(widget, linked, inSync)) changed = true;

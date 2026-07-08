@@ -472,13 +472,11 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "default",
         "clip_dtype": "default",
     },
-    "Flux.2 Dev": {
-        "model_type": "flux2",
-        "weight_dtype": "default",
-        "clip_dtype": "default",
-    },
-    "Flux.2 Klein": {
-        "model_type": "flux2-klein",
+    # ALBABIT-FIX: Dev and Klein merged into one preset -- model/detect.py's
+    # Auto-Detect can now tell them apart on its own (single_blocks count),
+    # so there's no need for the user to pick the right one manually.
+    "Flux.2": {
+        "model_type": "Auto-Detect",
         "weight_dtype": "default",
         "clip_dtype": "default",
     },
