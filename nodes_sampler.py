@@ -38,6 +38,7 @@ try:
         TILE_BLEND_MODES, SamplerMode, SigmaCache, _sigma_cache,
         RadianceModelRegistry, detect_by_config, detect_by_architecture,
         detect_by_sampling, detect_model_type, get_model_defaults,
+        parse_model_meta, refine_distillation_from_meta,
         gradual_sigma_blend, log_tensor, SigmaIndexer, SamplingStage,
         apply_flux_guidance, compute_dynamic_guidance, compute_dynamic_cfg,
         compute_base_sigmas, WORKFLOW_PRESETS, flux_shift_sigmas, get_flux_sigmas,
@@ -63,6 +64,7 @@ except (ImportError, ValueError):
         TILE_BLEND_MODES, SamplerMode, SigmaCache, _sigma_cache,
         RadianceModelRegistry, detect_by_config, detect_by_architecture,
         detect_by_sampling, detect_model_type, get_model_defaults,
+        parse_model_meta, refine_distillation_from_meta,
         gradual_sigma_blend, log_tensor, SigmaIndexer, SamplingStage,
         apply_flux_guidance, compute_dynamic_guidance, compute_dynamic_cfg,
         compute_base_sigmas, WORKFLOW_PRESETS, flux_shift_sigmas, get_flux_sigmas,
@@ -398,6 +400,18 @@ class RadianceSamplerPro:
                     "FLOAT",
                     {"default": 0.65, "min": 0.0, "max": 1.0, "step": 0.05},
                 ),
+                # ── Model-aware auto defaults ─────────────────────────────────
+                "model_meta": (
+                    "STRING",
+                    {
+                        "default": "", "forceInput": True,
+                        "tooltip": "Optional: connect RadianceUnifiedLoader's model_meta output. "
+                                   "Only used when preset='None'/'Custom' and model_type='auto'. "
+                                   "Refines cfg/guidance/steps beyond what the loaded model's "
+                                   "architecture alone can tell -- e.g. distinguishing Flux.2 Klein "
+                                   "Base from Klein distilled, which are architecturally identical.",
+                    },
+                ),
             },
         }
 
@@ -439,20 +453,58 @@ class RadianceSamplerPro:
         logger.info(f"[Radiance] Preset '{preset}' active — relying strictly on UI parameters.")
         return kwargs
 
-    def _configure_model_and_defaults(self, model, model_type, preset, **kwargs):
+    @staticmethod
+    def _resolved_values_ui(cfg, flux_guidance, flux_shift, sampler, steps):
+        # ALBABIT-FIX: cfg/flux_guidance/flux_shift/sampler/steps can be
+        # silently adjusted by _configure_model_and_defaults() (MODEL_DEFAULTS
+        # auto-adapt, or model_meta-driven Flux.2 Klein refinement) without the
+        # widget on screen changing -- mirrors RadianceResolution's
+        # computed_width/height "ui" write-back so onExecuted (radiance_sampler.js)
+        # can sync the widgets to what was actually used, post-run.
+        return {
+            "resolved_cfg": [cfg], "resolved_flux_guidance": [flux_guidance],
+            "resolved_flux_shift": [flux_shift], "resolved_sampler": [sampler],
+            "resolved_steps": [steps],
+        }
+
+    def _configure_model_and_defaults(self, model, model_type, preset, model_meta="", **kwargs):
         detected_type = detect_model_type(model) if model_type == "auto" else model_type
-        
-        if preset in ("None", "Custom") and model_type == "auto":
+
+        # model_meta's arch is the Loader's own (already-correct) resolution --
+        # prefer it over re-detecting from the loaded MODEL object, which can't
+        # distinguish Flux.2 Dev from Flux.2 Klein either. Only applies in auto
+        # mode, never overriding an explicit manual model_type.
+        meta_arch, meta_unet_file = parse_model_meta(model_meta)
+        if model_type == "auto" and meta_arch:
+            detected_type = meta_arch
+
+        # ALBABIT-FIX: "and model_type == auto" used to also gate this block --
+        # redundant on top of the per-field "still at generic default" checks
+        # below, which already protect any field the user set by hand,
+        # regardless of how model_type itself was determined.
+        if preset in ("None", "Custom"):
             defaults = get_model_defaults(detected_type)
-            
+            distilled = refine_distillation_from_meta(detected_type, meta_unet_file)
+
             # Apply defaults if user has them at "default" values
             if kwargs.get('cfg') == 1.0 and detected_type != "flux":
                 kwargs['cfg'] = defaults.get("cfg", kwargs['cfg'])
 
-            if kwargs.get('flux_guidance') == 3.5 and detected_type != "flux":
-                model_default_guidance = defaults.get("guidance", kwargs['flux_guidance'])
+            # ALBABIT-FIX: "detected_type != flux" used to gate this whole block
+            # off for Flux.1 -- harmless when guidance always matched (3.5 ==
+            # the widget's own generic default), but it silently blocked the
+            # Schnell override (0.0) once distillation_refined started covering
+            # Flux.1 too. Removed -- a plain "flux" with no override still
+            # resolves guidance=3.5, an unchanged no-op.
+            if kwargs.get('flux_guidance') == 3.5:
+                model_default_guidance = (distilled or {}).get(
+                    "guidance", defaults.get("guidance", kwargs['flux_guidance']))
                 if model_default_guidance > 0 or defaults.get("guidance_type") != "embedding":
                     kwargs['flux_guidance'] = model_default_guidance
+
+            if kwargs.get('steps') == 20 and distilled:
+                kwargs['steps'] = distilled["steps"]
+                logger.info(f"Auto-applied steps={kwargs['steps']} for {detected_type} (from model_meta)")
 
             default_shift = defaults.get("shift", 1.0)
             if kwargs.get('flux_shift') == 1.0 and default_shift != 1.0:
@@ -733,6 +785,7 @@ class RadianceSamplerPro:
         sdr_blend: float = 0.0,
         sdr_inject_steps: int = 0,
         sdr_decay: float = 0.65,
+        model_meta: str = "",
     ) -> Tuple:
 
         t_start = time.time()
@@ -750,12 +803,12 @@ class RadianceSamplerPro:
         sampler_mode, ays_schedule, model_type = params['sampler_mode'], params['ays_schedule'], params['model_type']
 
         # 2. Model Detection & Default Calibration
-        detected_type, params = self._configure_model_and_defaults(model, model_type, preset, 
-            cfg=cfg, flux_guidance=flux_guidance, flux_shift=flux_shift, 
-            sampler=sampler, scheduler=scheduler, scheduler_mode=scheduler_mode)
-        
+        detected_type, params = self._configure_model_and_defaults(model, model_type, preset,
+            model_meta=model_meta, cfg=cfg, flux_guidance=flux_guidance, flux_shift=flux_shift,
+            sampler=sampler, scheduler=scheduler, scheduler_mode=scheduler_mode, steps=steps)
+
         cfg, flux_guidance, flux_shift = params['cfg'], params['flux_guidance'], params['flux_shift']
-        sampler, scheduler = params['sampler'], params['scheduler']
+        sampler, scheduler, steps = params['sampler'], params['scheduler'], params['steps']
 
         # 3. Latent Preparation
         if not isinstance(latent_image, dict) or "samples" not in latent_image:
@@ -869,7 +922,10 @@ class RadianceSamplerPro:
                 frames=frames,
             )
             blank_plot = torch.zeros(1, 64, 128, 3)
-            return (latent_image.copy(), sigmas, torch.tensor([0.0]), blank_plot)
+            return {
+                "ui": self._resolved_values_ui(cfg, flux_guidance, flux_shift, sampler, steps),
+                "result": (latent_image.copy(), sigmas, torch.tensor([0.0]), blank_plot),
+            }
         log_tensor("Work Latent (Start)", work_latent)
 
 
@@ -1590,7 +1646,10 @@ class RadianceSamplerPro:
         # ── sigma_plot IMAGE ──────────────────────────────────────────────────
         sigma_plot = self._build_sigma_plot(output_sigmas, detected_type)
 
-        return (out, output_sigmas, sigmas_remaining, sigma_plot)
+        return {
+            "ui": self._resolved_values_ui(cfg, flux_guidance, flux_shift, sampler, steps),
+            "result": (out, output_sigmas, sigmas_remaining, sigma_plot),
+        }
 
 NODE_CLASS_MAPPINGS = {
     "RadianceSamplerPro": RadianceSamplerPro,
