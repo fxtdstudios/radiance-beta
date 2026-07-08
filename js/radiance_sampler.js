@@ -518,25 +518,6 @@ function updateSigmaLocks(node) {
     node.setDirtyCanvas(true, true);
 }
 
-// ALBABIT-FIX: infer the model_type that best matches the preset name, used when
-// the preset config doesn't explicitly include model_type. Mirrors resolveModelType
-// so the UI widget reflects the model family the preset targets.
-function inferModelTypeForPreset(presetName) {
-    if (LTX_PRESETS.includes(presetName)) return "ltxav";
-    const p = (presetName || "").toLowerCase();
-    if (p.includes("ltx 2.3") || p.includes("ltxav")) return "ltxav";
-    if (p.includes("ltx"))      return "ltxv";
-    if (p.includes("wan"))      return "wan";
-    if (p.includes("hunyuan"))  return "hunyuan_video";
-    if (p.includes("z_image"))  return "z_image";
-    if (p.includes("lumina"))   return "lumina2";
-    // ALBABIT-FIX: return "sd3.5" (canonical form, matches Loader/detect.py)
-    if (p.includes("sd3.5") || p.includes("sd35")) return "sd3.5";
-    if (p.includes("flux") || p.includes("draft") || p.includes("fast") ||
-        p.includes("balanced") || p.includes("quality") || p.includes("cinema")) return "flux";
-    return null;  // unknown, leave unchanged
-}
-
 function applyPreset(node, presetName) {
     if (presetName === "None" || presetName === "Custom") return;
 
@@ -553,16 +534,10 @@ function applyPreset(node, presetName) {
         }
     }
 
-    // ALBABIT-FIX: ensure model_type matches the preset's model family so
-    // resolveModelType (which returns early if model_type != "auto") picks the
-    // correct effective model and doesn't falsely flag Flux presets as isLTX.
-    if (!config.model_type) {
-        const inferred = inferModelTypeForPreset(presetName);
-        if (inferred) {
-            const modelTypeW = widgets.find(w => w.name === "model_type");
-            if (modelTypeW) modelTypeW.value = inferred;
-        }
-    }
+    // ALBABIT-FIX: model_type is left untouched here now -- resolveModelType()
+    // already derives the effective family from the preset name for widget
+    // folding, so forcing it (old inferModelTypeForPreset) only mislabeled
+    // every non-Flux.1 guidance-embedded model as literally "flux".
 
     // ALBABIT-FIX: widgets now match the preset again — clear any "✎" markers.
     updatePresetDivergenceMarkers(node);
@@ -910,12 +885,9 @@ app.registerExtension({
                     toggleFields(this);
                 } else if (value !== lastPresetValue) {
                     lastPresetValue = value;
-                    // ALBABIT-FIX: reset model_type to "auto" on manual switch to None/Custom
-                    // (named presets set it via applyPreset/inferModelTypeForPreset above)
-                    if (value === "None" || value === "Custom") {
-                        const modelTypeW = this.widgets?.find(w => w.name === "model_type");
-                        if (modelTypeW) modelTypeW.value = "auto";
-                    }
+                    // ALBABIT-FIX: no longer resets model_type -- named presets
+                    // don't force it anymore (see applyPreset), so there's
+                    // nothing to undo when switching to None/Custom.
                     updateUILocks(this, value);
                     updateDescription(value);
                     toggleFields(this);
