@@ -154,6 +154,10 @@ const PRESET_CONFIGS = {
         "clip_hints":    {
             "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
         },
+        // ALBABIT-FIX: either the high_noise or low_noise UNET works --
+        // _find_wan_moe_companion() (nodes_loader.py) auto-loads the other
+        // one server-side regardless of which one is picked here.
+        "companion_linked": true,
     },
     "Wan 2.2 TI2V": {
         "unet_hints":    ["wan2.2_ti2v_5B_fp16", "wan2.2_ti2v_5B", "wan2.2_ti2v"],
@@ -457,6 +461,10 @@ const PRESET_MARKER = " ✎";
 // unet_name, not a static default -- "🧲" marks that link instead of "✎"
 // (unet_name: any recognized size variant; llm_encoder: in sync with it).
 const LINKED_MARKER = " 🧲";
+// ALBABIT-FIX: for companion_linked presets (Wan 2.2), either the high_noise
+// or low_noise UNET is a valid pick -- "⛓" marks unet_name instead of "✎"
+// to signal its companion is auto-loaded server-side, not a manual mistake.
+const COMPANION_MARKER = " ⛓";
 
 // unet_name/vae_name are left untouched by autoFillPresetFiles() on no
 // match; CLIP slots/audio_vae/upscale fall back to "None" instead.
@@ -479,7 +487,9 @@ function updatePresetDivergenceMarkers(node) {
     const cleanPreset = presetVal ? presetVal.replace("→ ", "").replace("▶ ", "").replace("◈ ", "").trim() : "Custom";
     const config = cleanPreset === "Custom" ? null : PRESET_CONFIGS[cleanPreset];
     const activeSlots = config ? (PRESET_SLOTS[cleanPreset] || ALL_CLIP_WIDGETS) : [];
-    const sizeLinked = !!_knownSizeToken(config, getWidget(node, "unet_name")?.value || "");
+    const unetVal = getWidget(node, "unet_name")?.value || "";
+    const sizeLinked = !!_knownSizeToken(config, unetVal);
+    const companionLinked = !!(config?.companion_linked && findMatchingFile(config.unet_hints, [unetVal]));
 
     let changed = false;
 
@@ -502,11 +512,13 @@ function updatePresetDivergenceMarkers(node) {
         if (_markFileWidget(w, markerText)) changed = true;
     };
 
-    // unet_name always shows the link marker while sizeLinked, even when it
-    // matches the preset's top pick -- the point is to signal the two
-    // widgets are linked, not to flag a divergence.
+    // unet_name shows a link marker instead of the divergence marker while
+    // sizeLinked/companionLinked -- the point is to signal a relationship
+    // (linked CLIP size, auto-loaded companion), not flag a mistake.
     if (sizeLinked) {
         if (_markFileWidget(getWidget(node, "unet_name"), LINKED_MARKER)) changed = true;
+    } else if (companionLinked) {
+        if (_markFileWidget(getWidget(node, "unet_name"), COMPANION_MARKER)) changed = true;
     } else {
         check("unet_name", config?.unet_hints);
     }
