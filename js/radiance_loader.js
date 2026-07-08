@@ -266,10 +266,28 @@ const PRESET_CONFIGS = {
         },
     },
     "Flux.2 Klein": {
-        "unet_hints":    ["flux2-klein", "flux2_klein", "flux.2-klein", "klein"],
+        // ALBABIT-FIX: covers all sizes/distillation states (4B/9B, Base/
+        // distilled) -- exact filenames first (bf16 before fp8), generic
+        // patterns as a last resort.
+        "unet_hints": [
+            "flux-2-klein-9b.safetensors",
+            "flux-2-klein-base-4b.safetensors",
+            "flux-2-klein-base-9b-fp8.safetensors",
+            "klein-9b-kv", "klein-base", "klein-9b", "klein-4b",
+            "flux2-klein", "flux2_klein", "flux.2-klein", "klein",
+        ],
         "vae_hints":     ["flux2-vae", "flux2_vae", "flux2_ae"],
         "clip_hints":    {
+            // Fallback when no size token is detected in unet_name (see
+            // clip_size_hints below, which normally takes priority).
             "llm_encoder": ["qwen_3_4b", "qwen3_4b", "qwen_3"],
+        },
+        // ALBABIT-FIX: text encoder size must match the UNET (4B->qwen_3_4b,
+        // 9B->qwen_3_8b*) -- resolved dynamically from the size token
+        // detected in unet_name. Quality-first: bf16 before fp8/fp4mixed.
+        "clip_size_hints": {
+            "9b": ["qwen_3_8b.safetensors", "qwen_3_8b", "qwen_3_8b_fp8mixed", "qwen_3_8b_fp4mixed", "qwen3_8b"],
+            "4b": ["qwen_3_4b.safetensors", "qwen_3_4b", "qwen3_4b"],
         },
     },
     "Cosmos World": {
@@ -322,6 +340,49 @@ function findMatchingFile(hints, values) {
 }
 
 /**
+ * Extract a size token like "4b"/"9b" from a filename (e.g. Flux.2 Klein
+ * variants), used to pick a differently-sized paired text encoder.
+ */
+function _detectSizeToken(filename) {
+    const m = /(?:^|[-_])(\d+b)(?:[-_.]|$)/i.exec((filename || "").toLowerCase());
+    return m ? m[1] : null;
+}
+
+/**
+ * Like _detectSizeToken, but only returns a token the preset actually knows
+ * about (config.clip_size_hints) -- an unrelated UNET (e.g. Cosmos "...7B...")
+ * can contain a size-shaped substring without being a real Klein size.
+ */
+function _knownSizeToken(config, filename) {
+    const token = _detectSizeToken(filename);
+    return (token && config?.clip_size_hints?.[token]) ? token : null;
+}
+
+/**
+ * Resolve the CLIP hint list for a given slot, applying a preset's
+ * clip_size_hints (size-aware override) when present, falling back to its
+ * static clip_hints otherwise.
+ */
+function _resolveClipHints(node, config, wName) {
+    if (wName === "llm_encoder" && config?.clip_size_hints) {
+        const sizeToken = _knownSizeToken(config, getWidget(node, "unet_name")?.value || "");
+        if (sizeToken) {
+            return config.clip_size_hints[sizeToken];
+        }
+    }
+    return config?.clip_hints?.[wName];
+}
+
+/**
+ * Resolve which file (if any) currently matches a CLIP slot's hints.
+ */
+function _resolveClipMatch(node, config, wName) {
+    const w = getWidget(node, wName);
+    const hints = _resolveClipHints(node, config, wName);
+    return (w && hints && w.options?.values) ? findMatchingFile(hints, w.options.values) : null;
+}
+
+/**
  * Performs client-side smart auto-fill matching of files based on selected preset
  */
 function autoFillPresetFiles(node, cleanPreset) {
@@ -343,18 +404,14 @@ function autoFillPresetFiles(node, cleanPreset) {
     }
 
     // 3. Match CLIP Slots
-    const clipHints = config.clip_hints || {};
     for (const wName of ALL_CLIP_WIDGETS) {
         const clipW = getWidget(node, wName);
         if (!clipW) continue;
 
-        if (clipHints[wName] && clipW.options?.values) {
-            const matched = findMatchingFile(clipHints[wName], clipW.options.values);
-            if (matched) {
-                clipW.value = matched;
-            } else {
-                clipW.value = "None";
-            }
+        const hints = _resolveClipHints(node, config, wName);
+        if (hints && clipW.options?.values) {
+            const matched = findMatchingFile(hints, clipW.options.values);
+            clipW.value = matched || "None";
         } else {
             clipW.value = "None";
         }
@@ -395,20 +452,21 @@ function autoFillPresetFiles(node, cleanPreset) {
 // weight_dtype/clip_dtype, hidden by design — loader_utils.py). Flag any that
 // no longer match what autoFillPresetFiles() would pick right now, with a "✎"
 // label marker (same pattern as radiance_sampler.js/radiance_prompt.js).
-// Marks even a switch between two equally-valid variants (e.g. "-distilled"
-// vs "-dev-fp8") — the marker means "touched since the preset loaded", not
-// "still an acceptable choice".
 const PRESET_MARKER = " ✎";
+// ALBABIT-FIX: for clip_size_hints presets, llm_encoder is derived from
+// unet_name, not a static default -- "🧲" marks that link instead of "✎"
+// (unet_name: any recognized size variant; llm_encoder: in sync with it).
+const LINKED_MARKER = " 🧲";
 
 // unet_name/vae_name are left untouched by autoFillPresetFiles() on no
 // match; CLIP slots/audio_vae/upscale fall back to "None" instead.
 const NO_NONE_FALLBACK_FIELDS = new Set(["unet_name", "vae_name"]);
 
-function _markFileWidget(widget, marked) {
+function _markFileWidget(widget, markerText) {
     if (!widget) return false;
-    if (widget._radOrigLabel === undefined && !marked) return false;
+    if (widget._radOrigLabel === undefined && !markerText) return false;
     if (widget._radOrigLabel === undefined) widget._radOrigLabel = widget.label ?? widget.name;
-    const wanted = marked ? widget._radOrigLabel + PRESET_MARKER : widget._radOrigLabel;
+    const wanted = markerText ? widget._radOrigLabel + markerText : widget._radOrigLabel;
     if (widget.label === wanted) return false;
     widget.label = wanted;
     return true;
@@ -421,33 +479,49 @@ function updatePresetDivergenceMarkers(node) {
     const cleanPreset = presetVal ? presetVal.replace("→ ", "").replace("▶ ", "").replace("◈ ", "").trim() : "Custom";
     const config = cleanPreset === "Custom" ? null : PRESET_CONFIGS[cleanPreset];
     const activeSlots = config ? (PRESET_SLOTS[cleanPreset] || ALL_CLIP_WIDGETS) : [];
+    const sizeLinked = !!_knownSizeToken(config, getWidget(node, "unet_name")?.value || "");
 
     let changed = false;
 
     const check = (widgetName, hints) => {
         const w = getWidget(node, widgetName);
         if (!w) return;
-        let marked = false;
+        let markerText = null;
         if (config) {
             if (!hints || hints.length === 0) {
-                marked = String(w.value) !== "None";
+                if (String(w.value) !== "None") markerText = PRESET_MARKER;
             } else {
                 const matched = findMatchingFile(hints, w.options?.values);
                 if (matched !== null) {
-                    marked = String(w.value) !== String(matched);
+                    if (String(w.value) !== String(matched)) markerText = PRESET_MARKER;
                 } else if (!NO_NONE_FALLBACK_FIELDS.has(widgetName)) {
-                    marked = String(w.value) !== "None";
+                    if (String(w.value) !== "None") markerText = PRESET_MARKER;
                 }
             }
         }
-        if (_markFileWidget(w, marked)) changed = true;
+        if (_markFileWidget(w, markerText)) changed = true;
     };
 
-    check("unet_name", config?.unet_hints);
+    // unet_name always shows the link marker while sizeLinked, even when it
+    // matches the preset's top pick -- the point is to signal the two
+    // widgets are linked, not to flag a divergence.
+    if (sizeLinked) {
+        if (_markFileWidget(getWidget(node, "unet_name"), LINKED_MARKER)) changed = true;
+    } else {
+        check("unet_name", config?.unet_hints);
+    }
     check("vae_name", config?.vae_hints);
     for (const wName of ALL_CLIP_WIDGETS) {
         if (config && !activeSlots.includes(wName)) continue; // hidden slot
-        check(wName, config?.clip_hints?.[wName]);
+        if (wName === "llm_encoder" && sizeLinked) {
+            const w = getWidget(node, "llm_encoder");
+            const matched = _resolveClipMatch(node, config, "llm_encoder");
+            const markerText = matched === null ? null
+                : (String(w.value) === String(matched) ? LINKED_MARKER : PRESET_MARKER);
+            if (_markFileWidget(w, markerText)) changed = true;
+            continue;
+        }
+        check(wName, config ? _resolveClipHints(node, config, wName) : null);
     }
     check("audio_vae_name", config?.audio_vae_hints);
     check("upscale_model_name", config?.upscale_hints);
@@ -634,6 +708,31 @@ app.registerExtension({
                 modelTypeW.callback = function(value) {
                     if (origModelCallback) origModelCallback.call(this, value);
                     setTimeout(() => updateLoaderUI(node, false), 10);
+                };
+            }
+
+            // ALBABIT-FIX: for clip_size_hints presets (Flux.2 Klein), keep
+            // llm_encoder in sync when the user manually changes unet_name.
+            // No-op for every other preset.
+            const unetW = getWidget(node, "unet_name");
+            if (unetW) {
+                const origUnetCallback = unetW.callback;
+                unetW.callback = function(value) {
+                    if (origUnetCallback) origUnetCallback.call(this, value);
+                    setTimeout(() => {
+                        const presetVal = getWidget(node, "preset")?.value;
+                        const cleanPreset = presetVal ? presetVal.replace("→ ", "").replace("▶ ", "").replace("◈ ", "").trim() : "Custom";
+                        const cfg = PRESET_CONFIGS[cleanPreset];
+                        if (cfg?.clip_size_hints) {
+                            const clipW = getWidget(node, "llm_encoder");
+                            const matched = _resolveClipMatch(node, cfg, "llm_encoder");
+                            if (clipW && matched) {
+                                clipW.value = matched;
+                                node.setDirtyCanvas(true, true);
+                            }
+                        }
+                        updatePresetDivergenceMarkers(node);
+                    }, 10);
                 };
             }
 
