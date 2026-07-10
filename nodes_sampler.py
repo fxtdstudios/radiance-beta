@@ -96,24 +96,61 @@ def _is_invalid_progress_stream_error(exc: BaseException) -> bool:
     return False
 
 
+def _is_channel_mismatch_error(exc: BaseException) -> Optional[str]:
+    """Detect the classic PyTorch conv/linear channel-count mismatch message.
+
+    Returns the matched substring (for logging) or None. This is the error
+    shape torch raises when a latent's channel count doesn't match what the
+    connected model's first layer expects (e.g. a 4ch SDXL-shaped latent fed
+    into a 16ch Flux model) — the most common cause of "dimension not
+    matching" reports after switching a Load Preset without also updating
+    RadianceResolution's model_type/latent_channels to match.
+    """
+    msg = str(exc)
+    for needle in ("to have {} channels", "channels, but got", "size mismatch", "shapes cannot be multiplied"):
+        if needle in msg:
+            return msg
+    # torch's exact wording varies by op ("expected input[...] to have N
+    # channels, but got M channels instead"); match the stable middle part.
+    if "channels" in msg and ("expected" in msg or "got" in msg):
+        return msg
+    return None
+
+
 def _sample_custom_progress_safe(context: str, **kwargs):
     """Run Comfy sampling, retrying once with progress output disabled if stderr is broken."""
 
     try:
         return comfy.sample.sample_custom(**kwargs)
     except Exception as exc:
-        if not _is_invalid_progress_stream_error(exc) or kwargs.get("disable_pbar"):
-            raise
+        if _is_invalid_progress_stream_error(exc) and not kwargs.get("disable_pbar"):
+            retry_kwargs = dict(kwargs)
+            retry_kwargs["disable_pbar"] = True
+            retry_kwargs["callback"] = None
+            logger.warning(
+                "[%s] Comfy progress output failed with OSError(22). "
+                "Retrying with progress display disabled; sampling settings are unchanged.",
+                context,
+            )
+            return comfy.sample.sample_custom(**retry_kwargs)
 
-        retry_kwargs = dict(kwargs)
-        retry_kwargs["disable_pbar"] = True
-        retry_kwargs["callback"] = None
-        logger.warning(
-            "[%s] Comfy progress output failed with OSError(22). "
-            "Retrying with progress display disabled; sampling settings are unchanged.",
-            context,
-        )
-        return comfy.sample.sample_custom(**retry_kwargs)
+        # BUG FIX: RuntimeErrors from a latent/model channel-count mismatch
+        # (e.g. RadianceResolution's model_type wasn't updated after switching
+        # a Load Preset to a different architecture) surface as a raw, cryptic
+        # PyTorch shape error. Re-raise with the original error preserved as
+        # the cause, plus an actionable hint, instead of hiding or altering it.
+        if isinstance(exc, RuntimeError) and _is_channel_mismatch_error(exc):
+            raise RuntimeError(
+                f"[{context}] Sampling failed with a tensor shape/channel mismatch "
+                f"(original error below). This usually means the LATENT's channel "
+                f"count doesn't match what the connected MODEL expects — most often "
+                f"because RadianceResolution's 'model_type' (and/or 'latent_channels') "
+                f"still matches a previous model after the checkpoint/Load Preset was "
+                f"switched to a different architecture (e.g. SDXL's 4ch vs Flux's 16ch). "
+                f"Check that RadianceResolution's model_type matches the model currently "
+                f"loaded, then regenerate the latent.\n\nOriginal error: {exc}"
+            ) from exc
+        raise
 
 class RadianceSamplerPro:
     """
