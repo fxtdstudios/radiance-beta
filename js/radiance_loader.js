@@ -22,7 +22,6 @@ const PRESET_SLOTS = {
     "Flux.2": ["llm_encoder"],
     "Flux.2 (Low VRAM)": ["llm_encoder"],
     "HunyuanVideo": ["clip_l", "llm_encoder"],
-    "Kolors": ["llm_encoder"],
     "LTX Video": ["llm_encoder", "text_projection"],
     "LTX Video 13B": ["llm_encoder", "text_projection"],
     "LTX Video 2.3": ["llm_encoder", "text_projection"],
@@ -164,13 +163,6 @@ const PRESET_CONFIGS = {
         "clip_hints":    {
             "llm_encoder": ["llava_llama3", "llm_llava", "hunyuan_llm"],
             "clip_l":      ["clip_l.safetensors", "clip_l"],
-        },
-    },
-    "Kolors": {
-        "unet_hints":    ["kolors", "Kolors"],
-        "vae_hints":     ["kolors_vae", "sdxl_vae"],
-        "clip_hints":    {
-            "llm_encoder": ["chatglm3", "chatglm", "kolors_clip"],
         },
     },
     "LTX Video": {

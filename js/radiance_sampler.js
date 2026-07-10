@@ -651,7 +651,7 @@ const LOADER_PRESET_MODEL_TYPE = {
     "LTX Video": "ltxv", "LTX Video 13B": "ltxv",
     "LTX Video 2.3": "ltxav", "LTX Video 2.3 (Low VRAM)": "ltxav",
     "Cosmos World": "cosmos", "CogVideoX": "cogvideox", "Mochi": "mochi",
-    "PixArt Sigma": "pixart", "AuraFlow": "aura_flow", "Kolors": "kolors",
+    "PixArt Sigma": "pixart", "AuraFlow": "aura_flow",
     "Lumina2": "lumina2", "Z-Image": "z_image",
 };
 
@@ -685,11 +685,17 @@ const MODEL_TYPE_SAMPLING_DEFAULTS = {
     cogvideox:     { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0 },
     stepvideo:     { cfg: 9.0, sampler: "euler",    scheduler: "simple",      flux_shift: 13.0, guidance: 0.0 },
     mochi:         { cfg: 4.5, sampler: "euler",    scheduler: "simple",      flux_shift: 6.0,  guidance: 0.0 },
-    // pixart/aura_flow/kolors have no entry in sampler_utils.py's MODEL_DEFAULTS
-    // either -- get_model_defaults() falls back to "sd15" there, mirrored here.
-    pixart:        { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0 },
-    aura_flow:     { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0 },
-    kolors:        { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0 },
+    // ALBABIT-FIX: previously fell back to "sd15" (cfg=7.0/dpmpp_2m/normal) --
+    // verified against AuraFlow's own official ComfyUI workflow, which
+    // contradicts all three. No shift node present (unlike Lumina2, which
+    // reuses the same ModelSamplingAuraFlow node but at shift=6.0 -- confirmed
+    // NOT applicable to AuraFlow's own workflow, checked directly).
+    aura_flow:     { cfg: 3.48, sampler: "euler",   scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0, steps: 20 },
+    // ALBABIT-FIX: previously fell back to "sd15" -- cfg/sampler verified
+    // against multiple independent community sources (weaker than AuraFlow's
+    // direct official workflow, moderate confidence). scheduler/shift kept at
+    // sd15-equivalent values, no better source found.
+    pixart:        { cfg: 4.5,  sampler: "dpmpp_2m", scheduler: "normal",     flux_shift: 1.0,  guidance: 0.0 },
 };
 
 function _resolveLoaderModelType(loaderNode) {
@@ -760,11 +766,11 @@ function updateModelMetaDefaults(node) {
     // so there's no specific value to sync it to, just a link to flag.
     const sdTurboActive = detectedType === "sdxl" && (unetName || "").toLowerCase().includes("turbo");
 
-    // ALBABIT-FIX: pixart/aura_flow/kolors resolve fine as MODEL_TYPE_SAMPLING_
-    // DEFAULTS keys (sd15-equivalent values) but aren't real options in the
-    // model_type combo itself (sampler_utils.py's MODEL_TYPES never listed
-    // them) -- writing them would leave the widget on a value execution
-    // rejects as "not in list". Only write model_type if it's an option the
+    // ALBABIT-FIX: pixart/aura_flow resolve fine as MODEL_TYPE_SAMPLING_DEFAULTS
+    // keys but aren't real options in the model_type combo itself
+    // (sampler_utils.py's MODEL_TYPES never listed them) -- writing them
+    // would leave the widget on a value execution rejects as "not in list".
+    // Only write model_type if it's an option the
     // widget actually offers.
     const modelTypeW = node.widgets.find(w => w.name === "model_type");
     const validModelType = (detectedType && modelTypeW?.options?.values?.includes(detectedType))
