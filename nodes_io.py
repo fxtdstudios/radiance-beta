@@ -228,7 +228,12 @@ def _np_to_tensor(arr: np.ndarray) -> torch.Tensor:
         arr = arr.astype(np.float32)
     # np.ascontiguousarray guards against torch.from_numpy receiving a
     # non-contiguous view (e.g. a channel slice), which would corrupt layout.
-    return torch.from_numpy(np.ascontiguousarray(arr)).unsqueeze(0)
+    # OpenEXR's np.frombuffer views are contiguous but read-only; Torch warns
+    # that wrapping those can lead to undefined behaviour if later mutated.
+    arr = np.ascontiguousarray(arr)
+    if not arr.flags.writeable:
+        arr = arr.copy()
+    return torch.from_numpy(arr).unsqueeze(0)
 
 
 def _tensor_to_np(t: torch.Tensor) -> np.ndarray:
@@ -479,7 +484,7 @@ def _read_exr_single(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         mask = None
         if "A" in hdr["channels"]:
             a    = np.frombuffer(f.channel("A", pt), dtype=np.float32).reshape(h, w)
-            mask = torch.from_numpy(a).unsqueeze(0)
+            mask = _np_to_tensor(a)
         return _np_to_tensor(arr), mask
     except ImportError:
         pass
@@ -750,7 +755,27 @@ def _unique_path(path: Path) -> Path:
         i += 1
 
 
-def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str, quality: int = 18) -> None:
+def _workflow_metadata(prompt=None, extra_pnginfo=None) -> dict:
+    """
+    Build the ComfyUI provenance metadata dict ({"prompt": json, "workflow":
+    json, ...}) exactly as core SaveImage embeds into PNG tEXt chunks, so
+    files written by Radiance carry the workflow like a saved PNG does.
+    Values are JSON strings; storage encoding is handled per format.
+    """
+    meta = {}
+    try:
+        if prompt is not None:
+            meta["prompt"] = json.dumps(prompt)
+        if extra_pnginfo:
+            for key, value in extra_pnginfo.items():
+                meta[str(key)] = json.dumps(value)
+    except (TypeError, ValueError) as exc:
+        log.warning(f"[RadianceWrite] workflow metadata not serialisable: {exc}")
+    return meta
+
+
+def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str, quality: int = 18,
+                    metadata: dict | None = None) -> None:
     """Save a float32 (H, W, 3) array to an image file via Pillow.
 
     `quality` is the same widget value used for video CRF (0-51, lower = better).
@@ -758,7 +783,10 @@ def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str, quality: int = 18
     remapped rather than passed through raw -- matching the widget's own
     tooltip ("Also JPEG quality 0-100 (remapped)"), which previously had no
     code behind it at all (see ALBABIT-FIX below).
-    """
+
+    PNG output embeds `metadata` (workflow/prompt JSON strings) as tEXt
+    chunks — the same convention as ComfyUI core SaveImage, so the file
+    can be dragged back into ComfyUI to restore the workflow."""
     if not _HAS_PIL:
         raise ImportError("Pillow required for image writing.")
 
@@ -811,6 +839,15 @@ def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str, quality: int = 18
 
     arr_u8 = (np.clip(arr_f32, 0, 1) * 255).astype(np.uint8)
     pil = _PIL.fromarray(arr_u8)
+    pnginfo = None
+    if metadata and str(path).lower().endswith(".png"):
+        try:
+            from PIL.PngImagePlugin import PngInfo
+            pnginfo = PngInfo()
+            for _key, _val in metadata.items():
+                pnginfo.add_text(_key, _val)
+        except Exception:  # noqa: BLE001 — provenance is best-effort
+            pnginfo = None
     if "JPEG" in fmt or "WEBP" in fmt:
         # ALBABIT-FIX: quality was hardcoded to 90 here, ignoring the widget
         # entirely -- the tooltip promised JPEG control but nothing in this
@@ -821,6 +858,8 @@ def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str, quality: int = 18
             pil.save(str(path), "JPEG", quality=pil_quality)
         else:
             pil.save(str(path), "WEBP", quality=pil_quality, lossless=False)
+    elif pnginfo is not None:
+        pil.save(str(path), pnginfo=pnginfo)
     else:
         pil.save(str(path))
 
@@ -851,7 +890,8 @@ def _exr_channels(arr_f32: np.ndarray) -> "list[tuple[str, np.ndarray]]":
     raise ValueError(f"Unsupported EXR channel count {c}; expected 1, 3, or 4.")
 
 
-def _save_exr(arr_f32: np.ndarray, path: Path, half: bool) -> None:
+def _save_exr(arr_f32: np.ndarray, path: Path, half: bool,
+              metadata: dict | None = None) -> None:
     """Write a float array to OpenEXR, preserving channel count and alpha.
 
     Accepts (H,W), (H,W,1), (H,W,3) or (H,W,4) float data. Scene-linear
@@ -879,12 +919,23 @@ def _save_exr(arr_f32: np.ndarray, path: Path, half: bool) -> None:
         # version) persists arbitrary string/int/float attributes correctly,
         # and infers HALF vs FLOAT per channel from the numpy dtype directly
         # -- no Imath.Channel/PixelType wiring needed.
-        header = {
+        header: Dict[str, Any] = {
             "compression": OpenEXR.ZIP_COMPRESSION,
             "type": OpenEXR.scanlineimage,
             "rad_version": _RADIANCE_VERSION,
             "software": f"Radiance v{_RADIANCE_VERSION}",
         }
+        if metadata:
+            # ComfyUI provenance (workflow/prompt) — stored under these exact
+            # unprefixed names so the file can be dragged back into ComfyUI to
+            # restore the workflow, same convention as write_exr_openexr() in
+            # hdr/io.py. The modern API accepts plain str values directly (the
+            # byte-encoding the legacy API needed is no longer necessary).
+            for _key, _val in metadata.items():
+                try:
+                    header[_key] = _val
+                except Exception:  # noqa: BLE001 — provenance is best-effort
+                    pass
         channels_dict = {
             name: np.ascontiguousarray(plane, dtype=np_dtype)
             for name, plane in channels
@@ -1658,6 +1709,7 @@ class RadianceWrite:
                 fps, quality, exr_compression,
                 start_frame, frame_padding,
                 effective_audio_source, overwrite,
+                prompt, extra_pnginfo,
             )
             log.info("RadianceWrite: saved %d frame(s) → %s", count, saved)
             return ()
@@ -1687,6 +1739,8 @@ class RadianceWrite:
         frame_padding:  int,
         audio_source:   str,
         overwrite:      bool,
+        prompt:         Any = None,
+        extra_pnginfo:  Any = None,
     ) -> Tuple[str, int]:
 
         n = len(frames)
@@ -1708,14 +1762,15 @@ class RadianceWrite:
             }
             ext  = ext_map[stem]
             path = self._out_path(output_path, ext, overwrite)
+            meta = _workflow_metadata(prompt, extra_pnginfo)
             if "EXR" in stem:
-                _save_exr(frames[0], path, half="16-bit" in stem)
+                _save_exr(frames[0], path, half="16-bit" in stem, metadata=meta)
             elif "DPX" in stem:
                 _save_dpx(frames[0], path)
             elif "HDR" in stem:
                 _save_hdr(frames[0], path)
             else:
-                _save_pil_image(frames[0], path, stem, quality)
+                _save_pil_image(frames[0], path, stem, quality, metadata=meta)
             return str(path), 1
 
         # ── Video ─────────────────────────────────────────────────────────
@@ -1755,19 +1810,22 @@ class RadianceWrite:
             else:
                 ext = ".png"
 
+            saved_paths = []
+            seq_meta = _workflow_metadata(prompt, extra_pnginfo)
             for i, fr in enumerate(frames):
                 fn   = f"{seq_stem}_{(pad_fmt % (start_frame + i))}{ext}"
                 path = out_dir / fn
                 if not overwrite:
                     path = _unique_path(path)
                 if is_exr:
-                    _save_exr(fr, path, half=half_exr)
+                    _save_exr(fr, path, half=half_exr, metadata=seq_meta)
                 elif is_dpx:
                     _save_dpx(fr, path)
                 elif is_hdr:
                     _save_hdr(fr, path)
                 else:
-                    _save_pil_image(fr, path, stem, quality)
+                    _save_pil_image(fr, path, stem, quality, metadata=seq_meta)
+                saved_paths.append(str(path))
 
             return str(out_dir), n
 

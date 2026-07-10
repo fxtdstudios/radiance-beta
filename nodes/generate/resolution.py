@@ -930,19 +930,35 @@ class RadianceResolution:
         # ── Resolve resolution from preset or custom ─────────────────────────────
         elif preset != "Custom" and preset in PRESETS:
             w, h, category, ar_label = PRESETS[preset]
+            # BUG FIX: the width/height widgets are fully ignored whenever a
+            # named preset is selected — a frequent source of "I typed 1280x720
+            # but got a different size" confusion, since the widgets stay
+            # visible/editable and look like they should apply. Surface it
+            # loudly (WARNING, not debug) whenever the ignored values differ
+            # from the preset, so it shows up in the default console output.
+            if (width, height) != (w, h):
+                logger.warning(
+                    f"RadianceResolution: preset '{preset}' is selected, so the "
+                    f"width/height widgets ({width}×{height}) are ignored — using "
+                    f"the preset's {w}×{h} instead. Set preset to 'Custom' to use "
+                    f"manual width/height."
+                )
         else:
             w, h = width, height
             category = "Custom"
 
-        # Apply scale factor — log if it causes significant alignment correction
+        # Apply scale factor — always surface it (not just on alignment
+        # correction): a leftover scale_factor from a previous run silently
+        # doubling/halving every subsequent resolution is a common source of
+        # "I set X but got a different size" confusion.
         if scale_factor != 1.0:
             w_pre = int(w * scale_factor)
             h_pre = int(h * scale_factor)
-            if w_pre != w or h_pre != h:
-                logger.debug(
-                    f"Scale {scale_factor}×: {w}×{h} → {w_pre}×{h_pre} "
-                    f"(before alignment)"
-                )
+            logger.warning(
+                f"RadianceResolution: scale_factor={scale_factor} is applied — "
+                f"{w}×{h} → {w_pre}×{h_pre} (before alignment). Set scale_factor "
+                f"to 1.0 to disable this."
+            )
             w, h = w_pre, h_pre
 
         # Apply alignment — always round UP, never down

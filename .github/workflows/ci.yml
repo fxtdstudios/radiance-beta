@@ -163,8 +163,10 @@ jobs:
             "numpy>=1.22" "scipy>=1.9" "Pillow>=9.0" "defusedxml>=0.7" \
             "opencv-python-headless>=4.7" "tqdm>=4.66" \
             "OpenEXR>=3.2.0" \
+            "OpenImageIO>=3.0.0" \
             "opencolorio>=2.3.0" "colour-science>=0.4.4" \
-            "einops>=0.7.0" "pytest>=7.4" "pytest-timeout>=2.1"
+            "einops>=0.7.0" "safetensors>=0.4.0" \
+            "pytest>=7.4" "pytest-timeout>=2.1"
 
       - name: Run full test suite (real deps)
         run: |
