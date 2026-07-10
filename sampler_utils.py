@@ -152,17 +152,15 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "sampler": "euler",
         "steps": 20,
     },
-    # ALBABIT-FIX: steps=20 added, verified against ComfyUI's own default
-    # startup workflow (default.json, v1-5-pruned-emaonly) -- that same
-    # workflow uses cfg=8/sampler=euler, differing from our cfg=7.0/dpmpp_2m
-    # (community-sourced, not touched here, out of scope for this
-    # steps-only pass; flagged separately if worth revisiting).
+    # ALBABIT-FIX: cfg 7.0->8.0, sampler dpmpp_2m->euler, steps=20 -- all
+    # verified against ComfyUI's own default startup workflow (default.json,
+    # v1-5-pruned-emaonly, the graph shown on first launch).
     "sd15": {
-        "cfg": 7.0,
+        "cfg": 8.0,
         "scheduler": "normal",
         "guidance": 0.0,
         "shift": 1.0,
-        "sampler": "dpmpp_2m",
+        "sampler": "euler",
         "steps": 20,
     },
 
