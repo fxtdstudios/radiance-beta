@@ -151,7 +151,7 @@ const GUIDANCE_EMBED_MODELS = new Set(["flux", "flux2", "flux2-klein", "z_image"
 // official example workflow (plain KSampler cfg=4, no guidance-embed node)
 const CFG_GUIDED_MODELS = new Set([
     "wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd3.5",
-    "ltxav", "cogvideox", "stepvideo", "lumina2"
+    "ltxav", "cogvideox", "lumina2"
 ]);
 const LTX_MODEL_TYPES = new Set(["ltxv", "ltxav"]);
 
@@ -464,7 +464,7 @@ function applyFolding(node) {
     //    schedule, no flow-matching) -- hidden for those, shown otherwise
     //    (including "auto"/unresolved, same show-by-default bias as guidance below).
     //  - flux_guidance / profile only apply to guidance-embed models; CFG-guided
-    //    models (WAN, Hunyuan, SDXL, SD1.5/3/3.5, LTX-AV, CogVideoX, StepVideo) ignore them.
+    //    models (WAN, Hunyuan, SDXL, SD1.5/3/3.5, LTX-AV, CogVideoX) ignore them.
     const usesGuidanceEmbed =
         GUIDANCE_EMBED_MODELS.has(effectiveModel) ||
         (effectiveModel === "auto" && !CFG_GUIDED_MODELS.has(effectiveModel));
@@ -775,7 +775,6 @@ const MODEL_TYPE_SAMPLING_DEFAULTS = {
     // ALBABIT-FIX: steps=50, verified against THUDM's official CogVideoX-5b
     // model card (cfg was already exact).
     cogvideox:     { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0, steps: 50 },
-    stepvideo:     { cfg: 9.0, sampler: "euler",    scheduler: "simple",      flux_shift: 13.0, guidance: 0.0 },
     // ALBABIT-FIX: steps=64, verified against Genmo's official Mochi 1
     // model card (cfg was already exact).
     mochi:         { cfg: 4.5, sampler: "euler",    scheduler: "simple",      flux_shift: 6.0,  guidance: 0.0, steps: 64 },
