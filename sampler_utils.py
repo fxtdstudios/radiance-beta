@@ -116,13 +116,16 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "sampler": "dpmpp_2m",
         "denoise_range": (0.2, 1.0),
     },
-    # ALBABIT-FIX: renamed from "sd35" to "sd3.5" for consistency with Loader/detect.py
+    # ALBABIT-FIX: renamed from "sd35" to "sd3.5" for consistency with Loader/detect.py.
+    # cfg/sampler verified against Comfy-Org's own official SD3.5 Large workflow
+    # (sd3.5-t2i-fp8-scaled-workflow.json) -- sampler was "dpmpp_2m" (wrong,
+    # should be "euler"); cfg confirmed against Albabit's own ComfyUI workflow (4.0).
     "sd3.5": {
-        "cfg": 4.5,
+        "cfg": 4.0,
         "scheduler": "sgm_uniform",
         "guidance": 0.0,
         "shift": 1.0,
-        "sampler": "dpmpp_2m",
+        "sampler": "euler",
         "denoise_range": (0.2, 1.0),
     },
     "sdxl": {
@@ -225,12 +228,18 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "denoise_range": (0.0, 1.0),
         "guidance_type": "cfg",
     },
+    # ALBABIT-FIX: cfg/scheduler/steps verified against lodestones' own official
+    # Chroma1-HD ComfyUI workflow (cfg was 1.0, wrong; scheduler was "simple",
+    # wrong -- should be "beta"). "steps" is a generic (non-distillation)
+    # fallback -- new for this architecture, see refine_distillation_from_meta's
+    # docstring/_configure_model_and_defaults for how it's resolved.
     "chroma": {
-        "cfg": 1.0,
-        "scheduler": "simple",
+        "cfg": 3.8,
+        "scheduler": "beta",
         "guidance": 0.0,
         "shift": 1.0,
         "sampler": "euler",
+        "steps": 26,
         "denoise_range": (0.3, 1.0),
     },
     # ALBABIT-FIX: Mochi-1 (Genmo) — 12ch video VAE, T5XXL text encoder
@@ -457,11 +466,10 @@ def refine_distillation_from_meta(detected_type: str, unet_file: str) -> Optiona
     """
     Some checkpoints need settings that differ from their model_type's generic
     default -- only unet_file's exact filename can tell them apart. Verified
-    against official model cards: Klein Base/distilled, Flux.1 Dev/Schnell,
-    and Flux.1 Krea Dev (guidance only -- BFL gives no steps recommendation,
-    so the "steps" key is absent; callers must not assume it's always present).
-    Returns None when not applicable, leaving the generic MODEL_DEFAULTS
-    fallback in place.
+    against official model cards. Not every override includes every key (e.g.
+    Krea Dev is guidance-only, BFL gives no steps recommendation) -- callers
+    must not assume "steps"/"cfg" are always present. Returns None when not
+    applicable, leaving the generic MODEL_DEFAULTS fallback in place.
     """
     if not unet_file:
         return None
@@ -473,6 +481,13 @@ def refine_distillation_from_meta(detected_type: str, unet_file: str) -> Optiona
         return {"guidance": 0.0, "steps": 4}
     if detected_type == "flux" and "krea" in name:
         return {"guidance": 4.5}
+    if detected_type == "sdxl" and "turbo" in name:
+        return {"cfg": 1.0, "steps": 1, "sampler": "euler_ancestral"}
+    # ALBABIT-FIX: cfg=1.6 (not the "pure" diffusers guidance_scale=0.0
+    # translation) to match the Sampler's own pre-existing "[F] SD3.5 Turbo
+    # (4 steps)" preset, already tuned in practice.
+    if detected_type == "sd3.5" and "turbo" in name:
+        return {"cfg": 1.6, "steps": 4}
     return None
 
 def gradual_sigma_blend(
@@ -764,6 +779,21 @@ def flux_shift_sigmas(sigmas: torch.Tensor, shift: float) -> torch.Tensor:
 
     shifted = shift * sigmas / denominator
     return shifted
+
+def get_sd_turbo_sigmas(model, steps: int, denoise: float) -> torch.Tensor:
+    """
+    Mirrors ComfyUI's own SDTurboScheduler node (comfy_extras/nodes_custom_sampler.py)
+    exactly. SD-Turbo/SDXL-Turbo are only distilled at 10 fixed discrete timesteps
+    (99, 199, ..., 999), not across the continuous sigma space the standard
+    schedulers (karras/normal/simple/...) sample from -- using one of those on a
+    Turbo checkpoint asks the model to denoise at noise levels it was never
+    trained to be good at.
+    """
+    model_sampling = model.get_model_object("model_sampling")
+    start_step = 10 - int(10 * denoise)
+    timesteps = torch.flip(torch.arange(1, 11) * 100 - 1, (0,))[start_step:start_step + steps]
+    sigmas = model_sampling.sigma(timesteps)
+    return torch.cat([sigmas, sigmas.new_zeros([1])])
 
 def get_flux_sigmas(
     model, scheduler: str, steps: int, denoise: float, shift: float = 1.0,

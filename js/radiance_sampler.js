@@ -613,12 +613,12 @@ function _findModelMetaSourceNode(node) {
 
 // ALBABIT-FIX: some checkpoints need settings that differ from their
 // model_type's generic default -- only the exact filename can tell them
-// apart. Verified against official model cards: Klein Base/distilled
-// (4B/9B), Flux.1 Dev/Schnell, and Flux.1 Krea Dev (guidance only -- BFL
-// gives no steps recommendation). LTX 2.3 Dev/Distilled deliberately NOT
-// covered -- community values are inconsistent/pipeline-dependent; the
-// existing "LTX 2.3 LowRes/HighRes" presets are the right tool there.
-function _deriveDistillationOverride(filename) {
+// apart. Verified against official model cards. "turbo" needs detectedType
+// too (SDXL Turbo and SD3.5 Turbo both match the substring but need
+// different values). LTX 2.3 Dev/Distilled deliberately NOT covered --
+// community values are inconsistent/pipeline-dependent; the existing
+// "LTX 2.3 LowRes/HighRes" presets are the right tool there.
+function _deriveDistillationOverride(filename, detectedType) {
     if (!filename) return null;
     const f = filename.toLowerCase();
     if (f.includes("klein")) {
@@ -626,6 +626,14 @@ function _deriveDistillationOverride(filename) {
     }
     if (f.includes("schnell")) return { flux_guidance: 0.0, steps: 4 };
     if (f.includes("krea")) return { flux_guidance: 4.5 };
+    // ALBABIT-FIX: sampler verified against ComfyUI's own official SDXL Turbo
+    // workflow (sdxlturbo_example.png) -- scheduler there is "SDTurboScheduler",
+    // a dedicated node with no standard-scheduler equivalent, left unset.
+    if (detectedType === "sdxl" && f.includes("turbo")) return { cfg: 1.0, steps: 1, sampler: "euler_ancestral" };
+    // ALBABIT-FIX: cfg=1.6 (not the "pure" diffusers guidance_scale=0.0
+    // translation) to match the Sampler's own pre-existing "[F] SD3.5 Turbo
+    // (4 steps)" preset, already tuned in practice.
+    if (detectedType === "sd3.5" && f.includes("turbo")) return { cfg: 1.6, steps: 4 };
     return null;
 }
 
@@ -636,8 +644,8 @@ function _deriveDistillationOverride(filename) {
 const LOADER_PRESET_MODEL_TYPE = {
     "Flux.1": "flux", "Flux.1 (Low VRAM)": "flux",
     "Chroma": "chroma",
-    "SD3.5 Large": "sd3.5", "SD3.5 Medium": "sd3.5", "SD3.5 Turbo": "sd3.5",
-    "SDXL Base": "sdxl", "SDXL Turbo": "sdxl", "SD 1.5": "sd15",
+    "SD3.5 Large": "sd3.5", "SD3.5 Medium": "sd3.5",
+    "SDXL": "sdxl", "SD 1.5": "sd15",
     "HunyuanVideo": "hunyuan_video",
     "Wan 2.1": "wan", "Wan 2.2": "wan", "Wan 2.2 TI2V": "wan",
     "LTX Video": "ltxv", "LTX Video 13B": "ltxv",
@@ -656,9 +664,15 @@ const MODEL_TYPE_SAMPLING_DEFAULTS = {
     flux:          { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 3.5 },
     flux2:         { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 4.0 },
     "flux2-klein": { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 4.0 },
-    chroma:        { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 0.0 },
+    // ALBABIT-FIX: cfg/scheduler/steps verified against lodestones' own
+    // official Chroma1-HD ComfyUI workflow (cfg was 1.0, scheduler "simple" --
+    // both wrong). "steps" is a generic fallback, new for this architecture.
+    chroma:        { cfg: 3.8, sampler: "euler",    scheduler: "beta",        flux_shift: 1.0,  guidance: 0.0, steps: 26 },
     sd3:           { cfg: 4.5, sampler: "dpmpp_2m", scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0 },
-    "sd3.5":       { cfg: 4.5, sampler: "dpmpp_2m", scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0 },
+    // ALBABIT-FIX: cfg/sampler verified against Comfy-Org's official SD3.5
+    // Large workflow + Albabit's own ComfyUI workflow (sampler was
+    // "dpmpp_2m", wrong -- should be "euler"; cfg confirmed at 4.0).
+    "sd3.5":       { cfg: 4.0, sampler: "euler",    scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0 },
     sdxl:          { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "karras",      flux_shift: 1.0,  guidance: 0.0 },
     sd15:          { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0 },
     wan:           { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0 },
@@ -737,9 +751,14 @@ function updateModelMetaDefaults(node) {
 
     const sourceNode = eligible ? _findModelMetaSourceNode(node) : null;
     const unetName = sourceNode?.widgets?.find(w => w.name === "unet_name")?.value ?? null;
-    const override = _deriveDistillationOverride(unetName);
     const detectedType = _resolveLoaderModelType(sourceNode);
+    const override = _deriveDistillationOverride(unetName, detectedType);
     const modelDefaults = MODEL_TYPE_SAMPLING_DEFAULTS[detectedType] ?? null;
+    // ALBABIT-FIX: mirrors nodes_sampler.py's use_sd_turbo_schedule -- the
+    // scheduler widget's actual value is ignored server-side for this case
+    // (a dedicated discrete schedule is used instead, see get_sd_turbo_sigmas),
+    // so there's no specific value to sync it to, just a link to flag.
+    const sdTurboActive = detectedType === "sdxl" && (unetName || "").toLowerCase().includes("turbo");
 
     // ALBABIT-FIX: pixart/aura_flow/kolors resolve fine as MODEL_TYPE_SAMPLING_
     // DEFAULTS keys (sd15-equivalent values) but aren't real options in the
@@ -754,10 +773,9 @@ function updateModelMetaDefaults(node) {
     const pairs = [
         [modelTypeW, validModelType],
         [node.widgets.find(w => w.name === "flux_guidance"), override?.flux_guidance ?? modelDefaults?.guidance],
-        [node.widgets.find(w => w.name === "steps"), override?.steps],
-        [node.widgets.find(w => w.name === "cfg"), modelDefaults?.cfg],
-        [node.widgets.find(w => w.name === "sampler"), modelDefaults?.sampler],
-        [node.widgets.find(w => w.name === "scheduler"), modelDefaults?.scheduler],
+        [node.widgets.find(w => w.name === "steps"), override?.steps ?? modelDefaults?.steps],
+        [node.widgets.find(w => w.name === "cfg"), override?.cfg ?? modelDefaults?.cfg],
+        [node.widgets.find(w => w.name === "sampler"), override?.sampler ?? modelDefaults?.sampler],
         [node.widgets.find(w => w.name === "flux_shift"), modelDefaults?.flux_shift],
     ];
 
@@ -768,6 +786,19 @@ function updateModelMetaDefaults(node) {
         const inSync = linked && widget && widget.value === derivedVal;
         if (_markLinkedWidget(widget, linked, inSync)) changed = true;
     }
+
+    const schedulerW = node.widgets.find(w => w.name === "scheduler");
+    if (sdTurboActive) {
+        _syncAutoValue(schedulerW, undefined); // no value to track/force -- link only
+        if (_markLinkedWidget(schedulerW, true, true)) changed = true;
+    } else {
+        const schedulerDefault = modelDefaults?.scheduler;
+        if (_syncAutoValue(schedulerW, schedulerDefault)) changed = true;
+        const linked = schedulerDefault !== undefined;
+        const inSync = linked && schedulerW && schedulerW.value === schedulerDefault;
+        if (_markLinkedWidget(schedulerW, linked, inSync)) changed = true;
+    }
+
     if (changed) node.setDirtyCanvas(true, true);
 }
 

@@ -33,9 +33,7 @@ const PRESET_SLOTS = {
     "SD 1.5": ["clip_l"],
     "SD3.5 Large": ["clip_l", "clip_g", "t5xxl"],
     "SD3.5 Medium": ["clip_l", "clip_g", "t5xxl"],
-    "SD3.5 Turbo": ["clip_l", "clip_g", "t5xxl"],
-    "SDXL Base": ["clip_l", "clip_g"],
-    "SDXL Turbo": ["clip_l", "clip_g"],
+    "SDXL": ["clip_l", "clip_g"],
     "Wan 2.1": ["t5xxl"],
     "Wan 2.2": ["t5xxl"],
     "Wan 2.2 TI2V": ["t5xxl"],
@@ -91,8 +89,6 @@ const PRESET_CONFIGS = {
             "clip_l": ["clip_l.safetensors", "clip_l"],
             "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
-        // ALBABIT-FIX: Dev and Schnell are both legitimate picks -- 🧲, not ✎.
-        "variant_linked": true,
     },
     "Flux.1 (Low VRAM)": {
         "unet_hints":    ["flux1-dev-fp8", "flux1-dev", "flux1-krea-dev", "krea-dev", "flux-dev"],
@@ -106,7 +102,6 @@ const PRESET_CONFIGS = {
         // GPU where cpu_offload is unnecessarily slow).
         "extra_widgets": ["offload_mode"],
         "offload_mode": "cpu_offload",
-        "variant_linked": true,
     },
     // ALBABIT-FIX: Dev and Klein merged into one preset now that Auto-Detect
     // can tell them apart on its own (model/detect.py, single_blocks count).
@@ -209,8 +204,6 @@ const PRESET_CONFIGS = {
         },
         "extra_widgets": ["upscale_model_name", "audio_vae_name"],
         "upscale_hints": ["ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "ltx-2.3-spatial-upscaler-x2-1.0.safetensors", "ltx-2.3", "ltx_2.3", "latent_upsampler", "upsampler"],
-        // ALBABIT-FIX: Dev and Distilled(-1.1) are both legitimate picks -- 🧲, not ✎.
-        "variant_linked": true,
     },
     "LTX Video 2.3 (Low VRAM)": {
         // ALBABIT-FIX: distilled-1.1 replaces dev-fp8 as primary Low VRAM model
@@ -231,7 +224,6 @@ const PRESET_CONFIGS = {
         "extra_widgets": ["upscale_model_name", "offload_mode"],
         "offload_mode": "cpu_offload",
         "upscale_hints": ["ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "ltx-2.3-spatial-upscaler-x2-1.0.safetensors", "ltx-2.3", "ltx_2.3", "latent_upsampler", "upsampler"],
-        "variant_linked": true,
     },
     "Lumina2": {
         "unet_hints":    ["lumina2", "lumina-2", "lumina_2"],
@@ -262,8 +254,12 @@ const PRESET_CONFIGS = {
             "clip_l": ["clip_l.safetensors", "clip_l"],
         },
     },
+    // ALBABIT-FIX: Large and Turbo merged -- same vae_hints/clip_hints
+    // already, Turbo is Large's distilled variant (Sampler tells them apart
+    // by filename via _deriveDistillationOverride). "Medium" stays separate
+    // (a genuinely different-sized sibling, not a distillation pair).
     "SD3.5 Large": {
-        "unet_hints":    ["sd3.5_large_turbo", "sd3.5_large", "sd3-5_large"],
+        "unet_hints":    ["sd3.5_large", "sd3-5_large", "sd3.5_large_turbo", "sd3.5_turbo", "sd3-5_turbo"],
         "vae_hints":     ["sd3_vae", "sd3.5_vae", "sd3"],
         "clip_hints":    {
             "clip_l": ["clip_l.safetensors", "clip_l"],
@@ -280,25 +276,9 @@ const PRESET_CONFIGS = {
             "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
     },
-    "SD3.5 Turbo": {
-        "unet_hints":    ["sd3.5_large_turbo", "sd3.5_turbo", "sd3-5_turbo"],
-        "vae_hints":     ["sd3_vae", "sd3.5_vae", "sd3"],
-        "clip_hints":    {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-            "clip_g": ["clip_g.safetensors", "clip_g"],
-            "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
-        },
-    },
-    "SDXL Base": {
-        "unet_hints":    ["sd_xl_base", "sdxl_base", "sdxl-base"],
-        "vae_hints":     ["sdxl_vae", "vae-ft-mse", "xl_vae"],
-        "clip_hints":    {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-            "clip_g": ["clip_g.safetensors", "clip_g"],
-        },
-    },
-    "SDXL Turbo": {
-        "unet_hints":    ["sdxl_turbo", "sdxl-turbo", "turbo"],
+    // ALBABIT-FIX: Base and Turbo merged -- same reasoning as SD3.5 Large above.
+    "SDXL": {
+        "unet_hints":    ["sd_xl_base", "sdxl_base", "sdxl-base", "sdxl_turbo", "sdxl-turbo", "turbo"],
         "vae_hints":     ["sdxl_vae", "vae-ft-mse", "xl_vae"],
         "clip_hints":    {
             "clip_l": ["clip_l.safetensors", "clip_l"],
@@ -485,10 +465,11 @@ function autoFillPresetFiles(node, cleanPreset) {
 // no longer match what autoFillPresetFiles() would pick right now, with a "✎"
 // label marker (same pattern as radiance_sampler.js/radiance_prompt.js).
 const PRESET_MARKER = " ✎";
-// ALBABIT-FIX: "🧲" marks unet_name for variant_linked/clip_size_hints presets
-// (any recognized UNET among several legitimate ones, e.g. Flux.1 Dev/Schnell) --
-// clip_size_hints presets also mark llm_encoder, since its pick is derived
-// from unet_name (Klein's Mistral vs Qwen), not a static default.
+// ALBABIT-FIX: "🧲" marks unet_name whenever the file is a recognized preset
+// variant -- unet_name always has a real link to other magnet-marked widgets
+// (the Sampler's model_meta-driven defaults, and llm_encoder for Klein), so
+// picking any recognized file is never a mistake, unlike a genuinely
+// unrelated file (e.g. Flux1 Fill under "Flux.1"), which still gets "✎".
 const LINKED_MARKER = " 🧲";
 // ALBABIT-FIX: for companion_linked presets (Wan 2.2), either the high_noise
 // or low_noise UNET is a valid pick -- "⛓" marks unet_name instead of "✎"
@@ -518,10 +499,10 @@ function updatePresetDivergenceMarkers(node) {
     const activeSlots = config ? (PRESET_SLOTS[cleanPreset] || ALL_CLIP_WIDGETS) : [];
     const unetVal = getWidget(node, "unet_name")?.value || "";
     const unetRecognized = !!findMatchingFile(config?.unet_hints, [unetVal]);
-    // ALBABIT-FIX: unetVariantLinked (any recognized UNET in a multi-variant
-    // preset, e.g. Flux.1 Dev/Schnell) vs clipLinked (llm_encoder also
+    // ALBABIT-FIX: unetVariantLinked (any recognized file -- unet_name always
+    // feeds the Sampler's model_meta magnets) vs clipLinked (llm_encoder also
     // depends on it, Klein-only) -- previously conflated under one check.
-    const unetVariantLinked = !!((config?.variant_linked || config?.clip_size_hints) && unetRecognized);
+    const unetVariantLinked = !!(config && unetRecognized);
     const clipLinked = !!(config?.clip_size_hints && unetRecognized);
     const companionLinked = !!(config?.companion_linked && unetRecognized);
 
@@ -547,12 +528,14 @@ function updatePresetDivergenceMarkers(node) {
     };
 
     // unet_name shows a link marker instead of the divergence marker while
-    // unetVariantLinked/companionLinked -- the point is to signal a
-    // relationship (multi-variant preset, auto-loaded companion), not flag a mistake.
-    if (unetVariantLinked) {
-        if (_markFileWidget(getWidget(node, "unet_name"), LINKED_MARKER)) changed = true;
-    } else if (companionLinked) {
+    // companionLinked/unetVariantLinked -- the point is to signal a
+    // relationship (auto-loaded companion, recognized preset variant), not
+    // flag a mistake. companionLinked checked first: more specific than the
+    // general "recognized" case.
+    if (companionLinked) {
         if (_markFileWidget(getWidget(node, "unet_name"), COMPANION_MARKER)) changed = true;
+    } else if (unetVariantLinked) {
+        if (_markFileWidget(getWidget(node, "unet_name"), LINKED_MARKER)) changed = true;
     } else {
         check("unet_name", config?.unet_hints);
     }
