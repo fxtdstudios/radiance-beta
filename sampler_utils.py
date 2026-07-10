@@ -37,11 +37,9 @@ SIGMA_DISCONTINUITY_THRESHOLD = 0.01
 PAG_DEFAULT_SCALE = 0.0                       
 PAG_LAYER_NAMES = ["middle_block"]                               
 
-CFG_PLUS_PLUS_DEFAULT_SCALE = 1.6                           
+CFG_PLUS_PLUS_DEFAULT_SCALE = 1.6
 
-CFG_GUIDANCE_MODELS = {"wan", "hunyuan_video"}
-
-DYNAMIC_CFG_EARLY_MULTIPLIER = 1.2                                              
+DYNAMIC_CFG_EARLY_MULTIPLIER = 1.2
 DYNAMIC_CFG_LATE_MULTIPLIER = 0.7                                                
 DYNAMIC_CFG_EARLY_THRESHOLD = 0.15                      
 DYNAMIC_CFG_LATE_THRESHOLD = 0.85                      
@@ -90,7 +88,6 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "shift": 1.0,
         "sampler": "euler",
         "steps": 20,
-        "denoise_range": (0.3, 1.0),
     },
     # ALBABIT-FIX: Flux.2 Dev and Flux.2 Klein — guidance_embed models like Flux.1,
     # same sampling defaults (scheduler=simple, cfg=1.0, guidance_embed). guidance
@@ -107,7 +104,6 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "shift": 1.0,
         "sampler": "euler",
         "steps": 20,
-        "denoise_range": (0.3, 1.0),
     },
     "flux2-klein": {
         "cfg": 1.0,
@@ -116,20 +112,17 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "shift": 1.0,
         "sampler": "euler",
         "steps": 20,
-        "denoise_range": (0.3, 1.0),
     },
-    # ALBABIT-FIX: steps=30 added, verified against the official SD3 Medium
-    # example workflow (sd3_simple_example.png) -- that same workflow uses
-    # cfg=5.45, differing from our cfg=4.5 (not touched here, out of scope
-    # for this steps-only pass; flagged separately if worth revisiting).
+    # ALBABIT-FIX: cfg 4.5->5.45, sampler dpmpp_2m->euler, steps=30 -- all
+    # verified directly against the official SD3 Medium example workflow's
+    # embedded JSON (sd3_simple_example.png, comfyanonymous/ComfyUI_examples).
     "sd3": {
-        "cfg": 4.5,
+        "cfg": 5.45,
         "scheduler": "sgm_uniform",
         "guidance": 0.0,
         "shift": 1.0,
-        "sampler": "dpmpp_2m",
+        "sampler": "euler",
         "steps": 30,
-        "denoise_range": (0.2, 1.0),
     },
     # ALBABIT-FIX: renamed from "sd35" to "sd3.5" for consistency with Loader/detect.py.
     # cfg/sampler verified against Comfy-Org's own official SD3.5 Large workflow
@@ -144,7 +137,6 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "shift": 1.0,
         "sampler": "euler",
         "steps": 20,
-        "denoise_range": (0.2, 1.0),
     },
     # ALBABIT-FIX: cfg 7.0->8.0, sampler dpmpp_2m->euler, scheduler
     # karras->normal, matching ComfyUI's own official SDXL example workflow
@@ -159,7 +151,6 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "shift": 1.0,
         "sampler": "euler",
         "steps": 20,
-        "denoise_range": (0.3, 1.0),
     },
     # ALBABIT-FIX: steps=20 added, verified against ComfyUI's own default
     # startup workflow (default.json, v1-5-pruned-emaonly) -- that same
@@ -173,7 +164,6 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "shift": 1.0,
         "sampler": "dpmpp_2m",
         "steps": 20,
-        "denoise_range": (0.3, 1.0),
     },
 
     "wan": {
@@ -186,7 +176,6 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         # added, from the same 14B I2V workflow (its KSampler uses steps=20).
         "sampler": "uni_pc",
         "steps": 20,
-        "denoise_range": (0.3, 1.0),
         "guidance_type": "cfg",
     },
     # ALBABIT-FIX: steps=30 added (was previously "faible confiance" from a
@@ -201,7 +190,6 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "shift": 2.37,
         "sampler": "euler",
         "steps": 30,
-        "denoise_range": (0.3, 1.0),
         "guidance_type": "embedding",
     },
 
@@ -211,7 +199,6 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "guidance": 0.0,
         "shift": 3.0,                                                     
         "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
         "guidance_type": "cfg",
     },
     # ALBABIT-FIX: steps=20 added, from the same official ComfyUI HunyuanVideo
@@ -227,7 +214,6 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "shift": 7.0,
         "sampler": "euler",
         "steps": 20,
-        "denoise_range": (0.3, 1.0),
         "guidance_type": "cfg",
     },
     # ALBABIT-FIX: Lumina2's official example workflow shows a plain KSampler
@@ -243,7 +229,6 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "shift": 6.0,
         "sampler": "res_multistep",
         "steps": 25,
-        "denoise_range": (0.3, 1.0),
         "guidance_type": "cfg",
     },
     # ALBABIT-FIX: steps=25 added, verified against Comfy-Org's official
@@ -257,7 +242,6 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "shift": 3.0,
         "sampler": "euler",
         "steps": 25,
-        "denoise_range": (0.3, 1.0),
         "guidance_type": "embedding",
     },
     # ALBABIT-FIX: steps=20 added, verified against ComfyUI's own official
@@ -269,7 +253,6 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "shift": 3.0,
         "sampler": "euler",
         "steps": 20,
-        "denoise_range": (0.3, 1.0),
         "guidance_type": "cfg",
     },
     # ── v2.6.0: New video models ──────────────────────────────────────────────
@@ -283,7 +266,6 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "shift": 8.0,
         "sampler": "euler",
         "steps": 50,
-        "denoise_range": (0.0, 1.0),
         "guidance_type": "cfg",
     },
     # ALBABIT-FIX: cfg/scheduler/steps verified against lodestones' own official
@@ -298,7 +280,6 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "shift": 1.0,
         "sampler": "euler",
         "steps": 26,
-        "denoise_range": (0.3, 1.0),
     },
     # ALBABIT-FIX: Mochi-1 (Genmo) — 12ch video VAE, T5XXL text encoder.
     # steps=64 added, verified against Genmo's official Mochi 1 model card
@@ -310,7 +291,6 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "shift": 6.0,
         "sampler": "euler",
         "steps": 64,
-        "denoise_range": (0.0, 1.0),
         "guidance_type": "cfg",
     },
     # ALBABIT-FIX: previously fell back to "sd15" (cfg=7.0/dpmpp_2m/normal) --
@@ -325,7 +305,6 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "shift": 1.0,
         "sampler": "euler",
         "steps": 20,
-        "denoise_range": (0.3, 1.0),
     },
     # ALBABIT-FIX: previously fell back to "sd15" -- cfg/sampler verified
     # against multiple independent community sources (weaker than AuraFlow's
@@ -340,7 +319,6 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "shift": 1.0,
         "sampler": "dpmpp_2m",
         "steps": 20,
-        "denoise_range": (0.3, 1.0),
     },
 }
 

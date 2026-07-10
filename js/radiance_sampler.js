@@ -731,10 +731,10 @@ const MODEL_TYPE_SAMPLING_DEFAULTS = {
     // official Chroma1-HD ComfyUI workflow (cfg was 1.0, scheduler "simple" --
     // both wrong). "steps" is a generic fallback, new for this architecture.
     chroma:        { cfg: 3.8, sampler: "euler",    scheduler: "beta",        flux_shift: 1.0,  guidance: 0.0, steps: 26 },
-    // ALBABIT-FIX: steps=30 added, verified against the official SD3 Medium
-    // example workflow -- that same workflow uses cfg=5.45, differing from
-    // our cfg=4.5 (not touched, out of scope for this steps-only pass).
-    sd3:           { cfg: 4.5, sampler: "dpmpp_2m", scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0, steps: 30 },
+    // ALBABIT-FIX: cfg 4.5->5.45, sampler dpmpp_2m->euler, steps=30 -- all
+    // verified directly against the official SD3 Medium example workflow's
+    // embedded JSON (sd3_simple_example.png, comfyanonymous/ComfyUI_examples).
+    sd3:           { cfg: 5.45, sampler: "euler",   scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0, steps: 30 },
     // ALBABIT-FIX: cfg/sampler verified against Comfy-Org's official SD3.5
     // Large workflow + Albabit's own ComfyUI workflow (sampler was
     // "dpmpp_2m", wrong -- should be "euler"; cfg confirmed at 4.0).
