@@ -91,6 +91,8 @@ const PRESET_CONFIGS = {
             "clip_l": ["clip_l.safetensors", "clip_l"],
             "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
+        // ALBABIT-FIX: Dev and Schnell are both legitimate picks -- 🧲, not ✎.
+        "variant_linked": true,
     },
     "Flux.1 (Low VRAM)": {
         "unet_hints":    ["flux1-dev-fp8", "flux1-dev", "flux1-krea-dev", "krea-dev", "flux-dev"],
@@ -104,6 +106,7 @@ const PRESET_CONFIGS = {
         // GPU where cpu_offload is unnecessarily slow).
         "extra_widgets": ["offload_mode"],
         "offload_mode": "cpu_offload",
+        "variant_linked": true,
     },
     // ALBABIT-FIX: Dev and Klein merged into one preset now that Auto-Detect
     // can tell them apart on its own (model/detect.py, single_blocks count).
@@ -206,6 +209,8 @@ const PRESET_CONFIGS = {
         },
         "extra_widgets": ["upscale_model_name", "audio_vae_name"],
         "upscale_hints": ["ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "ltx-2.3-spatial-upscaler-x2-1.0.safetensors", "ltx-2.3", "ltx_2.3", "latent_upsampler", "upsampler"],
+        // ALBABIT-FIX: Dev and Distilled(-1.1) are both legitimate picks -- 🧲, not ✎.
+        "variant_linked": true,
     },
     "LTX Video 2.3 (Low VRAM)": {
         // ALBABIT-FIX: distilled-1.1 replaces dev-fp8 as primary Low VRAM model
@@ -226,6 +231,7 @@ const PRESET_CONFIGS = {
         "extra_widgets": ["upscale_model_name", "offload_mode"],
         "offload_mode": "cpu_offload",
         "upscale_hints": ["ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "ltx-2.3-spatial-upscaler-x2-1.0.safetensors", "ltx-2.3", "ltx_2.3", "latent_upsampler", "upsampler"],
+        "variant_linked": true,
     },
     "Lumina2": {
         "unet_hints":    ["lumina2", "lumina-2", "lumina_2"],
@@ -479,9 +485,10 @@ function autoFillPresetFiles(node, cleanPreset) {
 // no longer match what autoFillPresetFiles() would pick right now, with a "✎"
 // label marker (same pattern as radiance_sampler.js/radiance_prompt.js).
 const PRESET_MARKER = " ✎";
-// ALBABIT-FIX: for clip_size_hints presets, llm_encoder is derived from
-// unet_name, not a static default -- "🧲" marks that link instead of "✎"
-// (unet_name: any recognized variant of the preset; llm_encoder: in sync with it).
+// ALBABIT-FIX: "🧲" marks unet_name for variant_linked/clip_size_hints presets
+// (any recognized UNET among several legitimate ones, e.g. Flux.1 Dev/Schnell) --
+// clip_size_hints presets also mark llm_encoder, since its pick is derived
+// from unet_name (Klein's Mistral vs Qwen), not a static default.
 const LINKED_MARKER = " 🧲";
 // ALBABIT-FIX: for companion_linked presets (Wan 2.2), either the high_noise
 // or low_noise UNET is a valid pick -- "⛓" marks unet_name instead of "✎"
@@ -510,11 +517,13 @@ function updatePresetDivergenceMarkers(node) {
     const config = cleanPreset === "Custom" ? null : PRESET_CONFIGS[cleanPreset];
     const activeSlots = config ? (PRESET_SLOTS[cleanPreset] || ALL_CLIP_WIDGETS) : [];
     const unetVal = getWidget(node, "unet_name")?.value || "";
-    // ALBABIT-FIX: llm_encoder's pick depends on unet_name for the whole
-    // preset (Mistral vs Qwen), not just the size-token subset (Klein) --
-    // any recognized file in this preset's own unet_hints counts as linked.
-    const familyLinked = !!(config?.clip_size_hints && findMatchingFile(config.unet_hints, [unetVal]));
-    const companionLinked = !!(config?.companion_linked && findMatchingFile(config.unet_hints, [unetVal]));
+    const unetRecognized = !!findMatchingFile(config?.unet_hints, [unetVal]);
+    // ALBABIT-FIX: unetVariantLinked (any recognized UNET in a multi-variant
+    // preset, e.g. Flux.1 Dev/Schnell) vs clipLinked (llm_encoder also
+    // depends on it, Klein-only) -- previously conflated under one check.
+    const unetVariantLinked = !!((config?.variant_linked || config?.clip_size_hints) && unetRecognized);
+    const clipLinked = !!(config?.clip_size_hints && unetRecognized);
+    const companionLinked = !!(config?.companion_linked && unetRecognized);
 
     let changed = false;
 
@@ -538,9 +547,9 @@ function updatePresetDivergenceMarkers(node) {
     };
 
     // unet_name shows a link marker instead of the divergence marker while
-    // familyLinked/companionLinked -- the point is to signal a relationship
-    // (linked CLIP size, auto-loaded companion), not flag a mistake.
-    if (familyLinked) {
+    // unetVariantLinked/companionLinked -- the point is to signal a
+    // relationship (multi-variant preset, auto-loaded companion), not flag a mistake.
+    if (unetVariantLinked) {
         if (_markFileWidget(getWidget(node, "unet_name"), LINKED_MARKER)) changed = true;
     } else if (companionLinked) {
         if (_markFileWidget(getWidget(node, "unet_name"), COMPANION_MARKER)) changed = true;
@@ -550,7 +559,7 @@ function updatePresetDivergenceMarkers(node) {
     check("vae_name", config?.vae_hints);
     for (const wName of ALL_CLIP_WIDGETS) {
         if (config && !activeSlots.includes(wName)) continue; // hidden slot
-        if (wName === "llm_encoder" && familyLinked) {
+        if (wName === "llm_encoder" && clipLinked) {
             const w = getWidget(node, "llm_encoder");
             const matched = _resolveClipMatch(node, config, "llm_encoder");
             const markerText = matched === null ? null
