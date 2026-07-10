@@ -72,10 +72,14 @@ MODEL_TYPES = [
 VIDEO_MODEL_TYPES = {"wan", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "stepvideo", "mochi"}
 
 # ALBABIT-FIX: flux2/flux2-klein use guidance_embed like flux (not external CFG)
-GUIDANCE_EMBED_MODELS = {"flux", "flux2", "flux2-klein", "lumina2", "z_image", "ltxv"}
+# ALBABIT-FIX: lumina2 removed -- its official workflow uses a plain KSampler
+# cfg, no guidance-embed node (unlike Flux's FluxGuidance) -- see CFG_GUIDED_MODELS
+GUIDANCE_EMBED_MODELS = {"flux", "flux2", "flux2-klein", "z_image", "ltxv"}
 
 # ALBABIT-FIX: "sd35" renamed to "sd3.5" for consistency with Loader/detect.py
-CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd3.5", "ltxav", "cogvideox", "stepvideo", "mochi"}
+# ALBABIT-FIX: lumina2 added -- classic external CFG, confirmed via its
+# official example workflow (plain KSampler cfg=4, no guidance-embed node)
+CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd3.5", "ltxav", "cogvideox", "stepvideo", "mochi", "lumina2"}
 
 MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "flux": {
@@ -150,9 +154,11 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "scheduler": "simple",
         "guidance": 0.0,
         "shift": 8.0,
-        "sampler": "euler",
+        # ALBABIT-FIX: euler -> uni_pc, confirmed by 2 official Comfy-Org
+        # workflows (Wan 2.1 1.3B T2V and Wan 2.1 14B I2V 720P).
+        "sampler": "uni_pc",
         "denoise_range": (0.3, 1.0),
-        "guidance_type": "cfg",                                              
+        "guidance_type": "cfg",
     },
     "ltxv": {
         "cfg": 1.0,
@@ -182,14 +188,21 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "denoise_range": (0.3, 1.0),
         "guidance_type": "cfg",                                                       
     },
+    # ALBABIT-FIX: Lumina2's official example workflow shows a plain KSampler
+    # cfg=4 with no guidance-embed node at all (unlike Flux's FluxGuidance) --
+    # it's classic external CFG, not embedded guidance. cfg 1.0->4.0,
+    # sampler euler->res_multistep, guidance_type embedding->cfg, steps=25
+    # added (matches the workflow's saved value; its own Note claims "36
+    # steps" as the official recommendation but the workflow itself uses 25).
     "lumina2": {
-        "cfg": 1.0,
+        "cfg": 4.0,
         "scheduler": "simple",
-        "guidance": 3.5,                                    
+        "guidance": 0.0,
         "shift": 6.0,
-        "sampler": "euler",
+        "sampler": "res_multistep",
+        "steps": 25,
         "denoise_range": (0.3, 1.0),
-        "guidance_type": "embedding",
+        "guidance_type": "cfg",
     },
     "z_image": {
         "cfg": 1.0,

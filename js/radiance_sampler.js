@@ -144,10 +144,14 @@ const LTX_PRESETS = [
 // backend resolves models. GUIDANCE_EMBED models use flux_guidance; CFG_GUIDED
 // models drive denoising with plain CFG and ignore the guidance-embed widgets.
 // ALBABIT-FIX: flux2/flux2-klein use guidance_embed like flux; "sd35" renamed to "sd3.5"
-const GUIDANCE_EMBED_MODELS = new Set(["flux", "flux2", "flux2-klein", "lumina2", "z_image", "ltxv"]);
+// ALBABIT-FIX: lumina2 removed -- its official workflow uses a plain KSampler
+// cfg, no guidance-embed node (unlike Flux's FluxGuidance) -- see CFG_GUIDED_MODELS
+const GUIDANCE_EMBED_MODELS = new Set(["flux", "flux2", "flux2-klein", "z_image", "ltxv"]);
+// ALBABIT-FIX: lumina2 added -- classic external CFG, confirmed via its
+// official example workflow (plain KSampler cfg=4, no guidance-embed node)
 const CFG_GUIDED_MODELS = new Set([
     "wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd3.5",
-    "ltxav", "cogvideox", "stepvideo"
+    "ltxav", "cogvideox", "stepvideo", "lumina2"
 ]);
 const LTX_MODEL_TYPES = new Set(["ltxv", "ltxav"]);
 
@@ -675,11 +679,17 @@ const MODEL_TYPE_SAMPLING_DEFAULTS = {
     "sd3.5":       { cfg: 4.0, sampler: "euler",    scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0 },
     sdxl:          { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "karras",      flux_shift: 1.0,  guidance: 0.0 },
     sd15:          { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0 },
-    wan:           { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0 },
+    // ALBABIT-FIX: euler -> uni_pc, confirmed by 2 official Comfy-Org
+    // workflows (Wan 2.1 1.3B T2V and Wan 2.1 14B I2V 720P).
+    wan:           { cfg: 6.0, sampler: "uni_pc",  scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0 },
     ltxv:          { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 2.37, guidance: 3.5 },
     ltxav:         { cfg: 3.0, sampler: "euler",    scheduler: "beta",        flux_shift: 3.0,  guidance: 0.0 },
     hunyuan_video: { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 7.0,  guidance: 0.0 },
-    lumina2:       { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 6.0,  guidance: 3.5 },
+    // ALBABIT-FIX: official example workflow shows plain KSampler cfg=4, no
+    // guidance-embed node -- cfg 1.0->4.0, sampler euler->res_multistep,
+    // steps=25 added (matches the workflow; its own Note claims "36 steps"
+    // as official but the saved workflow itself uses 25).
+    lumina2:       { cfg: 4.0, sampler: "res_multistep", scheduler: "simple", flux_shift: 6.0,  guidance: 0.0, steps: 25 },
     z_image:       { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 3.0,  guidance: 3.5 },
     cosmos:        { cfg: 7.0, sampler: "euler",    scheduler: "simple",      flux_shift: 3.0,  guidance: 0.0 },
     cogvideox:     { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0 },
