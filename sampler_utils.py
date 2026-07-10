@@ -37,11 +37,9 @@ SIGMA_DISCONTINUITY_THRESHOLD = 0.01
 PAG_DEFAULT_SCALE = 0.0                       
 PAG_LAYER_NAMES = ["middle_block"]                               
 
-CFG_PLUS_PLUS_DEFAULT_SCALE = 1.6                           
+CFG_PLUS_PLUS_DEFAULT_SCALE = 1.6
 
-CFG_GUIDANCE_MODELS = {"wan", "hunyuan_video"}
-
-DYNAMIC_CFG_EARLY_MULTIPLIER = 1.2                                              
+DYNAMIC_CFG_EARLY_MULTIPLIER = 1.2
 DYNAMIC_CFG_LATE_MULTIPLIER = 0.7                                                
 DYNAMIC_CFG_EARLY_THRESHOLD = 0.15                      
 DYNAMIC_CFG_LATE_THRESHOLD = 0.85                      
@@ -65,26 +63,31 @@ MODEL_TYPES = [
     "chroma",
     "cosmos",
     "cogvideox",
-    "stepvideo",
     "mochi",  # ALBABIT-FIX: Mochi-1 — match Resolution/Loader model types
 ]
 
-VIDEO_MODEL_TYPES = {"wan", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "stepvideo", "mochi"}
+VIDEO_MODEL_TYPES = {"wan", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "mochi"}
 
 # ALBABIT-FIX: flux2/flux2-klein use guidance_embed like flux (not external CFG)
-GUIDANCE_EMBED_MODELS = {"flux", "flux2", "flux2-klein", "lumina2", "z_image", "ltxv"}
+# ALBABIT-FIX: lumina2 removed -- its official workflow uses a plain KSampler
+# cfg, no guidance-embed node (unlike Flux's FluxGuidance) -- see CFG_GUIDED_MODELS
+GUIDANCE_EMBED_MODELS = {"flux", "flux2", "flux2-klein", "z_image", "ltxv"}
 
 # ALBABIT-FIX: "sd35" renamed to "sd3.5" for consistency with Loader/detect.py
-CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd3.5", "ltxav", "cogvideox", "stepvideo", "mochi"}
+# ALBABIT-FIX: lumina2 added -- classic external CFG, confirmed via its
+# official example workflow (plain KSampler cfg=4, no guidance-embed node)
+CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd3.5", "ltxav", "cogvideox", "mochi", "lumina2"}
 
 MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    # ALBABIT-FIX: steps=20 added, verified against Comfy-Org's official
+    # Flux.1 Dev workflow template.
     "flux": {
         "cfg": 1.0,
         "scheduler": "simple",
         "guidance": 3.5,
         "shift": 1.0,
         "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
+        "steps": 20,
     },
     # ALBABIT-FIX: Flux.2 Dev and Flux.2 Klein — guidance_embed models like Flux.1,
     # same sampling defaults (scheduler=simple, cfg=1.0, guidance_embed). guidance
@@ -92,13 +95,15 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
     # value is a fallback for when model_meta isn't connected -- Base (undistilled,
     # guidance=4.0) and distilled (guidance~1.0) are architecturally identical and
     # only distinguishable via model_meta's unet_file (see refine_distillation_from_meta).
+    # ALBABIT-FIX: steps=20 added, verified against Comfy-Org's official
+    # Flux.2 Dev/Klein workflow templates.
     "flux2": {
         "cfg": 1.0,
         "scheduler": "simple",
         "guidance": 4.0,
         "shift": 1.0,
         "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
+        "steps": 20,
     },
     "flux2-klein": {
         "cfg": 1.0,
@@ -106,40 +111,57 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "guidance": 4.0,
         "shift": 1.0,
         "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
+        "steps": 20,
     },
+    # ALBABIT-FIX: cfg 4.5->5.45, sampler dpmpp_2m->euler, steps=30 -- all
+    # verified directly against the official SD3 Medium example workflow's
+    # embedded JSON (sd3_simple_example.png, comfyanonymous/ComfyUI_examples).
     "sd3": {
-        "cfg": 4.5,
+        "cfg": 5.45,
         "scheduler": "sgm_uniform",
         "guidance": 0.0,
         "shift": 1.0,
-        "sampler": "dpmpp_2m",
-        "denoise_range": (0.2, 1.0),
+        "sampler": "euler",
+        "steps": 30,
     },
-    # ALBABIT-FIX: renamed from "sd35" to "sd3.5" for consistency with Loader/detect.py
+    # ALBABIT-FIX: renamed from "sd35" to "sd3.5" for consistency with Loader/detect.py.
+    # cfg/sampler verified against Comfy-Org's own official SD3.5 Large workflow
+    # (sd3.5-t2i-fp8-scaled-workflow.json) -- sampler was "dpmpp_2m" (wrong,
+    # should be "euler"); cfg confirmed against Albabit's own ComfyUI workflow (4.0).
+    # ALBABIT-FIX: steps=20 added, verified against Comfy-Org's official
+    # SD3.5 Large workflow template (same source already used for cfg/sampler).
     "sd3.5": {
-        "cfg": 4.5,
+        "cfg": 4.0,
         "scheduler": "sgm_uniform",
         "guidance": 0.0,
         "shift": 1.0,
-        "sampler": "dpmpp_2m",
-        "denoise_range": (0.2, 1.0),
+        "sampler": "euler",
+        "steps": 20,
     },
+    # ALBABIT-FIX: cfg 7.0->8.0, sampler dpmpp_2m->euler, scheduler
+    # karras->normal, matching ComfyUI's own official SDXL example workflow
+    # (sdxl_simple_example.json). steps=20 added from the same file (base
+    # stage runs steps 0-20 of a nominal 25-step schedule with the optional
+    # refiner stage disabled by default -- we don't have a 2-stage refiner
+    # split, so 20 is the actual number of steps that workflow runs).
     "sdxl": {
-        "cfg": 7.0,
-        "scheduler": "karras",
-        "guidance": 0.0,
-        "shift": 1.0,
-        "sampler": "dpmpp_2m",                                                               
-        "denoise_range": (0.3, 1.0),
-    },
-    "sd15": {
-        "cfg": 7.0,
+        "cfg": 8.0,
         "scheduler": "normal",
         "guidance": 0.0,
         "shift": 1.0,
-        "sampler": "dpmpp_2m",                                                               
-        "denoise_range": (0.3, 1.0),
+        "sampler": "euler",
+        "steps": 20,
+    },
+    # ALBABIT-FIX: cfg 7.0->8.0, sampler dpmpp_2m->euler, steps=20 -- all
+    # verified against ComfyUI's own default startup workflow (default.json,
+    # v1-5-pruned-emaonly, the graph shown on first launch).
+    "sd15": {
+        "cfg": 8.0,
+        "scheduler": "normal",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "euler",
+        "steps": 20,
     },
 
     "wan": {
@@ -147,17 +169,25 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "scheduler": "simple",
         "guidance": 0.0,
         "shift": 8.0,
-        "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
-        "guidance_type": "cfg",                                              
+        # ALBABIT-FIX: euler -> uni_pc, confirmed by 2 official Comfy-Org
+        # workflows (Wan 2.1 1.3B T2V and Wan 2.1 14B I2V 720P). steps=20
+        # added, from the same 14B I2V workflow (its KSampler uses steps=20).
+        "sampler": "uni_pc",
+        "steps": 20,
+        "guidance_type": "cfg",
     },
+    # ALBABIT-FIX: steps=30 added (was previously "faible confiance" from a
+    # Lightricks model card, now upgraded to "haute" -- confirmed by
+    # ComfyUI's own official LTX Video example workflow, corroborated by
+    # Lightricks' own 13B-dev first-pass config). The 2B-0.9.6-dev config
+    # suggests 40 instead -- our entry doesn't distinguish 2B/13B currently.
     "ltxv": {
         "cfg": 1.0,
         "scheduler": "simple",
-        "guidance": 3.5,                                   
+        "guidance": 3.5,
         "shift": 2.37,
         "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
+        "steps": 30,
         "guidance_type": "embedding",
     },
 
@@ -167,81 +197,126 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "guidance": 0.0,
         "shift": 3.0,                                                     
         "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
         "guidance_type": "cfg",
     },
+    # ALBABIT-FIX: steps=20 added, from the same official ComfyUI HunyuanVideo
+    # workflow already used for shift/sampler/scheduler. Note: Tencent's own
+    # CLI README recommends 50 steps -- a real divergence between the
+    # ComfyUI-native default and the creator's own recommendation, not
+    # resolved here (kept internally consistent with the single source
+    # already used for this architecture's other values).
     "hunyuan_video": {
         "cfg": 6.0,
         "scheduler": "simple",
         "guidance": 0.0,
         "shift": 7.0,
         "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
-        "guidance_type": "cfg",                                                       
+        "steps": 20,
+        "guidance_type": "cfg",
     },
+    # ALBABIT-FIX: Lumina2's official example workflow shows a plain KSampler
+    # cfg=4 with no guidance-embed node at all (unlike Flux's FluxGuidance) --
+    # it's classic external CFG, not embedded guidance. cfg 1.0->4.0,
+    # sampler euler->res_multistep, guidance_type embedding->cfg, steps=25
+    # added (matches the workflow's saved value; its own Note claims "36
+    # steps" as the official recommendation but the workflow itself uses 25).
     "lumina2": {
-        "cfg": 1.0,
+        "cfg": 4.0,
         "scheduler": "simple",
-        "guidance": 3.5,                                    
+        "guidance": 0.0,
         "shift": 6.0,
-        "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
-        "guidance_type": "embedding",
+        "sampler": "res_multistep",
+        "steps": 25,
+        "guidance_type": "cfg",
     },
+    # ALBABIT-FIX: steps=25 added, verified against Comfy-Org's official
+    # Z-Image (Base) workflow template -- its Turbo variant uses 8 steps
+    # instead, not covered here (no filename-based override exists yet for
+    # z_image, unlike Flux Schnell/Klein).
     "z_image": {
         "cfg": 1.0,
         "scheduler": "simple",
-        "guidance": 3.5,                                            
+        "guidance": 3.5,
         "shift": 3.0,
         "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
+        "steps": 25,
         "guidance_type": "embedding",
     },
+    # ALBABIT-FIX: steps=20 added, verified against ComfyUI's own official
+    # Cosmos-1.0 7B example workflow.
     "cosmos": {
         "cfg": 7.0,
         "scheduler": "simple",
         "guidance": 0.0,
         "shift": 3.0,
         "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
+        "steps": 20,
         "guidance_type": "cfg",
     },
     # ── v2.6.0: New video models ──────────────────────────────────────────────
+    # ALBABIT-FIX: steps=50 added, verified against THUDM's official
+    # CogVideoX-5b model card (num_inference_steps=50, guidance_scale=6 --
+    # cfg was already exact).
     "cogvideox": {
         "cfg": 6.0,
         "scheduler": "simple",
         "guidance": 0.0,
         "shift": 8.0,
         "sampler": "euler",
-        "denoise_range": (0.0, 1.0),
+        "steps": 50,
         "guidance_type": "cfg",
     },
-    "stepvideo": {
-        "cfg": 9.0,
-        "scheduler": "simple",
-        "guidance": 0.0,
-        "shift": 13.0,
-        "sampler": "euler",
-        "denoise_range": (0.0, 1.0),
-        "guidance_type": "cfg",
-    },
+    # ALBABIT-FIX: cfg/scheduler/steps verified against lodestones' own official
+    # Chroma1-HD ComfyUI workflow (cfg was 1.0, wrong; scheduler was "simple",
+    # wrong -- should be "beta"). "steps" is a generic (non-distillation)
+    # fallback -- new for this architecture, see refine_distillation_from_meta's
+    # docstring/_configure_model_and_defaults for how it's resolved.
     "chroma": {
-        "cfg": 1.0,
-        "scheduler": "simple",
+        "cfg": 3.8,
+        "scheduler": "beta",
         "guidance": 0.0,
         "shift": 1.0,
         "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
+        "steps": 26,
     },
-    # ALBABIT-FIX: Mochi-1 (Genmo) — 12ch video VAE, T5XXL text encoder
+    # ALBABIT-FIX: Mochi-1 (Genmo) — 12ch video VAE, T5XXL text encoder.
+    # steps=64 added, verified against Genmo's official Mochi 1 model card
+    # (num_inference_steps=64, cfg_schedule=[4.5]*64 -- cfg was already exact).
     "mochi": {
         "cfg": 4.5,
         "scheduler": "simple",
         "guidance": 0.0,
         "shift": 6.0,
         "sampler": "euler",
-        "denoise_range": (0.0, 1.0),
+        "steps": 64,
         "guidance_type": "cfg",
+    },
+    # ALBABIT-FIX: previously fell back to "sd15" (cfg=7.0/dpmpp_2m/normal) --
+    # verified against AuraFlow's own official ComfyUI workflow, which
+    # contradicts all three. No shift node present (unlike Lumina2, which
+    # reuses the same ModelSamplingAuraFlow node but at shift=6.0 -- confirmed
+    # NOT applicable to AuraFlow's own workflow, checked directly).
+    "aura_flow": {
+        "cfg": 3.48,
+        "scheduler": "sgm_uniform",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "euler",
+        "steps": 20,
+    },
+    # ALBABIT-FIX: previously fell back to "sd15" -- cfg/sampler verified
+    # against multiple independent community sources (weaker than AuraFlow's
+    # direct official workflow, moderate confidence). scheduler/shift kept at
+    # sd15-equivalent values, no better source found. steps=20 added, from
+    # the diffusers pipeline's own default parameter (no official ComfyUI
+    # workflow found for PixArt Sigma -- moderate confidence, same tier as cfg).
+    "pixart": {
+        "cfg": 4.5,
+        "scheduler": "normal",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "dpmpp_2m",
+        "steps": 20,
     },
 }
 
@@ -372,7 +447,6 @@ def detect_by_config(model) -> Optional[str]:
             # ALBABIT-FIX: Flux2 config class maps to "flux2", not "flux"
             "Flux": "flux", "FluxSchnell": "flux", "FluxInpaint": "flux", "Flux2": "flux2",
             "CogVideoX": "cogvideox", "CogVideo": "cogvideox",
-            "StepVideo": "stepvideo",
             "Mochi": "mochi",  # ALBABIT-FIX: Mochi-1 config class detection
         }
         for pattern, mtype in config_map.items():
@@ -400,8 +474,6 @@ def detect_by_architecture(model) -> Optional[str]:
             return "hunyuan_video"
         if "cogvideo" in model_cls or "cogvideo" in model_module: return "cogvideox"
         if "mochi" in model_cls or "mochi" in model_module: return "mochi"  # ALBABIT-FIX
-        if "stepvideo" in model_cls or "stepvideo" in model_module or "step_video" in model_module:
-            return "stepvideo"
         if "lumina" in full_path:
             if hasattr(diffusion_model, "hidden_size") and diffusion_model.hidden_size >= 3840:
                 return "z_image"
@@ -455,13 +527,12 @@ def parse_model_meta(model_meta: str) -> Tuple[str, str]:
 
 def refine_distillation_from_meta(detected_type: str, unet_file: str) -> Optional[Dict[str, Any]]:
     """
-    Some architectures ship multiple checkpoints under one model_type needing
-    very different steps/guidance (distilled vs its undistilled base) --
-    architecturally identical, only unet_file's exact filename can tell them
-    apart. Verified against official model cards: Klein Base/distilled and
-    Flux.1 Dev/Schnell (Dev already matches MODEL_DEFAULTS, so only Schnell
-    needs an override). Returns None when not applicable, leaving the
-    generic MODEL_DEFAULTS fallback in place.
+    Some checkpoints need settings that differ from their model_type's generic
+    default -- only unet_file's exact filename can tell them apart. Verified
+    against official model cards. Not every override includes every key (e.g.
+    Krea Dev is guidance-only, BFL gives no steps recommendation) -- callers
+    must not assume "steps"/"cfg" are always present. Returns None when not
+    applicable, leaving the generic MODEL_DEFAULTS fallback in place.
     """
     if not unet_file:
         return None
@@ -471,6 +542,15 @@ def refine_distillation_from_meta(detected_type: str, unet_file: str) -> Optiona
         return {"guidance": 1.0, "steps": 4} if is_distilled else {"guidance": 4.0, "steps": 50}
     if detected_type == "flux" and "schnell" in name:
         return {"guidance": 0.0, "steps": 4}
+    if detected_type == "flux" and "krea" in name:
+        return {"guidance": 4.5}
+    if detected_type == "sdxl" and "turbo" in name:
+        return {"cfg": 1.0, "steps": 1, "sampler": "euler_ancestral"}
+    # ALBABIT-FIX: cfg=1.6 (not the "pure" diffusers guidance_scale=0.0
+    # translation) to match the Sampler's own pre-existing "[F] SD3.5 Turbo
+    # (4 steps)" preset, already tuned in practice.
+    if detected_type == "sd3.5" and "turbo" in name:
+        return {"cfg": 1.6, "steps": 4}
     return None
 
 def gradual_sigma_blend(
@@ -717,7 +797,10 @@ def compute_base_sigmas(
     return bs
 
 WORKFLOW_PRESETS = [
-    "None",
+    # ALBABIT-FIX: "None" renamed "Auto" -- it hides advanced widgets like
+    # "None" used to, but shows the model_meta-driven live values (cfg/
+    # sampler/scheduler/steps/model_type) instead of hiding everything.
+    "Auto",
     "Custom",
     "[F] Flux txt2img",
     "[F] Flux img2img",
@@ -762,6 +845,21 @@ def flux_shift_sigmas(sigmas: torch.Tensor, shift: float) -> torch.Tensor:
 
     shifted = shift * sigmas / denominator
     return shifted
+
+def get_sd_turbo_sigmas(model, steps: int, denoise: float) -> torch.Tensor:
+    """
+    Mirrors ComfyUI's own SDTurboScheduler node (comfy_extras/nodes_custom_sampler.py)
+    exactly. SD-Turbo/SDXL-Turbo are only distilled at 10 fixed discrete timesteps
+    (99, 199, ..., 999), not across the continuous sigma space the standard
+    schedulers (karras/normal/simple/...) sample from -- using one of those on a
+    Turbo checkpoint asks the model to denoise at noise levels it was never
+    trained to be good at.
+    """
+    model_sampling = model.get_model_object("model_sampling")
+    start_step = 10 - int(10 * denoise)
+    timesteps = torch.flip(torch.arange(1, 11) * 100 - 1, (0,))[start_step:start_step + steps]
+    sigmas = model_sampling.sigma(timesteps)
+    return torch.cat([sigmas, sigmas.new_zeros([1])])
 
 def get_flux_sigmas(
     model, scheduler: str, steps: int, denoise: float, shift: float = 1.0,

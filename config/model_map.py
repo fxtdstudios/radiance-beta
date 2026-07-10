@@ -305,20 +305,6 @@ MODEL_VAE_CONFIG: dict[str, dict] = {
         "clip_slots":          ["t5xxl"],
         "notes":               "PixArt-Σ / PixArt-α; 4ch latent DiT with T5 conditioning.",
     },
-    "kolors": {
-        "latent_channels":     4,
-        "scale_factor":        0.18215,
-        "log_curve":           "ARRI LogC3",
-        "compression_ratio":   0.40,
-        "norm_center":         2.5,
-        "vae_spatial_factor":  8,
-        "vae_temporal_factor": 1,
-        "noise_schedule":      "ddpm",
-        "text_embed_seq_len":  77,
-        "text_embed_hidden":   2048,
-        "clip_slots":          ["llm_encoder"],
-        "notes":               "Kolors; 4ch latent with ChatGLM text encoder.",
-    },
     "aura_flow": {
         "latent_channels":     4,
         "scale_factor":        0.18215,
@@ -389,8 +375,6 @@ _MODEL_VAE_ALIASES: dict[str, str] = {
     # PixArt
     "pixart_sigma":"pixart",
     "pixart-alpha":"pixart",
-    # Kolors
-    "kolors":      "kolors",
     # AuraFlow
     "auraflow":    "aura_flow",
     "aura":        "aura_flow",
@@ -439,38 +423,48 @@ def get_model_vae_param(model_hint: str, param: str, default=None):
 
 
 # ALBABIT-FIX: each preset only carries model_type/weight_dtype/clip_dtype —
-# the only fields _apply_preset_override() (nodes_loader.py) actually reads.
-# File-matching hints, CLIP slot layout and offload_mode defaults live in
-# js/radiance_loader.js (PRESET_CONFIGS/PRESET_SLOTS), which is the single
-# source of truth for the loader UI's auto-fill. Previously this dict also
-# carried offload_mode/clip_slots/vram_gb/unet_hints/vae_hints/clip_hints —
-# all dead (never read anywhere), and drifted out of sync with the JS copies.
+# the only fields _apply_preset_override() (nodes_loader.py) actually reads;
+# file-matching hints and CLIP slot layout live in js/radiance_loader.js
+# (PRESET_CONFIGS/PRESET_SLOTS), the single source of truth for the loader
+# UI's auto-fill. "default" dtypes (no dtype_map entry) let ComfyUI's own
+# VRAM-aware auto-selection apply. Keys sorted alphabetically ("Custom"
+# pinned first) to match the preset dropdown order.
 CHECKPOINT_PRESETS: dict = {
     "Custom": {},
-    "Flux Dev": {
-        "model_type": "flux",
-        "weight_dtype": "fp8_e4m3fn",
+    "AuraFlow": {
+        "model_type": "aura_flow",
+        "weight_dtype": "fp16",
         "clip_dtype": "fp16",
     },
-    "Flux Schnell": {
-        "model_type": "flux",
-        "weight_dtype": "fp8_e4m3fn",
-        "clip_dtype": "fp16",
-    },
-    "Flux Dev (Low VRAM)": {
-        "model_type": "flux",
-        "weight_dtype": "fp8_e4m3fn",
-        "clip_dtype": "fp8_e4m3fn",
-    },
-    # ALBABIT-FIX: Chroma and Flux.2 / Flux.2 Klein presets — new model_types
-    # added to model/detect.py and MODEL_VAE_CONFIG above. weight_dtype and
-    # clip_dtype use "default" (no entry in dtype_map) so ComfyUI's own
-    # VRAM-aware auto-selection applies, regardless of whether the user has
-    # a full-precision or pre-quantized checkpoint/encoder file.
     "Chroma": {
         "model_type": "chroma",
         "weight_dtype": "default",
         "clip_dtype": "default",
+    },
+    "CogVideoX": {
+        "model_type": "cogvideox",
+        "weight_dtype": "default",
+        "clip_dtype": "default",
+    },
+    "Cosmos World": {
+        "model_type": "cosmos",
+        "weight_dtype": "default",
+        "clip_dtype": "default",
+    },
+    # ALBABIT-FIX: Dev and Schnell merged -- both already shared this exact
+    # model_type/weight_dtype/clip_dtype, and are architecturally identical
+    # (unlike Flux.2 Klein); the Sampler's model_meta mechanism already tells
+    # them apart by filename for guidance/steps, so no reason to make the
+    # user pick manually here either.
+    "Flux.1": {
+        "model_type": "flux",
+        "weight_dtype": "fp8_e4m3fn",
+        "clip_dtype": "fp16",
+    },
+    "Flux.1 (Low VRAM)": {
+        "model_type": "flux",
+        "weight_dtype": "fp8_e4m3fn",
+        "clip_dtype": "fp8_e4m3fn",
     },
     # ALBABIT-FIX: Dev and Klein merged into one preset -- model/detect.py's
     # Auto-Detect can now tell them apart on its own (single_blocks count),
@@ -480,59 +474,17 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "default",
         "clip_dtype": "default",
     },
-    "SD3.5 Large": {
-        "model_type": "sd3.5",
-        "weight_dtype": "fp16",
-        "clip_dtype": "fp16",
-    },
-    "SD3.5 Medium": {
-        "model_type": "sd3.5",
-        "weight_dtype": "fp16",
-        "clip_dtype": "fp16",
-    },
-    "SD3.5 Turbo": {
-        "model_type": "sd3.5",
-        "weight_dtype": "fp16",
-        "clip_dtype": "fp16",
-    },
-    "SDXL Base": {
-        "model_type": "sdxl",
-        "weight_dtype": "fp16",
-        "clip_dtype": "fp16",
-    },
-    "SDXL Turbo": {
-        "model_type": "sdxl",
-        "weight_dtype": "fp16",
-        "clip_dtype": "fp16",
-    },
-    "SD 1.5": {
-        "model_type": "sd1.5",
-        "weight_dtype": "fp16",
-        "clip_dtype": "fp16",
+    # ALBABIT-FIX: clip_dtype forced (unlike "Flux.2"'s "default") -- Dev's
+    # Mistral-3 24B encoder is heavy enough that VRAM-constrained users
+    # benefit from an explicit push, on top of the offload_mode escape hatch.
+    "Flux.2 (Low VRAM)": {
+        "model_type": "Auto-Detect",
+        "weight_dtype": "default",
+        "clip_dtype": "fp8_e4m3fn",
     },
     "HunyuanVideo": {
         "model_type": "hunyuan_video",
         "weight_dtype": "fp8_e4m3fn",
-        "clip_dtype": "default",
-    },
-    "Wan 2.1": {
-        "model_type": "wan",
-        "weight_dtype": "fp8_e4m3fn",
-        "clip_dtype": "default",
-    },
-    # ALBABIT-FIX: separate preset for Wan 2.2 checkpoints — same CLIP
-    # slot layout as Wan 2.1, distinct unet_hints (js/radiance_loader.js) to
-    # avoid matching the wrong version when both are installed.
-    "Wan 2.2": {
-        "model_type": "wan",
-        "weight_dtype": "fp8_e4m3fn",
-        "clip_dtype": "default",
-    },
-    # ALBABIT-FIX: TI2V-5B is a single-UNET WAN 2.2 variant (no high/low_noise pair)
-    # and requires wan2.2_vae.safetensors (48ch), not wan_2.1_vae (16ch).
-    "Wan 2.2 TI2V": {
-        "model_type": "wan",
-        "weight_dtype": "default",
         "clip_dtype": "default",
     },
     "LTX Video": {
@@ -558,17 +510,9 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "fp8_e4m3fn",
     },
-    # ALBABIT-FIX: Cosmos World, CogVideoX and Mochi presets — new video
-    # model_types added to model/detect.py. weight_dtype/clip_dtype use
-    # "default" (see Chroma/Flux.2 note above).
-    "Cosmos World": {
-        "model_type": "cosmos",
-        "weight_dtype": "default",
-        "clip_dtype": "default",
-    },
-    "CogVideoX": {
-        "model_type": "cogvideox",
-        "weight_dtype": "default",
+    "Lumina2": {
+        "model_type": "lumina2",
+        "weight_dtype": "fp16",
         "clip_dtype": "default",
     },
     "Mochi": {
@@ -581,19 +525,50 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp16",
         "clip_dtype": "fp16",
     },
-    "AuraFlow": {
-        "model_type": "aura_flow",
+    "SD 1.5": {
+        "model_type": "sd1.5",
         "weight_dtype": "fp16",
         "clip_dtype": "fp16",
     },
-    "Kolors": {
-        "model_type": "kolors",
+    # ALBABIT-FIX: Large and Turbo merged -- same model_type/weight_dtype/
+    # clip_dtype already, Turbo is Large's distilled variant (Sampler tells
+    # them apart by filename). Kept "Large" in the name since "SD3.5 Medium"
+    # is a genuinely different-sized sibling, not a merge candidate.
+    "SD3.5 Large": {
+        "model_type": "sd3.5",
         "weight_dtype": "fp16",
+        "clip_dtype": "fp16",
+    },
+    "SD3.5 Medium": {
+        "model_type": "sd3.5",
+        "weight_dtype": "fp16",
+        "clip_dtype": "fp16",
+    },
+    # ALBABIT-FIX: Base and Turbo merged -- same reasoning as Flux.1/SD3.5
+    # Large above.
+    "SDXL": {
+        "model_type": "sdxl",
+        "weight_dtype": "fp16",
+        "clip_dtype": "fp16",
+    },
+    "Wan 2.1": {
+        "model_type": "wan",
+        "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "default",
     },
-    "Lumina2": {
-        "model_type": "lumina2",
-        "weight_dtype": "fp16",
+    # ALBABIT-FIX: separate preset for Wan 2.2 checkpoints — same CLIP
+    # slot layout as Wan 2.1, distinct unet_hints (js/radiance_loader.js) to
+    # avoid matching the wrong version when both are installed.
+    "Wan 2.2": {
+        "model_type": "wan",
+        "weight_dtype": "fp8_e4m3fn",
+        "clip_dtype": "default",
+    },
+    # ALBABIT-FIX: TI2V-5B is a single-UNET WAN 2.2 variant (no high/low_noise pair)
+    # and requires wan2.2_vae.safetensors (48ch), not wan_2.1_vae (16ch).
+    "Wan 2.2 TI2V": {
+        "model_type": "wan",
+        "weight_dtype": "default",
         "clip_dtype": "default",
     },
     "Z-Image": {
@@ -603,29 +578,27 @@ CHECKPOINT_PRESETS: dict = {
     },
 }
 
-# ALBABIT-FIX: presets for video-generation architectures, used by
-# RadianceVideoLoader to filter the "preset" dropdown so only relevant
-# presets are shown (RadianceUnifiedLoader shows the remaining/image presets).
+# ALBABIT-FIX: presets for video-generation architectures — used to filter
+# the Loader's "preset" dropdown (RadianceVideoLoader shows these,
+# RadianceUnifiedLoader shows the rest).
 VIDEO_PRESET_NAMES: set = {
+    "CogVideoX",
+    "Cosmos World",
     "HunyuanVideo",
-    "Wan 2.1",
-    "Wan 2.2",
-    "Wan 2.2 TI2V",
     "LTX Video",
     "LTX Video 13B",
     "LTX Video 2.3",
     "LTX Video 2.3 (Low VRAM)",
-    # ALBABIT-FIX: Cosmos World, CogVideoX and Mochi are video models.
-    "Cosmos World",
-    "CogVideoX",
     "Mochi",
+    "Wan 2.1",
+    "Wan 2.2",
+    "Wan 2.2 TI2V",
 }
 
-# ALBABIT-FIX: model_type analog of VIDEO_PRESET_NAMES — used by
-# RadianceVideoLoader / RadianceUnifiedLoader to filter the "model_type"
-# dropdown (Custom mode + Auto-Detect) the same way "preset" is filtered.
-# ALBABIT-FIX: "ltx" renamed to "ltxv" to match sampler_utils.py; "stepvideo" added
+# ALBABIT-FIX: model_type analog of VIDEO_PRESET_NAMES — filters the
+# "model_type" dropdown (Custom/Auto-Detect) the same way "preset" is
+# filtered. "ltx" renamed to "ltxv" to match sampler_utils.py.
 VIDEO_MODEL_TYPES: set = {
     "hunyuan_video", "wan", "ltxv", "ltxav",
-    "cosmos", "cogvideox", "mochi", "stepvideo",
+    "cosmos", "cogvideox", "mochi",
 }

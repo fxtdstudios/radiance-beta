@@ -49,3 +49,22 @@ class TestRefineDistillationFromMeta:
 
     def test_flux1_dev_not_affected(self):
         assert refine_distillation_from_meta("flux", "flux1-dev-fp8.safetensors") is None
+
+    def test_flux1_krea_dev_guidance_only(self):
+        # BFL's model card gives no steps recommendation for Krea Dev --
+        # unlike Klein/Schnell, the result must have no "steps" key at all.
+        result = refine_distillation_from_meta("flux", "flux1-krea-dev.safetensors")
+        assert result == {"guidance": 4.5}
+        assert "steps" not in result
+
+    def test_sdxl_turbo(self):
+        result = refine_distillation_from_meta("sdxl", "sd_xl_turbo_1.0_fp16.safetensors")
+        assert result == {"cfg": 1.0, "steps": 1, "sampler": "euler_ancestral"}
+
+    def test_sd35_turbo(self):
+        result = refine_distillation_from_meta("sd3.5", "sd3.5_large_turbo.safetensors")
+        assert result == {"cfg": 1.6, "steps": 4}
+
+    def test_sd35_medium_not_affected(self):
+        # "turbo" substring absent -- SD3.5 Medium has no Turbo variant.
+        assert refine_distillation_from_meta("sd3.5", "sd3.5_medium.safetensors") is None
