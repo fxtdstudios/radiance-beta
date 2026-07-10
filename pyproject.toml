@@ -7,7 +7,8 @@ name = "radiance"
 description = "Professional VFX, HDR color science, review, and DCC handoff nodes for ComfyUI."
 version = "3.1.2"
 readme = "README.md"
-license = {file = "LICENSE"}
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 authors = [
     { name = "FXTD Studios" },
@@ -29,7 +30,6 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Operating System :: OS Independent",
     "Environment :: GPU :: NVIDIA CUDA",
     "Environment :: GPU :: Apple Metal",
@@ -72,6 +72,7 @@ test = [
     "Pillow>=9.0",
     "defusedxml>=0.7",
     "opencv-python-headless>=4.7",
+    "safetensors>=0.4.0",
     "tqdm>=4.66",
 ]
 # Full production stack (installed in ComfyUI custom_nodes environment)

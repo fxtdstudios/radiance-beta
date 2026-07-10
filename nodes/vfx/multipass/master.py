@@ -43,6 +43,27 @@ except ImportError:
     _HAS_FOLDER_PATHS = False
 
 
+def _workflow_metadata(prompt=None, extra_pnginfo=None) -> Dict[str, Any]:
+    """
+    Build the ComfyUI provenance metadata dict ({"prompt": json, "workflow":
+    json, ...}) exactly as core SaveImage embeds into PNG tEXt chunks and as
+    RadianceWrite embeds into EXR headers, so multipass/AOV EXRs carry the
+    workflow like a saved PNG does too. Values are JSON strings; write_exr_openexr
+    / write_exr_multipart store "workflow"/"prompt" as unprefixed EXR string
+    attributes (see hdr/io.py).
+    """
+    meta: Dict[str, Any] = {}
+    try:
+        if prompt is not None:
+            meta["prompt"] = json.dumps(prompt)
+        if extra_pnginfo:
+            for key, value in extra_pnginfo.items():
+                meta[str(key)] = json.dumps(value)
+    except (TypeError, ValueError) as exc:
+        logger.warning("[EXR Passes Writer] workflow metadata not serialisable: %s", exc)
+    return meta
+
+
 def _generate_cryptomatte_manifest(K: int) -> str:
     import json
     phi = 1.6180339887
@@ -436,7 +457,11 @@ class RadianceEXRPassesWriter:
                 "frame_index": ("INT", {"default": 1001, "min": 0, "max": 999999}),
                 "exr_layout": (["Single-part multilayer", "Multi-part"], {"default": "Single-part multilayer"}),
                 "custom_metadata": ("STRING", {"default": "", "multiline": True}),
-            }
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+            },
         }
 
     def write_passes(
@@ -450,6 +475,8 @@ class RadianceEXRPassesWriter:
         frame_index: int = 1001,
         exr_layout: str = "Single-part multilayer",
         custom_metadata: str = "",
+        prompt: Optional[Any] = None,
+        extra_pnginfo: Optional[Any] = None,
     ) -> Tuple[str]:
         import datetime
         import tempfile
@@ -478,6 +505,10 @@ class RadianceEXRPassesWriter:
             if "=" in line:
                 k, v = line.split("=", 1)
                 meta[k.strip()] = v.strip()
+
+        # ComfyUI workflow/prompt provenance — same convention as RadianceWrite,
+        # so multipass EXRs can be dragged back into ComfyUI to restore the graph.
+        meta.update(_workflow_metadata(prompt, extra_pnginfo))
 
         # Retrieve beauty shape to detect batch size
         beauty = passes.get("beauty")

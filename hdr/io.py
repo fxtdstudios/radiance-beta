@@ -170,6 +170,15 @@ def write_exr_openexr(filepath: str, channels: Dict[str, np.ndarray], compressio
             if k == "timeCode":
                 tc = parse_timecode(str(v))
                 if tc: header["timeCode"] = tc
+            elif k in ("workflow", "prompt"):
+                # ComfyUI provenance — stored under these exact (unprefixed)
+                # names so the EXR carries its workflow like a ComfyUI PNG and
+                # the js/radiance_exr_workflow.js drag-drop loader can find it.
+                # NOTE: plain str, NOT bytes — the modern OpenEXR.File API
+                # (unlike the legacy Header()/OutputFile() API this module
+                # used to use) rejects bytes attribute values outright
+                # ("unrecognized type of attribute"); it wants plain str.
+                header[k] = v
             elif k in ["reelName", "capDate", "software", "comments", "owner"]:
                 header[k] = v
             elif isinstance(v, (str, int, float)):
@@ -193,8 +202,24 @@ def write_exr_robust(filepath: str, image: np.ndarray, bit_depth: str = "32-bit 
     # on a corrupted delivery, the opposite of the "fail loudly" philosophy
     # this module states elsewhere. (3) OpenEXR>=3.2.0 is a declared hard
     # dependency, so a real EXR writer is expected to always be available.
-    channels = {"R": image[..., 0], "G": image[..., 1], "B": image[..., 2]}
-    if image.shape[-1] == 4: channels["A"] = image[..., 3]
+    #
+    # BUG FIX (this session): the channel unpacking below also unconditionally
+    # assumed >=3 channels (image[..., 1], image[..., 2]) — any single-channel
+    # pass (depth/Z, a matte, cryptomatte ID, etc.) raised IndexError here.
+    # Single-channel passes are exactly what RadianceEXRPassesWriter routinely
+    # sends through this path (e.g. its "depth" pass). Handle 1/2/3/4 channels
+    # like nodes_io.py's _exr_channels() does, instead of assuming RGB.
+    if image.ndim == 2:
+        image = image[..., None]
+    n_ch = image.shape[-1]
+    if n_ch == 1:
+        channels = {"R": image[..., 0], "G": image[..., 0], "B": image[..., 0]}
+    elif n_ch == 2:
+        channels = {"R": image[..., 0], "G": image[..., 1]}
+    else:
+        channels = {"R": image[..., 0], "G": image[..., 1], "B": image[..., 2]}
+        if n_ch >= 4:
+            channels["A"] = image[..., 3]
     ptype = "HALF" if "16" in str(bit_depth) else "FLOAT"
     if check_openexr_available():
         try:
@@ -408,7 +433,11 @@ def write_exr_multipart(
 
                 if metadata:
                     for k, v in metadata.items():
-                        if k in ["timeCode", "reelName", "capDate", "software", "comments", "owner"]:
+                        if k in ("workflow", "prompt"):
+                            # ComfyUI provenance, unprefixed, plain str — see
+                            # write_exr_openexr()'s comment on why NOT bytes.
+                            header[k] = v
+                        elif k in ["timeCode", "reelName", "capDate", "software", "comments", "owner"]:
                             header[k] = v
                         elif isinstance(v, (str, int, float)):
                             key = k if (k.startswith("cryptomatte") or k.startswith("rad_")) else f"rad_{k}"
