@@ -305,20 +305,6 @@ MODEL_VAE_CONFIG: dict[str, dict] = {
         "clip_slots":          ["t5xxl"],
         "notes":               "PixArt-Σ / PixArt-α; 4ch latent DiT with T5 conditioning.",
     },
-    "kolors": {
-        "latent_channels":     4,
-        "scale_factor":        0.18215,
-        "log_curve":           "ARRI LogC3",
-        "compression_ratio":   0.40,
-        "norm_center":         2.5,
-        "vae_spatial_factor":  8,
-        "vae_temporal_factor": 1,
-        "noise_schedule":      "ddpm",
-        "text_embed_seq_len":  77,
-        "text_embed_hidden":   2048,
-        "clip_slots":          ["llm_encoder"],
-        "notes":               "Kolors; 4ch latent with ChatGLM text encoder.",
-    },
     "aura_flow": {
         "latent_channels":     4,
         "scale_factor":        0.18215,
@@ -389,8 +375,6 @@ _MODEL_VAE_ALIASES: dict[str, str] = {
     # PixArt
     "pixart_sigma":"pixart",
     "pixart-alpha":"pixart",
-    # Kolors
-    "kolors":      "kolors",
     # AuraFlow
     "auraflow":    "aura_flow",
     "aura":        "aura_flow",
@@ -501,11 +485,6 @@ CHECKPOINT_PRESETS: dict = {
     "HunyuanVideo": {
         "model_type": "hunyuan_video",
         "weight_dtype": "fp8_e4m3fn",
-        "clip_dtype": "default",
-    },
-    "Kolors": {
-        "model_type": "kolors",
-        "weight_dtype": "fp16",
         "clip_dtype": "default",
     },
     "LTX Video": {

@@ -73,9 +73,9 @@ LATENT_FORMAT_MAP = {
     # "flux" latent format with no other distinguishing entries anywhere in
     # resolution.py (SPATIAL_SCALE/TEMPORAL_SCALE/VIDEO_MODEL_TYPES all default).
     "Flux / SD3 / Lumina2 / Z-Image (16ch)": "flux",
-    # ALBABIT-FIX: merged with "PixArt / Aura Flow / Kolors (4ch)" — both are 4ch,
-    # 8px, "sdxl" latent format with no other distinguishing entries.
-    "SDXL / SD 1.5 / PixArt / Aura Flow / Kolors (4ch)": "sdxl",
+    # ALBABIT-FIX: SDXL/SD 1.5/PixArt/AuraFlow are all 4ch, 8px, "sdxl" latent
+    # format with no other distinguishing entries -- merged into one option.
+    "SDXL / SD 1.5 / PixArt / Aura Flow (4ch)": "sdxl",
     # ALBABIT-FIX: Chroma uses the Flux latent format (16ch, 8px spatial
     # compression) — matches sampler_utils.py's "chroma" -> "flux" mapping.
     "Chroma (16ch)": "chroma",
@@ -106,9 +106,7 @@ MODEL_TYPES = [
     # ALBABIT-FIX: merged "Flux / SD3 (16ch)" + "Lumina2 / Z-Image (16ch)" — both
     # 16ch/8px/"flux" with no other distinguishing entries in this file.
     "Flux / SD3 / Lumina2 / Z-Image (16ch)",
-    # ALBABIT-FIX: merged "SDXL / SD 1.5 (4ch)" + "PixArt / Aura Flow / Kolors (4ch)"
-    # — both 4ch/8px/"sdxl" with no other distinguishing entries in this file.
-    "SDXL / SD 1.5 / PixArt / Aura Flow / Kolors (4ch)",
+    "SDXL / SD 1.5 / PixArt / Aura Flow (4ch)",
     "Chroma (16ch)",
     "Cosmos World (16ch)",
     "CogVideoX (16ch)",
@@ -131,7 +129,7 @@ ORIENTATIONS = ["As Preset", "Landscape", "Portrait", "Square"]
 LATENT_CHANNELS = {
     "Manual": 16,
     "Flux / SD3 / Lumina2 / Z-Image (16ch)": 16,
-    "SDXL / SD 1.5 / PixArt / Aura Flow / Kolors (4ch)": 4,
+    "SDXL / SD 1.5 / PixArt / Aura Flow (4ch)": 4,
     "Chroma (16ch)": 16,
     "Cosmos World (16ch)": 16,
     "CogVideoX (16ch)": 16,

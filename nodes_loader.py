@@ -146,7 +146,7 @@ MODEL_TYPES = [
     # mode despite being used by the "LTX Video 2.3" presets.
     "ltxav",
     "lumina2", "z_image",
-    "pixart", "aura_flow", "kolors",
+    "pixart", "aura_flow",
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi — match Resolution/Sampler model types
     "cosmos", "cogvideox", "mochi",
     # ALBABIT-FIX: Chroma (distilled Flux) and Flux.2 / Flux.2 Klein
@@ -232,7 +232,8 @@ class RadianceUnifiedLoader:
                 "t5xxl":       clip_slot(
                     "T5-XXL (text encoder). Used by: Flux, SD3, SD3.5, Wan, PixArt, LTX (pre-2.3)."),
                 "llm_encoder": clip_slot(
-                    "LLM encoder. Used by: Kolors/HunyuanVideo (ChatGLM3), LTX 2.3 (Gemma 3)."),
+                    "LLM encoder. Used by: HunyuanVideo (Llava-Llama3), LTX 2.3 (Gemma 3), "
+                    "Lumina2 (Gemma-2), Z-Image (Qwen3), Flux.2 (Mistral-3/Qwen3)."),
                 "text_projection": text_projection_slot(
                     "Text projection matrix. Used by: LTX 2.3 (with Gemma 3 llm_encoder). "
                     "'Baked (from UNET)' loads it from the main LTX 2.3 checkpoint, like the native LTXV Audio Text Encoder Loader."),

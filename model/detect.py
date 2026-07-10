@@ -69,7 +69,6 @@ _ARCH_HEURISTICS = [
      and _tensor_dim0(f, ks, "cap_embedder.1.weight") == 3840, "z_image"),
     (lambda ks, f: any("cap_embedder.1.weight" in k for k in ks)
      and any("noise_refiner.0.attention.k_norm.weight" in k for k in ks), "lumina2"),
-    (lambda ks, f: any("chatglm" in k.lower() for k in ks), "kolors"),
     (lambda ks, f: any("auraflow" in k.lower() for k in ks), "aura_flow"),
     # ALBABIT-FIX: Mochi (Genmo preview) UNET.
     (lambda ks, f: any("t5_yproj.weight" in k for k in ks), "mochi"),
@@ -97,7 +96,7 @@ LATENT_CHANNELS = {
     # ALBABIT-FIX: LTX-Video VAE (incl. LTX 2.3) uses 128 latent channels, not 16
     "flux": 16, "sd3": 16, "sd3.5": 16, "ltxv": 128, "ltxav": 128,  # ALBABIT-FIX: "ltx" → "ltxv"
     "hunyuan_video": 16, "wan": 16, "lumina2": 16, "z_image": 16,
-    "sdxl": 4, "sd1.5": 4, "pixart": 4, "aura_flow": 4, "kolors": 4,
+    "sdxl": 4, "sd1.5": 4, "pixart": 4, "aura_flow": 4,
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi latent channels
     "cosmos": 16, "cogvideox": 16, "mochi": 12,
     # ALBABIT-FIX: Chroma (distilled Flux, 16ch) and Flux.2 / Flux.2 Klein (128ch)
@@ -110,7 +109,7 @@ _FORMAT_MAP = {
     "hunyuan_video": "hunyuan_16ch", "wan": "wan_16ch",
     "lumina2": "lumina_16ch", "z_image": "z_image_16ch",
     "sdxl": "sd_4ch", "sd1.5": "sd_4ch", "pixart": "sd_4ch",
-    "aura_flow": "sd_4ch", "kolors": "sd_4ch",
+    "aura_flow": "sd_4ch",
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi latent formats
     "cosmos": "cosmos_16ch", "cogvideox": "cogvideox_16ch", "mochi": "mochi_12ch",
     # ALBABIT-FIX: Chroma and Flux.2 / Flux.2 Klein (share the 128ch VAE)
@@ -134,7 +133,6 @@ CLIP_SLOT_ORDER = {
     "z_image": ["llm_encoder"],
     "pixart": ["t5xxl"],
     "aura_flow": ["clip_l"],
-    "kolors": ["llm_encoder"],
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi all use a single T5XXL text encoder
     "cosmos": ["t5xxl"], "cogvideox": ["t5xxl"], "mochi": ["t5xxl"],
     # ALBABIT-FIX: Chroma — distilled Flux, single T5XXL (no clip_l). Flux.2 /
@@ -156,7 +154,7 @@ _CLIP_TYPE_VARIANTS = {
 _BASE_CLIP_VRAM = {
     "flux": 4.5, "sd3": 3.0, "sd3.5": 3.5, "sdxl": 1.5, "sd1.5": 0.8,
     "hunyuan_video": 4.5, "wan": 3.0, "ltxv": 2.5, "ltxav": 8.0,  # ALBABIT-FIX: "ltx" → "ltxv"
-    "pixart": 2.0, "aura_flow": 2.0, "kolors": 3.0, "lumina2": 3.0, "z_image": 3.0,
+    "pixart": 2.0, "aura_flow": 2.0, "lumina2": 3.0, "z_image": 3.0,
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi — single T5XXL encoder, similar to Wan
     "cosmos": 3.0, "cogvideox": 3.0, "mochi": 3.0,
     # ALBABIT-FIX: Chroma — single T5XXL (no clip_l). Flux.2 Dev — Mistral-3 24B
@@ -178,7 +176,7 @@ _BASE_VRAM = {
     "flux": 12.0, "sd3": 10.0, "sd3.5": 12.0,
     "sdxl": 6.5, "sd1.5": 3.5,
     "hunyuan_video": 20.0, "wan": 14.0, "ltxv": 11.0, "ltxav": 15.0,  # ALBABIT-FIX: "ltx" → "ltxv"
-    "pixart": 6.0, "aura_flow": 8.0, "kolors": 8.0,
+    "pixart": 6.0, "aura_flow": 8.0,
     "lumina2": 12.0, "z_image": 14.0,
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi base VRAM estimates
     "cosmos": 14.0, "cogvideox": 12.0, "mochi": 16.0,
@@ -251,7 +249,7 @@ def get_clip_type_enum(model_type: str):
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi resolve via CLIPType.{COSMOS,COGVIDEOX,MOCHI}.
     # Chroma -> CLIPType.CHROMA, Flux.2 -> CLIPType.FLUX2 (Flux.2 Klein via
     # _CLIP_TYPE_VARIANTS override above, since "FLUX2-KLEIN" isn't a real enum).
-    for name in ("hunyuan_video", "wan", "ltxv", "ltxav", "pixart", "aura_flow", "kolors", "lumina2", "z_image",  # ALBABIT-FIX: "ltx" → "ltxv"
+    for name in ("hunyuan_video", "wan", "ltxv", "ltxav", "pixart", "aura_flow", "lumina2", "z_image",  # ALBABIT-FIX: "ltx" → "ltxv"
                   "cosmos", "cogvideox", "mochi", "chroma", "flux2", "flux2-klein"):
         enum_name = name.upper().replace(".", "_")
         auto_variants = [enum_name, name.upper(), name.title().replace("_", "")]

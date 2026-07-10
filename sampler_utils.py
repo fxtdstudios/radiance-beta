@@ -252,6 +252,32 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "denoise_range": (0.0, 1.0),
         "guidance_type": "cfg",
     },
+    # ALBABIT-FIX: previously fell back to "sd15" (cfg=7.0/dpmpp_2m/normal) --
+    # verified against AuraFlow's own official ComfyUI workflow, which
+    # contradicts all three. No shift node present (unlike Lumina2, which
+    # reuses the same ModelSamplingAuraFlow node but at shift=6.0 -- confirmed
+    # NOT applicable to AuraFlow's own workflow, checked directly).
+    "aura_flow": {
+        "cfg": 3.48,
+        "scheduler": "sgm_uniform",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "euler",
+        "steps": 20,
+        "denoise_range": (0.3, 1.0),
+    },
+    # ALBABIT-FIX: previously fell back to "sd15" -- cfg/sampler verified
+    # against multiple independent community sources (weaker than AuraFlow's
+    # direct official workflow, moderate confidence). scheduler/shift kept at
+    # sd15-equivalent values, no better source found.
+    "pixart": {
+        "cfg": 4.5,
+        "scheduler": "normal",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "dpmpp_2m",
+        "denoise_range": (0.3, 1.0),
+    },
 }
 
 PREVIEW_METHODS = ["None", "TAESD", "Latent2RGB"]
