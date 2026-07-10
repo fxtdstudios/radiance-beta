@@ -170,7 +170,7 @@ class RadianceSamplerPro:
                 "positive": ("CONDITIONING",),
                 "negative": ("CONDITIONING",),
                 "latent_image": ("LATENT",),
-                "preset": (WORKFLOW_PRESETS, {"default": "None"}),
+                "preset": (WORKFLOW_PRESETS, {"default": "Auto"}),
                 "steps": ("INT", {"default": 20, "min": 1, "max": 200, "step": 1,
                     "tooltip": "Total denoising steps. More steps = higher quality but slower. 20–30 is typical for most samplers."
                 }),
@@ -443,7 +443,7 @@ class RadianceSamplerPro:
                     {
                         "default": "", "forceInput": True,
                         "tooltip": "Optional: connect RadianceUnifiedLoader's model_meta output. "
-                                   "Only used when preset='None'/'Custom' and model_type='auto'. "
+                                   "Only used when preset='Auto'/'Custom' and model_type='auto'. "
                                    "Refines cfg/guidance/steps beyond what the loaded model's "
                                    "architecture alone can tell -- e.g. distinguishing Flux.2 Klein "
                                    "Base from Klein distilled, which are architecturally identical.",
@@ -473,7 +473,7 @@ class RadianceSamplerPro:
     )
 
     def _apply_presets(self, preset, **kwargs):
-        if preset in ("None", "Custom"):
+        if preset in ("Auto", "Custom"):
             return kwargs
 
         if preset not in WORKFLOW_PRESETS:
@@ -519,7 +519,7 @@ class RadianceSamplerPro:
         # redundant on top of the per-field "still at generic default" checks
         # below, which already protect any field the user set by hand,
         # regardless of how model_type itself was determined.
-        if preset in ("None", "Custom"):
+        if preset in ("Auto", "Custom"):
             defaults = get_model_defaults(detected_type)
             distilled = refine_distillation_from_meta(detected_type, meta_unet_file)
 
