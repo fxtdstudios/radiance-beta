@@ -502,7 +502,9 @@ class RadianceSamplerPro:
                 if model_default_guidance > 0 or defaults.get("guidance_type") != "embedding":
                     kwargs['flux_guidance'] = model_default_guidance
 
-            if kwargs.get('steps') == 20 and distilled:
+            # ALBABIT-FIX: "steps" isn't always present -- Krea Dev's override
+            # is guidance-only (no official steps recommendation exists).
+            if kwargs.get('steps') == 20 and "steps" in (distilled or {}):
                 kwargs['steps'] = distilled["steps"]
                 logger.info(f"Auto-applied steps={kwargs['steps']} for {detected_type} (from model_meta)")
 

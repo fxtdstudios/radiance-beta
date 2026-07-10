@@ -49,3 +49,10 @@ class TestRefineDistillationFromMeta:
 
     def test_flux1_dev_not_affected(self):
         assert refine_distillation_from_meta("flux", "flux1-dev-fp8.safetensors") is None
+
+    def test_flux1_krea_dev_guidance_only(self):
+        # BFL's model card gives no steps recommendation for Krea Dev --
+        # unlike Klein/Schnell, the result must have no "steps" key at all.
+        result = refine_distillation_from_meta("flux", "flux1-krea-dev.safetensors")
+        assert result == {"guidance": 4.5}
+        assert "steps" not in result

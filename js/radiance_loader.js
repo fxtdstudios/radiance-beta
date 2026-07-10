@@ -8,58 +8,91 @@ import { app } from "../../scripts/app.js";
 // Node definition identifiers
 const LOADER_NODES = ["RadianceUnifiedLoader", "RadianceImageLoader", "RadianceVideoLoader"];
 
-// Dynamic visibility rules for CLIP slots per preset
+// Dynamic visibility rules for CLIP slots per preset.
+// ALBABIT-FIX: keys sorted alphabetically ("Custom" pinned first) to match
+// the preset dropdown order (config/model_map.py's CHECKPOINT_PRESETS).
 const PRESET_SLOTS = {
     "Custom": ["clip_l", "clip_g", "t5xxl", "llm_encoder", "text_projection"],
-    "Flux Dev": ["clip_l", "t5xxl"],
-    "Flux Schnell": ["clip_l", "t5xxl"],
-    "Flux Dev (Low VRAM)": ["clip_l", "t5xxl"],
+    "AuraFlow": ["clip_l"],
+    "Chroma": ["t5xxl"],
+    "CogVideoX": ["t5xxl"],
+    "Cosmos World": ["t5xxl"],
+    "Flux.1": ["clip_l", "t5xxl"],
+    "Flux.1 (Low VRAM)": ["clip_l", "t5xxl"],
+    "Flux.2": ["llm_encoder"],
+    "Flux.2 (Low VRAM)": ["llm_encoder"],
+    "HunyuanVideo": ["clip_l", "llm_encoder"],
+    "Kolors": ["llm_encoder"],
+    "LTX Video": ["llm_encoder", "text_projection"],
+    "LTX Video 13B": ["llm_encoder", "text_projection"],
+    "LTX Video 2.3": ["llm_encoder", "text_projection"],
+    "LTX Video 2.3 (Low VRAM)": ["llm_encoder", "text_projection"],
+    "Lumina2": ["llm_encoder"],
+    "Mochi": ["t5xxl"],
+    "PixArt Sigma": ["t5xxl"],
+    "SD 1.5": ["clip_l"],
     "SD3.5 Large": ["clip_l", "clip_g", "t5xxl"],
     "SD3.5 Medium": ["clip_l", "clip_g", "t5xxl"],
     "SD3.5 Turbo": ["clip_l", "clip_g", "t5xxl"],
     "SDXL Base": ["clip_l", "clip_g"],
     "SDXL Turbo": ["clip_l", "clip_g"],
-    "SD 1.5": ["clip_l"],
-    "HunyuanVideo": ["clip_l", "llm_encoder"],
     "Wan 2.1": ["t5xxl"],
     "Wan 2.2": ["t5xxl"],
     "Wan 2.2 TI2V": ["t5xxl"],
-    "LTX Video": ["llm_encoder", "text_projection"],
-    "LTX Video 13B": ["llm_encoder", "text_projection"],
-    "LTX Video 2.3": ["llm_encoder", "text_projection"],
-    "LTX Video 2.3 (Low VRAM)": ["llm_encoder", "text_projection"],
-    "PixArt Sigma": ["t5xxl"],
-    "AuraFlow": ["clip_l"],
-    "Kolors": ["llm_encoder"],
-    "Lumina2": ["llm_encoder"],
     "Z-Image": ["llm_encoder"],
-    // ALBABIT-FIX: Chroma, Flux.2 (Dev+Klein merged), Cosmos World, CogVideoX, Mochi
-    "Chroma": ["t5xxl"],
-    "Flux.2": ["llm_encoder"],
-    "Cosmos World": ["t5xxl"],
-    "CogVideoX": ["t5xxl"],
-    "Mochi": ["t5xxl"],
 };
 
-// Full hints configs for automatic local file selection matching
+// Full hints configs for automatic local file selection matching.
+// ALBABIT-FIX: keys sorted alphabetically to match PRESET_SLOTS/the preset
+// dropdown order (config/model_map.py's CHECKPOINT_PRESETS).
 const PRESET_CONFIGS = {
-    "Flux Dev": {
-        "unet_hints":    ["flux1-dev-fp8", "flux1-dev", "flux1-krea-dev", "krea-dev", "flux-dev"],
+    "AuraFlow": {
+        "unet_hints":    ["auraflow", "aura_flow", "aura-flow"],
+        "vae_hints":     ["aura_vae", "sd_vae"],
+        "clip_hints":    {
+            "clip_l": ["clip_l.safetensors", "clip_l"],
+        },
+    },
+    "Chroma": {
+        "unet_hints":    ["chroma-unlocked", "chroma_unlocked", "chroma"],
+        "vae_hints":     ["ae.safetensors", "flux_ae", "ae_"],
+        "clip_hints":    {
+            "t5xxl": ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
+        },
+    },
+    "CogVideoX": {
+        "unet_hints":    ["cogvideox-5b", "cogvideox_5b", "CogVideoX", "cogvideox"],
+        "vae_hints":     ["cogvideox_vae", "cogvideox-vae", "cogvideo_vae"],
+        "clip_hints":    {
+            "t5xxl": ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
+        },
+    },
+    "Cosmos World": {
+        "unet_hints":    ["cosmos-1_0-diffusion", "Cosmos-1_0", "cosmos_world", "cosmos"],
+        "vae_hints":     ["cosmos_vae", "cosmos-tokenizer", "cosmos"],
+        "clip_hints":    {
+            // ALBABIT-FIX: Cosmos uses the "old" T5-XXL (T5 1.0) encoder,
+            // distinct from the t5xxl_fp8/fp16 (T5 1.1) used by Flux/SD3/etc.
+            // Prioritize oldt5_xxl_*, fall back to t5xxl_* if absent.
+            "t5xxl": ["oldt5_xxl_fp8_e4m3fn", "oldt5_xxl_fp16", "oldt5_xxl", "t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
+        },
+    },
+    // ALBABIT-FIX: Dev and Schnell merged -- architecturally identical (no
+    // single_blocks-style split like Flux.2 Klein), and the Sampler's
+    // model_meta mechanism already tells them apart by filename for
+    // guidance/steps. unet_hints combines both lists, Dev first.
+    "Flux.1": {
+        "unet_hints":    [
+            "flux1-dev-fp8", "flux1-dev", "flux1-krea-dev", "krea-dev", "flux-dev",
+            "flux1-schnell-fp8", "flux1-schnell", "flux-schnell",
+        ],
         "vae_hints":     ["ae.safetensors", "flux_ae", "ae_"],
         "clip_hints":    {
             "clip_l": ["clip_l.safetensors", "clip_l"],
             "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
     },
-    "Flux Schnell": {
-        "unet_hints":    ["flux1-schnell-fp8", "flux1-schnell", "flux-schnell"],
-        "vae_hints":     ["ae.safetensors", "flux_ae", "ae_"],
-        "clip_hints":    {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-            "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
-        },
-    },
-    "Flux Dev (Low VRAM)": {
+    "Flux.1 (Low VRAM)": {
         "unet_hints":    ["flux1-dev-fp8", "flux1-dev", "flux1-krea-dev", "krea-dev", "flux-dev"],
         "vae_hints":     ["ae.safetensors", "flux_ae", "ae_"],
         "clip_hints":    {
@@ -72,55 +105,60 @@ const PRESET_CONFIGS = {
         "extra_widgets": ["offload_mode"],
         "offload_mode": "cpu_offload",
     },
-    "SD3.5 Large": {
-        "unet_hints":    ["sd3.5_large_turbo", "sd3.5_large", "sd3-5_large"],
-        "vae_hints":     ["sd3_vae", "sd3.5_vae", "sd3"],
+    // ALBABIT-FIX: Dev and Klein merged into one preset now that Auto-Detect
+    // can tell them apart on its own (model/detect.py, single_blocks count).
+    // unet_hints cover both families -- Dev first (flagship, quality-first),
+    // then Klein's sizes/distillation states (4B/9B, Base/distilled).
+    "Flux.2": {
+        "unet_hints": [
+            "flux2-dev.safetensors", "flux2_dev_fp8mixed.safetensors",
+            "flux-2-klein-9b.safetensors",
+            "flux-2-klein-base-4b.safetensors",
+            "flux-2-klein-base-9b-fp8.safetensors",
+            "klein-9b-kv", "klein-base", "klein-9b", "klein-4b",
+            "flux2-dev", "flux2_dev", "flux.2-dev",
+            "flux2-klein", "flux2_klein", "flux.2-klein", "klein",
+        ],
+        // full_encoder_small_decoder is a lighter/faster decoder (same
+        // encoder) -- only used if the full-quality flux2-vae isn't present.
+        "vae_hints":     ["flux2-vae", "flux2_vae", "flux2_ae", "full_encoder_small_decoder"],
         "clip_hints":    {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-            "clip_g": ["clip_g.safetensors", "clip_g"],
-            "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
+            // Dev's encoder (Mistral) -- also the fallback when unet_name
+            // isn't a recognized Klein size (see clip_size_hints, which
+            // takes priority whenever a Klein 4B/9B file is detected).
+            "llm_encoder": ["mistral_3_small_flux2_bf16", "mistral_3_small_flux2_fp8", "mistral_3_small_flux2", "mistral_3", "mistral"],
+        },
+        // ALBABIT-FIX: Klein's encoder (Qwen) must match its size (4B->qwen_3_4b,
+        // 9B->qwen_3_8b*) -- resolved dynamically from the size token detected
+        // in unet_name. Quality-first: bf16 before fp8/fp4mixed.
+        "clip_size_hints": {
+            "9b": ["qwen_3_8b.safetensors", "qwen_3_8b", "qwen_3_8b_fp8mixed", "qwen_3_8b_fp4mixed", "qwen3_8b"],
+            "4b": ["qwen_3_4b.safetensors", "qwen_3_4b", "qwen3_4b"],
         },
     },
-    "SD3.5 Medium": {
-        "unet_hints":    ["sd3.5_medium", "sd3-5_medium"],
-        "vae_hints":     ["sd3_vae", "sd3.5_vae", "sd3"],
+    "Flux.2 (Low VRAM)": {
+        "unet_hints": [
+            "flux2-dev.safetensors", "flux2_dev_fp8mixed.safetensors",
+            "flux-2-klein-9b.safetensors",
+            "flux-2-klein-base-4b.safetensors",
+            "flux-2-klein-base-9b-fp8.safetensors",
+            "klein-9b-kv", "klein-base", "klein-9b", "klein-4b",
+            "flux2-dev", "flux2_dev", "flux.2-dev",
+            "flux2-klein", "flux2_klein", "flux.2-klein", "klein",
+        ],
+        "vae_hints":     ["flux2-vae", "flux2_vae", "flux2_ae", "full_encoder_small_decoder"],
         "clip_hints":    {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-            "clip_g": ["clip_g.safetensors", "clip_g"],
-            "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
+            "llm_encoder": ["mistral_3_small_flux2_bf16", "mistral_3_small_flux2_fp8", "mistral_3_small_flux2", "mistral_3", "mistral"],
         },
-    },
-    "SD3.5 Turbo": {
-        "unet_hints":    ["sd3.5_large_turbo", "sd3.5_turbo", "sd3-5_turbo"],
-        "vae_hints":     ["sd3_vae", "sd3.5_vae", "sd3"],
-        "clip_hints":    {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-            "clip_g": ["clip_g.safetensors", "clip_g"],
-            "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
+        "clip_size_hints": {
+            "9b": ["qwen_3_8b.safetensors", "qwen_3_8b", "qwen_3_8b_fp8mixed", "qwen_3_8b_fp4mixed", "qwen3_8b"],
+            "4b": ["qwen_3_4b.safetensors", "qwen_3_4b", "qwen3_4b"],
         },
-    },
-    "SDXL Base": {
-        "unet_hints":    ["sd_xl_base", "sdxl_base", "sdxl-base"],
-        "vae_hints":     ["sdxl_vae", "vae-ft-mse", "xl_vae"],
-        "clip_hints":    {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-            "clip_g": ["clip_g.safetensors", "clip_g"],
-        },
-    },
-    "SDXL Turbo": {
-        "unet_hints":    ["sdxl_turbo", "sdxl-turbo", "turbo"],
-        "vae_hints":     ["sdxl_vae", "vae-ft-mse", "xl_vae"],
-        "clip_hints":    {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-            "clip_g": ["clip_g.safetensors", "clip_g"],
-        },
-    },
-    "SD 1.5": {
-        "unet_hints":    ["v1-5", "v1_5", "sd15", "sd-1-5", "sd_1.5"],
-        "vae_hints":     ["vae-ft-mse", "sd15_vae", "kl-f8"],
-        "clip_hints":    {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-        },
+        // ALBABIT-FIX: "Low VRAM" presets force offload_mode — expose the
+        // widget so the user can still override it (e.g. on a higher-VRAM
+        // GPU where cpu_offload is unnecessarily slow).
+        "extra_widgets": ["offload_mode"],
+        "offload_mode": "cpu_offload",
     },
     "HunyuanVideo": {
         "unet_hints":    ["hunyuan_video", "hunyuanvideo", "hyvideo"],
@@ -130,39 +168,11 @@ const PRESET_CONFIGS = {
             "clip_l":      ["clip_l.safetensors", "clip_l"],
         },
     },
-    "Wan 2.1": {
-        "unet_hints":    ["wan2.1", "wan_2.1", "wan-2.1", "Wan2.1"],
-        "vae_hints":     ["wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
+    "Kolors": {
+        "unet_hints":    ["kolors", "Kolors"],
+        "vae_hints":     ["kolors_vae", "sdxl_vae"],
         "clip_hints":    {
-            "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
-        },
-    },
-    "Wan 2.2": {
-        "unet_hints":    [
-            "wan2.2_t2v_high_noise_14B_fp8_scaled",
-            "wan2.2_i2v_high_noise_14B_fp8_scaled",
-            "wan2.2_t2v_high_noise",
-            "wan2.2_i2v_high_noise",
-            "wan2.2_high_noise",
-            "wan2.2",
-            "wan_2.2",
-            "wan-2.2",
-            "Wan2.2",
-        ],
-        "vae_hints":     ["wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
-        "clip_hints":    {
-            "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
-        },
-        // ALBABIT-FIX: either the high_noise or low_noise UNET works --
-        // _find_wan_moe_companion() (nodes_loader.py) auto-loads the other
-        // one server-side regardless of which one is picked here.
-        "companion_linked": true,
-    },
-    "Wan 2.2 TI2V": {
-        "unet_hints":    ["wan2.2_ti2v_5B_fp16", "wan2.2_ti2v_5B", "wan2.2_ti2v"],
-        "vae_hints":     ["wan2.2_vae", "wan_2.2_vae"],
-        "clip_hints":    {
-            "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
+            "llm_encoder": ["chatglm3", "chatglm", "kolors_clip"],
         },
     },
     "LTX Video": {
@@ -217,96 +227,11 @@ const PRESET_CONFIGS = {
         "offload_mode": "cpu_offload",
         "upscale_hints": ["ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "ltx-2.3-spatial-upscaler-x2-1.0.safetensors", "ltx-2.3", "ltx_2.3", "latent_upsampler", "upsampler"],
     },
-    "PixArt Sigma": {
-        "unet_hints":    ["pixart_sigma", "pixart-sigma", "PixArt-Sigma"],
-        "vae_hints":     ["pixart_sigma_sdxlvae", "sdxl_vae", "sd_vae", "pixart_vae", "vae-ft-mse"],
-        "clip_hints":    {
-            "t5xxl": ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
-        },
-    },
-    "AuraFlow": {
-        "unet_hints":    ["auraflow", "aura_flow", "aura-flow"],
-        "vae_hints":     ["aura_vae", "sd_vae"],
-        "clip_hints":    {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-        },
-    },
-    "Kolors": {
-        "unet_hints":    ["kolors", "Kolors"],
-        "vae_hints":     ["kolors_vae", "sdxl_vae"],
-        "clip_hints":    {
-            "llm_encoder": ["chatglm3", "chatglm", "kolors_clip"],
-        },
-    },
     "Lumina2": {
         "unet_hints":    ["lumina2", "lumina-2", "lumina_2"],
         "vae_hints":     ["ae.safetensors", "flux_ae", "sd3_vae", "sd_vae", "lumina_vae"],
         "clip_hints":    {
             "llm_encoder": ["gemma_2_2b", "gemma2_2b", "gemma_2"],
-        },
-    },
-    "Z-Image": {
-        "unet_hints":    ["z_image", "z-image", "zimage"],
-        "vae_hints":     ["flux_vae", "ae.safetensors", "flux_ae", "sd3_vae", "sd_vae"],
-        "clip_hints":    {
-            "llm_encoder": ["qwen_3_4b", "qwen3_4b", "qwen_3"],
-        },
-    },
-    // ALBABIT-FIX: Chroma, Flux.2, Cosmos World, CogVideoX, Mochi —
-    // mirrors CHECKPOINT_PRESETS in config/model_map.py.
-    "Chroma": {
-        "unet_hints":    ["chroma-unlocked", "chroma_unlocked", "chroma"],
-        "vae_hints":     ["ae.safetensors", "flux_ae", "ae_"],
-        "clip_hints":    {
-            "t5xxl": ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
-        },
-    },
-    // ALBABIT-FIX: Dev and Klein merged into one preset now that Auto-Detect
-    // can tell them apart on its own (model/detect.py, single_blocks count).
-    // unet_hints cover both families -- Dev first (flagship, quality-first),
-    // then Klein's sizes/distillation states (4B/9B, Base/distilled).
-    "Flux.2": {
-        "unet_hints": [
-            "flux2-dev.safetensors", "flux2_dev_fp8mixed.safetensors",
-            "flux-2-klein-9b.safetensors",
-            "flux-2-klein-base-4b.safetensors",
-            "flux-2-klein-base-9b-fp8.safetensors",
-            "klein-9b-kv", "klein-base", "klein-9b", "klein-4b",
-            "flux2-dev", "flux2_dev", "flux.2-dev",
-            "flux2-klein", "flux2_klein", "flux.2-klein", "klein",
-        ],
-        // full_encoder_small_decoder is a lighter/faster decoder (same
-        // encoder) -- only used if the full-quality flux2-vae isn't present.
-        "vae_hints":     ["flux2-vae", "flux2_vae", "flux2_ae", "full_encoder_small_decoder"],
-        "clip_hints":    {
-            // Dev's encoder (Mistral) -- also the fallback when unet_name
-            // isn't a recognized Klein size (see clip_size_hints, which
-            // takes priority whenever a Klein 4B/9B file is detected).
-            "llm_encoder": ["mistral_3_small_flux2_bf16", "mistral_3_small_flux2_fp8", "mistral_3_small_flux2", "mistral_3", "mistral"],
-        },
-        // ALBABIT-FIX: Klein's encoder (Qwen) must match its size (4B->qwen_3_4b,
-        // 9B->qwen_3_8b*) -- resolved dynamically from the size token detected
-        // in unet_name. Quality-first: bf16 before fp8/fp4mixed.
-        "clip_size_hints": {
-            "9b": ["qwen_3_8b.safetensors", "qwen_3_8b", "qwen_3_8b_fp8mixed", "qwen_3_8b_fp4mixed", "qwen3_8b"],
-            "4b": ["qwen_3_4b.safetensors", "qwen_3_4b", "qwen3_4b"],
-        },
-    },
-    "Cosmos World": {
-        "unet_hints":    ["cosmos-1_0-diffusion", "Cosmos-1_0", "cosmos_world", "cosmos"],
-        "vae_hints":     ["cosmos_vae", "cosmos-tokenizer", "cosmos"],
-        "clip_hints":    {
-            // ALBABIT-FIX: Cosmos uses the "old" T5-XXL (T5 1.0) encoder,
-            // distinct from the t5xxl_fp8/fp16 (T5 1.1) used by Flux/SD3/etc.
-            // Prioritize oldt5_xxl_*, fall back to t5xxl_* if absent.
-            "t5xxl": ["oldt5_xxl_fp8_e4m3fn", "oldt5_xxl_fp16", "oldt5_xxl", "t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
-        },
-    },
-    "CogVideoX": {
-        "unet_hints":    ["cogvideox-5b", "cogvideox_5b", "CogVideoX", "cogvideox"],
-        "vae_hints":     ["cogvideox_vae", "cogvideox-vae", "cogvideo_vae"],
-        "clip_hints":    {
-            "t5xxl": ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
     },
     "Mochi": {
@@ -315,6 +240,105 @@ const PRESET_CONFIGS = {
         "clip_hints":    {
             // ALBABIT-FIX: prioritize fp16 t5xxl for Mochi, fp8 as fallback.
             "t5xxl": ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
+        },
+    },
+    "PixArt Sigma": {
+        "unet_hints":    ["pixart_sigma", "pixart-sigma", "PixArt-Sigma"],
+        "vae_hints":     ["pixart_sigma_sdxlvae", "sdxl_vae", "sd_vae", "pixart_vae", "vae-ft-mse"],
+        "clip_hints":    {
+            "t5xxl": ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
+        },
+    },
+    "SD 1.5": {
+        "unet_hints":    ["v1-5", "v1_5", "sd15", "sd-1-5", "sd_1.5"],
+        "vae_hints":     ["vae-ft-mse", "sd15_vae", "kl-f8"],
+        "clip_hints":    {
+            "clip_l": ["clip_l.safetensors", "clip_l"],
+        },
+    },
+    "SD3.5 Large": {
+        "unet_hints":    ["sd3.5_large_turbo", "sd3.5_large", "sd3-5_large"],
+        "vae_hints":     ["sd3_vae", "sd3.5_vae", "sd3"],
+        "clip_hints":    {
+            "clip_l": ["clip_l.safetensors", "clip_l"],
+            "clip_g": ["clip_g.safetensors", "clip_g"],
+            "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
+        },
+    },
+    "SD3.5 Medium": {
+        "unet_hints":    ["sd3.5_medium", "sd3-5_medium"],
+        "vae_hints":     ["sd3_vae", "sd3.5_vae", "sd3"],
+        "clip_hints":    {
+            "clip_l": ["clip_l.safetensors", "clip_l"],
+            "clip_g": ["clip_g.safetensors", "clip_g"],
+            "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
+        },
+    },
+    "SD3.5 Turbo": {
+        "unet_hints":    ["sd3.5_large_turbo", "sd3.5_turbo", "sd3-5_turbo"],
+        "vae_hints":     ["sd3_vae", "sd3.5_vae", "sd3"],
+        "clip_hints":    {
+            "clip_l": ["clip_l.safetensors", "clip_l"],
+            "clip_g": ["clip_g.safetensors", "clip_g"],
+            "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
+        },
+    },
+    "SDXL Base": {
+        "unet_hints":    ["sd_xl_base", "sdxl_base", "sdxl-base"],
+        "vae_hints":     ["sdxl_vae", "vae-ft-mse", "xl_vae"],
+        "clip_hints":    {
+            "clip_l": ["clip_l.safetensors", "clip_l"],
+            "clip_g": ["clip_g.safetensors", "clip_g"],
+        },
+    },
+    "SDXL Turbo": {
+        "unet_hints":    ["sdxl_turbo", "sdxl-turbo", "turbo"],
+        "vae_hints":     ["sdxl_vae", "vae-ft-mse", "xl_vae"],
+        "clip_hints":    {
+            "clip_l": ["clip_l.safetensors", "clip_l"],
+            "clip_g": ["clip_g.safetensors", "clip_g"],
+        },
+    },
+    "Wan 2.1": {
+        "unet_hints":    ["wan2.1", "wan_2.1", "wan-2.1", "Wan2.1"],
+        "vae_hints":     ["wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
+        "clip_hints":    {
+            "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
+        },
+    },
+    "Wan 2.2": {
+        "unet_hints":    [
+            "wan2.2_t2v_high_noise_14B_fp8_scaled",
+            "wan2.2_i2v_high_noise_14B_fp8_scaled",
+            "wan2.2_t2v_high_noise",
+            "wan2.2_i2v_high_noise",
+            "wan2.2_high_noise",
+            "wan2.2",
+            "wan_2.2",
+            "wan-2.2",
+            "Wan2.2",
+        ],
+        "vae_hints":     ["wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
+        "clip_hints":    {
+            "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
+        },
+        // ALBABIT-FIX: either the high_noise or low_noise UNET works --
+        // _find_wan_moe_companion() (nodes_loader.py) auto-loads the other
+        // one server-side regardless of which one is picked here.
+        "companion_linked": true,
+    },
+    "Wan 2.2 TI2V": {
+        "unet_hints":    ["wan2.2_ti2v_5B_fp16", "wan2.2_ti2v_5B", "wan2.2_ti2v"],
+        "vae_hints":     ["wan2.2_vae", "wan_2.2_vae"],
+        "clip_hints":    {
+            "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
+        },
+    },
+    "Z-Image": {
+        "unet_hints":    ["z_image", "z-image", "zimage"],
+        "vae_hints":     ["flux_vae", "ae.safetensors", "flux_ae", "sd3_vae", "sd_vae"],
+        "clip_hints":    {
+            "llm_encoder": ["qwen_3_4b", "qwen3_4b", "qwen_3"],
         },
     },
 };

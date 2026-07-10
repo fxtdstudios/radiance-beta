@@ -455,13 +455,13 @@ def parse_model_meta(model_meta: str) -> Tuple[str, str]:
 
 def refine_distillation_from_meta(detected_type: str, unet_file: str) -> Optional[Dict[str, Any]]:
     """
-    Some architectures ship multiple checkpoints under one model_type needing
-    very different steps/guidance (distilled vs its undistilled base) --
-    architecturally identical, only unet_file's exact filename can tell them
-    apart. Verified against official model cards: Klein Base/distilled and
-    Flux.1 Dev/Schnell (Dev already matches MODEL_DEFAULTS, so only Schnell
-    needs an override). Returns None when not applicable, leaving the
-    generic MODEL_DEFAULTS fallback in place.
+    Some checkpoints need settings that differ from their model_type's generic
+    default -- only unet_file's exact filename can tell them apart. Verified
+    against official model cards: Klein Base/distilled, Flux.1 Dev/Schnell,
+    and Flux.1 Krea Dev (guidance only -- BFL gives no steps recommendation,
+    so the "steps" key is absent; callers must not assume it's always present).
+    Returns None when not applicable, leaving the generic MODEL_DEFAULTS
+    fallback in place.
     """
     if not unet_file:
         return None
@@ -471,6 +471,8 @@ def refine_distillation_from_meta(detected_type: str, unet_file: str) -> Optiona
         return {"guidance": 1.0, "steps": 4} if is_distilled else {"guidance": 4.0, "steps": 50}
     if detected_type == "flux" and "schnell" in name:
         return {"guidance": 0.0, "steps": 4}
+    if detected_type == "flux" and "krea" in name:
+        return {"guidance": 4.5}
     return None
 
 def gradual_sigma_blend(
