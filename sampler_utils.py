@@ -65,11 +65,10 @@ MODEL_TYPES = [
     "chroma",
     "cosmos",
     "cogvideox",
-    "stepvideo",
     "mochi",  # ALBABIT-FIX: Mochi-1 — match Resolution/Loader model types
 ]
 
-VIDEO_MODEL_TYPES = {"wan", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "stepvideo", "mochi"}
+VIDEO_MODEL_TYPES = {"wan", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "mochi"}
 
 # ALBABIT-FIX: flux2/flux2-klein use guidance_embed like flux (not external CFG)
 # ALBABIT-FIX: lumina2 removed -- its official workflow uses a plain KSampler
@@ -79,7 +78,7 @@ GUIDANCE_EMBED_MODELS = {"flux", "flux2", "flux2-klein", "z_image", "ltxv"}
 # ALBABIT-FIX: "sd35" renamed to "sd3.5" for consistency with Loader/detect.py
 # ALBABIT-FIX: lumina2 added -- classic external CFG, confirmed via its
 # official example workflow (plain KSampler cfg=4, no guidance-embed node)
-CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd3.5", "ltxav", "cogvideox", "stepvideo", "mochi", "lumina2"}
+CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd3.5", "ltxav", "cogvideox", "mochi", "lumina2"}
 
 MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
     # ALBABIT-FIX: steps=20 added, verified against Comfy-Org's official
@@ -287,15 +286,6 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "denoise_range": (0.0, 1.0),
         "guidance_type": "cfg",
     },
-    "stepvideo": {
-        "cfg": 9.0,
-        "scheduler": "simple",
-        "guidance": 0.0,
-        "shift": 13.0,
-        "sampler": "euler",
-        "denoise_range": (0.0, 1.0),
-        "guidance_type": "cfg",
-    },
     # ALBABIT-FIX: cfg/scheduler/steps verified against lodestones' own official
     # Chroma1-HD ComfyUI workflow (cfg was 1.0, wrong; scheduler was "simple",
     # wrong -- should be "beta"). "steps" is a generic (non-distillation)
@@ -481,7 +471,6 @@ def detect_by_config(model) -> Optional[str]:
             # ALBABIT-FIX: Flux2 config class maps to "flux2", not "flux"
             "Flux": "flux", "FluxSchnell": "flux", "FluxInpaint": "flux", "Flux2": "flux2",
             "CogVideoX": "cogvideox", "CogVideo": "cogvideox",
-            "StepVideo": "stepvideo",
             "Mochi": "mochi",  # ALBABIT-FIX: Mochi-1 config class detection
         }
         for pattern, mtype in config_map.items():
@@ -509,8 +498,6 @@ def detect_by_architecture(model) -> Optional[str]:
             return "hunyuan_video"
         if "cogvideo" in model_cls or "cogvideo" in model_module: return "cogvideox"
         if "mochi" in model_cls or "mochi" in model_module: return "mochi"  # ALBABIT-FIX
-        if "stepvideo" in model_cls or "stepvideo" in model_module or "step_video" in model_module:
-            return "stepvideo"
         if "lumina" in full_path:
             if hasattr(diffusion_model, "hidden_size") and diffusion_model.hidden_size >= 3840:
                 return "z_image"

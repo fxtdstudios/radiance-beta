@@ -597,8 +597,8 @@ VIDEO_PRESET_NAMES: set = {
 
 # ALBABIT-FIX: model_type analog of VIDEO_PRESET_NAMES — filters the
 # "model_type" dropdown (Custom/Auto-Detect) the same way "preset" is
-# filtered. "ltx" renamed to "ltxv" to match sampler_utils.py; "stepvideo" added.
+# filtered. "ltx" renamed to "ltxv" to match sampler_utils.py.
 VIDEO_MODEL_TYPES: set = {
     "hunyuan_video", "wan", "ltxv", "ltxav",
-    "cosmos", "cogvideox", "mochi", "stepvideo",
+    "cosmos", "cogvideox", "mochi",
 }
