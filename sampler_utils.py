@@ -82,12 +82,15 @@ GUIDANCE_EMBED_MODELS = {"flux", "flux2", "flux2-klein", "z_image", "ltxv"}
 CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd3.5", "ltxav", "cogvideox", "stepvideo", "mochi", "lumina2"}
 
 MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    # ALBABIT-FIX: steps=20 added, verified against Comfy-Org's official
+    # Flux.1 Dev workflow template.
     "flux": {
         "cfg": 1.0,
         "scheduler": "simple",
         "guidance": 3.5,
         "shift": 1.0,
         "sampler": "euler",
+        "steps": 20,
         "denoise_range": (0.3, 1.0),
     },
     # ALBABIT-FIX: Flux.2 Dev and Flux.2 Klein — guidance_embed models like Flux.1,
@@ -96,12 +99,15 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
     # value is a fallback for when model_meta isn't connected -- Base (undistilled,
     # guidance=4.0) and distilled (guidance~1.0) are architecturally identical and
     # only distinguishable via model_meta's unet_file (see refine_distillation_from_meta).
+    # ALBABIT-FIX: steps=20 added, verified against Comfy-Org's official
+    # Flux.2 Dev/Klein workflow templates.
     "flux2": {
         "cfg": 1.0,
         "scheduler": "simple",
         "guidance": 4.0,
         "shift": 1.0,
         "sampler": "euler",
+        "steps": 20,
         "denoise_range": (0.3, 1.0),
     },
     "flux2-klein": {
@@ -110,42 +116,64 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "guidance": 4.0,
         "shift": 1.0,
         "sampler": "euler",
+        "steps": 20,
         "denoise_range": (0.3, 1.0),
     },
+    # ALBABIT-FIX: steps=30 added, verified against the official SD3 Medium
+    # example workflow (sd3_simple_example.png) -- that same workflow uses
+    # cfg=5.45, differing from our cfg=4.5 (not touched here, out of scope
+    # for this steps-only pass; flagged separately if worth revisiting).
     "sd3": {
         "cfg": 4.5,
         "scheduler": "sgm_uniform",
         "guidance": 0.0,
         "shift": 1.0,
         "sampler": "dpmpp_2m",
+        "steps": 30,
         "denoise_range": (0.2, 1.0),
     },
     # ALBABIT-FIX: renamed from "sd35" to "sd3.5" for consistency with Loader/detect.py.
     # cfg/sampler verified against Comfy-Org's own official SD3.5 Large workflow
     # (sd3.5-t2i-fp8-scaled-workflow.json) -- sampler was "dpmpp_2m" (wrong,
     # should be "euler"); cfg confirmed against Albabit's own ComfyUI workflow (4.0).
+    # ALBABIT-FIX: steps=20 added, verified against Comfy-Org's official
+    # SD3.5 Large workflow template (same source already used for cfg/sampler).
     "sd3.5": {
         "cfg": 4.0,
         "scheduler": "sgm_uniform",
         "guidance": 0.0,
         "shift": 1.0,
         "sampler": "euler",
+        "steps": 20,
         "denoise_range": (0.2, 1.0),
     },
+    # ALBABIT-FIX: cfg 7.0->8.0, sampler dpmpp_2m->euler, scheduler
+    # karras->normal, matching ComfyUI's own official SDXL example workflow
+    # (sdxl_simple_example.json). steps=20 added from the same file (base
+    # stage runs steps 0-20 of a nominal 25-step schedule with the optional
+    # refiner stage disabled by default -- we don't have a 2-stage refiner
+    # split, so 20 is the actual number of steps that workflow runs).
     "sdxl": {
-        "cfg": 7.0,
-        "scheduler": "karras",
+        "cfg": 8.0,
+        "scheduler": "normal",
         "guidance": 0.0,
         "shift": 1.0,
-        "sampler": "dpmpp_2m",                                                               
+        "sampler": "euler",
+        "steps": 20,
         "denoise_range": (0.3, 1.0),
     },
+    # ALBABIT-FIX: steps=20 added, verified against ComfyUI's own default
+    # startup workflow (default.json, v1-5-pruned-emaonly) -- that same
+    # workflow uses cfg=8/sampler=euler, differing from our cfg=7.0/dpmpp_2m
+    # (community-sourced, not touched here, out of scope for this
+    # steps-only pass; flagged separately if worth revisiting).
     "sd15": {
         "cfg": 7.0,
         "scheduler": "normal",
         "guidance": 0.0,
         "shift": 1.0,
-        "sampler": "dpmpp_2m",                                                               
+        "sampler": "dpmpp_2m",
+        "steps": 20,
         "denoise_range": (0.3, 1.0),
     },
 
@@ -155,17 +183,25 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "guidance": 0.0,
         "shift": 8.0,
         # ALBABIT-FIX: euler -> uni_pc, confirmed by 2 official Comfy-Org
-        # workflows (Wan 2.1 1.3B T2V and Wan 2.1 14B I2V 720P).
+        # workflows (Wan 2.1 1.3B T2V and Wan 2.1 14B I2V 720P). steps=20
+        # added, from the same 14B I2V workflow (its KSampler uses steps=20).
         "sampler": "uni_pc",
+        "steps": 20,
         "denoise_range": (0.3, 1.0),
         "guidance_type": "cfg",
     },
+    # ALBABIT-FIX: steps=30 added (was previously "faible confiance" from a
+    # Lightricks model card, now upgraded to "haute" -- confirmed by
+    # ComfyUI's own official LTX Video example workflow, corroborated by
+    # Lightricks' own 13B-dev first-pass config). The 2B-0.9.6-dev config
+    # suggests 40 instead -- our entry doesn't distinguish 2B/13B currently.
     "ltxv": {
         "cfg": 1.0,
         "scheduler": "simple",
-        "guidance": 3.5,                                   
+        "guidance": 3.5,
         "shift": 2.37,
         "sampler": "euler",
+        "steps": 30,
         "denoise_range": (0.3, 1.0),
         "guidance_type": "embedding",
     },
@@ -179,14 +215,21 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "denoise_range": (0.3, 1.0),
         "guidance_type": "cfg",
     },
+    # ALBABIT-FIX: steps=20 added, from the same official ComfyUI HunyuanVideo
+    # workflow already used for shift/sampler/scheduler. Note: Tencent's own
+    # CLI README recommends 50 steps -- a real divergence between the
+    # ComfyUI-native default and the creator's own recommendation, not
+    # resolved here (kept internally consistent with the single source
+    # already used for this architecture's other values).
     "hunyuan_video": {
         "cfg": 6.0,
         "scheduler": "simple",
         "guidance": 0.0,
         "shift": 7.0,
         "sampler": "euler",
+        "steps": 20,
         "denoise_range": (0.3, 1.0),
-        "guidance_type": "cfg",                                                       
+        "guidance_type": "cfg",
     },
     # ALBABIT-FIX: Lumina2's official example workflow shows a plain KSampler
     # cfg=4 with no guidance-embed node at all (unlike Flux's FluxGuidance) --
@@ -204,31 +247,43 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "denoise_range": (0.3, 1.0),
         "guidance_type": "cfg",
     },
+    # ALBABIT-FIX: steps=25 added, verified against Comfy-Org's official
+    # Z-Image (Base) workflow template -- its Turbo variant uses 8 steps
+    # instead, not covered here (no filename-based override exists yet for
+    # z_image, unlike Flux Schnell/Klein).
     "z_image": {
         "cfg": 1.0,
         "scheduler": "simple",
-        "guidance": 3.5,                                            
+        "guidance": 3.5,
         "shift": 3.0,
         "sampler": "euler",
+        "steps": 25,
         "denoise_range": (0.3, 1.0),
         "guidance_type": "embedding",
     },
+    # ALBABIT-FIX: steps=20 added, verified against ComfyUI's own official
+    # Cosmos-1.0 7B example workflow.
     "cosmos": {
         "cfg": 7.0,
         "scheduler": "simple",
         "guidance": 0.0,
         "shift": 3.0,
         "sampler": "euler",
+        "steps": 20,
         "denoise_range": (0.3, 1.0),
         "guidance_type": "cfg",
     },
     # ── v2.6.0: New video models ──────────────────────────────────────────────
+    # ALBABIT-FIX: steps=50 added, verified against THUDM's official
+    # CogVideoX-5b model card (num_inference_steps=50, guidance_scale=6 --
+    # cfg was already exact).
     "cogvideox": {
         "cfg": 6.0,
         "scheduler": "simple",
         "guidance": 0.0,
         "shift": 8.0,
         "sampler": "euler",
+        "steps": 50,
         "denoise_range": (0.0, 1.0),
         "guidance_type": "cfg",
     },
@@ -255,13 +310,16 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "steps": 26,
         "denoise_range": (0.3, 1.0),
     },
-    # ALBABIT-FIX: Mochi-1 (Genmo) — 12ch video VAE, T5XXL text encoder
+    # ALBABIT-FIX: Mochi-1 (Genmo) — 12ch video VAE, T5XXL text encoder.
+    # steps=64 added, verified against Genmo's official Mochi 1 model card
+    # (num_inference_steps=64, cfg_schedule=[4.5]*64 -- cfg was already exact).
     "mochi": {
         "cfg": 4.5,
         "scheduler": "simple",
         "guidance": 0.0,
         "shift": 6.0,
         "sampler": "euler",
+        "steps": 64,
         "denoise_range": (0.0, 1.0),
         "guidance_type": "cfg",
     },
@@ -282,13 +340,16 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
     # ALBABIT-FIX: previously fell back to "sd15" -- cfg/sampler verified
     # against multiple independent community sources (weaker than AuraFlow's
     # direct official workflow, moderate confidence). scheduler/shift kept at
-    # sd15-equivalent values, no better source found.
+    # sd15-equivalent values, no better source found. steps=20 added, from
+    # the diffusers pipeline's own default parameter (no official ComfyUI
+    # workflow found for PixArt Sigma -- moderate confidence, same tier as cfg).
     "pixart": {
         "cfg": 4.5,
         "scheduler": "normal",
         "guidance": 0.0,
         "shift": 1.0,
         "sampler": "dpmpp_2m",
+        "steps": 20,
         "denoise_range": (0.3, 1.0),
     },
 }

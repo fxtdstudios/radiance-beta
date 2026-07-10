@@ -665,36 +665,64 @@ const LOADER_PRESET_MODEL_TYPE = {
 // it, same relationship as the Python side's klein_refined/defaults. Kept in
 // sync by hand (same pattern as GUIDANCE_EMBED_MODELS/CFG_GUIDED_MODELS above).
 const MODEL_TYPE_SAMPLING_DEFAULTS = {
-    flux:          { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 3.5 },
-    flux2:         { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 4.0 },
-    "flux2-klein": { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 4.0 },
+    // ALBABIT-FIX: steps=20 added to flux/flux2/flux2-klein, verified
+    // against Comfy-Org's official Flux.1 Dev/Flux.2 Dev/Flux.2 Klein
+    // workflow templates.
+    flux:          { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 3.5, steps: 20 },
+    flux2:         { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 4.0, steps: 20 },
+    "flux2-klein": { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 4.0, steps: 20 },
     // ALBABIT-FIX: cfg/scheduler/steps verified against lodestones' own
     // official Chroma1-HD ComfyUI workflow (cfg was 1.0, scheduler "simple" --
     // both wrong). "steps" is a generic fallback, new for this architecture.
     chroma:        { cfg: 3.8, sampler: "euler",    scheduler: "beta",        flux_shift: 1.0,  guidance: 0.0, steps: 26 },
-    sd3:           { cfg: 4.5, sampler: "dpmpp_2m", scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0 },
+    // ALBABIT-FIX: steps=30 added, verified against the official SD3 Medium
+    // example workflow -- that same workflow uses cfg=5.45, differing from
+    // our cfg=4.5 (not touched, out of scope for this steps-only pass).
+    sd3:           { cfg: 4.5, sampler: "dpmpp_2m", scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0, steps: 30 },
     // ALBABIT-FIX: cfg/sampler verified against Comfy-Org's official SD3.5
     // Large workflow + Albabit's own ComfyUI workflow (sampler was
     // "dpmpp_2m", wrong -- should be "euler"; cfg confirmed at 4.0).
-    "sd3.5":       { cfg: 4.0, sampler: "euler",    scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0 },
-    sdxl:          { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "karras",      flux_shift: 1.0,  guidance: 0.0 },
-    sd15:          { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0 },
+    // steps=20 added, same official workflow.
+    "sd3.5":       { cfg: 4.0, sampler: "euler",    scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0, steps: 20 },
+    // ALBABIT-FIX: cfg 7.0->8.0, sampler dpmpp_2m->euler, scheduler
+    // karras->normal, matching ComfyUI's own official SDXL example workflow.
+    // steps=20 added, same file (base stage runs 0-20 of a nominal 25-step
+    // schedule with the optional refiner stage disabled by default).
+    sdxl:          { cfg: 8.0, sampler: "euler",    scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0, steps: 20 },
+    // ALBABIT-FIX: steps=20 added, verified against ComfyUI's own default
+    // startup workflow -- that same workflow uses cfg=8/sampler=euler,
+    // differing from our cfg=7.0/dpmpp_2m (community-sourced, not touched).
+    sd15:          { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0, steps: 20 },
     // ALBABIT-FIX: euler -> uni_pc, confirmed by 2 official Comfy-Org
-    // workflows (Wan 2.1 1.3B T2V and Wan 2.1 14B I2V 720P).
-    wan:           { cfg: 6.0, sampler: "uni_pc",  scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0 },
-    ltxv:          { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 2.37, guidance: 3.5 },
+    // workflows (Wan 2.1 1.3B T2V and Wan 2.1 14B I2V 720P). steps=20
+    // added, from the same 14B I2V workflow.
+    wan:           { cfg: 6.0, sampler: "uni_pc",  scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0, steps: 20 },
+    // ALBABIT-FIX: steps=30, upgraded to high confidence -- confirmed by
+    // ComfyUI's own official LTX Video example workflow.
+    ltxv:          { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 2.37, guidance: 3.5, steps: 30 },
     ltxav:         { cfg: 3.0, sampler: "euler",    scheduler: "beta",        flux_shift: 3.0,  guidance: 0.0 },
-    hunyuan_video: { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 7.0,  guidance: 0.0 },
+    // ALBABIT-FIX: steps=20, from the same official ComfyUI HunyuanVideo
+    // workflow already used for shift/sampler/scheduler (Tencent's own CLI
+    // README recommends 50 -- a divergence, not resolved here).
+    hunyuan_video: { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 7.0,  guidance: 0.0, steps: 20 },
     // ALBABIT-FIX: official example workflow shows plain KSampler cfg=4, no
     // guidance-embed node -- cfg 1.0->4.0, sampler euler->res_multistep,
     // steps=25 added (matches the workflow; its own Note claims "36 steps"
     // as official but the saved workflow itself uses 25).
     lumina2:       { cfg: 4.0, sampler: "res_multistep", scheduler: "simple", flux_shift: 6.0,  guidance: 0.0, steps: 25 },
-    z_image:       { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 3.0,  guidance: 3.5 },
-    cosmos:        { cfg: 7.0, sampler: "euler",    scheduler: "simple",      flux_shift: 3.0,  guidance: 0.0 },
-    cogvideox:     { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0 },
+    // ALBABIT-FIX: steps=25, verified against Comfy-Org's official Z-Image
+    // (Base) workflow template -- Turbo variant uses 8, not covered here.
+    z_image:       { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 3.0,  guidance: 3.5, steps: 25 },
+    // ALBABIT-FIX: steps=20, verified against ComfyUI's own official
+    // Cosmos-1.0 7B example workflow.
+    cosmos:        { cfg: 7.0, sampler: "euler",    scheduler: "simple",      flux_shift: 3.0,  guidance: 0.0, steps: 20 },
+    // ALBABIT-FIX: steps=50, verified against THUDM's official CogVideoX-5b
+    // model card (cfg was already exact).
+    cogvideox:     { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0, steps: 50 },
     stepvideo:     { cfg: 9.0, sampler: "euler",    scheduler: "simple",      flux_shift: 13.0, guidance: 0.0 },
-    mochi:         { cfg: 4.5, sampler: "euler",    scheduler: "simple",      flux_shift: 6.0,  guidance: 0.0 },
+    // ALBABIT-FIX: steps=64, verified against Genmo's official Mochi 1
+    // model card (cfg was already exact).
+    mochi:         { cfg: 4.5, sampler: "euler",    scheduler: "simple",      flux_shift: 6.0,  guidance: 0.0, steps: 64 },
     // ALBABIT-FIX: previously fell back to "sd15" (cfg=7.0/dpmpp_2m/normal) --
     // verified against AuraFlow's own official ComfyUI workflow, which
     // contradicts all three. No shift node present (unlike Lumina2, which
@@ -705,7 +733,9 @@ const MODEL_TYPE_SAMPLING_DEFAULTS = {
     // against multiple independent community sources (weaker than AuraFlow's
     // direct official workflow, moderate confidence). scheduler/shift kept at
     // sd15-equivalent values, no better source found.
-    pixart:        { cfg: 4.5,  sampler: "dpmpp_2m", scheduler: "normal",     flux_shift: 1.0,  guidance: 0.0 },
+    // ALBABIT-FIX: steps=20 added, from the diffusers pipeline's own default
+    // parameter (no official ComfyUI workflow found -- moderate confidence).
+    pixart:        { cfg: 4.5,  sampler: "dpmpp_2m", scheduler: "normal",     flux_shift: 1.0,  guidance: 0.0, steps: 20 },
 };
 
 function _resolveLoaderModelType(loaderNode) {
