@@ -611,13 +611,13 @@ function _findModelMetaSourceNode(node) {
     return originNode;
 }
 
-// ALBABIT-FIX: some architectures ship multiple checkpoints under one
-// model_type needing very different steps/guidance (distilled vs its
-// undistilled base) -- only the exact filename can tell them apart.
-// Verified against official model cards: Klein Base/distilled (4B/9B) and
-// Flux.1 Dev/Schnell. LTX 2.3 Dev/Distilled deliberately NOT covered --
-// community values are inconsistent/pipeline-dependent; the existing
-// dedicated "LTX 2.3 LowRes/HighRes" presets are the right tool there.
+// ALBABIT-FIX: some checkpoints need settings that differ from their
+// model_type's generic default -- only the exact filename can tell them
+// apart. Verified against official model cards: Klein Base/distilled
+// (4B/9B), Flux.1 Dev/Schnell, and Flux.1 Krea Dev (guidance only -- BFL
+// gives no steps recommendation). LTX 2.3 Dev/Distilled deliberately NOT
+// covered -- community values are inconsistent/pipeline-dependent; the
+// existing "LTX 2.3 LowRes/HighRes" presets are the right tool there.
 function _deriveDistillationOverride(filename) {
     if (!filename) return null;
     const f = filename.toLowerCase();
@@ -625,6 +625,7 @@ function _deriveDistillationOverride(filename) {
         return f.includes("base") ? { flux_guidance: 4.0, steps: 50 } : { flux_guidance: 1.0, steps: 4 };
     }
     if (f.includes("schnell")) return { flux_guidance: 0.0, steps: 4 };
+    if (f.includes("krea")) return { flux_guidance: 4.5 };
     return null;
 }
 
@@ -633,7 +634,7 @@ function _deriveDistillationOverride(filename) {
 // alone, no execution needed. Must be kept in sync by hand (same pattern
 // already used for GUIDANCE_EMBED_MODELS/CFG_GUIDED_MODELS above).
 const LOADER_PRESET_MODEL_TYPE = {
-    "Flux Dev": "flux", "Flux Schnell": "flux", "Flux Dev (Low VRAM)": "flux",
+    "Flux.1": "flux", "Flux.1 (Low VRAM)": "flux",
     "Chroma": "chroma",
     "SD3.5 Large": "sd3.5", "SD3.5 Medium": "sd3.5", "SD3.5 Turbo": "sd3.5",
     "SDXL Base": "sdxl", "SDXL Turbo": "sdxl", "SD 1.5": "sd15",
@@ -680,10 +681,11 @@ const MODEL_TYPE_SAMPLING_DEFAULTS = {
 function _resolveLoaderModelType(loaderNode) {
     if (!loaderNode) return null;
     const presetVal = loaderNode.widgets?.find(w => w.name === "preset")?.value;
-    // ALBABIT-FIX: "Flux.2" covers Dev and Klein in one preset (Auto-Detect
-    // tells them apart at execution time) -- resolve here the same way,
-    // from the Loader's own unet_name, since the preset name alone can't.
-    if (presetVal === "Flux.2") {
+    // ALBABIT-FIX: "Flux.2"/"Flux.2 (Low VRAM)" cover Dev and Klein in one
+    // preset (Auto-Detect tells them apart at execution time) -- resolve
+    // here the same way, from the Loader's own unet_name, since the preset
+    // name alone can't.
+    if (presetVal === "Flux.2" || presetVal === "Flux.2 (Low VRAM)") {
         const unetName = loaderNode.widgets?.find(w => w.name === "unet_name")?.value || "";
         return unetName.toLowerCase().includes("klein") ? "flux2-klein" : "flux2";
     }
@@ -739,8 +741,18 @@ function updateModelMetaDefaults(node) {
     const detectedType = _resolveLoaderModelType(sourceNode);
     const modelDefaults = MODEL_TYPE_SAMPLING_DEFAULTS[detectedType] ?? null;
 
+    // ALBABIT-FIX: pixart/aura_flow/kolors resolve fine as MODEL_TYPE_SAMPLING_
+    // DEFAULTS keys (sd15-equivalent values) but aren't real options in the
+    // model_type combo itself (sampler_utils.py's MODEL_TYPES never listed
+    // them) -- writing them would leave the widget on a value execution
+    // rejects as "not in list". Only write model_type if it's an option the
+    // widget actually offers.
+    const modelTypeW = node.widgets.find(w => w.name === "model_type");
+    const validModelType = (detectedType && modelTypeW?.options?.values?.includes(detectedType))
+        ? detectedType : undefined;
+
     const pairs = [
-        [node.widgets.find(w => w.name === "model_type"), detectedType ?? undefined],
+        [modelTypeW, validModelType],
         [node.widgets.find(w => w.name === "flux_guidance"), override?.flux_guidance ?? modelDefaults?.guidance],
         [node.widgets.find(w => w.name === "steps"), override?.steps],
         [node.widgets.find(w => w.name === "cfg"), modelDefaults?.cfg],
