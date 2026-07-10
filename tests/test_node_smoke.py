@@ -677,7 +677,7 @@ def _ensure_stubs() -> None:
         "CLIP_TARGETS":                      ["auto"],
         "MULTI_COND_MODES":                  ["merge"],
         "TILE_BLEND_MODES":                  ["linear"],
-        "WORKFLOW_PRESETS":                  ["None", "Custom"],
+        "WORKFLOW_PRESETS":                  ["Auto", "Custom"],
         "AYS_ANCHORS":                       {},
         "MODEL_DEFAULTS":                    {},
     }

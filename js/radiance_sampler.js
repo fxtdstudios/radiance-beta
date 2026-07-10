@@ -155,6 +155,19 @@ const CFG_GUIDED_MODELS = new Set([
 ]);
 const LTX_MODEL_TYPES = new Set(["ltxv", "ltxav"]);
 
+// ALBABIT-FIX: mirrors sampler_utils.py's AYS_ANCHORS coverage (5 direct
+// entries + aliases) -- everything NOT in this set silently falls through
+// to the standard sigma computation when ays_schedule=True, no warning.
+const AYS_SUPPORTED_MODELS = new Set([
+    "sdxl", "sd15", "flux", "sd3", "wan", "ltxv",
+    "sd3.5", "chroma", "hunyuan_video", "lumina2", "z_image",
+]);
+
+// ALBABIT-FIX: PAG hooks the "middle_block" attention layer (sampler_utils.py's
+// pag_attention_patch checks block_type=="middle") -- a U-Net-only concept,
+// no effect at all for DiT architectures (verified in apply_pag_to_model()).
+const PAG_SUPPORTED_MODELS = new Set(["sdxl", "sd15"]);
+
 // Infer the effective model type when model_type is left on "auto" by reading
 // the chosen preset name. Returns "auto" when nothing matches (treated as a
 // generic flux-style flow model — guidance widgets stay visible).
@@ -328,9 +341,12 @@ function auditSamplerWidgets(node) {
 
 function toggleFields(node) {
     if (!node.widgets) return;
+    // ALBABIT-FIX: must run before applyFolding() -- it writes the resolved
+    // model_type that applyFolding()'s architecture-aware folding reads, so
+    // folding first left every model-dependent show/hide one cycle stale.
+    updateModelMetaDefaults(node);
     applyFolding(node);
     auditSamplerWidgets(node);
-    updateModelMetaDefaults(node);
     // ALBABIT-FIX: after Vue processes this render cycle, clear the synthetic
     // computedHeight = 32 we set so Vue can recompute the real per-widget height.
     // The 32 was needed as a safe initial value for the _forceWidgetReinsert mount;
@@ -357,22 +373,17 @@ function applyFolding(node) {
 
     // Get key widget references
     const presetW = find("preset");
-    const presetVal = presetW ? presetW.value : "None";
-    const isNone = presetVal === "None";
+    const presetVal = presetW ? presetW.value : "Auto";
     const isCustom = presetVal === "Custom";
 
     // Dummy compatibility absorbers that are always hidden
     const dummyWidgets = ["_js_export_btn", "_js_import_btn", "_js_preset_info"];
     const controlAfterW = find("control_after_generate");
 
-    // ── None: simple default mode → hide EVERYTHING except the essentials ──
-    if (isNone) {
-        const alwaysVisible = ["preset", "preset_info", "› Export Preset", "› Import Preset"];
-        node.widgets.forEach(w => setWidgetVisible(w, alwaysVisible.includes(w.name), node));
-        if (controlAfterW) setWidgetVisible(controlAfterW, false, node);
-        refreshNodeSize(node);
-        return;
-    }
+    // ALBABIT-FIX: "Auto" (formerly "None") no longer hides everything -- it
+    // falls through to the same "show all, smart-fold" branch as named
+    // presets below, just without hardcoded values (those come live from
+    // updateModelMetaDefaults instead).
 
     // ── Custom: full manual control → show everything, only tile sub-options follow tile_mode ──
     if (isCustom) {
@@ -408,6 +419,7 @@ function applyFolding(node) {
 
     // Check optional link states using node.inputs
     const hasRefinerModel = node.inputs && node.inputs.some(i => i.name === "refiner_model" && i.link !== null);
+    const hasSdrReference = node.inputs && node.inputs.some(i => i.name === "sdr_reference" && i.link !== null);
 
     const modelType = modelTypeW ? modelTypeW.value : "auto";
     const samplerMode = samplerModeW ? samplerModeW.value : "Standard";
@@ -415,9 +427,17 @@ function applyFolding(node) {
     // Resolve the effective model so folding matches what the backend will run.
     const effectiveModel = resolveModelType(presetVal, modelType);
     const isLTX = LTX_MODEL_TYPES.has(effectiveModel) || LTX_PRESETS.includes(presetVal);
+    const sdTurboActive = _isSdTurboActive(node);
 
     // 3.1. Refiner: visible if refiner_model input port is wired up
     setWidgetVisible(find("refiner_start_step"), hasRefinerModel, node);
+
+    // 3.1b. SDR reference conditioning: visible if sdr_reference input port is wired up
+    // (same pattern as refiner_start_step above -- sdr_blend/inject_steps/decay are
+    // entirely gated on sdr_reference+sdr_vae in nodes_sampler.py, inert without it).
+    setWidgetVisible(find("sdr_blend"), hasSdrReference, node);
+    setWidgetVisible(find("sdr_inject_steps"), hasSdrReference, node);
+    setWidgetVisible(find("sdr_decay"), hasSdrReference, node);
 
     // 3.2. Tiled latent sampling: visible if tile_mode is checked
     const isTiled = tileModeW && tileModeW.value === true;
@@ -435,18 +455,51 @@ function applyFolding(node) {
     const isAys = aysScheduleW && aysScheduleW.value === true;
     setWidgetVisible(find("sigma_blend_steps"), isPhaseShift || isAys, node);
 
+    // 3.4b. Phase-split fraction: only meaningful in a Phase-Shift sampler_mode
+    // (not model-dependent -- a widget-state fold missed by the original pass).
+    setWidgetVisible(find("phase_split"), isPhaseShift, node);
+
     // 3.5. Model-aware shift/guidance folding.
-    //  - flux_shift (flow-match shift) is used by every modern flow model → show in preset mode.
+    //  - flux_shift (flow-match shift) is a no-op for SDXL/SD1.5 (ddpm noise
+    //    schedule, no flow-matching) -- hidden for those, shown otherwise
+    //    (including "auto"/unresolved, same show-by-default bias as guidance below).
     //  - flux_guidance / profile only apply to guidance-embed models; CFG-guided
     //    models (WAN, Hunyuan, SDXL, SD1.5/3/3.5, LTX-AV, CogVideoX, StepVideo) ignore them.
     const usesGuidanceEmbed =
         GUIDANCE_EMBED_MODELS.has(effectiveModel) ||
         (effectiveModel === "auto" && !CFG_GUIDED_MODELS.has(effectiveModel));
-    setWidgetVisible(find("flux_shift"), true, node);
+    const usesFlowShift = effectiveModel !== "sdxl" && effectiveModel !== "sd15";
+    setWidgetVisible(find("flux_shift"), usesFlowShift, node);
     setWidgetVisible(find("flux_guidance"), usesGuidanceEmbed, node);
     setWidgetVisible(find("flux_guidance_profile"), usesGuidanceEmbed, node);
 
-    // 3.5b. LTX models can't use the flux-style guidance / tiling / preview widgets.
+    // 3.5b. PAG / AYS: narrow architecture support (verified against
+    // sampler_utils.py's actual hook conditions, not just naming) -- hidden
+    // by default since most architectures DON'T support them, shown only
+    // when the loaded model is confirmed to (opposite bias from 3.5 above,
+    // where most architectures DO use flow-matching/guidance).
+    setWidgetVisible(find("pag_scale"), PAG_SUPPORTED_MODELS.has(effectiveModel), node);
+    setWidgetVisible(aysScheduleW, AYS_SUPPORTED_MODELS.has(effectiveModel), node);
+
+    // 3.5c. Guidance rescale only has an effect when cfg > 1.0 (nodes_sampler.py
+    // gates it on that exact condition) -- moot for guidance-embed models,
+    // whose cfg is pinned at 1.0 by design.
+    setWidgetVisible(find("guidance_rescale_phi"), !usesGuidanceEmbed, node);
+
+    // 3.5d. SDXL Turbo's discrete schedule (get_sd_turbo_sigmas) ignores
+    // scheduler/scheduler_mode/terminal_sigma_to_zero/force_exact_steps
+    // entirely, and its cfg is pinned at 1.0 so guidance_rescale_phi's own
+    // "cfg > 1.0" gate never fires -- hide all five rather than showing
+    // values that silently do nothing.
+    if (sdTurboActive) {
+        setWidgetVisible(find("scheduler"), false, node);
+        setWidgetVisible(find("scheduler_mode"), false, node);
+        setWidgetVisible(find("terminal_sigma_to_zero"), false, node);
+        setWidgetVisible(find("force_exact_steps"), false, node);
+        setWidgetVisible(find("guidance_rescale_phi"), false, node);
+    }
+
+    // 3.5e. LTX models can't use the flux-style guidance / tiling / preview widgets.
     if (isLTX) {
         LTX_INCOMPATIBLE_WIDGETS.forEach(name => setWidgetVisible(find(name), false, node));
     }
@@ -462,7 +515,7 @@ function applyFolding(node) {
 function updateUILocks(node, presetName) {
     if (!node.widgets) return;
     const isLTX = LTX_PRESETS.includes(presetName);
-    const isCustom = presetName === "None" || presetName === "Custom";
+    const isCustom = presetName === "Auto" || presetName === "Custom";
 
     node.widgets.forEach((widget) => {
         if (widget.name === "preset" || widget.name === "preset_info") return;
@@ -524,7 +577,7 @@ function updateSigmaLocks(node) {
 }
 
 function applyPreset(node, presetName) {
-    if (presetName === "None" || presetName === "Custom") return;
+    if (presetName === "Auto" || presetName === "Custom") return;
 
     const config = getPresetConfig(presetName);
     if (!config) return;
@@ -571,14 +624,17 @@ function presetValuesEqual(a, b) {
 function updatePresetDivergenceMarkers(node) {
     if (!node.widgets) return;
     const presetW = node.widgets.find(w => w.name === "preset");
-    const presetVal = presetW ? presetW.value : "None";
-    const config = (presetVal === "None" || presetVal === "Custom")
+    const presetVal = presetW ? presetW.value : "Auto";
+    const config = (presetVal === "Auto" || presetVal === "Custom")
         ? null
         : getPresetConfig(presetVal);
 
     let changed = false;
     for (const w of node.widgets) {
         if (!w || !w.name) continue;
+        // ALBABIT-FIX: skip widgets currently owned by the model_meta system
+        // (🧲/its own ✎) -- see _markLinkedWidget(). Magnet takes priority.
+        if (w._radMetaLinked) continue;
         let marked = false;
         if (config && config[w.name] !== undefined && !PRESET_MARKER_EXCLUDED.has(w.name)) {
             marked = !presetValuesEqual(w.value, config[w.name]);
@@ -756,6 +812,18 @@ function _resolveLoaderModelType(loaderNode) {
     return (modelType && modelType !== "Auto-Detect") ? modelType : null;
 }
 
+// ALBABIT-FIX: shared by updateModelMetaDefaults() (value sync) and
+// applyFolding() (Auto visibility) -- mirrors nodes_sampler.py's
+// use_sd_turbo_schedule. Re-resolves the Loader link/unet_name itself
+// rather than caching -- cheap, and avoids relying on call order between
+// the two functions (toggleFields() calls updateModelMetaDefaults() first).
+function _isSdTurboActive(node) {
+    const sourceNode = _findModelMetaSourceNode(node);
+    const unetName = sourceNode?.widgets?.find(w => w.name === "unet_name")?.value ?? "";
+    const detectedType = _resolveLoaderModelType(sourceNode);
+    return detectedType === "sdxl" && unetName.toLowerCase().includes("turbo");
+}
+
 // ALBABIT-FIX: can't just check "is the widget still at its generic default"
 // -- after the first auto-write the value IS the derived one, so a later
 // Loader change would never re-apply. _radAutoValue tracks what WE last
@@ -773,8 +841,14 @@ function _syncAutoValue(widget, newValue) {
     return true;
 }
 
+// ALBABIT-FIX: _radMetaLinked marks this widget as owned by the model_meta
+// system (🧲 or its own ✎ divergence) so updatePresetDivergenceMarkers()
+// leaves its label alone -- both systems write the same widget.label, and
+// without an explicit flag, whichever ran last silently won regardless of
+// which one was actually supposed to be authoritative.
 function _markLinkedWidget(widget, linked, inSync) {
     if (!widget) return false;
+    widget._radMetaLinked = linked;
     const markerText = linked ? (inSync ? LINKED_MARKER : PRESET_MARKER) : null;
     if (widget._radOrigLabel === undefined && !markerText) return false;
     if (widget._radOrigLabel === undefined) widget._radOrigLabel = widget.label ?? widget.name;
@@ -786,25 +860,25 @@ function _markLinkedWidget(widget, linked, inSync) {
 
 // ALBABIT-FIX: extends the guidance/steps sync (above) to model_type/cfg/
 // sampler/scheduler/flux_shift, resolved from the linked Loader's preset/
-// model_type. Gated on preset (None/Custom) only -- not model_type=="auto"
+// model_type. Gated on preset (Auto/Custom) only -- not model_type=="auto"
 // too, since the per-field checks in _syncAutoValue() already protect any
 // field the user deliberately set (mirrors nodes_sampler.py).
 function updateModelMetaDefaults(node) {
     if (!node.widgets) return;
     const presetW = node.widgets.find(w => w.name === "preset");
-    const presetVal = presetW ? presetW.value : "None";
-    const eligible = presetVal === "None" || presetVal === "Custom";
+    const presetVal = presetW ? presetW.value : "Auto";
+    const eligible = presetVal === "Auto" || presetVal === "Custom";
 
     const sourceNode = eligible ? _findModelMetaSourceNode(node) : null;
     const unetName = sourceNode?.widgets?.find(w => w.name === "unet_name")?.value ?? null;
     const detectedType = _resolveLoaderModelType(sourceNode);
     const override = _deriveDistillationOverride(unetName, detectedType);
     const modelDefaults = MODEL_TYPE_SAMPLING_DEFAULTS[detectedType] ?? null;
-    // ALBABIT-FIX: mirrors nodes_sampler.py's use_sd_turbo_schedule -- the
-    // scheduler widget's actual value is ignored server-side for this case
-    // (a dedicated discrete schedule is used instead, see get_sd_turbo_sigmas),
-    // so there's no specific value to sync it to, just a link to flag.
-    const sdTurboActive = detectedType === "sdxl" && (unetName || "").toLowerCase().includes("turbo");
+    // ALBABIT-FIX: the scheduler widget's actual value is ignored server-side
+    // for this case (a dedicated discrete schedule is used instead, see
+    // get_sd_turbo_sigmas), so there's no specific value to sync it to, just
+    // a link to flag (and, under Auto, a widget to hide -- see applyFolding).
+    const sdTurboActive = eligible && _isSdTurboActive(node);
 
     // ALBABIT-FIX: pixart/aura_flow resolve fine as MODEL_TYPE_SAMPLING_DEFAULTS
     // keys but aren't real options in the model_type combo itself
@@ -1108,8 +1182,8 @@ app.registerExtension({
             const updateDescription = (presetName) => {
                 const config = getPresetConfig(presetName);
                 let text = "Manual / Custom Mode. All widgets are unlocked.";
-                if (presetName === "None") {
-                    text = "Default simple mode. Parameters are hidden and use standard defaults. Select 'Custom' to manually tweak settings.";
+                if (presetName === "Auto") {
+                    text = "Auto mode. Only the parameters that actually apply to the loaded model are shown, auto-filled from the Loader (🧲). Select 'Custom' to unlock every widget.";
                 } else if (config && config.description) {
                     text = config.description;
                 }
@@ -1131,7 +1205,7 @@ app.registerExtension({
 
                 if (window.app && window.app.configuringGraph) return;
 
-                if (value !== lastPresetValue && value !== "None" && value !== "Custom") {
+                if (value !== lastPresetValue && value !== "Auto" && value !== "Custom") {
                     lastPresetValue = value;
                     applyPreset(this, value);
                     updateUILocks(this, value);
@@ -1141,7 +1215,7 @@ app.registerExtension({
                     lastPresetValue = value;
                     // ALBABIT-FIX: no longer resets model_type -- named presets
                     // don't force it anymore (see applyPreset), so there's
-                    // nothing to undo when switching to None/Custom.
+                    // nothing to undo when switching to Auto/Custom.
                     updateUILocks(this, value);
                     updateDescription(value);
                     toggleFields(this);
@@ -1176,15 +1250,18 @@ app.registerExtension({
                 toggleFields(this);
             };
 
-            // ALBABIT-FIX: poll for upstream mute/bypass changes. onConnectionsChange only
-            // fires on this node — it does not fire when the upstream node is muted/bypassed.
-            // Also refresh the preset "✎" divergence markers here: state-based polling
-            // covers every mutation path (manual edit, undo/redo, import, workflow load)
-            // without wrapping every widget callback. Only dirties the canvas on change.
+            // ALBABIT-FIX: polls because onConnectionsChange only fires on link
+            // changes -- not on upstream mute/bypass, nor a Loader-side value
+            // edit (e.g. picking a different unet_name). Refreshes preset "✎"
+            // markers, model_meta values, AND widget visibility (folding used
+            // to lag behind a Loader-side model change until an unrelated
+            // Sampler edit forced a refresh).
             this._sigmaCheckInterval = setInterval(() => {
                 updateSigmaLocks(self);
                 updatePresetDivergenceMarkers(self);
                 updateModelMetaDefaults(self);
+                applyFolding(self);
+                auditSamplerWidgets(self);
             }, 250);
             const origOnRemoved = this.onRemoved;
             this.onRemoved = function () {
@@ -1223,7 +1300,7 @@ app.registerExtension({
 
         // Re-apply folding after a saved workflow restores this node. onNodeCreated
         // runs BEFORE ComfyUI deserializes widget values, so the preset value isn't
-        // known at creation time; without this hook a node saved with a non-None
+        // known at creation time; without this hook a node saved with a non-Auto
         // preset (or in Custom mode) could load stuck-collapsed.
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (info) {

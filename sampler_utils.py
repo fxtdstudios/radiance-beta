@@ -834,7 +834,10 @@ def compute_base_sigmas(
     return bs
 
 WORKFLOW_PRESETS = [
-    "None",
+    # ALBABIT-FIX: "None" renamed "Auto" -- it hides advanced widgets like
+    # "None" used to, but shows the model_meta-driven live values (cfg/
+    # sampler/scheduler/steps/model_type) instead of hiding everything.
+    "Auto",
     "Custom",
     "[F] Flux txt2img",
     "[F] Flux img2img",
