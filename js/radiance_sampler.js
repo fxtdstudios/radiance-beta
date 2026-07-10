@@ -144,12 +144,29 @@ const LTX_PRESETS = [
 // backend resolves models. GUIDANCE_EMBED models use flux_guidance; CFG_GUIDED
 // models drive denoising with plain CFG and ignore the guidance-embed widgets.
 // ALBABIT-FIX: flux2/flux2-klein use guidance_embed like flux; "sd35" renamed to "sd3.5"
-const GUIDANCE_EMBED_MODELS = new Set(["flux", "flux2", "flux2-klein", "lumina2", "z_image", "ltxv"]);
+// ALBABIT-FIX: lumina2 removed -- its official workflow uses a plain KSampler
+// cfg, no guidance-embed node (unlike Flux's FluxGuidance) -- see CFG_GUIDED_MODELS
+const GUIDANCE_EMBED_MODELS = new Set(["flux", "flux2", "flux2-klein", "z_image", "ltxv"]);
+// ALBABIT-FIX: lumina2 added -- classic external CFG, confirmed via its
+// official example workflow (plain KSampler cfg=4, no guidance-embed node)
 const CFG_GUIDED_MODELS = new Set([
     "wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd3.5",
-    "ltxav", "cogvideox", "stepvideo"
+    "ltxav", "cogvideox", "lumina2"
 ]);
 const LTX_MODEL_TYPES = new Set(["ltxv", "ltxav"]);
+
+// ALBABIT-FIX: mirrors sampler_utils.py's AYS_ANCHORS coverage (5 direct
+// entries + aliases) -- everything NOT in this set silently falls through
+// to the standard sigma computation when ays_schedule=True, no warning.
+const AYS_SUPPORTED_MODELS = new Set([
+    "sdxl", "sd15", "flux", "sd3", "wan", "ltxv",
+    "sd3.5", "chroma", "hunyuan_video", "lumina2", "z_image",
+]);
+
+// ALBABIT-FIX: PAG hooks the "middle_block" attention layer (sampler_utils.py's
+// pag_attention_patch checks block_type=="middle") -- a U-Net-only concept,
+// no effect at all for DiT architectures (verified in apply_pag_to_model()).
+const PAG_SUPPORTED_MODELS = new Set(["sdxl", "sd15"]);
 
 // Infer the effective model type when model_type is left on "auto" by reading
 // the chosen preset name. Returns "auto" when nothing matches (treated as a
@@ -324,9 +341,12 @@ function auditSamplerWidgets(node) {
 
 function toggleFields(node) {
     if (!node.widgets) return;
+    // ALBABIT-FIX: must run before applyFolding() -- it writes the resolved
+    // model_type that applyFolding()'s architecture-aware folding reads, so
+    // folding first left every model-dependent show/hide one cycle stale.
+    updateModelMetaDefaults(node);
     applyFolding(node);
     auditSamplerWidgets(node);
-    updateModelMetaDefaults(node);
     // ALBABIT-FIX: after Vue processes this render cycle, clear the synthetic
     // computedHeight = 32 we set so Vue can recompute the real per-widget height.
     // The 32 was needed as a safe initial value for the _forceWidgetReinsert mount;
@@ -353,22 +373,17 @@ function applyFolding(node) {
 
     // Get key widget references
     const presetW = find("preset");
-    const presetVal = presetW ? presetW.value : "None";
-    const isNone = presetVal === "None";
+    const presetVal = presetW ? presetW.value : "Auto";
     const isCustom = presetVal === "Custom";
 
     // Dummy compatibility absorbers that are always hidden
     const dummyWidgets = ["_js_export_btn", "_js_import_btn", "_js_preset_info"];
     const controlAfterW = find("control_after_generate");
 
-    // ── None: simple default mode → hide EVERYTHING except the essentials ──
-    if (isNone) {
-        const alwaysVisible = ["preset", "preset_info", "› Export Preset", "› Import Preset"];
-        node.widgets.forEach(w => setWidgetVisible(w, alwaysVisible.includes(w.name), node));
-        if (controlAfterW) setWidgetVisible(controlAfterW, false, node);
-        refreshNodeSize(node);
-        return;
-    }
+    // ALBABIT-FIX: "Auto" (formerly "None") no longer hides everything -- it
+    // falls through to the same "show all, smart-fold" branch as named
+    // presets below, just without hardcoded values (those come live from
+    // updateModelMetaDefaults instead).
 
     // ── Custom: full manual control → show everything, only tile sub-options follow tile_mode ──
     if (isCustom) {
@@ -404,6 +419,7 @@ function applyFolding(node) {
 
     // Check optional link states using node.inputs
     const hasRefinerModel = node.inputs && node.inputs.some(i => i.name === "refiner_model" && i.link !== null);
+    const hasSdrReference = node.inputs && node.inputs.some(i => i.name === "sdr_reference" && i.link !== null);
 
     const modelType = modelTypeW ? modelTypeW.value : "auto";
     const samplerMode = samplerModeW ? samplerModeW.value : "Standard";
@@ -411,9 +427,17 @@ function applyFolding(node) {
     // Resolve the effective model so folding matches what the backend will run.
     const effectiveModel = resolveModelType(presetVal, modelType);
     const isLTX = LTX_MODEL_TYPES.has(effectiveModel) || LTX_PRESETS.includes(presetVal);
+    const sdTurboActive = _isSdTurboActive(node);
 
     // 3.1. Refiner: visible if refiner_model input port is wired up
     setWidgetVisible(find("refiner_start_step"), hasRefinerModel, node);
+
+    // 3.1b. SDR reference conditioning: visible if sdr_reference input port is wired up
+    // (same pattern as refiner_start_step above -- sdr_blend/inject_steps/decay are
+    // entirely gated on sdr_reference+sdr_vae in nodes_sampler.py, inert without it).
+    setWidgetVisible(find("sdr_blend"), hasSdrReference, node);
+    setWidgetVisible(find("sdr_inject_steps"), hasSdrReference, node);
+    setWidgetVisible(find("sdr_decay"), hasSdrReference, node);
 
     // 3.2. Tiled latent sampling: visible if tile_mode is checked
     const isTiled = tileModeW && tileModeW.value === true;
@@ -431,18 +455,51 @@ function applyFolding(node) {
     const isAys = aysScheduleW && aysScheduleW.value === true;
     setWidgetVisible(find("sigma_blend_steps"), isPhaseShift || isAys, node);
 
+    // 3.4b. Phase-split fraction: only meaningful in a Phase-Shift sampler_mode
+    // (not model-dependent -- a widget-state fold missed by the original pass).
+    setWidgetVisible(find("phase_split"), isPhaseShift, node);
+
     // 3.5. Model-aware shift/guidance folding.
-    //  - flux_shift (flow-match shift) is used by every modern flow model → show in preset mode.
+    //  - flux_shift (flow-match shift) is a no-op for SDXL/SD1.5 (ddpm noise
+    //    schedule, no flow-matching) -- hidden for those, shown otherwise
+    //    (including "auto"/unresolved, same show-by-default bias as guidance below).
     //  - flux_guidance / profile only apply to guidance-embed models; CFG-guided
-    //    models (WAN, Hunyuan, SDXL, SD1.5/3/3.5, LTX-AV, CogVideoX, StepVideo) ignore them.
+    //    models (WAN, Hunyuan, SDXL, SD1.5/3/3.5, LTX-AV, CogVideoX) ignore them.
     const usesGuidanceEmbed =
         GUIDANCE_EMBED_MODELS.has(effectiveModel) ||
         (effectiveModel === "auto" && !CFG_GUIDED_MODELS.has(effectiveModel));
-    setWidgetVisible(find("flux_shift"), true, node);
+    const usesFlowShift = effectiveModel !== "sdxl" && effectiveModel !== "sd15";
+    setWidgetVisible(find("flux_shift"), usesFlowShift, node);
     setWidgetVisible(find("flux_guidance"), usesGuidanceEmbed, node);
     setWidgetVisible(find("flux_guidance_profile"), usesGuidanceEmbed, node);
 
-    // 3.5b. LTX models can't use the flux-style guidance / tiling / preview widgets.
+    // 3.5b. PAG / AYS: narrow architecture support (verified against
+    // sampler_utils.py's actual hook conditions, not just naming) -- hidden
+    // by default since most architectures DON'T support them, shown only
+    // when the loaded model is confirmed to (opposite bias from 3.5 above,
+    // where most architectures DO use flow-matching/guidance).
+    setWidgetVisible(find("pag_scale"), PAG_SUPPORTED_MODELS.has(effectiveModel), node);
+    setWidgetVisible(aysScheduleW, AYS_SUPPORTED_MODELS.has(effectiveModel), node);
+
+    // 3.5c. Guidance rescale only has an effect when cfg > 1.0 (nodes_sampler.py
+    // gates it on that exact condition) -- moot for guidance-embed models,
+    // whose cfg is pinned at 1.0 by design.
+    setWidgetVisible(find("guidance_rescale_phi"), !usesGuidanceEmbed, node);
+
+    // 3.5d. SDXL Turbo's discrete schedule (get_sd_turbo_sigmas) ignores
+    // scheduler/scheduler_mode/terminal_sigma_to_zero/force_exact_steps
+    // entirely, and its cfg is pinned at 1.0 so guidance_rescale_phi's own
+    // "cfg > 1.0" gate never fires -- hide all five rather than showing
+    // values that silently do nothing.
+    if (sdTurboActive) {
+        setWidgetVisible(find("scheduler"), false, node);
+        setWidgetVisible(find("scheduler_mode"), false, node);
+        setWidgetVisible(find("terminal_sigma_to_zero"), false, node);
+        setWidgetVisible(find("force_exact_steps"), false, node);
+        setWidgetVisible(find("guidance_rescale_phi"), false, node);
+    }
+
+    // 3.5e. LTX models can't use the flux-style guidance / tiling / preview widgets.
     if (isLTX) {
         LTX_INCOMPATIBLE_WIDGETS.forEach(name => setWidgetVisible(find(name), false, node));
     }
@@ -458,7 +515,7 @@ function applyFolding(node) {
 function updateUILocks(node, presetName) {
     if (!node.widgets) return;
     const isLTX = LTX_PRESETS.includes(presetName);
-    const isCustom = presetName === "None" || presetName === "Custom";
+    const isCustom = presetName === "Auto" || presetName === "Custom";
 
     node.widgets.forEach((widget) => {
         if (widget.name === "preset" || widget.name === "preset_info") return;
@@ -520,7 +577,7 @@ function updateSigmaLocks(node) {
 }
 
 function applyPreset(node, presetName) {
-    if (presetName === "None" || presetName === "Custom") return;
+    if (presetName === "Auto" || presetName === "Custom") return;
 
     const config = getPresetConfig(presetName);
     if (!config) return;
@@ -567,14 +624,17 @@ function presetValuesEqual(a, b) {
 function updatePresetDivergenceMarkers(node) {
     if (!node.widgets) return;
     const presetW = node.widgets.find(w => w.name === "preset");
-    const presetVal = presetW ? presetW.value : "None";
-    const config = (presetVal === "None" || presetVal === "Custom")
+    const presetVal = presetW ? presetW.value : "Auto";
+    const config = (presetVal === "Auto" || presetVal === "Custom")
         ? null
         : getPresetConfig(presetVal);
 
     let changed = false;
     for (const w of node.widgets) {
         if (!w || !w.name) continue;
+        // ALBABIT-FIX: skip widgets currently owned by the model_meta system
+        // (🧲/its own ✎) -- see _markLinkedWidget(). Magnet takes priority.
+        if (w._radMetaLinked) continue;
         let marked = false;
         if (config && config[w.name] !== undefined && !PRESET_MARKER_EXCLUDED.has(w.name)) {
             marked = !presetValuesEqual(w.value, config[w.name]);
@@ -611,20 +671,29 @@ function _findModelMetaSourceNode(node) {
     return originNode;
 }
 
-// ALBABIT-FIX: some architectures ship multiple checkpoints under one
-// model_type needing very different steps/guidance (distilled vs its
-// undistilled base) -- only the exact filename can tell them apart.
-// Verified against official model cards: Klein Base/distilled (4B/9B) and
-// Flux.1 Dev/Schnell. LTX 2.3 Dev/Distilled deliberately NOT covered --
+// ALBABIT-FIX: some checkpoints need settings that differ from their
+// model_type's generic default -- only the exact filename can tell them
+// apart. Verified against official model cards. "turbo" needs detectedType
+// too (SDXL Turbo and SD3.5 Turbo both match the substring but need
+// different values). LTX 2.3 Dev/Distilled deliberately NOT covered --
 // community values are inconsistent/pipeline-dependent; the existing
-// dedicated "LTX 2.3 LowRes/HighRes" presets are the right tool there.
-function _deriveDistillationOverride(filename) {
+// "LTX 2.3 LowRes/HighRes" presets are the right tool there.
+function _deriveDistillationOverride(filename, detectedType) {
     if (!filename) return null;
     const f = filename.toLowerCase();
     if (f.includes("klein")) {
         return f.includes("base") ? { flux_guidance: 4.0, steps: 50 } : { flux_guidance: 1.0, steps: 4 };
     }
     if (f.includes("schnell")) return { flux_guidance: 0.0, steps: 4 };
+    if (f.includes("krea")) return { flux_guidance: 4.5 };
+    // ALBABIT-FIX: sampler verified against ComfyUI's own official SDXL Turbo
+    // workflow (sdxlturbo_example.png) -- scheduler there is "SDTurboScheduler",
+    // a dedicated node with no standard-scheduler equivalent, left unset.
+    if (detectedType === "sdxl" && f.includes("turbo")) return { cfg: 1.0, steps: 1, sampler: "euler_ancestral" };
+    // ALBABIT-FIX: cfg=1.6 (not the "pure" diffusers guidance_scale=0.0
+    // translation) to match the Sampler's own pre-existing "[F] SD3.5 Turbo
+    // (4 steps)" preset, already tuned in practice.
+    if (detectedType === "sd3.5" && f.includes("turbo")) return { cfg: 1.6, steps: 4 };
     return null;
 }
 
@@ -633,16 +702,16 @@ function _deriveDistillationOverride(filename) {
 // alone, no execution needed. Must be kept in sync by hand (same pattern
 // already used for GUIDANCE_EMBED_MODELS/CFG_GUIDED_MODELS above).
 const LOADER_PRESET_MODEL_TYPE = {
-    "Flux Dev": "flux", "Flux Schnell": "flux", "Flux Dev (Low VRAM)": "flux",
+    "Flux.1": "flux", "Flux.1 (Low VRAM)": "flux",
     "Chroma": "chroma",
-    "SD3.5 Large": "sd3.5", "SD3.5 Medium": "sd3.5", "SD3.5 Turbo": "sd3.5",
-    "SDXL Base": "sdxl", "SDXL Turbo": "sdxl", "SD 1.5": "sd15",
+    "SD3.5 Large": "sd3.5", "SD3.5 Medium": "sd3.5",
+    "SDXL": "sdxl", "SD 1.5": "sd15",
     "HunyuanVideo": "hunyuan_video",
     "Wan 2.1": "wan", "Wan 2.2": "wan", "Wan 2.2 TI2V": "wan",
     "LTX Video": "ltxv", "LTX Video 13B": "ltxv",
     "LTX Video 2.3": "ltxav", "LTX Video 2.3 (Low VRAM)": "ltxav",
     "Cosmos World": "cosmos", "CogVideoX": "cogvideox", "Mochi": "mochi",
-    "PixArt Sigma": "pixart", "AuraFlow": "aura_flow", "Kolors": "kolors",
+    "PixArt Sigma": "pixart", "AuraFlow": "aura_flow",
     "Lumina2": "lumina2", "Z-Image": "z_image",
 };
 
@@ -652,38 +721,86 @@ const LOADER_PRESET_MODEL_TYPE = {
 // it, same relationship as the Python side's klein_refined/defaults. Kept in
 // sync by hand (same pattern as GUIDANCE_EMBED_MODELS/CFG_GUIDED_MODELS above).
 const MODEL_TYPE_SAMPLING_DEFAULTS = {
-    flux:          { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 3.5 },
-    flux2:         { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 4.0 },
-    "flux2-klein": { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 4.0 },
-    chroma:        { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 0.0 },
-    sd3:           { cfg: 4.5, sampler: "dpmpp_2m", scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0 },
-    "sd3.5":       { cfg: 4.5, sampler: "dpmpp_2m", scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0 },
-    sdxl:          { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "karras",      flux_shift: 1.0,  guidance: 0.0 },
-    sd15:          { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0 },
-    wan:           { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0 },
-    ltxv:          { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 2.37, guidance: 3.5 },
+    // ALBABIT-FIX: steps=20 added to flux/flux2/flux2-klein, verified
+    // against Comfy-Org's official Flux.1 Dev/Flux.2 Dev/Flux.2 Klein
+    // workflow templates.
+    flux:          { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 3.5, steps: 20 },
+    flux2:         { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 4.0, steps: 20 },
+    "flux2-klein": { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 1.0,  guidance: 4.0, steps: 20 },
+    // ALBABIT-FIX: cfg/scheduler/steps verified against lodestones' own
+    // official Chroma1-HD ComfyUI workflow (cfg was 1.0, scheduler "simple" --
+    // both wrong). "steps" is a generic fallback, new for this architecture.
+    chroma:        { cfg: 3.8, sampler: "euler",    scheduler: "beta",        flux_shift: 1.0,  guidance: 0.0, steps: 26 },
+    // ALBABIT-FIX: cfg 4.5->5.45, sampler dpmpp_2m->euler, steps=30 -- all
+    // verified directly against the official SD3 Medium example workflow's
+    // embedded JSON (sd3_simple_example.png, comfyanonymous/ComfyUI_examples).
+    sd3:           { cfg: 5.45, sampler: "euler",   scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0, steps: 30 },
+    // ALBABIT-FIX: cfg/sampler verified against Comfy-Org's official SD3.5
+    // Large workflow + Albabit's own ComfyUI workflow (sampler was
+    // "dpmpp_2m", wrong -- should be "euler"; cfg confirmed at 4.0).
+    // steps=20 added, same official workflow.
+    "sd3.5":       { cfg: 4.0, sampler: "euler",    scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0, steps: 20 },
+    // ALBABIT-FIX: cfg 7.0->8.0, sampler dpmpp_2m->euler, scheduler
+    // karras->normal, matching ComfyUI's own official SDXL example workflow.
+    // steps=20 added, same file (base stage runs 0-20 of a nominal 25-step
+    // schedule with the optional refiner stage disabled by default).
+    sdxl:          { cfg: 8.0, sampler: "euler",    scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0, steps: 20 },
+    // ALBABIT-FIX: cfg 7.0->8.0, sampler dpmpp_2m->euler, steps=20 -- all
+    // verified against ComfyUI's own default startup workflow (the graph
+    // shown on first launch).
+    sd15:          { cfg: 8.0, sampler: "euler",    scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0, steps: 20 },
+    // ALBABIT-FIX: euler -> uni_pc, confirmed by 2 official Comfy-Org
+    // workflows (Wan 2.1 1.3B T2V and Wan 2.1 14B I2V 720P). steps=20
+    // added, from the same 14B I2V workflow.
+    wan:           { cfg: 6.0, sampler: "uni_pc",  scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0, steps: 20 },
+    // ALBABIT-FIX: steps=30, upgraded to high confidence -- confirmed by
+    // ComfyUI's own official LTX Video example workflow.
+    ltxv:          { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 2.37, guidance: 3.5, steps: 30 },
     ltxav:         { cfg: 3.0, sampler: "euler",    scheduler: "beta",        flux_shift: 3.0,  guidance: 0.0 },
-    hunyuan_video: { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 7.0,  guidance: 0.0 },
-    lumina2:       { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 6.0,  guidance: 3.5 },
-    z_image:       { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 3.0,  guidance: 3.5 },
-    cosmos:        { cfg: 7.0, sampler: "euler",    scheduler: "simple",      flux_shift: 3.0,  guidance: 0.0 },
-    cogvideox:     { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0 },
-    stepvideo:     { cfg: 9.0, sampler: "euler",    scheduler: "simple",      flux_shift: 13.0, guidance: 0.0 },
-    mochi:         { cfg: 4.5, sampler: "euler",    scheduler: "simple",      flux_shift: 6.0,  guidance: 0.0 },
-    // pixart/aura_flow/kolors have no entry in sampler_utils.py's MODEL_DEFAULTS
-    // either -- get_model_defaults() falls back to "sd15" there, mirrored here.
-    pixart:        { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0 },
-    aura_flow:     { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0 },
-    kolors:        { cfg: 7.0, sampler: "dpmpp_2m", scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0 },
+    // ALBABIT-FIX: steps=20, from the same official ComfyUI HunyuanVideo
+    // workflow already used for shift/sampler/scheduler (Tencent's own CLI
+    // README recommends 50 -- a divergence, not resolved here).
+    hunyuan_video: { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 7.0,  guidance: 0.0, steps: 20 },
+    // ALBABIT-FIX: official example workflow shows plain KSampler cfg=4, no
+    // guidance-embed node -- cfg 1.0->4.0, sampler euler->res_multistep,
+    // steps=25 added (matches the workflow; its own Note claims "36 steps"
+    // as official but the saved workflow itself uses 25).
+    lumina2:       { cfg: 4.0, sampler: "res_multistep", scheduler: "simple", flux_shift: 6.0,  guidance: 0.0, steps: 25 },
+    // ALBABIT-FIX: steps=25, verified against Comfy-Org's official Z-Image
+    // (Base) workflow template -- Turbo variant uses 8, not covered here.
+    z_image:       { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 3.0,  guidance: 3.5, steps: 25 },
+    // ALBABIT-FIX: steps=20, verified against ComfyUI's own official
+    // Cosmos-1.0 7B example workflow.
+    cosmos:        { cfg: 7.0, sampler: "euler",    scheduler: "simple",      flux_shift: 3.0,  guidance: 0.0, steps: 20 },
+    // ALBABIT-FIX: steps=50, verified against THUDM's official CogVideoX-5b
+    // model card (cfg was already exact).
+    cogvideox:     { cfg: 6.0, sampler: "euler",    scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0, steps: 50 },
+    // ALBABIT-FIX: steps=64, verified against Genmo's official Mochi 1
+    // model card (cfg was already exact).
+    mochi:         { cfg: 4.5, sampler: "euler",    scheduler: "simple",      flux_shift: 6.0,  guidance: 0.0, steps: 64 },
+    // ALBABIT-FIX: previously fell back to "sd15" (cfg=7.0/dpmpp_2m/normal) --
+    // verified against AuraFlow's own official ComfyUI workflow, which
+    // contradicts all three. No shift node present (unlike Lumina2, which
+    // reuses the same ModelSamplingAuraFlow node but at shift=6.0 -- confirmed
+    // NOT applicable to AuraFlow's own workflow, checked directly).
+    aura_flow:     { cfg: 3.48, sampler: "euler",   scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0, steps: 20 },
+    // ALBABIT-FIX: previously fell back to "sd15" -- cfg/sampler verified
+    // against multiple independent community sources (weaker than AuraFlow's
+    // direct official workflow, moderate confidence). scheduler/shift kept at
+    // sd15-equivalent values, no better source found.
+    // ALBABIT-FIX: steps=20 added, from the diffusers pipeline's own default
+    // parameter (no official ComfyUI workflow found -- moderate confidence).
+    pixart:        { cfg: 4.5,  sampler: "dpmpp_2m", scheduler: "normal",     flux_shift: 1.0,  guidance: 0.0, steps: 20 },
 };
 
 function _resolveLoaderModelType(loaderNode) {
     if (!loaderNode) return null;
     const presetVal = loaderNode.widgets?.find(w => w.name === "preset")?.value;
-    // ALBABIT-FIX: "Flux.2" covers Dev and Klein in one preset (Auto-Detect
-    // tells them apart at execution time) -- resolve here the same way,
-    // from the Loader's own unet_name, since the preset name alone can't.
-    if (presetVal === "Flux.2") {
+    // ALBABIT-FIX: "Flux.2"/"Flux.2 (Low VRAM)" cover Dev and Klein in one
+    // preset (Auto-Detect tells them apart at execution time) -- resolve
+    // here the same way, from the Loader's own unet_name, since the preset
+    // name alone can't.
+    if (presetVal === "Flux.2" || presetVal === "Flux.2 (Low VRAM)") {
         const unetName = loaderNode.widgets?.find(w => w.name === "unet_name")?.value || "";
         return unetName.toLowerCase().includes("klein") ? "flux2-klein" : "flux2";
     }
@@ -692,6 +809,18 @@ function _resolveLoaderModelType(loaderNode) {
     }
     const modelType = loaderNode.widgets?.find(w => w.name === "model_type")?.value;
     return (modelType && modelType !== "Auto-Detect") ? modelType : null;
+}
+
+// ALBABIT-FIX: shared by updateModelMetaDefaults() (value sync) and
+// applyFolding() (Auto visibility) -- mirrors nodes_sampler.py's
+// use_sd_turbo_schedule. Re-resolves the Loader link/unet_name itself
+// rather than caching -- cheap, and avoids relying on call order between
+// the two functions (toggleFields() calls updateModelMetaDefaults() first).
+function _isSdTurboActive(node) {
+    const sourceNode = _findModelMetaSourceNode(node);
+    const unetName = sourceNode?.widgets?.find(w => w.name === "unet_name")?.value ?? "";
+    const detectedType = _resolveLoaderModelType(sourceNode);
+    return detectedType === "sdxl" && unetName.toLowerCase().includes("turbo");
 }
 
 // ALBABIT-FIX: can't just check "is the widget still at its generic default"
@@ -711,8 +840,14 @@ function _syncAutoValue(widget, newValue) {
     return true;
 }
 
+// ALBABIT-FIX: _radMetaLinked marks this widget as owned by the model_meta
+// system (🧲 or its own ✎ divergence) so updatePresetDivergenceMarkers()
+// leaves its label alone -- both systems write the same widget.label, and
+// without an explicit flag, whichever ran last silently won regardless of
+// which one was actually supposed to be authoritative.
 function _markLinkedWidget(widget, linked, inSync) {
     if (!widget) return false;
+    widget._radMetaLinked = linked;
     const markerText = linked ? (inSync ? LINKED_MARKER : PRESET_MARKER) : null;
     if (widget._radOrigLabel === undefined && !markerText) return false;
     if (widget._radOrigLabel === undefined) widget._radOrigLabel = widget.label ?? widget.name;
@@ -724,28 +859,42 @@ function _markLinkedWidget(widget, linked, inSync) {
 
 // ALBABIT-FIX: extends the guidance/steps sync (above) to model_type/cfg/
 // sampler/scheduler/flux_shift, resolved from the linked Loader's preset/
-// model_type. Gated on preset (None/Custom) only -- not model_type=="auto"
+// model_type. Gated on preset (Auto/Custom) only -- not model_type=="auto"
 // too, since the per-field checks in _syncAutoValue() already protect any
 // field the user deliberately set (mirrors nodes_sampler.py).
 function updateModelMetaDefaults(node) {
     if (!node.widgets) return;
     const presetW = node.widgets.find(w => w.name === "preset");
-    const presetVal = presetW ? presetW.value : "None";
-    const eligible = presetVal === "None" || presetVal === "Custom";
+    const presetVal = presetW ? presetW.value : "Auto";
+    const eligible = presetVal === "Auto" || presetVal === "Custom";
 
     const sourceNode = eligible ? _findModelMetaSourceNode(node) : null;
     const unetName = sourceNode?.widgets?.find(w => w.name === "unet_name")?.value ?? null;
-    const override = _deriveDistillationOverride(unetName);
     const detectedType = _resolveLoaderModelType(sourceNode);
+    const override = _deriveDistillationOverride(unetName, detectedType);
     const modelDefaults = MODEL_TYPE_SAMPLING_DEFAULTS[detectedType] ?? null;
+    // ALBABIT-FIX: the scheduler widget's actual value is ignored server-side
+    // for this case (a dedicated discrete schedule is used instead, see
+    // get_sd_turbo_sigmas), so there's no specific value to sync it to, just
+    // a link to flag (and, under Auto, a widget to hide -- see applyFolding).
+    const sdTurboActive = eligible && _isSdTurboActive(node);
+
+    // ALBABIT-FIX: pixart/aura_flow resolve fine as MODEL_TYPE_SAMPLING_DEFAULTS
+    // keys but aren't real options in the model_type combo itself
+    // (sampler_utils.py's MODEL_TYPES never listed them) -- writing them
+    // would leave the widget on a value execution rejects as "not in list".
+    // Only write model_type if it's an option the
+    // widget actually offers.
+    const modelTypeW = node.widgets.find(w => w.name === "model_type");
+    const validModelType = (detectedType && modelTypeW?.options?.values?.includes(detectedType))
+        ? detectedType : undefined;
 
     const pairs = [
-        [node.widgets.find(w => w.name === "model_type"), detectedType ?? undefined],
+        [modelTypeW, validModelType],
         [node.widgets.find(w => w.name === "flux_guidance"), override?.flux_guidance ?? modelDefaults?.guidance],
-        [node.widgets.find(w => w.name === "steps"), override?.steps],
-        [node.widgets.find(w => w.name === "cfg"), modelDefaults?.cfg],
-        [node.widgets.find(w => w.name === "sampler"), modelDefaults?.sampler],
-        [node.widgets.find(w => w.name === "scheduler"), modelDefaults?.scheduler],
+        [node.widgets.find(w => w.name === "steps"), override?.steps ?? modelDefaults?.steps],
+        [node.widgets.find(w => w.name === "cfg"), override?.cfg ?? modelDefaults?.cfg],
+        [node.widgets.find(w => w.name === "sampler"), override?.sampler ?? modelDefaults?.sampler],
         [node.widgets.find(w => w.name === "flux_shift"), modelDefaults?.flux_shift],
     ];
 
@@ -756,6 +905,19 @@ function updateModelMetaDefaults(node) {
         const inSync = linked && widget && widget.value === derivedVal;
         if (_markLinkedWidget(widget, linked, inSync)) changed = true;
     }
+
+    const schedulerW = node.widgets.find(w => w.name === "scheduler");
+    if (sdTurboActive) {
+        _syncAutoValue(schedulerW, undefined); // no value to track/force -- link only
+        if (_markLinkedWidget(schedulerW, true, true)) changed = true;
+    } else {
+        const schedulerDefault = modelDefaults?.scheduler;
+        if (_syncAutoValue(schedulerW, schedulerDefault)) changed = true;
+        const linked = schedulerDefault !== undefined;
+        const inSync = linked && schedulerW && schedulerW.value === schedulerDefault;
+        if (_markLinkedWidget(schedulerW, linked, inSync)) changed = true;
+    }
+
     if (changed) node.setDirtyCanvas(true, true);
 }
 
@@ -1019,8 +1181,8 @@ app.registerExtension({
             const updateDescription = (presetName) => {
                 const config = getPresetConfig(presetName);
                 let text = "Manual / Custom Mode. All widgets are unlocked.";
-                if (presetName === "None") {
-                    text = "Default simple mode. Parameters are hidden and use standard defaults. Select 'Custom' to manually tweak settings.";
+                if (presetName === "Auto") {
+                    text = "Auto mode. Only the parameters that actually apply to the loaded model are shown, auto-filled from the Loader (🧲). Select 'Custom' to unlock every widget.";
                 } else if (config && config.description) {
                     text = config.description;
                 }
@@ -1042,7 +1204,7 @@ app.registerExtension({
 
                 if (window.app && window.app.configuringGraph) return;
 
-                if (value !== lastPresetValue && value !== "None" && value !== "Custom") {
+                if (value !== lastPresetValue && value !== "Auto" && value !== "Custom") {
                     lastPresetValue = value;
                     applyPreset(this, value);
                     updateUILocks(this, value);
@@ -1052,7 +1214,7 @@ app.registerExtension({
                     lastPresetValue = value;
                     // ALBABIT-FIX: no longer resets model_type -- named presets
                     // don't force it anymore (see applyPreset), so there's
-                    // nothing to undo when switching to None/Custom.
+                    // nothing to undo when switching to Auto/Custom.
                     updateUILocks(this, value);
                     updateDescription(value);
                     toggleFields(this);
@@ -1087,15 +1249,18 @@ app.registerExtension({
                 toggleFields(this);
             };
 
-            // ALBABIT-FIX: poll for upstream mute/bypass changes. onConnectionsChange only
-            // fires on this node — it does not fire when the upstream node is muted/bypassed.
-            // Also refresh the preset "✎" divergence markers here: state-based polling
-            // covers every mutation path (manual edit, undo/redo, import, workflow load)
-            // without wrapping every widget callback. Only dirties the canvas on change.
+            // ALBABIT-FIX: polls because onConnectionsChange only fires on link
+            // changes -- not on upstream mute/bypass, nor a Loader-side value
+            // edit (e.g. picking a different unet_name). Refreshes preset "✎"
+            // markers, model_meta values, AND widget visibility (folding used
+            // to lag behind a Loader-side model change until an unrelated
+            // Sampler edit forced a refresh).
             this._sigmaCheckInterval = setInterval(() => {
                 updateSigmaLocks(self);
                 updatePresetDivergenceMarkers(self);
                 updateModelMetaDefaults(self);
+                applyFolding(self);
+                auditSamplerWidgets(self);
             }, 250);
             const origOnRemoved = this.onRemoved;
             this.onRemoved = function () {
@@ -1134,7 +1299,7 @@ app.registerExtension({
 
         // Re-apply folding after a saved workflow restores this node. onNodeCreated
         // runs BEFORE ComfyUI deserializes widget values, so the preset value isn't
-        // known at creation time; without this hook a node saved with a non-None
+        // known at creation time; without this hook a node saved with a non-Auto
         // preset (or in Custom mode) could load stuck-collapsed.
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (info) {
