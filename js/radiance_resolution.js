@@ -177,11 +177,13 @@ function refreshNodeSize(node) {
 // active (both apply regardless of preset). "✎" = orientation/latent_channels
 // off their neutral default.
 function _setLabelMarker(widget, marked, marker) {
-    if (!widget) return;
-    if (widget._radOrigLabel === undefined && !marked) return;
+    if (!widget) return false;
+    if (widget._radOrigLabel === undefined && !marked) return false;
     if (widget._radOrigLabel === undefined) widget._radOrigLabel = widget.label ?? widget.name;
     const wanted = marked ? widget._radOrigLabel + marker : widget._radOrigLabel;
-    if (widget.label !== wanted) widget.label = wanted;
+    if (widget.label === wanted) return false;
+    widget.label = wanted;
+    return true;
 }
 
 function updateResolutionMarkers(node) {
@@ -195,15 +197,22 @@ function updateResolutionMarkers(node) {
     const scaleActive = scaleFactorW && parseFloat(scaleFactorW.value) !== 1.0;
     const mpActive     = mpTargetW && parseFloat(mpTargetW.value) > 0;
 
-    _setLabelMarker(scaleFactorW, scaleActive, " 📐");
-    _setLabelMarker(mpTargetW, mpActive, " 📐");
-    _setLabelMarker(widthW, scaleActive || mpActive, " 📐");
-    _setLabelMarker(heightW, scaleActive || mpActive, " 📐");
+    // ALBABIT-FIX: only redraw when a label actually changed -- this runs
+    // every 250ms via the polling loop (see onNodeCreated), and calling
+    // setDirtyCanvas unconditionally on every tick was the same "reassign
+    // even when unchanged" anti-pattern fixed in the Sampler's
+    // updateSigmaLocks() (radiance_sampler.js) after it interrupted manual
+    // widget typing there.
+    let changed = false;
+    if (_setLabelMarker(scaleFactorW, scaleActive, " 📐")) changed = true;
+    if (_setLabelMarker(mpTargetW, mpActive, " 📐")) changed = true;
+    if (_setLabelMarker(widthW, scaleActive || mpActive, " 📐")) changed = true;
+    if (_setLabelMarker(heightW, scaleActive || mpActive, " 📐")) changed = true;
 
-    _setLabelMarker(orientationW, orientationW && orientationW.value !== "As Preset", " ✎");
-    _setLabelMarker(latentChW, latentChW && parseInt(latentChW.value, 10) !== 0, " ✎");
+    if (_setLabelMarker(orientationW, orientationW && orientationW.value !== "As Preset", " ✎")) changed = true;
+    if (_setLabelMarker(latentChW, latentChW && parseInt(latentChW.value, 10) !== 0, " ✎")) changed = true;
 
-    node.setDirtyCanvas(true, true);
+    if (changed) node.setDirtyCanvas(true, true);
 }
 
 app.registerExtension({
