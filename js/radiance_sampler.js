@@ -279,14 +279,9 @@ function _forceWidgetReinsert(widget, node) {
 function setWidgetVisible(widget, visible, node) {
     if (!widget) return;
 
-    // ALBABIT-FIX: reinserting (below) destroys and recreates the widget's Vue
-    // component -- fine for a real hidden/type transition, but applyFolding()
-    // now runs every 250ms via the polling loop, and reinserting on every single
-    // call (even when nothing changed) was destroying the DOM input the user was
-    // actively typing into, snapping manually-typed values back to the last
-    // committed one every poll tick. +/- buttons commit atomically so they
-    // survived; typing, which needs the same DOM node to stay mounted across
-    // multiple keystrokes, didn't. Only reinsert on an actual transition.
+    // ALBABIT-FIX: only reinsert (destroys/recreates the Vue component, see
+    // below) on a real hidden/type transition -- redundant reinserts were
+    // interrupting in-progress widget typing (see applyFolding's comment).
     const wasHidden = widget.hidden === true || widget.type === "hidden";
 
     if (!widget.options) widget.options = {};
@@ -321,13 +316,9 @@ function setWidgetVisible(widget, visible, node) {
         }
     }
 
-    // Once a widget's Vue component has been (re)mounted, it stops reacting to
-    // later type/hidden changes via a no-op splice(0,0) alone -- it keeps
-    // rendering its previous state until reinserted again. But only reinsert
-    // when hidden/type actually transitioned this call (see comment above) --
-    // not on every redundant call, which is now most of them (poll-driven).
-    // Returns whether a transition happened so callers (applyFolding) can
-    // skip their own size/redraw work on fully-idle passes.
+    // A no-op splice(0,0) alone doesn't make Vue re-read a mounted widget's
+    // type/hidden -- only a real reinsert does. Returns whether that
+    // happened so callers (applyFolding) can skip their own redraw work.
     if (wasHidden !== !visible) {
         _forceWidgetReinsert(widget, node);
         return true;
@@ -342,12 +333,9 @@ function refreshNodeSize(node) {
     const sz = node.computeSize();
     const newWidth = Math.max(node.size[0], sz[0]);
     const newHeight = sz[1];
-    // ALBABIT-FIX: applyFolding() calls this unconditionally on every call,
-    // which now includes every 250ms poll tick -- reassigning size even when
-    // unchanged was enough to disrupt in-progress typing in any widget (same
-    // bug class as setWidgetVisible/updateSigmaLocks, likely the main
-    // contributor since this runs at the end of every single fold pass
-    // regardless of which node.widgets are connected). Skip if unchanged.
+    // ALBABIT-FIX: skip if unchanged -- applyFolding() calls this on every
+    // poll tick now, and reassigning size even when identical was another
+    // contributor to the typing-interruption bug (see applyFolding).
     if (node.size[0] === newWidth && node.size[1] === newHeight) return;
     // ALBABIT-FIX: node.setSize(...) is the API Vue's resize handling actually
     // observes; raw node.size[i] mutation has zero visual effect.
@@ -419,23 +407,18 @@ function applyFolding(node) {
 
     // Dummy compatibility absorbers that are always hidden
     const dummyWidgets = ["_js_export_btn", "_js_import_btn", "_js_preset_info"];
-    const controlAfterW = find("control_after_generate");
 
     // ALBABIT-FIX: "Auto" (formerly "None") no longer hides everything -- it
     // falls through to the same smart-fold branch as named presets below,
     // just without hardcoded values (those come live from
     // updateModelMetaDefaults instead).
 
-    // ALBABIT-FIX: two-phase visibility. The old flow ("show everything,
-    // then re-hide the folded ones") made every folded widget transition
-    // hidden→visible→hidden on every call -- harmless when folding only ran
-    // on real events, but the 250ms poll turned that into two Vue component
-    // remounts per folded widget per tick, each of which can also remount
-    // neighbouring widgets in the reactive array -- destroying the DOM input
-    // the user was typing into (typed values snapped back; +/- clicks commit
-    // atomically so they survived). Now: compute the FINAL hidden set first,
-    // then apply once -- steady state produces zero transitions, so
-    // setWidgetVisible's transition guard never reinserts anything.
+    // ALBABIT-FIX: compute the final hidden set once, then apply in a single
+    // pass below -- the old "show everything, then re-hide" two-phase flow
+    // toggled every folded widget hidden→visible→hidden on every poll tick,
+    // and each transition remounts that widget's Vue component (and its
+    // neighbours in the reactive array), which was interrupting in-progress
+    // typing. Steady state now produces zero transitions.
     const hiddenNames = new Set(dummyWidgets);
 
     // ── Custom: full manual control → everything visible, only tile sub-options follow tile_mode ──
@@ -448,11 +431,12 @@ function applyFolding(node) {
             hiddenNames.add("tile_overlap");
             hiddenNames.add("tile_blend");
         }
+        // "control_after_generate" is never added to hiddenNames, so this
+        // loop alone already leaves it visible.
         let visChanged = false;
         node.widgets.forEach(w => {
             if (setWidgetVisible(w, !hiddenNames.has(w.name), node)) visChanged = true;
         });
-        if (controlAfterW && setWidgetVisible(controlAfterW, true, node)) visChanged = true;
         // ALBABIT-FIX: restore the full sampler_mode option list -- Custom
         // means no restrictions, even if Auto previously filtered it down
         // for a video model / cfg==1.0 (see 3.5f below).
@@ -568,12 +552,12 @@ function applyFolding(node) {
         LTX_INCOMPATIBLE_WIDGETS.forEach(name => hiddenNames.add(name));
     }
 
-    // ── Apply the final state in one pass (preset_info stays visible) ──
+    // ── Apply the final state in one pass (preset_info / control_after_generate
+    // are never added to hiddenNames, so they stay visible automatically) ──
     let visChanged = false;
     node.widgets.forEach(w => {
         if (setWidgetVisible(w, !hiddenNames.has(w.name), node)) visChanged = true;
     });
-    if (controlAfterW && setWidgetVisible(controlAfterW, true, node)) visChanged = true;
 
     // 3.5f. sampler_mode combo: filter out individual choices that are dead
     // for the current state, rather than hiding the whole widget (Standard
