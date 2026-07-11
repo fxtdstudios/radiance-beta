@@ -155,6 +155,23 @@ const CFG_GUIDED_MODELS = new Set([
 ]);
 const LTX_MODEL_TYPES = new Set(["ltxv", "ltxav"]);
 
+// ALBABIT-FIX: mirrors sampler_utils.py's VIDEO_MODEL_TYPES -- used to
+// filter the "Phase-Shift" sampler_mode options (see PHASE_SHIFT_MODES
+// below), which nodes_sampler.py silently falls back to Standard for.
+const VIDEO_MODEL_TYPES = new Set([
+    "wan", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "mochi",
+]);
+
+// ALBABIT-FIX: mirrors sampler_utils.py's SamplerMode string constants --
+// used to filter the sampler_mode combo dynamically (see 3.5f in
+// applyFolding). Phase-Shift is a no-op for video models (falls back to
+// Standard server-side). CFG++ is a no-op whenever cfg==1.0 exactly
+// (apply_cfg_plus_plus interpolates cfg->1.0, collapsing to a constant
+// when cfg is already 1.0) -- purely a function of the live cfg value,
+// not the architecture (which only influences cfg's *default*).
+const PHASE_SHIFT_MODES = new Set(["Phase-Shift (Euler >> DPM)", "Phase-Shift (Euler >> SGM)"]);
+const CFG_PLUS_PLUS_MODE = "CFG++ (Perpendicular)";
+
 // ALBABIT-FIX: mirrors sampler_utils.py's AYS_ANCHORS coverage (5 direct
 // entries + aliases) -- everything NOT in this set silently falls through
 // to the standard sigma computation when ays_schedule=True, no warning.
@@ -400,6 +417,17 @@ function applyFolding(node) {
         setWidgetVisible(find("tile_size"),    isTiled, node);
         setWidgetVisible(find("tile_overlap"), isTiled, node);
         setWidgetVisible(find("tile_blend"),   isTiled, node);
+        // ALBABIT-FIX: restore the full sampler_mode option list -- Custom
+        // means no restrictions, even if Auto previously filtered it down
+        // for a video model / cfg==1.0 (see 3.5f below).
+        const samplerModeW = find("sampler_mode");
+        if (samplerModeW?._radOrigOptions) {
+            const currentValues = samplerModeW.options?.values || [];
+            if (currentValues.length !== samplerModeW._radOrigOptions.length) {
+                samplerModeW.options.values = samplerModeW._radOrigOptions.slice();
+                _forceWidgetReinsert(samplerModeW, node);
+            }
+        }
         refreshNodeSize(node);
         return;
     }
@@ -502,6 +530,35 @@ function applyFolding(node) {
     // 3.5e. LTX models can't use the flux-style guidance / tiling / preview widgets.
     if (isLTX) {
         LTX_INCOMPATIBLE_WIDGETS.forEach(name => setWidgetVisible(find(name), false, node));
+    }
+
+    // 3.5f. sampler_mode combo: filter out individual choices that are dead
+    // for the current state, rather than hiding the whole widget (Standard
+    // and the Phase-Shift options remain meaningful for most models).
+    // Mutates the combo's own option list -- a different mechanism from
+    // setWidgetVisible, needed because these are choices inside one dropdown.
+    if (samplerModeW) {
+        if (!samplerModeW._radOrigOptions) {
+            samplerModeW._radOrigOptions = (samplerModeW.options?.values || []).slice();
+        }
+        const cfgIsOne = Number(find("cfg")?.value) === 1;
+        const isVideoModel = VIDEO_MODEL_TYPES.has(effectiveModel);
+        const allowedModes = samplerModeW._radOrigOptions.filter(m => {
+            if (PHASE_SHIFT_MODES.has(m) && isVideoModel) return false;
+            if (m === CFG_PLUS_PLUS_MODE && cfgIsOne) return false;
+            return true;
+        });
+        const currentValues = samplerModeW.options?.values || [];
+        const listChanged = currentValues.length !== allowedModes.length ||
+            currentValues.some((v, i) => v !== allowedModes[i]);
+        if (listChanged) {
+            if (!samplerModeW.options) samplerModeW.options = {};
+            samplerModeW.options.values = allowedModes;
+            if (!allowedModes.includes(samplerModeW.value)) {
+                samplerModeW.value = "Standard";
+            }
+            _forceWidgetReinsert(samplerModeW, node);
+        }
     }
 
     // 3.6. Preset info text box is shown for named presets.
