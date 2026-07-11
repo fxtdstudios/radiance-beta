@@ -279,6 +279,16 @@ function _forceWidgetReinsert(widget, node) {
 function setWidgetVisible(widget, visible, node) {
     if (!widget) return;
 
+    // ALBABIT-FIX: reinserting (below) destroys and recreates the widget's Vue
+    // component -- fine for a real hidden/type transition, but applyFolding()
+    // now runs every 250ms via the polling loop, and reinserting on every single
+    // call (even when nothing changed) was destroying the DOM input the user was
+    // actively typing into, snapping manually-typed values back to the last
+    // committed one every poll tick. +/- buttons commit atomically so they
+    // survived; typing, which needs the same DOM node to stay mounted across
+    // multiple keystrokes, didn't. Only reinsert on an actual transition.
+    const wasHidden = widget.hidden === true || widget.type === "hidden";
+
     if (!widget.options) widget.options = {};
     widget.options.hidden = !visible;
     widget.hidden = !visible;
@@ -311,13 +321,18 @@ function setWidgetVisible(widget, visible, node) {
         }
     }
 
-    // ALBABIT-FIX: always force a remove+reinsert, even if type/hidden didn't
-    // change this call. Once a widget's Vue component has been (re)mounted, it
-    // stops reacting to later type/hidden changes via a no-op splice(0,0) alone
-    // -- it keeps rendering its previous state until reinserted again. Reinserting
-    // unconditionally guarantees every widget's component reflects its current
-    // state regardless of how many times it toggled before.
-    _forceWidgetReinsert(widget, node);
+    // Once a widget's Vue component has been (re)mounted, it stops reacting to
+    // later type/hidden changes via a no-op splice(0,0) alone -- it keeps
+    // rendering its previous state until reinserted again. But only reinsert
+    // when hidden/type actually transitioned this call (see comment above) --
+    // not on every redundant call, which is now most of them (poll-driven).
+    // Returns whether a transition happened so callers (applyFolding) can
+    // skip their own size/redraw work on fully-idle passes.
+    if (wasHidden !== !visible) {
+        _forceWidgetReinsert(widget, node);
+        return true;
+    }
+    return false;
 }
 
 // ── 2. Resize and redraw helper ──
@@ -325,9 +340,18 @@ function refreshNodeSize(node) {
     if (!node.computeSize) return;
 
     const sz = node.computeSize();
+    const newWidth = Math.max(node.size[0], sz[0]);
+    const newHeight = sz[1];
+    // ALBABIT-FIX: applyFolding() calls this unconditionally on every call,
+    // which now includes every 250ms poll tick -- reassigning size even when
+    // unchanged was enough to disrupt in-progress typing in any widget (same
+    // bug class as setWidgetVisible/updateSigmaLocks, likely the main
+    // contributor since this runs at the end of every single fold pass
+    // regardless of which node.widgets are connected). Skip if unchanged.
+    if (node.size[0] === newWidth && node.size[1] === newHeight) return;
     // ALBABIT-FIX: node.setSize(...) is the API Vue's resize handling actually
     // observes; raw node.size[i] mutation has zero visual effect.
-    node.setSize([Math.max(node.size[0], sz[0]), sz[1]]);
+    node.setSize([newWidth, newHeight]);
     app.graph.setDirtyCanvas(true, true);
 }
 
@@ -398,25 +422,37 @@ function applyFolding(node) {
     const controlAfterW = find("control_after_generate");
 
     // ALBABIT-FIX: "Auto" (formerly "None") no longer hides everything -- it
-    // falls through to the same "show all, smart-fold" branch as named
-    // presets below, just without hardcoded values (those come live from
+    // falls through to the same smart-fold branch as named presets below,
+    // just without hardcoded values (those come live from
     // updateModelMetaDefaults instead).
 
-    // ── Custom: full manual control → show everything, only tile sub-options follow tile_mode ──
+    // ALBABIT-FIX: two-phase visibility. The old flow ("show everything,
+    // then re-hide the folded ones") made every folded widget transition
+    // hidden→visible→hidden on every call -- harmless when folding only ran
+    // on real events, but the 250ms poll turned that into two Vue component
+    // remounts per folded widget per tick, each of which can also remount
+    // neighbouring widgets in the reactive array -- destroying the DOM input
+    // the user was typing into (typed values snapped back; +/- clicks commit
+    // atomically so they survived). Now: compute the FINAL hidden set first,
+    // then apply once -- steady state produces zero transitions, so
+    // setWidgetVisible's transition guard never reinserts anything.
+    const hiddenNames = new Set(dummyWidgets);
+
+    // ── Custom: full manual control → everything visible, only tile sub-options follow tile_mode ──
     if (isCustom) {
-        node.widgets.forEach(w => {
-            const hide = (w.name === "preset_info") || dummyWidgets.includes(w.name);
-            setWidgetVisible(w, !hide, node);
-        });
-        if (controlAfterW) setWidgetVisible(controlAfterW, true, node);
-        // ALBABIT-FIX: tile sub-options are meaningless when tile_mode is off — keep them
-        // hidden in Custom too so the UI stays uncluttered. tile_mode callback triggers
-        // toggleFields, so toggling tile_mode immediately shows/hides these.
+        hiddenNames.add("preset_info");
         const tileModeW = find("tile_mode");
         const isTiled = tileModeW && tileModeW.value === true;
-        setWidgetVisible(find("tile_size"),    isTiled, node);
-        setWidgetVisible(find("tile_overlap"), isTiled, node);
-        setWidgetVisible(find("tile_blend"),   isTiled, node);
+        if (!isTiled) {
+            hiddenNames.add("tile_size");
+            hiddenNames.add("tile_overlap");
+            hiddenNames.add("tile_blend");
+        }
+        let visChanged = false;
+        node.widgets.forEach(w => {
+            if (setWidgetVisible(w, !hiddenNames.has(w.name), node)) visChanged = true;
+        });
+        if (controlAfterW && setWidgetVisible(controlAfterW, true, node)) visChanged = true;
         // ALBABIT-FIX: restore the full sampler_mode option list -- Custom
         // means no restrictions, even if Auto previously filtered it down
         // for a video model / cfg==1.0 (see 3.5f below).
@@ -428,17 +464,13 @@ function applyFolding(node) {
                 _forceWidgetReinsert(samplerModeW, node);
             }
         }
-        refreshNodeSize(node);
+        // ALBABIT-FIX: only resize on an actual visibility transition --
+        // resizing every poll tick disrupted in-progress typing.
+        if (visChanged) refreshNodeSize(node);
         return;
     }
 
-    // ── Preset: show all by default, then apply smart, model-aware folding ──
-    node.widgets.forEach(w => {
-        const hide = dummyWidgets.includes(w.name);
-        setWidgetVisible(w, !hide, node);
-    });
-    if (controlAfterW) setWidgetVisible(controlAfterW, true, node);
-
+    // ── Preset/Auto: compute the smart, model-aware hidden set ──
     const tileModeW = find("tile_mode");
     const restartCountW = find("restart_count");
     const aysScheduleW = find("ays_schedule");
@@ -458,34 +490,38 @@ function applyFolding(node) {
     const sdTurboActive = _isSdTurboActive(node);
 
     // 3.1. Refiner: visible if refiner_model input port is wired up
-    setWidgetVisible(find("refiner_start_step"), hasRefinerModel, node);
+    if (!hasRefinerModel) hiddenNames.add("refiner_start_step");
 
-    // 3.1b. SDR reference conditioning: visible if sdr_reference input port is wired up
-    // (same pattern as refiner_start_step above -- sdr_blend/inject_steps/decay are
-    // entirely gated on sdr_reference+sdr_vae in nodes_sampler.py, inert without it).
-    setWidgetVisible(find("sdr_blend"), hasSdrReference, node);
-    setWidgetVisible(find("sdr_inject_steps"), hasSdrReference, node);
-    setWidgetVisible(find("sdr_decay"), hasSdrReference, node);
+    // 3.1b. SDR reference conditioning: visible if sdr_reference input port is
+    // wired up (sdr_blend/inject_steps/decay are entirely gated on
+    // sdr_reference+sdr_vae in nodes_sampler.py, inert without it).
+    if (!hasSdrReference) {
+        hiddenNames.add("sdr_blend");
+        hiddenNames.add("sdr_inject_steps");
+        hiddenNames.add("sdr_decay");
+    }
 
     // 3.2. Tiled latent sampling: visible if tile_mode is checked
     const isTiled = tileModeW && tileModeW.value === true;
-    setWidgetVisible(find("tile_size"), isTiled, node);
-    setWidgetVisible(find("tile_overlap"), isTiled, node);
-    setWidgetVisible(find("tile_blend"), isTiled, node);
+    if (!isTiled) {
+        hiddenNames.add("tile_size");
+        hiddenNames.add("tile_overlap");
+        hiddenNames.add("tile_blend");
+    }
 
     // 3.3. Restart schedules: visible if restart_count > 0
     const hasRestartCount = restartCountW && parseInt(restartCountW.value, 10) > 0;
-    setWidgetVisible(find("noise_alpha_start"), hasRestartCount, node);
-    setWidgetVisible(find("noise_alpha_end"), hasRestartCount, node);
+    if (!hasRestartCount) {
+        hiddenNames.add("noise_alpha_start");
+        hiddenNames.add("noise_alpha_end");
+    }
 
-    // 3.4. Sigma blend steps: visible if Phase-Shift sampler_mode OR ays_schedule is active
+    // 3.4. Sigma blend steps: visible if Phase-Shift sampler_mode OR ays_schedule
+    // is active. phase_split: only meaningful in a Phase-Shift sampler_mode.
     const isPhaseShift = samplerMode.includes("Phase-Shift");
     const isAys = aysScheduleW && aysScheduleW.value === true;
-    setWidgetVisible(find("sigma_blend_steps"), isPhaseShift || isAys, node);
-
-    // 3.4b. Phase-split fraction: only meaningful in a Phase-Shift sampler_mode
-    // (not model-dependent -- a widget-state fold missed by the original pass).
-    setWidgetVisible(find("phase_split"), isPhaseShift, node);
+    if (!(isPhaseShift || isAys)) hiddenNames.add("sigma_blend_steps");
+    if (!isPhaseShift) hiddenNames.add("phase_split");
 
     // 3.5. Model-aware shift/guidance folding.
     //  - flux_shift (flow-match shift) is a no-op for SDXL/SD1.5 (ddpm noise
@@ -497,22 +533,22 @@ function applyFolding(node) {
         GUIDANCE_EMBED_MODELS.has(effectiveModel) ||
         (effectiveModel === "auto" && !CFG_GUIDED_MODELS.has(effectiveModel));
     const usesFlowShift = effectiveModel !== "sdxl" && effectiveModel !== "sd15";
-    setWidgetVisible(find("flux_shift"), usesFlowShift, node);
-    setWidgetVisible(find("flux_guidance"), usesGuidanceEmbed, node);
-    setWidgetVisible(find("flux_guidance_profile"), usesGuidanceEmbed, node);
+    if (!usesFlowShift) hiddenNames.add("flux_shift");
+    if (!usesGuidanceEmbed) {
+        hiddenNames.add("flux_guidance");
+        hiddenNames.add("flux_guidance_profile");
+    }
 
     // 3.5b. PAG / AYS: narrow architecture support (verified against
     // sampler_utils.py's actual hook conditions, not just naming) -- hidden
-    // by default since most architectures DON'T support them, shown only
-    // when the loaded model is confirmed to (opposite bias from 3.5 above,
-    // where most architectures DO use flow-matching/guidance).
-    setWidgetVisible(find("pag_scale"), PAG_SUPPORTED_MODELS.has(effectiveModel), node);
-    setWidgetVisible(aysScheduleW, AYS_SUPPORTED_MODELS.has(effectiveModel), node);
+    // unless the loaded model is confirmed to support them.
+    if (!PAG_SUPPORTED_MODELS.has(effectiveModel)) hiddenNames.add("pag_scale");
+    if (!AYS_SUPPORTED_MODELS.has(effectiveModel)) hiddenNames.add("ays_schedule");
 
     // 3.5c. Guidance rescale only has an effect when cfg > 1.0 (nodes_sampler.py
     // gates it on that exact condition) -- moot for guidance-embed models,
     // whose cfg is pinned at 1.0 by design.
-    setWidgetVisible(find("guidance_rescale_phi"), !usesGuidanceEmbed, node);
+    if (usesGuidanceEmbed) hiddenNames.add("guidance_rescale_phi");
 
     // 3.5d. SDXL Turbo's discrete schedule (get_sd_turbo_sigmas) ignores
     // scheduler/scheduler_mode/terminal_sigma_to_zero/force_exact_steps
@@ -520,17 +556,24 @@ function applyFolding(node) {
     // "cfg > 1.0" gate never fires -- hide all five rather than showing
     // values that silently do nothing.
     if (sdTurboActive) {
-        setWidgetVisible(find("scheduler"), false, node);
-        setWidgetVisible(find("scheduler_mode"), false, node);
-        setWidgetVisible(find("terminal_sigma_to_zero"), false, node);
-        setWidgetVisible(find("force_exact_steps"), false, node);
-        setWidgetVisible(find("guidance_rescale_phi"), false, node);
+        hiddenNames.add("scheduler");
+        hiddenNames.add("scheduler_mode");
+        hiddenNames.add("terminal_sigma_to_zero");
+        hiddenNames.add("force_exact_steps");
+        hiddenNames.add("guidance_rescale_phi");
     }
 
     // 3.5e. LTX models can't use the flux-style guidance / tiling / preview widgets.
     if (isLTX) {
-        LTX_INCOMPATIBLE_WIDGETS.forEach(name => setWidgetVisible(find(name), false, node));
+        LTX_INCOMPATIBLE_WIDGETS.forEach(name => hiddenNames.add(name));
     }
+
+    // ── Apply the final state in one pass (preset_info stays visible) ──
+    let visChanged = false;
+    node.widgets.forEach(w => {
+        if (setWidgetVisible(w, !hiddenNames.has(w.name), node)) visChanged = true;
+    });
+    if (controlAfterW && setWidgetVisible(controlAfterW, true, node)) visChanged = true;
 
     // 3.5f. sampler_mode combo: filter out individual choices that are dead
     // for the current state, rather than hiding the whole widget (Standard
@@ -561,12 +604,11 @@ function applyFolding(node) {
         }
     }
 
-    // 3.6. Preset info text box is shown for named presets.
-    setWidgetVisible(find("preset_info"), true, node);
-
     // ALBABIT-FIX: update disabled state for sigmas_override-dependent widgets.
     updateSigmaLocks(node);
-    refreshNodeSize(node);
+    // ALBABIT-FIX: only resize on an actual visibility transition -- resizing
+    // every poll tick disrupted in-progress typing.
+    if (visChanged) refreshNodeSize(node);
 }
 
 function updateUILocks(node, presetName) {
@@ -620,9 +662,17 @@ function updateSigmaLocks(node) {
     if (!node.widgets) return;
     const locked = isSigmaOverrideActive(node);
 
+    // ALBABIT-FIX: same bug class as setWidgetVisible -- this runs every 250ms
+    // via the polling loop, and reassigning widget.disabled/inputEl styling
+    // even when "locked" hasn't changed was enough to interrupt in-progress
+    // typing in "steps"/"denoise"/"scheduler"/etc. (SIGMA_OVERRIDE_WIDGETS).
+    // Skip entirely per-widget when already in the desired state.
+    let changed = false;
     node.widgets.forEach(widget => {
         if (!SIGMA_OVERRIDE_WIDGETS.includes(widget.name)) return;
+        if (widget.disabled === locked) return;
         widget.disabled = locked;
+        changed = true;
         if (widget.inputEl) {
             widget.inputEl.disabled = locked;
             widget.inputEl.style.opacity = locked ? "0.4" : "1.0";
@@ -630,7 +680,7 @@ function updateSigmaLocks(node) {
         }
     });
 
-    node.setDirtyCanvas(true, true);
+    if (changed) node.setDirtyCanvas(true, true);
 }
 
 function applyPreset(node, presetName) {
