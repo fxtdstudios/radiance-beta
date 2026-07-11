@@ -191,7 +191,9 @@ function _forceWidgetReinsert(widget, node) {
 }
 
 function setWidgetVisible(widget, visible, node) {
-	if (!widget) return;
+	if (!widget) return false;
+
+	const wasHidden = widget.hidden === true || widget.type === "hidden";
 
 	if (!widget.options) widget.options = {};
 	widget.options.hidden = !visible;
@@ -220,13 +222,24 @@ function setWidgetVisible(widget, visible, node) {
 		}
 	}
 
-	_forceWidgetReinsert(widget, node);
+	// Only reinsert on an actual hidden/type transition -- reinserting
+	// unconditionally on every call (even a no-op) destroys and recreates the
+	// widget's Vue component every time, which interrupts in-progress typing
+	// in neighbouring widgets when this runs on the 250ms poll below.
+	if (wasHidden !== !visible) {
+		_forceWidgetReinsert(widget, node);
+		return true;
+	}
+	return false;
 }
 
 function refreshNodeSize(node) {
 	if (!node.computeSize) return;
 	const sz = node.computeSize();
-	node.setSize([Math.max(node.size[0], sz[0]), sz[1]]);
+	const newWidth = Math.max(node.size[0], sz[0]);
+	const newHeight = sz[1];
+	if (node.size[0] === newWidth && node.size[1] === newHeight) return;
+	node.setSize([newWidth, newHeight]);
 	node.setDirtyCanvas(true, true);
 }
 
@@ -322,14 +335,15 @@ app.registerExtension({
 							: "quality";
 					}
 
-					setWidgetVisible(fpsWidget,          isVid, node);
-					setWidgetVisible(qualityWidget,       isVid || isJpgWebp, node);
-					setWidgetVisible(exrCompWidget,       isExr, node);
-					setWidgetVisible(startFrameWidget,    isSeq, node);
-					setWidgetVisible(framePaddingWidget,  isSeq, node);
-					setWidgetVisible(audioSourceWidget,   isVid, node);
+					let changed = false;
+					if (setWidgetVisible(fpsWidget,          isVid, node)) changed = true;
+					if (setWidgetVisible(qualityWidget,       isVid || isJpgWebp, node)) changed = true;
+					if (setWidgetVisible(exrCompWidget,       isExr, node)) changed = true;
+					if (setWidgetVisible(startFrameWidget,    isSeq, node)) changed = true;
+					if (setWidgetVisible(framePaddingWidget,  isSeq, node)) changed = true;
+					if (setWidgetVisible(audioSourceWidget,   isVid, node)) changed = true;
 
-					refreshNodeSize(node);
+					if (changed) refreshNodeSize(node);
 				};
 
 				if (formatWidget) {

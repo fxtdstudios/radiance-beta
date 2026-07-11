@@ -120,7 +120,9 @@ function _forceWidgetReinsert(widget, node) {
 }
 
 function setWidgetVisible(widget, visible, node) {
-    if (!widget) return;
+    if (!widget) return false;
+
+    const wasHidden = widget.hidden === true || widget.type === "hidden";
 
     if (!widget.options) widget.options = {};
     widget.options.hidden = !visible;
@@ -149,13 +151,24 @@ function setWidgetVisible(widget, visible, node) {
         }
     }
 
-    _forceWidgetReinsert(widget, node);
+    // Only reinsert on an actual hidden/type transition -- reinserting
+    // unconditionally on every call (even a no-op) destroys and recreates the
+    // widget's Vue component every time, which interrupts in-progress typing
+    // in neighbouring widgets when this runs on the 250ms poll below.
+    if (wasHidden !== !visible) {
+        _forceWidgetReinsert(widget, node);
+        return true;
+    }
+    return false;
 }
 
 function refreshNodeSize(node) {
     if (!node.computeSize) return;
     const sz = node.computeSize();
-    node.setSize([Math.max(node.size[0], sz[0]), sz[1]]);
+    const newWidth = Math.max(node.size[0], sz[0]);
+    const newHeight = sz[1];
+    if (node.size[0] === newWidth && node.size[1] === newHeight) return;
+    node.setSize([newWidth, newHeight]);
     node.setDirtyCanvas(true, true);
 }
 
@@ -202,7 +215,8 @@ function syncWidgets(node) {
     );
     _setLabelMarker(hdrOutputW, willBlowOut ? BLOWOUT_MARKER : null);
 
-    setWidgetVisible(displayTmW, isCompressLog, node);
+    let changed = false;
+    if (setWidgetVisible(displayTmW, isCompressLog, node)) changed = true;
 
     // ALBABIT-FIX: force export_rhdr off before reading its value below, so
     // rhdr_precision's visibility (which depends on it) reflects the forced
@@ -211,22 +225,22 @@ function syncWidgets(node) {
     if (rhdrRedundant && exportRhdrW?.value) {
         exportRhdrW.value = false;
     }
-    setWidgetVisible(exportRhdrW, !rhdrRedundant, node);
+    if (setWidgetVisible(exportRhdrW, !rhdrRedundant, node)) changed = true;
 
-    setWidgetVisible(targetStopsW, !!inverseTmW?.value && !isCompressLog, node);
-    setWidgetVisible(rhdrPrecisionW, !!exportRhdrW?.value, node);
-    setWidgetVisible(decoderSizeW, rudraDecoderW?.value === "Enabled", node);
-    setWidgetVisible(sourceSpaceW, isCompressLog, node);
-    setWidgetVisible(decodeNoiseW, isCompressLog, node);
-    setWidgetVisible(inverseTmW, !isCompressLog, node);
-    setWidgetVisible(hdrScaleW, !DISPLAY_READY_SPACES.has(targetSpaceVal), node);
+    if (setWidgetVisible(targetStopsW, !!inverseTmW?.value && !isCompressLog, node)) changed = true;
+    if (setWidgetVisible(rhdrPrecisionW, !!exportRhdrW?.value, node)) changed = true;
+    if (setWidgetVisible(decoderSizeW, rudraDecoderW?.value === "Enabled", node)) changed = true;
+    if (setWidgetVisible(sourceSpaceW, isCompressLog, node)) changed = true;
+    if (setWidgetVisible(decodeNoiseW, isCompressLog, node)) changed = true;
+    if (setWidgetVisible(inverseTmW, !isCompressLog, node)) changed = true;
+    if (setWidgetVisible(hdrScaleW, !DISPLAY_READY_SPACES.has(targetSpaceVal), node)) changed = true;
 
     // ALBABIT-FIX: temporal_overlap is only read inside `if latent.ndim == 5
     // and temporal_size > 0:` (hdr/vae.py:2763) -- matches its own tooltip
     // ("Only active when temporal_size > 0").
-    setWidgetVisible(temporalOverlapW, (parseInt(temporalSizeW?.value, 10) || 0) > 0, node);
+    if (setWidgetVisible(temporalOverlapW, (parseInt(temporalSizeW?.value, 10) || 0) > 0, node)) changed = true;
 
-    refreshNodeSize(node);
+    if (changed) refreshNodeSize(node);
 }
 
 app.registerExtension({
