@@ -530,22 +530,21 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp16",
         "clip_dtype": "fp16",
     },
-    # ALBABIT-FIX: Large and Turbo merged -- same model_type/weight_dtype/
-    # clip_dtype already, Turbo is Large's distilled variant (Sampler tells
-    # them apart by filename). Kept "Large" in the name since "SD3.5 Medium"
-    # is a genuinely different-sized sibling, not a merge candidate.
-    "SD3.5 Large": {
-        "model_type": "sd3.5",
-        "weight_dtype": "fp16",
-        "clip_dtype": "fp16",
-    },
-    "SD3.5 Medium": {
+    # ALBABIT-FIX: Large, Large Turbo, and Medium all merged into one preset --
+    # same model_type/weight_dtype/clip_dtype already, and (unlike Flux.2
+    # Dev/Klein) Large and Medium even share identical vae_hints/clip_hints
+    # (js/radiance_loader.js), so there's no downstream CLIP-size branching
+    # to worry about either. Turbo is Large's distilled variant (Sampler
+    # tells it apart by filename); Large vs Medium is resolved the same way
+    # Flux.2 Dev/Klein's unet_hints are -- a combined hint list, no separate
+    # preset needed.
+    "SD3.5": {
         "model_type": "sd3.5",
         "weight_dtype": "fp16",
         "clip_dtype": "fp16",
     },
     # ALBABIT-FIX: Base and Turbo merged -- same reasoning as Flux.1/SD3.5
-    # Large above.
+    # above.
     "SDXL": {
         "model_type": "sdxl",
         "weight_dtype": "fp16",
