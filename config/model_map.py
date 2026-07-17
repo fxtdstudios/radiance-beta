@@ -576,7 +576,15 @@ CHECKPOINT_PRESETS: dict = {
     # ALBABIT-FIX: separate preset for Wan 2.2 checkpoints — same CLIP
     # slot layout as Wan 2.1, distinct unet_hints (js/radiance_loader.js) to
     # avoid matching the wrong version when both are installed.
+    # weight_dtype now "default" -- same reasoning as "Wan 2.1" above, for
+    # consistency/user choice (comfy.sd auto-picks per the real loaded file).
+    # See "Wan 2.2 (Low VRAM)" for the old forced-fp8 behavior.
     "Wan 2.2": {
+        "model_type": "wan",
+        "weight_dtype": "default",
+        "clip_dtype": "default",
+    },
+    "Wan 2.2 (Low VRAM)": {
         "model_type": "wan",
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "default",
@@ -610,6 +618,7 @@ VIDEO_PRESET_NAMES: set = {
     "Wan 2.1",
     "Wan 2.1 (Low VRAM)",
     "Wan 2.2",
+    "Wan 2.2 (Low VRAM)",
     "Wan 2.2 TI2V",
 }
 
