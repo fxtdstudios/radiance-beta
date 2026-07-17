@@ -73,12 +73,17 @@ VIDEO_MODEL_TYPES = {"wan", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvide
 # ALBABIT-FIX: flux2/flux2-klein use guidance_embed like flux (not external CFG)
 # ALBABIT-FIX: lumina2 removed -- its official workflow uses a plain KSampler
 # cfg, no guidance-embed node (unlike Flux's FluxGuidance) -- see CFG_GUIDED_MODELS
-GUIDANCE_EMBED_MODELS = {"flux", "flux2", "flux2-klein", "z_image", "ltxv"}
+# ALBABIT-FIX: z_image removed too -- exact same situation as lumina2 (its
+# official workflow's KSampler uses cfg=4, no guidance-embed node either),
+# apparently missed when lumina2 got the same fix. Confirmed against
+# Comfy-Org's own bundled "image_z_image.json" template directly.
+GUIDANCE_EMBED_MODELS = {"flux", "flux2", "flux2-klein", "ltxv"}
 
 # ALBABIT-FIX: "sd35" renamed to "sd3.5" for consistency with Loader/detect.py
 # ALBABIT-FIX: lumina2 added -- classic external CFG, confirmed via its
 # official example workflow (plain KSampler cfg=4, no guidance-embed node)
-CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd1.5", "sd3", "sd3.5", "ltxav", "cogvideox", "mochi", "lumina2"}
+# ALBABIT-FIX: z_image added -- same evidence class as lumina2 above.
+CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd1.5", "sd3", "sd3.5", "ltxav", "cogvideox", "mochi", "lumina2", "z_image"}
 
 MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
     # ALBABIT-FIX: steps=20 added, verified against Comfy-Org's official
@@ -231,18 +236,22 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "steps": 25,
         "guidance_type": "cfg",
     },
-    # ALBABIT-FIX: steps=25 added, verified against Comfy-Org's official
-    # Z-Image (Base) workflow template -- its Turbo variant uses 8 steps
-    # instead, not covered here (no filename-based override exists yet for
-    # z_image, unlike Flux Schnell/Klein).
+    # ALBABIT-FIX: steps=25 verified against Comfy-Org's official Z-Image
+    # (Base) workflow template -- its Turbo variant uses 8 steps instead, see
+    # refine_distillation_from_meta() below. Same template's KSampler also
+    # showed cfg=1.0/sampler="euler"/guidance_type="embedding" here were all
+    # wrong -- plain KSampler cfg=4, sampler="res_multistep", no
+    # guidance-embed node at all (exact same situation lumina2 was already
+    # fixed for, apparently missed for z_image at the time -- both share the
+    # same "lumina2" CLIPLoader type, consistent with a related architecture).
     "z_image": {
-        "cfg": 1.0,
+        "cfg": 4.0,
         "scheduler": "simple",
-        "guidance": 3.5,
+        "guidance": 0.0,
         "shift": 3.0,
-        "sampler": "euler",
+        "sampler": "res_multistep",
         "steps": 25,
-        "guidance_type": "embedding",
+        "guidance_type": "cfg",
     },
     # ALBABIT-FIX: steps=20 added, verified against ComfyUI's own official
     # Cosmos-1.0 7B example workflow.
@@ -553,6 +562,12 @@ def refine_distillation_from_meta(detected_type: str, unet_file: str) -> Optiona
     # (4 steps)" preset, already tuned in practice.
     if detected_type == "sd3.5" and "turbo" in name:
         return {"cfg": 1.6, "steps": 4}
+    # ALBABIT-FIX: verified against Comfy-Org's official Z-Image Turbo
+    # workflow template -- KSampler cfg=1/steps=8 (sampler stays
+    # "res_multistep", inherited unchanged from MODEL_DEFAULTS["z_image"]
+    # above, same for both Base and Turbo).
+    if detected_type == "z_image" and "turbo" in name:
+        return {"cfg": 1.0, "steps": 8}
     return None
 
 def gradual_sigma_blend(
