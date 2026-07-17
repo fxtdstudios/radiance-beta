@@ -33,6 +33,8 @@ from typing import Any
 import numpy as np
 import torch
 
+from radiance.path_utils import strip_path_quotes
+
 log = logging.getLogger("radiance.aces2")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1032,6 +1034,7 @@ class RadianceACESMetadataFile:
         save_path:        str   = "",
         amf_xml_in:       str   = "",
     ):
+        save_path = strip_path_quotes(save_path)
         if mode == "write":
             xml = _build_amf(
                 clip_name        = clip_name,
@@ -1042,8 +1045,8 @@ class RadianceACESMetadataFile:
                 description      = description,
             )
 
-            if save_path.strip():
-                path = save_path.strip()
+            if save_path:
+                path = save_path
                 if not path.lower().endswith(".amf"):
                     path += ".amf"
                 os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -1061,8 +1064,8 @@ class RadianceACESMetadataFile:
 
         else:  # read
             src = amf_xml_in.strip()
-            if not src and save_path.strip():
-                with open(save_path.strip(), encoding="utf-8") as fh:
+            if not src and save_path:
+                with open(save_path, encoding="utf-8") as fh:
                     src = fh.read()
 
             if not src:
