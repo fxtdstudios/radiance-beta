@@ -346,20 +346,30 @@ const PRESET_CONFIGS = {
     // ALBABIT-FIX: unet_hints previously matched any Wan 2.1 file regardless
     // of size -- with both 1.3B and 14B installed, findMatchingFile would
     // pick whichever sorted first in the file list, not the user's intent.
-    // "14b"/"1.3b" listed first (flagship-first, same convention as LTX
-    // 13B/Flux Dev) so a specific size wins over the generic fallback. VAE/T5
-    // untouched -- confirmed shared across both sizes on HF
-    // (Comfy-Org/Wan_2.1_ComfyUI_repackaged: single wan_2.1_vae.safetensors +
-    // umt5_xxl_* files, no size-specific variants) -- no 🧲 needed here.
+    // ALBABIT-FIX (bug caught by Albabit, 2026-07-17): a first attempt added
+    // bare "14b"/"1.3b" tokens directly to unet_hints -- but findMatchingFile
+    // tests each hint against EVERY available file with no architecture
+    // awareness, so a bare "14b" also matched Wan 2.2's own 14B-class
+    // high_noise/low_noise files (e.g. "wan2.2_i2v_high_noise_14B_fp16..."),
+    // hijacking "Wan 2.1"'s auto-fill onto a completely different
+    // architecture. Fixed via unet_size_priority (see _resolveUnetMatch)
+    // instead: size tokens are now only ever considered among files that
+    // ALREADY matched one of these architecture-identifying unet_hints, never
+    // tested against the full file list on their own. VAE/T5 untouched --
+    // confirmed shared across both sizes on HF (Comfy-Org/Wan_2.1_ComfyUI_repackaged:
+    // single wan_2.1_vae.safetensors + umt5_xxl_* files, no size-specific
+    // variants) -- no 🧲 needed here.
     "Wan 2.1": {
-        "unet_hints":    ["14b", "1.3b", "wan2.1", "wan_2.1", "wan-2.1", "Wan2.1"],
+        "unet_hints":    ["wan2.1", "wan_2.1", "wan-2.1", "Wan2.1"],
+        "unet_size_priority": ["14b", "1.3b"],
         "vae_hints":     ["wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
         "clip_hints":    {
             "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
         },
     },
     "Wan 2.1 (Low VRAM)": {
-        "unet_hints":    ["14b", "1.3b", "wan2.1", "wan_2.1", "wan-2.1", "Wan2.1"],
+        "unet_hints":    ["wan2.1", "wan_2.1", "wan-2.1", "Wan2.1"],
+        "unet_size_priority": ["14b", "1.3b"],
         "vae_hints":     ["wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
         "clip_hints":    {
             "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
@@ -514,6 +524,29 @@ function _resolveUpscaleHints(node, config) {
 }
 
 /**
+ * Resolve unet_name's auto-fill pick. Without unet_size_priority, behaves
+ * exactly like a plain findMatchingFile() call (existing behavior for every
+ * other preset, unchanged). With it (e.g. Wan 2.1's 1.3B/14B): a bare size
+ * token must NEVER be tested against the full file list on its own -- it
+ * would just as happily match an unrelated architecture's same-size file
+ * (Wan 2.2's own 14B-class high_noise/low_noise checkpoints, under the
+ * "Wan 2.1" preset -- the exact bug Albabit caught live). So size tokens are
+ * only considered among files that already matched one of unet_hints
+ * (architecture identity first, size preference second, never combined into
+ * one flat scan).
+ */
+function _resolveUnetMatch(config, values) {
+    if (!config?.unet_hints || !values) return null;
+    if (!config.unet_size_priority) return findMatchingFile(config.unet_hints, values);
+    const candidates = values.filter(v => config.unet_hints.some(h => v.toLowerCase().includes(h.toLowerCase())));
+    for (const token of config.unet_size_priority) {
+        const match = candidates.find(v => v.toLowerCase().includes(token.toLowerCase()));
+        if (match) return match;
+    }
+    return candidates[0] || null;
+}
+
+/**
  * Performs client-side smart auto-fill matching of files based on selected preset
  */
 function autoFillPresetFiles(node, cleanPreset) {
@@ -523,7 +556,7 @@ function autoFillPresetFiles(node, cleanPreset) {
     // 1. Match UNET
     const unetW = getWidget(node, "unet_name");
     if (unetW && unetW.options?.values && config.unet_hints) {
-        const matched = findMatchingFile(config.unet_hints, unetW.options.values);
+        const matched = _resolveUnetMatch(config, unetW.options.values);
         if (matched) unetW.value = matched;
     }
 
@@ -657,7 +690,12 @@ function updatePresetDivergenceMarkers(node) {
 
     let changed = false;
 
-    const check = (widgetName, hints) => {
+    // resolveMatch overrides the plain findMatchingFile(hints, ...) lookup --
+    // needed for unet_name, whose match must go through _resolveUnetMatch()
+    // (unet_size_priority-aware) instead, same resolver autoFillPresetFiles()
+    // itself uses, so the "✎" divergence check never disagrees with what
+    // auto-fill would actually pick.
+    const check = (widgetName, hints, resolveMatch) => {
         const w = getWidget(node, widgetName);
         if (!w) return;
         let markerText = null;
@@ -665,7 +703,7 @@ function updatePresetDivergenceMarkers(node) {
             if (!hints || hints.length === 0) {
                 if (String(w.value) !== "None") markerText = PRESET_MARKER;
             } else {
-                const matched = findMatchingFile(hints, w.options?.values);
+                const matched = resolveMatch ? resolveMatch() : findMatchingFile(hints, w.options?.values);
                 if (matched !== null) {
                     if (String(w.value) !== String(matched)) markerText = PRESET_MARKER;
                 } else if (!NO_NONE_FALLBACK_FIELDS.has(widgetName)) {
@@ -693,7 +731,8 @@ function updatePresetDivergenceMarkers(node) {
     } else if (unetVariantLinked && modelMetaConnected) {
         if (_markFileWidget(getWidget(node, "unet_name"), LINKED_MARKER)) changed = true;
     } else {
-        check("unet_name", config?.unet_hints);
+        const unetW = getWidget(node, "unet_name");
+        check("unet_name", config?.unet_hints, () => _resolveUnetMatch(config, unetW?.options?.values));
     }
     check("vae_name", config?.vae_hints);
     for (const wName of ALL_CLIP_WIDGETS) {
