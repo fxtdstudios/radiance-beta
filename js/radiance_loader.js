@@ -257,7 +257,13 @@ const PRESET_CONFIGS = {
             "sd3.5_large", "sd3-5_large", "sd3.5_large_turbo", "sd3.5_turbo", "sd3-5_turbo",
             "sd3.5_medium", "sd3-5_medium",
         ],
-        "vae_hints":     ["sd3_vae", "sd3.5_vae", "sd3"],
+        // ALBABIT-FIX: every official SD3.5 release (ComfyUI's own bundled
+        // workflow template, the Comfy-Org HF repo, the official examples page)
+        // ships VAE baked into the main checkpoint -- no standalone SD3.5 VAE
+        // file was found anywhere. "Baked VAE (from UNET)" listed first so it's
+        // the auto-fill default; the old hints stay as a fallback in case a
+        // standalone file does turn up for some user.
+        "vae_hints":     ["Baked VAE (from UNET)", "sd3_vae", "sd3.5_vae", "sd3"],
         "clip_hints":    {
             "clip_l": ["clip_l.safetensors", "clip_l"],
             "clip_g": ["clip_g.safetensors", "clip_g"],
