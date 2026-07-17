@@ -40,6 +40,8 @@ from typing import Any
 
 import torch
 
+from radiance.path_utils import strip_path_quotes
+
 logger = logging.getLogger("radiance.hdr_lora")
 diag_logger = logging.getLogger("radiance.diagnostics")
 
@@ -262,7 +264,7 @@ class RadianceHDRLoRALoader:
     ):
         load_file = _require_safetensors()
 
-        lora_path = lora_path.strip()
+        lora_path = strip_path_quotes(lora_path)
         if not lora_path:
             raise ValueError("RadianceHDRLoRALoader: lora_path must not be empty.")
         if not os.path.isfile(lora_path):

@@ -39,6 +39,7 @@ from radiance.color_utils import (
     tensor_to_numpy  as _to_numpy,
     numpy_to_tensor  as _to_tensor,
 )
+from radiance.path_utils import strip_path_quotes
 
 log = logging.getLogger("radiance.preview")
 
@@ -574,7 +575,7 @@ class RadianceFlipbookGIF:
                 pil_img = pil_img.resize((new_w, new_h), _PilImage.LANCZOS)
             pil_frames.append(pil_img.convert("P", dither=dith_mode))
 
-        path = Path(save_path.strip())
+        path = Path(strip_path_quotes(save_path))
         if not path.suffix:
             path = path.with_suffix(".gif")
         path.parent.mkdir(parents=True, exist_ok=True)

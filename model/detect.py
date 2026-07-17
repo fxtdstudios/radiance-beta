@@ -124,7 +124,11 @@ CLIP_SLOT_ORDER = {
     "sd1.5": ["clip_l"],
     "hunyuan_video": ["llm_encoder", "clip_l"],
     "wan": ["t5xxl"],
-    "ltxv": ["llm_encoder", "text_projection"],  # ALBABIT-FIX: "ltx" → "ltxv"
+    # ALBABIT-FIX: "ltxv" (pre-2.3) has no text_projection slot -- its CLIP
+    # loading (comfy/text_encoders/lt.py's ltxv_te) is T5-only, 1 file. Adding
+    # a 2nd file would route comfy.sd's CLIPType.LTXV branch into ltxav_te
+    # (Gemma-based, LTX 2.3 only) instead -- wrong encoder, not just unused.
+    "ltxv": ["llm_encoder"],  # ALBABIT-FIX: "ltx" → "ltxv"
     "ltxav": ["llm_encoder", "text_projection"],
     # ALBABIT-FIX: Lumina2 (Gemma-2 2B) and Z-Image (Qwen3-4B) are routed to
     # llm_encoder by their presets, not t5xxl — fixes "No CLIP encoders
@@ -132,7 +136,10 @@ CLIP_SLOT_ORDER = {
     "lumina2": ["llm_encoder"],
     "z_image": ["llm_encoder"],
     "pixart": ["t5xxl"],
-    "aura_flow": ["clip_l"],
+    # ALBABIT-FIX: AuraFlow's real encoder is a T5 variant (comfy.text_encoders.
+    # aura_t5.AuraT5Model, TEModel.T5_XL) -- "clip_l" was wrong, no file matching
+    # that slot's naming convention exists for AuraFlow anywhere.
+    "aura_flow": ["t5xxl"],
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi all use a single T5XXL text encoder
     "cosmos": ["t5xxl"], "cogvideox": ["t5xxl"], "mochi": ["t5xxl"],
     # ALBABIT-FIX: Chroma — distilled Flux, single T5XXL (no clip_l). Flux.2 /

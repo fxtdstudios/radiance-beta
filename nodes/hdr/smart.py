@@ -104,7 +104,7 @@ RADIANCE_MODEL_PRESETS: dict[str, dict] = {
         "latent_channels":     4,
         "notes": "SDXL classic 4ch VAE; tighter DR headroom → lower ratio.",
     },
-    "sd15": {
+    "sd1.5": {
         "compression_ratio":   0.35,
         "norm_center":         2.5,
         "vae_spatial_factor":  8,
@@ -129,8 +129,8 @@ _MODEL_ALIASES: dict[str, str] = {
     "sd3":        "sd3",
     "stable-diffusion-3": "sd3",
     "sdxl":       "sdxl",
-    "sd1":        "sd15",
-    "sd2":        "sd15",
+    "sd1":        "sd1.5",
+    "sd2":        "sd1.5",
 }
 
 def _resolve_model(hint: str) -> dict | None:

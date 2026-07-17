@@ -53,7 +53,9 @@ MODEL_TYPES = [
     # ALBABIT-FIX: renamed "sd35" → "sd3.5" to match Loader, model/detect.py, prompt.py
     "sd3.5",
     "sdxl",
-    "sd15",
+    # ALBABIT-FIX: renamed "sd15" → "sd1.5" -- same rationale as sd3.5 above,
+    # converges on the Loader/model/detect.py form instead of diverging from it.
+    "sd1.5",
     "wan",
     "ltxv",
     "ltxav",
@@ -71,12 +73,17 @@ VIDEO_MODEL_TYPES = {"wan", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvide
 # ALBABIT-FIX: flux2/flux2-klein use guidance_embed like flux (not external CFG)
 # ALBABIT-FIX: lumina2 removed -- its official workflow uses a plain KSampler
 # cfg, no guidance-embed node (unlike Flux's FluxGuidance) -- see CFG_GUIDED_MODELS
-GUIDANCE_EMBED_MODELS = {"flux", "flux2", "flux2-klein", "z_image", "ltxv"}
+# ALBABIT-FIX: z_image removed too -- exact same situation as lumina2 (its
+# official workflow's KSampler uses cfg=4, no guidance-embed node either),
+# apparently missed when lumina2 got the same fix. Confirmed against
+# Comfy-Org's own bundled "image_z_image.json" template directly.
+GUIDANCE_EMBED_MODELS = {"flux", "flux2", "flux2-klein", "ltxv"}
 
 # ALBABIT-FIX: "sd35" renamed to "sd3.5" for consistency with Loader/detect.py
 # ALBABIT-FIX: lumina2 added -- classic external CFG, confirmed via its
 # official example workflow (plain KSampler cfg=4, no guidance-embed node)
-CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd3.5", "ltxav", "cogvideox", "mochi", "lumina2"}
+# ALBABIT-FIX: z_image added -- same evidence class as lumina2 above.
+CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd1.5", "sd3", "sd3.5", "ltxav", "cogvideox", "mochi", "lumina2", "z_image"}
 
 MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
     # ALBABIT-FIX: steps=20 added, verified against Comfy-Org's official
@@ -155,7 +162,7 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
     # ALBABIT-FIX: cfg 7.0->8.0, sampler dpmpp_2m->euler, steps=20 -- all
     # verified against ComfyUI's own default startup workflow (default.json,
     # v1-5-pruned-emaonly, the graph shown on first launch).
-    "sd15": {
+    "sd1.5": {
         "cfg": 8.0,
         "scheduler": "normal",
         "guidance": 0.0,
@@ -229,18 +236,22 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "steps": 25,
         "guidance_type": "cfg",
     },
-    # ALBABIT-FIX: steps=25 added, verified against Comfy-Org's official
-    # Z-Image (Base) workflow template -- its Turbo variant uses 8 steps
-    # instead, not covered here (no filename-based override exists yet for
-    # z_image, unlike Flux Schnell/Klein).
+    # ALBABIT-FIX: steps=25 verified against Comfy-Org's official Z-Image
+    # (Base) workflow template -- its Turbo variant uses 8 steps instead, see
+    # refine_distillation_from_meta() below. Same template's KSampler also
+    # showed cfg=1.0/sampler="euler"/guidance_type="embedding" here were all
+    # wrong -- plain KSampler cfg=4, sampler="res_multistep", no
+    # guidance-embed node at all (exact same situation lumina2 was already
+    # fixed for, apparently missed for z_image at the time -- both share the
+    # same "lumina2" CLIPLoader type, consistent with a related architecture).
     "z_image": {
-        "cfg": 1.0,
+        "cfg": 4.0,
         "scheduler": "simple",
-        "guidance": 3.5,
+        "guidance": 0.0,
         "shift": 3.0,
-        "sampler": "euler",
+        "sampler": "res_multistep",
         "steps": 25,
-        "guidance_type": "embedding",
+        "guidance_type": "cfg",
     },
     # ALBABIT-FIX: steps=20 added, verified against ComfyUI's own official
     # Cosmos-1.0 7B example workflow.
@@ -291,7 +302,7 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "steps": 64,
         "guidance_type": "cfg",
     },
-    # ALBABIT-FIX: previously fell back to "sd15" (cfg=7.0/dpmpp_2m/normal) --
+    # ALBABIT-FIX: previously fell back to "sd1.5" (cfg=7.0/dpmpp_2m/normal) --
     # verified against AuraFlow's own official ComfyUI workflow, which
     # contradicts all three. No shift node present (unlike Lumina2, which
     # reuses the same ModelSamplingAuraFlow node but at shift=6.0 -- confirmed
@@ -304,10 +315,10 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "sampler": "euler",
         "steps": 20,
     },
-    # ALBABIT-FIX: previously fell back to "sd15" -- cfg/sampler verified
+    # ALBABIT-FIX: previously fell back to "sd1.5" -- cfg/sampler verified
     # against multiple independent community sources (weaker than AuraFlow's
     # direct official workflow, moderate confidence). scheduler/shift kept at
-    # sd15-equivalent values, no better source found. steps=20 added, from
+    # sd1.5-equivalent values, no better source found. steps=20 added, from
     # the diffusers pipeline's own default parameter (no official ComfyUI
     # workflow found for PixArt Sigma -- moderate confidence, same tier as cfg).
     "pixart": {
@@ -429,7 +440,7 @@ class RadianceModelRegistry:
                 if res: return res
             except Exception as e:
                 logger.debug(f"Detector {detector.__name__} failed: {e}")
-        return "sd15"
+        return "sd1.5"
 
 @RadianceModelRegistry.register(priority=1)
 def detect_by_config(model) -> Optional[str]:
@@ -509,7 +520,7 @@ def detect_model_type(model) -> str:
 
 def get_model_defaults(model_type: str) -> Dict[str, Any]:
 
-    return MODEL_DEFAULTS.get(model_type, MODEL_DEFAULTS["sd15"])
+    return MODEL_DEFAULTS.get(model_type, MODEL_DEFAULTS["sd1.5"])
 
 
 def parse_model_meta(model_meta: str) -> Tuple[str, str]:
@@ -551,6 +562,12 @@ def refine_distillation_from_meta(detected_type: str, unet_file: str) -> Optiona
     # (4 steps)" preset, already tuned in practice.
     if detected_type == "sd3.5" and "turbo" in name:
         return {"cfg": 1.6, "steps": 4}
+    # ALBABIT-FIX: verified against Comfy-Org's official Z-Image Turbo
+    # workflow template -- KSampler cfg=1/steps=8 (sampler stays
+    # "res_multistep", inherited unchanged from MODEL_DEFAULTS["z_image"]
+    # above, same for both Base and Turbo).
+    if detected_type == "z_image" and "turbo" in name:
+        return {"cfg": 1.0, "steps": 8}
     return None
 
 def gradual_sigma_blend(
@@ -976,20 +993,7 @@ def apply_pag_to_model(model, pag_scale: float):
 
 AYS_ANCHORS = {
     "sdxl": [14.615, 6.315, 3.771, 1.181, 0.468, 0.131, 0.029, 0.0],
-    "sd15": [
-        14.615,
-        6.475,
-        3.861,
-        2.697,
-        1.886,
-        1.396,
-        0.963,
-        0.652,
-        0.399,
-        0.152,
-        0.029,
-        0.0,
-    ],
+    "sd1.5": [14.615, 6.475, 3.861, 2.697, 1.886, 1.396, 0.963, 0.652, 0.399, 0.152, 0.029, 0.0],
 
     "flux": [1.0, 0.90, 0.70, 0.45, 0.22, 0.08, 0.02, 0.0],
     "sd3": [14.615, 6.291, 3.438, 1.566, 0.741, 0.288, 0.079, 0.0],
