@@ -801,7 +801,7 @@ const LOADER_PRESET_MODEL_TYPE = {
     "SDXL": "sdxl", "SD 1.5": "sd1.5",
     "HunyuanVideo": "hunyuan_video",
     "Wan 2.1": "wan", "Wan 2.2": "wan", "Wan 2.2 TI2V": "wan",
-    "LTX Video": "ltxv", "LTX Video 13B": "ltxv",
+    "LTX Video": "ltxv", "LTX Video (Low VRAM)": "ltxv",
     "LTX Video 2.3": "ltxav", "LTX Video 2.3 (Low VRAM)": "ltxav",
     "Cosmos World": "cosmos", "CogVideoX": "cogvideox", "Mochi": "mochi",
     "PixArt Sigma": "pixart", "AuraFlow": "aura_flow",

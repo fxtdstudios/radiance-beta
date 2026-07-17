@@ -487,13 +487,21 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "default",
     },
+    # ALBABIT-FIX: 2B and 13B merged into one preset -- identical model_type/
+    # clip_dtype/vae_hints/clip_hints already (the only real difference was
+    # weight_dtype: fp16 vs fp8, reflecting size, not distillation). "default"
+    # lets comfy.sd's own model_management.unet_dtype() auto-pick based on the
+    # actual loaded file's real parameter count -- same approach already used
+    # for Flux.2's own wide size range (Klein 4B through Dev). Explicit "(Low
+    # VRAM)" sibling added for users who want to force fp8 regardless (same
+    # pattern as Flux.1/Flux.2/LTX Video 2.3's own Low VRAM variants).
     "LTX Video": {
         "model_type": "ltxv",  # ALBABIT-FIX: "ltx" → "ltxv" — matches sampler_utils.py
-        "weight_dtype": "fp16",
+        "weight_dtype": "default",
         "clip_dtype": "default",
     },
-    "LTX Video 13B": {
-        "model_type": "ltxv",  # ALBABIT-FIX: "ltx" → "ltxv" — matches sampler_utils.py
+    "LTX Video (Low VRAM)": {
+        "model_type": "ltxv",
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "default",
     },
@@ -585,7 +593,7 @@ VIDEO_PRESET_NAMES: set = {
     "Cosmos World",
     "HunyuanVideo",
     "LTX Video",
-    "LTX Video 13B",
+    "LTX Video (Low VRAM)",
     "LTX Video 2.3",
     "LTX Video 2.3 (Low VRAM)",
     "Mochi",

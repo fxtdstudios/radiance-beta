@@ -124,7 +124,11 @@ CLIP_SLOT_ORDER = {
     "sd1.5": ["clip_l"],
     "hunyuan_video": ["llm_encoder", "clip_l"],
     "wan": ["t5xxl"],
-    "ltxv": ["llm_encoder", "text_projection"],  # ALBABIT-FIX: "ltx" → "ltxv"
+    # ALBABIT-FIX: "ltxv" (pre-2.3) has no text_projection slot -- its CLIP
+    # loading (comfy/text_encoders/lt.py's ltxv_te) is T5-only, 1 file. Adding
+    # a 2nd file would route comfy.sd's CLIPType.LTXV branch into ltxav_te
+    # (Gemma-based, LTX 2.3 only) instead -- wrong encoder, not just unused.
+    "ltxv": ["llm_encoder"],  # ALBABIT-FIX: "ltx" → "ltxv"
     "ltxav": ["llm_encoder", "text_projection"],
     # ALBABIT-FIX: Lumina2 (Gemma-2 2B) and Z-Image (Qwen3-4B) are routed to
     # llm_encoder by their presets, not t5xxl — fixes "No CLIP encoders

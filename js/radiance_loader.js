@@ -24,8 +24,13 @@ const PRESET_SLOTS = {
     "Flux.2": ["llm_encoder"],
     "Flux.2 (Low VRAM)": ["llm_encoder"],
     "HunyuanVideo": ["clip_l", "llm_encoder"],
-    "LTX Video": ["llm_encoder", "text_projection"],
-    "LTX Video 13B": ["llm_encoder", "text_projection"],
+    // ALBABIT-FIX: text_projection dropped -- pre-2.3 LTX only ever loads 1
+    // CLIP file (comfy/text_encoders/lt.py's ltxv_te, T5-only). Providing a
+    // 2nd file (text_projection) would route comfy.sd's CLIPType.LTXV branch
+    // into ltxav_te (Gemma-based, LTX 2.3 only) instead -- the wrong encoder
+    // for these architectures, not just an unused widget.
+    "LTX Video": ["llm_encoder"],
+    "LTX Video (Low VRAM)": ["llm_encoder"],
     "LTX Video 2.3": ["llm_encoder", "text_projection"],
     "LTX Video 2.3 (Low VRAM)": ["llm_encoder", "text_projection"],
     "Lumina2": ["llm_encoder"],
@@ -175,23 +180,47 @@ const PRESET_CONFIGS = {
             "clip_l":      ["clip_l.safetensors", "clip_l"],
         },
     },
+    // ALBABIT-FIX: 2B and 13B merged into one preset -- same reasoning as the
+    // config/model_map.py comment: identical vae_hints/clip_hints already,
+    // weight_dtype now "default" (comfy.sd auto-picks per the actual loaded
+    // file's real size). unet_hints/upscale_hints list 13B-specific patterns
+    // first -- the old 2B list's bare "ltxv"/"ltx_video" fallback would
+    // otherwise match a 13B-named file first via substring (findMatchingFile
+    // stops at the first hint that matches anything, in list order).
     "LTX Video": {
-        "unet_hints":    ["ltx-video-2b", "ltxv-2b", "ltx_video", "ltxv"],
+        "unet_hints":    ["ltx-video-13b", "ltxv-13b", "ltx_13b", "ltx-video-2b", "ltxv-2b", "ltx_video", "ltxv"],
         "vae_hints":     ["Baked VAE (from UNET)", "ltxvideo_vae", "ltx_vae", "ltxv_vae", "causal_vae"],
         "clip_hints":    {
             "llm_encoder": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
         },
         "extra_widgets": ["upscale_model_name"],
-        "upscale_hints": ["ltxv", "ltx_video", "latent_upsampler", "upsampler"],
+        // ALBABIT-FIX: real filenames confirmed on Lightricks/LTX-Video's HF
+        // repo -- "spatial" (resolution) and "temporal" (frame count/motion)
+        // upscalers are genuinely separate files, not the same file with a
+        // toggle. Reference 13B workflow uses the spatial one (with
+        // temporal_upsample=false), matching the "upscale = higher resolution"
+        // expectation here -- 0.9.8 listed first as the newer generation
+        // (same "prefer newest" convention as LTX 2.3's own upscale_hints).
+        "upscale_hints": ["ltxv-spatial-upscaler-0.9.8", "ltxv-spatial-upscaler-0.9.7", "ltxv-13b", "ltx_13b", "ltxv", "ltx_video", "latent_upsampler", "upsampler"],
     },
-    "LTX Video 13B": {
-        "unet_hints":    ["ltx-video-13b", "ltxv-13b", "ltx_13b"],
+    "LTX Video (Low VRAM)": {
+        "unet_hints":    ["ltx-video-13b", "ltxv-13b", "ltx_13b", "ltx-video-2b", "ltxv-2b", "ltx_video", "ltxv"],
         "vae_hints":     ["Baked VAE (from UNET)", "ltxvideo_vae", "ltx_vae", "ltxv_vae", "causal_vae"],
         "clip_hints":    {
             "llm_encoder": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
         },
-        "extra_widgets": ["upscale_model_name"],
-        "upscale_hints": ["ltxv-13b", "ltx_13b", "latent_upsampler", "upsampler"],
+        // ALBABIT-FIX: offload_mode exposed + defaulted, same convention as
+        // Flux.1/Flux.2/LTX Video 2.3's own "(Low VRAM)" siblings.
+        "extra_widgets": ["upscale_model_name", "offload_mode"],
+        "offload_mode": "cpu_offload",
+        // ALBABIT-FIX: real filenames confirmed on Lightricks/LTX-Video's HF
+        // repo -- "spatial" (resolution) and "temporal" (frame count/motion)
+        // upscalers are genuinely separate files, not the same file with a
+        // toggle. Reference 13B workflow uses the spatial one (with
+        // temporal_upsample=false), matching the "upscale = higher resolution"
+        // expectation here -- 0.9.8 listed first as the newer generation
+        // (same "prefer newest" convention as LTX 2.3's own upscale_hints).
+        "upscale_hints": ["ltxv-spatial-upscaler-0.9.8", "ltxv-spatial-upscaler-0.9.7", "ltxv-13b", "ltx_13b", "ltxv", "ltx_video", "latent_upsampler", "upsampler"],
     },
     "LTX Video 2.3": {
         // ALBABIT-FIX: distilled-1.1 added in second position — auto-matches if user has it
@@ -684,7 +713,7 @@ function updateLoaderUI(node, forceAutoFill = false) {
     // --- Specific Model Preset mode ---
     // Hide: model_type, weight_dtype, clip_dtype, offload_mode (preset manages them)
     // Hide general utilities to keep the UI clean: check_vram, use_cache, lora_on_error, auto_download
-    // Show only: preset, unet_name, vae_name, and active CLIP slots!
+    // Show only: preset, unet_name, vae_name (unless baked, see below), and active CLIP slots!
     const activeSlots = PRESET_SLOTS[cleanPreset] || ALL_CLIP_WIDGETS;
     const extraWidgets = (PRESET_CONFIGS[cleanPreset] && PRESET_CONFIGS[cleanPreset].extra_widgets) || [];
 
@@ -693,8 +722,18 @@ function updateLoaderUI(node, forceAutoFill = false) {
     }
 
     node.widgets.forEach(w => {
-        if (w.name === "preset" || w.name === "unet_name" || w.name === "vae_name") {
+        if (w.name === "preset" || w.name === "unet_name") {
             setWidgetVisible(w, true, node);
+        } else if (w.name === "vae_name") {
+            // ALBABIT-FIX: hide vae_name once it's resolved to the "Baked VAE
+            // (from UNET)" sentinel -- nothing left to choose, same treatment
+            // as weight_dtype/model_type/clip_dtype above. Stays visible if a
+            // real standalone file was found/selected instead (e.g. the
+            // preset's vae_hints matched a real file the user has installed),
+            // so it can still be seen/changed. "Custom" mode (isCustom branch
+            // above) always shows it regardless, as the manual-control escape
+            // hatch.
+            setWidgetVisible(w, w.value !== "Baked VAE (from UNET)", node);
         } else if (ALL_CLIP_WIDGETS.includes(w.name)) {
             const shouldShow = activeSlots.includes(w.name);
             setWidgetVisible(w, shouldShow, node);
