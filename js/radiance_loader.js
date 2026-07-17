@@ -42,6 +42,7 @@ const PRESET_SLOTS = {
     "Wan 2.1": ["t5xxl"],
     "Wan 2.1 (Low VRAM)": ["t5xxl"],
     "Wan 2.2": ["t5xxl"],
+    "Wan 2.2 (Low VRAM)": ["t5xxl"],
     "Wan 2.2 TI2V": ["t5xxl"],
     "Z-Image": ["llm_encoder"],
 };
@@ -389,6 +390,29 @@ const PRESET_CONFIGS = {
         // one server-side regardless of which one is picked here.
         "companion_linked": true,
     },
+    "Wan 2.2 (Low VRAM)": {
+        "unet_hints":    [
+            "wan2.2_t2v_high_noise_14B_fp8_scaled",
+            "wan2.2_i2v_high_noise_14B_fp8_scaled",
+            "wan2.2_t2v_high_noise",
+            "wan2.2_i2v_high_noise",
+            "wan2.2_high_noise",
+            "wan2.2",
+            "wan_2.2",
+            "wan-2.2",
+            "Wan2.2",
+        ],
+        "vae_hints":     ["wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
+        "clip_hints":    {
+            "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
+        },
+        "companion_linked": true,
+        // ALBABIT-FIX: offload_mode exposed + defaulted, same convention as
+        // every other "(Low VRAM)" sibling -- both high_noise and low_noise
+        // UNETs (~14B each) get offloaded together.
+        "extra_widgets": ["offload_mode"],
+        "offload_mode": "cpu_offload",
+    },
     "Wan 2.2 TI2V": {
         "unet_hints":    ["wan2.2_ti2v_5B_fp16", "wan2.2_ti2v_5B", "wan2.2_ti2v"],
         "vae_hints":     ["wan2.2_vae", "wan_2.2_vae"],
@@ -562,15 +586,40 @@ function autoFillPresetFiles(node, cleanPreset) {
 // label marker (same pattern as radiance_sampler.js/radiance_prompt.js).
 const PRESET_MARKER = " ✎";
 // ALBABIT-FIX: "🧲" marks unet_name whenever the file is a recognized preset
-// variant -- unet_name always has a real link to other magnet-marked widgets
-// (the Sampler's model_meta-driven defaults, and llm_encoder for Klein), so
-// picking any recognized file is never a mistake, unlike a genuinely
-// unrelated file (e.g. Flux1 Fill under "Flux.1"), which still gets "✎".
+// variant AND its model_meta output actually reaches a live Sampler right now
+// (see _isModelMetaConnected below) -- the marker's whole justification is
+// "this feeds the Sampler's model_meta magnets", so it's gated on that link
+// actually existing, not just on the file being recognized. llm_encoder's own
+// "🧲" under Klein's clip_size_hints is a DIFFERENT, Loader-internal fact
+// (unet_name's size determines the right CLIP file) with no relation to
+// model_meta/the Sampler -- left ungated, same category as "⛓" below.
 const LINKED_MARKER = " 🧲";
 // ALBABIT-FIX: for companion_linked presets (Wan 2.2), either the high_noise
 // or low_noise UNET is a valid pick -- "⛓" marks unet_name instead of "✎"
 // to signal its companion is auto-loaded server-side, not a manual mistake.
+// Purely a Loader-internal fact (nodes_loader.py's _find_wan_moe_companion()
+// runs regardless of what's downstream) -- unlike "🧲" above, NOT gated on
+// model_meta being connected.
 const COMPANION_MARKER = " ⛓";
+
+/**
+ * Mirrors radiance_sampler.js's _findModelMetaSourceNode() in reverse: does
+ * this Loader's own model_meta OUTPUT actually reach a live downstream node
+ * right now? An output can fan out to several links (one Loader feeding
+ * multiple Samplers) -- true as soon as at least one target is real and not
+ * muted/bypassed (mode 2/4, same exclusion the Sampler-side lookup applies
+ * to its origin node).
+ */
+function _isModelMetaConnected(node) {
+    const output = node.outputs?.find(o => o.name === "model_meta");
+    if (!output?.links || output.links.length === 0) return false;
+    return output.links.some(linkId => {
+        const link = app.graph.links[linkId];
+        if (!link) return false;
+        const targetNode = app.graph.getNodeById(link.target_id);
+        return !!(targetNode && targetNode.mode !== 2 && targetNode.mode !== 4);
+    });
+}
 
 // unet_name/vae_name are left untouched by autoFillPresetFiles() on no
 // match; CLIP slots/audio_vae/upscale fall back to "None" instead.
@@ -601,6 +650,10 @@ function updatePresetDivergenceMarkers(node) {
     const unetVariantLinked = !!(config && unetRecognized);
     const clipLinked = !!(config?.clip_size_hints && unetRecognized);
     const companionLinked = !!(config?.companion_linked && unetRecognized);
+    // ALBABIT-FIX: gates "🧲" specifically -- "⛓" and llm_encoder's own "🧲"
+    // (clipLinked) are Loader-internal facts, unaffected by whether anything
+    // downstream is actually listening.
+    const modelMetaConnected = _isModelMetaConnected(node);
 
     let changed = false;
 
@@ -626,11 +679,18 @@ function updatePresetDivergenceMarkers(node) {
     // unet_name shows a link marker instead of the divergence marker while
     // companionLinked/unetVariantLinked -- the point is to signal a
     // relationship (auto-loaded companion, recognized preset variant), not
-    // flag a mistake. companionLinked checked first: more specific than the
-    // general "recognized" case.
+    // flag a mistake. companionLinked implies unetVariantLinked too (both
+    // require unetRecognized). "⛓" always shows when companionLinked (a
+    // Loader-internal fact); "🧲" -- for both the plain unetVariantLinked
+    // case and as an addition alongside "⛓" -- only shows on top of that
+    // when modelMetaConnected is also true. Without a live downstream
+    // Sampler, a plain unetVariantLinked (non-companion) file falls back to
+    // the normal "✎" divergence check instead, same treatment as any other
+    // non-magnet widget.
     if (companionLinked) {
-        if (_markFileWidget(getWidget(node, "unet_name"), COMPANION_MARKER)) changed = true;
-    } else if (unetVariantLinked) {
+        const marker = COMPANION_MARKER + (modelMetaConnected ? LINKED_MARKER : "");
+        if (_markFileWidget(getWidget(node, "unet_name"), marker)) changed = true;
+    } else if (unetVariantLinked && modelMetaConnected) {
         if (_markFileWidget(getWidget(node, "unet_name"), LINKED_MARKER)) changed = true;
     } else {
         check("unet_name", config?.unet_hints);
