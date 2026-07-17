@@ -123,10 +123,14 @@ const PRESET_CONFIGS = {
         denoise: 1.0, flux_shift: 1.5, flux_guidance: 4.5,
         description: "Cinema-grade 60-step with Phase-Shift SGM. Maximum fidelity.",
     },
+    // ALBABIT-FIX: cfg 1.0->4.0, sampler euler->res_multistep -- same
+    // official-workflow evidence as MODEL_TYPE_SAMPLING_DEFAULTS.z_image
+    // above (this manual preset was equally stale, not just the
+    // auto-detected defaults).
     "◈ z_image (25 steps)": {
-        steps: 25, cfg: 1.0, sampler: "euler", scheduler: "simple",
+        steps: 25, cfg: 4.0, sampler: "res_multistep", scheduler: "simple",
         denoise: 1.0, flux_shift: 3.0, flux_guidance: 3.5,
-        description: "z_image / Lumina variant — shift=3.",
+        description: "z_image / Lumina variant — shift=3, CFG=4.",
     },
     "◈ Lumina2 (25 steps)": {
         steps: 25, cfg: 1.0, sampler: "euler", scheduler: "simple",
@@ -146,14 +150,19 @@ const LTX_PRESETS = [
 // ALBABIT-FIX: flux2/flux2-klein use guidance_embed like flux; "sd35" renamed to "sd3.5"
 // ALBABIT-FIX: lumina2 removed -- its official workflow uses a plain KSampler
 // cfg, no guidance-embed node (unlike Flux's FluxGuidance) -- see CFG_GUIDED_MODELS
-const GUIDANCE_EMBED_MODELS = new Set(["flux", "flux2", "flux2-klein", "z_image", "ltxv"]);
+// ALBABIT-FIX: z_image removed too -- exact same situation as lumina2 (its
+// official workflow's KSampler uses cfg=4, no guidance-embed node either),
+// apparently missed when lumina2 got the same fix. Confirmed against
+// Comfy-Org's own bundled "image_z_image.json" template directly.
+const GUIDANCE_EMBED_MODELS = new Set(["flux", "flux2", "flux2-klein", "ltxv"]);
 // ALBABIT-FIX: lumina2 added -- classic external CFG, confirmed via its
 // official example workflow (plain KSampler cfg=4, no guidance-embed node)
 // ALBABIT-FIX: "sd15" renamed to "sd1.5" -- same rationale as "sd35" -> "sd3.5"
 // above, converges on the Loader/model/detect.py form instead of diverging.
+// ALBABIT-FIX: z_image added -- same evidence class as lumina2 above.
 const CFG_GUIDED_MODELS = new Set([
     "wan", "hunyuan_video", "sdxl", "sd1.5", "sd3", "sd3.5",
-    "ltxav", "cogvideox", "lumina2"
+    "ltxav", "cogvideox", "lumina2", "z_image"
 ]);
 const LTX_MODEL_TYPES = new Set(["ltxv", "ltxav"]);
 
@@ -787,6 +796,11 @@ function _deriveDistillationOverride(filename, detectedType) {
     // translation) to match the Sampler's own pre-existing "[F] SD3.5 Turbo
     // (4 steps)" preset, already tuned in practice.
     if (detectedType === "sd3.5" && f.includes("turbo")) return { cfg: 1.6, steps: 4 };
+    // ALBABIT-FIX: verified against Comfy-Org's official Z-Image Turbo
+    // workflow template -- KSampler cfg=1/steps=8 (sampler stays
+    // "res_multistep", inherited unchanged from MODEL_TYPE_SAMPLING_DEFAULTS
+    // .z_image above, same for both Base and Turbo).
+    if (detectedType === "z_image" && f.includes("turbo")) return { cfg: 1.0, steps: 8 };
     return null;
 }
 
@@ -861,9 +875,14 @@ const MODEL_TYPE_SAMPLING_DEFAULTS = {
     // steps=25 added (matches the workflow; its own Note claims "36 steps"
     // as official but the saved workflow itself uses 25).
     lumina2:       { cfg: 4.0, sampler: "res_multistep", scheduler: "simple", flux_shift: 6.0,  guidance: 0.0, steps: 25 },
-    // ALBABIT-FIX: steps=25, verified against Comfy-Org's official Z-Image
-    // (Base) workflow template -- Turbo variant uses 8, not covered here.
-    z_image:       { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 3.0,  guidance: 3.5, steps: 25 },
+    // ALBABIT-FIX: steps=25 verified against Comfy-Org's official Z-Image
+    // (Base) workflow template -- Turbo variant uses 8, see
+    // _deriveDistillationOverride() below. Same template's KSampler also
+    // showed cfg=1.0/sampler="euler" here were both wrong -- plain KSampler
+    // cfg=4, sampler="res_multistep", no guidance-embed node at all (exact
+    // same fix already applied to lumina2 just above, apparently missed for
+    // z_image at the time).
+    z_image:       { cfg: 4.0, sampler: "res_multistep", scheduler: "simple", flux_shift: 3.0,  guidance: 0.0, steps: 25 },
     // ALBABIT-FIX: steps=20, verified against ComfyUI's own official
     // Cosmos-1.0 7B example workflow.
     cosmos:        { cfg: 7.0, sampler: "euler",    scheduler: "simple",      flux_shift: 3.0,  guidance: 0.0, steps: 20 },
