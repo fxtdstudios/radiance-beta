@@ -558,7 +558,17 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp16",
         "clip_dtype": "fp16",
     },
+    # ALBABIT-FIX: weight_dtype now "default" -- 1.3B is small enough that
+    # forcing fp8 for every user cost quality for no reason; comfy.sd
+    # auto-picks per the real loaded file's param count (same mechanism as
+    # LTX Video/Flux.2 above). See "Wan 2.1 (Low VRAM)" for the old forced-fp8
+    # behavior, still needed by 14B users on tight VRAM.
     "Wan 2.1": {
+        "model_type": "wan",
+        "weight_dtype": "default",
+        "clip_dtype": "default",
+    },
+    "Wan 2.1 (Low VRAM)": {
         "model_type": "wan",
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "default",
@@ -598,6 +608,7 @@ VIDEO_PRESET_NAMES: set = {
     "LTX Video 2.3 (Low VRAM)",
     "Mochi",
     "Wan 2.1",
+    "Wan 2.1 (Low VRAM)",
     "Wan 2.2",
     "Wan 2.2 TI2V",
 }

@@ -40,6 +40,7 @@ const PRESET_SLOTS = {
     "SD3.5": ["clip_l", "clip_g", "t5xxl"],
     "SDXL": ["clip_l", "clip_g"],
     "Wan 2.1": ["t5xxl"],
+    "Wan 2.1 (Low VRAM)": ["t5xxl"],
     "Wan 2.2": ["t5xxl"],
     "Wan 2.2 TI2V": ["t5xxl"],
     "Z-Image": ["llm_encoder"],
@@ -202,6 +203,15 @@ const PRESET_CONFIGS = {
         // expectation here -- 0.9.8 listed first as the newer generation
         // (same "prefer newest" convention as LTX 2.3's own upscale_hints).
         "upscale_hints": ["ltxv-spatial-upscaler-0.9.8", "ltxv-spatial-upscaler-0.9.7", "ltxv-13b", "ltx_13b", "ltxv", "ltx_video", "latent_upsampler", "upsampler"],
+        // ALBABIT-FIX: 2B's standard workflow is a single Sampler -- no
+        // latent-upscale stage -- so leave upscale_model_name on "None"
+        // instead of pre-filling a file the typical pipeline doesn't use.
+        // 13B keeps the real upscale_hints above (2-stage LowRes+HighRes
+        // pipeline, confirmed via the reference 13B workflow).
+        "upscale_size_hints": {
+            "2b": [],
+            "13b": ["ltxv-spatial-upscaler-0.9.8", "ltxv-spatial-upscaler-0.9.7", "ltxv-13b", "ltx_13b", "ltxv", "ltx_video", "latent_upsampler", "upsampler"],
+        },
     },
     "LTX Video (Low VRAM)": {
         "unet_hints":    ["ltx-video-13b", "ltxv-13b", "ltx_13b", "ltx-video-2b", "ltxv-2b", "ltx_video", "ltxv"],
@@ -221,6 +231,15 @@ const PRESET_CONFIGS = {
         // expectation here -- 0.9.8 listed first as the newer generation
         // (same "prefer newest" convention as LTX 2.3's own upscale_hints).
         "upscale_hints": ["ltxv-spatial-upscaler-0.9.8", "ltxv-spatial-upscaler-0.9.7", "ltxv-13b", "ltx_13b", "ltxv", "ltx_video", "latent_upsampler", "upsampler"],
+        // ALBABIT-FIX: 2B's standard workflow is a single Sampler -- no
+        // latent-upscale stage -- so leave upscale_model_name on "None"
+        // instead of pre-filling a file the typical pipeline doesn't use.
+        // 13B keeps the real upscale_hints above (2-stage LowRes+HighRes
+        // pipeline, confirmed via the reference 13B workflow).
+        "upscale_size_hints": {
+            "2b": [],
+            "13b": ["ltxv-spatial-upscaler-0.9.8", "ltxv-spatial-upscaler-0.9.7", "ltxv-13b", "ltx_13b", "ltxv", "ltx_video", "latent_upsampler", "upsampler"],
+        },
     },
     "LTX Video 2.3": {
         // ALBABIT-FIX: distilled-1.1 added in second position — auto-matches if user has it
@@ -323,12 +342,31 @@ const PRESET_CONFIGS = {
             "clip_g": ["clip_g.safetensors", "clip_g"],
         },
     },
+    // ALBABIT-FIX: unet_hints previously matched any Wan 2.1 file regardless
+    // of size -- with both 1.3B and 14B installed, findMatchingFile would
+    // pick whichever sorted first in the file list, not the user's intent.
+    // "14b"/"1.3b" listed first (flagship-first, same convention as LTX
+    // 13B/Flux Dev) so a specific size wins over the generic fallback. VAE/T5
+    // untouched -- confirmed shared across both sizes on HF
+    // (Comfy-Org/Wan_2.1_ComfyUI_repackaged: single wan_2.1_vae.safetensors +
+    // umt5_xxl_* files, no size-specific variants) -- no 🧲 needed here.
     "Wan 2.1": {
-        "unet_hints":    ["wan2.1", "wan_2.1", "wan-2.1", "Wan2.1"],
+        "unet_hints":    ["14b", "1.3b", "wan2.1", "wan_2.1", "wan-2.1", "Wan2.1"],
         "vae_hints":     ["wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
         "clip_hints":    {
             "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
         },
+    },
+    "Wan 2.1 (Low VRAM)": {
+        "unet_hints":    ["14b", "1.3b", "wan2.1", "wan_2.1", "wan-2.1", "Wan2.1"],
+        "vae_hints":     ["wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
+        "clip_hints":    {
+            "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
+        },
+        // ALBABIT-FIX: offload_mode exposed + defaulted, same convention as
+        // Flux.1/Flux.2/LTX Video's own "(Low VRAM)" siblings.
+        "extra_widgets": ["offload_mode"],
+        "offload_mode": "cpu_offload",
     },
     "Wan 2.2": {
         "unet_hints":    [
@@ -433,6 +471,25 @@ function _resolveClipMatch(node, config, wName) {
 }
 
 /**
+ * Like _resolveClipHints, but for upscale_model_name (e.g. LTX Video 2B/13B):
+ * a preset's upscale_size_hints lets a known size (e.g. "2b") resolve to an
+ * empty list -- the typical 2B workflow is a single Sampler with no latent
+ * upscale stage, unlike 13B's 2-stage LowRes+upscale+HighRes pipeline -- so
+ * the widget correctly defaults to "None" instead of a real (but unused)
+ * upscaler file. Uses hasOwnProperty (not truthiness) so an empty-array entry
+ * still counts as "known" and isn't skipped in favor of the static fallback.
+ */
+function _resolveUpscaleHints(node, config) {
+    if (config?.upscale_size_hints) {
+        const sizeToken = _detectSizeToken(getWidget(node, "unet_name")?.value || "");
+        if (sizeToken && Object.prototype.hasOwnProperty.call(config.upscale_size_hints, sizeToken)) {
+            return config.upscale_size_hints[sizeToken];
+        }
+    }
+    return config?.upscale_hints;
+}
+
+/**
  * Performs client-side smart auto-fill matching of files based on selected preset
  */
 function autoFillPresetFiles(node, cleanPreset) {
@@ -481,8 +538,9 @@ function autoFillPresetFiles(node, cleanPreset) {
     // 5. Match Latent Upscale Model (Radiance Video Loader only)
     const upscaleW = getWidget(node, "upscale_model_name");
     if (upscaleW && upscaleW.options?.values) {
-        if (config.upscale_hints) {
-            const matched = findMatchingFile(config.upscale_hints, upscaleW.options.values);
+        const upscaleHints = _resolveUpscaleHints(node, config);
+        if (upscaleHints) {
+            const matched = findMatchingFile(upscaleHints, upscaleW.options.values);
             upscaleW.value = matched || "None";
         } else {
             upscaleW.value = "None";
@@ -591,7 +649,7 @@ function updatePresetDivergenceMarkers(node) {
         check(wName, config ? _resolveClipHints(node, config, wName) : null);
     }
     check("audio_vae_name", config?.audio_vae_hints);
-    check("upscale_model_name", config?.upscale_hints);
+    check("upscale_model_name", config ? _resolveUpscaleHints(node, config) : null);
 
     if (changed) node.setDirtyCanvas(true, true);
 }
