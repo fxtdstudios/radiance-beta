@@ -114,6 +114,8 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 
+from ....core.system.path_utils import strip_path_quotes
+
 logger = logging.getLogger("radiance.vfx_multipass")
 
 
@@ -572,6 +574,7 @@ def _normal_from_dsine(img_bhwc, dsine_model_path, convention):
       2. Fall back to ComfyUI model folder auto-discovery.
       3. Fall back to HuggingFace download (requires auth if repo is gated).
     """
+    dsine_model_path = strip_path_quotes(dsine_model_path)
     if dsine_model_path == "auto":
         # ── 1. torch.hub (preferred — no auth required) ───────────────────────
         result = _try_dsine_hub(img_bhwc, convention)

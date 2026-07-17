@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional, Tuple, List
 import numpy as np
 
 from ....performance import perf_finish, perf_start
-from ....core.system.path_utils import get_safe_output_dir
+from ....core.system.path_utils import get_safe_output_dir, strip_path_quotes
 
 # Core library imports
 from .core import (
@@ -482,6 +482,9 @@ class RadianceEXRPassesWriter:
         import tempfile
         import shutil
 
+        output_path = strip_path_quotes(output_path)
+        remote_path = strip_path_quotes(remote_path)
+
         # Determine target directory
         if _HAS_FOLDER_PATHS:
             base_dir = folder_paths.get_output_directory()
@@ -492,7 +495,7 @@ class RadianceEXRPassesWriter:
         # with no anti-traversal protection for relative output_path values.
         # get_safe_output_dir() is the same helper RadianceWrite/RadianceEXRMultiPart
         # already use for this exact pattern.
-        out_dir = get_safe_output_dir(base_dir, output_path.strip(), allow_absolute=True)
+        out_dir = get_safe_output_dir(base_dir, output_path, allow_absolute=True)
 
         # Standard Metadata dictionary
         meta: Dict[str, Any] = {
@@ -553,9 +556,9 @@ class RadianceEXRPassesWriter:
             saved_paths.append(filepath)
 
             # Best effort copy to remote/NAS path
-            if remote_path.strip():
+            if remote_path:
                 try:
-                    dest = os.path.join(remote_path.strip(), f"{filename_prefix}.{frame_num}.exr")
+                    dest = os.path.join(remote_path, f"{filename_prefix}.{frame_num}.exr")
                     os.makedirs(os.path.dirname(dest), exist_ok=True)
                     shutil.copy2(filepath, dest)
                     logger.info("[EXR Passes Writer] Copied to remote → %s", dest)
