@@ -797,7 +797,7 @@ function _deriveDistillationOverride(filename, detectedType) {
 const LOADER_PRESET_MODEL_TYPE = {
     "Flux.1": "flux", "Flux.1 (Low VRAM)": "flux",
     "Chroma": "chroma",
-    "SD3.5 Large": "sd3.5", "SD3.5 Medium": "sd3.5",
+    "SD3.5": "sd3.5",
     "SDXL": "sdxl", "SD 1.5": "sd1.5",
     "HunyuanVideo": "hunyuan_video",
     "Wan 2.1": "wan", "Wan 2.2": "wan", "Wan 2.2 TI2V": "wan",

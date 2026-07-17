@@ -30,8 +30,7 @@ const PRESET_SLOTS = {
     "Mochi": ["t5xxl"],
     "PixArt Sigma": ["t5xxl"],
     "SD 1.5": ["clip_l"],
-    "SD3.5 Large": ["clip_l", "clip_g", "t5xxl"],
-    "SD3.5 Medium": ["clip_l", "clip_g", "t5xxl"],
+    "SD3.5": ["clip_l", "clip_g", "t5xxl"],
     "SDXL": ["clip_l", "clip_g"],
     "Wan 2.1": ["t5xxl"],
     "Wan 2.2": ["t5xxl"],
@@ -246,12 +245,18 @@ const PRESET_CONFIGS = {
             "clip_l": ["clip_l.safetensors", "clip_l"],
         },
     },
-    // ALBABIT-FIX: Large and Turbo merged -- same vae_hints/clip_hints
-    // already, Turbo is Large's distilled variant (Sampler tells them apart
-    // by filename via _deriveDistillationOverride). "Medium" stays separate
-    // (a genuinely different-sized sibling, not a distillation pair).
-    "SD3.5 Large": {
-        "unet_hints":    ["sd3.5_large", "sd3-5_large", "sd3.5_large_turbo", "sd3.5_turbo", "sd3-5_turbo"],
+    // ALBABIT-FIX: Large, Large Turbo, and Medium all merged into one preset --
+    // vae_hints/clip_hints are identical across all three (unlike Flux.2
+    // Dev/Klein, no clip_size_hints branching needed), so a combined
+    // unet_hints list is enough. Large listed first (flagship, quality-first,
+    // same convention as Flux.2's Dev-before-Klein ordering); Turbo is Large's
+    // distilled variant (Sampler tells it apart by filename via
+    // _deriveDistillationOverride, unaffected by this merge).
+    "SD3.5": {
+        "unet_hints":    [
+            "sd3.5_large", "sd3-5_large", "sd3.5_large_turbo", "sd3.5_turbo", "sd3-5_turbo",
+            "sd3.5_medium", "sd3-5_medium",
+        ],
         "vae_hints":     ["sd3_vae", "sd3.5_vae", "sd3"],
         "clip_hints":    {
             "clip_l": ["clip_l.safetensors", "clip_l"],
@@ -259,16 +264,7 @@ const PRESET_CONFIGS = {
             "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
     },
-    "SD3.5 Medium": {
-        "unet_hints":    ["sd3.5_medium", "sd3-5_medium"],
-        "vae_hints":     ["sd3_vae", "sd3.5_vae", "sd3"],
-        "clip_hints":    {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-            "clip_g": ["clip_g.safetensors", "clip_g"],
-            "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
-        },
-    },
-    // ALBABIT-FIX: Base and Turbo merged -- same reasoning as SD3.5 Large above.
+    // ALBABIT-FIX: Base and Turbo merged -- same reasoning as SD3.5 above.
     "SDXL": {
         "unet_hints":    ["sd_xl_base", "sdxl_base", "sdxl-base", "sdxl_turbo", "sdxl-turbo", "turbo"],
         "vae_hints":     ["sdxl_vae", "vae-ft-mse", "xl_vae"],
