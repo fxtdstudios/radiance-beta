@@ -149,8 +149,10 @@ const LTX_PRESETS = [
 const GUIDANCE_EMBED_MODELS = new Set(["flux", "flux2", "flux2-klein", "z_image", "ltxv"]);
 // ALBABIT-FIX: lumina2 added -- classic external CFG, confirmed via its
 // official example workflow (plain KSampler cfg=4, no guidance-embed node)
+// ALBABIT-FIX: "sd15" renamed to "sd1.5" -- same rationale as "sd35" -> "sd3.5"
+// above, converges on the Loader/model/detect.py form instead of diverging.
 const CFG_GUIDED_MODELS = new Set([
-    "wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd3.5",
+    "wan", "hunyuan_video", "sdxl", "sd1.5", "sd3", "sd3.5",
     "ltxav", "cogvideox", "lumina2"
 ]);
 const LTX_MODEL_TYPES = new Set(["ltxv", "ltxav"]);
@@ -176,14 +178,14 @@ const CFG_PLUS_PLUS_MODE = "CFG++ (Perpendicular)";
 // entries + aliases) -- everything NOT in this set silently falls through
 // to the standard sigma computation when ays_schedule=True, no warning.
 const AYS_SUPPORTED_MODELS = new Set([
-    "sdxl", "sd15", "flux", "sd3", "wan", "ltxv",
+    "sdxl", "sd1.5", "flux", "sd3", "wan", "ltxv",
     "sd3.5", "chroma", "hunyuan_video", "lumina2", "z_image",
 ]);
 
 // ALBABIT-FIX: PAG hooks the "middle_block" attention layer (sampler_utils.py's
 // pag_attention_patch checks block_type=="middle") -- a U-Net-only concept,
 // no effect at all for DiT architectures (verified in apply_pag_to_model()).
-const PAG_SUPPORTED_MODELS = new Set(["sdxl", "sd15"]);
+const PAG_SUPPORTED_MODELS = new Set(["sdxl", "sd1.5"]);
 
 // Infer the effective model type when model_type is left on "auto" by reading
 // the chosen preset name. Returns "auto" when nothing matches (treated as a
@@ -516,7 +518,7 @@ function applyFolding(node) {
     const usesGuidanceEmbed =
         GUIDANCE_EMBED_MODELS.has(effectiveModel) ||
         (effectiveModel === "auto" && !CFG_GUIDED_MODELS.has(effectiveModel));
-    const usesFlowShift = effectiveModel !== "sdxl" && effectiveModel !== "sd15";
+    const usesFlowShift = effectiveModel !== "sdxl" && effectiveModel !== "sd1.5";
     if (!usesFlowShift) hiddenNames.add("flux_shift");
     if (!usesGuidanceEmbed) {
         hiddenNames.add("flux_guidance");
@@ -796,7 +798,7 @@ const LOADER_PRESET_MODEL_TYPE = {
     "Flux.1": "flux", "Flux.1 (Low VRAM)": "flux",
     "Chroma": "chroma",
     "SD3.5 Large": "sd3.5", "SD3.5 Medium": "sd3.5",
-    "SDXL": "sdxl", "SD 1.5": "sd15",
+    "SDXL": "sdxl", "SD 1.5": "sd1.5",
     "HunyuanVideo": "hunyuan_video",
     "Wan 2.1": "wan", "Wan 2.2": "wan", "Wan 2.2 TI2V": "wan",
     "LTX Video": "ltxv", "LTX Video 13B": "ltxv",
@@ -838,8 +840,9 @@ const MODEL_TYPE_SAMPLING_DEFAULTS = {
     sdxl:          { cfg: 8.0, sampler: "euler",    scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0, steps: 20 },
     // ALBABIT-FIX: cfg 7.0->8.0, sampler dpmpp_2m->euler, steps=20 -- all
     // verified against ComfyUI's own default startup workflow (the graph
-    // shown on first launch).
-    sd15:          { cfg: 8.0, sampler: "euler",    scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0, steps: 20 },
+    // shown on first launch). Key renamed "sd15" -> "sd1.5" -- same
+    // rationale as "sd35" -> "sd3.5" (converges on the Loader form).
+    "sd1.5":       { cfg: 8.0, sampler: "euler",    scheduler: "normal",      flux_shift: 1.0,  guidance: 0.0, steps: 20 },
     // ALBABIT-FIX: euler -> uni_pc, confirmed by 2 official Comfy-Org
     // workflows (Wan 2.1 1.3B T2V and Wan 2.1 14B I2V 720P). steps=20
     // added, from the same 14B I2V workflow.
@@ -869,16 +872,16 @@ const MODEL_TYPE_SAMPLING_DEFAULTS = {
     // ALBABIT-FIX: steps=64, verified against Genmo's official Mochi 1
     // model card (cfg was already exact).
     mochi:         { cfg: 4.5, sampler: "euler",    scheduler: "simple",      flux_shift: 6.0,  guidance: 0.0, steps: 64 },
-    // ALBABIT-FIX: previously fell back to "sd15" (cfg=7.0/dpmpp_2m/normal) --
+    // ALBABIT-FIX: previously fell back to "sd1.5" (cfg=7.0/dpmpp_2m/normal) --
     // verified against AuraFlow's own official ComfyUI workflow, which
     // contradicts all three. No shift node present (unlike Lumina2, which
     // reuses the same ModelSamplingAuraFlow node but at shift=6.0 -- confirmed
     // NOT applicable to AuraFlow's own workflow, checked directly).
     aura_flow:     { cfg: 3.48, sampler: "euler",   scheduler: "sgm_uniform", flux_shift: 1.0,  guidance: 0.0, steps: 20 },
-    // ALBABIT-FIX: previously fell back to "sd15" -- cfg/sampler verified
+    // ALBABIT-FIX: previously fell back to "sd1.5" -- cfg/sampler verified
     // against multiple independent community sources (weaker than AuraFlow's
     // direct official workflow, moderate confidence). scheduler/shift kept at
-    // sd15-equivalent values, no better source found.
+    // sd1.5-equivalent values, no better source found.
     // ALBABIT-FIX: steps=20 added, from the diffusers pipeline's own default
     // parameter (no official ComfyUI workflow found -- moderate confidence).
     pixart:        { cfg: 4.5,  sampler: "dpmpp_2m", scheduler: "normal",     flux_shift: 1.0,  guidance: 0.0, steps: 20 },
