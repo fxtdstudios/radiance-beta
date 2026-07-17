@@ -184,6 +184,15 @@ class RadianceUnifiedLoader:
         # weights ship inside the main UNET checkpoint (see assemble_clip_paths).
         text_projection_list = ["None", "Baked (from UNET)"] + folder_paths.get_filename_list("text_encoders")
         text_projection_slot = lambda tip: (text_projection_list, {"default": "None", "tooltip": tip})
+        # ALBABIT-FIX: AuraFlow's official example workflow (CheckpointLoaderSimple
+        # only, no separate CLIPLoader) and its HF repo (fal/AuraFlow-v0.2, only a
+        # generic diffusers-format text_encoder/ folder, no distinct ComfyUI-ready
+        # filename) confirm it has no standalone text encoder file either -- same
+        # "Baked (from UNET)" mechanism as text_projection, on the t5xxl slot
+        # (AuraFlow's real encoder is a T5 variant per comfy.text_encoders.aura_t5,
+        # not clip_l -- see assemble_clip_paths/CLIP_SLOT_ORDER).
+        t5xxl_list = ["None", "Baked (from UNET)"] + folder_paths.get_filename_list("text_encoders")
+        t5xxl_slot = lambda tip: (t5xxl_list, {"default": "None", "tooltip": tip})
 
         return {
             "required": {
@@ -239,8 +248,10 @@ class RadianceUnifiedLoader:
                     "CLIP-L (text encoder). Used by: SD1.5, SDXL, Flux, SD3."),
                 "clip_g":      clip_slot(
                     "CLIP-G (text encoder). Used by: SDXL, SD3, SD3.5."),
-                "t5xxl":       clip_slot(
-                    "T5-XXL (text encoder). Used by: Flux, SD3, SD3.5, Wan, PixArt, LTX (pre-2.3)."),
+                "t5xxl":       t5xxl_slot(
+                    "T5-XXL (text encoder). Used by: Flux, SD3, SD3.5, Wan, PixArt, LTX (pre-2.3). "
+                    "'Baked (from UNET)' loads it from the main checkpoint -- AuraFlow ships no "
+                    "standalone text encoder file."),
                 "llm_encoder": clip_slot(
                     "LLM encoder. Used by: HunyuanVideo (Llava-Llama3), LTX 2.3 (Gemma 3), "
                     "Lumina2 (Gemma-2), Z-Image (Qwen3), Flux.2 (Mistral-3/Qwen3)."),

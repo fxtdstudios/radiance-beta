@@ -13,7 +13,9 @@ const LOADER_NODES = ["RadianceUnifiedLoader", "RadianceImageLoader", "RadianceV
 // the preset dropdown order (config/model_map.py's CHECKPOINT_PRESETS).
 const PRESET_SLOTS = {
     "Custom": ["clip_l", "clip_g", "t5xxl", "llm_encoder", "text_projection"],
-    "AuraFlow": ["clip_l"],
+    // ALBABIT-FIX: AuraFlow's real encoder is a T5 variant (comfy.text_encoders.
+    // aura_t5), not clip_l -- matches CLIP_SLOT_ORDER["aura_flow"] (model/detect.py).
+    "AuraFlow": ["t5xxl"],
     "Chroma": ["t5xxl"],
     "CogVideoX": ["t5xxl"],
     "Cosmos World": ["t5xxl"],
@@ -49,8 +51,13 @@ const PRESET_CONFIGS = {
         // -- no separate VAELoader node at all. No standalone AuraFlow VAE file
         // found; "Baked VAE (from UNET)" listed first, old guesses kept as fallback.
         "vae_hints":     ["Baked VAE (from UNET)", "aura_vae", "sd_vae"],
+        // ALBABIT-FIX: AuraFlow's real encoder is a T5 variant (comfy.text_encoders.
+        // aura_t5.AuraT5Model, TEModel.T5_XL) -- "clip_l" hints never matched any
+        // real file. No standalone encoder file found either (fal/AuraFlow-v0.2's
+        // HF repo only has a generic diffusers-format text_encoder/ folder, not a
+        // distinct ComfyUI-ready filename) -- "Baked (from UNET)" on t5xxl instead.
         "clip_hints":    {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
+            "t5xxl": ["Baked (from UNET)"],
         },
     },
     "Chroma": {
