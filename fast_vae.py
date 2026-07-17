@@ -62,7 +62,7 @@ _DECODER_TYPE_FALLBACKS: dict[str, list[str]] = {
     "chroma": ["flux"], "zimage": ["flux"], "z_image": ["flux"], "qwen": ["flux"],
     "cosmos": ["flux"], "sd3": ["flux"], "lumina2": ["flux"],
     "hunyuanvideo": ["wan"], "cogvideox": ["wan"],
-    "sd15": ["sdxl"], "pixart": ["sdxl"], "aura_flow": ["sdxl"],
+    "sd1.5": ["sdxl"], "pixart": ["sdxl"], "aura_flow": ["sdxl"],
 }
 
 

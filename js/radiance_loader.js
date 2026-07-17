@@ -13,7 +13,9 @@ const LOADER_NODES = ["RadianceUnifiedLoader", "RadianceImageLoader", "RadianceV
 // the preset dropdown order (config/model_map.py's CHECKPOINT_PRESETS).
 const PRESET_SLOTS = {
     "Custom": ["clip_l", "clip_g", "t5xxl", "llm_encoder", "text_projection"],
-    "AuraFlow": ["clip_l"],
+    // ALBABIT-FIX: AuraFlow's real encoder is a T5 variant (comfy.text_encoders.
+    // aura_t5), not clip_l -- matches CLIP_SLOT_ORDER["aura_flow"] (model/detect.py).
+    "AuraFlow": ["t5xxl"],
     "Chroma": ["t5xxl"],
     "CogVideoX": ["t5xxl"],
     "Cosmos World": ["t5xxl"],
@@ -22,19 +24,25 @@ const PRESET_SLOTS = {
     "Flux.2": ["llm_encoder"],
     "Flux.2 (Low VRAM)": ["llm_encoder"],
     "HunyuanVideo": ["clip_l", "llm_encoder"],
-    "LTX Video": ["llm_encoder", "text_projection"],
-    "LTX Video 13B": ["llm_encoder", "text_projection"],
+    // ALBABIT-FIX: text_projection dropped -- pre-2.3 LTX only ever loads 1
+    // CLIP file (comfy/text_encoders/lt.py's ltxv_te, T5-only). Providing a
+    // 2nd file (text_projection) would route comfy.sd's CLIPType.LTXV branch
+    // into ltxav_te (Gemma-based, LTX 2.3 only) instead -- the wrong encoder
+    // for these architectures, not just an unused widget.
+    "LTX Video": ["llm_encoder"],
+    "LTX Video (Low VRAM)": ["llm_encoder"],
     "LTX Video 2.3": ["llm_encoder", "text_projection"],
     "LTX Video 2.3 (Low VRAM)": ["llm_encoder", "text_projection"],
     "Lumina2": ["llm_encoder"],
     "Mochi": ["t5xxl"],
     "PixArt Sigma": ["t5xxl"],
     "SD 1.5": ["clip_l"],
-    "SD3.5 Large": ["clip_l", "clip_g", "t5xxl"],
-    "SD3.5 Medium": ["clip_l", "clip_g", "t5xxl"],
+    "SD3.5": ["clip_l", "clip_g", "t5xxl"],
     "SDXL": ["clip_l", "clip_g"],
     "Wan 2.1": ["t5xxl"],
+    "Wan 2.1 (Low VRAM)": ["t5xxl"],
     "Wan 2.2": ["t5xxl"],
+    "Wan 2.2 (Low VRAM)": ["t5xxl"],
     "Wan 2.2 TI2V": ["t5xxl"],
     "Z-Image": ["llm_encoder"],
 };
@@ -45,9 +53,18 @@ const PRESET_SLOTS = {
 const PRESET_CONFIGS = {
     "AuraFlow": {
         "unet_hints":    ["auraflow", "aura_flow", "aura-flow"],
-        "vae_hints":     ["aura_vae", "sd_vae"],
+        // ALBABIT-FIX: official AuraFlow example workflow (fal/AuraFlow-v0.2,
+        // extracted from aura_flow_0.2_example.png) uses CheckpointLoaderSimple
+        // -- no separate VAELoader node at all. No standalone AuraFlow VAE file
+        // found; "Baked VAE (from UNET)" listed first, old guesses kept as fallback.
+        "vae_hints":     ["Baked VAE (from UNET)", "aura_vae", "sd_vae"],
+        // ALBABIT-FIX: AuraFlow's real encoder is a T5 variant (comfy.text_encoders.
+        // aura_t5.AuraT5Model, TEModel.T5_XL) -- "clip_l" hints never matched any
+        // real file. No standalone encoder file found either (fal/AuraFlow-v0.2's
+        // HF repo only has a generic diffusers-format text_encoder/ folder, not a
+        // distinct ComfyUI-ready filename) -- "Baked (from UNET)" on t5xxl instead.
         "clip_hints":    {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
+            "t5xxl": ["Baked (from UNET)"],
         },
     },
     "Chroma": {
@@ -165,23 +182,65 @@ const PRESET_CONFIGS = {
             "clip_l":      ["clip_l.safetensors", "clip_l"],
         },
     },
+    // ALBABIT-FIX: 2B and 13B merged into one preset -- same reasoning as the
+    // config/model_map.py comment: identical vae_hints/clip_hints already,
+    // weight_dtype now "default" (comfy.sd auto-picks per the actual loaded
+    // file's real size). unet_hints/upscale_hints list 13B-specific patterns
+    // first -- the old 2B list's bare "ltxv"/"ltx_video" fallback would
+    // otherwise match a 13B-named file first via substring (findMatchingFile
+    // stops at the first hint that matches anything, in list order).
     "LTX Video": {
-        "unet_hints":    ["ltx-video-2b", "ltxv-2b", "ltx_video", "ltxv"],
+        "unet_hints":    ["ltx-video-13b", "ltxv-13b", "ltx_13b", "ltx-video-2b", "ltxv-2b", "ltx_video", "ltxv"],
         "vae_hints":     ["Baked VAE (from UNET)", "ltxvideo_vae", "ltx_vae", "ltxv_vae", "causal_vae"],
         "clip_hints":    {
             "llm_encoder": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
         },
         "extra_widgets": ["upscale_model_name"],
-        "upscale_hints": ["ltxv", "ltx_video", "latent_upsampler", "upsampler"],
+        // ALBABIT-FIX: real filenames confirmed on Lightricks/LTX-Video's HF
+        // repo -- "spatial" (resolution) and "temporal" (frame count/motion)
+        // upscalers are genuinely separate files, not the same file with a
+        // toggle. Reference 13B workflow uses the spatial one (with
+        // temporal_upsample=false), matching the "upscale = higher resolution"
+        // expectation here -- 0.9.8 listed first as the newer generation
+        // (same "prefer newest" convention as LTX 2.3's own upscale_hints).
+        "upscale_hints": ["ltxv-spatial-upscaler-0.9.8", "ltxv-spatial-upscaler-0.9.7", "ltxv-13b", "ltx_13b", "ltxv", "ltx_video", "latent_upsampler", "upsampler"],
+        // ALBABIT-FIX: 2B's standard workflow is a single Sampler -- no
+        // latent-upscale stage -- so leave upscale_model_name on "None"
+        // instead of pre-filling a file the typical pipeline doesn't use.
+        // 13B keeps the real upscale_hints above (2-stage LowRes+HighRes
+        // pipeline, confirmed via the reference 13B workflow).
+        "upscale_size_hints": {
+            "2b": [],
+            "13b": ["ltxv-spatial-upscaler-0.9.8", "ltxv-spatial-upscaler-0.9.7", "ltxv-13b", "ltx_13b", "ltxv", "ltx_video", "latent_upsampler", "upsampler"],
+        },
     },
-    "LTX Video 13B": {
-        "unet_hints":    ["ltx-video-13b", "ltxv-13b", "ltx_13b"],
+    "LTX Video (Low VRAM)": {
+        "unet_hints":    ["ltx-video-13b", "ltxv-13b", "ltx_13b", "ltx-video-2b", "ltxv-2b", "ltx_video", "ltxv"],
         "vae_hints":     ["Baked VAE (from UNET)", "ltxvideo_vae", "ltx_vae", "ltxv_vae", "causal_vae"],
         "clip_hints":    {
             "llm_encoder": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
         },
-        "extra_widgets": ["upscale_model_name"],
-        "upscale_hints": ["ltxv-13b", "ltx_13b", "latent_upsampler", "upsampler"],
+        // ALBABIT-FIX: offload_mode exposed + defaulted, same convention as
+        // Flux.1/Flux.2/LTX Video 2.3's own "(Low VRAM)" siblings.
+        "extra_widgets": ["upscale_model_name", "offload_mode"],
+        "offload_mode": "cpu_offload",
+        // ALBABIT-FIX: real filenames confirmed on Lightricks/LTX-Video's HF
+        // repo -- "spatial" (resolution) and "temporal" (frame count/motion)
+        // upscalers are genuinely separate files, not the same file with a
+        // toggle. Reference 13B workflow uses the spatial one (with
+        // temporal_upsample=false), matching the "upscale = higher resolution"
+        // expectation here -- 0.9.8 listed first as the newer generation
+        // (same "prefer newest" convention as LTX 2.3's own upscale_hints).
+        "upscale_hints": ["ltxv-spatial-upscaler-0.9.8", "ltxv-spatial-upscaler-0.9.7", "ltxv-13b", "ltx_13b", "ltxv", "ltx_video", "latent_upsampler", "upsampler"],
+        // ALBABIT-FIX: 2B's standard workflow is a single Sampler -- no
+        // latent-upscale stage -- so leave upscale_model_name on "None"
+        // instead of pre-filling a file the typical pipeline doesn't use.
+        // 13B keeps the real upscale_hints above (2-stage LowRes+HighRes
+        // pipeline, confirmed via the reference 13B workflow).
+        "upscale_size_hints": {
+            "2b": [],
+            "13b": ["ltxv-spatial-upscaler-0.9.8", "ltxv-spatial-upscaler-0.9.7", "ltxv-13b", "ltx_13b", "ltxv", "ltx_video", "latent_upsampler", "upsampler"],
+        },
     },
     "LTX Video 2.3": {
         // ALBABIT-FIX: distilled-1.1 added in second position — auto-matches if user has it
@@ -219,7 +278,11 @@ const PRESET_CONFIGS = {
     },
     "Lumina2": {
         "unet_hints":    ["lumina2", "lumina-2", "lumina_2"],
-        "vae_hints":     ["ae.safetensors", "flux_ae", "sd3_vae", "sd_vae", "lumina_vae"],
+        // ALBABIT-FIX: official Lumina2 example workflow (lumina_2.safetensors,
+        // extracted from lumina2_basic_example.png) uses CheckpointLoaderSimple
+        // -- no separate VAELoader node at all. No standalone Lumina2 VAE file
+        // found; "Baked VAE (from UNET)" listed first, old guesses kept as fallback.
+        "vae_hints":     ["Baked VAE (from UNET)", "ae.safetensors", "flux_ae", "sd3_vae", "sd_vae", "lumina_vae"],
         "clip_hints":    {
             "llm_encoder": ["gemma_2_2b", "gemma2_2b", "gemma_2"],
         },
@@ -246,29 +309,32 @@ const PRESET_CONFIGS = {
             "clip_l": ["clip_l.safetensors", "clip_l"],
         },
     },
-    // ALBABIT-FIX: Large and Turbo merged -- same vae_hints/clip_hints
-    // already, Turbo is Large's distilled variant (Sampler tells them apart
-    // by filename via _deriveDistillationOverride). "Medium" stays separate
-    // (a genuinely different-sized sibling, not a distillation pair).
-    "SD3.5 Large": {
-        "unet_hints":    ["sd3.5_large", "sd3-5_large", "sd3.5_large_turbo", "sd3.5_turbo", "sd3-5_turbo"],
-        "vae_hints":     ["sd3_vae", "sd3.5_vae", "sd3"],
+    // ALBABIT-FIX: Large, Large Turbo, and Medium all merged into one preset --
+    // vae_hints/clip_hints are identical across all three (unlike Flux.2
+    // Dev/Klein, no clip_size_hints branching needed), so a combined
+    // unet_hints list is enough. Large listed first (flagship, quality-first,
+    // same convention as Flux.2's Dev-before-Klein ordering); Turbo is Large's
+    // distilled variant (Sampler tells it apart by filename via
+    // _deriveDistillationOverride, unaffected by this merge).
+    "SD3.5": {
+        "unet_hints":    [
+            "sd3.5_large", "sd3-5_large", "sd3.5_large_turbo", "sd3.5_turbo", "sd3-5_turbo",
+            "sd3.5_medium", "sd3-5_medium",
+        ],
+        // ALBABIT-FIX: every official SD3.5 release (ComfyUI's own bundled
+        // workflow template, the Comfy-Org HF repo, the official examples page)
+        // ships VAE baked into the main checkpoint -- no standalone SD3.5 VAE
+        // file was found anywhere. "Baked VAE (from UNET)" listed first so it's
+        // the auto-fill default; the old hints stay as a fallback in case a
+        // standalone file does turn up for some user.
+        "vae_hints":     ["Baked VAE (from UNET)", "sd3_vae", "sd3.5_vae", "sd3"],
         "clip_hints":    {
             "clip_l": ["clip_l.safetensors", "clip_l"],
             "clip_g": ["clip_g.safetensors", "clip_g"],
             "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
         },
     },
-    "SD3.5 Medium": {
-        "unet_hints":    ["sd3.5_medium", "sd3-5_medium"],
-        "vae_hints":     ["sd3_vae", "sd3.5_vae", "sd3"],
-        "clip_hints":    {
-            "clip_l": ["clip_l.safetensors", "clip_l"],
-            "clip_g": ["clip_g.safetensors", "clip_g"],
-            "t5xxl":  ["t5xxl_fp16", "t5xxl_fp8_e4m3fn", "t5xxl"],
-        },
-    },
-    // ALBABIT-FIX: Base and Turbo merged -- same reasoning as SD3.5 Large above.
+    // ALBABIT-FIX: Base and Turbo merged -- same reasoning as SD3.5 above.
     "SDXL": {
         "unet_hints":    ["sd_xl_base", "sdxl_base", "sdxl-base", "sdxl_turbo", "sdxl-turbo", "turbo"],
         "vae_hints":     ["sdxl_vae", "vae-ft-mse", "xl_vae"],
@@ -277,12 +343,41 @@ const PRESET_CONFIGS = {
             "clip_g": ["clip_g.safetensors", "clip_g"],
         },
     },
+    // ALBABIT-FIX: unet_hints previously matched any Wan 2.1 file regardless
+    // of size -- with both 1.3B and 14B installed, findMatchingFile would
+    // pick whichever sorted first in the file list, not the user's intent.
+    // ALBABIT-FIX (bug caught by Albabit, 2026-07-17): a first attempt added
+    // bare "14b"/"1.3b" tokens directly to unet_hints -- but findMatchingFile
+    // tests each hint against EVERY available file with no architecture
+    // awareness, so a bare "14b" also matched Wan 2.2's own 14B-class
+    // high_noise/low_noise files (e.g. "wan2.2_i2v_high_noise_14B_fp16..."),
+    // hijacking "Wan 2.1"'s auto-fill onto a completely different
+    // architecture. Fixed via unet_size_priority (see _resolveUnetMatch)
+    // instead: size tokens are now only ever considered among files that
+    // ALREADY matched one of these architecture-identifying unet_hints, never
+    // tested against the full file list on their own. VAE/T5 untouched --
+    // confirmed shared across both sizes on HF (Comfy-Org/Wan_2.1_ComfyUI_repackaged:
+    // single wan_2.1_vae.safetensors + umt5_xxl_* files, no size-specific
+    // variants) -- no 🧲 needed here.
     "Wan 2.1": {
         "unet_hints":    ["wan2.1", "wan_2.1", "wan-2.1", "Wan2.1"],
+        "unet_size_priority": ["14b", "1.3b"],
         "vae_hints":     ["wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
         "clip_hints":    {
             "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
         },
+    },
+    "Wan 2.1 (Low VRAM)": {
+        "unet_hints":    ["wan2.1", "wan_2.1", "wan-2.1", "Wan2.1"],
+        "unet_size_priority": ["14b", "1.3b"],
+        "vae_hints":     ["wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
+        "clip_hints":    {
+            "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
+        },
+        // ALBABIT-FIX: offload_mode exposed + defaulted, same convention as
+        // Flux.1/Flux.2/LTX Video's own "(Low VRAM)" siblings.
+        "extra_widgets": ["offload_mode"],
+        "offload_mode": "cpu_offload",
     },
     "Wan 2.2": {
         "unet_hints":    [
@@ -304,6 +399,29 @@ const PRESET_CONFIGS = {
         // _find_wan_moe_companion() (nodes_loader.py) auto-loads the other
         // one server-side regardless of which one is picked here.
         "companion_linked": true,
+    },
+    "Wan 2.2 (Low VRAM)": {
+        "unet_hints":    [
+            "wan2.2_t2v_high_noise_14B_fp8_scaled",
+            "wan2.2_i2v_high_noise_14B_fp8_scaled",
+            "wan2.2_t2v_high_noise",
+            "wan2.2_i2v_high_noise",
+            "wan2.2_high_noise",
+            "wan2.2",
+            "wan_2.2",
+            "wan-2.2",
+            "Wan2.2",
+        ],
+        "vae_hints":     ["wan_2.1_vae", "wan2.1_vae", "wan_vae", "wan2_vae", "open_wan"],
+        "clip_hints":    {
+            "t5xxl": ["umt5_xxl", "umt5-xxl", "umt5xxl", "t5xxl"],
+        },
+        "companion_linked": true,
+        // ALBABIT-FIX: offload_mode exposed + defaulted, same convention as
+        // every other "(Low VRAM)" sibling -- both high_noise and low_noise
+        // UNETs (~14B each) get offloaded together.
+        "extra_widgets": ["offload_mode"],
+        "offload_mode": "cpu_offload",
     },
     "Wan 2.2 TI2V": {
         "unet_hints":    ["wan2.2_ti2v_5B_fp16", "wan2.2_ti2v_5B", "wan2.2_ti2v"],
@@ -387,6 +505,48 @@ function _resolveClipMatch(node, config, wName) {
 }
 
 /**
+ * Like _resolveClipHints, but for upscale_model_name (e.g. LTX Video 2B/13B):
+ * a preset's upscale_size_hints lets a known size (e.g. "2b") resolve to an
+ * empty list -- the typical 2B workflow is a single Sampler with no latent
+ * upscale stage, unlike 13B's 2-stage LowRes+upscale+HighRes pipeline -- so
+ * the widget correctly defaults to "None" instead of a real (but unused)
+ * upscaler file. Uses hasOwnProperty (not truthiness) so an empty-array entry
+ * still counts as "known" and isn't skipped in favor of the static fallback.
+ */
+function _resolveUpscaleHints(node, config) {
+    if (config?.upscale_size_hints) {
+        const sizeToken = _detectSizeToken(getWidget(node, "unet_name")?.value || "");
+        if (sizeToken && Object.prototype.hasOwnProperty.call(config.upscale_size_hints, sizeToken)) {
+            return config.upscale_size_hints[sizeToken];
+        }
+    }
+    return config?.upscale_hints;
+}
+
+/**
+ * Resolve unet_name's auto-fill pick. Without unet_size_priority, behaves
+ * exactly like a plain findMatchingFile() call (existing behavior for every
+ * other preset, unchanged). With it (e.g. Wan 2.1's 1.3B/14B): a bare size
+ * token must NEVER be tested against the full file list on its own -- it
+ * would just as happily match an unrelated architecture's same-size file
+ * (Wan 2.2's own 14B-class high_noise/low_noise checkpoints, under the
+ * "Wan 2.1" preset -- the exact bug Albabit caught live). So size tokens are
+ * only considered among files that already matched one of unet_hints
+ * (architecture identity first, size preference second, never combined into
+ * one flat scan).
+ */
+function _resolveUnetMatch(config, values) {
+    if (!config?.unet_hints || !values) return null;
+    if (!config.unet_size_priority) return findMatchingFile(config.unet_hints, values);
+    const candidates = values.filter(v => config.unet_hints.some(h => v.toLowerCase().includes(h.toLowerCase())));
+    for (const token of config.unet_size_priority) {
+        const match = candidates.find(v => v.toLowerCase().includes(token.toLowerCase()));
+        if (match) return match;
+    }
+    return candidates[0] || null;
+}
+
+/**
  * Performs client-side smart auto-fill matching of files based on selected preset
  */
 function autoFillPresetFiles(node, cleanPreset) {
@@ -396,7 +556,7 @@ function autoFillPresetFiles(node, cleanPreset) {
     // 1. Match UNET
     const unetW = getWidget(node, "unet_name");
     if (unetW && unetW.options?.values && config.unet_hints) {
-        const matched = findMatchingFile(config.unet_hints, unetW.options.values);
+        const matched = _resolveUnetMatch(config, unetW.options.values);
         if (matched) unetW.value = matched;
     }
 
@@ -435,8 +595,9 @@ function autoFillPresetFiles(node, cleanPreset) {
     // 5. Match Latent Upscale Model (Radiance Video Loader only)
     const upscaleW = getWidget(node, "upscale_model_name");
     if (upscaleW && upscaleW.options?.values) {
-        if (config.upscale_hints) {
-            const matched = findMatchingFile(config.upscale_hints, upscaleW.options.values);
+        const upscaleHints = _resolveUpscaleHints(node, config);
+        if (upscaleHints) {
+            const matched = findMatchingFile(upscaleHints, upscaleW.options.values);
             upscaleW.value = matched || "None";
         } else {
             upscaleW.value = "None";
@@ -458,15 +619,40 @@ function autoFillPresetFiles(node, cleanPreset) {
 // label marker (same pattern as radiance_sampler.js/radiance_prompt.js).
 const PRESET_MARKER = " ✎";
 // ALBABIT-FIX: "🧲" marks unet_name whenever the file is a recognized preset
-// variant -- unet_name always has a real link to other magnet-marked widgets
-// (the Sampler's model_meta-driven defaults, and llm_encoder for Klein), so
-// picking any recognized file is never a mistake, unlike a genuinely
-// unrelated file (e.g. Flux1 Fill under "Flux.1"), which still gets "✎".
+// variant AND its model_meta output actually reaches a live Sampler right now
+// (see _isModelMetaConnected below) -- the marker's whole justification is
+// "this feeds the Sampler's model_meta magnets", so it's gated on that link
+// actually existing, not just on the file being recognized. llm_encoder's own
+// "🧲" under Klein's clip_size_hints is a DIFFERENT, Loader-internal fact
+// (unet_name's size determines the right CLIP file) with no relation to
+// model_meta/the Sampler -- left ungated, same category as "⛓" below.
 const LINKED_MARKER = " 🧲";
 // ALBABIT-FIX: for companion_linked presets (Wan 2.2), either the high_noise
 // or low_noise UNET is a valid pick -- "⛓" marks unet_name instead of "✎"
 // to signal its companion is auto-loaded server-side, not a manual mistake.
+// Purely a Loader-internal fact (nodes_loader.py's _find_wan_moe_companion()
+// runs regardless of what's downstream) -- unlike "🧲" above, NOT gated on
+// model_meta being connected.
 const COMPANION_MARKER = " ⛓";
+
+/**
+ * Mirrors radiance_sampler.js's _findModelMetaSourceNode() in reverse: does
+ * this Loader's own model_meta OUTPUT actually reach a live downstream node
+ * right now? An output can fan out to several links (one Loader feeding
+ * multiple Samplers) -- true as soon as at least one target is real and not
+ * muted/bypassed (mode 2/4, same exclusion the Sampler-side lookup applies
+ * to its origin node).
+ */
+function _isModelMetaConnected(node) {
+    const output = node.outputs?.find(o => o.name === "model_meta");
+    if (!output?.links || output.links.length === 0) return false;
+    return output.links.some(linkId => {
+        const link = app.graph.links[linkId];
+        if (!link) return false;
+        const targetNode = app.graph.getNodeById(link.target_id);
+        return !!(targetNode && targetNode.mode !== 2 && targetNode.mode !== 4);
+    });
+}
 
 // unet_name/vae_name are left untouched by autoFillPresetFiles() on no
 // match; CLIP slots/audio_vae/upscale fall back to "None" instead.
@@ -497,10 +683,19 @@ function updatePresetDivergenceMarkers(node) {
     const unetVariantLinked = !!(config && unetRecognized);
     const clipLinked = !!(config?.clip_size_hints && unetRecognized);
     const companionLinked = !!(config?.companion_linked && unetRecognized);
+    // ALBABIT-FIX: gates "🧲" specifically -- "⛓" and llm_encoder's own "🧲"
+    // (clipLinked) are Loader-internal facts, unaffected by whether anything
+    // downstream is actually listening.
+    const modelMetaConnected = _isModelMetaConnected(node);
 
     let changed = false;
 
-    const check = (widgetName, hints) => {
+    // resolveMatch overrides the plain findMatchingFile(hints, ...) lookup --
+    // needed for unet_name, whose match must go through _resolveUnetMatch()
+    // (unet_size_priority-aware) instead, same resolver autoFillPresetFiles()
+    // itself uses, so the "✎" divergence check never disagrees with what
+    // auto-fill would actually pick.
+    const check = (widgetName, hints, resolveMatch) => {
         const w = getWidget(node, widgetName);
         if (!w) return;
         let markerText = null;
@@ -508,7 +703,7 @@ function updatePresetDivergenceMarkers(node) {
             if (!hints || hints.length === 0) {
                 if (String(w.value) !== "None") markerText = PRESET_MARKER;
             } else {
-                const matched = findMatchingFile(hints, w.options?.values);
+                const matched = resolveMatch ? resolveMatch() : findMatchingFile(hints, w.options?.values);
                 if (matched !== null) {
                     if (String(w.value) !== String(matched)) markerText = PRESET_MARKER;
                 } else if (!NO_NONE_FALLBACK_FIELDS.has(widgetName)) {
@@ -522,14 +717,22 @@ function updatePresetDivergenceMarkers(node) {
     // unet_name shows a link marker instead of the divergence marker while
     // companionLinked/unetVariantLinked -- the point is to signal a
     // relationship (auto-loaded companion, recognized preset variant), not
-    // flag a mistake. companionLinked checked first: more specific than the
-    // general "recognized" case.
+    // flag a mistake. companionLinked implies unetVariantLinked too (both
+    // require unetRecognized). "⛓" always shows when companionLinked (a
+    // Loader-internal fact); "🧲" -- for both the plain unetVariantLinked
+    // case and as an addition alongside "⛓" -- only shows on top of that
+    // when modelMetaConnected is also true. Without a live downstream
+    // Sampler, a plain unetVariantLinked (non-companion) file falls back to
+    // the normal "✎" divergence check instead, same treatment as any other
+    // non-magnet widget.
     if (companionLinked) {
-        if (_markFileWidget(getWidget(node, "unet_name"), COMPANION_MARKER)) changed = true;
-    } else if (unetVariantLinked) {
+        const marker = COMPANION_MARKER + (modelMetaConnected ? LINKED_MARKER : "");
+        if (_markFileWidget(getWidget(node, "unet_name"), marker)) changed = true;
+    } else if (unetVariantLinked && modelMetaConnected) {
         if (_markFileWidget(getWidget(node, "unet_name"), LINKED_MARKER)) changed = true;
     } else {
-        check("unet_name", config?.unet_hints);
+        const unetW = getWidget(node, "unet_name");
+        check("unet_name", config?.unet_hints, () => _resolveUnetMatch(config, unetW?.options?.values));
     }
     check("vae_name", config?.vae_hints);
     for (const wName of ALL_CLIP_WIDGETS) {
@@ -545,7 +748,7 @@ function updatePresetDivergenceMarkers(node) {
         check(wName, config ? _resolveClipHints(node, config, wName) : null);
     }
     check("audio_vae_name", config?.audio_vae_hints);
-    check("upscale_model_name", config?.upscale_hints);
+    check("upscale_model_name", config ? _resolveUpscaleHints(node, config) : null);
 
     if (changed) node.setDirtyCanvas(true, true);
 }
@@ -667,7 +870,7 @@ function updateLoaderUI(node, forceAutoFill = false) {
     // --- Specific Model Preset mode ---
     // Hide: model_type, weight_dtype, clip_dtype, offload_mode (preset manages them)
     // Hide general utilities to keep the UI clean: check_vram, use_cache, lora_on_error, auto_download
-    // Show only: preset, unet_name, vae_name, and active CLIP slots!
+    // Show only: preset, unet_name, vae_name (unless baked, see below), and active CLIP slots!
     const activeSlots = PRESET_SLOTS[cleanPreset] || ALL_CLIP_WIDGETS;
     const extraWidgets = (PRESET_CONFIGS[cleanPreset] && PRESET_CONFIGS[cleanPreset].extra_widgets) || [];
 
@@ -676,8 +879,18 @@ function updateLoaderUI(node, forceAutoFill = false) {
     }
 
     node.widgets.forEach(w => {
-        if (w.name === "preset" || w.name === "unet_name" || w.name === "vae_name") {
+        if (w.name === "preset" || w.name === "unet_name") {
             setWidgetVisible(w, true, node);
+        } else if (w.name === "vae_name") {
+            // ALBABIT-FIX: hide vae_name once it's resolved to the "Baked VAE
+            // (from UNET)" sentinel -- nothing left to choose, same treatment
+            // as weight_dtype/model_type/clip_dtype above. Stays visible if a
+            // real standalone file was found/selected instead (e.g. the
+            // preset's vae_hints matched a real file the user has installed),
+            // so it can still be seen/changed. "Custom" mode (isCustom branch
+            // above) always shows it regardless, as the manual-control escape
+            // hatch.
+            setWidgetVisible(w, w.value !== "Baked VAE (from UNET)", node);
         } else if (ALL_CLIP_WIDGETS.includes(w.name)) {
             const shouldShow = activeSlots.includes(w.name);
             setWidgetVisible(w, shouldShow, node);

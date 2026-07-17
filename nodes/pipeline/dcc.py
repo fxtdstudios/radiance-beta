@@ -12,6 +12,7 @@ import numpy as np
 
 from radiance.config.env import ENV, get_env_bool
 from radiance.nodes_io import _save_exr, _save_video_ffmpeg, _load_video_to_numpy, _read_sequence
+from radiance.path_utils import strip_path_quotes
 
 logger = logging.getLogger("radiance.mcp")
 
@@ -400,6 +401,10 @@ class RadianceMCP:
         bridge_port:      int   = 1987,
         bridge_host:      str   = "127.0.0.1",
     ) -> Tuple[str, str]:
+        output_path = strip_path_quotes(output_path)
+        video_path = strip_path_quotes(video_path)
+        sequence_path = strip_path_quotes(sequence_path)
+
         from radiance.config.env import get_mcp_port, get_mcp_host
         if bridge_port == 1987:
             bridge_port = get_mcp_port()

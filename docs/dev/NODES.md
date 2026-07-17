@@ -194,7 +194,7 @@ model from the dropdown to instantly load all tuned HDR parameters.
 | `model_hint_override` | STRING | `""` | Optional partial string to override dropdown selection |
 
 **Model choices:** `ltx-video`, `flux`, `cogvideox`, `wan`, `hunyuanvideo`,
-`sd3`, `sdxl`, `sd15`
+`sd3`, `sdxl`, `sd1.5`
 
 #### Outputs
 
@@ -400,7 +400,7 @@ for creative effect.
 | hunyuanvideo | 0.60 | 3.5 | 8 | 4 | 16 |
 | sd3 | 0.50 | 3.0 | 8 | 1 | 16 |
 | sdxl | 0.40 | 2.5 | 8 | 1 | 4 |
-| sd15 | 0.35 | 2.5 | 8 | 1 | 4 |
+| sd1.5 | 0.35 | 2.5 | 8 | 1 | 4 |
 
 **Aliases accepted by all nodes with `model_hint`:**
 

@@ -25,6 +25,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
+from ....core.system.path_utils import strip_path_quotes
+
 logger = logging.getLogger("radiance.vfx_multipass.aov_reader")
 
 # Output slot -> accepted layer-name aliases (all lowercased, dots/spaces/dashes
@@ -271,7 +273,8 @@ class RadianceMultipassAOVReader:
         normal_layer: str = "auto",
         depth_layer: str = "auto",
     ) -> Tuple:
-        layers, h, w = _read_multilayer_exr(exr_path.strip())
+        exr_path = strip_path_quotes(exr_path)
+        layers, h, w = _read_multilayer_exr(exr_path)
 
         # Normalized lookup of available layers.
         norm_to_raw = {_norm_layer_name(k): k for k in layers}
