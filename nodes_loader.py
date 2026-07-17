@@ -218,9 +218,19 @@ class RadianceUnifiedLoader:
                                 "architecture. Override manually if detection fails."},
                 ),
                 # ── VAE ──
+                # ALBABIT-FIX: "Baked VAE (from UNET)" lets checkpoint-style files
+                # that embed their own VAE (e.g. SD3.5) skip the standalone vae_name
+                # file entirely -- same mechanism RadianceVideoLoader already uses
+                # for LTX 2.3. Appended (not prepended) so the raw combo default
+                # for architectures with real separate VAE files (Flux, SDXL,
+                # SD1.5...) is unchanged; per-preset auto-fill (vae_hints) is what
+                # actually selects it for presets where it's the norm.
                 "vae_name": (
-                    folder_paths.get_filename_list("vae"),
-                    {"tooltip": "VAE for encoding/decoding latents."},
+                    folder_paths.get_filename_list("vae") + ["Baked VAE (from UNET)"],
+                    {"tooltip": "VAE for encoding/decoding latents. "
+                                "'Baked VAE (from UNET)' extracts it from the checkpoint, "
+                                "for architectures whose standard release bundles the VAE "
+                                "into the main file instead of shipping it separately."},
                 ),
             },
             "optional": {
@@ -353,12 +363,10 @@ class RadianceUnifiedLoader:
         )
 
         # ════════════════════════════════════════════════════════════════
-        # 4. LOAD UNET  (mtime + size cache key)
+        # 4. LOAD UNET  (+ optional baked VAE extraction, mtime + size cache key)
         # ════════════════════════════════════════════════════════════════
-        # The base loader never extracts a baked VAE/Audio VAE (vae_name is
-        # never "Baked VAE (from UNET)" and there's no audio_vae_name slot),
-        # so the baked-VAE outputs below are always None/0.0/False.
-        model, _vae, _audio_vae, unet_time, unet_cache_hit, _vae_time, _vae_cache_hit = load_unet_and_baked_vae(
+        # No audio_vae_name slot on the base loader -- always passed "None".
+        model, vae, _audio_vae, unet_time, unet_cache_hit, vae_time, vae_cache_hit = load_unet_and_baked_vae(
             unet_path, unet_name, weight_dtype, offload_mode, vae_name, "None",
             caching, divider, info_lines
         )
@@ -372,11 +380,13 @@ class RadianceUnifiedLoader:
         )
 
         # ════════════════════════════════════════════════════════════════
-        # 6. LOAD VAE  (mtime cache key)
+        # 6. LOAD STANDALONE VAE  (mtime cache key) — skipped if baked
         # ════════════════════════════════════════════════════════════════
-        vae, vae_time, vae_cache_hit = load_standalone_vae(
-            vae_name, auto_download, caching, divider, info_lines, self._load_vae_sd_metadata
-        )
+        extract_vae = (vae_name == "Baked VAE (from UNET)")
+        if not extract_vae:
+            vae, vae_time, vae_cache_hit = load_standalone_vae(
+                vae_name, auto_download, caching, divider, info_lines, self._load_vae_sd_metadata
+            )
 
         # ════════════════════════════════════════════════════════════════
         # 7. APPLY LoRA STACK
