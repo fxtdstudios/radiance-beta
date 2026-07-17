@@ -44,7 +44,11 @@ const PRESET_SLOTS = {
 const PRESET_CONFIGS = {
     "AuraFlow": {
         "unet_hints":    ["auraflow", "aura_flow", "aura-flow"],
-        "vae_hints":     ["aura_vae", "sd_vae"],
+        // ALBABIT-FIX: official AuraFlow example workflow (fal/AuraFlow-v0.2,
+        // extracted from aura_flow_0.2_example.png) uses CheckpointLoaderSimple
+        // -- no separate VAELoader node at all. No standalone AuraFlow VAE file
+        // found; "Baked VAE (from UNET)" listed first, old guesses kept as fallback.
+        "vae_hints":     ["Baked VAE (from UNET)", "aura_vae", "sd_vae"],
         "clip_hints":    {
             "clip_l": ["clip_l.safetensors", "clip_l"],
         },
@@ -218,7 +222,11 @@ const PRESET_CONFIGS = {
     },
     "Lumina2": {
         "unet_hints":    ["lumina2", "lumina-2", "lumina_2"],
-        "vae_hints":     ["ae.safetensors", "flux_ae", "sd3_vae", "sd_vae", "lumina_vae"],
+        // ALBABIT-FIX: official Lumina2 example workflow (lumina_2.safetensors,
+        // extracted from lumina2_basic_example.png) uses CheckpointLoaderSimple
+        // -- no separate VAELoader node at all. No standalone Lumina2 VAE file
+        // found; "Baked VAE (from UNET)" listed first, old guesses kept as fallback.
+        "vae_hints":     ["Baked VAE (from UNET)", "ae.safetensors", "flux_ae", "sd3_vae", "sd_vae", "lumina_vae"],
         "clip_hints":    {
             "llm_encoder": ["gemma_2_2b", "gemma2_2b", "gemma_2"],
         },
