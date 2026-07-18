@@ -97,7 +97,7 @@ function setWidgetVisible(widget, visible, node) {
 // when the user toggles frame_computation.
 // ALBABIT-FIX follow-up: mirrors VIDEO_MODEL_TYPES in resolution.py —
 // model_types that emit 5D video latents and should auto-enable "enable_video".
-const VIDEO_MODEL_TYPES_JS = new Set(["WAN (16ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)", "Cosmos World (16ch)", "CogVideoX (16ch)"]);
+const VIDEO_MODEL_TYPES_JS = new Set(["WAN (16ch)", "WAN TI2V (48ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)", "Cosmos World (16ch)", "CogVideoX (16ch)"]);
 
 // ALBABIT-FIX follow-up: mirrors SPATIAL_SCALE/_align_up in resolution.py —
 // recompute width/height instantly when model_type changes, instead of waiting
@@ -105,6 +105,9 @@ const VIDEO_MODEL_TYPES_JS = new Set(["WAN (16ch)", "LTXV (128ch)", "HunyuanVide
 const SPATIAL_SCALE_JS = {
     "LTXV (128ch)": 32,
     "Flux.2 / Flux.2 Klein (128ch)": 16,
+    // ALBABIT-FIX: WAN 2.2 TI2V-5B's VAE compresses 16x spatially (double
+    // standard WAN's 8x) -- real bug fix, see resolution.py's SPATIAL_SCALE.
+    "WAN TI2V (48ch)": 16,
     // ALBABIT-FIX: "Manual" -> scale=1, _alignUp is a no-op and the +/- step
     // becomes 1, so width/height are fully unconstrained.
     "Manual": 1,
