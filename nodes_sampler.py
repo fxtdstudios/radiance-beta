@@ -1156,7 +1156,7 @@ class RadianceSamplerPro:
                 secondary_sampler = "dpmpp_2m"
                 secondary_scheduler = None                       
 
-                flow_match_types = GUIDANCE_EMBED_MODELS | {"wan", "hunyuan_video"}
+                flow_match_types = GUIDANCE_EMBED_MODELS | {"wan", "wan_ti2v", "hunyuan_video"}
                 if detected_type in flow_match_types:
                     logger.warning(
                         f"WARNING: DPM solvers are generally incompatible with {detected_type}'s "

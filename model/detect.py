@@ -9,16 +9,19 @@ import folder_paths
 logger = logging.getLogger("radiance.model.detect")
 
 
-def _tensor_dim0(f, ks: list[str], substr: str) -> int | None:
-    """Return shape[0] of the first key containing `substr`, or None.
+def _tensor_dim(f, ks: list[str], substr: str, dim: int = 0) -> int | None:
+    """Return shape[dim] of the first key containing `substr`, or None.
 
     ALBABIT-FIX: used to distinguish architectures that share identical key
-    names but differ by tensor width (e.g. Lumina2 vs Z-Image).
+    names but differ by tensor width (e.g. Lumina2 vs Z-Image, dim=0) or by
+    input-channel count (e.g. WAN 14B/1.3B vs WAN 2.2 TI2V-5B's patch_embedding,
+    dim=1 -- verified against real checkpoints: [1536/5120, 16, 1, 2, 2] for
+    T2V/I2V vs [3072, 48, 1, 2, 2] for TI2V-5B).
     """
     for k in ks:
         if substr in k:
             try:
-                return f.get_slice(k).get_shape()[0]
+                return f.get_slice(k).get_shape()[dim]
             except Exception:
                 return None
     return None
@@ -66,7 +69,7 @@ _ARCH_HEURISTICS = [
     # "cap_v_projection.weight" heuristic never matched any real checkpoint.
     (lambda ks, f: any("cap_embedder.1.weight" in k for k in ks)
      and any("noise_refiner.0.attention.k_norm.weight" in k for k in ks)
-     and _tensor_dim0(f, ks, "cap_embedder.1.weight") == 3840, "z_image"),
+     and _tensor_dim(f, ks, "cap_embedder.1.weight") == 3840, "z_image"),
     (lambda ks, f: any("cap_embedder.1.weight" in k for k in ks)
      and any("noise_refiner.0.attention.k_norm.weight" in k for k in ks), "lumina2"),
     (lambda ks, f: any("auraflow" in k.lower() for k in ks), "aura_flow"),
@@ -76,6 +79,17 @@ _ARCH_HEURISTICS = [
     (lambda ks, f: any("blocks.block0.blocks.0.block.attn.to_q.0.weight" in k for k in ks), "cosmos"),
     # ALBABIT-FIX: CogVideoX UNET.
     (lambda ks, f: any("blocks.0.norm1.linear.weight" in k for k in ks), "cogvideox"),
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B shares patch_embedding/time_embedding keys
+    # with every other WAN variant but its patch_embedding.weight takes 48
+    # input channels instead of 16 (verified on real checkpoints: TI2V-5B is
+    # [3072, 48, 1, 2, 2] vs 14B/1.3B's [*, 16, 1, 2, 2]) -- must be checked
+    # before the generic "wan" entry (different LATENT_CHANNELS/VAE/latent
+    # format, real crash risk otherwise: a 16ch empty latent fed to a UNET
+    # that expects 48ch).
+    (lambda ks, f: any("patch_embedding" in k for k in ks)
+     and any("time_embedding" in k for k in ks)
+     and not any("joint_blocks" in k for k in ks)
+     and _tensor_dim(f, ks, "patch_embedding.weight", dim=1) == 48, "wan_ti2v"),
     (lambda ks, f: any("patch_embedding" in k for k in ks)
      and any("time_embedding" in k for k in ks)
      and not any("joint_blocks" in k for k in ks), "wan"),
@@ -101,6 +115,11 @@ LATENT_CHANNELS = {
     "cosmos": 16, "cogvideox": 16, "mochi": 12,
     # ALBABIT-FIX: Chroma (distilled Flux, 16ch) and Flux.2 / Flux.2 Klein (128ch)
     "chroma": 16, "flux2": 128, "flux2-klein": 128,
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B's VAE is a distinct architecture (comfy's own
+    # latent_formats.Wan22) -- 48 latent channels, not 16. Verified directly on
+    # a real wan2.2_ti2v_5B_fp16.safetensors checkpoint's patch_embedding.weight
+    # shape ([3072, 48, 1, 2, 2]) and against comfy/latent_formats.py.
+    "wan_ti2v": 48,
 }
 
 _FORMAT_MAP = {
@@ -114,6 +133,7 @@ _FORMAT_MAP = {
     "cosmos": "cosmos_16ch", "cogvideox": "cogvideox_16ch", "mochi": "mochi_12ch",
     # ALBABIT-FIX: Chroma and Flux.2 / Flux.2 Klein (share the 128ch VAE)
     "chroma": "chroma_16ch", "flux2": "flux2_128ch", "flux2-klein": "flux2_128ch",
+    "wan_ti2v": "wan_ti2v_48ch",
 }
 
 CLIP_SLOT_ORDER = {
@@ -145,6 +165,10 @@ CLIP_SLOT_ORDER = {
     # ALBABIT-FIX: Chroma — distilled Flux, single T5XXL (no clip_l). Flux.2 /
     # Flux.2 Klein — single LLM encoder (Mistral-3 24B / Qwen3-4B).
     "chroma": ["t5xxl"], "flux2": ["llm_encoder"], "flux2-klein": ["llm_encoder"],
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B uses the same umt5-xxl text encoder as every
+    # other WAN variant -- confirmed via the official TI2V-5B workflow's
+    # CLIPLoader (umt5_xxl_fp8_e4m3fn_scaled.safetensors, type "wan").
+    "wan_ti2v": ["t5xxl"],
 }
 
 _CLIP_TYPE_VARIANTS = {
@@ -152,6 +176,9 @@ _CLIP_TYPE_VARIANTS = {
     "ltxav": ["LTX_VIDEO", "LTXV", "LTX"],
     "hunyuan_video": ["HUNYUAN_VIDEO", "HUNYUANVIDEO"],
     "wan": ["WAN", "WAN2", "WAN_VIDEO"],
+    # ALBABIT-FIX: no dedicated CLIPType.WAN_TI2V exists in ComfyUI -- TI2V-5B
+    # reuses the same CLIPType.WAN as every other WAN variant.
+    "wan_ti2v": ["WAN", "WAN2", "WAN_VIDEO"],
     "aura_flow": ["AURA_FLOW", "AURAFLOW"],
     # ALBABIT-FIX: Flux.2 Klein shares CLIPType.FLUX2 with Flux.2 Dev (the
     # auto-generated "FLUX2-KLEIN" enum name doesn't exist).
@@ -167,6 +194,8 @@ _BASE_CLIP_VRAM = {
     # ALBABIT-FIX: Chroma — single T5XXL (no clip_l). Flux.2 Dev — Mistral-3 24B
     # encoder (much heavier). Flux.2 Klein — Qwen3-4B, same as Z-Image.
     "chroma": 3.5, "flux2": 8.0, "flux2-klein": 3.0,
+    # ALBABIT-FIX: same umt5-xxl CLIP as "wan" -- identical VRAM cost.
+    "wan_ti2v": 3.0,
 }
 
 _DTYPE_MULT = {
@@ -189,6 +218,9 @@ _BASE_VRAM = {
     "cosmos": 14.0, "cogvideox": 12.0, "mochi": 16.0,
     # ALBABIT-FIX: Chroma (~8.9B distilled Flux) and Flux.2 / Flux.2 Klein (128ch)
     "chroma": 10.0, "flux2": 20.0, "flux2-klein": 14.0,
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B is a ~5B DiT (vs "wan"'s 14B) -- rough
+    # estimate, not sourced from a specific benchmark like the others above.
+    "wan_ti2v": 7.0,
 }
 
 
@@ -256,7 +288,7 @@ def get_clip_type_enum(model_type: str):
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi resolve via CLIPType.{COSMOS,COGVIDEOX,MOCHI}.
     # Chroma -> CLIPType.CHROMA, Flux.2 -> CLIPType.FLUX2 (Flux.2 Klein via
     # _CLIP_TYPE_VARIANTS override above, since "FLUX2-KLEIN" isn't a real enum).
-    for name in ("hunyuan_video", "wan", "ltxv", "ltxav", "pixart", "aura_flow", "lumina2", "z_image",  # ALBABIT-FIX: "ltx" → "ltxv"
+    for name in ("hunyuan_video", "wan", "wan_ti2v", "ltxv", "ltxav", "pixart", "aura_flow", "lumina2", "z_image",  # ALBABIT-FIX: "ltx" → "ltxv"
                   "cosmos", "cogvideox", "mochi", "chroma", "flux2", "flux2-klein"):
         enum_name = name.upper().replace(".", "_")
         auto_variants = [enum_name, name.upper(), name.title().replace("_", "")]

@@ -145,6 +145,9 @@ MODEL_TYPES = [
     # above, never in the active one, so "ltxav" was unselectable in Custom
     # mode despite being used by the "LTX Video 2.3" presets.
     "ltxav",
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B (48ch VAE, distinct from "wan"'s 16ch) —
+    # real bug fix, see model/detect.py.
+    "wan_ti2v",
     "lumina2", "z_image",
     "pixart", "aura_flow",
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi — match Resolution/Sampler model types
