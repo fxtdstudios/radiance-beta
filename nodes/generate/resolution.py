@@ -59,7 +59,7 @@ PRESET_NAMES = ["Custom"] + list(PRESETS.keys())
 #    further differentiated beyond the existing SPATIAL_SCALE/LATENT_CHANNELS entries.
 
 # Model types that emit 5D latent (1, C, T, H, W)
-VIDEO_MODEL_TYPES = {"WAN (16ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)", "Cosmos World (16ch)", "CogVideoX (16ch)"}
+VIDEO_MODEL_TYPES = {"WAN (16ch)", "WAN TI2V (48ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)", "Cosmos World (16ch)", "CogVideoX (16ch)"}
 
 # Latent format string matching nodes_sampler.py latent_format input
 LATENT_FORMAT_MAP = {
@@ -89,6 +89,10 @@ LATENT_FORMAT_MAP = {
     "LTXV (128ch)": "ltxav",
     # ALBABIT-FIX: Added model types matching the Radiance Video Loader / RUDRA decoder set
     "WAN (16ch)": "wan",
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B -- distinct 48ch VAE (comfy.latent_formats.Wan22),
+    # real bug fix (was silently defaulting to "WAN (16ch)"'s 16ch/8px, a
+    # wrong-shaped-latent crash risk at sampling for this checkpoint).
+    "WAN TI2V (48ch)": "wan_ti2v",
     # ALBABIT-FIX: "hunyuan_video" (not "hunyuan") to match sampler_utils.py model_type
     "HunyuanVideo (16ch)": "hunyuan_video",
     # ALBABIT-FIX: Flux.2 latent format (comfy.latent_formats.Flux2)
@@ -117,6 +121,9 @@ MODEL_TYPES = [
     "LTXV (128ch)",
     # ALBABIT-FIX: Added model types matching the Radiance Video Loader / RUDRA decoder set
     "WAN (16ch)",
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B -- previously had no dedicated option here at
+    # all, forcing users onto "WAN (16ch)" (wrong channel count/spatial scale).
+    "WAN TI2V (48ch)",
     "HunyuanVideo (16ch)",
     # ALBABIT-FIX: Flux.2 / Flux.2 Klein — 128ch latent like LTXV, but ×16 spatial
     # downscale (vs ×32 for LTXV) and no 5D/video handling.
@@ -138,6 +145,9 @@ LATENT_CHANNELS = {
     "LTXV (128ch)": 128,
     # ALBABIT-FIX: Added model types matching the Radiance Video Loader / RUDRA decoder set
     "WAN (16ch)": 16,
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B's VAE is comfy.latent_formats.Wan22 (48
+    # latent channels) -- real bug fix, see the model_type list comment above.
+    "WAN TI2V (48ch)": 48,
     "HunyuanVideo (16ch)": 16,
     # ALBABIT-FIX: Flux.2 latent is 128 channels (comfy.latent_formats.Flux2)
     "Flux.2 / Flux.2 Klein (128ch)": 128,
@@ -151,6 +161,12 @@ LATENT_CHANNELS = {
 SPATIAL_SCALE = {
     "LTXV (128ch)": 32,
     "Flux.2 / Flux.2 Klein (128ch)": 16,
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B's VAE trades channel depth for spatial
+    # compression -- comfy.latent_formats.Wan22 sets spacial_downscale_ratio=16
+    # (double the standard WAN's implicit 8x). Real bug fix: this model_type had
+    # no entry at all, silently falling back to the 8px default -- wrong latent
+    # size, not just a metadata inaccuracy.
+    "WAN TI2V (48ch)": 16,
     # ALBABIT-FIX: "Manual" uses scale=1 -> _align_up is a no-op, so width/height
     # are fully unconstrained (no rounding, +/- step of 1) for experimental models.
     "Manual": 1,
@@ -165,6 +181,11 @@ SPATIAL_SCALE = {
 TEMPORAL_SCALE = {
     "LTXV (128ch)": 8,
     "WAN (16ch)": 4,
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B keeps the same 4x temporal compression as
+    # standard WAN (comfy.latent_formats.Wan22 inherits temporal_downscale_ratio
+    # from Wan21, only spacial_downscale_ratio is overridden) -- listed
+    # explicitly for clarity even though it matches this table's own default.
+    "WAN TI2V (48ch)": 4,
     "HunyuanVideo (16ch)": 4,
     "CogVideoX (16ch)": 4,
     # ALBABIT-FIX: Mochi's VAE temporal compression is ×6 (nodes_mochi.py:
@@ -187,6 +208,7 @@ MODEL_BASE_VRAM = {
     "flux": 12.0,  # Flux is heavy
     "sdxl": 4.5,   # SDXL is medium
     "wan":  14.0,  # Video models are very heavy
+    "wan_ti2v": 7.0,  # ALBABIT-FIX: ~5B DiT, roughly half of "wan"'s 14B -- estimate
     "ltxav": 10.0,  # ALBABIT-FIX: renamed from "ltx" to match latent_format key
     "hunyuan_video": 16.0,  # ALBABIT-FIX: renamed from "hunyuan" to match latent_format key
     "flux2": 20.0,    # ALBABIT-FIX: Flux.2 base VRAM estimate (32B+ models)

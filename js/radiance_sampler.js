@@ -160,8 +160,9 @@ const GUIDANCE_EMBED_MODELS = new Set(["flux", "flux2", "flux2-klein", "ltxv"]);
 // ALBABIT-FIX: "sd15" renamed to "sd1.5" -- same rationale as "sd35" -> "sd3.5"
 // above, converges on the Loader/model/detect.py form instead of diverging.
 // ALBABIT-FIX: z_image added -- same evidence class as lumina2 above.
+// ALBABIT-FIX: wan_ti2v added -- same CFG-guided convention as "wan".
 const CFG_GUIDED_MODELS = new Set([
-    "wan", "hunyuan_video", "sdxl", "sd1.5", "sd3", "sd3.5",
+    "wan", "wan_ti2v", "hunyuan_video", "sdxl", "sd1.5", "sd3", "sd3.5",
     "ltxav", "cogvideox", "lumina2", "z_image"
 ]);
 const LTX_MODEL_TYPES = new Set(["ltxv", "ltxav"]);
@@ -170,7 +171,7 @@ const LTX_MODEL_TYPES = new Set(["ltxv", "ltxav"]);
 // filter the "Phase-Shift" sampler_mode options (see PHASE_SHIFT_MODES
 // below), which nodes_sampler.py silently falls back to Standard for.
 const VIDEO_MODEL_TYPES = new Set([
-    "wan", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "mochi",
+    "wan", "wan_ti2v", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "mochi",
 ]);
 
 // ALBABIT-FIX: mirrors sampler_utils.py's SamplerMode string constants --
@@ -815,7 +816,7 @@ const LOADER_PRESET_MODEL_TYPE = {
     "SDXL": "sdxl", "SD 1.5": "sd1.5",
     "HunyuanVideo": "hunyuan_video",
     "Wan 2.1": "wan", "Wan 2.1 (Low VRAM)": "wan",
-    "Wan 2.2": "wan", "Wan 2.2 (Low VRAM)": "wan", "Wan 2.2 TI2V": "wan",
+    "Wan 2.2": "wan", "Wan 2.2 (Low VRAM)": "wan", "Wan 2.2 TI2V": "wan_ti2v",
     "LTX Video": "ltxv", "LTX Video (Low VRAM)": "ltxv",
     "LTX Video 2.3": "ltxav", "LTX Video 2.3 (Low VRAM)": "ltxav",
     "Cosmos World": "cosmos", "CogVideoX": "cogvideox", "Mochi": "mochi",
@@ -862,6 +863,10 @@ const MODEL_TYPE_SAMPLING_DEFAULTS = {
     // workflows (Wan 2.1 1.3B T2V and Wan 2.1 14B I2V 720P). steps=20
     // added, from the same 14B I2V workflow.
     wan:           { cfg: 6.0, sampler: "uni_pc",  scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0, steps: 20 },
+    // ALBABIT-FIX: WAN 2.2 TI2V-5B -- verified against Comfy-Org's official
+    // bundled "video_wan2_2_5B_ti2v.json" workflow. Same as "wan" except cfg
+    // (5 vs 6, genuinely different).
+    wan_ti2v:      { cfg: 5.0, sampler: "uni_pc",  scheduler: "simple",      flux_shift: 8.0,  guidance: 0.0, steps: 20 },
     // ALBABIT-FIX: steps=30, upgraded to high confidence -- confirmed by
     // ComfyUI's own official LTX Video example workflow.
     ltxv:          { cfg: 1.0, sampler: "euler",    scheduler: "simple",      flux_shift: 2.37, guidance: 3.5, steps: 30 },
