@@ -591,8 +591,13 @@ CHECKPOINT_PRESETS: dict = {
     },
     # ALBABIT-FIX: TI2V-5B is a single-UNET WAN 2.2 variant (no high/low_noise pair)
     # and requires wan2.2_vae.safetensors (48ch), not wan_2.1_vae (16ch).
+    # model_type "wan_ti2v" (was "wan") -- real bug fix, see model/detect.py:
+    # "wan" implies 16 latent channels everywhere downstream (Resolution's empty
+    # latent, VRAM estimate) but TI2V-5B's real VAE is 48ch -- picking "WAN
+    # (16ch)" in Resolution for this preset built a wrong-shaped latent, a
+    # crash risk at sampling, not just a metadata inaccuracy.
     "Wan 2.2 TI2V": {
-        "model_type": "wan",
+        "model_type": "wan_ti2v",
         "weight_dtype": "default",
         "clip_dtype": "default",
     },
@@ -626,6 +631,6 @@ VIDEO_PRESET_NAMES: set = {
 # "model_type" dropdown (Custom/Auto-Detect) the same way "preset" is
 # filtered. "ltx" renamed to "ltxv" to match sampler_utils.py.
 VIDEO_MODEL_TYPES: set = {
-    "hunyuan_video", "wan", "ltxv", "ltxav",
+    "hunyuan_video", "wan", "wan_ti2v", "ltxv", "ltxav",
     "cosmos", "cogvideox", "mochi",
 }

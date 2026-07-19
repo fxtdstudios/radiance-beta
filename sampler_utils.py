@@ -57,6 +57,9 @@ MODEL_TYPES = [
     # converges on the Loader/model/detect.py form instead of diverging from it.
     "sd1.5",
     "wan",
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B (48ch VAE, distinct from "wan"'s 16ch) —
+    # real bug fix, see model/detect.py.
+    "wan_ti2v",
     "ltxv",
     "ltxav",
     "hunyuan_video",
@@ -68,7 +71,7 @@ MODEL_TYPES = [
     "mochi",  # ALBABIT-FIX: Mochi-1 — match Resolution/Loader model types
 ]
 
-VIDEO_MODEL_TYPES = {"wan", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "mochi"}
+VIDEO_MODEL_TYPES = {"wan", "wan_ti2v", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "mochi"}
 
 # ALBABIT-FIX: flux2/flux2-klein use guidance_embed like flux (not external CFG)
 # ALBABIT-FIX: lumina2 removed -- its official workflow uses a plain KSampler
@@ -83,7 +86,9 @@ GUIDANCE_EMBED_MODELS = {"flux", "flux2", "flux2-klein", "ltxv"}
 # ALBABIT-FIX: lumina2 added -- classic external CFG, confirmed via its
 # official example workflow (plain KSampler cfg=4, no guidance-embed node)
 # ALBABIT-FIX: z_image added -- same evidence class as lumina2 above.
-CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd1.5", "sd3", "sd3.5", "ltxav", "cogvideox", "mochi", "lumina2", "z_image"}
+# ALBABIT-FIX: wan_ti2v added -- same CFG-guided convention as "wan" (its
+# official workflow's KSampler uses a real cfg value, no guidance-embed node).
+CFG_GUIDED_MODELS = {"wan", "wan_ti2v", "hunyuan_video", "sdxl", "sd1.5", "sd3", "sd3.5", "ltxav", "cogvideox", "mochi", "lumina2", "z_image"}
 
 MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
     # ALBABIT-FIX: steps=20 added, verified against Comfy-Org's official
@@ -179,6 +184,18 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         # ALBABIT-FIX: euler -> uni_pc, confirmed by 2 official Comfy-Org
         # workflows (Wan 2.1 1.3B T2V and Wan 2.1 14B I2V 720P). steps=20
         # added, from the same 14B I2V workflow (its KSampler uses steps=20).
+        "sampler": "uni_pc",
+        "steps": 20,
+        "guidance_type": "cfg",
+    },
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B -- verified against Comfy-Org's official
+    # bundled "video_wan2_2_5B_ti2v.json" workflow template. Same scheduler/
+    # shift/sampler/steps as "wan" above, only cfg genuinely differs (5 vs 6).
+    "wan_ti2v": {
+        "cfg": 5.0,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 8.0,
         "sampler": "uni_pc",
         "steps": 20,
         "guidance_type": "cfg",
