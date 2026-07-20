@@ -15,21 +15,23 @@
  *     active tonemap curve -- outside that it would just duplicate the image
  *     output, so it's forced off and hidden there too.
  *
- *   Additional: hdr_output=True shows a warning on hdr_output's label when
- *   either (a) hdr_mode=Compress(Log) + display_tonemap=None (no tonemap
- *   applied, unbounded values) or (b) target_space is scene-referred (not
- *   sRGB/Raw) -- both make the ComfyUI preview look overexposed/wrong
- *   (intentional for VFX pipelines that consume the raw tensor downstream).
- *
  *   temporal_overlap is hidden unless temporal_size > 0 (its own tooltip:
  *   "Only active when temporal_size > 0").
  *
- *   Post-execution: rudra_decoder gets a warning when RUDRA fell all the way
- *   back to the standard VAE (no compatible checkpoint at all), or a shorter
- *   note when a cross-architecture checkpoint was silently substituted (e.g.
- *   wan -> flux, fast_vae.py's _DECODER_TYPE_FALLBACKS) -- both read from
- *   engine.py's "ui" channel via onExecuted, since only knowable once decode
- *   actually runs.
+ *   Post-execution (read from engine.py's "ui" channel via onExecuted, since
+ *   only knowable once decode actually runs):
+ *     - rudra_decoder gets a warning when RUDRA fell all the way back to the
+ *       standard VAE (no compatible checkpoint at all), or a shorter note
+ *       when a cross-architecture checkpoint was silently substituted (e.g.
+ *       wan -> flux, fast_vae.py's _DECODER_TYPE_FALLBACKS).
+ *     - hdr_output gets a warning when Compress(Log) ran with no
+ *       radiance_meta on the latent (no genuine HDR-encoded source upstream,
+ *       stripped by a sampler in between): the log-decompression curve then
+ *       inverts values that were never log-encoded, producing genuinely
+ *       wrong output. display_tonemap can't fix this, since hdr/vae.py
+ *       applies it AFTER the decompression. target_space alone is NOT
+ *       flagged: that's a ComfyUI-preview-only quirk, real output is
+ *       unaffected. Both confirmed against real decoded pixel values.
  *
  * INSTALL:
  *   Place this file in the same folder as radiance_bootstrap.js (the custom
@@ -194,26 +196,14 @@ function syncWidgets(node) {
 
     if (!hdrOutputW) return;
 
-    const hdrOut  = !!hdrOutputW.value;
     const hdrMode = hdrModeW?.value ?? "";
     const isCompressLog = hdrMode === "Compress (Log)";
-
-    // Guaranteed-overexposure warning: hdr_output=True skips the final [0,1]
-    // clamp in every hdr_mode, so the preview looks wrong for two independent
-    // reasons -- (a) hdr_mode=Compress(Log) + display_tonemap=None applies no
-    // tonemap at all, so raw decompressed HDR values pass through unbounded;
-    // (b) target_space is scene-referred (anything but sRGB/Raw), which
-    // ComfyUI's native preview always misinterprets as sRGB regardless of
-    // tonemap -- confirmed by target_space's own tooltip ("Requires
-    // hdr_output=True for true linear passthrough... Log/ACEScg/Rec.2020
-    // spaces are scene-referred — connect to a tonemap node before SaveImage").
     const displayTmVal = displayTmW?.value ?? "ACES Filmic";
     const targetSpaceVal = targetSpaceW?.value ?? "sRGB";
-    const willBlowOut = hdrOut && (
-        (isCompressLog && displayTmVal === "None") ||
-        !DISPLAY_READY_SPACES.has(targetSpaceVal)
-    );
-    _setLabelMarker(hdrOutputW, willBlowOut ? BLOWOUT_MARKER : null);
+
+    // ALBABIT-FIX: BLOWOUT_MARKER moved to onExecuted (post-execution only)
+    // below. Risk depends on radiance_meta, only known once decode runs, not
+    // from widget values here. See file header for the full rationale.
 
     let changed = false;
     if (setWidgetVisible(displayTmW, isCompressLog, node)) changed = true;
@@ -329,6 +319,14 @@ app.registerExtension({
             if (fellBack) marker = RUDRA_FALLBACK_MARKER;
             else if (substitutedType) marker = ` ⚠ ${substitutedType} ckpt`;
             _setLabelMarker(getWidget(this, W_RUDRA_DECODER), marker);
+
+            // ALBABIT-FIX: same "ui" side-channel convention, for hdr_output.
+            // engine.py computes log_overexposure_risk from radiance_meta
+            // (only known at decode time), so this only reflects the run that
+            // just finished, not the current widget values.
+            const overexpRisk = !!message?.log_overexposure_risk?.[0];
+            _setLabelMarker(getWidget(this, W_HDR_OUTPUT), overexpRisk ? BLOWOUT_MARKER : null);
+
             this.setDirtyCanvas?.(true, true);
         };
     },
