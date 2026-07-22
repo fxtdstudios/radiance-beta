@@ -273,6 +273,11 @@ class RadianceHDRVAEDecode:
         alpha_provided = alpha is not None
         force_hdr_decode = True  # always True for this HDR-dedicated node
 
+        # ALBABIT-FIX: presence only known at execution time (a sampler
+        # between encode/decode strips this key). Used below to compute
+        # log_overexposure_risk for the frontend's post-execution marker.
+        radiance_meta_present = bool(samples.get("radiance_meta"))
+
         # Forward extra vae.py params via **kwargs, stripping any key already
         # passed explicitly to avoid "multiple values for keyword argument".
         # Derive the set from inspect.signature so it stays in sync automatically
@@ -423,13 +428,21 @@ class RadianceHDRVAEDecode:
 
         # ALBABIT-FIX: surface the RUDRA fallback to the frontend via the "ui"
         # channel (same convention as resolution.py's computed_width/height) so
-        # radiance_vae_widgets.js can flag it on rudra_decoder post-execution --
-        # the console log alone is easy to miss.
+        # radiance_vae_widgets.js can flag it on rudra_decoder post-execution.
+        # The console log alone is easy to miss.
         rudra_fallback = rudra_decoder == "Enabled" and not rudra_actually_used
+
+        # ALBABIT-FIX: surfaces to hdr_output's post-execution marker (see
+        # radiance_vae_widgets.js header for the full rationale). Only risky
+        # when Compress(Log) ran without a genuine HDR-encoded source
+        # upstream; display_tonemap doesn't gate this since hdr/vae.py
+        # applies it AFTER the log decompression that's the actual problem.
+        log_overexposure_risk = hdr_mode == "Compress (Log)" and not radiance_meta_present
         return {
             "ui": {
                 "rudra_fallback": [rudra_fallback],
                 "rudra_substituted_type": [rudra_substituted_type or ""],
+                "log_overexposure_risk": [log_overexposure_risk],
             },
             "result": (image, meta),
         }

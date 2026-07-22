@@ -285,7 +285,12 @@ def estimate_vram_for_load(
         logger.info(vram_msg)
         info_lines.append(vram_msg)
         if avail > 0 and est > avail * 0.9:
-            warn = f"VRAM tight! {est} GB estimated, {avail:.2f} GB free. Consider fp8 dtype or cpu_offload."
+            # ALBABIT-FIX: est assumes a traditional full load -- with
+            # DynamicVRAM/async offload active (ComfyUI 0.28+), real usage can
+            # be far lower, so this warning may not actually apply.
+            warn = (f"VRAM tight! {est} GB estimated, {avail:.2f} GB free. "
+                    f"Consider fp8 dtype or cpu_offload -- or ignore if DynamicVRAM "
+                    f"is active (actual usage may be much lower).")
             logger.warning(warn)
             info_lines.append(warn)
     else:
