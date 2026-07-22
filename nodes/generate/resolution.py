@@ -8,6 +8,8 @@ from typing import Dict, Any, Tuple
 
 import folder_paths
 
+from radiance.model.detect import _BASE_VRAM, _BASE_CLIP_VRAM
+
 logger = logging.getLogger("radiance.resolution")
 
 
@@ -203,19 +205,13 @@ TEMPORAL_SCALE = {
 # ── VRAM Estimation Metadata ──────────────────────────────────────────────────
 # Bytes per latent element (ComfyUI usually uses float32 internally = 4 bytes)
 LATENT_ELEMENT_BYTES = 4
-# Typical VRAM overhead for a modern diffusion model pass (Geniune rough estimate in GB)
-MODEL_BASE_VRAM = {
-    "flux": 12.0,  # Flux is heavy
-    "sdxl": 4.5,   # SDXL is medium
-    "wan":  14.0,  # Video models are very heavy
-    "wan_ti2v": 7.0,  # ALBABIT-FIX: ~5B DiT, roughly half of "wan"'s 14B -- estimate
-    "ltxav": 10.0,  # ALBABIT-FIX: renamed from "ltx" to match latent_format key
-    "hunyuan_video": 16.0,  # ALBABIT-FIX: renamed from "hunyuan" to match latent_format key
-    "flux2": 20.0,    # ALBABIT-FIX: Flux.2 base VRAM estimate (32B+ models)
-    # ALBABIT-FIX: Cosmos / CogVideoX / Mochi base VRAM estimates
-    "cosmos": 14.0, "cogvideox": 12.0, "mochi": 16.0,
-    "chroma": 12.0,  # ALBABIT-FIX: Chroma is Flux-sized (16ch, ~12GB base)
-}
+# ALBABIT-FIX: this used to be a separate MODEL_BASE_VRAM dict, hand-duplicated
+# from model/detect.py's _BASE_VRAM -- it drifted (missing the CLIP/text-encoder
+# cost entirely, plus several UNET numbers had gone stale vs _BASE_VRAM) causing
+# this node's "Est. VRAM" to disagree with the Loader's own estimate for the
+# same checkpoint (e.g. Flux.2: 20.0 GB shown here vs the Loader's real 28.0 GB,
+# UNET+CLIP). Reuses _BASE_VRAM/_BASE_CLIP_VRAM directly now -- one source of
+# truth, see _estimate_vram() below.
 
 LATENT_SCALE = 8  # VAE downscale factor
 
@@ -241,8 +237,11 @@ def _estimate_vram(w: int, h: int, c: int, b: int, format_key: str = "flux", spa
     latent_bytes = b * c * lw * lh * LATENT_ELEMENT_BYTES
     # Convert to GB
     latent_gb = latent_bytes / (1024**3)
-    # Model overhead
-    base_gb = MODEL_BASE_VRAM.get(format_key.lower(), 4.0)
+    # Model overhead: UNET + CLIP/text-encoder, same tables the Loader's own
+    # estimate_vram_usage() uses -- keeps this node's readout consistent with
+    # the Loader's, instead of a separately-drifting local table.
+    key = format_key.lower()
+    base_gb = _BASE_VRAM.get(key, 4.0) + _BASE_CLIP_VRAM.get(key, 2.0)
     # Total
     return latent_gb + base_gb
 
@@ -769,11 +768,12 @@ class RadianceResolution:
                         "default": "Manual",
                         "tooltip": (
                             "Drives pixel alignment, video-latent shape, frame-count "
-                            "rules, and latent_format for the selected model family. "
-                            "Flux/SD3/Cosmos = 16ch. SDXL/SD 1.5 = 4ch. Mochi = 12ch. "
-                            "'Manual' applies no alignment/frame-count constraints — "
-                            "use the 'latent_channels' input to set channels for "
-                            "experimental/unlisted models."
+                            "rules, latent_format, and the Est. VRAM readout.\n"
+                            "Flux/SD3/Cosmos = 16ch. SDXL/SD 1.5 = 4ch. Mochi = 12ch.\n"
+                            "'Manual': no alignment/frame-count constraints; use "
+                            "'latent_channels' for experimental/unlisted models.\n"
+                            "Est. VRAM assumes a full load; actual usage may be lower "
+                            "with DynamicVRAM/CPU offload active."
                         ),
                     },
                 ),

@@ -845,6 +845,26 @@ class RadianceSamplerPro:
         t_start = time.time()
         timings: Dict[str, float] = {}
 
+        # ALBABIT-FIX: refiner_model swaps only the MODEL mid-run, never the
+        # CONDITIONING -- a mismatched context_dim crashes deep in the sampling
+        # loop with a cryptic PyTorch shape error. Fail early and clearly
+        # instead (e.g. SDXL Base's 2048-dim clip_l+clip_g conditioning vs
+        # Refiner's 1280-dim clip_g-only).
+        if refiner_model is not None and positive:
+            try:
+                refiner_dim = refiner_model.model.model_config.unet_config.get("context_dim")
+                cond_dim = positive[0][0].shape[-1]
+            except AttributeError:
+                refiner_dim = cond_dim = None
+            if refiner_dim is not None and refiner_dim != cond_dim:
+                raise RuntimeError(
+                    f"refiner_model expects conditioning with {refiner_dim} dimensions, "
+                    f"but positive/negative were encoded with {cond_dim}.\n\n"
+                    f"Encode the prompt with a CLIP compatible with refiner_model "
+                    f"(e.g. SDXL Refiner needs its own clip_g-only encode, not the "
+                    f"Base model's clip_l+clip_g)."
+                )
+
         # 1. Apply Presets
         params = self._apply_presets(preset, 
             steps=steps, cfg=cfg, sampler=sampler, scheduler=scheduler, 
