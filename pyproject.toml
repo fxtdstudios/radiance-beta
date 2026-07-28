@@ -152,6 +152,7 @@ radiance = [
     "workflows/*.rad",
     "workflows/*/*.json",
     "workflows/*/*.rad",
+    "scripts/training/train_temporal_rudra.py",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────

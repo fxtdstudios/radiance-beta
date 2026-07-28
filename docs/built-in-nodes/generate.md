@@ -128,7 +128,7 @@ Use `◎ Radiance Sampler Pro` when the graph reaches the Sampler Pro step in a 
 
 ### What it does
 
-HDR VAE Decode.
+Decodes image or video latents through the selected VAE with explicit sampler-safe and direct-HDR contracts. Sampler mode avoids camera-log inversion on ordinary diffusion output. Direct HDR / RUDRA mode produces scene-linear Linear output, disables display tonemapping, and preserves values above 1.0.
 
 ### When to use it
 
@@ -136,17 +136,31 @@ Use `◎ HDR VAE Decode` when the graph reaches the HDR VAE Decode step in a gen
 
 ### Inputs
 
-This node does not expose static `INPUT_TYPES` metadata that can be read without importing the full ComfyUI runtime.
+| Input | Required | Type | Default | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `samples` | Yes | `LATENT` | - | 4D image or 5D video latent. |
+| `vae` | Yes | `VAE` | - | VAE used for standard decoding and model-type detection. |
+| `target_space` | Yes | `ENUM` | `sRGB` | Sampler-mode output space. Direct HDR mode sets this to Linear. |
+| `decode_mode` | Optional | `ENUM` | `Sampler (SDR-safe)` | Choose ordinary sampled-latent decode or direct HDR/RUDRA decode. |
+| `tile_size`, `overlap` | Optional | `ENUM`, `INT` | `Auto`, `128` | Spatial tiled-decode controls. |
+| `temporal_size`, `temporal_overlap` | Optional | `INT`, `INT` | `0`, `0` | Video-latent chunking with duration-preserving overlap crossfade. |
+| `alpha` | Optional | `IMAGE` | - | Alpha restored after the full temporal sequence is assembled. |
+| `hdr_scale_factor` | Optional | `FLOAT` | `1.0` | Scene-linear multiplier; ignored for display-referred output. |
+| `rudra_decoder` | Optional | `ENUM` | `Disabled` | Use compatible RUDRA weights when available. |
+| `export_rhdr` | Optional | `BOOLEAN` | `False` | Explicitly opt in to RHDR sidecar export. |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `image` | `IMAGE` | Output produced by the `image` socket. |
+| `image` | `IMAGE` | Display-ready output in sampler mode or scene-linear HDR in Direct HDR / RUDRA mode. |
+| `metadata` | `STRING` | Effective decode mode, color contract, decoder status, latent format, RHDR path, temporal information, and alpha status. |
 
 ### Practical notes
 
-- The node returns `image` (`IMAGE`).
+- Sampler mode is the safe default for standard diffusion output and does not apply LogC4 inversion.
+- Direct HDR / RUDRA mode forces `Compress (Log)`, a compatible log source, Linear output, `hdr_output=True`, and `display_tonemap=None`.
+- RHDR export is opt-in and its path is preserved in metadata.
 - Preserve HDR masters as EXR when values above display white matter.
 - If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
 

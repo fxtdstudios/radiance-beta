@@ -66,8 +66,6 @@ CHANGELOG v3.0.0 vs v2.5:
 import inspect
 import logging
 import math
-import os
-import struct
 import json
 import datetime
 from datetime import timezone as _tz
@@ -79,10 +77,8 @@ from radiance.fast_vae import decode_to_linear_realtime, load_radiance_decoder_w
 from radiance.color.transfer import (
     tensor_linear_to_logc4,
     tensor_linear_to_slog3,
-    tensor_srgb_to_linear,
-    tensor_linear_to_srgb,
 )
-from radiance.color.pipeline import apply_input_transform, apply_output_transform, INPUT_COLORSPACES
+from radiance.color.pipeline import apply_input_transform, INPUT_COLORSPACES
 
 logger = logging.getLogger("radiance.engine")
 
@@ -107,8 +103,8 @@ class RadianceHDRVAEDecode:
       • display_tonemap   — exposed from vae.py v2.3.8 (required for Compress(Log))
       • metadata output   — decode settings as a JSON string for downstream nodes
       • All vae.py params passed through correctly, no silent drops
-      • force_hdr_decode defaults True (this is an HDR-dedicated node)
-      • Alpha passthrough tracked in metadata (alpha_restored flag)
+      • explicit sampler-safe and direct-HDR/RUDRA decode contracts
+      • Alpha restoration verified from the actual output tensor
       • source_space, hdr_output, and all vae.py params explicitly declared
     """
 
@@ -136,25 +132,23 @@ class RadianceHDRVAEDecode:
         if "target_space" in types.get("required", {}):
             types["required"]["target_space"][1]["default"] = "sRGB"
 
-        # force_hdr_decode is always True for this HDR-dedicated node — no user-facing
-        # widget needed. The parent node uses it as a safety guard against accidentally
-        # applying Log/SoftClip inversion on post-sampler sRGB latents, but anyone
-        # using a node labelled "HDR VAE Decode" intends HDR output.
+        # Decode mode owns the force_hdr_decode safety decision.
         types["optional"].pop("force_hdr_decode", None)
 
-        # Override hdr_mode default to Compress(Log) — this is an HDR node
+        # Safe defaults for ordinary sampler latents. Direct HDR mode below
+        # explicitly selects the log/linear contract at execution time.
         if "hdr_mode" in types.get("optional", {}):
-            types["optional"]["hdr_mode"][1]["default"] = "Compress (Log)"
+            types["optional"]["hdr_mode"][1]["default"] = "Clip (SDR)"
 
-        # Override source_space default to ARRI LogC4 — matches the default Compress(Log) decompression curve
         if "source_space" in types.get("optional", {}):
-            types["optional"]["source_space"][1]["default"] = "ARRI LogC4"
+            types["optional"]["source_space"][1]["default"] = "sRGB"
+        if "display_tonemap" in types.get("optional", {}):
+            types["optional"]["display_tonemap"][1]["default"] = "None"
 
-        # All HDR-specific widgets default to True for this HDR-dedicated node
         if "hdr_output" in types.get("optional", {}):
-            types["optional"]["hdr_output"][1]["default"] = True
+            types["optional"]["hdr_output"][1]["default"] = False
         if "export_rhdr" in types.get("optional", {}):
-            types["optional"]["export_rhdr"][1]["default"] = True
+            types["optional"]["export_rhdr"][1]["default"] = False
         if "rhdr_precision" in types.get("optional", {}):
             types["optional"]["rhdr_precision"][1]["default"] = "f32"
 
@@ -219,9 +213,22 @@ class RadianceHDRVAEDecode:
                 ),
             },
         )
+        # Append new widgets after the existing v3.0 controls so legacy
+        # widgets_values arrays retain their original positional mapping.
+        types["optional"]["decode_mode"] = (
+            ["Auto (Recommended)", "Sampler (SDR-safe)", "Direct HDR / RUDRA"],
+            {
+                "default": "Auto (Recommended)",
+                "tooltip": (
+                    "Auto uses direct HDR only when encode metadata survives; otherwise it is sampler-safe. "
+                    "Sampler mode always decodes standard diffusion latents without log inversion. "
+                    "Direct HDR / RUDRA forces LogC4 decode to scene-linear Linear output, "
+                    "disables display tonemapping, and preserves values above 1.0."
+                ),
+            },
+        )
         return types
 
-    @torch.no_grad()   # FIX (Low): explicit no_grad — makes intent clear, guards future paths
     def apply(
         self,
         samples: dict,
@@ -231,10 +238,10 @@ class RadianceHDRVAEDecode:
         overlap: int = 128,
         exposure_adjust: float = 0.0,
         alpha=None,
-        hdr_mode: str = "Compress (Log)",
-        display_tonemap: str = "Reinhard",  # BUG 1 FIX: now forwarded to decode()
-        source_space: str = "ARRI LogC4",
-        hdr_output: bool = True,
+        hdr_mode: str = "Clip (SDR)",
+        display_tonemap: str = "None",
+        source_space: str = "sRGB",
+        hdr_output: bool = False,
         inverse_tonemap: bool = False,
         target_stops: float = 12.0,
         crop_padding: str = "",
@@ -242,6 +249,7 @@ class RadianceHDRVAEDecode:
         rhdr_precision: str = "f32",
         processing_mode: str = "sequential",
         decode_noise_scale: float = 0.0,
+        decode_mode: str = "Auto (Recommended)",
         hdr_scale_factor: float = 1.0,
         rudra_decoder: str = "Disabled",
         decoder_size: str = "rudra_turbo",
@@ -268,10 +276,18 @@ class RadianceHDRVAEDecode:
                 f"Keys found: {list(samples.keys())}\n"
                 "Make sure you connect a valid LATENT output."
             )
+        latent_tensor = samples["samples"]
+        if not isinstance(latent_tensor, torch.Tensor) or latent_tensor.ndim not in (4, 5):
+            raise RuntimeError(
+                "The LATENT 'samples' value must be a 4D image latent or 5D video latent tensor."
+            )
 
         # Track whether alpha was provided (for metadata / downstream use)
         alpha_provided = alpha is not None
-        force_hdr_decode = True  # always True for this HDR-dedicated node
+        radiance_meta = samples.get("radiance_meta", {})
+        encoded_hdr_mode = radiance_meta.get("hdr_mode") if isinstance(radiance_meta, dict) else None
+        auto_direct = decode_mode == "Auto (Recommended)" and encoded_hdr_mode in {"Compress (Log)", "Soft Clip"}
+        force_hdr_decode = decode_mode == "Direct HDR / RUDRA" or auto_direct
 
         # Forward extra vae.py params via **kwargs, stripping any key already
         # passed explicitly to avoid "multiple values for keyword argument".
@@ -357,6 +373,33 @@ class RadianceHDRVAEDecode:
         # fallback to the standard VAE (rudra_actually_used=False above).
         rudra_substituted_type = getattr(turbo_decoder, "_radiance_resolved_type", None)
 
+        effective_decode_mode = (
+            "Direct HDR / RUDRA" if force_hdr_decode or rudra_actually_used
+            else "Sampler (SDR-safe)"
+        )
+        if effective_decode_mode == "Direct HDR / RUDRA":
+            force_hdr_decode = True
+            if encoded_hdr_mode in {"Compress (Log)", "Soft Clip"}:
+                hdr_mode = encoded_hdr_mode
+            elif hdr_mode not in {"Compress (Log)", "Soft Clip"} or rudra_actually_used:
+                hdr_mode = "Compress (Log)"
+            if hdr_mode == "Compress (Log)" and source_space not in {"ARRI LogC4", "Sony S-Log3", "ARRI LogC3", "Panasonic V-Log", "DaVinci Intermediate", "RED Log3G10"}:
+                source_space = "ARRI LogC4"
+            target_space = "Linear"
+            hdr_output = True
+            display_tonemap = "None"
+        else:
+            force_hdr_decode = False
+            hdr_mode = "Clip (SDR)"
+            source_space = "sRGB"
+            if export_rhdr:
+                logger.warning(
+                    "[RadianceHDRVAEDecode] RHDR export is disabled in sampler-safe mode "
+                    "because the decoded image is display-referred. Select Direct HDR / RUDRA "
+                    "to export a scene-linear RHDR master."
+                )
+                export_rhdr = False
+
         result = engine.decode(
             samples=samples,
             vae=vae,
@@ -368,7 +411,7 @@ class RadianceHDRVAEDecode:
             hdr_mode=hdr_mode,
             display_tonemap=display_tonemap,
             source_space=source_space,
-            force_hdr_decode=True,
+            force_hdr_decode=force_hdr_decode,
             hdr_output=hdr_output,
             inverse_tonemap=inverse_tonemap,
             target_stops=target_stops,
@@ -382,6 +425,13 @@ class RadianceHDRVAEDecode:
         )
 
         image = result[0] if isinstance(result, (tuple, list)) else result
+        engine_meta = {}
+        if isinstance(result, (tuple, list)) and len(result) > 1:
+            try:
+                engine_meta = json.loads(result[1]) if isinstance(result[1], str) else dict(result[1])
+            except (json.JSONDecodeError, TypeError, ValueError):
+                engine_meta = {}
+        latent_format = result[2] if isinstance(result, (tuple, list)) and len(result) > 2 else None
 
         # BUG 2 FIX: guard hdr_scale_factor for display-referred spaces
         # FIX (Issue 1): use exact set membership — substring matching was fragile
@@ -400,26 +450,35 @@ class RadianceHDRVAEDecode:
                 )
 
         # BUG 7 FIX: emit decode settings as metadata JSON
-        meta = json.dumps({
+        if rudra_actually_used:
+            rudra_status = (
+                f"Enabled (substituted {rudra_substituted_type!r} checkpoint for {model_type!r})"
+                if rudra_substituted_type else "Enabled"
+            )
+        elif rudra_decoder == "Enabled":
+            rudra_status = "Enabled (fallback: standard VAE used)"
+        else:
+            rudra_status = "Disabled"
+
+        engine_meta.update({
             "node": "RadianceHDRVAEDecode",
-            "version": "3.0.2",
+            "version": "3.1.0",
+            "decode_mode": effective_decode_mode,
             "target_space": target_space,
             "source_space": source_space,
             "hdr_mode": hdr_mode,
             "display_tonemap": display_tonemap,
             "exposure_adjust": exposure_adjust,
             "hdr_scale_factor": hdr_scale_factor if scale_applied else "N/A (display-referred)",
-            "rudra_decoder": (
-                f"{rudra_decoder} (fallback: standard VAE used)" if not rudra_actually_used
-                else f"{rudra_decoder} (substituted {rudra_substituted_type!r} checkpoint for {model_type!r})" if rudra_substituted_type
-                else rudra_decoder
-            ),
+            "rudra_decoder": rudra_status,
             "decoder_size": decoder_size if rudra_actually_used else "N/A",
             "force_hdr_decode": force_hdr_decode,
-            "alpha_restored": alpha_provided,
+            "alpha_restored": bool(alpha_provided and image.shape[-1] == 4),
             "hdr_output": hdr_output,
+            "latent_format": latent_format or engine_meta.get("latent_format", "unknown"),
             "timestamp": datetime.datetime.now(_tz.utc).isoformat(timespec="seconds"),
-        }, indent=2)
+        })
+        meta = json.dumps(engine_meta, indent=2)
 
         # ALBABIT-FIX: surface the RUDRA fallback to the frontend via the "ui"
         # channel (same convention as resolution.py's computed_width/height) so

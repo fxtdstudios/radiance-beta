@@ -28,6 +28,7 @@ from radiance.nodes.hdr.uplift import (
     RadianceHDRHighlightComposite,
 )
 from radiance.nodes.hdr.uplift_universal import (
+    RadianceSDRToHDRRecover,
     RadianceSDRToHDRUniversal,
 )
 from radiance.nodes.hdr.synthesis import (
@@ -39,10 +40,6 @@ from radiance.nodes.hdr.tonemap import (
     HDRExpandDynamicRange,
     HDRToneMap,
 )
-from radiance.nodes.hdr.vae import (
-    RadianceNativeHDREncoder,
-)
-
 logger = logging.getLogger("radiance.nodes.hdr")
 
 NODE_CLASS_MAPPINGS = {
@@ -58,6 +55,7 @@ NODE_CLASS_MAPPINGS = {
     "RadianceSDRToHDRPrepare": RadianceSDRToHDRPrepare,
     "RadianceHDRHighlightComposite": RadianceHDRHighlightComposite,
     "RadianceSDRtoHDRExpand": RadianceSDRtoHDRExpand,
+    "RadianceSDRToHDRRecover": RadianceSDRToHDRRecover,
     "RadianceSDRToHDRUniversal": RadianceSDRToHDRUniversal,
     "RadianceHDRExpandDynamicRange": HDRExpandDynamicRange,
     "RadianceHDRToneMap": HDRToneMap,
@@ -79,6 +77,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceSDRToHDRPrepare": "◎ SDR to HDR Prepare",
     "RadianceHDRHighlightComposite": "◎ HDR Highlight Composite",
     "RadianceSDRtoHDRExpand": "◎ SDR to HDR Expand",
+    "RadianceSDRToHDRRecover": "◎ SDR → HDR Recover",
     "RadianceSDRToHDRUniversal": "◎ SDR → HDR Universal",
     "RadianceHDRExpandDynamicRange": "◎ HDR Expand Dynamic Range",
     "RadianceHDRToneMap": "◎ HDR Tone Map",
