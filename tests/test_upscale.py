@@ -56,6 +56,12 @@ from nodes_upscale import (
     RadianceUpscaleFaceRestore,
 )
 
+# This module already gates its torch-dependent tests correctly (they skip
+# cleanly against conftest's stub), so opt out of the automatic module-level
+# skip and keep the rest of the file running on the no-torch CI matrix.
+RADIANCE_TORCH_GATED = True
+
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers

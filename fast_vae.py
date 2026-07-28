@@ -33,6 +33,8 @@ import logging
 from typing import Optional, Tuple
 
 import torch
+
+from radiance.model.cache import GPUModelCache
 import torch.nn as nn
 from radiance.config.model_map import resolve_model_vae_config
 
@@ -49,7 +51,8 @@ _ENV_CKPT = os.environ.get("RADIANCE_TURBO_DECODER", "")
 # ALBABIT-FIX: a cached value of None means "no compatible RUDRA checkpoint"
 # (FiLM architecture, missing file, or failed strict load) — so repeated calls
 # don't repeat the same failing filesystem lookup / warning log.
-_TRAINED_DECODER_CACHE: dict = {}
+# Bounded LRU -- was an unbounded dict holding GPU-resident models.
+_TRAINED_DECODER_CACHE = GPUModelCache(max_size=2)
 
 # ALBABIT-FIX: additional model_type tokens to try for checkpoint filenames
 # when the primary model_type has no matching file on disk — covers both
@@ -693,7 +696,7 @@ def load_radiance_decoder_weights(
         model_type,
     )
     if cache_key in _TRAINED_DECODER_CACHE:
-        return _TRAINED_DECODER_CACHE[cache_key]
+        return _TRAINED_DECODER_CACHE.get(cache_key)
 
     if ckpt_path and os.path.exists(ckpt_path):
         try:
@@ -707,7 +710,7 @@ def load_radiance_decoder_weights(
                         f"{ckpt_path} is unusable — {_corrupt}. "
                         f"Falling back to the standard VAE decode."
                     )
-                    _TRAINED_DECODER_CACHE[cache_key] = None
+                    _TRAINED_DECODER_CACHE.put(cache_key, None)
                     return None
                 import safetensors.torch
                 state_dict = safetensors.torch.load_file(ckpt_path, device="cpu")
@@ -767,7 +770,7 @@ def load_radiance_decoder_weights(
                 f"[Radiance {model_size.upper()}] Failed to load checkpoint {ckpt_path}: {e}\n"
                 f"Falling back to the standard VAE decoder."
             )
-            _TRAINED_DECODER_CACHE[cache_key] = None
+            _TRAINED_DECODER_CACHE.put(cache_key, None)
             return None
     else:
         # ALBABIT-FIX: previously returned a randomly-initialised decoder
@@ -780,11 +783,11 @@ def load_radiance_decoder_weights(
             f"Then set: export RADIANCE_TURBO_DECODER=/path/to/checkpoint.pth\n"
             f"Or place checkpoint at: models/radiance/{model_size}_decoder_{model_type}_ema.pth"
         )
-        _TRAINED_DECODER_CACHE[cache_key] = None
+        _TRAINED_DECODER_CACHE.put(cache_key, None)
         return None
 
     model.eval()
-    _TRAINED_DECODER_CACHE[cache_key] = model
+    _TRAINED_DECODER_CACHE.put(cache_key, model)
     return model
 
 

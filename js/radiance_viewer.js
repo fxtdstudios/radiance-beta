@@ -17,6 +17,27 @@ class RadianceViewer {
      * Use this before inserting any backend-supplied or user-supplied
      * string into innerHTML.
      */
+    /**
+     * Safe localStorage JSON read.
+     *
+     * `|| '{}'` only covers a null value, not malformed content. ComfyUI shares
+     * one origin-wide localStorage bucket with every installed pack, so a
+     * quota-truncated or colliding write made these throw from inside a render
+     * path -- after container.innerHTML had already been cleared, leaving the
+     * tab permanently half-rendered with no error surfaced.
+     */
+    static readJSON(key, fallback) {
+        try {
+            const raw = localStorage.getItem(key);
+            if (raw == null) return fallback;
+            const parsed = JSON.parse(raw);
+            return (parsed && typeof parsed === 'object') ? parsed : fallback;
+        } catch (e) {
+            console.warn(`[Radiance] Ignoring malformed localStorage key "${key}"`, e);
+            return fallback;
+        }
+    }
+
     static escapeHtml(str) {
         if (typeof str !== 'string') str = String(str);
         return str
@@ -3872,10 +3893,15 @@ class RadianceViewer {
             item.style.cssText = `background: #111; border: 1px solid #222; padding: 6px 10px; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; font-size: 10px;`;
 
             const info = document.createElement('div');
+            // Escaped: `name` is the raw Filename textbox value and `path`/`qc`
+            // come from the /radiance/deliver JSON. This was the one tainted
+            // innerHTML in the file -- the same class already has escapeHtml()
+            // and uses it correctly a few hundred lines up.
+            const _esc = RadianceViewer.escapeHtml;
             info.innerHTML = `
-                <div style="color: #eee; font-weight: bold;">${name}</div>
-                <div style="color: #555; font-size: 9px; margin-top: 2px;">${path}</div>
-                <div style="color: ${qc.includes('[QC PASS]') ? '#00ff88' : '#ff4444'}; font-size: 8px; margin-top: 2px;">${qc}</div>
+                <div style="color: #eee; font-weight: bold;">${_esc(name)}</div>
+                <div style="color: #555; font-size: 9px; margin-top: 2px;">${_esc(path)}</div>
+                <div style="color: ${qc.includes('[QC PASS]') ? '#00ff88' : '#ff4444'}; font-size: 8px; margin-top: 2px;">${_esc(qc)}</div>
             `;
 
             const openBtn = document.createElement('button');
@@ -14812,7 +14838,7 @@ else:
         exportGroup.appendChild(exportRow);
 
         // Preset List
-        const presets = JSON.parse(localStorage.getItem('radiance_presets') || '{}');
+        const presets = RadianceViewer.readJSON('radiance_presets', {});
         const presetNames = Object.keys(presets);
         if (presetNames.length > 0) {
             const list = document.createElement('div');
@@ -16399,7 +16425,7 @@ else:
         if (!name) return;
 
         const state = this._captureGradingState();
-        const presets = JSON.parse(localStorage.getItem('radiance_presets') || '{}');
+        const presets = RadianceViewer.readJSON('radiance_presets', {});
         presets[name] = state;
         localStorage.setItem('radiance_presets', JSON.stringify(presets));
         console.log(`[Radiance] Preset "${name}" saved.`);
@@ -16407,7 +16433,7 @@ else:
     }
 
     loadGrade(name) {
-        const presets = JSON.parse(localStorage.getItem('radiance_presets') || '{}');
+        const presets = RadianceViewer.readJSON('radiance_presets', {});
         const state = presets[name];
         if (state) {
             this._pushUndo();
@@ -16417,7 +16443,7 @@ else:
     }
 
     deleteGrade(name) {
-        const presets = JSON.parse(localStorage.getItem('radiance_presets') || '{}');
+        const presets = RadianceViewer.readJSON('radiance_presets', {});
         delete presets[name];
         localStorage.setItem('radiance_presets', JSON.stringify(presets));
         if (this._lastRenderContent) this._lastRenderContent();
@@ -16434,7 +16460,7 @@ else:
         const MAX_HIST = 50;
 
         // ── History ────────────────────────────────────────────────────────
-        let history = JSON.parse(localStorage.getItem(STORAGE_HIST) || '[]');
+        let history = RadianceViewer.readJSON(STORAGE_HIST, []);
         let histIdx = history.length; // Points past the last entry (fresh line)
 
         // ── Root layout ────────────────────────────────────────────────────
@@ -18372,17 +18398,52 @@ else:
             document.removeEventListener('keydown', this._transportSpaceHandler);
             this._transportSpaceHandler = null;
         }
-        // Remove control panels from DOM
-        if (this.controlsPanel && this.controlsPanel.parentNode) {
+
+        // ── Cancel every self-rescheduling animation frame and pending timer ──
+        // destroy() previously contained ZERO cancelAnimationFrame calls. The
+        // grain ticker re-schedules itself unconditionally (before its own
+        // enable guards), so deleting a viewer node left a 60fps closure running
+        // forever, holding the whole instance alive: renderer, GL resource maps,
+        // and every Float32Array of HDR frame data. Ten add/delete cycles meant
+        // ten immortal render loops.
+        if (this._stopGrainTicker) this._stopGrainTicker();
+        if (this._grainRAF) { cancelAnimationFrame(this._grainRAF); this._grainRAF = null; }
+        if (this._seqRAF) { cancelAnimationFrame(this._seqRAF); this._seqRAF = null; }
+        if (this._referenceScopeRAF) { cancelAnimationFrame(this._referenceScopeRAF); this._referenceScopeRAF = null; }
+        if (this._videoRAF) { cancelAnimationFrame(this._videoRAF); this._videoRAF = null; }
+        if (this.scopeUpdateTimer) { clearTimeout(this.scopeUpdateTimer); this.scopeUpdateTimer = null; }
+        if (this._scopeUpdateTimer) { clearTimeout(this._scopeUpdateTimer); this._scopeUpdateTimer = null; }
+
+        // Remove control panels from DOM.
+        // The HUD is a STATIC SINGLETON shared by every viewer instance
+        // (RadianceViewer.singletonHUD). Detaching it unconditionally here meant
+        // deleting one viewer node ripped the shared control panel out of every
+        // other one, leaving them with an empty right dock -- no exposure, no
+        // curves, no scopes, no delivery -- until a full page reload, because
+        // createHUD() never rebuilds an existing singleton.
+        const _isSharedHUD = this.controlsPanel && this.controlsPanel === RadianceViewer.singletonHUD;
+        const _lastInstance = RadianceViewer.allInstances.size <= 1;
+        if (this.controlsPanel && this.controlsPanel.parentNode && (!_isSharedHUD || _lastInstance)) {
             this.controlsPanel.parentNode.removeChild(this.controlsPanel);
         }
         if (this.rightControlPanel && this.rightControlPanel.parentNode) {
             this.rightControlPanel.parentNode.removeChild(this.rightControlPanel);
         }
-        // Disconnect ResizeObserver
+        // Disconnect every ResizeObserver, not just the canvas one.
         if (this.resizeObserver) this.resizeObserver.disconnect();
-        // Destroy WebGL renderer
-        if (this.renderer) this.renderer.destroy();
+        if (this._curveResizeObs) { this._curveResizeObs.disconnect(); this._curveResizeObs = null; }
+        if (this._refCurveResizeObs) { this._refCurveResizeObs.disconnect(); this._refCurveResizeObs = null; }
+        // Curve editors install their own window listeners.
+        if (this.curveEditor?.destroy) { this.curveEditor.destroy(); this.curveEditor = null; }
+        if (this.refCurveEditor?.destroy) { this.refCurveEditor.destroy(); this.refCurveEditor = null; }
+        // Destroy WebGL renderer and drop the reference, so a debounce that
+        // fires after teardown cannot call into deleted GL programs/textures.
+        if (this.renderer) { this.renderer.destroy(); this.renderer = null; }
+        // Release the big buffers explicitly rather than waiting for the
+        // instance itself to become unreachable.
+        this.frameHDRData = null;
+        this.frameImages = null;
+        this.imageData = null;
         // Clear container
         if (this.container) this.container.innerHTML = '';
 
@@ -18418,23 +18479,41 @@ window.RadianceViewer = RadianceViewer;
 app.registerExtension({
     name: "FXTD.RadianceViewer",
     init() {
+        // Hide the two pinned legacy widgets on Radiance viewer nodes only.
+        //
+        // This previously scanned the ENTIRE document for any widget row
+        // labelled bit_depth or exposure_bracketing, so it also hid those
+        // widgets on unrelated node packs that use the same names -- the user
+        // just saw a control disappear with no explanation. It also ran that
+        // O(DOM) scan from six retry timers AND from a document.body
+        // MutationObserver with subtree:true for 10s, i.e. on every DOM
+        // insertion anywhere in ComfyUI during page load.
+        //
+        // Per-node hiding is already handled correctly and scoped in
+        // beforeRegisterNodeDef via hideMountedViewerDefaultRows(), which
+        // targets [data-node-id]. This pass only needs to catch rows belonging
+        // to Radiance nodes restored from a saved workflow.
+        const RADIANCE_VIEWER_TYPES = ["RadianceViewer", "FXTD_RadianceViewer", "◎ Radiance Viewer"];
         const hideLegacyViewerRows = () => {
-            if (!document?.querySelectorAll) return;
-            for (const row of document.querySelectorAll('.lg-node-widget')) {
-                const label = row.querySelector('.truncate, [aria-label]');
-                const name = (label?.textContent || label?.getAttribute?.('aria-label') || '').trim();
-                if (name === 'bit_depth' || name === 'exposure_bracketing') {
-                    row.style.display = 'none';
+            if (!document?.querySelector) return;
+            const nodes = app?.graph?._nodes || [];
+            for (const node of nodes) {
+                const names = [node?.type, node?.comfyClass, node?.title].filter(Boolean);
+                if (!names.some(n => RADIANCE_VIEWER_TYPES.includes(n))) continue;
+                const nodeEl = node?.id != null
+                    ? document.querySelector(`[data-node-id="${node.id}"]`) : null;
+                if (!nodeEl) continue;
+                for (const row of nodeEl.querySelectorAll('.lg-node-widget')) {
+                    const label = row.querySelector('.truncate, [aria-label]');
+                    const name = (label?.textContent || label?.getAttribute?.('aria-label') || '').trim();
+                    if (name === 'bit_depth' || name === 'exposure_bracketing') {
+                        row.style.display = 'none';
+                    }
                 }
             }
         };
-        for (const delay of [0, 100, 500, 1000, 2500, 5000]) {
+        for (const delay of [0, 250, 1000]) {
             setTimeout(hideLegacyViewerRows, delay);
-        }
-        if (typeof MutationObserver !== 'undefined') {
-            const observer = new MutationObserver(hideLegacyViewerRows);
-            observer.observe(document.body, { childList: true, subtree: true });
-            setTimeout(() => observer.disconnect(), 10000);
         }
     },
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
@@ -18468,10 +18547,15 @@ app.registerExtension({
             node.setDirtyCanvas?.(true, true);
         };
         const hideLegacyViewerRows = () => {
-            for (const row of document.querySelectorAll('.lg-node-widget')) {
-                const label = row.querySelector('.truncate, [aria-label]');
-                const name = (label?.textContent || label?.getAttribute?.('aria-label') || '').trim();
-                if (name in hiddenViewerDefaults) row.style.display = 'none';
+            // Scoped to Radiance viewer nodes. This used to scan the WHOLE
+            // document for any widget row labelled bit_depth or
+            // exposure_bracketing and hide it -- so installing Radiance made
+            // those widgets silently vanish from unrelated node packs that
+            // happen to use the same widget names, with no visible cause.
+            if (!document?.querySelectorAll) return;
+            for (const node of (app?.graph?._nodes || [])) {
+                if (!isRadianceViewerNode(node)) continue;
+                hideMountedViewerDefaultRows(node);
             }
         };
         const hideMountedViewerDefaultRows = (node) => {
@@ -18543,10 +18627,14 @@ app.registerExtension({
             this.radianceViewer = new RadianceViewer(this, container);
 
             // Lifecycle hooks for singleton HUD management
-            this.onRemoved = () => {
+            const _prevOnRemoved = this.onRemoved;
+            this.onRemoved = function () {
+                _prevOnRemoved?.apply(this, arguments);
                 if (this.radianceViewer) this.radianceViewer.destroy();
             };
-            this.onSelected = () => {
+            const _prevOnSelected = this.onSelected;
+            this.onSelected = function () {
+                _prevOnSelected?.apply(this, arguments);
                 RadianceViewer.activeInstance = this.radianceViewer;
                 if (this.radianceViewer && this.radianceViewer._lastRenderContent) {
                     this.radianceViewer._lastRenderContent();
@@ -18872,6 +18960,19 @@ app.registerExtension({
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class RadianceCurveEditor {
+
+    /**
+     * Release the window-level listeners this editor installed.
+     * Called from RadianceViewer.destroy(); without it every deleted viewer
+     * left three live handlers holding the editor and its canvas.
+     */
+    destroy() {
+        if (this._winMouseUp) { window.removeEventListener('mouseup', this._winMouseUp); this._winMouseUp = null; }
+        if (this._winPanMove) { window.removeEventListener('mousemove', this._winPanMove); this._winPanMove = null; }
+        if (this._winPanUp)   { window.removeEventListener('mouseup', this._winPanUp);   this._winPanUp = null; }
+        if (this._resizeObs)  { this._resizeObs.disconnect(); this._resizeObs = null; }
+    }
+
     /**
      * DaVinci Resolve–style curve editor with Fritsch–Carlson monotonic interpolation.
      *
@@ -19267,6 +19368,10 @@ class RadianceCurveEditor {
                 this.draw();
             }
         };
+        // Keep the reference: RadianceCurveEditor had no destroy() at all, so
+        // these three window listeners outlived every deleted viewer node and
+        // kept the editor (and its canvas) alive forever.
+        this._winMouseUp = onMouseUp;
         window.addEventListener('mouseup', onMouseUp);
 
         // Double-click: remove interior point
@@ -19337,7 +19442,7 @@ class RadianceCurveEditor {
             }
         });
 
-        window.addEventListener('mousemove', (e) => {
+        this._winPanMove = (e) => {
             if (isPanning) {
                 const dx = e.clientX - lastPanPos.x;
                 const dy = e.clientY - lastPanPos.y;
@@ -19349,14 +19454,16 @@ class RadianceCurveEditor {
                 this._clampView();
                 this.draw();
             }
-        });
+        };
+        window.addEventListener('mousemove', this._winPanMove);
 
-        window.addEventListener('mouseup', () => {
+        this._winPanUp = () => {
             if (isPanning) {
                 isPanning = false;
                 cvs.style.cursor = 'crosshair';
             }
-        });
+        };
+        window.addEventListener('mouseup', this._winPanUp);
 
         // Keyboard nudge
         cvs.addEventListener('keydown', (e) => {

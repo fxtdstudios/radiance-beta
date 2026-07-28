@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from radiance.nodes.generate.prompt import (
     RadianceCinematicPromptEncoder,
     _detect_arch_from_clip,
@@ -66,6 +68,9 @@ def test_weak_negative_arch_downgrades_to_soft():
     assert "cartoon" not in negative
 
 
+# The encoder runs its token budget through torch; under conftest's stub the
+# conditioning it returns is a MagicMock rather than the CLIP payload.
+@pytest.mark.real_torch
 def test_encoder_returns_debug_outputs_and_uses_model_meta():
     clip = FakeClip(("t5xxl",))
     encoder = RadianceCinematicPromptEncoder()

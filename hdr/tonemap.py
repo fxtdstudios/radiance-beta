@@ -347,8 +347,22 @@ class HDRToneMap:
             # 2. Log2 inset: working range →  AgX scene (−10 … +6.5 EV)
             x_log = (torch.log2(x_agx.clamp(min=1e-10)) - (-10.0)) / (6.5 - (-10.0))
             x_log = x_log.clamp(0.0, 1.0)
-            # 3. Sigmoid contrast curve (fitted to AgX CDL, Troy Sobotka)
-            x_sig = x_log / (1.0 + torch.abs(x_log - 0.5) * 2.0)
+            # 3. Sigmoid contrast curve (fitted to AgX CDL, Troy Sobotka).
+            #
+            # This previously read:
+            #     x_sig = x_log / (1.0 + torch.abs(x_log - 0.5) * 2.0)
+            # For x_log > 0.5 the denominator is exactly 2*x_log, so the whole
+            # expression reduces to x/(2x) = 0.5 -- every scene-linear value
+            # above 2**(0.5*16.5-10) = 0.2973 collapsed to flat mid-grey. A sky
+            # at 5.0 and a specular at 100.0 came out identical.
+            #
+            # Replaced with a genuine symmetric sigmoid, which is monotonic over
+            # the whole domain and agrees with the intended shape near 0.5.
+            _p = 1.7   # shoulder/toe firmness
+            _d = x_log - 0.5
+            x_sig = 0.5 + _d / torch.pow(
+                1.0 + torch.pow((2.0 * _d.abs()).clamp(min=1e-8), _p), 1.0 / _p
+            )
             x_sig = (x_sig - 0.5) * 1.5 + 0.5   # approx CDL slope
             x_sig = x_sig.clamp(0.0, 1.0)
             # 4. Back to display sRGB

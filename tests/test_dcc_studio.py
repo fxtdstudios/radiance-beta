@@ -41,6 +41,12 @@ from radiance.tools.nuke_connector import NukeConnector, validate_nuke_identifie
 from radiance.nodes.pipeline.dcc import RadianceMCP, _push_to_nuke
 from radiance.nodes.pipeline.studio_integrations import RadianceNukeSend, RadianceDaVinciSend
 
+# Only the tests marked @pytest.mark.real_torch below need genuine tensors; the
+# rest run fine against conftest's stub. Opt out of the automatic module-level
+# skip so they keep running on the no-torch CI matrix.
+RADIANCE_TORCH_GATED = True
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  1. NukeConnector & Security Sanitization Tests
 # ─────────────────────────────────────────────────────────────────────────────
@@ -122,6 +128,7 @@ def test_nuke_connector_load_exr(mock_socket_cls):
 
 @patch("radiance.nodes.pipeline.studio_integrations._save_exr")
 @patch("radiance.tools.nuke_connector.NukeConnector.load_exr")
+@pytest.mark.real_torch
 def test_nuke_send_single_frame(mock_load_exr, mock_save_exr, tmp_path):
     """Verify RadianceNukeSend single-frame export and .nk snippet creation."""
     mock_load_exr.return_value = (True, "loaded")
@@ -160,6 +167,7 @@ def test_nuke_send_single_frame(mock_load_exr, mock_save_exr, tmp_path):
 
 @patch("radiance.nodes.pipeline.studio_integrations._save_exr")
 @patch("radiance.nodes.pipeline.studio_integrations._save_pil_image")
+@pytest.mark.real_torch
 def test_davinci_send_formats(mock_save_pil, mock_save_exr, tmp_path):
     """Verify RadianceDaVinciSend successfully exports 8-bit PNG, 16-bit TIFF, and EXR."""
     node = RadianceDaVinciSend()
@@ -204,6 +212,7 @@ def test_mcp_push_to_nuke_sequence_regex_fix():
 
 @patch("radiance.nodes.pipeline.dcc._save_exr")
 @patch("radiance.tools.nuke_connector.NukeConnector.load_exr")
+@pytest.mark.real_torch
 def test_mcp_export_frames_flow(mock_load_exr, mock_save_exr, tmp_path):
     """Verify full frame export flow of RadianceMCP."""
     mock_load_exr.return_value = (True, "loaded")
@@ -254,10 +263,20 @@ def test_nuke_connector_v2_signature(mock_socket_cls, monkeypatch):
     # Assert version is 2
     assert sent_bytes[4] == 2
 
-    # Assert signature field is computed correctly
+    # Assert signature field is computed correctly.
+    # HMAC, not SHA256(token || command): the bare-hash construction was
+    # length-extendable and carried no nonce, so any observed (command,
+    # signature) pair replayed indefinitely.
+    import hmac
     import hashlib
-    expected_sig = hashlib.sha256(("super-secret-key-123" + cmd).encode("utf-8")).digest()
+    expected_sig = hmac.new(
+        b"super-secret-key-123", cmd.encode("utf-8"), hashlib.sha256
+    ).digest()
     assert sent_bytes[5:37] == expected_sig
+
+    # And the old construction must NOT match, so a regression is caught.
+    legacy_sig = hashlib.sha256(("super-secret-key-123" + cmd).encode("utf-8")).digest()
+    assert sent_bytes[5:37] != legacy_sig
 
     # Assert correct length and command payload
     cmd_len = struct.unpack("<I", sent_bytes[37:41])[0]

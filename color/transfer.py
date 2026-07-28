@@ -219,78 +219,103 @@ def tensor_vlog_to_linear(tensor: torch.Tensor) -> torch.Tensor:
 
 # ── Canon Log 3 ───────────────────────────────────────────────────────────────
 
-_CANON_CUT = 0.014
-_CANON_A = 14.98325
-_CANON_C = 0.36726845
-_CANON_D = 0.12783901
-_CANON_E = 5.449285
-_CANON_F = 0.073059361
-_CANON_CUT_ENCODED = 0.14926
+# Canon Log 3 v1.2, per Canon's published specification.
+#
+# The previous implementation was a two-segment approximation that (a) omitted
+# the x/0.9 reflectance scaling entirely, (b) used the negative-branch intercept
+# 0.12783901 on the POSITIVE log branch where the spec calls for 0.12240537,
+# and (c) used a fitted toe slope of 5.449285 instead of the spec's 1.9754798.
+# The result was an 0.0089 discontinuity at the cut (~9 code values at 10-bit,
+# a visible band) and an encode/decode pair that disagreed by 4.4e-3 -- so a
+# round trip through Canon Log 3 did not return the original image.
+# 18% grey now encodes to 0.343371 as specified (was 0.336392).
+_CANON_SCALE = 0.9          # linear reflectance -> Canon's normalised x
+_CANON_A = 14.98325         # log gain
+_CANON_C = 0.36726845       # log scale
+_CANON_LIN_SLOPE = 1.9754798
+_CANON_LIN_OFFSET = 0.12512219
+_CANON_POS_OFFSET = 0.12240537
+_CANON_NEG_OFFSET = 0.12783901
+_CANON_CUT_LO = -0.009670   # in normalised x
+_CANON_CUT_HI = 0.014043    # in normalised x
+_CANON_ENC_LO = _CANON_LIN_SLOPE * _CANON_CUT_LO + _CANON_LIN_OFFSET
+_CANON_ENC_HI = _CANON_LIN_SLOPE * _CANON_CUT_HI + _CANON_LIN_OFFSET
 
 
 def linear_to_canonlog3(img: np.ndarray) -> np.ndarray:
-    out = np.empty_like(img, dtype=np.float32)
-    mask = img >= _CANON_CUT
-    out[mask] = _CANON_C * np.log10(_CANON_A * img[mask] + 1.0) + _CANON_D
-    out[~mask] = _CANON_E * img[~mask] + _CANON_F
+    xr = np.asarray(img, dtype=np.float32) / _CANON_SCALE
+    out = np.empty_like(xr, dtype=np.float32)
+    neg = xr < _CANON_CUT_LO
+    pos = xr > _CANON_CUT_HI
+    mid = ~(neg | pos)
+    out[neg] = -_CANON_C * np.log10(np.maximum(1.0 - _CANON_A * xr[neg], 1e-10)) + _CANON_NEG_OFFSET
+    out[mid] = _CANON_LIN_SLOPE * xr[mid] + _CANON_LIN_OFFSET
+    out[pos] = _CANON_C * np.log10(np.maximum(_CANON_A * xr[pos] + 1.0, 1e-10)) + _CANON_POS_OFFSET
     return out
 
 
 def canonlog3_to_linear(img: np.ndarray) -> np.ndarray:
-    out = np.empty_like(img, dtype=np.float32)
-    mask = img > _CANON_CUT_ENCODED
-    out[mask] = (np.power(10.0, (img[mask] - _CANON_D) / _CANON_C) - 1.0) / _CANON_A
-    out[~mask] = (img[~mask] - _CANON_F) / _CANON_E
-    return out
+    y = np.asarray(img, dtype=np.float32)
+    xr = np.empty_like(y, dtype=np.float32)
+    neg = y < _CANON_ENC_LO
+    pos = y > _CANON_ENC_HI
+    mid = ~(neg | pos)
+    xr[neg] = (1.0 - np.power(10.0, (_CANON_NEG_OFFSET - y[neg]) / _CANON_C)) / _CANON_A
+    xr[mid] = (y[mid] - _CANON_LIN_OFFSET) / _CANON_LIN_SLOPE
+    xr[pos] = (np.power(10.0, (y[pos] - _CANON_POS_OFFSET) / _CANON_C) - 1.0) / _CANON_A
+    return xr * _CANON_SCALE
 
 
 def tensor_linear_to_canonlog3(tensor: torch.Tensor) -> torch.Tensor:
-    log_val = _CANON_C * torch.log10(_CANON_A * tensor + 1.0) + _CANON_D
-    lin_val = _CANON_E * tensor + _CANON_F
-    return torch.where(tensor >= _CANON_CUT, log_val, lin_val)
+    xr = tensor / _CANON_SCALE
+    neg_val = -_CANON_C * torch.log10((1.0 - _CANON_A * xr).clamp(min=1e-10)) + _CANON_NEG_OFFSET
+    mid_val = _CANON_LIN_SLOPE * xr + _CANON_LIN_OFFSET
+    pos_val = _CANON_C * torch.log10((_CANON_A * xr + 1.0).clamp(min=1e-10)) + _CANON_POS_OFFSET
+    out = torch.where(xr > _CANON_CUT_HI, pos_val, mid_val)
+    return torch.where(xr < _CANON_CUT_LO, neg_val, out)
 
 
 def tensor_canonlog3_to_linear(tensor: torch.Tensor) -> torch.Tensor:
-    log_val = (torch.pow(10.0, (tensor - _CANON_D) / _CANON_C) - 1.0) / _CANON_A
-    lin_val = (tensor - _CANON_F) / _CANON_E
-    return torch.where(tensor > _CANON_CUT_ENCODED, log_val, lin_val)
+    neg_val = (1.0 - torch.pow(10.0, (_CANON_NEG_OFFSET - tensor) / _CANON_C)) / _CANON_A
+    mid_val = (tensor - _CANON_LIN_OFFSET) / _CANON_LIN_SLOPE
+    pos_val = (torch.pow(10.0, (tensor - _CANON_POS_OFFSET) / _CANON_C) - 1.0) / _CANON_A
+    out = torch.where(tensor > _CANON_ENC_HI, pos_val, mid_val)
+    return torch.where(tensor < _CANON_ENC_LO, neg_val, out) * _CANON_SCALE
 
 
 # ── RED Log3G10 ───────────────────────────────────────────────────────────────
-
+#
+# RED Log3G10 v2 is a single continuous curve over a shifted input, not a
+# piecewise one. The previous implementation dropped the +0.01 shift and bolted
+# on a linear toe below 0.01, which put 18% grey at 0.338243 instead of the
+# specified 1/3, and made black 0.0 instead of the correct 0.0915. As with
+# DaVinci Intermediate and Canon Log 3, color/luts.py already carried the
+# correct form -- this is now the single source and luts.py delegates to it.
 _LOG3G10_A = 0.224282
 _LOG3G10_B = 155.975327
-_LOG3G10_C = 0.01
-_LOG3G10_CUT = 0.01
-_LOG3G10_CUT_ENCODED = 0.101551  # encode(_LOG3G10_CUT)
+_LOG3G10_SHIFT = 0.01
 
 
 def linear_to_log3g10(img: np.ndarray) -> np.ndarray:
-    out = np.empty_like(img, dtype=np.float32)
-    mask = img > _LOG3G10_CUT
-    out[mask] = _LOG3G10_A * np.log10(_LOG3G10_B * img[mask] + 1.0) + _LOG3G10_C
-    out[~mask] = (img[~mask] / _LOG3G10_CUT) * _LOG3G10_CUT_ENCODED
-    return out
+    x = np.asarray(img, dtype=np.float32) + _LOG3G10_SHIFT
+    return (np.sign(x) * _LOG3G10_A
+            * np.log10(np.abs(x) * _LOG3G10_B + 1.0)).astype(np.float32)
 
 
 def log3g10_to_linear(img: np.ndarray) -> np.ndarray:
-    out = np.empty_like(img, dtype=np.float32)
-    mask = img > _LOG3G10_CUT_ENCODED
-    out[mask] = (np.power(10.0, (img[mask] - _LOG3G10_C) / _LOG3G10_A) - 1.0) / _LOG3G10_B
-    out[~mask] = img[~mask] / _LOG3G10_CUT_ENCODED * _LOG3G10_CUT
-    return out
+    y = np.asarray(img, dtype=np.float32)
+    x = np.sign(y) * (np.power(10.0, np.abs(y) / _LOG3G10_A) - 1.0) / _LOG3G10_B
+    return (x - _LOG3G10_SHIFT).astype(np.float32)
 
 
 def tensor_linear_to_log3g10(tensor: torch.Tensor) -> torch.Tensor:
-    log_val = _LOG3G10_A * torch.log10(_LOG3G10_B * tensor + 1.0) + _LOG3G10_C
-    lin_val = (tensor / _LOG3G10_CUT) * _LOG3G10_CUT_ENCODED
-    return torch.where(tensor > _LOG3G10_CUT, log_val, lin_val)
+    x = tensor + _LOG3G10_SHIFT
+    return torch.sign(x) * _LOG3G10_A * torch.log10(x.abs() * _LOG3G10_B + 1.0)
 
 
 def tensor_log3g10_to_linear(tensor: torch.Tensor) -> torch.Tensor:
-    log_val = (torch.pow(10.0, (tensor - _LOG3G10_C) / _LOG3G10_A) - 1.0) / _LOG3G10_B
-    lin_val = tensor / _LOG3G10_CUT_ENCODED * _LOG3G10_CUT
-    return torch.where(tensor > _LOG3G10_CUT_ENCODED, log_val, lin_val)
+    x = torch.sign(tensor) * (torch.pow(10.0, tensor.abs() / _LOG3G10_A) - 1.0) / _LOG3G10_B
+    return x - _LOG3G10_SHIFT
 
 
 # ── ACEScct ───────────────────────────────────────────────────────────────────
@@ -331,42 +356,51 @@ def tensor_acescct_to_linear(tensor: torch.Tensor) -> torch.Tensor:
 
 # ── DaVinci Intermediate ──────────────────────────────────────────────────────
 
-_DI_A = 0.24928
-_DI_B = 444.8616
-_DI_C = 0.0139
-_DI_D = 0.4
-_DI_CUT = 0.00262409
-_DI_SLOPE = 3.14403760  # C1-continuous toe slope
-_DI_INTERCEPT = 0.34555736
-_DI_CUT_ENCODED = 0.353808
+# Blackmagic DaVinci Intermediate, per the published specification.
+#
+# The previous parameterisation here (A=0.24928, B=444.8616, C=0.0139, D=0.4,
+# with a fitted toe slope/intercept) was wrong in every measurable respect:
+# 18% grey encoded to 0.874523 instead of 0.336043, black encoded to 0.345557
+# instead of 0, the two branches disagreed by 0.064 at the cut, and the decode
+# was consequently non-monotonic -- real DI footage at 18% grey decoded to
+# -0.003 linear. color/luts.py already carried the correct formulation; this is
+# now the single source and luts.py delegates to it.
+_DI_A = 0.0075          # linear offset inside the log
+_DI_B = 7.0             # log2 offset
+_DI_C = 0.07329248      # log scale
+_DI_M = 10.44426855     # toe slope
+_DI_LIN_CUT = 0.00262409
+_DI_CUT_ENCODED = _DI_LIN_CUT * _DI_M   # 0.02740668...
 
 
 def linear_to_davinci_intermediate(img: np.ndarray) -> np.ndarray:
+    img = np.asarray(img, dtype=np.float32)
     out = np.empty_like(img, dtype=np.float32)
-    mask = img >= _DI_CUT
-    out[mask] = _DI_A * np.log10(img[mask] * _DI_B + _DI_C) + _DI_D
-    out[~mask] = _DI_SLOPE * img[~mask] + _DI_INTERCEPT
+    mask = img > _DI_LIN_CUT
+    out[mask] = _DI_C * (np.log2(np.maximum(img[mask] + _DI_A, 1e-10)) + _DI_B)
+    out[~mask] = img[~mask] * _DI_M
     return out
 
 
 def davinci_intermediate_to_linear(img: np.ndarray) -> np.ndarray:
+    img = np.asarray(img, dtype=np.float32)
     out = np.empty_like(img, dtype=np.float32)
-    mask = img >= _DI_CUT_ENCODED
-    out[mask] = (np.power(10.0, (img[mask] - _DI_D) / _DI_A) - _DI_C) / _DI_B
-    out[~mask] = (img[~mask] - _DI_INTERCEPT) / _DI_SLOPE
+    mask = img > _DI_CUT_ENCODED
+    out[mask] = np.power(2.0, img[mask] / _DI_C - _DI_B) - _DI_A
+    out[~mask] = img[~mask] / _DI_M
     return out
 
 
 def tensor_linear_to_davinci_intermediate(tensor: torch.Tensor) -> torch.Tensor:
-    log_val = torch.log10(tensor * _DI_B + _DI_C) * _DI_A + _DI_D
-    lin_val = _DI_SLOPE * tensor + _DI_INTERCEPT
-    return torch.where(tensor >= _DI_CUT, log_val, lin_val)
+    log_val = _DI_C * (torch.log2((tensor + _DI_A).clamp(min=1e-10)) + _DI_B)
+    lin_val = tensor * _DI_M
+    return torch.where(tensor > _DI_LIN_CUT, log_val, lin_val)
 
 
 def tensor_davinci_intermediate_to_linear(tensor: torch.Tensor) -> torch.Tensor:
-    log_val = torch.pow(10.0, (tensor - _DI_D) / _DI_A) - _DI_C
-    lin_val = (tensor - _DI_INTERCEPT) / _DI_SLOPE
-    return torch.where(tensor > _DI_CUT_ENCODED, log_val / _DI_B, lin_val)
+    log_val = torch.pow(2.0, tensor / _DI_C - _DI_B) - _DI_A
+    lin_val = tensor / _DI_M
+    return torch.where(tensor > _DI_CUT_ENCODED, log_val, lin_val)
 
 
 # ── HDR Transfer Functions (PQ / HLG) ─────────────────────────────────────────

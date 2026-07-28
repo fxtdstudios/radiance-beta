@@ -36,6 +36,12 @@ from nodes_scene_cut import (
     RadianceShotGradeRouter,
 )
 
+# This module already gates its torch-dependent tests correctly (they skip
+# cleanly against conftest's stub), so opt out of the automatic module-level
+# skip and keep the rest of the file running on the no-torch CI matrix.
+RADIANCE_TORCH_GATED = True
+
+
 
 def _batch(b, h=8, w=8, fill=0.5):
     return np.full((b, h, w, 3), fill, dtype=np.float32)
