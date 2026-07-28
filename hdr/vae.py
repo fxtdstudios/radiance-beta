@@ -3005,8 +3005,11 @@ class RadianceVAE4KDecode:
                         f"If the decode looks too bright, change source_space to 'sRGB'. "
                         f"This warning is suppressed when hdr_mode='Compress (Log)'."
                     )
-            except Exception:
-                pass
+            except Exception as _exc:
+                logger.debug(
+                    "[Radiance] decode(): ignoring %s from `_sample_px = img[0].reshape(-1, img.shape[-1]) if img.ndim =…`: %s",
+                    type(_exc).__name__, _exc,
+                )
 
         # v2.3: Pre-transform NaN/Inf guard — mode-aware, unconditional.
         # Previously gated on source_space == "Linear", which let NaN values
@@ -3063,8 +3066,11 @@ class RadianceVAE4KDecode:
                 meta = json.loads(crop_padding)
                 pad_h = meta.get("pad_h", 0)
                 pad_w = meta.get("pad_w", 0)
-            except (json.JSONDecodeError, TypeError):
-                pass
+            except (json.JSONDecodeError, TypeError) as _exc:
+                logger.debug(
+                    "[Radiance] decode(): ignoring %s from `meta = json.loads(crop_padding)`: %s",
+                    type(_exc).__name__, _exc,
+                )
 
         if pad_h > 0 or pad_w > 0:
             crop_h = img.shape[1] - pad_h

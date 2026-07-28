@@ -206,8 +206,11 @@ class RadianceColorSpaceConvert:
                 try:
                     if config.getColorSpace(n):
                         return n
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    logger.debug(
+                        "[Radiance] _resolve_name(): ignoring %s from `if config.getColorSpace(n):`: %s",
+                        type(_exc).__name__, _exc,
+                    )
                 _NAME_MAP = {
                     "Linear sRGB (D65)": "Linear", "ACEScg": "acescg",
                     "ACEScc": "acescc", "ACEScct": "acescct",

@@ -4,6 +4,8 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
+import { escapeHtml } from "./radiance_dom_utils.js";
+
 // ALBABIT-FIX: resolve extension base at runtime so the path works regardless of the install folder name (e.g. "radiance" vs "radiance-beta")
 const _EXT_BASE = import.meta.url.replace(/\/[^/]+$/, '');
 
@@ -355,16 +357,6 @@ function promptRadianceAction(titleText, message, defaultValue = "", confirmLabe
         input.focus();
         input.select();
     });
-}
-
-function escapeHtml(value) {
-    return String(value ?? "").replace(/[&<>"']/g, (char) => ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        "\"": "&quot;",
-        "'": "&#39;",
-    })[char]);
 }
 
 function escapeAttr(value) {

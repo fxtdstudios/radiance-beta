@@ -242,8 +242,24 @@ def _tensor_to_np(t: torch.Tensor) -> np.ndarray:
     return arr[0] if arr.ndim == 4 else arr
 
 
+def _ffmpeg_bin() -> str:
+    """ffmpeg path, PATH first then the imageio-ffmpeg bundle."""
+    from .core.ffmpeg import require_ffmpeg
+    return require_ffmpeg()
+
+
+def _ffprobe_bin() -> str:
+    """ffprobe path. imageio-ffmpeg does not ship ffprobe, so this can be
+    absent even when ffmpeg is present; callers fall back to defaults."""
+    from .core.ffmpeg import ffprobe_exe
+    return ffprobe_exe() or "ffprobe"
+
+
 def _ffmpeg_ok() -> bool:
-    return shutil.which("ffmpeg") is not None
+    # shutil.which alone missed the ffmpeg that imageio-ffmpeg ships, which
+    # is the only one most Windows installs have.
+    from .core.ffmpeg import ffmpeg_available
+    return ffmpeg_available()
 
 
 def _apply_output_colorspace(arr: np.ndarray, cs: str) -> np.ndarray:
@@ -350,8 +366,11 @@ def _is_16bit_rgb_source(path: str, ext: str) -> bool:
             with tifffile.TiffFile(path) as tf:
                 page = tf.pages[0]
                 return page.dtype == np.uint16 and page.samplesperpixel in (3, 4)
-    except Exception:
-        pass
+    except Exception as _exc:
+        log.debug(
+            "[Radiance] _is_16bit_rgb_source(): ignoring %s from `if ext == '.png':`: %s",
+            type(_exc).__name__, _exc,
+        )
     return False
 
 
@@ -486,8 +505,11 @@ def _read_exr_single(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
             a    = np.frombuffer(f.channel("A", pt), dtype=np.float32).reshape(h, w)
             mask = _np_to_tensor(a)
         return _np_to_tensor(arr), mask
-    except ImportError:
-        pass
+    except ImportError as _exc:
+        log.debug(
+            "[Radiance] _read_exr_single(): ignoring %s from `import OpenEXR, Imath`: %s",
+            type(_exc).__name__, _exc,
+        )
 
     # Fallback: cv2 with OpenEXR flag
     try:
@@ -497,8 +519,11 @@ def _read_exr_single(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
             # EXR is scene-linear float; preserve magnitude (no normalization).
             arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB).astype(np.float32)
             return _np_to_tensor(arr), None
-    except Exception:
-        pass
+    except Exception as _exc:
+        log.debug(
+            "[Radiance] _read_exr_single(): ignoring %s from `import cv2`: %s",
+            type(_exc).__name__, _exc,
+        )
 
     raise RuntimeError(f"Cannot read EXR '{path}': install OpenEXR or OpenCV with EXR support.")
 
@@ -639,7 +664,7 @@ def _read_video(
 
     # --- probe ---
     probe_cmd = [
-        "ffprobe", "-v", "quiet", "-print_format", "json",
+        _ffprobe_bin(), "-v", "quiet", "-print_format", "json",
         "-show_streams", path,
     ]
     try:
@@ -671,7 +696,7 @@ def _read_video(
     with tempfile.TemporaryDirectory() as tmpdir:
         frame_pat = os.path.join(tmpdir, "f%06d.png")
         decode_cmd = [
-            "ffmpeg", "-v", "error", "-i", path,
+            _ffmpeg_bin(), "-v", "error", "-i", path,
         ] + vf_args + [
             "-vsync", "0", "-f", "image2", frame_pat,
         ]
@@ -755,7 +780,7 @@ def _load_video_to_numpy(path: str, max_frames: int = 0) -> np.ndarray:
         raise RuntimeError("Neither OpenCV nor ffmpeg available to decode video.")
     with tempfile.TemporaryDirectory() as tmp:
         frame_pat = os.path.join(tmp, "f%06d.png")
-        cmd = ["ffmpeg", "-v", "error", "-i", path]
+        cmd = [_ffmpeg_bin(), "-v", "error", "-i", path]
         if max_frames > 0:
             cmd += ["-vframes", str(max_frames)]
         cmd += ["-vsync", "0", "-f", "image2", frame_pat]
@@ -870,8 +895,11 @@ def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str, quality: int = 18
             import tifffile  # type: ignore
             tifffile.imwrite(str(path), arr_f32.astype(np.float32))
             return
-        except ImportError:
-            pass
+        except ImportError as _exc:
+            log.debug(
+                "[Radiance] _save_pil_image(): ignoring %s from `import tifffile`: %s",
+                type(_exc).__name__, _exc,
+            )
 
     arr_u8 = (np.clip(arr_f32, 0, 1) * 255).astype(np.uint8)
     pil = _PIL.fromarray(arr_u8)
@@ -1148,7 +1176,7 @@ def _save_video_ffmpeg(
         raw = (np.clip(frames, 0, 1) * 255).astype(np.uint8).tobytes()
 
     cmd = [
-        "ffmpeg", "-v", "error", "-y",
+        _ffmpeg_bin(), "-v", "error", "-y",
         "-f", "rawvideo", "-vcodec", "rawvideo",
         "-s", f"{w}x{h}", "-pix_fmt", src_pix_fmt,
         "-r", str(fps),
@@ -1320,8 +1348,11 @@ class RadianceRead:
             try:
                 stat = os.stat(resolved)
                 return f"{resolved}:{stat.st_mtime}:{stat.st_size}:reload{reload}"
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug(
+                    "[Radiance] IS_CHANGED(): ignoring %s from `stat = os.stat(resolved)`: %s",
+                    type(_exc).__name__, _exc,
+                )
         return float("nan")
 
     def read(
@@ -1778,8 +1809,11 @@ class RadianceWrite:
             if temp_audio_wav and os.path.exists(temp_audio_wav):
                 try:
                     os.unlink(temp_audio_wav)
-                except OSError:
-                    pass
+                except OSError as _exc:
+                    log.debug(
+                        "[Radiance] write(): ignoring %s from `os.unlink(temp_audio_wav)`: %s",
+                        type(_exc).__name__, _exc,
+                    )
 
     def _dispatch(
         self,

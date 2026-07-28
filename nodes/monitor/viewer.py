@@ -113,8 +113,11 @@ def _viewer_purge_temp(instance_key: str) -> int:
         try:
             os.unlink(path)
             removed += 1
-        except FileNotFoundError:
-            pass
+        except FileNotFoundError as _exc:
+            logger.debug(
+                "[Radiance] _viewer_purge_temp(): ignoring %s from `os.unlink(path)`: %s",
+                type(_exc).__name__, _exc,
+            )
         except OSError as exc:
             logger.debug("[Radiance] Could not remove stale viewer temp %s: %s", path, exc)
     if removed:

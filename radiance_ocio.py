@@ -60,8 +60,11 @@ def _find_file(directory: str, filename: str) -> Optional[str]:
             sub = os.path.join(directory, entry, filename)
             if os.path.isfile(sub):
                 return sub
-    except OSError:
-        pass
+    except OSError as _exc:
+        logger.debug(
+            "[Radiance] _find_file(): ignoring %s from `for entry in os.listdir(directory):`: %s",
+            type(_exc).__name__, _exc,
+        )
     return None
 
 

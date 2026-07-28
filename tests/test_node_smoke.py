@@ -990,27 +990,21 @@ class TestCoverageSummary(unittest.TestCase):
         )
 
     #: Node keys that appear in a NODE_CLASS_MAPPINGS literal in the source but
-    #: never reach the package entry point, so ComfyUI never sees them.
+    #: are deliberately not published to ComfyUI.
     #:
-    #: These are NOT import failures. Every one lives in a legacy flat-file
-    #: module (nodes_loader.py, nodes_io.py, nodes_qc.py, nodes_workspace.py,
-    #: nodes_realtime_preview.py, nodes_colorscience.py, color/lut.py) that the
-    #: v3 entry point does not load. The list is a ratchet: it may shrink as
-    #: nodes get wired up, and a shrink fails the test so the entry can be
-    #: dropped, but it may never grow without someone editing this file.
+    #: This list was twelve entries long. Nine of them turned out to be complete,
+    #: importable node classes that the v3 reorganisation simply forgot to list
+    #: in a group's mapping dict — they are registered now. What remains is three
+    #: back-compat aliases: each points at a class that IS published under its
+    #: current key, so registering the old key would put a second, identical
+    #: entry in the node menu for no benefit.
+    #:
+    #: The list is a ratchet: it may shrink, and a shrink fails this test so the
+    #: entry gets removed, but it may never grow without someone editing here.
     _KNOWN_UNREGISTERED = frozenset({
-        "RadianceBitDepthDegrade",     # nodes_colorscience.py
-        "RadianceControlApply",        # nodes_loader.py
-        "RadianceControlNetApply",     # nodes_loader.py
-        "RadianceDigitalCinemaRead",   # nodes_io.py
-        "RadianceDigitalCinemaWrite",  # nodes_io.py
-        "RadianceFlipbookGIF",         # nodes_realtime_preview.py
-        "RadianceImageLoader",         # nodes_loader.py
-        "RadianceLUTApply",            # color/lut.py
-        "RadianceLUTBlend",            # color/lut.py
-        "RadiancePolicyGuard",         # nodes_qc.py
-        "RadiancePreviewServer",       # nodes_realtime_preview.py
-        "RadianceWorkspace",           # nodes_workspace.py
+        "RadianceImageLoader",   # nodes_loader.py — alias of RadianceUnifiedLoader
+        "RadianceControlApply",  # nodes_loader.py — alias of RadianceControlNetApply
+        "RadianceWorkspace",     # nodes_workspace.py — alias of RadianceProjectManager
     })
 
     @staticmethod

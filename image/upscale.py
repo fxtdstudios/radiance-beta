@@ -81,8 +81,11 @@ def gaussian_blur_32bit(img: np.ndarray, sigma: float) -> np.ndarray:
             # Blur spatial dims only, not channels
             return gaussian_filter(img, sigma=[sigma, sigma, 0]).astype(np.float32)
         return gaussian_filter(img, sigma=sigma).astype(np.float32)
-    except ImportError:
-        pass
+    except ImportError as _exc:
+        logger.debug(
+            "[Radiance] gaussian_blur_32bit(): ignoring %s from `from scipy.ndimage import gaussian_filter`: %s",
+            type(_exc).__name__, _exc,
+        )
 
     # Pure numpy fallback: separable 1D convolution via np.convolve.
     # NOTE: scipy is strongly recommended for production use — the numpy path is
@@ -1998,8 +2001,11 @@ class RadianceAIUpscale:
             import nodes as _comfy_nodes
             _ncm = getattr(_comfy_nodes, "NODE_CLASS_MAPPINGS", {})
             loader_cls = _ncm.get("SUPIR_model_loader")
-        except (ImportError, AttributeError):
-            pass
+        except (ImportError, AttributeError) as _exc:
+            logger.debug(
+                "[Radiance] _load_supir_model(): ignoring %s from `import nodes as _comfy_nodes`: %s",
+                type(_exc).__name__, _exc,
+            )
 
         # Fallback: ComfyUI 0.19.x stores the module under its full directory path
         if loader_cls is None:
@@ -2084,8 +2090,11 @@ class RadianceAIUpscale:
                 for bucket in _tmp_buckets:
                     try:
                         fp.folder_names_and_paths[bucket][0].remove(model_dir)
-                    except (ValueError, KeyError):
-                        pass
+                    except (ValueError, KeyError) as _exc:
+                        logger.debug(
+                            "[Radiance] _load_supir_model(): ignoring %s from `fp.folder_names_and_paths[bucket][0].remove(model_dir)`: %s",
+                            type(_exc).__name__, _exc,
+                        )
 
             if not result or result[0] is None:
                 return None, "SUPIR_model_loader returned an empty result — check ComfyUI-SUPIR logs."

@@ -783,8 +783,11 @@ def _load_shot_status(project: dict) -> dict:
             data = json.loads(sp.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 return data
-    except Exception:
-        pass
+    except Exception as _exc:
+        logger.debug(
+            "[Radiance] _load_shot_status(): ignoring %s from `sp = _shot_status_path(project)`: %s",
+            type(_exc).__name__, _exc,
+        )
     return {}
 
 
@@ -1366,8 +1369,11 @@ async def delete_workflow(request):
             try:
                 if not any(versions_dir.iterdir()):
                     versions_dir.rmdir()
-            except OSError:
-                pass
+            except OSError as _exc:
+                logger.debug(
+                    "[Radiance] delete_workflow(): ignoring %s from `if not any(versions_dir.iterdir()):`: %s",
+                    type(_exc).__name__, _exc,
+                )
 
         # Clean up empty parent directories (but never WORKFLOW_DIR itself)
         try:
@@ -1378,8 +1384,11 @@ async def delete_workflow(request):
                     parent = parent.parent
                 else:
                     break
-        except OSError:
-            pass  # Directory not empty or permission issue, safe to ignore
+        except OSError as _exc:
+            logger.debug(
+                "[Radiance] delete_workflow(): ignoring %s from `parent = filepath.parent`: %s",
+                type(_exc).__name__, _exc,
+            )
 
         return web.json_response({"success": True})
 
@@ -1417,8 +1426,11 @@ async def get_workflow_history(request):
                 if meta_file.exists():
                     try:
                         v_info.update(json.loads(meta_file.read_text(encoding="utf-8")))
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        logger.debug(
+                            "[Radiance] get_workflow_history(): ignoring %s from `v_info.update(json.loads(meta_file.read_text(encoding='utf-8…`: %s",
+                            type(_exc).__name__, _exc,
+                        )
                 
                 history.append(v_info)
 
@@ -1525,8 +1537,11 @@ def _asset_roots() -> "list[Path]":
                 p = Path(fn()).resolve()
                 if p.exists():
                     roots.append(p)
-            except Exception:
-                pass
+            except Exception as _exc:
+                logger.debug(
+                    "[Radiance] _asset_roots(): ignoring %s from `p = Path(fn()).resolve()`: %s",
+                    type(_exc).__name__, _exc,
+                )
     return roots
 
 
@@ -1557,8 +1572,11 @@ def _load_bins() -> "list[dict]":
             data = json.loads(_ASSETS_BINS_PATH.read_text(encoding="utf-8"))
             if isinstance(data, list):
                 return data
-    except Exception:
-        pass
+    except Exception as _exc:
+        logger.debug(
+            "[Radiance] _load_bins(): ignoring %s from `if _ASSETS_BINS_PATH.exists():`: %s",
+            type(_exc).__name__, _exc,
+        )
     return []
 
 
@@ -1604,8 +1622,11 @@ def _scan_assets() -> "list[dict]":
             for _r, it, _n in members:
                 try:
                     st = it.stat(); total += st.st_size; mtime = max(mtime, st.st_mtime)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    logger.debug(
+                        "[Radiance] _scan_assets(): ignoring %s from `st = it.stat()`: %s",
+                        type(_exc).__name__, _exc,
+                    )
             ext = key[2]
             prefix = (key[1].rstrip("._-") or first_item.stem)
             assets.append({
@@ -1796,8 +1817,11 @@ async def asset_thumb(request):
         if png:
             try:
                 cached.write_bytes(png)
-            except Exception:
-                pass
+            except Exception as _exc:
+                logger.debug(
+                    "[Radiance] asset_thumb(): ignoring %s from `cached.write_bytes(png)`: %s",
+                    type(_exc).__name__, _exc,
+                )
             return web.Response(body=png, content_type="image/png")
     except Exception as e:
         logger.debug("[Radiance] thumb render failed: %s", e)

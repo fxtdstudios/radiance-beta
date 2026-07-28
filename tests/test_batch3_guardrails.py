@@ -189,7 +189,7 @@ def test_allowlist_entries_are_all_annotated_with_their_source_file():
     entries = re.findall(r'"(\w+)",\s*#\s*(\S+)', block)
     quoted = re.findall(r'"(\w+)"', block)
     assert len(entries) == len(quoted), "an allowlist entry has no source-file note"
-    assert len(entries) == 12
+    assert len(entries) == 3
 
 
 # ── 4. Startup reports a shortfall as an error ──────────────────────────────

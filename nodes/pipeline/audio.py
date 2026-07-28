@@ -139,7 +139,7 @@ def _load_audio_numpy(filepath: str, target_sr: int = 22050) -> Tuple[Any, int]:
     # ffmpeg pipe fallback — decode to raw PCM s16le mono
     try:
         cmd = [
-            "ffmpeg", "-i", filepath,
+            _ffmpeg_bin(), "-i", filepath,
             "-ac", "1", "-ar", str(target_sr),
             "-f", "s16le", "-",
         ]
@@ -225,6 +225,12 @@ def _detect_scipy(filepath: str, method: str, fps: float,
     return sorted(set(int(t * fps) for t in times))
 
 
+def _ffmpeg_bin() -> str:
+    """ffmpeg path — PATH first, then the binary imageio-ffmpeg ships."""
+    from radiance.core.ffmpeg import require_ffmpeg
+    return require_ffmpeg()
+
+
 def _detect_ffmpeg(filepath: str, fps: float,
                    sensitivity: float, min_interval_frames: int) -> List[int]:
     """
@@ -233,7 +239,7 @@ def _detect_ffmpeg(filepath: str, fps: float,
     """
     noise_db = -30 + int((1.0 - sensitivity) * 20)  # sensitivity 1.0 → -30dB, 0.0 → -10dB
     cmd = [
-        "ffmpeg", "-i", filepath,
+        _ffmpeg_bin(), "-i", filepath,
         "-af", f"silencedetect=noise={noise_db}dB:duration=0.1",
         "-f", "null", "-",
     ]

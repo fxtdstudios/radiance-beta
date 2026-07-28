@@ -17,4 +17,4 @@ WEB_DIRECTORY = "./js"
 #:
 #: Raise it when the catalog grows; a drop below it means something failed to
 #: import, not that the catalog shrank.
-EXPECTED_MIN_NODE_COUNT = 100
+EXPECTED_MIN_NODE_COUNT = 109

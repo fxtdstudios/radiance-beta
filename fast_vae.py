@@ -528,8 +528,11 @@ def resolve_rudra_model_type(
             arch = json.loads(model_meta).get("arch", "")
             if arch and arch != "unknown":
                 return arch.lower()
-        except Exception:
-            pass
+        except Exception as _exc:
+            logger.debug(
+                "[Radiance] resolve_rudra_model_type(): ignoring %s from `arch = json.loads(model_meta).get('arch', '')`: %s",
+                type(_exc).__name__, _exc,
+            )
     return detect_rudra_model_type(latent_channels, is_video, vae=vae)
 
 
@@ -683,8 +686,11 @@ def load_radiance_decoder_weights(
                     ckpt_path = found
                     resolved_type = t
                     break
-        except ImportError:
-            pass
+        except ImportError as _exc:
+            logger.debug(
+                "[Radiance] load_radiance_decoder_weights(): ignoring %s from `import folder_paths`: %s",
+                type(_exc).__name__, _exc,
+            )
 
     # ALBABIT-FIX: checkpoint path is part of the cache identity. This prevents
     # a prior "no checkpoint" lookup from hiding an explicit checkpoint load.

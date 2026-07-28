@@ -44,8 +44,11 @@ class RadianceVectorMaskDraw:
             cleaned = data.strip()
             if cleaned.startswith("[") or cleaned.startswith("{"):
                 return json.loads(cleaned)
-        except Exception:
-            pass
+        except Exception as _exc:
+            logger.debug(
+                "[Radiance] _parse_points(): ignoring %s from `cleaned = data.strip()`: %s",
+                type(_exc).__name__, _exc,
+            )
             
         # 2. Try parsing raw float pairs (handles Nuke copy-paste shapes)
         # Find all blocks of float coordinates e.g. "{ 100.5 200.2 }" or just numbers

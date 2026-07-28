@@ -103,13 +103,19 @@ def _parse_lora_metadata(raw_meta: dict) -> dict:
         if key in ("radiance_compression_ratio", "radiance_alpha"):
             try:
                 out[key] = float(val)
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as _exc:
+                logger.debug(
+                    "[Radiance] _parse_lora_metadata(): ignoring %s from `out[key] = float(val)`: %s",
+                    type(_exc).__name__, _exc,
+                )
         elif key in ("radiance_rank",):
             try:
                 out[key] = int(val)
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as _exc:
+                logger.debug(
+                    "[Radiance] _parse_lora_metadata(): ignoring %s from `out[key] = int(val)`: %s",
+                    type(_exc).__name__, _exc,
+                )
         else:
             out[key] = str(val)
     return out

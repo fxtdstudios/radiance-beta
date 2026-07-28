@@ -382,8 +382,11 @@ async def radiance_deliver_endpoint(request):
                                 import cv2 as _cv2
                                 sigma = _denoise * 3.0
                                 f = _cv2.bilateralFilter((f * 65535).astype(np.uint16), d=5, sigmaColor=sigma*20, sigmaSpace=sigma*20).astype(np.float32) / 65535.0
-                            except Exception:
-                                pass
+                            except Exception as _exc:
+                                logger.debug(
+                                    "[Radiance] _run_export(): ignoring %s from `import cv2 as _cv2`: %s",
+                                    type(_exc).__name__, _exc,
+                                )
 
                         if _grain > 0.01:
                             noise = rng.standard_normal(f.shape).astype(np.float32)
@@ -718,8 +721,11 @@ async def radiance_deliver_endpoint(request):
             try:
                 _progress_set(instance_key, {"current": 100, "total": 100,
                                              "status": "error", "message": str(e)[:200]})
-            except Exception:
-                pass
+            except Exception as _exc:
+                logger.debug(
+                    "[Radiance] radiance_deliver_endpoint(): ignoring %s from `_progress_set(instance_key, {'current': 100, 'total': 100, '…`: %s",
+                    type(_exc).__name__, _exc,
+                )
         # status=500, not the aiohttp default of 200 -- a failed delivery that
         # answers 200 reads as success to every client.
         return web.json_response({"error": str(e), "status": "error"}, status=500)

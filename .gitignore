@@ -132,3 +132,6 @@ _to_delete/
 .phase3-dist-final/
 batch01.patch
 batch2.patch
+
+# Caches, build output and local virtualenvs — never part of the source tree
+.phase3-venv/
