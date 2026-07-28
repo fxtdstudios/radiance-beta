@@ -1,5 +1,16 @@
 import { app } from "../../scripts/app.js";
 
+import {
+    forceWidgetReinsert as _forceWidgetReinsert,
+    setWidgetVisible as _setWidgetVisible,
+} from "./radiance_widget_utils.js";
+
+// Widget helpers now live in radiance_widget_utils.js; this module's only
+// local difference was the "number" fallback type, which is passed through.
+function setWidgetVisible(widget, visible, node) {
+    _setWidgetVisible(widget, visible, node, { fallbackType: "number" });
+}
+
 /**
  * Radiance Universal I/O Widget Management (v2.3)
  * Handles dynamic visibility for Digital Cinema Read and Write nodes.
@@ -166,61 +177,6 @@ try {
 	}
 } catch (e) {
 	console.warn("[Radiance.IO] Failed to patch HTMLImageElement.src", e);
-}
-
-// REMOVED: a global Element.prototype.setAttribute override.
-//
-// It was described as a "fail-safe fallback" behind the HTMLImageElement.src
-// property patch above, but the cost was routing every setAttribute call in
-// ComfyUI and in every other installed extension through Radiance's
-// resolvePlaceholder() -- an extra JS frame and two string compares on one of
-// the hottest methods in the DOM, for a path the property patch already covers.
-// If a specific call site is found that sets an <img src> via setAttribute and
-// needs placeholder resolution, patch that site rather than the prototype.
-
-// Widget visibility helpers — same pattern as radiance_vae_widgets.js /
-// radiance_sampler.js (three-mechanism: options.hidden for Nodes 2.0 Vue
-// filtering, type="hidden"+computeSize for legacy LiteGraph canvas, splice
-// reinsert to force Vue to re-evaluate options.hidden on show).
-function _forceWidgetReinsert(widget, node) {
-	if (!node?.widgets) return;
-	const idx = node.widgets.indexOf(widget);
-	if (idx === -1) return;
-	node.widgets.splice(idx, 1);
-	node.widgets.splice(idx, 0, widget);
-}
-
-function setWidgetVisible(widget, visible, node) {
-	if (!widget) return;
-
-	if (!widget.options) widget.options = {};
-	widget.options.hidden = !visible;
-	widget.hidden = !visible;
-
-	if (visible) {
-		if (widget.type === "hidden") {
-			widget.type = widget._origType || "number";
-			if (widget._origComputeSize !== undefined) {
-				widget.computeSize = widget._origComputeSize;
-			} else {
-				delete widget.computeSize;
-			}
-			delete widget._origComputeSize;
-			widget.computedHeight = widget._origComputedHeight ?? 32;
-			delete widget._origComputedHeight;
-		}
-	} else {
-		if (widget.type !== "hidden") {
-			widget._origType = widget.type;
-			widget._origComputeSize = widget.computeSize;
-			widget._origComputedHeight = widget.computedHeight;
-			widget.type = "hidden";
-			widget.computeSize = () => [0, -4];
-			widget.computedHeight = 4;
-		}
-	}
-
-	_forceWidgetReinsert(widget, node);
 }
 
 function refreshNodeSize(node) {

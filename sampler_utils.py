@@ -293,8 +293,11 @@ class SigmaCache:
             try:
                 if hasattr(model, "model") and hasattr(model.model, "model_config"):
                     config_name = type(model.model.model_config).__name__
-            except (AttributeError, RuntimeError):
-                pass
+            except (AttributeError, RuntimeError) as _exc:
+                logger.debug(
+                    "[Radiance] _make_key(): ignoring %s from `if hasattr(model, 'model') and hasattr(model.model, 'model_c…`: %s",
+                    type(_exc).__name__, _exc,
+                )
 
             return (config_name, round(sigma_max, 6), round(sigma_min, 6), scheduler, total_steps)
         except (AttributeError, RuntimeError):

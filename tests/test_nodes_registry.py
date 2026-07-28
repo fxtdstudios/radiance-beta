@@ -213,7 +213,10 @@ _KNOWN_CROSS_MODULE_DUPLICATES: dict = {
     # color/ sub-package and nodes.monitor currently both expose LUT apply.
     # Track this transition explicitly so unrelated duplicate keys still fail.
     "RadianceLUTApply":  frozenset(["color", "nodes"]),
-    "RadianceLUTBlend":  frozenset(["color", "nodes_engine"]),
+    # Was ["color", "nodes_engine"]. nodes.color now publishes LUT Blend too --
+    # it had been written in color/lut.py and left out of every mapping dict, so
+    # the node existed but never reached ComfyUI's menu.
+    "RadianceLUTBlend":  frozenset(["color", "nodes"]),
     # film/ sub-package supersedes nodes_optics.py for FilmGrain
     "RadianceFilmGrain": frozenset(["film", "nodes_optics"]),
     # film/ sub-package supersedes nodes_motion_blur.py for MotionBlur
@@ -222,6 +225,11 @@ _KNOWN_CROSS_MODULE_DUPLICATES: dict = {
     # shim (Task #140 / #141-fix).  The shim re-exports the same keys so that
     # saved ComfyUI workflows and test_io.py continue to resolve them.
     "RadianceEXRMultiPart": frozenset(["nodes_io", "nodes_io_unified"]),
+    # Same story as the colour nodes below: the DPX read/write pair lived in
+    # nodes_io.py and the v3 nodes.io group forgot to list them, so they were
+    # unreachable until 2026-07. nodes.io is canonical; nodes_io is the shim.
+    "RadianceDigitalCinemaRead": frozenset(["nodes", "nodes_io"]),
+    "RadianceDigitalCinemaWrite": frozenset(["nodes", "nodes_io"]),
     # v3 organized package plus compatibility wrappers.
     "RadianceFilmGrain": frozenset(["film", "nodes"]),
     "RadianceMotionBlur": frozenset(["film", "nodes"]),

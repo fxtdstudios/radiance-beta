@@ -33,6 +33,18 @@
 
 import { app } from "../../scripts/app.js";
 
+import {
+    forceWidgetReinsert as _forceWidgetReinsert,
+    setWidgetVisible as _setWidgetVisible,
+    getWidget,
+} from "./radiance_widget_utils.js";
+
+// Widget helpers now live in radiance_widget_utils.js; this module's only
+// local difference was the "number" fallback type, which is passed through.
+function setWidgetVisible(widget, visible, node) {
+    _setWidgetVisible(widget, visible, node, { fallbackType: "number" });
+}
+
 // ALBABIT-FIX: v1.0 matched node.type against the display-name string
 // "◎ Radiance HDR VAE Decode" instead of the class key ("RadianceHDRVAEDecode")
 // -- confirmed via live browser console that node.type is always the class
@@ -78,10 +90,6 @@ const BLOWOUT_MARKER = " ⚠ overexp risk";
 const RUDRA_FALLBACK_MARKER = " ⚠ VAE fallback";
 
 /** Return widget by name from a node, or null. */
-function getWidget(node, name) {
-    return node.widgets?.find(w => w.name === name) ?? null;
-}
-
 // Same convention as radiance_resolution.js's _setLabelMarker: cache the
 // original label once, then swap between origLabel and origLabel+marker.
 // Renders identically on the legacy LiteGraph canvas and the Vue frontend.
@@ -91,52 +99,6 @@ function _setLabelMarker(widget, marker) {
     if (widget._radOrigLabel === undefined) widget._radOrigLabel = widget.label ?? widget.name;
     const wanted = marker ? widget._radOrigLabel + marker : widget._radOrigLabel;
     if (widget.label !== wanted) widget.label = wanted;
-}
-
-// ── Widget visibility helpers (same pattern as radiance_sampler.js) ──
-// ALBABIT-FIX: hidden unless their condition holds (verified against
-// hdr/vae.py): target_stops needs inverse_tonemap in sampler mode;
-// rhdr_precision needs export_rhdr; decoder_size needs RUDRA enabled;
-// source_space/decode_noise_scale/hdr_scale_factor belong to direct HDR mode.
-function _forceWidgetReinsert(widget, node) {
-    if (!node?.widgets) return;
-    const idx = node.widgets.indexOf(widget);
-    if (idx === -1) return;
-    node.widgets.splice(idx, 1);
-    node.widgets.splice(idx, 0, widget);
-}
-
-function setWidgetVisible(widget, visible, node) {
-    if (!widget) return;
-
-    if (!widget.options) widget.options = {};
-    widget.options.hidden = !visible;
-    widget.hidden = !visible;
-
-    if (visible) {
-        if (widget.type === "hidden") {
-            widget.type = widget._origType || "number";
-            if (widget._origComputeSize !== undefined) {
-                widget.computeSize = widget._origComputeSize;
-            } else {
-                delete widget.computeSize;
-            }
-            delete widget._origComputeSize;
-            widget.computedHeight = widget._origComputedHeight ?? 32;
-            delete widget._origComputedHeight;
-        }
-    } else {
-        if (widget.type !== "hidden") {
-            widget._origType = widget.type;
-            widget._origComputeSize = widget.computeSize;
-            widget._origComputedHeight = widget.computedHeight;
-            widget.type = "hidden";
-            widget.computeSize = () => [0, -4];
-            widget.computedHeight = 4;
-        }
-    }
-
-    _forceWidgetReinsert(widget, node);
 }
 
 function refreshNodeSize(node) {

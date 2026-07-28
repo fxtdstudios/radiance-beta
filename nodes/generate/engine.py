@@ -918,6 +918,9 @@ def _ndi_cleanup():
         try:
             import NDIlib as ndi
             ndi.send_destroy(RadianceNDISender._ndi_send_instance)
-        except Exception:
-            pass
+        except Exception as _exc:
+            logger.debug(
+                "[Radiance] _ndi_cleanup(): ignoring %s from `import NDIlib as ndi`: %s",
+                type(_exc).__name__, _exc,
+            )
 atexit.register(_ndi_cleanup)

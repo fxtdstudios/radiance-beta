@@ -1,5 +1,16 @@
 import { app } from "../../../scripts/app.js";
 
+import {
+    forceWidgetReinsert as _forceWidgetReinsert,
+    setWidgetVisible as _setWidgetVisible,
+} from "./radiance_widget_utils.js";
+
+// Widget helpers now live in radiance_widget_utils.js; this module's only
+// local difference was the "text" fallback type, which is passed through.
+function setWidgetVisible(widget, visible, node) {
+    _setWidgetVisible(widget, visible, node, { fallbackType: "text" });
+}
+
 /**
  * Radiance AI Upscale Widget Visibility (v1.0)
  * Hides SUPIR-specific widgets when a non-SUPIR model is selected.
@@ -17,70 +28,6 @@ import { app } from "../../../scripts/app.js";
 
 // ALBABIT-FIX: SUPIR model name identifiers — must match _SUPIR_MODELS in upscale.py.
 const SUPIR_MODEL_NAMES = ["SUPIR-v0F_fp16", "SUPIR-v0Q_fp16"];
-
-// Force Vue to destroy and recreate a widget's component instance by doing a real
-// remove+re-insert in the reactive array. A splice(0,0) no-op only notifies Vue that
-// the array changed but Vue's vdom differ may reuse the existing component instance
-// (same object reference) and skip re-reading changed properties like `type`.
-// A true remove+insert forces Vue to treat it as a new item → fresh component mount.
-function _forceWidgetReinsert(widget, node) {
-	if (!node?.widgets) return;
-	const idx = node.widgets.indexOf(widget);
-	if (idx === -1) return;
-	node.widgets.splice(idx, 1);          // remove → Vue destroys component instance
-	node.widgets.splice(idx, 0, widget);  // re-insert → Vue creates fresh instance
-}
-
-function setWidgetVisible(widget, visible, node) {
-	if (!widget) return;
-
-	if (!widget.options) widget.options = {};
-	widget.options.hidden = !visible;
-
-	widget.hidden = !visible;
-	if (visible) {
-		if (widget.type === "hidden") {
-			widget.type = widget._origType || "text";
-			delete widget.computeSize;
-			delete widget._origComputeSize;
-			if (widget._origDraw !== undefined) {
-				widget.draw = widget._origDraw;
-				delete widget._origDraw;
-			} else {
-				delete widget.draw;
-			}
-			if (widget.inputEl) widget.inputEl.style.display = "";
-			if (widget.element)  widget.element.style.display  = "";
-			if (widget._origComputedHeight !== undefined) {
-				widget.computedHeight = widget._origComputedHeight;
-				delete widget._origComputedHeight;
-			} else {
-				widget.computedHeight = 32;
-			}
-		}
-	} else {
-		if (widget.type !== "hidden") {
-			widget._origType        = widget.type;
-			widget._origComputeSize = widget.computeSize;
-			widget._origComputedHeight = widget.computedHeight;
-			widget.type = "hidden";
-			widget.computeSize = () => [0, -4];
-			if (widget.draw) widget._origDraw = widget.draw;
-			widget.draw = function() {};
-			if (widget.inputEl) widget.inputEl.style.display = "none";
-			if (widget.element)  widget.element.style.display  = "none";
-			widget.computedHeight = 4;
-		}
-	}
-
-	// ALBABIT-FIX: always force a remove+reinsert, even if type/hidden didn't
-	// change this call. Once a widget's Vue component has been (re)mounted, it
-	// stops reacting to later type/hidden changes via a no-op splice(0,0) alone
-	// -- it keeps rendering its previous state until reinserted again. Reinserting
-	// unconditionally guarantees every widget's component reflects its current
-	// state regardless of how many times it toggled before.
-	_forceWidgetReinsert(widget, node);
-}
 
 function refreshNodeSize(node) {
 	if (!node.computeSize) return;

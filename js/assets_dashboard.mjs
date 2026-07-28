@@ -1,6 +1,7 @@
 // ◎ Radiance — Assets manager (dark minimal). Live data from /radiance/assets.
 
 // ALBABIT-FIX: resolve extension base at runtime so asset paths work regardless of the install folder name
+import { escapeHtml } from "./radiance_dom_utils.js";
 const _EXT_BASE = import.meta.url.replace(/\/[^/]+$/, '');
 
 const API = {
@@ -15,9 +16,6 @@ const mock = { assets: [], bins: [], counts: { all: 0, image: 0, video: 0, seque
 
 let state = { data: mock, activeBin: "all", query: "" };
 
-function escapeHtml(v) {
-    return String(v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
 function playSvg() { return '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>'; }
 function searchSvg() { return '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#52555c" stroke-width="1.6"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>'; }
 

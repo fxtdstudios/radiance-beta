@@ -1,4 +1,15 @@
 import { app } from "../../../scripts/app.js";
+import {
+    forceWidgetReinsert as _forceWidgetReinsert,
+    setWidgetVisible as _setWidgetVisible,
+} from "./radiance_widget_utils.js";
+
+// Widget helpers now live in radiance_widget_utils.js; this module's only
+// local difference was the "INT" fallback type, which is passed through.
+function setWidgetVisible(widget, visible, node) {
+    _setWidgetVisible(widget, visible, node, { fallbackType: "INT" });
+}
+
 // FIX 5: was "../../scripts/app.js" — extensions in custom_nodes/Radiance/web/
 // need three ../ to reach ComfyUI's scripts/ directory.
 
@@ -27,70 +38,6 @@ import { app } from "../../../scripts/app.js";
  * FEATURE: Shows/hides mp_target and mp_aspect_ratio widgets based on whether
  *          mp_target > 0, alongside the existing video/batch toggle.
  */
-
-// Force Vue to destroy and recreate a widget's component instance by doing a real
-// remove+re-insert in the reactive array. A splice(0,0) no-op only notifies Vue that
-// the array changed but Vue's vdom differ may reuse the existing component instance
-// (same object reference) and skip re-reading changed properties like `type`.
-// A true remove+insert forces Vue to treat it as a new item → fresh component mount.
-function _forceWidgetReinsert(widget, node) {
-    if (!node?.widgets) return;
-    const idx = node.widgets.indexOf(widget);
-    if (idx === -1) return;
-    node.widgets.splice(idx, 1);          // remove → Vue destroys component instance
-    node.widgets.splice(idx, 0, widget);  // re-insert → Vue creates fresh instance
-}
-
-// ALBABIT-FIX: node param required so we can force a remove+reinsert in Vue's
-// reactive widgets array. Nodes 2.0 uses widget.options.hidden to filter widgets
-// from the Vue render list.
-// (confirmed in ComfyUI frontend source: t.filter(e=>!(e.options?.hidden||...)))
-function setWidgetVisible(widget, visible, node) {
-    if (!widget) return;
-
-    if (!widget.options) widget.options = {};
-    widget.options.hidden = !visible;
-    widget.hidden = !visible;
-
-    if (visible) {
-        if (widget.type === "hidden") {
-            widget.type = widget._origType || "INT";
-            // ALBABIT-FIX: delete override so LiteGraph prototype recalculates correctly;
-            // a fallback closure gave wrong heights for toggles/combos.
-            if (widget._origComputeSize !== undefined) {
-                widget.computeSize = widget._origComputeSize;
-            } else {
-                delete widget.computeSize;
-            }
-            delete widget._origComputeSize;
-            // ALBABIT-FIX: restore saved computedHeight for Nodes 2.0 Vue layout.
-            if (widget._origComputedHeight !== undefined) {
-                widget.computedHeight = widget._origComputedHeight;
-                delete widget._origComputedHeight;
-            } else {
-                widget.computedHeight = 32;
-            }
-        }
-    } else {
-        if (widget.type !== "hidden") {
-            widget._origType = widget.type;
-            widget._origComputeSize = widget.computeSize;
-            widget._origComputedHeight = widget.computedHeight;
-            widget.type = "hidden";
-            widget.computeSize = () => [0, -4];
-            // ALBABIT-FIX: 4 not -4 — Vue uses computedHeight for CSS; 4px collapses the row.
-            widget.computedHeight = 4;
-        }
-    }
-
-    // ALBABIT-FIX: always force a remove+reinsert, even if type/hidden didn't
-    // change this call. Once a widget's Vue component has been (re)mounted, it
-    // stops reacting to later type/hidden changes via a no-op splice(0,0) alone
-    // -- it keeps rendering its previous state until reinserted again. Reinserting
-    // unconditionally guarantees every widget's component reflects its current
-    // state regardless of how many times it toggled before.
-    _forceWidgetReinsert(widget, node);
-}
 
 // ALBABIT-FIX: Mirrors the temporal stride logic in resolution.py's generate()
 // (n*stride + 1 frame counts) so video_frames <-> duration_seconds stay in sync

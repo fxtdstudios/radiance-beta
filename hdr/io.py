@@ -61,6 +61,9 @@ if not _HAS_COLOR_UTILS:
         )
         _HAS_COLOR_UTILS = True
     except ImportError:
+        # Deliberately silent: this is the second of two optional import paths
+        # for the colour helpers, and it runs at module scope before `logger`
+        # exists. _HAS_COLOR_UTILS stays False and every caller checks it.
         pass
 
 logger = logging.getLogger("radiance.hdr.io")

@@ -688,8 +688,11 @@ class RadianceVideoSampler:
             if tiling and hasattr(model, "model") and hasattr(model.model, "set_tiling"):
                 try:
                     model.model.set_tiling(False)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    logger.debug(
+                        "[Radiance] sample(): ignoring %s from `model.model.set_tiling(False)`: %s",
+                        type(_exc).__name__, _exc,
+                    )
 
 
 # ===========================================================================

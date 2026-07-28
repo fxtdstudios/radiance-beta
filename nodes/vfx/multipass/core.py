@@ -228,8 +228,11 @@ def _verify_or_report_sha256(dest: str, info: dict, key: str) -> bool:
         logger.error(f"[Radiance] CHECKSUM MISMATCH for '{key}' (expected {expected}, got {actual}) — removing.")
         try:
             os.remove(dest)
-        except OSError:
-            pass
+        except OSError as _exc:
+            logger.debug(
+                "[Radiance] _verify_or_report_sha256(): ignoring %s from `os.remove(dest)`: %s",
+                type(_exc).__name__, _exc,
+            )
         return False
     logger.info(f"[Radiance] ✓ sha256 verified for '{key}'")
     return True

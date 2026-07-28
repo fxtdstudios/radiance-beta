@@ -88,8 +88,11 @@ def _resolve_config(ocio_config_path: str = "") -> "Optional[OCIO.Config]":
         aces_path = os.path.join(folder_paths.models_dir, "ACES", "config.ocio")
         if os.path.exists(aces_path):
             return OCIO.Config.CreateFromFile(aces_path)
-    except ImportError:
-        pass
+    except ImportError as _exc:
+        logger.debug(
+            "[Radiance] _resolve_config(): ignoring %s from `import folder_paths`: %s",
+            type(_exc).__name__, _exc,
+        )
 
     return None
 
@@ -577,8 +580,11 @@ class ACESConfigManager:
                 aces_path = os.path.join(folder_paths.models_dir, "ACES", "config.ocio")
                 if os.path.exists(aces_path):
                     return aces_path, f"Found config in ComfyUI models: {aces_path}"
-            except ImportError:
-                pass
+            except ImportError as _exc:
+                logger.debug(
+                    "[Radiance] _find_existing_config(): ignoring %s from `import folder_paths`: %s",
+                    type(_exc).__name__, _exc,
+                )
 
             current_dir = os.path.dirname(os.path.realpath(__file__))
             radiance_dir = os.path.dirname(current_dir)

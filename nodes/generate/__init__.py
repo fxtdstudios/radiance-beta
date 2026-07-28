@@ -8,6 +8,7 @@ from radiance.nodes.generate.engine import (
     RadianceHDRVAEDecode,
 )
 from radiance.nodes_loader import (
+    RadianceControlNetApply,
     RadianceLoraStack,
     RadianceUnifiedLoader,
     RadianceVideoLoader,
@@ -27,6 +28,9 @@ NODE_CLASS_MAPPINGS = {
     "RadianceHDRVAEDecode": RadianceHDRVAEDecode,
     "RadianceLoraStack": RadianceLoraStack,
     "RadianceUnifiedLoader": RadianceUnifiedLoader,
+    # Written, complete and importable since v3, but never listed here,
+    # so it never appeared in ComfyUI's node menu.
+    "RadianceControlNetApply": RadianceControlNetApply,
     "RadianceVideoLoader": RadianceVideoLoader,
     "RadianceHDRLoRALoader": RadianceHDRLoRALoader,
     "RadianceHDRLoRAApply": RadianceHDRLoRAApply,
@@ -42,6 +46,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceHDRVAEDecode": "◎ HDR VAE Decode",
     "RadianceLoraStack": "◎ LoRA Stack",
     "RadianceUnifiedLoader": "◎ Radiance Read Models",
+    "RadianceControlNetApply": "◎ Radiance ControlNet Apply",
     "RadianceVideoLoader": "◎ Video Loader",
     "RadianceHDRLoRALoader": "◎ HDR LoRA Loader",
     "RadianceHDRLoRAApply": "◎ HDR LoRA Apply",

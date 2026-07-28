@@ -225,8 +225,11 @@ def _verify_or_report_sha256(dest: str, info: Dict[str, Any], key: str) -> bool:
         )
         try:
             os.remove(dest)
-        except OSError:
-            pass
+        except OSError as _exc:
+            logger.debug(
+                "[Radiance] _verify_or_report_sha256(): ignoring %s from `os.remove(dest)`: %s",
+                type(_exc).__name__, _exc,
+            )
         return False
     logger.info(f"[Radiance/Upscale] sha256 verified for {key}")
     return True
@@ -312,8 +315,11 @@ def _download_upscale_model(key: str, force: bool = False) -> Optional[str]:
             return None
         logger.info(f"[Radiance/Upscale] OK huggingface_hub -> {dest}")
         return dest
-    except ImportError:
-        pass
+    except ImportError as _exc:
+        logger.debug(
+            "[Radiance] _download_upscale_model(): ignoring %s from `from huggingface_hub import hf_hub_download`: %s",
+            type(_exc).__name__, _exc,
+        )
     except Exception as e:
         logger.warning(f"[Radiance/Upscale] hf_hub failed: {e}; falling back to urllib")
 
@@ -831,8 +837,11 @@ def _load_tier2(model_key: str, scale: int, device: torch.device) -> Any:
         net.eval().to(device)
         logger.info(f"[Radiance/Upscale] basicsr SwinIR loaded: {ckpt_path}")
         return net
-    except ImportError:
-        pass
+    except ImportError as _exc:
+        logger.debug(
+            "[Radiance] _load_tier2(): ignoring %s from `from basicsr.archs.swinir_arch import SwinIR`: %s",
+            type(_exc).__name__, _exc,
+        )
     except Exception as e:
         logger.warning(f"[Radiance/Upscale] basicsr SwinIR load failed: {e}")
 
@@ -952,8 +961,11 @@ def _load_seedvr2_pipeline(device: torch.device) -> Any:
         _DIFFUSION_PIPE_CACHE.put(cache_key, pipe)
         logger.info("[Radiance/Upscale] SeedVR2 pipeline loaded")
         return pipe
-    except ImportError:
-        pass
+    except ImportError as _exc:
+        logger.debug(
+            "[Radiance] _load_seedvr2_pipeline(): ignoring %s from `import seedvr2`: %s",
+            type(_exc).__name__, _exc,
+        )
     except Exception as e:
         logger.warning(f"[Radiance/Upscale] SeedVR2 load attempt failed: {e}")
 
@@ -2365,8 +2377,11 @@ def _load_face_restore_model(model_key: str, device: torch.device) -> Any:
         model = _load_spandrel(ckpt_path, device)
         _FACE_MODEL_CACHE.put(cache_id, model)
         return model
-    except RuntimeError:
-        pass
+    except RuntimeError as _exc:
+        logger.debug(
+            "[Radiance] _load_face_restore_model(): ignoring %s from `model = _load_spandrel(ckpt_path, device)`: %s",
+            type(_exc).__name__, _exc,
+        )
 
     # ── basicsr CodeFormer arch ───────────────────────────────────────────────
     if "codeformer" in model_key:
