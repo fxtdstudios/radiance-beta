@@ -267,21 +267,34 @@ def handle_client(conn):
             cmd_data += chunk
         command = cmd_data.decode("utf-8", errors="replace").strip()
 
-        # Enforce security token authentication if configured on the server
-        if DCC_AUTH_TOKEN:
-            if version != 2 or not sig_received:
-                msg = "ERROR: Authentication required — Server configured with token but connection is unauthenticated."
-                print(f"[Radiance Security] {msg}")
-                conn.sendall((msg + RADIANCE_END).encode("utf-8"))
-                return
+        # Authentication is mandatory. It used to be skipped entirely whenever
+        # RADIANCE_DCC_AUTH_TOKEN was unset -- which is the default -- so any
+        # client that could reach the port was trusted.
+        if not DCC_AUTH_TOKEN:
+            msg = ("ERROR: Server is not configured with RADIANCE_DCC_AUTH_TOKEN; "
+                   "refusing all commands.")
+            print(f"[Radiance Security] {msg}")
+            conn.sendall((msg + RADIANCE_END).encode("utf-8"))
+            return
 
-            import hashlib
-            expected_sig = hashlib.sha256((DCC_AUTH_TOKEN + command).encode("utf-8")).digest()
-            if sig_received != expected_sig:
-                msg = "ERROR: Authentication failed — Invalid security token signature."
-                print(f"[Radiance Security] {msg}")
-                conn.sendall((msg + RADIANCE_END).encode("utf-8"))
-                return
+        if version != 2 or not sig_received:
+            msg = "ERROR: Authentication required — connection is unauthenticated."
+            print(f"[Radiance Security] {msg}")
+            conn.sendall((msg + RADIANCE_END).encode("utf-8"))
+            return
+
+        # HMAC, not SHA256(token || command): the bare-hash construction was
+        # length-extendable and had no nonce, so any observed pair replayed.
+        import hmac
+        import hashlib
+        expected_sig = hmac.new(
+            DCC_AUTH_TOKEN.encode("utf-8"), command.encode("utf-8"), hashlib.sha256
+        ).digest()
+        if not hmac.compare_digest(sig_received, expected_sig):
+            msg = "ERROR: Authentication failed — Invalid security token signature."
+            print(f"[Radiance Security] {msg}")
+            conn.sendall((msg + RADIANCE_END).encode("utf-8"))
+            return
 
         if command:
             structured_payload = _parse_structured_command(command)
@@ -299,37 +312,12 @@ def handle_client(conn):
             error_box = [None]
             done_event = threading.Event()
 
-            # v1.1 FIX-1: Explicitly restrict __builtins__ to an empty dict.
-            # Without this, Python silently injects the FULL standard builtins
-            # into any exec/eval context, completely bypassing the blocklist.
-            # An attacker could access open(), __import__(), etc. via:
-            #   vars()['__builtins__']['open']('/etc/passwd').read()
-            # Setting __builtins__={} prevents all implicit builtin access.
-            _SAFE_BUILTINS = {
-                "print": print,
-                "len": len,
-                "range": range,
-                "str": str,
-                "int": int,
-                "float": float,
-                "bool": bool,
-                "list": list,
-                "dict": dict,
-                "tuple": tuple,
-                "isinstance": isinstance,
-                "hasattr": hasattr,
-                "True": True,
-                "False": False,
-                "None": None,
-            }
-            safe_globals = {
-                "__builtins__": _SAFE_BUILTINS,   # CRITICAL: explicit restriction
-                "nuke": nuke,
-                "nukescripts": nukescripts,
-                "json": json,
-                "math": __import__("math"),
-                "random": random,
-            }
+            # There is deliberately no eval/exec sandbox here any more.
+            # The restricted-__builtins__ dict that used to sit at this
+            # point was dead weight once the eval/exec fallback was removed:
+            # it protected nothing and read like an active defence, which is
+            # worse than no defence at all. Commands are structured or
+            # ast.literal_eval'd; nothing else runs.
 
             def execute_wrapper():
                 try:
@@ -339,33 +327,21 @@ def handle_client(conn):
                         result_box[0] = structured_result
                         return
 
-                    # Try ast.literal_eval first for safe literals
+                    # Literals only. The eval/exec fallback that used to live
+                    # here was guarded by a substring blocklist, which a single
+                    # space defeated ("open (" does not contain "open("), as did
+                    # module chaining through the permitted `json` global. Both
+                    # bypasses gave arbitrary code execution inside Nuke. Only
+                    # structured commands and literal payloads are accepted now.
                     try:
                         val = ast.literal_eval(command)
                         result_box[0] = str(val)
                     except (ValueError, SyntaxError):
-                        if not DYNAMIC_EXEC_ENABLED:
-                            error_box[0] = "ERROR: Dynamic Nuke execution is disabled. Set RADIANCE_DEV=1 for trusted local development."
-                            return
-                        # Fallback to eval for Nuke expressions
-                        try:
-                            val = eval(command, safe_globals)  # noqa: S307
-                            result_box[0] = str(val)
-                        except SyntaxError:
-                            # Fallback to exec for multi-line scripts
-                            exec(command, safe_globals)  # noqa: S102
-                            lines = command.strip().split("\n")
-                            if lines:
-                                last = lines[-1].strip()
-                                if last.startswith(("'", '"', "(")) or (last and last[0].isdigit()):
-                                    try:
-                                        result_box[0] = str(eval(last, safe_globals))  # noqa: S307
-                                    except Exception:
-                                        result_box[0] = "OK"
-                                else:
-                                    result_box[0] = "OK"
-                            else:
-                                result_box[0] = "OK"
+                        error_box[0] = (
+                            "ERROR: Only structured commands and literal values are accepted. "
+                            "Arbitrary Python execution has been removed for security reasons."
+                        )
+                        return
                 except Exception as e:
                     error_box[0] = f"ERROR: {e}"
                 finally:
@@ -399,13 +375,23 @@ def start_radiance_server():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.settimeout(0.5)
 
+    if BIND_HOST not in ("127.0.0.1", "localhost", "::1") and not DCC_AUTH_TOKEN:
+        msg = (f"Radiance Bridge: refusing to bind {BIND_HOST} without "
+               f"RADIANCE_DCC_AUTH_TOKEN set. Falling back to 127.0.0.1.")
+        print(msg)
+        safe_message(msg)
+        bind_host = "127.0.0.1"
+    else:
+        bind_host = BIND_HOST
+
     try:
-        # v1.1: Bind to BIND_HOST (default 127.0.0.1 — loopback only).
-        # Set RADIANCE_NUKE_BIND_HOST=0.0.0.0 for cross-machine studio pipelines.
-        server.bind((BIND_HOST, PORT))  # nosec B104
+        # v1.1: Bind to bind_host (default 127.0.0.1 — loopback only).
+        # Set RADIANCE_NUKE_BIND_HOST=0.0.0.0 for cross-machine studio pipelines;
+        # a token is mandatory in that case.
+        server.bind((bind_host, PORT))  # nosec B104
         server.listen(5)
 
-        msg = f"Radiance Bridge listening on {BIND_HOST}:{PORT}..."
+        msg = f"Radiance Bridge listening on {bind_host}:{PORT}..."
         print(msg)
         safe_message(msg)
 

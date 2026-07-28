@@ -539,7 +539,33 @@ def _resolve_sequence_paths(
         hashes = hash_match.group(1)
         pattern = pattern.replace(hashes, f"%0{len(hashes)}d")
 
-    frames = list(range(start, end + 1, step)) if end >= start else [start]
+    # Probe the directory once to learn which frame numbers actually exist.
+    # Walking the caller's upper bound blindly is not viable: "read all frames"
+    # arrives here as end=99999, which expanded a 5-frame sequence into ~99k
+    # slots, 98,994 of them phantoms, and blew up the downstream torch.cat.
+    available: set = set()
+    pad_match = re.search(r"%0(\d+)d", pattern)
+    if pad_match:
+        import glob as _glob
+        token = pad_match.group(0)
+        prefix, suffix = pattern.split(token, 1)
+        for hit in _glob.glob(pattern.replace(token, "[0-9]" * int(pad_match.group(1)))):
+            if hit.startswith(prefix) and hit.endswith(suffix):
+                num = hit[len(prefix):len(hit) - len(suffix)] if suffix else hit[len(prefix):]
+                if num.isdigit():
+                    available.add(int(num))
+
+    if available:
+        hi = min(end, max(available)) if end >= start else max(available)
+        frames = [f for f in range(start, hi + 1, step)]
+        # Requested window misses the sequence entirely (e.g. the default
+        # start_frame=1001 against a sequence numbered from 1) -- fall back to
+        # everything on disk rather than reporting a range full of holes.
+        if not any(f in available for f in frames):
+            frames = sorted(available)[::step]
+    else:
+        frames = list(range(start, end + 1, step)) if end >= start else [start]
+
     paths  = []
     missing = []
     for f in frames:
@@ -548,9 +574,11 @@ def _resolve_sequence_paths(
             paths.append(p)
         else:
             missing.append(p)
-            if missing_frames in ("Black", "Skip"):
+            if missing_frames == "Black":
                 paths.append(p)   # keep slot for black-frame insertion
             else:
+                # "Skip" means skip: keeping the slot here inserted an 8x8
+                # black tile that then failed to concatenate with real frames.
                 log.debug("Frame not found: %s", p)
 
     if missing_frames == "Error" and missing:
@@ -574,6 +602,7 @@ def _read_sequence(
         raise FileNotFoundError(f"No frames found for pattern: {pattern}")
 
     frames: List[torch.Tensor] = []
+    blank_slots: List[int] = []
     for p in paths:
         if os.path.isfile(p):
             img_t, _ = _read_image(p)
@@ -581,9 +610,16 @@ def _read_sequence(
             arr = _apply_input_colorspace(arr, input_cs)
             frames.append(torch.from_numpy(arr).unsqueeze(0))
         else:
-            # Black frame for missing
-            blank = torch.zeros(1, 8, 8, 3)
-            frames.append(blank)
+            # Placeholder for a missing frame. Size it from a real frame below
+            # -- a fixed 8x8 tile cannot concatenate with the rest of the batch.
+            blank_slots.append(len(frames))
+            frames.append(None)  # type: ignore[arg-type]
+
+    real = next((f for f in frames if f is not None), None)
+    if real is None:
+        raise FileNotFoundError(f"No readable frames found for pattern: {pattern}")
+    for i in blank_slots:
+        frames[i] = torch.zeros_like(real)
 
     batch  = torch.cat(frames, dim=0)   # (N, H, W, C)
     _, h, w, _ = batch.shape
@@ -1680,11 +1716,26 @@ class RadianceWrite:
         # gating condition needed to change.
         alpha = _coerce_mask_to_alpha(mask, n, h, w) if mask is not None and ("EXR" in format or "PNG" in format) else None
 
-        # Apply color space + broadcast-safe clamp
+        # Apply color space + broadcast-safe clamp.
+        #
+        # The clamp is now gated on the output format. It used to be
+        # unconditional, so exporting "EXR (32-bit float)" with broadcast_safe
+        # on -- which the delivery panel defaults to -- clamped every pixel of a
+        # scene-referred master into [16/255, 235/255]: highlights destroyed,
+        # blacks lifted 6.3%, and the .exr extension making it look like a
+        # legitimate HDR deliverable. Legal-range limiting is a video/8-bit
+        # concept and must never touch a float or DPX deliverable.
+        _is_float_format = ("EXR" in format or "HDR" in format
+                            or "32-bit float" in format or "DPX" in format)
+        apply_legal_range = bool(broadcast_safe) and not _is_float_format
+        if broadcast_safe and _is_float_format:
+            log.info("RadianceWrite: broadcast_safe ignored for %s "
+                     "(legal-range limiting does not apply to float formats)", format)
+
         out_frames: List[np.ndarray] = []
         for i, fr in enumerate(frames):
             fr = _apply_output_colorspace(fr, color_space)
-            if broadcast_safe:
+            if apply_legal_range:
                 fr = np.clip(fr, 16/255.0, 235/255.0)
             if alpha is not None and fr.ndim == 3 and fr.shape[-1] == 3:
                 fr = np.concatenate([fr, alpha[i][..., None]], axis=-1)   # RGB -> RGBA
@@ -1712,7 +1763,10 @@ class RadianceWrite:
                 prompt, extra_pnginfo,
             )
             log.info("RadianceWrite: saved %d frame(s) → %s", count, saved)
-            return ()
+            # Return the saved path so programmatic callers (delivery/handler.py)
+            # can report it. ComfyUI ignores extra tuple entries for a node whose
+            # RETURN_TYPES is empty, so this is safe for graph use.
+            return (saved, count)
 
         except Exception as e:
             # Never silently swallow a delivery failure — surface it so the node

@@ -1,5 +1,4 @@
 import os
-import ast
 import json
 import socket
 import threading
@@ -10,7 +9,6 @@ from typing import Tuple, Optional
 import torch
 import numpy as np
 
-from radiance.config.env import ENV, get_env_bool
 from radiance.nodes_io import _save_exr, _save_video_ffmpeg, _load_video_to_numpy, _read_sequence
 
 logger = logging.getLogger("radiance.mcp")
@@ -18,108 +16,18 @@ logger = logging.getLogger("radiance.mcp")
 # ── Bridge Protocol ───────────────────────────────────────────────────────────
 MCP_EOM = "\n__MCP_EOM__\n"
 
-_SAFE_BUILTINS = {
-    "True": True, "False": False, "None": None,
-    "print": print, "len": len, "range": range,
-    "int": int, "float": float, "str": str, "bool": bool,
-    "list": list, "dict": dict, "tuple": tuple,
-    "isinstance": isinstance, "hasattr": hasattr,
-    "abs": abs, "round": round, "min": min, "max": max,
-    "sum": sum, "sorted": sorted, "reversed": reversed,
-    "enumerate": enumerate, "zip": zip, "map": map, "filter": filter,
-}
-
 _SERVER: Optional[socket.socket] = None
 _SERVER_THREAD: Optional[threading.Thread] = None
 _SERVER_RUNNING = False
-_BOUND_LOOPBACK = True  # set at bind time; gates the exec command
+_BOUND_LOOPBACK = True  # set at bind time; recorded for diagnostics
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
-
-# Attribute access is the classic sandbox-escape vector, so it is allowed only on
-# this short list of names and never on dunder/private attributes.
-_ALLOWED_ATTR_OWNERS = {"json"}
-_ALLOWED_CALL_NAMES = set(_SAFE_BUILTINS) | {"json"}
-
-# AST node types permitted in bridge code. Anything outside this set — imports,
-# function/lambda defs, loops, with-blocks, etc. — is rejected before execution.
-_ALLOWED_AST_NODES: tuple = (
-    ast.Module, ast.Expr, ast.Expression,
-    ast.Constant, ast.List, ast.Tuple, ast.Dict, ast.Set,
-    ast.Name, ast.Load, ast.Store,
-    ast.BinOp, ast.UnaryOp, ast.BoolOp, ast.Compare,
-    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow,
-    ast.USub, ast.UAdd, ast.Not, ast.And, ast.Or,
-    ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.In, ast.NotIn,
-    ast.Call, ast.keyword, ast.Subscript, ast.Slice,
-    ast.IfExp, ast.comprehension,
-    ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp,
-    ast.Attribute, ast.Assign, ast.AugAssign,
-)
-
 
 def _remote_bridge_allowed() -> bool:
     return os.environ.get("RADIANCE_ALLOW_REMOTE_BRIDGE", "").strip().lower() in {"1", "true", "yes"}
 
 
-def _validate(code: str) -> Tuple[bool, str]:
-    """AST allowlist: reject anything that isn't simple, side-effect-free expression code."""
-    try:
-        tree = ast.parse(code, mode="exec")
-    except SyntaxError as exc:
-        return False, f"syntax error: {exc}"
-    for node in ast.walk(tree):
-        if not isinstance(node, _ALLOWED_AST_NODES):
-            return False, f"blocked construct: {type(node).__name__}"
-        if isinstance(node, ast.Name) and node.id.startswith("__"):
-            return False, f"blocked name: {node.id}"
-        if isinstance(node, ast.Attribute):
-            if node.attr.startswith("_"):
-                return False, f"blocked attribute: {node.attr}"
-            owner = node.value
-            if not (isinstance(owner, ast.Name) and owner.id in _ALLOWED_ATTR_OWNERS):
-                return False, "blocked attribute access (only json.* permitted)"
-        if isinstance(node, ast.Call):
-            fn = node.func
-            if isinstance(fn, ast.Name):
-                if fn.id not in _ALLOWED_CALL_NAMES:
-                    return False, f"blocked call: {fn.id}"
-            elif not isinstance(fn, ast.Attribute):
-                return False, "blocked call form"
-    return True, "ok"
-
-
-def _dynamic_exec_enabled() -> bool:
-    return get_env_bool(ENV.RADIANCE_DEV, False)
-
-
-def _exec_sandbox(code: str) -> str:
-    import ast
-    g = {"__builtins__": _SAFE_BUILTINS, "json": json}
-    try:
-        v = ast.literal_eval(code)
-        return json.dumps({"ok": True, "result": str(v)})
-    except Exception:
-        pass
-    if not _dynamic_exec_enabled():
-        return json.dumps({
-            "ok": False,
-            "error": "Dynamic bridge execution is disabled. Set RADIANCE_DEV=1 to enable local developer automation.",
-        })
-    try:
-        v = eval(code, g)
-        return json.dumps({"ok": True, "result": str(v)})
-    except SyntaxError:
-        pass
-    try:
-        exec(code, g)
-        return json.dumps({"ok": True, "result": "ok"})
-    except Exception as e:
-        return json.dumps({"ok": False, "error": str(e)})
-
-
 def _handle(conn, addr=None):
-    peer_loopback = bool(addr) and str(addr[0]) in _LOOPBACK_HOSTS
     try:
         conn.settimeout(15.0)
         buf = b""
@@ -143,19 +51,18 @@ def _handle(conn, addr=None):
                 elif cmd == "status":
                     conn.sendall((json.dumps({"ok": True, "result": {"mode": "bridge", "running": True}}) + "\n").encode())
                 elif cmd == "exec":
-                    if not (peer_loopback and _BOUND_LOOPBACK):
-                        conn.sendall((json.dumps({
-                            "ok": False,
-                            "error": "exec is restricted to loopback connections only.",
-                        }) + "\n").encode())
-                        continue
-                    code = msg.get("code", "")
-                    safe, reason = _validate(code)
-                    if not safe:
-                        conn.sendall((json.dumps({"ok": False, "error": reason}) + "\n").encode())
-                    else:
-                        result = _exec_sandbox(code)
-                        conn.sendall((result + "\n").encode())
+                    # Removed. This accepted arbitrary Python behind an AST
+                    # allowlist that permitted `ast.Assign` and attribute access
+                    # on the name `json`. Rebinding that name walked out of the
+                    # sandbox to the real `builtins` module in two statements,
+                    # giving full RCE. A blocklist over attacker-supplied source
+                    # is not a defensible boundary, so the command is gone
+                    # rather than patched. Use `queue` for automation.
+                    conn.sendall((json.dumps({
+                        "ok": False,
+                        "error": "The 'exec' command has been removed for security reasons. "
+                                 "Use 'queue' to submit a workflow prompt instead.",
+                    }) + "\n").encode())
                 elif cmd == "queue":
                     payload = msg.get("prompt", {})
                     try:

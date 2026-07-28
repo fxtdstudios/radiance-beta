@@ -94,6 +94,8 @@ import urllib.request
 from typing import Tuple, Dict, Any, Optional
 
 import torch
+
+from radiance.model.cache import GPUModelCache
 import torch.nn.functional as F
 import numpy as np
 
@@ -506,7 +508,8 @@ def _dsine_ensure_model() -> Optional[str]:
 
 
 # Module-level cache for the torch.hub DSINE model.
-_DSINE_HUB_CACHE: Dict[str, Any] = {}
+# Bounded LRU -- was an unbounded dict with no eviction path.
+_DSINE_HUB_CACHE = GPUModelCache(max_size=1)
 
 
 def _try_dsine_hub(img_bhwc: torch.Tensor, convention: str) -> "Optional[torch.Tensor]":
@@ -526,10 +529,10 @@ def _try_dsine_hub(img_bhwc: torch.Tensor, convention: str) -> "Optional[torch.T
                 trust_repo=True, force_reload=False, verbose=False,
             )
             model.eval()
-            _DSINE_HUB_CACHE["model"] = model
+            _DSINE_HUB_CACHE.put("model", model)
             logger.info("[Radiance] DSINE (torch.hub) ready.")
 
-        model  = _DSINE_HUB_CACHE["model"]
+        model  = _DSINE_HUB_CACHE.get("model")
         device = img_bhwc.device
         normals = []
         for b in range(img_bhwc.shape[0]):
@@ -624,7 +627,8 @@ def _normal_from_dsine(img_bhwc, dsine_model_path, convention):
 #  DEPTH ANYTHING V2 — AUTO-INFER (v3.0)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_DA_PIPELINE_CACHE: Dict[str, Any] = {}   # hf_model_id → loaded pipeline
+# Bounded LRU -- was an unbounded dict with no eviction path.
+_DA_PIPELINE_CACHE = GPUModelCache(max_size=2)   # hf_model_id → loaded pipeline
 
 
 def _depth_anything_v2_infer(
@@ -662,10 +666,10 @@ def _depth_anything_v2_infer(
                 model=hf_pipe_id,
                 device=0 if device.type == "cuda" else -1,
             )
-            _DA_PIPELINE_CACHE[hf_pipe_id] = pipe
+            _DA_PIPELINE_CACHE.put(hf_pipe_id, pipe)
             logger.info(f"[Radiance] Depth Anything V2 ({model_key}) ready.")
 
-        pipe = _DA_PIPELINE_CACHE[hf_pipe_id]
+        pipe = _DA_PIPELINE_CACHE.get(hf_pipe_id)
         depths = []
         for b in range(B):
             arr = (img_bhwc[b, ..., :3].float().clamp(0.0, 1.0).cpu().numpy() * 255).astype(np.uint8)
@@ -708,10 +712,10 @@ def _depth_anything_v2_infer(
             state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
             model.load_state_dict(state)
             model.eval()
-            _DA_PIPELINE_CACHE[cache_key] = model
+            _DA_PIPELINE_CACHE.put(cache_key, model)
             logger.info(f"[Radiance] Depth Anything V2 ({encoder}) loaded from {ckpt_path}")
 
-        model = _DA_PIPELINE_CACHE[cache_key].to(device)
+        model = _DA_PIPELINE_CACHE.get(cache_key).to(device)
 
         # Normalise to ImageNet stats expected by ViT backbone
         mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1,3,1,1)

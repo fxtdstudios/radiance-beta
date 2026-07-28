@@ -353,7 +353,7 @@ def train(
     # ── Resume ────────────────────────────────────────────────────────────────
     start_step = 0
     if resume and os.path.exists(resume):
-        ckpt = torch.load(resume, map_location=device)
+        ckpt = torch.load(resume, map_location=device, weights_only=True)
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
@@ -611,7 +611,7 @@ def load_trained_turbo_decoder(
     else:
         model = RadianceTurboDecoder(latent_channels=latent_channels)
 
-    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
 
     if isinstance(ckpt, dict) and "ema_shadow" in ckpt and use_ema:
         # Full checkpoint — load EMA weights

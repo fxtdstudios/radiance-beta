@@ -118,3 +118,17 @@ workflows/.asset_thumbs/
 workflows/**/.shot_status.json
 workflows/**/.review_notes.json
 gizmos/*.gizmo
+
+# Internal dev artifacts — must not ship to the registry (audit 2026-07)
+bug_report_reply_draft.md
+PACKAGE_REVIEW.md
+.codex-backup-*/
+.agents/
+
+# Session scratch from the 2026-07 audit — never part of the source tree
+_audit_tmp/
+_to_delete/
+.phase3-dist/
+.phase3-dist-final/
+batch01.patch
+batch2.patch

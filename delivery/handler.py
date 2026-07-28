@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -19,6 +20,50 @@ from radiance.color.grading import apply_grading
 logger = logging.getLogger("radiance.delivery.handler")
 
 _SAFE_FILENAME_RE = re.compile(r'[^\w\s◎_.() -]', re.UNICODE)
+
+# ── UI → RadianceWrite vocabulary ───────────────────────────────────────────
+# The delivery panel (js/radiance_viewer.js) and RadianceWrite (nodes_io.py)
+# grew separate names for the same things; the JS comment still claims they
+# "MUST exactly match", but they have not matched for some time. Translating at
+# this boundary keeps both sides untouched. Anything absent from these tables
+# has no writer implementation and is rejected explicitly rather than silently
+# falling through to a wrong encoder.
+_UI_TO_WRITE_FORMAT = {
+    'Video — MP4 (H.264)':          'VID │ MP4 (H.264)',
+    'Video — MP4 (H.265 10-bit)':   'VID │ MP4 (H.265 10-bit)',
+    'Video — MOV (ProRes 422 HQ)':  'VID │ MOV (ProRes 422 HQ)',
+    'Video — MOV (ProRes 4444)':    'VID │ MOV (ProRes 4444)',
+    'Image Sequence — PNG (8-bit)': 'SEQ │ PNG (8-bit)',
+    'Image Sequence — PNG (16-bit)':'SEQ │ PNG (16-bit)',
+    'Image Sequence — EXR (32-bit)':'SEQ │ EXR (32-bit float)',
+}
+
+_UI_TO_WRITE_COLORSPACE = {
+    'Linear (sRGB)':    'Linear (pass-through)',
+    'sRGB (Standard)':  'sRGB',
+    'ACEScg (AP1)':     'ACEScg',
+    'ARRI LogC3':       'ARRI LogC3',
+    'ARRI LogC4':       'ARRI LogC4',
+    'Sony S-Log3':      'Sony S-Log3',
+}
+
+
+def _resolve_write_format(ui_format: str) -> str:
+    if ui_format in _UI_TO_WRITE_FORMAT:
+        return _UI_TO_WRITE_FORMAT[ui_format]
+    raise ValueError(
+        f"Delivery format {ui_format!r} has no writer implementation. "
+        f"Supported: {', '.join(sorted(_UI_TO_WRITE_FORMAT))}"
+    )
+
+
+def _resolve_write_colorspace(ui_cs: str) -> str:
+    if ui_cs in _UI_TO_WRITE_COLORSPACE:
+        return _UI_TO_WRITE_COLORSPACE[ui_cs]
+    raise ValueError(
+        f"Output colour space {ui_cs!r} is not supported by the writer. "
+        f"Supported: {', '.join(sorted(_UI_TO_WRITE_COLORSPACE))}"
+    )
 
 
 def get_next_version(directory: str, filename_base: str) -> str:
@@ -113,12 +158,33 @@ def _export_aces_clip_xml(media_path: str, grading: dict, color_space: str, vers
     logger.info(f'[Radiance] ACES Metadata File written: {amf_path}')
 
 
-@PromptServer.instance.routes.post('/radiance/deliver')
+# Idempotent registration, matching nodes/monitor/viewer.py's _radiance_route_once
+# and radiance_ocio.py's flag. Without it, importing this module twice under two
+# module paths (delivery/__init__.py imports it unconditionally) raises
+# "method POST is already registered" at startup and the whole pack fails to load
+# -- exactly the crash those two guards were written for.
+_RADIANCE_DELIVER_ROUTE_REGISTERED = getattr(
+    PromptServer.instance, "_radiance_deliver_route_registered", False)
+
+
+def _register_deliver_route(handler):
+    if _RADIANCE_DELIVER_ROUTE_REGISTERED:
+        logger.debug("[Deliver] Route already registered; skipping duplicate registration.")
+        return handler
+    try:
+        PromptServer.instance.routes.post('/radiance/deliver')(handler)
+        PromptServer.instance._radiance_deliver_route_registered = True
+    except Exception as exc:  # pragma: no cover - startup-only
+        logger.warning("[Deliver] Could not register /radiance/deliver: %s", exc)
+    return handler
+
+
 async def radiance_deliver_endpoint(request):
     """
     VFX Delivery Endpoint: Receives grading state + export settings from HUD.
     Applies grading, AI-Upscaling, and Burn-ins before high-quality encoding.
     """
+    instance_key = ""
     try:
         data = await request.json()
         instance_key = str(data.get('instance_id', ''))
@@ -126,8 +192,14 @@ async def radiance_deliver_endpoint(request):
         settings = data.get('settings', {})
 
         images = _viewer_cache_get(instance_key)
+        # Initialise progress immediately. It was only ever set at 90% and 100%,
+        # so a client polling before the first update read a stale value from a
+        # previous run -- and a failure left it pinned at 90% for the life of
+        # the process, because the except branch never reset it.
+        _progress_set(instance_key, {"current": 0, "total": 100,
+                                     "status": "starting", "message": "Preparing…"})
         if images is None:
-            return web.json_response({"error": "No frames found in cache for this node. Run the workflow first.", "status": "error"})
+            return web.json_response({"error": "No frames found in cache for this node. Run the workflow first.", "status": "error"}, status=400)
         
         # ─── Render Range ──────────────────────────────────────────────
         range_in = max(1, int(settings.get('range_in', 1)))
@@ -153,11 +225,26 @@ async def radiance_deliver_endpoint(request):
         if len(filename_prefix) > 200:
             filename_prefix = filename_prefix[:200]
 
+        # Resolve the default BEFORE the sandbox check. Previously the entire
+        # check lived inside `if output_path:`, so leaving Location blank -- which
+        # the UI placeholder ("Default Output Folder") actively invites -- skipped
+        # containment altogether and produced a *relative* path: the master landed
+        # in ComfyUI's working directory rather than output/, and the security
+        # guard was inert in exactly the default case.
+        if not str(output_path).strip():
+            try:
+                output_path = folder_paths.get_output_directory()
+            except Exception as exc:
+                logger.error("[Deliver] Could not resolve the ComfyUI output directory: %s", exc)
+                return web.json_response(
+                    {"error": "Could not resolve the default output directory.",
+                     "status": "error"}, status=500)
+
         if output_path:
             output_path = os.path.abspath(os.path.normpath(str(output_path)))
             if len(output_path) > 1024:
                 logger.warning(f"[Deliver] Rejected oversized output path (len={len(output_path)})")
-                return web.json_response({"error": "Invalid output path", "status": "error"})
+                return web.json_response({"error": "Invalid output path", "status": "error"}, status=400)
             try:
                 _allowed_root = os.path.abspath(folder_paths.get_output_directory())
             except Exception:
@@ -170,7 +257,7 @@ async def radiance_deliver_endpoint(request):
                     _outside = True
                 if _outside:
                     logger.warning(f"[Deliver] Rejected output path outside ComfyUI output dir: {output_path[:120]}")
-                    return web.json_response({"error": "Output path must be inside the ComfyUI output directory.", "status": "error"})
+                    return web.json_response({"error": "Output path must be inside the ComfyUI output directory.", "status": "error"}, status=403)
 
         # Clamp numeric parameters to sane ranges
         fps = max(1.0, min(fps, 240.0))
@@ -222,335 +309,397 @@ async def radiance_deliver_endpoint(request):
         lift_rgb   = safe_array(grading.get('lift'),   0.0)
         offset_rgb = safe_array(grading.get('offset'), 0.0)
 
-        # Apply grading to whole batch
-        out_batch = []
-        for i in range(images.shape[0]):
-            frame_np = images[i].cpu().numpy()
-            graded = apply_grading(
-                img=frame_np,
-                exposure=exposure,
-                gamma=1.0,
-                gain=1.0,
-                lift=0.0,
-                saturation=saturation,
-                temperature=temperature,
-                offset=0.0,
-                contrast=contrast,
-                pivot=pivot,
-                shadows=shadows,
-                highlights=highlights,
-                hue_shift=hue_shift,
-                gamma_rgb=gamma_rgb,
-                gain_rgb=gain_rgb,
-                lift_rgb=lift_rgb,
-                offset_rgb=offset_rgb,
-                lut_name=lut_name,
-                lut_intensity=lut_intensity,
-                color_science=1 if str(grading.get('colorScience')) in ['1', 'ACEScct'] else 0,
-                luma_mix=float(grading.get('lumaMix', 1.0)),
-                gamut_compression=gamut_compression
-            )
-            out_batch.append(torch.from_numpy(graded))
-
-        graded_tensor = torch.stack(out_batch)
-
-        # ─── FX Baking ────────────────────────────────────────────────
-        _grain     = float(grading.get('grain', 0.0))
-        _bloom     = float(grading.get('bloom', 0.0))
-        _halation  = float(grading.get('halation', 0.0))
-        _diffusion = float(grading.get('diffusion', 0.0))
-        _denoise   = float(grading.get('denoise', 0.0))
-
-        if _grain > 0.01 or _bloom > 0.01 or _halation > 0.01 or _diffusion > 0.01 or _denoise > 0.01:
-            try:
-                np_batch = graded_tensor.cpu().numpy()
-                fx_batch = []
-                rng = np.random.default_rng(seed=42)
-                for i_frame in range(np_batch.shape[0]):
-                    f = np_batch[i_frame].astype(np.float32)
-
-                    if _denoise > 0.01:
-                        try:
-                            import cv2 as _cv2
-                            sigma = _denoise * 3.0
-                            f = _cv2.bilateralFilter((f * 65535).astype(np.uint16), d=5, sigmaColor=sigma*20, sigmaSpace=sigma*20).astype(np.float32) / 65535.0
-                        except Exception:
-                            pass
-
-                    if _grain > 0.01:
-                        noise = rng.standard_normal(f.shape).astype(np.float32)
-                        f = f + noise * _grain * 0.02
-
-                    if _halation > 0.01:
-                        try:
-                            import cv2 as _cv2
-                            hi = np.clip(f[..., 0] - 0.8, 0, None)
-                            blurred = _cv2.GaussianBlur(hi, (0, 0), sigmaX=_halation * 30)
-                            f[..., 0] = np.minimum(f[..., 0] + blurred * _halation * 2.0, 2.0)
-                        except Exception as exc:
-                            logger.warning("[radiance.delivery.handler]: %s", exc)
-
-                    if _bloom > 0.01:
-                        try:
-                            import cv2 as _cv2
-                            lum = 0.2126*f[...,0] + 0.7152*f[...,1] + 0.0722*f[...,2]
-                            hi = np.clip(lum - 0.7, 0, None)[..., np.newaxis]
-                            blurred = _cv2.GaussianBlur(hi * np.ones((1,1,3), np.float32), (0, 0), sigmaX=_bloom * 40)
-                            f = f + blurred * _bloom
-                        except Exception as exc:
-                            logger.warning("[radiance.delivery.handler]: %s", exc)
-
-                    if _diffusion > 0.01:
-                        try:
-                            import cv2 as _cv2
-                            soft = _cv2.GaussianBlur(f, (0, 0), sigmaX=_diffusion * 20)
-                            f = f * (1 - _diffusion * 0.5) + soft * _diffusion * 0.5
-                        except Exception as exc:
-                            logger.warning("[radiance.delivery.handler]: %s", exc)
-
-                    fx_batch.append(f)
-                graded_tensor = torch.from_numpy(np.stack(fx_batch))
-                logger.info(f"[Deliver] FX baked: grain={_grain:.2f} bloom={_bloom:.2f} halation={_halation:.2f} diffusion={_diffusion:.2f}")
-            except Exception as e:
-                logger.warning(f"[Deliver] FX baking failed (non-fatal): {e}")
-
-        # ─── AI Upscale (2x) ──────────────────────────────────────────
-        if upscale_2x:
-            try:
-                from radiance.nodes_upscale import RadianceAIUpscale
-                upscaler = RadianceAIUpscale()
-                graded_tensor, _ = upscaler.upscale(
-                    image=graded_tensor,
-                    model_name="RealESRGAN_x2plus",
-                    mode="Refine (HDR)",
-                    tile_size=512
+        # ── Everything below runs OFF the event loop ─────────────────────
+        # This entire block used to execute inside `async def`, on aiohttp's
+        # event loop thread: per-frame NumPy grading, cv2 filters, a 2x model
+        # upscale, and a blocking ffmpeg subprocess. A 240-frame 1080p export
+        # therefore froze ComfyUI's whole websocket for minutes -- progress bar,
+        # node highlighting and queue view all stalled, and the client's own
+        # poll of /radiance/progress could not be answered, so the bar sat at 0%
+        # and jumped straight to 100%. `_progress_set(..., 90, "encoding")` was
+        # unobservable by construction.
+        #
+        # It is now a closure handed to run_in_executor, so it captures the
+        # locals above unchanged while the loop stays free to serve /progress.
+        def _run_export():
+            # Apply grading to whole batch
+            out_batch = []
+            _n_frames = max(1, int(images.shape[0]))
+            for i in range(images.shape[0]):
+                # Grading is the long pole; report it. Now that the work runs in
+                # an executor the event loop is free to answer /radiance/progress,
+                # so this is actually observable.
+                if i % 4 == 0 or i == _n_frames - 1:
+                    _progress_set(instance_key, {
+                        "current": int(5 + 80 * i / _n_frames), "total": 100,
+                        "status": "grading", "message": f"Grading frame {i + 1}/{_n_frames}"})
+                frame_np = images[i].cpu().numpy()
+                graded = apply_grading(
+                    img=frame_np,
+                    exposure=exposure,
+                    gamma=1.0,
+                    gain=1.0,
+                    lift=0.0,
+                    saturation=saturation,
+                    temperature=temperature,
+                    offset=0.0,
+                    contrast=contrast,
+                    pivot=pivot,
+                    shadows=shadows,
+                    highlights=highlights,
+                    hue_shift=hue_shift,
+                    gamma_rgb=gamma_rgb,
+                    gain_rgb=gain_rgb,
+                    lift_rgb=lift_rgb,
+                    offset_rgb=offset_rgb,
+                    lut_name=lut_name,
+                    lut_intensity=lut_intensity,
+                    color_science=1 if str(grading.get('colorScience')) in ['1', 'ACEScct'] else 0,
+                    luma_mix=float(grading.get('lumaMix', 1.0)),
+                    gamut_compression=gamut_compression
                 )
-            except Exception as e:
-                logger.error(f"AI Upscale failed, continuing with original: {e}")
+                out_batch.append(torch.from_numpy(graded))
 
-        # ─── Aspect Ratio Blanking ────────────────────────────────────
-        aspect_ratio_str = settings.get('aspect_ratio', 'None')
-        if aspect_ratio_str != 'None':
-            try:
-                target_ratio = float(aspect_ratio_str.split(':')[0])
-                _, h, w, _ = graded_tensor.shape
-                current_ratio = w / h
-                if current_ratio > target_ratio + 0.01:
-                    target_w = int(h * target_ratio)
-                    pad = (w - target_w) // 2
-                    graded_tensor[:, :, :pad, :] = 0.0
-                    graded_tensor[:, :, -pad:, :] = 0.0
-                elif current_ratio < target_ratio - 0.01:
-                    target_h = int(w / target_ratio)
-                    pad = (h - target_h) // 2
-                    graded_tensor[:, :pad, :, :] = 0.0
-                    graded_tensor[:, -pad:, :, :] = 0.0
-            except Exception as e:
-                logger.error(f"Aspect blanking failed: {e}")
+            graded_tensor = torch.stack(out_batch)
 
-        # ─── Integrated QC Pass ───────────────────────────────────────
-        qc_report = ""
-        try:
-            v_min = graded_tensor.min().item()
-            v_max = graded_tensor.max().item()
+            # ─── FX Baking ────────────────────────────────────────────────
+            _grain     = float(grading.get('grain', 0.0))
+            _bloom     = float(grading.get('bloom', 0.0))
+            _halation  = float(grading.get('halation', 0.0))
+            _diffusion = float(grading.get('diffusion', 0.0))
+            _denoise   = float(grading.get('denoise', 0.0))
 
-            is_aces_cs = color_space in ('ACEScg (AP1)', 'ACES2065-1 (AP0)', 'ACEScct')
-
-            if is_aces_cs:
-                M_AP1_TO_REC2020 = np.array([
-                    [ 1.70505,  -0.62179, -0.08326],
-                    [-0.13026,   1.14080, -0.01054],
-                    [-0.02400,  -0.12897,  1.15297],
-                ], dtype=np.float32)
+            if _grain > 0.01 or _bloom > 0.01 or _halation > 0.01 or _diffusion > 0.01 or _denoise > 0.01:
                 try:
-                    sample = graded_tensor[0].cpu().numpy()
-                    if sample.ndim == 3 and sample.shape[2] >= 3:
-                        rgb_ap1 = sample[..., :3]
-                        rec2020 = np.tensordot(rgb_ap1, M_AP1_TO_REC2020, axes=([2], [1]))
-                        imaginary_pct = float(np.mean(np.any(rec2020 < -0.001, axis=-1)) * 100)
-                        if imaginary_pct > 0.5:
-                            qc_report = (
-                                f"◎ [QC WARNING] {imaginary_pct:.1f}% imaginary-gamut pixels detected "
-                                f"(outside Rec.2020 after AP1→Rec.2020 transform). "
-                                f"Apply gamut compression before display-referred delivery."
-                            )
-                        else:
-                            qc_report = (
-                                f"◎ [QC PASS — ACES] {color_space} · "
-                                f"Imaginary gamut: {imaginary_pct:.2f}% (within Rec.2020 tolerance)."
-                            )
-                    else:
-                        qc_report = f"◎ [QC PASS — ACES] {color_space} output."
-                except Exception as _e:
-                    qc_report = f"◎ [QC PASS — ACES] {color_space} (gamut check skipped: {_e})."
-            elif v_min < 0.0 or v_max > 1.0:
-                qc_report = (
-                    f"◎ [QC WARNING] Out-of-Gamut detected: "
-                    f"Min={v_min:.3f}, Max={v_max:.3f}. "
-                    f"(Illegal levels for broadcast)."
-                )
-            else:
-                qc_report = "◎ [QC PASS] Levels within legal broadcast range (0.0 - 1.0)."
-        except Exception as exc:
-            logger.warning("[radiance.delivery.handler]: %s", exc)
+                    np_batch = graded_tensor.cpu().numpy()
+                    fx_batch = []
+                    rng = np.random.default_rng(seed=42)
+                    for i_frame in range(np_batch.shape[0]):
+                        f = np_batch[i_frame].astype(np.float32)
 
-        # ─── Save using RadianceWrite Logic ────────────────────────────
-        from radiance.nodes_io import RadianceWrite
-        writer = RadianceWrite()
+                        if _denoise > 0.01:
+                            try:
+                                import cv2 as _cv2
+                                sigma = _denoise * 3.0
+                                f = _cv2.bilateralFilter((f * 65535).astype(np.uint16), d=5, sigmaColor=sigma*20, sigmaSpace=sigma*20).astype(np.float32) / 65535.0
+                            except Exception:
+                                pass
 
-        is_exr = 'EXR' in output_format or 'exr' in output_format.lower()
-        bake_grade_exr = settings.get('bake_grade', False) and is_exr
-        if bake_grade_exr:
-            if color_space in ('sRGB (Standard)', 'Linear (sRGB)'):
-                try:
-                    gt_np = graded_tensor.cpu().numpy().astype(np.float32)
-                    lo = gt_np <= 0.04045
-                    gt_np[lo]  = gt_np[lo] / 12.92
-                    gt_np[~lo] = np.power((gt_np[~lo] + 0.055) / 1.055, 2.4)
-                    graded_tensor = torch.from_numpy(gt_np)
-                    logger.info('[Deliver v3.0.0] Grade baked into EXR — sRGB→linear applied')
-                except Exception as _e:
-                    logger.warning(f'[Deliver v3.0.0] Grade bake linearize failed: {_e}')
-            else:
-                logger.info(f'[Deliver v3.0.0] Grade baked into EXR — {color_space} (already linear)')
+                        if _grain > 0.01:
+                            noise = rng.standard_normal(f.shape).astype(np.float32)
+                            f = f + noise * _grain * 0.02
 
-        # ─── Shot Continuity QC ───────────────────────────────────────
-        continuity_report = []
-        if graded_tensor.shape[0] > 1:
-            try:
-                frames_np = graded_tensor.cpu().numpy()
-                def _frame_midluma(f):
-                    luma = 0.2126*f[...,0] + 0.7152*f[...,1] + 0.0722*f[...,2]
-                    s = np.sort(luma.ravel())
-                    return float(s[len(s)//2])
-                mid_lumas = [_frame_midluma(frames_np[i]) for i in range(frames_np.shape[0])]
-                for i in range(1, len(mid_lumas)):
-                    p0, p1 = max(mid_lumas[i-1], 1e-6), max(mid_lumas[i], 1e-6)
-                    ev_delta = abs(math.log2(p1 / p0))
-                    if ev_delta > 0.5:
-                        continuity_report.append(
-                            f'Frame {i-1}→{i}: {ev_delta:.2f} EV jump (mid-luma {p0:.3f}→{p1:.3f})'
-                        )
-                if continuity_report:
-                    logger.warning(f'[Deliver v3.0.0] Continuity issues: {len(continuity_report)} flicker events')
-            except Exception as _e:
-                logger.debug(f'[Deliver v3.0.0] Continuity scan failed: {_e}')
+                        if _halation > 0.01:
+                            try:
+                                import cv2 as _cv2
+                                hi = np.clip(f[..., 0] - 0.8, 0, None)
+                                blurred = _cv2.GaussianBlur(hi, (0, 0), sigmaX=_halation * 30)
+                                f[..., 0] = np.minimum(f[..., 0] + blurred * _halation * 2.0, 2.0)
+                            except Exception as exc:
+                                logger.warning("[radiance.delivery.handler]: %s", exc)
 
-        _progress_set(instance_key, {"current": 90, "total": 100, "status": "encoding", "message": "Encoding Master..."})
+                        if _bloom > 0.01:
+                            try:
+                                import cv2 as _cv2
+                                lum = 0.2126*f[...,0] + 0.7152*f[...,1] + 0.0722*f[...,2]
+                                hi = np.clip(lum - 0.7, 0, None)[..., np.newaxis]
+                                blurred = _cv2.GaussianBlur(hi * np.ones((1,1,3), np.float32), (0, 0), sigmaX=_bloom * 40)
+                                f = f + blurred * _bloom
+                            except Exception as exc:
+                                logger.warning("[radiance.delivery.handler]: %s", exc)
 
-        _, path, _ = writer.write(
-            filename_prefix=filename_prefix,
-            output_format=output_format,
-            fps=fps,
-            quality=quality,
-            output_color_space=color_space,
-            image=graded_tensor,
-            output_path=output_path,
-            broadcast_safe=broadcast_safe,
-        )
+                        if _diffusion > 0.01:
+                            try:
+                                import cv2 as _cv2
+                                soft = _cv2.GaussianBlur(f, (0, 0), sigmaX=_diffusion * 20)
+                                f = f * (1 - _diffusion * 0.5) + soft * _diffusion * 0.5
+                            except Exception as exc:
+                                logger.warning("[radiance.delivery.handler]: %s", exc)
 
-        # ─── Post-Export: Thumbnails & Sidecars ────────────────────────
-        try:
-            import PIL.Image
-            n_graded = graded_tensor.shape[0]
-            thumb_frame = graded_tensor[min(n_graded - 1, 10 if n_graded > 10 else 0)]
-            thumb_np = (thumb_frame.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
-            thumb_img = PIL.Image.fromarray(thumb_np)
-            thumb_path = os.path.splitext(path)[0] + "_thumb.jpg"
-            thumb_img.save(thumb_path, quality=85)
-            
-            # ASC CDL Sidecar Export
-            if settings.get('export_cdl', False):
-                slope = grading.get('gain', 1.0)
-                offset = grading.get('offset', 0.0)
-                power = grading.get('gamma', 1.0)
-                sat = grading.get('saturation', 1.0)
-                if not isinstance(slope, list): slope = [slope]*3
-                if not isinstance(offset, list): offset = [offset]*3
-                if not isinstance(power, list): power = [power]*3
-                
-                cdl = f"""<ColorCorrection id="◎ Radiance_grade">\n  <SOPNode>\n    <Slope>{slope[0]:.6f} {slope[1]:.6f} {slope[2]:.6f}</Slope>\n    <Offset>{offset[0]:.6f} {offset[1]:.6f} {offset[2]:.6f}</Offset>\n    <Power>{power[0]:.6f} {power[1]:.6f} {power[2]:.6f}</Power>\n  </SOPNode>\n  <SatNode>\n    <Saturation>{sat:.6f}</Saturation>\n  </SatNode>\n</ColorCorrection>"""
-                cdl_path = os.path.splitext(path)[0] + ".cdl"
-                with open(cdl_path, "w") as f:
-                    f.write(cdl)
-
-            # AMF Export
-            if settings.get('export_amf', False):
-                _export_aces_clip_xml(path, grading, color_space, version_str)
-            
-            # Save Metadata Sidecar (.json)
-            meta = {
-                "version": version_str,
-                "grading": grading,
-                "export_settings": settings,
-                "qc": qc_report,
-                "continuity": continuity_report if continuity_report else "PASS",
-                "bake_grade_exr": bake_grade_exr,
-                "timestamp": os.path.getmtime(path)
-            }
-            with open(os.path.splitext(path)[0] + "_meta.json", 'w') as f:
-                json.dump(meta, f, indent=4)
-                
-            # Reveal Folder Hook
-            if settings.get('reveal_folder', False):
-                import platform, subprocess
-                try:
-                    p = os.path.abspath(output_path)
-                    if platform.system() == "Windows":
-                        os.startfile(p)
-                    elif platform.system() == "Darwin":
-                        subprocess.Popen(["open", p])
-                    else:
-                        subprocess.Popen(["xdg-open", p])
+                        fx_batch.append(f)
+                    graded_tensor = torch.from_numpy(np.stack(fx_batch))
+                    logger.info(f"[Deliver] FX baked: grain={_grain:.2f} bloom={_bloom:.2f} halation={_halation:.2f} diffusion={_diffusion:.2f}")
                 except Exception as e:
-                    logger.error(f"Launch folder failed: {e}")
-                    
-        except Exception as e:
-            logger.error(f"Sidecar generation failed: {e}")
+                    logger.warning(f"[Deliver] FX baking failed (non-fatal): {e}")
 
-        _progress_set(instance_key, {"current": 100, "total": 100, "status": "done", "message": "Delivery Complete"})
-
-        # Session Tracker
-        try:
-            _sessions_path = os.path.join(folder_paths.get_output_directory(), 'radiance_sessions.json')
-            _sessions = []
-            if os.path.exists(_sessions_path):
+            # ─── AI Upscale (2x) ──────────────────────────────────────────
+            if upscale_2x:
                 try:
-                    with open(_sessions_path, 'r') as _sf:
-                        _sessions = json.load(_sf)
-                except Exception:
-                    _sessions = []
-            _session_entry = {
-                "timestamp":    datetime.now().isoformat(timespec='seconds'),
-                "shot":         os.path.basename(path),
-                "version":      version_str,
-                "format":       output_format,
-                "color_space":  color_space,
-                "frames":       int(graded_tensor.shape[0]),
-                "resolution":   f"{graded_tensor.shape[2]}×{graded_tensor.shape[1]}",
-                "exposure":     round(exposure, 3),
-                "saturation":   round(saturation, 3),
-                "gain_rgb":     [round(v, 4) for v in gain_rgb],
-                "lift_rgb":     [round(v, 4) for v in lift_rgb],
-                "gamma_rgb":    [round(v, 4) for v in gamma_rgb],
-                "qc":           qc_report[:120] if qc_report else "",
-                "continuity":   f"{len(continuity_report)} events" if continuity_report else "PASS",
-                "bake_grade":   bake_grade_exr,
-            }
-            _sessions.append(_session_entry)
-            if len(_sessions) > 500:
-                _sessions = _sessions[-500:]
-            with open(_sessions_path, 'w') as _sf:
-                json.dump(_sessions, _sf, indent=2)
-            logger.debug(f'[Deliver v3.0.0] Session logged → {_sessions_path}')
-        except Exception as _e:
-            logger.debug(f'[Deliver v3.0.0] Session log failed (non-fatal): {_e}')
+                    from radiance.nodes_upscale import RadianceAIUpscale
+                    upscaler = RadianceAIUpscale()
+                    graded_tensor, _ = upscaler.upscale(
+                        image=graded_tensor,
+                        model_name="RealESRGAN_x2plus",
+                        mode="Refine (HDR)",
+                        tile_size=512
+                    )
+                except Exception as e:
+                    logger.error(f"AI Upscale failed, continuing with original: {e}")
 
-        _cont_warn = ""
-        if continuity_report:
-            _cont_warn = f" ⚠ {len(continuity_report)} flicker event(s): " + "; ".join(continuity_report[:3])
-            if len(continuity_report) > 3:
-                _cont_warn += f" (+{len(continuity_report)-3} more)"
+            # ─── Aspect Ratio Blanking ────────────────────────────────────
+            aspect_ratio_str = settings.get('aspect_ratio', 'None')
+            if aspect_ratio_str != 'None':
+                try:
+                    # Parse BOTH terms. This used to read only the numerator, so
+                    # "9:16 (Vertical)" became the ratio 9.0 instead of 0.5625 --
+                    # a 1920x1080 plate then took the horizontal branch and was
+                    # blanked down to a 214px letterbox slit, delivered as success.
+                    # The other three presets survived only because their
+                    # denominator happens to be 1.
+                    ratio_token = aspect_ratio_str.split()[0]
+                    num, _, den = ratio_token.partition(':')
+                    target_ratio = float(num) / float(den or 1.0)
+                    if target_ratio <= 0.0:
+                        raise ValueError(f"non-positive aspect ratio {aspect_ratio_str!r}")
+
+                    _, h, w, _ = graded_tensor.shape
+                    current_ratio = w / h
+                    # `pad > 0` guards are required: `t[:, :, -0:, :] = 0` is
+                    # `t[:, :, 0:, :] = 0`, which blanks the ENTIRE frame.
+                    if current_ratio > target_ratio + 0.01:
+                        pad = (w - int(h * target_ratio)) // 2
+                        if pad > 0:
+                            graded_tensor[:, :, :pad, :] = 0.0
+                            graded_tensor[:, :, -pad:, :] = 0.0
+                    elif current_ratio < target_ratio - 0.01:
+                        pad = (h - int(w / target_ratio)) // 2
+                        if pad > 0:
+                            graded_tensor[:, :pad, :, :] = 0.0
+                            graded_tensor[:, -pad:, :, :] = 0.0
+                except Exception as e:
+                    logger.error(f"Aspect blanking failed: {e}")
+
+            # ─── Integrated QC Pass ───────────────────────────────────────
+            qc_report = ""
+            try:
+                v_min = graded_tensor.min().item()
+                v_max = graded_tensor.max().item()
+
+                is_aces_cs = color_space in ('ACEScg (AP1)', 'ACES2065-1 (AP0)', 'ACEScct')
+
+                if is_aces_cs:
+                    M_AP1_TO_REC2020 = np.array([
+                        [ 1.70505,  -0.62179, -0.08326],
+                        [-0.13026,   1.14080, -0.01054],
+                        [-0.02400,  -0.12897,  1.15297],
+                    ], dtype=np.float32)
+                    try:
+                        sample = graded_tensor[0].cpu().numpy()
+                        if sample.ndim == 3 and sample.shape[2] >= 3:
+                            rgb_ap1 = sample[..., :3]
+                            rec2020 = np.tensordot(rgb_ap1, M_AP1_TO_REC2020, axes=([2], [1]))
+                            imaginary_pct = float(np.mean(np.any(rec2020 < -0.001, axis=-1)) * 100)
+                            if imaginary_pct > 0.5:
+                                qc_report = (
+                                    f"◎ [QC WARNING] {imaginary_pct:.1f}% imaginary-gamut pixels detected "
+                                    f"(outside Rec.2020 after AP1→Rec.2020 transform). "
+                                    f"Apply gamut compression before display-referred delivery."
+                                )
+                            else:
+                                qc_report = (
+                                    f"◎ [QC PASS — ACES] {color_space} · "
+                                    f"Imaginary gamut: {imaginary_pct:.2f}% (within Rec.2020 tolerance)."
+                                )
+                        else:
+                            qc_report = f"◎ [QC PASS — ACES] {color_space} output."
+                    except Exception as _e:
+                        qc_report = f"◎ [QC PASS — ACES] {color_space} (gamut check skipped: {_e})."
+                elif v_min < 0.0 or v_max > 1.0:
+                    qc_report = (
+                        f"◎ [QC WARNING] Out-of-Gamut detected: "
+                        f"Min={v_min:.3f}, Max={v_max:.3f}. "
+                        f"(Illegal levels for broadcast)."
+                    )
+                else:
+                    qc_report = "◎ [QC PASS] Levels within legal broadcast range (0.0 - 1.0)."
+            except Exception as exc:
+                logger.warning("[radiance.delivery.handler]: %s", exc)
+
+            # ─── Save using RadianceWrite Logic ────────────────────────────
+            from radiance.nodes_io import RadianceWrite
+            writer = RadianceWrite()
+
+            is_exr = 'EXR' in output_format or 'exr' in output_format.lower()
+            bake_grade_exr = settings.get('bake_grade', False) and is_exr
+            if bake_grade_exr:
+                if color_space in ('sRGB (Standard)', 'Linear (sRGB)'):
+                    try:
+                        gt_np = graded_tensor.cpu().numpy().astype(np.float32)
+                        lo = gt_np <= 0.04045
+                        gt_np[lo]  = gt_np[lo] / 12.92
+                        gt_np[~lo] = np.power((gt_np[~lo] + 0.055) / 1.055, 2.4)
+                        graded_tensor = torch.from_numpy(gt_np)
+                        logger.info('[Deliver v3.0.0] Grade baked into EXR — sRGB→linear applied')
+                    except Exception as _e:
+                        logger.warning(f'[Deliver v3.0.0] Grade bake linearize failed: {_e}')
+                else:
+                    logger.info(f'[Deliver v3.0.0] Grade baked into EXR — {color_space} (already linear)')
+
+            # ─── Shot Continuity QC ───────────────────────────────────────
+            continuity_report = []
+            if graded_tensor.shape[0] > 1:
+                try:
+                    frames_np = graded_tensor.cpu().numpy()
+                    def _frame_midluma(f):
+                        luma = 0.2126*f[...,0] + 0.7152*f[...,1] + 0.0722*f[...,2]
+                        s = np.sort(luma.ravel())
+                        return float(s[len(s)//2])
+                    mid_lumas = [_frame_midluma(frames_np[i]) for i in range(frames_np.shape[0])]
+                    for i in range(1, len(mid_lumas)):
+                        p0, p1 = max(mid_lumas[i-1], 1e-6), max(mid_lumas[i], 1e-6)
+                        ev_delta = abs(math.log2(p1 / p0))
+                        if ev_delta > 0.5:
+                            continuity_report.append(
+                                f'Frame {i-1}→{i}: {ev_delta:.2f} EV jump (mid-luma {p0:.3f}→{p1:.3f})'
+                            )
+                    if continuity_report:
+                        logger.warning(f'[Deliver v3.0.0] Continuity issues: {len(continuity_report)} flicker events')
+                except Exception as _e:
+                    logger.debug(f'[Deliver v3.0.0] Continuity scan failed: {_e}')
+
+            _progress_set(instance_key, {"current": 90, "total": 100, "status": "encoding", "message": "Encoding Master..."})
+
+            # NOTE: these kwargs must track RadianceWrite.write's real signature.
+            # They previously read filename_prefix / output_format /
+            # output_color_space, none of which exist, and omitted the required
+            # `format` -- so every delivery raised TypeError, was swallowed by the
+            # handler below, and returned HTTP 200 with status "error".
+            path, _count = writer.write(
+                image=graded_tensor,
+                output_path=output_path,
+                format=_resolve_write_format(output_format),
+                filename=filename_prefix,
+                color_space=_resolve_write_colorspace(color_space),
+                fps=fps,
+                quality=quality,
+                broadcast_safe=broadcast_safe,
+            )
+
+            # ─── Post-Export: Thumbnails & Sidecars ────────────────────────
+            try:
+                import PIL.Image
+                n_graded = graded_tensor.shape[0]
+                thumb_frame = graded_tensor[min(n_graded - 1, 10 if n_graded > 10 else 0)]
+                thumb_np = (thumb_frame.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+                thumb_img = PIL.Image.fromarray(thumb_np)
+                # JPEG cannot store an alpha channel: PIL raises
+                # "cannot write mode RGBA as JPEG". Because this was the FIRST
+                # statement in the shared sidecar try-block, an RGBA plate
+                # aborted the CDL export, the AMF export, the .json sidecar and
+                # the reveal-folder hook as well -- while the response still
+                # said "success". Each sidecar now also fails independently.
+                if thumb_img.mode not in ("RGB", "L"):
+                    thumb_img = thumb_img.convert("RGB")
+                thumb_path = os.path.splitext(path)[0] + "_thumb.jpg"
+                try:
+                    thumb_img.save(thumb_path, quality=85)
+                except Exception as _te:
+                    logger.warning("[Deliver] Thumbnail failed (non-fatal): %s", _te)
+            
+                # ASC CDL Sidecar Export
+                if settings.get('export_cdl', False):
+                    slope = grading.get('gain', 1.0)
+                    offset = grading.get('offset', 0.0)
+                    power = grading.get('gamma', 1.0)
+                    sat = grading.get('saturation', 1.0)
+                    if not isinstance(slope, list): slope = [slope]*3
+                    if not isinstance(offset, list): offset = [offset]*3
+                    if not isinstance(power, list): power = [power]*3
+                
+                    cdl = f"""<ColorCorrection id="◎ Radiance_grade">\n  <SOPNode>\n    <Slope>{slope[0]:.6f} {slope[1]:.6f} {slope[2]:.6f}</Slope>\n    <Offset>{offset[0]:.6f} {offset[1]:.6f} {offset[2]:.6f}</Offset>\n    <Power>{power[0]:.6f} {power[1]:.6f} {power[2]:.6f}</Power>\n  </SOPNode>\n  <SatNode>\n    <Saturation>{sat:.6f}</Saturation>\n  </SatNode>\n</ColorCorrection>"""
+                    cdl_path = os.path.splitext(path)[0] + ".cdl"
+                    try:
+                        with open(cdl_path, "w") as f:
+                            f.write(cdl)
+                    except Exception as _ce:
+                        logger.warning("[Deliver] CDL export failed: %s", _ce)
+
+                # AMF Export
+                if settings.get('export_amf', False):
+                    try:
+                        _export_aces_clip_xml(path, grading, color_space, version_str)
+                    except Exception as _ae:
+                        logger.warning("[Deliver] AMF export failed: %s", _ae)
+            
+                # Save Metadata Sidecar (.json)
+                meta = {
+                    "version": version_str,
+                    "grading": grading,
+                    "export_settings": settings,
+                    "qc": qc_report,
+                    "continuity": continuity_report if continuity_report else "PASS",
+                    "bake_grade_exr": bake_grade_exr,
+                    "timestamp": os.path.getmtime(path)
+                }
+                with open(os.path.splitext(path)[0] + "_meta.json", 'w') as f:
+                    json.dump(meta, f, indent=4)
+                
+                # Reveal Folder Hook
+                if settings.get('reveal_folder', False):
+                    import platform, subprocess
+                    try:
+                        p = os.path.abspath(output_path)
+                        if platform.system() == "Windows":
+                            os.startfile(p)
+                        elif platform.system() == "Darwin":
+                            subprocess.Popen(["open", p])
+                        else:
+                            subprocess.Popen(["xdg-open", p])
+                    except Exception as e:
+                        logger.error(f"Launch folder failed: {e}")
+                    
+            except Exception as e:
+                logger.error(f"Sidecar generation failed: {e}")
+
+            _progress_set(instance_key, {"current": 100, "total": 100, "status": "done", "message": "Delivery Complete"})
+
+            # Session Tracker
+            try:
+                _sessions_path = os.path.join(folder_paths.get_output_directory(), 'radiance_sessions.json')
+                _sessions = []
+                if os.path.exists(_sessions_path):
+                    try:
+                        with open(_sessions_path, 'r') as _sf:
+                            _sessions = json.load(_sf)
+                    except Exception:
+                        _sessions = []
+                _session_entry = {
+                    "timestamp":    datetime.now().isoformat(timespec='seconds'),
+                    "shot":         os.path.basename(path),
+                    "version":      version_str,
+                    "format":       output_format,
+                    "color_space":  color_space,
+                    "frames":       int(graded_tensor.shape[0]),
+                    "resolution":   f"{graded_tensor.shape[2]}×{graded_tensor.shape[1]}",
+                    "exposure":     round(exposure, 3),
+                    "saturation":   round(saturation, 3),
+                    "gain_rgb":     [round(v, 4) for v in gain_rgb],
+                    "lift_rgb":     [round(v, 4) for v in lift_rgb],
+                    "gamma_rgb":    [round(v, 4) for v in gamma_rgb],
+                    "qc":           qc_report[:120] if qc_report else "",
+                    "continuity":   f"{len(continuity_report)} events" if continuity_report else "PASS",
+                    "bake_grade":   bake_grade_exr,
+                }
+                _sessions.append(_session_entry)
+                if len(_sessions) > 500:
+                    _sessions = _sessions[-500:]
+                with open(_sessions_path, 'w') as _sf:
+                    json.dump(_sessions, _sf, indent=2)
+                logger.debug(f'[Deliver v3.0.0] Session logged → {_sessions_path}')
+            except Exception as _e:
+                logger.debug(f'[Deliver v3.0.0] Session log failed (non-fatal): {_e}')
+
+            _cont_warn = ""
+            if continuity_report:
+                _cont_warn = f" ⚠ {len(continuity_report)} flicker event(s): " + "; ".join(continuity_report[:3])
+                if len(continuity_report) > 3:
+                    _cont_warn += f" (+{len(continuity_report)-3} more)"
+
+            return path, qc_report, _cont_warn, continuity_report
+
+        loop = asyncio.get_running_loop()
+        path, qc_report, _cont_warn, continuity_report = await loop.run_in_executor(
+            None, _run_export)
 
         return web.json_response({
             "status": "success",
@@ -562,4 +711,18 @@ async def radiance_deliver_endpoint(request):
 
     except Exception as e:
         logger.error(f"Delivery failed: {traceback.format_exc()}")
-        return web.json_response({"error": str(e), "status": "error"})
+        # Mark the run failed so the client's poll loop terminates. Without this
+        # the progress entry stayed at 90%/"encoding" forever, and the JS only
+        # clears its interval on status in ('done', 'error').
+        if instance_key:
+            try:
+                _progress_set(instance_key, {"current": 100, "total": 100,
+                                             "status": "error", "message": str(e)[:200]})
+            except Exception:
+                pass
+        # status=500, not the aiohttp default of 200 -- a failed delivery that
+        # answers 200 reads as success to every client.
+        return web.json_response({"error": str(e), "status": "error"}, status=500)
+
+
+_register_deliver_route(radiance_deliver_endpoint)

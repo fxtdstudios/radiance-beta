@@ -6,6 +6,13 @@ import types
 import unittest
 
 import torch
+import pytest
+
+# Only the tests marked @pytest.mark.real_torch below need genuine tensors; the
+# rest run fine against conftest's stub. Opt out of the automatic module-level
+# skip so they keep running on the no-torch CI matrix.
+RADIANCE_TORCH_GATED = True
+
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -113,6 +120,7 @@ class TestHDRVAEDecodeContract(unittest.TestCase):
         self.assertEqual(optional["source_space"][1]["default"], "sRGB")
         self.assertFalse(optional["export_rhdr"][1]["default"])
 
+    @pytest.mark.real_torch
     def test_sampler_mode_blocks_log_inversion_and_preserves_engine_metadata(self):
         result = RadianceHDRVAEDecode().apply(
             self.samples, object(), hdr_mode="Compress (Log)",
@@ -129,6 +137,7 @@ class TestHDRVAEDecodeContract(unittest.TestCase):
         self.assertNotIn("rhdr_export", metadata)
         self.assertEqual(metadata["rudra_decoder"], "Disabled")
 
+    @pytest.mark.real_torch
     def test_direct_hdr_mode_owns_scene_linear_contract(self):
         alpha = torch.ones(1, 2, 2, 3)
         result = RadianceHDRVAEDecode().apply(
@@ -148,6 +157,7 @@ class TestHDRVAEDecodeContract(unittest.TestCase):
         self.assertEqual(metadata["latent_format"], "returned_fmt")
         self.assertEqual(metadata["rhdr_export"], "preserved.rhdr")
 
+    @pytest.mark.real_torch
     def test_auto_mode_recognizes_direct_hdr_encode_metadata(self):
         samples = {
             "samples": torch.zeros(1, 4, 2, 2),

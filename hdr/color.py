@@ -828,6 +828,41 @@ _AP1_TO_XYZ = np.array(
     dtype=np.float32,
 )
 
+# ── Chromatic adaptation ────────────────────────────────────────────────────
+# AP1 (ACEScg) is defined at D60; sRGB, DaVinci Wide Gamut and ARRI Wide Gamut 4
+# are all D65. Crossing between them via XYZ without adapting the white point
+# leaves a visible tint on neutrals -- a D65 white arrives in ACEScg as a
+# non-neutral triplet. These constants supply the missing step.
+
+_WP_D65_XY = (0.3127, 0.3290)
+_WP_D60_XY = (0.32168, 0.33767)   # ACES white
+
+_BRADFORD = np.array(
+    [
+        [ 0.8951,  0.2664, -0.1614],
+        [-0.7502,  1.7135,  0.0367],
+        [ 0.0389, -0.0685,  1.0296],
+    ],
+    dtype=np.float64,
+)
+
+
+def _xy_to_XYZ(xy) -> np.ndarray:
+    x, y = xy
+    return np.array([x / y, 1.0, (1.0 - x - y) / y], dtype=np.float64)
+
+
+def _chromatic_adaptation(src_xy, dst_xy) -> np.ndarray:
+    """Bradford von-Kries adaptation matrix, XYZ(src white) -> XYZ(dst white)."""
+    src_cone = _BRADFORD @ _xy_to_XYZ(src_xy)
+    dst_cone = _BRADFORD @ _xy_to_XYZ(dst_xy)
+    scale = np.diag(dst_cone / src_cone)
+    return (np.linalg.inv(_BRADFORD) @ scale @ _BRADFORD).astype(np.float32)
+
+
+_ADAPT_D65_TO_D60 = _chromatic_adaptation(_WP_D65_XY, _WP_D60_XY)
+_ADAPT_D60_TO_D65 = _chromatic_adaptation(_WP_D60_XY, _WP_D65_XY)
+
 
 class DaVinciWideGamut:
     """
@@ -858,26 +893,25 @@ class DaVinciWideGamut:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = "Convert to/from DaVinci Wide Gamut and DaVinci Intermediate."
 
-    # DaVinci Wide Gamut to/from XYZ (D65)
+    # DaVinci Wide Gamut to/from XYZ (D65), per Blackmagic's published values.
+    #
+    # The third row used to read [-0.0099, -0.0315, 0.9417], which is wrong: a
+    # colour matrix's row sums are its implied white point, and that gave
+    # (0.9507, 1.0000, 0.9003) against D65's (0.95047, 1.0, 1.08883) -- roughly
+    # 17% short on blue, so every neutral picked up a green/yellow cast. Rows 0
+    # and 1 were already correct to 4dp. Verified: M @ [1,1,1] == D65 XYZ.
     DWG_TO_XYZ = np.array(
         [
-            [0.7006, 0.1487, 0.1014],
-            [0.2741, 0.8736, -0.1477],
-            [-0.0099, -0.0315, 0.9417],
+            [0.7006224, 0.1487748, 0.1010587],
+            [0.2741185, 0.8736319, -0.1477504],
+            [-0.0989629, -0.1378953, 1.3259160],
         ],
         dtype=np.float32,
     )
 
-    XYZ_TO_DWG = np.linalg.inv(
-        np.array(
-            [
-                [0.7006, 0.1487, 0.1014],
-                [0.2741, 0.8736, -0.1477],
-                [-0.0099, -0.0315, 0.9417],
-            ],
-            dtype=np.float32,
-        )
-    ).astype(np.float32)
+    # Derived from DWG_TO_XYZ rather than a second literal -- the duplicate
+    # literal that used to live here is how the two drifted apart.
+    XYZ_TO_DWG = np.linalg.inv(DWG_TO_XYZ).astype(np.float32)
 
     # v2.1: Use shared module-level matrices
     SRGB_TO_XYZ = _SRGB_TO_XYZ
@@ -939,11 +973,12 @@ class DaVinciWideGamut:
                 result = xyz @ self.XYZ_TO_SRGB.T
 
             elif transform == "DaVinci WG to ACEScg":
-                xyz = img @ self.DWG_TO_XYZ.T
+                # DWG is D65, AP1 is D60 -- adapt, or neutrals pick up a tint.
+                xyz = img @ self.DWG_TO_XYZ.T @ _ADAPT_D65_TO_D60.T
                 result = xyz @ _XYZ_TO_AP1.T
 
             else:  # ACEScg to DaVinci WG
-                xyz = img @ _AP1_TO_XYZ.T
+                xyz = img @ _AP1_TO_XYZ.T @ _ADAPT_D60_TO_D65.T
                 result = xyz @ self.XYZ_TO_DWG.T
             
             result_batch[b] = result
@@ -979,26 +1014,22 @@ class ARRIWideGamut4:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = "Convert to/from ARRI Wide Gamut 4 (AWG4) for Alexa 35."
 
-    # ARRI Wide Gamut 4 to XYZ (D65)
+    # ARRI Wide Gamut 4 to XYZ (D65), per ARRI's published values.
+    #
+    # The third row used to read [-0.0094877, -0.0324927, 0.8954361], giving a
+    # white point of (0.9505, 1.0000, 0.8535) -- 22% short on blue. AWG4's
+    # primaries are chosen so the true third row is exactly [0, 0, 1.0890578].
+    # Verified: M @ [1,1,1] == D65 XYZ.
     AWG4_TO_XYZ = np.array(
         [
-            [0.7048583, 0.1290112, 0.1166296],
-            [0.2540892, 0.7814076, -0.0354969],
-            [-0.0094877, -0.0324927, 0.8954361],
+            [0.7048583, 0.1297603, 0.1158373],
+            [0.2545242, 0.7814777, -0.0360019],
+            [0.0000000, 0.0000000, 1.0890578],
         ],
         dtype=np.float32,
     )
 
-    XYZ_TO_AWG4 = np.linalg.inv(
-        np.array(
-            [
-                [0.7048583, 0.1290112, 0.1166296],
-                [0.2540892, 0.7814076, -0.0354969],
-                [-0.0094877, -0.0324927, 0.8954361],
-            ],
-            dtype=np.float32,
-        )
-    ).astype(np.float32)
+    XYZ_TO_AWG4 = np.linalg.inv(AWG4_TO_XYZ).astype(np.float32)
 
     # v2.1: Use shared module-level matrices
     SRGB_TO_XYZ = _SRGB_TO_XYZ
@@ -1018,11 +1049,12 @@ class ARRIWideGamut4:
         for b in range(batch):
             img = img_full[b]
             if direction == "AWG4 to ACEScg":
-                xyz = img @ self.AWG4_TO_XYZ.T
+                # AWG4 is D65, AP1 is D60 -- adapt, or neutrals pick up a tint.
+                xyz = img @ self.AWG4_TO_XYZ.T @ _ADAPT_D65_TO_D60.T
                 result = xyz @ self.XYZ_TO_AP1.T
 
             elif direction == "ACEScg to AWG4":
-                xyz = img @ self.AP1_TO_XYZ.T
+                xyz = img @ self.AP1_TO_XYZ.T @ _ADAPT_D60_TO_D65.T
                 result = xyz @ self.XYZ_TO_AWG4.T
 
             elif direction == "AWG4 to Linear sRGB":
@@ -1263,7 +1295,6 @@ class ACES2OutputTransform:
         contrast = 1.55 * surround_factor
         pivot = 0.18
         toe_power = 2.0
-        shoulder_power = 1.0 / 2.6
 
         result = np.zeros_like(rgb)
 
@@ -1289,22 +1320,42 @@ class ACES2OutputTransform:
                 * channel_contrast
             )
 
-            # Shoulder (highlights)
-            white_scale = peak_scale
-            channel_shoulder = white_scale * np.power(
-                np.maximum(channel_toe / white_scale, 1e-10), shoulder_power
-            )
+            # Shoulder (highlights).
+            #
+            # Two defects were fixed here:
+            #
+            # 1. Midtones tracked the peak. The old form ended in
+            #    `channel_shoulder / peak_scale`, which divided the WHOLE curve
+            #    -- not just the highlight region -- by the peak. Measured: 18%
+            #    grey rendered at 1.80 nits on a 1000-nit target and 0.45 nits
+            #    on a 4000-nit one. Raising the peak made the picture darker.
+            #    Diffuse midtones must sit at the same luminance regardless of
+            #    how much highlight headroom the display has.
+            #
+            # 2. A 10% step at the knee. The branches disagreed there: with
+            #    tanh(0) == 0 the upper branch evaluated to `white_scale` while
+            #    the lower gave `0.9 * white_scale`, so 0.8999*ws -> 0.89990 and
+            #    0.9001*ws -> 0.99999 -- a visible contour ring around every
+            #    highlight, and non-monotonic past it.
+            #
+            # The replacement keeps everything below the knee identity-mapped
+            # and rolls the excess into the available headroom with a tanh.
+            # It is continuous AND C1 at the knee (d/dx of h*tanh(x/h) is 1 at
+            # x=0, matching the identity below), monotonic everywhere, and
+            # asymptotes to exactly peak_scale.
+            #
+            # The knee sits at diffuse white for HDR, and at 0.9 for SDR so the
+            # existing SDR roll-off is preserved rather than becoming a clip.
+            knee = min(1.0, 0.9 * peak_scale)
+            headroom = max(peak_scale - knee, 1e-6)
+            excess = channel_toe - knee
             channel_shoulder = np.where(
-                channel_toe < white_scale * 0.9,
+                channel_toe < knee,
                 channel_toe,
-                white_scale
-                - (white_scale - channel_shoulder)
-                * np.tanh(
-                    (channel_toe - white_scale * 0.9) / (white_scale * 0.5 + 1e-10)
-                ),
+                knee + headroom * np.tanh(excess / headroom),
             )
 
-            result[..., c] = channel_shoulder / peak_scale
+            result[..., c] = channel_shoulder
 
         # Desaturate very bright highlights (path-to-white)
         luma = self._compute_luminance(result)

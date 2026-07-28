@@ -18,11 +18,18 @@ import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
+
+# Only the tests marked @pytest.mark.real_torch below need genuine tensors; the
+# rest run fine against conftest's stub. Opt out of the automatic module-level
+# skip so they keep running on the no-torch CI matrix.
+RADIANCE_TORCH_GATED = True
+
 nodes_io = importlib.import_module("radiance.nodes_io")
 
 
 # ── C-1: scene-linear values must survive the tensor conversion ─────────────
 
+@pytest.mark.real_torch
 def test_np_to_tensor_preserves_hdr_values():
     """Values above 2.0 must NOT be normalized away."""
     arr = np.array([[[0.0, 1.0, 5.0], [10.0, 50.0, 123.4]]], dtype=np.float32)
@@ -34,6 +41,7 @@ def test_np_to_tensor_preserves_hdr_values():
     assert float(out.max()) == pytest.approx(123.4, abs=1e-4)
 
 
+@pytest.mark.real_torch
 def test_np_to_tensor_does_not_touch_low_range():
     arr = np.array([[[0.25, 0.5, 0.75]]], dtype=np.float32)
     out = nodes_io._np_to_tensor(arr)[0].cpu().numpy()
@@ -82,6 +90,7 @@ def _exr_writable():
 
 
 @pytest.mark.skipif(not _exr_writable(), reason="no EXR backend available")
+@pytest.mark.real_torch
 def test_save_exr_rgba_roundtrip(tmp_path):
     arr = np.random.rand(8, 8, 4).astype(np.float32)
     arr[..., :3] *= 12.0  # scene-linear highlights well above 1.0
@@ -95,6 +104,7 @@ def test_save_exr_rgba_roundtrip(tmp_path):
 
 
 @pytest.mark.skipif(not _exr_writable(), reason="no EXR backend available")
+@pytest.mark.real_torch
 def test_save_exr_single_channel_does_not_crash(tmp_path):
     matte = np.full((8, 8), 0.6, dtype=np.float32)
     path = tmp_path / "matte.exr"
@@ -122,6 +132,7 @@ def test_save_exr_raises_when_no_backend(tmp_path, monkeypatch):
 
 # ── #5: MASK -> EXR alpha wiring (RadianceWrite) ────────────────────────────
 
+@pytest.mark.real_torch
 def test_coerce_mask_to_alpha_shapes():
     """Mask normalizes to (N,H,W), broadcasting a single mask across frames."""
     m = torch.full((1, 8, 8), 0.3)
@@ -134,6 +145,7 @@ def test_coerce_mask_to_alpha_shapes():
 
 
 @pytest.mark.skipif(not _exr_writable(), reason="no EXR backend available")
+@pytest.mark.real_torch
 def test_mask_written_as_exr_alpha(tmp_path):
     """An RGB frame + mask is written as a 4-channel RGBA EXR with alpha preserved."""
     rgb = (np.random.rand(8, 8, 3).astype(np.float32)) * 5.0  # HDR

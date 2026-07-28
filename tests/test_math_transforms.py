@@ -4,6 +4,13 @@ import numpy as np
 import math
 import sys
 from unittest.mock import MagicMock
+import pytest
+
+# Only the tests marked @pytest.mark.real_torch below need genuine tensors; the
+# rest run fine against conftest's stub. Opt out of the automatic module-level
+# skip so they keep running on the no-torch CI matrix.
+RADIANCE_TORCH_GATED = True
+
 
 # Mock ComfyUI specific modules before importing
 sys.modules['aiohttp'] = MagicMock()
@@ -64,6 +71,7 @@ class TestViewerMathTransforms(unittest.TestCase):
         
         np.testing.assert_allclose(decoded, test_values, rtol=1e-3, atol=1e-4)
 
+    @pytest.mark.real_torch
     def test_apply_lut_passthrough(self):
         """Test that passthrough LUT mode does not alter the tensor."""
         dummy_tensor = torch.rand((2, 3, 256, 256))
@@ -92,6 +100,7 @@ class TestViewerMathTransforms(unittest.TestCase):
 
 class TestSamplerMathTransforms(unittest.TestCase):
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Pipeline"
+    @pytest.mark.real_torch
     def test_flux_shift_sigmas(self):
         """Test flux sigma shifting logic."""
         sigmas = torch.tensor([10.0, 5.0, 1.0, 0.1, 0.0])
@@ -107,6 +116,9 @@ class TestSamplerMathTransforms(unittest.TestCase):
         expected = shift * sigmas / denominator
         torch.testing.assert_close(shifted, expected)
 
+    # Order-dependent without real torch: another module in the suite swaps the
+    # shared stub for a numpy-backed shim whose indexing yields plain floats.
+    @pytest.mark.real_torch
     def test_gradual_sigma_blend(self):
         """Test smooth blending between two sigma schedules."""
         sigmas_a = torch.tensor([10.0, 5.0, 2.0, 1.0])

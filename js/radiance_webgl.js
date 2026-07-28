@@ -157,6 +157,9 @@ class RadianceWebGLRenderer extends RadianceRenderer {
                 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
                 gl.bindFramebuffer(gl.FRAMEBUFFER, this.scopeFBO);
                 gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.scopeTex, 0);
+                this._scopeFBOType = gl.UNSIGNED_BYTE;
+            } else {
+                this._scopeFBOType = precFmt.type;
             }
         }
 
@@ -198,9 +201,34 @@ class RadianceWebGLRenderer extends RadianceRenderer {
         gl.drawArrays(gl.POINTS, 0, this.scopePointCount);
         gl.disable(gl.BLEND);
 
-        // Read pixels — reuse pre-allocated buffer to avoid GC pressure (v3.1 PERF)
+        // Read pixels — reuse pre-allocated buffers to avoid GC pressure (v3.1 PERF)
+        //
+        // The type must match the colour attachment. This was hard-coded to
+        // UNSIGNED_BYTE while the scope FBO is created at pipelinePrecision,
+        // which defaults to f32 -> RGBA32F. Per WebGL2, RGBA/UNSIGNED_BYTE is
+        // only a valid ReadPixels pair for a NORMALIZED FIXED-POINT buffer, so
+        // on every GPU with EXT_color_buffer_float (i.e. all desktop GPUs) the
+        // call raised INVALID_OPERATION and left the buffer untouched --
+        // waveform, vectorscope, histogram, parade and chromaticity all stayed
+        // black or stale. The RGBA8 fallback above never fired because a float
+        // FBO *is* FRAMEBUFFER_COMPLETE.
         const pixels = this._scopePixels;
-        gl.readPixels(0, 0, size, size, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        const fboType = this._scopeFBOType || gl.UNSIGNED_BYTE;
+        if (fboType === gl.UNSIGNED_BYTE) {
+            gl.readPixels(0, 0, size, size, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        } else {
+            if (!this._scopePixelsF32 || this._scopePixelsF32.length !== size * size * 4) {
+                this._scopePixelsF32 = new Float32Array(size * size * 4);
+            }
+            const fpix = this._scopePixelsF32;
+            gl.readPixels(0, 0, size, size, gl.RGBA, gl.FLOAT, fpix);
+            // Scope points are additively blended in [0,1]; saturate to 8-bit
+            // for the ImageData copy below.
+            for (let i = 0; i < fpix.length; i++) {
+                const v = fpix[i];
+                pixels[i] = v <= 0 ? 0 : (v >= 1 ? 255 : (v * 255) | 0);
+            }
+        }
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.viewport(0, 0, this.canvas.width, this.canvas.height);
 
@@ -4165,6 +4193,20 @@ vec3 getDenoiseColor(vec2 uv) {
         // Clear uniform caches
         this._uniformCache.clear();
         this._uniformValueCache.clear();
+
+        // Null the maps. They previously kept the now-invalid handles, so a
+        // scope debounce that fired after teardown passed the
+        // `if (!this.gl || !this.programs[mode]) return;` guard and issued
+        // useProgram/bindTexture on deleted objects -- INVALID_OPERATION spam
+        // and a corrupted GL state shared with everything else on the page.
+        this.textures = {};
+        this.programs = {};
+
+        // Explicitly release the driver context. Without this the context is
+        // only reclaimed on GC, which browsers do lazily; ~16 add/delete cycles
+        // hit Chrome's context limit and it starts killing the OLDEST context,
+        // which may be the live viewer or ComfyUI's own canvas.
+        try { this.gl.getExtension('WEBGL_lose_context')?.loseContext(); } catch (e) { /* best effort */ }
 
         console.log('[Radiance] WebGL renderer destroyed — all GPU resources released');
     }

@@ -11,12 +11,15 @@ import os
 from pathlib import Path
 
 import torch
+
+from radiance.model.cache import GPUModelCache
 import torch.nn as nn
 import torch.nn.functional as F
 
 logger = logging.getLogger("radiance.temporal_rudra")
 
-_TEMPORAL_MODEL_CACHE: dict[tuple[str, str], nn.Module | None] = {}
+# Bounded LRU -- was an unbounded dict holding GPU-resident models.
+_TEMPORAL_MODEL_CACHE = GPUModelCache(max_size=1)
 
 
 def _flow_grid(flow: torch.Tensor) -> torch.Tensor:
@@ -155,7 +158,7 @@ def load_temporal_rudra_weights(
         return None
     cache_key = (str(candidate.resolve()), str(device))
     if cache_key in _TEMPORAL_MODEL_CACHE:
-        return _TEMPORAL_MODEL_CACHE[cache_key]  # type: ignore[return-value]
+        return _TEMPORAL_MODEL_CACHE.get(cache_key)  # type: ignore[return-value]
 
     try:
         if candidate.suffix.lower() == ".safetensors":
@@ -182,12 +185,20 @@ def load_temporal_rudra_weights(
         model.to(device).eval()
     except (OSError, RuntimeError, KeyError, ValueError) as exc:
         logger.error("Temporal RUDRA checkpoint %s is incompatible: %s", candidate, exc)
-        _TEMPORAL_MODEL_CACHE[cache_key] = None
+        _TEMPORAL_MODEL_CACHE.put(cache_key, None)
         return None
 
-    _TEMPORAL_MODEL_CACHE[cache_key] = model
+    _TEMPORAL_MODEL_CACHE.put(cache_key, model)
     logger.info("Loaded temporal RUDRA residual checkpoint: %s", candidate)
     return model
+
+
+# Per-frame model forwards accumulated into three lists. Without this the
+# activation graph of every frame is retained simultaneously -- VRAM grows
+# linearly with clip length until it OOMs.
+
+
+@torch.no_grad()
 
 
 def recover_temporal_residual(

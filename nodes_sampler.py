@@ -735,6 +735,9 @@ class RadianceSamplerPro:
 
     # ── AVControl — SDR Reference Conditioning ───────────────────────────────
 
+    # Inference only. .eval() does not clear requires_grad on parameters, so an
+# unguarded forward still builds and retains an autograd graph.
+    @torch.no_grad()
     def _encode_sdr_reference(self, ref, vae, work):
         res = vae.encode(ref)
         ref_latent = res["samples"]

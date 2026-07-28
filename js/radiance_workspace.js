@@ -13,6 +13,11 @@ const TOAST_DURATION_MS = 3000;
 
 // Listen for postMessage updates from Studio Dashboard
 window.addEventListener("message", (event) => {
+    // Reject cross-origin senders. Without this, any page that can get a handle
+    // to this window could load an arbitrary graph, or ask for the user's graph
+    // back via the radiance_save_project_version reply below. The sibling
+    // handler in project_manager_dashboard.mjs already does this check.
+    if (event.origin !== window.location.origin) return;
     if (event.data && event.data.type === "radiance_load_workflow") {
         try {
             const graphData = typeof event.data.content === 'string' ? JSON.parse(event.data.content) : event.data.content;
@@ -63,11 +68,11 @@ window.addEventListener("message", (event) => {
                 .then(({ ok, data }) => {
                     if (!ok || !data.success) throw new Error(data.error || "Save failed");
                     showToast("Project Manager saved the current canvas.", "success");
-                    event.source?.postMessage({ type: "radiance_project_action_result", action: "save-version", success: true }, "*");
+                    event.source?.postMessage({ type: "radiance_project_action_result", action: "save-version", success: true }, window.location.origin);
                 })
                 .catch((err) => {
                     showToast(`Project Manager save failed: ${err.message}`, "error");
-                    event.source?.postMessage({ type: "radiance_project_action_result", action: "save-version", success: false, error: err.message }, "*");
+                    event.source?.postMessage({ type: "radiance_project_action_result", action: "save-version", success: false, error: err.message }, window.location.origin);
                 });
         } catch(err) {
             showToast(`Project Manager save failed: ${err.message}`, "error");
