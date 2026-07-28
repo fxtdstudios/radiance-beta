@@ -1,5 +1,11 @@
 import numpy as np
 import logging
+
+from radiance.color.transfer import (
+    linear_to_davinci_intermediate as _linear_to_davinci_intermediate,
+    linear_to_canonlog3 as _linear_to_canonlog3,
+    linear_to_log3g10 as _linear_to_log3g10,
+)
 from typing import Dict, Any, Optional, List, Tuple
 
 logger = logging.getLogger("radiance.color.luts")
@@ -102,7 +108,9 @@ def _lut_filmic(x: np.ndarray) -> np.ndarray:
     def hable(v):
         return ((v * (A * v + C * B) + D * E) / (v * (A * v + B) + D * F)) - E / F
 
-    white_scale = 1.0 / hable(np.array(11.2))
+    # np.float32, not a bare float: NEP 50 promotes the whole expression
+    # to float64 otherwise, doubling the memory of every frame downstream.
+    white_scale = np.float32(1.0) / hable(np.float32(11.2))
     return np.clip(hable(np.maximum(x, 0.0) * 2.0) * white_scale, 0.0, 1.0)
 
 
@@ -229,35 +237,25 @@ def _lut_flog2(x: np.ndarray) -> np.ndarray:
 
 
 def _lut_clog3(x: np.ndarray) -> np.ndarray:
-    """Linear → Canon C-Log3 v1.2."""
-    xr = x / 0.9
-    k = 14.98325
-    a = 0.36726845
-    lo = -0.009670
-    hi = 0.014043
-    neg = -a * np.log10(np.maximum(-xr * k + 1.0, 1e-10)) + 0.12783901
-    lin = 1.9754798 * xr + 0.12512219
-    pos = a * np.log10(np.maximum(xr * k + 1.0, 1e-10)) + 0.12240537
-    result = np.where(xr < lo, neg, np.where(xr <= hi, lin, pos))
-    return np.clip(result, 0.0, 1.0)
+    """Linear → Canon C-Log3 v1.2 (delegates to the single source)."""
+    return np.clip(_linear_to_canonlog3(x), 0.0, 1.0)
 
 
 def _lut_log3g10(x: np.ndarray) -> np.ndarray:
-    """Linear → RED Log3G10 v2."""
-    xoff = x + 0.01
-    return np.sign(xoff) * 0.224282 * np.log10(np.abs(xoff) * 155.975327 + 1.0)
+    """Linear → RED Log3G10 v2 (delegates to the single source)."""
+    return _linear_to_log3g10(x)
 
 
 def _lut_davinci_intermediate(x: np.ndarray) -> np.ndarray:
-    """Linear → DaVinci Intermediate."""
-    DI_A = 0.0075
-    DI_B = 7.0
-    DI_C = 0.07329248
-    DI_M = 10.44426855
-    DI_LIN_CUT = 0.00262409
-    return np.where(
-        x <= DI_LIN_CUT, x * DI_M, DI_C * (np.log2(np.maximum(x + DI_A, 1e-10)) + DI_B)
-    )
+    """Linear → DaVinci Intermediate.
+
+    Delegates to radiance.color.transfer, which is the single source for every
+    transfer function. This file used to carry its own (correct) copy while
+    transfer.py carried a different, broken one -- the two disagreed by a
+    factor of 2.6 at 18% grey and only the broken one was wired into the VAE
+    and the IO nodes.
+    """
+    return _linear_to_davinci_intermediate(x)
 
 
 def _lut_bmd_gen5(x: np.ndarray) -> np.ndarray:
@@ -285,7 +283,11 @@ def _lut_nlog(x: np.ndarray) -> np.ndarray:
 
 def _lut_lin_to_log(x: np.ndarray) -> np.ndarray:
     """Generic linear → log (Cineon-style)."""
-    return np.clip(np.log2(np.maximum(x, 1e-10) * 5.55 + 1.0) / np.log2(6.55), 0.0, 1.0)
+    return np.clip(
+        np.log2(np.maximum(x, 1e-10) * np.float32(5.55) + np.float32(1.0))
+        / np.float32(np.log2(6.55)),
+        0.0, 1.0,
+    ).astype(np.float32)
 
 
 def _lut_log_to_lin(x: np.ndarray) -> np.ndarray:

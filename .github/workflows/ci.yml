@@ -94,19 +94,18 @@ jobs:
       #    No manual --ignore needed — torch-gated tests self-skip.
       - name: Run tests
         run: |
-          # Full suite on the lightweight matrix. torch/OpenEXR/OCIO-gated tests
-          # self-skip here; real-dependency coverage runs in the test-full job.
-          # These files import torch unconditionally (no effective skip guard), so
-          # they cannot pass without real torch — they run in the test-full job
-          # below instead of the no-torch lightweight matrix.
+          # Full suite on the lightweight matrix — no --ignore list.
+          #
+          # There used to be one, naming the files that import torch at module
+          # scope. It was hand-maintained and went stale the moment anyone added
+          # a torch-using test file: CI was red from 2026-07-10 to 2026-07-27
+          # with 13 failures in two files that were never added to it.
+          #
+          # tests/conftest.py now gates on real torch automatically — a module
+          # that binds torch at module scope skips itself here and runs in the
+          # test-full job below, and individual tests can opt in with
+          # @pytest.mark.real_torch. Nothing to keep in sync.
           python -m pytest tests/ \
-            --ignore=tests/test_dcc_studio.py \
-            --ignore=tests/test_hdr_blend_fixes.py \
-            --ignore=tests/test_io_functional.py \
-            --ignore=tests/test_io_hdr_regression.py \
-            --ignore=tests/test_math_transforms.py \
-            --ignore=tests/test_radiance_load_image_mask.py \
-            --ignore=tests/test_vfx_nodes.py \
             --tb=short \
             --timeout=60 \
             -q \

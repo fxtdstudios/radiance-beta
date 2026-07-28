@@ -6,6 +6,7 @@ import gc
 import json
 from typing import Tuple, Dict, Any, Optional, List
 from dataclasses import dataclass, field
+from radiance.core.tiling import blend_weight_2d, edge_overlaps_from_coords, clamp_overlap
 
 import comfy.samplers
 import comfy.sample
@@ -1587,6 +1588,9 @@ def tile_sample(
         )
 
     B, C, H, W = latent_samples.shape
+    # An overlap >= tile_size collapses the stride to 1 and turns this into
+    # millions of tile inferences; only one of five tilers checked for it.
+    tile_overlap = clamp_overlap(tile_size, tile_overlap)
     step = max(1, tile_size - tile_overlap)
     device = latent_samples.device
 
@@ -1634,17 +1638,19 @@ def tile_sample(
         tw = x2 - x1
 
         if tile_blend == "feather":
-
-            wy = torch.ones(th, device=device)
-            wx = torch.ones(tw, device=device)
-            fade = min(tile_overlap, th // 2, tw // 2)
-            if fade > 0:
-                ramp = (1 - torch.cos(torch.linspace(0, math.pi, fade, device=device))) / 2
-                wy[:fade] = ramp
-                wy[-fade:] = ramp.flip(0)
-                wx[:fade] = ramp
-                wx[-fade:] = ramp.flip(0)
-            w_tile = (wy.unsqueeze(1) * wx.unsqueeze(0)).unsqueeze(0).unsqueeze(0)
+            # Border-aware feather via the shared helper. The previous inline
+            # ramp started at exactly 0 and was applied to all four edges of
+            # every tile, including edges lying on the image border -- those
+            # pixels are covered by no other tile, so dividing by the
+            # accumulated weight gave 0/1e-6 == 0 and produced a black band
+            # around the whole latent (8 image pixels wide after the VAE).
+            ov_t, ov_b, ov_l, ov_r = edge_overlaps_from_coords(
+                y1, y2, x1, x2, H, W, tile_overlap
+            )
+            w_tile = blend_weight_2d(
+                th, tw, ov_t, ov_b, ov_l, ov_r,
+                device=device, dtype=latent_samples.dtype,
+            )
         elif tile_blend == "gaussian":
             sigma_h = th / 4.0
             sigma_w = tw / 4.0

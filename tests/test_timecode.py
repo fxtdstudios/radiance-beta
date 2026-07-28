@@ -40,6 +40,12 @@ from nodes_realtime_preview import (
     NODE_DISPLAY_NAME_MAPPINGS,
 )
 
+# This module already gates its torch-dependent tests correctly (they skip
+# cleanly against conftest's stub), so opt out of the automatic module-level
+# skip and keep the rest of the file running on the no-torch CI matrix.
+RADIANCE_TORCH_GATED = True
+
+
 _ftc = RadianceFrameStamp._frame_to_tc   # shorthand
 
 

@@ -223,6 +223,9 @@ def _make_noise(shape, seed: int = 0) -> "torch.Tensor":
     return torch.randn(shape, generator=gen)
 
 
+# Inference only. .eval() does not clear requires_grad on parameters, so an
+# unguarded forward still builds and retains an autograd graph.
+@torch.no_grad()
 def _vae_encode(vae, image_tensor) -> "torch.Tensor":
     """Encode an IMAGE tensor [B,H,W,3] through VAE → latent samples."""
     if not HAS_COMFY or not HAS_TORCH:
@@ -238,6 +241,9 @@ def _vae_encode(vae, image_tensor) -> "torch.Tensor":
         return torch.zeros(B, 4, H // 8, W // 8)
 
 
+# Inference only. .eval() does not clear requires_grad on parameters, so an
+# unguarded forward still builds and retains an autograd graph.
+@torch.no_grad()
 def _vae_decode(vae, latent) -> "torch.Tensor":
     """Decode latents → IMAGE tensor [B,H,W,3]."""
     if not HAS_COMFY or not HAS_TORCH:
@@ -838,6 +844,9 @@ class RadianceT2VPipeline:
         return (video_latent, preview, pos_cond or [], "\n".join(report))
 
     # ------------------------------------------------------------------
+    # Inference only. .eval() does not clear requires_grad on parameters, so an
+# unguarded forward still builds and retains an autograd graph.
+    @torch.no_grad()
     def _encode_text(self, clip, text):
         if clip is None or not HAS_TORCH:
             return []
@@ -879,6 +888,10 @@ class RadianceT2VPipeline:
                 tok = bt
             merged.append([tok, new_d])
         return merged
+
+    # VAE decode for the preview image -- no gradients are ever needed here.
+
+    @torch.no_grad()
 
     def _decode_preview(self, vae, latent, target_frames):
         if not HAS_TORCH:
@@ -1116,6 +1129,9 @@ class RadianceI2VPipeline:
         return (video_latent, preview, "\n".join(report))
 
     # ------------------------------------------------------------------
+    # Inference only. .eval() does not clear requires_grad on parameters, so an
+# unguarded forward still builds and retains an autograd graph.
+    @torch.no_grad()
     def _encode_text(self, clip, text, peak_nits=None, gamut=None, eotf=None):
         if clip is None or not HAS_TORCH:
             return []

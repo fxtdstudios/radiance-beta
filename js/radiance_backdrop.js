@@ -308,7 +308,19 @@ app.registerExtension({
         // ─────────────────────────────────────────────────────────────────────
         // 1. PREMIUM GLASSMORPHIC RENDERING (LGraphGroup.prototype.draw)
         // ─────────────────────────────────────────────────────────────────────
+        // Save the original before replacing it. This override previously
+        // clobbered LGraphGroup.prototype.draw with no reference kept, which
+        // destroyed any group rendering another extension had installed and
+        // left no way back. The sibling patches below (getGroupAt,
+        // onDoubleClick) already save and delegate -- this one now matches.
+        const origGroupDraw = LGraphGroup.prototype.draw;
         LGraphGroup.prototype.draw = function() {
+            // Escape hatch: lets a user or another pack opt out of Radiance's
+            // group styling without uninstalling.
+            if (window.RADIANCE_DISABLE_GROUP_STYLE ||
+                localStorage.getItem("radiance.disableGroupStyle") === "1") {
+                return origGroupDraw ? origGroupDraw.apply(this, arguments) : undefined;
+            }
             // Bulletproof context and canvas argument resolution (supports all LiteGraph versions)
             let ctx = null;
             let canvas = null;

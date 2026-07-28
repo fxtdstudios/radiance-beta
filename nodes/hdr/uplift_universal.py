@@ -74,6 +74,31 @@ def _luma(rgb: torch.Tensor) -> torch.Tensor:
 #  Core expansion math (kept as free functions so they are unit-testable)
 # ─────────────────────────────────────────────────────────────────────────────
 
+#: torch.quantile refuses inputs above 2**24 elements along the reduced axis.
+#: A single 8K frame is 33.2M pixels, so the default adaptive knee mode raised
+#: "quantile() input tensor is too large" on anything past roughly 4K -- on the
+#: node whose entire purpose is film-resolution HDR work.
+_QUANTILE_MAX_ELEMS = 2 ** 24
+
+
+def _row_quantile(flat: torch.Tensor, percentile: float) -> torch.Tensor:
+    """
+    Per-row quantile that works at any resolution.
+
+    Falls back to ``torch.kthvalue`` (which has no size cap) for rows too large
+    for ``torch.quantile``. kthvalue returns the exact k-th order statistic
+    rather than interpolating between neighbours; on image-sized inputs the two
+    agree to ~1e-5, which is far below the precision a tone-mapping knee needs.
+    """
+    n = flat.shape[1]
+    if n == 0:
+        return flat.new_zeros((flat.shape[0],))
+    if n <= _QUANTILE_MAX_ELEMS:
+        return torch.quantile(flat, percentile, dim=1)
+    k = max(1, min(n, int(round(float(percentile) * (n - 1))) + 1))
+    return torch.kthvalue(flat, k, dim=1).values
+
+
 def _adaptive_knees(luma: torch.Tensor, percentile: float,
                     smoothing: float) -> torch.Tensor:
     """
@@ -82,8 +107,10 @@ def _adaptive_knees(luma: torch.Tensor, percentile: float,
     Returns a tensor of shape [B].
     """
     b = luma.shape[0]
+    if b == 0:                                   # empty batch — nothing to do
+        return luma.new_zeros((0,))
     flat = luma.reshape(b, -1)
-    q = torch.quantile(flat, percentile, dim=1).clamp(0.05, 0.99)
+    q = _row_quantile(flat, percentile).clamp(0.05, 0.99)
     if smoothing <= 0.0 or b == 1:
         return q
     knees = torch.empty_like(q)
@@ -148,6 +175,32 @@ def _clipped_highlight_mask(sdr_rgb: torch.Tensor,
     evidence = torch.maximum(_luma(sdr_rgb), sdr_rgb.max(dim=-1).values)
     x = ((evidence - t) / max(1.0 - t, _EPS)).clamp(0.0, 1.0)
     return x * x * (3.0 - 2.0 * x)
+
+
+def _pixel_checkpoint_available(checkpoint_path: str) -> bool:
+    """
+    Whether a direct-pixel checkpoint can actually be resolved.
+
+    `resolve_pixel_checkpoint` searches, in order: the explicit path, the
+    RADIANCE_SDR2HDR_PIXEL environment variable, then models/radiance. The
+    Auto backend used to gate on `bool(pixel_checkpoint.strip())` instead of
+    asking the resolver, so a user with an installed checkpoint but an empty
+    path widget -- the stock defaults -- never got the direct-pixel model at
+    all. It silently fell through to legacy VAE RUDRA or plain expansion,
+    contradicting both the `learned_backend` tooltip ("Auto prefers ... the
+    direct-pixel model ...") and the `pixel_checkpoint` tooltip ("Empty
+    searches models/radiance and RADIANCE_SDR2HDR_PIXEL").
+    """
+    try:
+        from radiance.pixel_sdr2hdr import resolve_pixel_checkpoint
+    except Exception as exc:  # noqa: BLE001 — optional dependency chain
+        logger.debug("Direct-pixel backend unavailable: %s", exc)
+        return False
+    try:
+        return resolve_pixel_checkpoint(str(checkpoint_path)) is not None
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Direct-pixel checkpoint lookup failed: %s", exc)
+        return False
 
 
 def _encode_output(hdr: torch.Tensor, output_encoding: str,
@@ -238,7 +291,21 @@ class _RudraRecoveryCore:
         # mastering limit, not merely a hint used by the deterministic path.
         rec = _soft_peak_limit(rec, peak_scale)
         w = (mask * float(blend)).unsqueeze(-1)
-        return _soft_peak_limit(base_hdr * (1.0 - w) + rec * w, peak_scale)
+        # Limit the LEARNED signal only, then blend -- do not re-limit the
+        # result. Two reasons:
+        #   1. _soft_peak_limit is a tanh compressor, so it is not idempotent.
+        #      Applying it to `rec` and again to the blend compounded the
+        #      compression and pulled highlights below the peak they should sit
+        #      at.
+        #   2. Re-limiting the blend altered pixels where the mask is zero,
+        #      contradicting this node's documented contract that pixels
+        #      outside the recovery masks are preserved exactly.
+        # The peak guarantee still holds: luma is linear in RGB and the blend is
+        # convex, so a blend of two signals that each respect `peak_scale` also
+        # respects it. Callers must pass a `base_hdr` that already does -- every
+        # in-tree caller does (deterministic expansion tops out at peak_scale,
+        # and decoded SDR tops out at 1.0).
+        return base_hdr * (1.0 - w) + rec * w
 
     @staticmethod
     def _temporal_reconstruct(
@@ -302,10 +369,10 @@ class _RudraRecoveryCore:
         ).clamp(min=0.0)
         recovered_709 = _soft_peak_limit(recovered_709, peak_scale)
         weight = (mask * float(blend)).unsqueeze(-1)
-        return _soft_peak_limit(
-            base_hdr * (1.0 - weight) + recovered_709 * weight,
-            peak_scale,
-        )
+        # Limit the learned signal only — see the note in _rudra_reconstruct.
+        # Re-limiting the blend double-compressed highlights and modified
+        # pixels the mask had excluded.
+        return base_hdr * (1.0 - weight) + recovered_709 * weight
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -359,6 +426,10 @@ class RadianceSDRToHDRRecover(_RudraRecoveryCore):
             },
         }
 
+    # Runs VAE encode + a temporal model. Its sibling convert() has carried this guard
+    # all along; without it the whole encoder activation stack is retained as an
+    # autograd graph -- several GB of VRAM on a 4K frame.
+    @torch.no_grad()
     def recover(self, image: torch.Tensor, inverse_oetf: str,
                 peak_nits: float, highlight_threshold: float,
                 shadow_threshold: float, highlight_strength: float,
@@ -368,6 +439,9 @@ class RadianceSDRToHDRRecover(_RudraRecoveryCore):
         img = torch.nan_to_num(image.clone().float(), nan=0.0, posinf=1.0, neginf=0.0)
         if img.dim() == 3:
             img = img.unsqueeze(0)
+        if img.shape[0] == 0:                   # empty batch → empty result
+            zeros = img[..., 0]
+            return (img, zeros, zeros, zeros, zeros)
         rgb, extra = img[..., :3], img[..., 3:]
         peak_scale = max(float(peak_nits), 100.0) / 100.0
         lin = _inverse_oetf(rgb.clamp(0.0, 1.0), inverse_oetf)
@@ -493,6 +567,9 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
         )
         if img.dim() == 3:                      # single HWC frame → batch of 1
             img = img.unsqueeze(0)
+        if img.shape[0] == 0:                   # empty batch → empty result
+            zeros = img[..., 0]
+            return (img, zeros, zeros, zeros, zeros)
 
         rgb, extra = img[..., :3], img[..., 3:]
         peak_scale = max(peak_nits, 100.0) / 100.0
@@ -552,8 +629,11 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
             # The direct-pixel checkpoint supports stills and frame batches.
             # Until the temporal direct model is trained, video frames are
             # independent and may need downstream deflicker/temporal QC.
+            # Ask the resolver, don't just look for a non-empty widget: an
+            # installed checkpoint in models/radiance (or RADIANCE_SDR2HDR_PIXEL)
+            # is discoverable with the path left blank, which is the default.
             use_pixel = backend == "Direct Pixel" or (
-                backend == "Auto" and bool(str(pixel_checkpoint).strip())
+                backend == "Auto" and _pixel_checkpoint_available(pixel_checkpoint)
             )
             if not recovery_applied and use_pixel:
                 try:

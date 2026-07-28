@@ -15,11 +15,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
+
+from radiance.model.cache import GPUModelCache
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-_MODEL_CACHE: dict[tuple[str, str], "SDR2HDRNet"] = {}
+# Bounded LRU -- was an unbounded dict holding GPU-resident models.
+_MODEL_CACHE = GPUModelCache(max_size=2)
 
 
 def srgb_to_linear(x: torch.Tensor) -> torch.Tensor:
@@ -296,13 +299,18 @@ def load_pixel_sdr2hdr_weights(checkpoint_path: str, device: torch.device) -> SD
     cached = _MODEL_CACHE.get(key)
     if cached is not None:
         return cached
-    checkpoint = torch.load(str(resolved), map_location="cpu", weights_only=False)
+    # weights_only=True is required: `resolved` comes from the user-editable
+    # `pixel_checkpoint` widget, so a workflow can aim this at any .pt on disk.
+    # Unpickling one executes arbitrary code. Only checkpoint["config"] (ints)
+    # and checkpoint["model"] (a state dict) are read, both of which load fine
+    # under weights_only.
+    checkpoint = torch.load(str(resolved), map_location="cpu", weights_only=True)
     config = checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
     model = SDR2HDRNet(base_channels=int(config.get("base_channels", 32)))
     state = checkpoint.get("model", checkpoint) if isinstance(checkpoint, dict) else checkpoint
     model.load_state_dict(state, strict=True)
     model.to(device).eval()
-    _MODEL_CACHE[key] = model
+    _MODEL_CACHE.put(key, model)
     return model
 
 

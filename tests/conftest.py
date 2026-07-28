@@ -8,6 +8,7 @@ actually calls into ComfyUI (e.g. comfy.sample.sample) is tested via
 integration tests that mock the call-site, not here.
 """
 
+import os
 import sys
 import types
 import importlib
@@ -144,6 +145,15 @@ def _make_torch_stub():
     torch_mod.load        = MagicMock(return_value=MagicMock())
     torch_mod.save        = MagicMock()
     torch_mod.inference_mode = MagicMock(return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock()))
+
+    # Mark the stub so tests can tell it apart from the real package.
+    #
+    # Without this there is no reliable signal: the stub is a real ModuleType
+    # (so `isinstance(torch, MagicMock)` is False) and every attribute access
+    # returns a MagicMock that answers `hasattr` for anything (so
+    # `hasattr(torch.zeros(1), "shape")` is True too). Both idioms were in use
+    # in this suite and both reported "real torch is available".
+    torch_mod.__radiance_stub__ = True
     return torch_mod
 
 
@@ -195,6 +205,128 @@ if not hasattr(sys.modules.get("torch"), "__version__"):
         setattr(_hdr_cs_stub, _attr, {})
     _hdr_cs_stub._apply_matrix = MagicMock(return_value=MagicMock())
     sys.modules.setdefault("radiance.nodes_hdr_colorspace", _hdr_cs_stub)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Real-torch gate
+#
+#  CI's lightweight matrix installs no torch, so the MagicMock stub above is
+#  active. Every "self-skip" idiom in the suite was defeated by it:
+#
+#    * `pytest.importorskip("torch")` succeeds -- the stub IS importable.
+#    * `isinstance(torch, MagicMock)` is False -- the stub is a ModuleType.
+#    * `hasattr(torch.zeros(1), "shape")` is True -- MagicMock answers hasattr.
+#
+#  so torch-dependent tests ran against mocks and failed. The workaround was a
+#  hand-maintained `--ignore=` list in .github/workflows/ci.yml, which went
+#  stale the moment a new torch-using test file was added: CI had been red
+#  since 2026-07-10 with 13 failures in two files nobody had added to the list.
+#
+#  The gate below replaces that list with something that cannot go stale:
+#
+#    1. `HAS_REAL_TORCH` is the single source of truth, keyed off the marker
+#       the stub sets on itself.
+#    2. Any test marked `@pytest.mark.real_torch` skips when the stub is active.
+#    3. Any test module that imports torch at module scope -- unguarded
+#       `import torch` / `from torch import ...`, or `importorskip("torch")` --
+#       is skipped wholesale, automatically, with no list to maintain. A module
+#       that gates itself per-test opts out by setting
+#       `RADIANCE_TORCH_GATED = True` at module scope.
+#
+#  Nothing is skipped when real torch is present, so the test-full lane still
+#  executes every one of these.
+# ─────────────────────────────────────────────────────────────────────────────
+
+HAS_REAL_TORCH = not getattr(sys.modules.get("torch"), "__radiance_stub__", False)
+
+_TORCH_GATE_OPT_OUT = "RADIANCE_TORCH_GATED"
+_torch_need_cache: dict = {}
+
+
+def _module_needs_real_torch(path) -> bool:
+    """True if this test file binds torch at module scope without a guard.
+
+    A guarded import (`try: import torch / except ImportError:`) is left alone:
+    the module has said it handles absence itself.
+    """
+    key = str(path)
+    if key in _torch_need_cache:
+        return _torch_need_cache[key]
+
+    verdict = False
+    try:
+        import ast
+
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+
+        guarded = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Try):
+                for child in ast.walk(node):
+                    guarded.add(id(child))
+
+        for node in tree.body:
+            if id(node) in guarded:
+                continue
+            if isinstance(node, ast.Import):
+                if any(a.name == "torch" or a.name.startswith("torch.")
+                       for a in node.names):
+                    verdict = True
+            elif isinstance(node, ast.ImportFrom):
+                if node.module and (node.module == "torch"
+                                    or node.module.startswith("torch.")):
+                    verdict = True
+            elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                call = node.value
+                name = getattr(call.func, "attr", getattr(call.func, "id", ""))
+                if name == "importorskip" and call.args:
+                    arg = call.args[0]
+                    if isinstance(arg, ast.Constant) and str(arg.value).split(".")[0] == "torch":
+                        verdict = True
+            elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+                call = node.value
+                name = getattr(call.func, "attr", getattr(call.func, "id", ""))
+                if name == "importorskip" and call.args:
+                    arg = call.args[0]
+                    if isinstance(arg, ast.Constant) and str(arg.value).split(".")[0] == "torch":
+                        verdict = True
+    except Exception:  # pragma: no cover - unparseable file fails elsewhere
+        verdict = False
+
+    _torch_need_cache[key] = verdict
+    return verdict
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "real_torch: test needs the real torch package, not the conftest stub",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if HAS_REAL_TORCH or os.environ.get("RADIANCE_DISABLE_TORCH_GATE"):
+        return
+
+    marker_skip = pytest.mark.skip(
+        reason="requires real torch (the conftest MagicMock stub is active)"
+    )
+    module_skip = pytest.mark.skip(
+        reason="module imports torch at module scope; the conftest MagicMock "
+               "stub is active, so it cannot run here (covered by the "
+               "test-full CI lane)"
+    )
+
+    for item in items:
+        if item.get_closest_marker("real_torch"):
+            item.add_marker(marker_skip)
+            continue
+        module = getattr(item, "module", None)
+        if module is not None and getattr(module, _TORCH_GATE_OPT_OUT, False):
+            continue
+        fspath = getattr(item, "fspath", None)
+        if fspath is not None and _module_needs_real_torch(str(fspath)):
+            item.add_marker(module_skip)
 
 
 # ── radiance.image subpackage (used by nodes_qc via `from .image import defects`) ─

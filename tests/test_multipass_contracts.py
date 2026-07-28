@@ -17,6 +17,13 @@ from radiance.nodes.vfx.multipass.relight_comp import (
     RadianceMultipassComposite,
     RadianceMultipassRelight,
 )
+import pytest
+
+# Only the tests marked @pytest.mark.real_torch below need genuine tensors; the
+# rest run fine against conftest's stub. Opt out of the automatic module-level
+# skip so they keep running on the no-torch CI matrix.
+RADIANCE_TORCH_GATED = True
+
 
 try:
     import OpenEXR  # noqa: F401
@@ -26,11 +33,13 @@ except ImportError:
 
 
 class TestMultipassContracts(unittest.TestCase):
+    @pytest.mark.real_torch
     def test_optional_batch_allows_singleton_and_rejects_partial_batch(self):
         self.assertEqual(_match_optional_image(torch.zeros(1, 4, 4, 3), 3, 4, 4).shape[0], 3)
         with self.assertRaisesRegex(ValueError, "Batch mismatch"):
             _match_optional_image(torch.zeros(2, 4, 4, 3), 3, 4, 4)
 
+    @pytest.mark.real_torch
     def test_relight_treats_ao_as_occlusion_amount(self):
         relight = RadianceMultipassRelight()
         albedo = torch.ones(1, 2, 2, 3)
@@ -41,6 +50,7 @@ class TestMultipassContracts(unittest.TestCase):
         self.assertTrue(torch.allclose(open_result, torch.ones_like(open_result)))
         self.assertTrue(torch.allclose(blocked_result, torch.zeros_like(blocked_result)))
 
+    @pytest.mark.real_torch
     def test_relight_defaults_to_straight_rgb(self):
         relight = RadianceMultipassRelight()
         albedo = torch.ones(1, 1, 1, 3)
@@ -53,6 +63,7 @@ class TestMultipassContracts(unittest.TestCase):
         self.assertTrue(torch.allclose(straight, torch.ones_like(straight)))
         self.assertTrue(torch.allclose(premult, torch.full_like(premult, 0.25)))
 
+    @pytest.mark.real_torch
     def test_premultiplied_foreground_respects_depth_holdout(self):
         comp = RadianceMultipassComposite()
         foreground = torch.tensor([0.5, 0.0, 0.0]).view(1, 1, 1, 3)
@@ -65,6 +76,7 @@ class TestMultipassContracts(unittest.TestCase):
         )[0]
         self.assertTrue(torch.allclose(result, background))
 
+    @pytest.mark.real_torch
     def test_ssao_preserves_occlusion_shape_and_range(self):
         depth = torch.linspace(0.0, 1.0, 64).reshape(1, 8, 8)
         ao = _ssao_multisampled(depth, None, 2.0, 1.0, 4, False)
@@ -97,6 +109,7 @@ class TestMultipassContracts(unittest.TestCase):
     def test_bare_z_channel_maps_to_depth(self):
         self.assertEqual(aov_reader._layer_key_for_channel("Z"), ("depth", "Z"))
 
+    @pytest.mark.real_torch
     def test_master_gap_fill_preserves_present_renderer_pass(self):
         master = RadianceMultipassMaster()
         beauty = torch.rand(1, 8, 8, 3)
@@ -119,6 +132,7 @@ class TestMultipassContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "filename_prefix"):
             writer.write_passes(passes, "../escape", output_path=tempfile.mkdtemp())
 
+    @pytest.mark.real_torch
     def test_writer_rejects_lossy_data_aov_compression(self):
         writer = RadianceEXRPassesWriter()
         passes = {
@@ -148,6 +162,7 @@ class TestMultipassContracts(unittest.TestCase):
         self.assertTrue(torch.allclose(result[18][..., :2], motion[..., :2]))
         self.assertTrue(torch.allclose(result[-1], torch.full_like(result[-1], 0.7)))
 
+    @pytest.mark.real_torch
     def test_reader_rejects_invalid_manual_override_and_preserves_alpha(self):
         rgba = np.ones((2, 3, 4), dtype=np.float32)
         with mock.patch.object(aov_reader, "_read_multilayer_exr", return_value=({"beauty": rgba}, 2, 3, {})):

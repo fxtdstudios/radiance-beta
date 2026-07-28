@@ -49,13 +49,17 @@ try {
 	console.warn("[Radiance.IO] Failed to patch HTMLInputElement.accept", e);
 }
 
-const originalClick = HTMLInputElement.prototype.click;
-HTMLInputElement.prototype.click = function () {
-	if (this.type === "file" && (this.accept === "image/*" || this.accept === "video/*")) {
-		this.accept = "image/*,video/*,.exr,.dpx,.hdr";
+// Previously this replaced HTMLInputElement.prototype.click outright, which put
+// a Radiance frame on every input click in the whole application, ComfyUI's and
+// every other extension's. A capture-phase listener reaches the same inputs just
+// before the picker opens without touching a shared prototype.
+document.addEventListener("click", (ev) => {
+	const el = ev.target;
+	if (el instanceof HTMLInputElement && el.type === "file" &&
+		(el.accept === "image/*" || el.accept === "video/*")) {
+		el.accept = "image/*,video/*,.exr,.dpx,.hdr";
 	}
-	return originalClick.apply(this, arguments);
-};
+}, true);
 
 // FIX 7: Sleek Obsidian & Neon SVG placeholders for unsupported formats (Videos, EXR, DPX, HDR Sequences)
 const VIDEO_PLACEHOLDER_SVG = `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
@@ -164,19 +168,15 @@ try {
 	console.warn("[Radiance.IO] Failed to patch HTMLImageElement.src", e);
 }
 
-// Hook Element.prototype.setAttribute as a fail-safe uploader fallback
-try {
-	const originalSetAttribute = Element.prototype.setAttribute;
-	Element.prototype.setAttribute = function (name, value) {
-		let resolved = value;
-		if (name === "src" && this.tagName === "IMG") {
-			resolved = resolvePlaceholder(value);
-		}
-		return originalSetAttribute.call(this, name, resolved);
-	};
-} catch (e) {
-	console.warn("[Radiance.IO] Failed to patch Element.prototype.setAttribute", e);
-}
+// REMOVED: a global Element.prototype.setAttribute override.
+//
+// It was described as a "fail-safe fallback" behind the HTMLImageElement.src
+// property patch above, but the cost was routing every setAttribute call in
+// ComfyUI and in every other installed extension through Radiance's
+// resolvePlaceholder() -- an extra JS frame and two string compares on one of
+// the hottest methods in the DOM, for a path the property patch already covers.
+// If a specific call site is found that sets an <img src> via setAttribute and
+// needs placeholder resolution, patch that site rather than the prototype.
 
 // Widget visibility helpers — same pattern as radiance_vae_widgets.js /
 // radiance_sampler.js (three-mechanism: options.hidden for Nodes 2.0 Vue
