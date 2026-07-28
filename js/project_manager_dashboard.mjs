@@ -1,4 +1,5 @@
 // ALBABIT-FIX: resolve extension base at runtime so asset paths work regardless of the install folder name
+import { escapeHtml } from "./radiance_dom_utils.js";
 const _EXT_BASE = import.meta.url.replace(/\/[^/]+$/, '');
 
 const futureApi = {
@@ -73,16 +74,6 @@ const mockProjectManagerData = {
     activeProjectId: "hdr-test",
     source: "Mock fallback",
 };
-
-function escapeHtml(value) {
-    return String(value).replace(/[&<>"']/g, (char) => ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        "\"": "&quot;",
-        "'": "&#39;",
-    })[char]);
-}
 
 const NAV = [
     { key: "Dashboard", icon: "dashboard", active: true },

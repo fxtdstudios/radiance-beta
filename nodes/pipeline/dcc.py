@@ -84,8 +84,11 @@ def _handle(conn, addr=None):
                     conn.sendall((json.dumps({"ok": False, "error": f"unknown cmd: {cmd}"}) + "\n").encode())
             else:
                 buf += c
-    except Exception:
-        pass
+    except Exception as _exc:
+        logger.debug(
+            "[Radiance] _handle(): ignoring %s from `conn.settimeout(15.0)`: %s",
+            type(_exc).__name__, _exc,
+        )
     finally:
         conn.close()
 
@@ -133,8 +136,11 @@ def start_server(port: int = None, host: str = None) -> str:
         finally:
             try:
                 _SERVER.close()
-            except Exception:
-                pass
+            except Exception as _exc:
+                logger.debug(
+                    "[Radiance] _run(): ignoring %s from `_SERVER.close()`: %s",
+                    type(_exc).__name__, _exc,
+                )
             _SERVER = None
 
     _SERVER_THREAD = threading.Thread(target=_run, daemon=True)
@@ -148,8 +154,11 @@ def stop_server() -> str:
     if _SERVER:
         try:
             _SERVER.close()
-        except Exception:
-            pass
+        except Exception as _exc:
+            logger.debug(
+                "[Radiance] stop_server(): ignoring %s from `_SERVER.close()`: %s",
+                type(_exc).__name__, _exc,
+            )
         _SERVER = None
     if _SERVER_THREAD:
         _SERVER_THREAD.join(timeout=2.0)

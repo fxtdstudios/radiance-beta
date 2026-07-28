@@ -169,8 +169,11 @@ class RadianceSubpixelStabilizer:
                 denom_x = val_0_n1 + val_0_p1 - 2 * val_0_0
                 if abs(denom_x) > 1e-5:
                     dx_sub += (val_0_n1 - val_0_p1) / (2 * denom_x)
-            except Exception:
-                pass
+            except Exception as _exc:
+                logger.debug(
+                    "[Radiance] apply(): ignoring %s from `y_indices = [(dy_int + offset) % H for offset in [-1, 0, 1]]`: %s",
+                    type(_exc).__name__, _exc,
+                )
                 
             # Clamp maximum shifts to prevent wild drift on noise
             dx = max(min(dx_sub, float(max_shift)), -float(max_shift))

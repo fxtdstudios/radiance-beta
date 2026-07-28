@@ -7,13 +7,12 @@ OpenEXR>=3.2.0
 OpenImageIO>=3.0.0
 # DPX has no Pillow plugin; OpenImageIO is the VFX-industry-standard library for it.
 opencolorio>=2.3.0
-colour-science>=0.4.4
+# colour-science, einops and torchsde were declared here but imported nowhere
+# in the package; colour-science remains available via the `full` extra.
 transformers>=4.36.0
 scipy>=1.10.0
 defusedxml>=0.7.1
 imageio-ffmpeg>=0.4.9
 tqdm>=4.66.0
 aiohttp>=3.8.0
-einops>=0.7.0
-torchsde>=0.2.5,<1.0.0
 

@@ -40,10 +40,20 @@ CORE_DEPENDENCIES: Tuple[DependencySpec, ...] = (
     DependencySpec("OpenEXR", "OpenEXR", "EXR file support", "pip install OpenEXR", True),
 )
 
+# Optional packages that gate a specific, user-visible feature.
+#
+# The `colour-science` entry that used to live here claimed to unlock "advanced
+# color science"; nothing in the package has ever imported `colour`, so the row
+# was reporting on a feature that did not exist. The three added below are the
+# reverse case -- real feature gates whose absence produced a confusing runtime
+# failure rather than a line in this table.
 OPTIONAL_DEPENDENCIES: Tuple[DependencySpec, ...] = (
     DependencySpec("transformers", "transformers", "Depth Anything V2", "pip install transformers"),
-    DependencySpec("colour", "colour-science", "advanced color science", "pip install colour-science"),
     DependencySpec("defusedxml", "defusedxml", "secure CDL XML parsing", "pip install defusedxml"),
+    DependencySpec("OpenImageIO", "OpenImageIO", "DPX read/write", "pip install OpenImageIO"),
+    DependencySpec("PyOpenColorIO", "opencolorio", "OCIO color transforms", "pip install opencolorio"),
+    DependencySpec("imageio_ffmpeg", "imageio-ffmpeg", "bundled ffmpeg for video export",
+                   "pip install imageio-ffmpeg"),
 )
 
 

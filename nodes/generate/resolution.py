@@ -1098,8 +1098,11 @@ class RadianceResolution:
             if _old and _old != preview_path and os.path.exists(_old):
                 try:
                     os.remove(_old)
-                except OSError:
-                    pass
+                except OSError as _exc:
+                    logger.debug(
+                        "[Radiance] generate(): ignoring %s from `os.remove(_old)`: %s",
+                        type(_exc).__name__, _exc,
+                    )
             RadianceResolution._preview_paths[node_key] = preview_path
 
             preview_img.save(preview_path, "PNG")

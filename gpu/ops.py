@@ -141,6 +141,9 @@ def gpu_memory_info() -> dict:
             info["available_gb"] = round(free_mem / (1024 ** 3), 1)
             total_mem = torch.cuda.get_device_properties(0).total_memory
             info["total_gb"] = round(total_mem / (1024 ** 3), 1)
-    except Exception:
-        pass
+    except Exception as _exc:
+        logger.debug(
+            "[Radiance] gpu_memory_info(): ignoring %s from `if torch.cuda.is_available():`: %s",
+            type(_exc).__name__, _exc,
+        )
     return info

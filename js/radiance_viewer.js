@@ -7,6 +7,8 @@ import { RadianceNeuralMonitor } from "./radiance_neural.js";
 
 
 
+import { escapeHtml as _escapeHtml } from "./radiance_dom_utils.js";
+
 class RadianceViewer {
     static singletonHUD = null;
     static activeInstance = null;
@@ -38,14 +40,10 @@ class RadianceViewer {
         }
     }
 
+    // Delegates to the shared helper. The static stays because
+    // RadianceViewer.escapeHtml is referenced from other modules.
     static escapeHtml(str) {
-        if (typeof str !== 'string') str = String(str);
-        return str
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#39;');
+        return _escapeHtml(str);
     }
 
     static isDevToolsEnabled() {

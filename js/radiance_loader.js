@@ -5,6 +5,18 @@
 
 import { app } from "../../scripts/app.js";
 
+import {
+    forceWidgetReinsert as _forceWidgetReinsert,
+    setWidgetVisible as _setWidgetVisible,
+    getWidget,
+} from "./radiance_widget_utils.js";
+
+// Widget helpers now live in radiance_widget_utils.js; this module's only
+// local difference was the "combo" fallback type, which is passed through.
+function setWidgetVisible(widget, visible, node) {
+    _setWidgetVisible(widget, visible, node, { fallbackType: "combo" });
+}
+
 // Node definition identifiers
 const LOADER_NODES = ["RadianceUnifiedLoader", "RadianceImageLoader", "RadianceVideoLoader"];
 
@@ -321,10 +333,6 @@ const PRESET_CONFIGS = {
 
 const ALL_CLIP_WIDGETS = ["clip_l", "clip_g", "t5xxl", "llm_encoder", "text_projection"];
 
-function getWidget(node, name) {
-    return node.widgets?.find(w => w.name === name) ?? null;
-}
-
 /**
  * Fuzzy search through options values list for any item containing the hints
  */
@@ -551,72 +559,9 @@ function updatePresetDivergenceMarkers(node) {
  * switching back to "Custom"). Removing and re-inserting the widget at the
  * same index forces Vue to destroy and remount its component.
  */
-function _forceWidgetReinsert(widget, node) {
-    if (!node?.widgets) return;
-    const idx = node.widgets.indexOf(widget);
-    if (idx === -1) return;
-    node.widgets.splice(idx, 1);
-    node.widgets.splice(idx, 0, widget);
-}
-
 /**
  * Collapsible widget visibility helper
  */
-function setWidgetVisible(widget, visible, node) {
-    if (!widget) return;
-
-    if (!widget.options) widget.options = {};
-    widget.options.hidden = !visible;
-
-    widget.hidden = !visible;
-
-    if (visible) {
-        if (widget.type === "hidden") {
-            widget.type = widget._origType || "combo";
-            delete widget.computeSize;
-            delete widget._origComputeSize;
-            if (widget._origDraw !== undefined) {
-                widget.draw = widget._origDraw;
-                delete widget._origDraw;
-            } else {
-                delete widget.draw;
-            }
-            if (widget.inputEl) widget.inputEl.style.display = "";
-            if (widget.element)  widget.element.style.display  = "";
-            if (widget._origComputedHeight !== undefined) {
-                widget.computedHeight = widget._origComputedHeight;
-                delete widget._origComputedHeight;
-            } else {
-                widget.computedHeight = 32;
-            }
-        }
-    } else {
-        if (widget.type !== "hidden") {
-            widget._origType        = widget.type;
-            widget._origComputeSize = widget.computeSize;
-            widget._origComputedHeight = widget.computedHeight;
-            widget.type = "hidden";
-            widget.computeSize = () => [0, -4];
-            if (widget.draw) widget._origDraw = widget.draw;
-            widget.draw = function() {};
-            if (widget.inputEl) widget.inputEl.style.display = "none";
-            if (widget.element)  widget.element.style.display  = "none";
-            widget.computedHeight = 4;
-        }
-    }
-
-    // ALBABIT-FIX: always force a remove+reinsert, even if type/hidden didn't
-    // change this call. Empirically, once a widget's Vue component has been
-    // (re)mounted, it stops reacting to later type/hidden changes via a
-    // no-op splice(0,0) alone -- it keeps rendering its previous state until
-    // reinserted again (e.g. after "LTX -> Custom -> LTX", the 2nd LTX still
-    // showed every widget, even though widget.type was already correctly
-    // "hidden" again). Reinserting unconditionally guarantees every widget's
-    // component reflects its current state regardless of how many times it
-    // toggled before.
-    _forceWidgetReinsert(widget, node);
-}
-
 /**
  * Recalculate node dimensions and refresh the canvas layout cleanly
  */

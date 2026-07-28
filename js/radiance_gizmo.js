@@ -8,21 +8,13 @@
 
 import { app } from "../../scripts/app.js";
 
+import { escapeHtml } from "./radiance_dom_utils.js";
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 const PANEL_ID = "radiance-gizmo-modal";
 const ACCENT_COLOR = "#00a8ff"; // Radiance blue
 const BACKDROP_COLOR = "rgba(15, 15, 20, 0.9)";
 const GLASS_BORDER = "1.5px solid rgba(0, 168, 255, 0.25)";
-
-function escapeHtml(value) {
-    return String(value ?? "").replace(/[&<>"']/g, (char) => ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        "\"": "&quot;",
-        "'": "&#39;",
-    })[char]);
-}
 
 function escapeAttr(value) {
     return escapeHtml(value).replace(/`/g, "&#96;");
