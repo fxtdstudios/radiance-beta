@@ -13,7 +13,7 @@ Each group page includes the node purpose, when to use it, source category, inpu
 | [IO and Delivery](built-in-nodes/io-delivery.md) | 4 | Load, inspect, save, and package production media. These nodes are the safest entry and exit points for EXR, sequences, masks, and delivery files. |
 | [Generate, Loaders, and Sampling](built-in-nodes/generate.md) | 12 | Model loading, LoRA stacks, prompt conditioning, resolution setup, denoising, and sampling controls for Radiance generation workflows. |
 | [Color](built-in-nodes/color.md) | 13 | Primary grading, CDL exchange, curves, white balance, color-space conversion, OCIO context, and QC checks. |
-| [HDR and ACES](built-in-nodes/hdr-aces.md) | 15 | HDR analysis, tone mapping, ACES 2.0 transforms, SDR-to-HDR preparation, highlight recovery, relighting, and HDR latent support. |
+| [HDR and ACES](built-in-nodes/hdr-aces.md) | 17 | HDR analysis, tone mapping, ACES 2.0 transforms, SDR-to-HDR preparation, highlight recovery, relighting, and HDR latent support. |
 | [VFX, Masks, Optics, and Multipass](built-in-nodes/vfx.md) | 24 | Depth, optical flow, motion blur, lens effects, SAM masking, matting, inpaint crop/stitch, roto, video mask propagation, multipass extraction, relight, composite, and EXR pass writing. |
 | [Pipeline and Studio](built-in-nodes/pipeline.md) | 5 | Project containers, blend composites, local MCP bridge, Nuke send, and Resolve handoff. |
 | [Review, Viewer, and Preview](built-in-nodes/review.md) | 5 | Interactive viewer, lightweight viewer, focus peaking, contact sheets, and frame stamps. |
@@ -31,7 +31,7 @@ Each group page includes the node purpose, when to use it, source category, inpu
 
 ## Catalog coverage
 
-This reference covers **96 registered nodes** from the grouped Radiance catalog. User-generated `.gizmo` nodes are dynamic and should be documented with the studio workflow that creates them.
+This reference covers **98 registered nodes** from the grouped Radiance catalog. User-generated `.gizmo` nodes are dynamic and should be documented with the studio workflow that creates them.
 
 ## Fast lookup
 
@@ -76,6 +76,8 @@ This reference covers **96 registered nodes** from the grouped Radiance catalog.
 | `◎ HDR Diagnostics` / `RadianceHDRDiagnostics` | [HDR and ACES](built-in-nodes/hdr-aces.md) |
 | `◎ Clip Detector` / `RadianceClipDetector` | [HDR and ACES](built-in-nodes/hdr-aces.md) |
 | `◎ SDR to HDR Prepare` / `RadianceSDRToHDRPrepare` | [HDR and ACES](built-in-nodes/hdr-aces.md) |
+| `◎ SDR → HDR Recover` / `RadianceSDRToHDRRecover` | [HDR and ACES](built-in-nodes/hdr-aces.md) |
+| `◎ SDR → HDR Universal` / `RadianceSDRToHDRUniversal` | [HDR and ACES](built-in-nodes/hdr-aces.md) |
 | `◎ HDR Highlight Composite` / `RadianceHDRHighlightComposite` | [HDR and ACES](built-in-nodes/hdr-aces.md) |
 | `◎ SDR to HDR Expand` / `RadianceSDRtoHDRExpand` | [HDR and ACES](built-in-nodes/hdr-aces.md) |
 | `◎ HDR Synthesis Engine` / `RadianceHDRSynthesisEngine` | [HDR and ACES](built-in-nodes/hdr-aces.md) |

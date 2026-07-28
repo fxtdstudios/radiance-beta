@@ -30,6 +30,8 @@ Read EXR -> HDR Auto Log Select -> HDR Color Pipeline -> Generate/VFX -> HDR Dia
 | [◎ HDR Diagnostics](#hdr-diagnostics) | `RadianceHDRDiagnostics` | Analyzes the image or workflow state and returns reports that help catch delivery problems. |
 | [◎ Clip Detector](#clip-detector) | `RadianceClipDetector` | Performs the Radiance operation described by its inputs and outputs in the selected workflow group. |
 | [◎ SDR to HDR Prepare](#sdr-to-hdr-prepare) | `RadianceSDRToHDRPrepare` | Performs the Radiance operation described by its inputs and outputs in the selected workflow group. |
+| [◎ SDR → HDR Recover](#sdr--hdr-recover) | `RadianceSDRToHDRRecover` | Learned reconstruction confined to clipped highlights and crushed shadows. |
+| [◎ SDR → HDR Universal](#sdr--hdr-universal) | `RadianceSDRToHDRUniversal` | Selects deterministic expansion, learned recovery, or a blended hybrid. |
 | [◎ HDR Highlight Composite](#hdr-highlight-composite) | `RadianceHDRHighlightComposite` | Performs the Radiance operation described by its inputs and outputs in the selected workflow group. |
 | [◎ SDR to HDR Expand](#sdr-to-hdr-expand) | `RadianceSDRtoHDRExpand` | SDR to HDR Expand. |
 | [◎ HDR Synthesis Engine](#hdr-synthesis-engine) | `RadianceHDRSynthesisEngine` | HDR Synthesis Engine. |
@@ -440,6 +442,92 @@ Use `◎ SDR to HDR Prepare` when the graph reaches the SDR to HDR Prepare step 
 - The node returns `image` (`IMAGE`), `mask` (`MASK`), `stats_json` (`STRING`), `peak_linear` (`FLOAT`).
 - Preserve HDR masters as EXR when values above display white matter.
 - If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+
+## ◎ SDR → HDR Recover
+
+**Internal key:** `RadianceSDRToHDRRecover`
+**Category:** `FXTD STUDIOS/Radiance/◎ HDR`
+**Source:** `nodes/hdr/uplift_universal.py`
+**Function:** `recover`
+
+### What it does
+
+Runs a compatible trained RUDRA model to reconstruct information only in
+clipped highlights and crushed shadows. Pixels outside the returned masks are
+preserved exactly. Single images use the original VAE/RUDRA decoder path.
+Ordered video batches use the Phase 3 temporal residual model directly in
+scene-linear RGB, without flattening or temporally compressing the frames.
+
+The temporal model processes 5, 7, or 9 adjacent frames, predicts only a signed
+residual, motion-aligns neighboring frames with learned flow, and uses 3D
+convolutions for temporal context. Separate learned confidence maps control
+highlight and shadow reconstruction. Low-confidence pixels fall back to the
+deterministic expansion rather than accepting an uncertain generated result.
+
+Set `RADIANCE_TEMPORAL_RUDRA` to the trained checkpoint path, place
+`temporal_rudra_residual_ema.safetensors` in `models/radiance`, or provide the
+`temporal_checkpoint` widget. Architecture code alone is not a trained model.
+
+### Outputs
+
+| Output | Type | Description |
+| :--- | :--- | :--- |
+| `image` | `IMAGE` | Learned scene-linear or delivery-encoded HDR result. |
+| `highlight_mask` | `MASK` | Evidence mask for clipped luma or individual RGB channels. |
+| `shadow_mask` | `MASK` | Evidence mask for crushed linear-light shadows. |
+| `highlight_confidence` | `MASK` | Confidence-weighted highlight reconstruction region. |
+| `shadow_confidence` | `MASK` | Confidence-weighted shadow reconstruction region. |
+
+## ◎ SDR → HDR Universal
+
+**Internal key:** `RadianceSDRToHDRUniversal`
+**Category:** `FXTD STUDIOS/Radiance/◎ HDR`
+**Source:** `nodes/hdr/uplift_universal.py`
+**Function:** `convert`
+
+### What it does
+
+Orchestrates the two distinct products without hiding their semantics:
+
+- `Expand` performs fast deterministic inverse tone mapping and never loads RUDRA.
+- `Recover` performs masked learned reconstruction, with deterministic expansion as a safe fallback.
+- `Hybrid` expands first, then blends learned recovery only into clipped highlights and crushed shadows.
+
+Independent image batches are processed without cross-image temporal state.
+Select `Video Frames` to enable both EMA knee smoothing and Phase 3 temporal
+recovery when a compatible temporal checkpoint is installed.
+
+### Output choices
+
+| Choice | Primaries / transfer | Intended use |
+| :--- | :--- | :--- |
+| `Linear` | Scene-linear Rec.709 | General EXR working master. |
+| `Linear ACES2065-1 (AP0)` | Scene-linear ACES AP0 | Connect to RadianceWrite 16-bit EXR for interchange/finishing. |
+| `PQ (HDR10)` | Rec.2020 / ST.2084 | HDR10 delivery signal. |
+| `HLG` | Rec.2020 / ARIB STD-B67 | Broadcast/review delivery signal. |
+
+All RUDRA paths are constrained by `peak_nits`. Missing/incompatible temporal
+weights and low-confidence temporal regions safely fall back to deterministic
+math.
+
+### Outputs
+
+| Output | Type | Description |
+| :--- | :--- | :--- |
+| `image` | `IMAGE` | Expanded or encoded HDR image. |
+| `highlight_mask` | `MASK` | Pixels affected by highlight expansion/reconstruction. |
+| `shadow_mask` | `MASK` | Soft crushed-shadow QC/recovery region. |
+| `highlight_confidence` | `MASK` | Learned highlight confidence; zero for deterministic-only output. |
+| `shadow_confidence` | `MASK` | Learned shadow confidence; zero for deterministic-only output. |
+
+### Training Phase 3
+
+Use `scripts/training/train_temporal_rudra.py` with registered consecutive
+`.npz` pairs containing display-referred `sdr` and scene-linear `hdr` arrays.
+The training loss includes log-luminance reconstruction, separate highlight and
+shadow weighting, spatial gradients, temporal trajectory consistency, identity
+outside recovery masks, and confidence calibration. Genuine consecutive
+HDR/RAW footage is required; repeated still frames cannot train motion recovery.
 
 ## ◎ HDR Highlight Composite
 
