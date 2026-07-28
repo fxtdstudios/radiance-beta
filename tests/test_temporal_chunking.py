@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import sys
 import os
+import json
 import types
 import importlib
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 # ── Real torch check ──────────────────────────────────────────────────────────
 try:
@@ -187,6 +188,7 @@ class TestTemporalChunkingSmoke(unittest.TestCase):
         """Mock VAE: vae.decode(5D_latent) → (1, F_out, H, W, 3) tensor.
         F_out = frames_per_lat_frame * T_lat (simple linear ratio for testing)."""
         mock = MagicMock()
+        mock.latent_dim = 3
         def _decode(lat):
             T = lat.shape[2] if lat.ndim == 5 else 1
             return torch.zeros(1, T * frames_per_lat_frame, 4, 4, 3)
@@ -226,12 +228,57 @@ class TestTemporalChunkingSmoke(unittest.TestCase):
             display_tonemap="None", hdr_output=False,
             temporal_size=3, temporal_overlap=1,
         )
-        # TileEngine(6, 3, 1): stride=2 → (0,3),(2,5),(3,6) → 3 chunks of size 3
-        # Each chunk: 3 lat * 2 px/lat = 6 px frames
-        # Trim: pix_per_lat=6/3=2, pix_ov=round(1*2)=2 → trim 2 from each non-last
-        # Chunk0: 6-2=4, Chunk1: 6-2=4, Chunk2: 6 (last) → total 14
-        self.assertGreater(img.shape[0], 0)
+        self.assertEqual(img.shape[0], 12)
         self.assertIsInstance(img, torch.Tensor)
+
+    def test_temporal_chunking_restores_alpha_after_stitch(self):
+        decoder = _make_decoder()
+        mock_vae = self._make_mock_vae(frames_per_lat_frame=2)
+        latent_5d = torch.zeros(1, 4, 6, 4, 4)
+        alpha = torch.linspace(0.0, 1.0, 12).view(12, 1, 1, 1).expand(12, 4, 4, 3)
+
+        img, meta, _ = decoder.decode(
+            {"samples": latent_5d}, vae=mock_vae,
+            tile_size="Auto", overlap=64,
+            hdr_mode="Clip (SDR)", source_space="sRGB",
+            display_tonemap="None", hdr_output=False,
+            temporal_size=3, temporal_overlap=1, alpha=alpha,
+        )
+
+        self.assertEqual(tuple(img.shape), (12, 4, 4, 4))
+        self.assertTrue(torch.allclose(img[..., 3], alpha[..., 0]))
+        self.assertTrue(json.loads(meta)["alpha_restored"])
+
+    def test_temporal_chunking_rejects_ambiguous_alpha_batch(self):
+        decoder = _make_decoder()
+        mock_vae = self._make_mock_vae(frames_per_lat_frame=2)
+        with self.assertRaisesRegex(ValueError, "Alpha batch"):
+            decoder.decode(
+                {"samples": torch.zeros(1, 4, 6, 4, 4)}, vae=mock_vae,
+                tile_size="Auto", overlap=64,
+                hdr_mode="Clip (SDR)", source_space="sRGB",
+                display_tonemap="None", hdr_output=False,
+                temporal_size=3, temporal_overlap=1,
+                alpha=torch.ones(5, 4, 4, 3),
+            )
+
+    def test_temporal_chunking_exports_every_frame_when_requested(self):
+        decoder = _make_decoder()
+        decoder._save_rhdr = MagicMock(side_effect=lambda _frame, _out, prefix, precision: f"{prefix}.{precision}.rhdr")
+        sys.modules["folder_paths"].get_temp_directory = lambda: "temp"
+        img, meta, _ = decoder.decode(
+            {"samples": torch.zeros(1, 4, 6, 4, 4)},
+            vae=self._make_mock_vae(frames_per_lat_frame=2),
+            tile_size="Auto", overlap=64,
+            hdr_mode="Compress (Log)", source_space="ARRI LogC4",
+            display_tonemap="None", hdr_output=True,
+            temporal_size=3, temporal_overlap=1,
+            export_rhdr=True, rhdr_precision="f32",
+        )
+        metadata = json.loads(meta)
+        self.assertEqual(img.shape[0], 12)
+        self.assertEqual(decoder._save_rhdr.call_count, 12)
+        self.assertEqual(len(metadata["rhdr_export"]), 12)
 
     def test_temporal_chunking_not_fired_when_size_zero(self):
         """temporal_size=0 must disable chunking entirely."""
@@ -273,8 +320,6 @@ class TestLatentFormatMap(unittest.TestCase):
         self.assertEqual(self.fmt_map.get(16), "flux_16ch")
 
     def test_unknown_channel_count_returns_fallback(self):
-        vae_mod = _import_vae()
-        decoder = vae_mod.RadianceVAE4KDecode()
         # _latent_format_label() uses LATENT_FORMAT_MAP.get(ch, f"unknown_{ch}ch")
         result = self.fmt_map.get(99, "unknown_99ch")
         self.assertEqual(result, "unknown_99ch")

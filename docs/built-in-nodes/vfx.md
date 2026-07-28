@@ -769,7 +769,7 @@ Use `◎ Video Mask Propagator` when the graph reaches the Video Mask Propagator
 
 ### What it does
 
-Performs the Radiance operation described by its inputs and outputs in the selected workflow group.
+Estimates utility, material, and lighting passes from a beauty image. Renderer AOVs supplied through `source_passes` are preserved and only absent layers are estimated.
 
 ### When to use it
 
@@ -783,6 +783,7 @@ Use `◎ Multipass: Master VFX Extractor` when the graph reaches the Multipass: 
 | `depth_map` | Optional | `IMAGE` | - | - |
 | `normal_map` | Optional | `IMAGE` | - | - |
 | `prev_frame` | Optional | `IMAGE` | - | - |
+| `source_passes` | Optional | `RADIANCE_PASSES` | - | Preserves layers present in an AOV Reader bundle and estimates only missing layers. |
 | `luma_weights` | Optional | `(list(_LUMA_WEIGHTS.keys()), {'default': 'Rec.709 / sRGB'})` | - | - |
 | `auto_depth_model` | Optional | `(_AUTO_DEPTH_CHOICES, {'default': 'disabled'})` | - | - |
 | `depth_near_is_white` | Optional | `BOOLEAN` | `True` | - |
@@ -808,6 +809,7 @@ Use `◎ Multipass: Master VFX Extractor` when the graph reaches the Multipass: 
 | `ao_samples` | Optional | `INT` | `8` | - |
 | `lk_window_radius` | Optional | `INT` | `7` | - |
 | `motion_coherence` | Optional | `FLOAT` | `0.5` | - |
+| `batch_is_sequence` | Optional | `BOOLEAN` | `False` | Enable temporal motion smoothing only when the batch is an ordered sequence. |
 | `object_id_segments` | Optional | `INT` | `16` | - |
 | `object_id_spatial_weight` | Optional | `FLOAT` | `0.25` | - |
 
@@ -833,8 +835,10 @@ Use `◎ Multipass: Master VFX Extractor` when the graph reaches the Multipass: 
 | `midtone_mask` | `IMAGE` | Output produced by the `midtone_mask` socket. |
 | `highlight_mask` | `IMAGE` | Output produced by the `highlight_mask` socket. |
 | `reflection_mask` | `IMAGE` | Output produced by the `reflection_mask` socket. |
-| `motion_vector` | `IMAGE` | Output produced by the `motion_vector` socket. |
+| `motion_vector` | `IMAGE` | Raw signed optical flow as XY0; EXR output uses `MV.X` and `MV.Y`. |
 | `object_id` | `IMAGE` | Output produced by the `object_id` socket. |
+| `motion_visualization` | `IMAGE` | HSV visualization of motion direction and magnitude. |
+| `alpha` | `IMAGE` | Preserved source alpha, or white when no alpha is available. |
 
 ### Practical notes
 
@@ -879,6 +883,7 @@ Use `◎ Radiance EXR Passes Writer` near the end of the graph after the image, 
 ### Practical notes
 
 - The node returns `output_path` (`STRING`).
+- `filename_prefix` must be a filename without path components. Data AOVs are promoted to 32-bit float, and lossy B44/DWA compression is rejected for those layers.
 - Preserve HDR masters as EXR when values above display white matter.
 - If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
 
@@ -891,7 +896,7 @@ Use `◎ Radiance EXR Passes Writer` near the end of the graph after the image, 
 
 ### What it does
 
-Performs the Radiance operation described by its inputs and outputs in the selected workflow group.
+Relights supplied material and utility passes with a directional or point light. Point lights use `world_position` when connected and otherwise reconstruct an approximate view-space position from depth.
 
 ### When to use it
 
@@ -911,6 +916,7 @@ Use `◎ Multipass: Real PBR Relight` when the graph reaches the Multipass: Real
 | `alpha` | Optional | `IMAGE` | - | - |
 | `shadow_mask` | Optional | `IMAGE` | - | - |
 | `depth_map` | Optional | `IMAGE` | - | - |
+| `world_position` | Optional | `IMAGE` | - | Preferred position source for point lights; falls back to approximate depth reconstruction. |
 | `normal_convention` | Optional | `(_NORMAL_INPUTS, {'default': 'OpenGL (Y-Up)'})` | - | - |
 | `light_type` | Optional | `(_LIGHT_TYPES, {'default': 'Directional'})` | - | - |
 | `light_x` | Optional | `FLOAT` | `-0.35` | - |
@@ -923,7 +929,9 @@ Use `◎ Multipass: Real PBR Relight` when the graph reaches the Multipass: Real
 | `ambient` | Optional | `FLOAT` | `0.03` | - |
 | `specular_intensity` | Optional | `FLOAT` | `1.0` | - |
 | `depth_scale` | Optional | `FLOAT` | `10.0` | - |
+| `depth_near_is_white` | Optional | `BOOLEAN` | `True` | Sets the convention used by the depth fallback. |
 | `mix_with_beauty` | Optional | `FLOAT` | `0.0` | - |
+| `output_premultiplied` | Optional | `BOOLEAN` | `False` | Keep disabled for the Composite node's default straight-RGB input contract. |
 
 ### Outputs
 
@@ -939,6 +947,7 @@ Use `◎ Multipass: Real PBR Relight` when the graph reaches the Multipass: Real
 ### Practical notes
 
 - The node returns `relit` (`IMAGE`), `diffuse_light` (`IMAGE`), `specular_light` (`IMAGE`), `lighting` (`IMAGE`), `alpha` (`IMAGE`), `relight_info` (`STRING`).
+- AO is an occlusion amount: `0` is open and `1` is fully occluded. Relight converts it to ambient accessibility internally.
 - If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
 
 ## ◎ Multipass: VFX Composite
@@ -950,7 +959,7 @@ Use `◎ Multipass: Real PBR Relight` when the graph reaches the Multipass: Real
 
 ### What it does
 
-Performs the Radiance operation described by its inputs and outputs in the selected workflow group.
+Composites straight or premultiplied foregrounds over a background with optional depth holdout, shadow darkening, and light wrap.
 
 ### When to use it
 
@@ -1019,11 +1028,14 @@ Use `◎ Multipass: AOV Reader` when your footage is CG and you already have gro
 | Output | Type | Description |
 | :--- | :--- | :--- |
 | `passes` | `RADIANCE_PASSES` | Bundle of all split layers, interchangeable with the Master extractor's `passes`. |
-| `beauty`, `albedo`, `normal_map`, `depth`, `roughness`, `specular`, `metallic`, `ao`, `emission`, `transmission`, `highpass`, `world_position`, `curvature`, `shadow_mask`, `midtone_mask`, `highlight_mask`, `reflection_mask`, `motion_vector`, `segmentation_id` | `IMAGE` | Individual passes mapped from the EXR's named layers; black where the layer is absent. |
+| `beauty`, `albedo`, `normal_map`, `depth`, `roughness`, `specular`, `metallic`, `ao`, `emission`, `transmission`, `highpass`, `world_position`, `curvature`, `shadow_mask`, `midtone_mask`, `highlight_mask`, `reflection_mask`, `motion_vector`, `segmentation_id` | `IMAGE` | Individual passes mapped from the EXR's named layers; black where the layer is absent. Motion vectors remain raw XY0. |
+| `motion_visualization`, `alpha` | `IMAGE` | Motion preview and preserved beauty alpha. |
 
 ### Practical notes
 
 - Output order and types **mirror `RadianceMultipassMaster` exactly**, so the two nodes are drop-in interchangeable into the EXR Passes Writer and relight/composite nodes.
+- Connect `passes` to the Master's `source_passes` and connect Reader `beauty` to Master `beauty` to preserve real AOVs while filling only missing layers.
+- Data-window pixels are placed into a canvas that includes both display-window and overscan bounds; the original bounds are retained in the pass bundle metadata.
 - Scene-linear values pass through unchanged (no normalization) — highlights above 1.0 are preserved.
 - A per-read report of which layers were found and how they mapped is logged to the console; check it if a pass comes through black unexpectedly.
 - Requires the `OpenEXR` + `Imath` packages; the node raises a clear error if they are missing rather than failing silently.
