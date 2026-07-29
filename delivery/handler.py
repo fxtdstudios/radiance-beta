@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import tempfile
+import threading
 import re
 import math
 import traceback
@@ -93,6 +95,37 @@ def _warn_on_missing_grade_keys(grading: dict) -> None:
             "cached older radiance_viewer.js -- hard-refresh ComfyUI.",
             len(missing), ", ".join(missing),
         )
+
+
+#: Serialises the read-modify-write of the session log.
+#:
+#: Deliveries run in a thread-pool executor, so two exports finishing close
+#: together both read the file, both append their own entry, and the second
+#: write loses the first. The write itself also went straight to the final
+#: path, so a crash or a full disk mid-dump left a truncated file that the next
+#: read discarded entirely -- the whole history, not just the last entry.
+_SESSIONS_LOCK = threading.Lock()
+
+
+def _write_sessions_atomically(path: str, sessions: list) -> None:
+    """Write the session log via a temp file + os.replace, under a lock."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    with _SESSIONS_LOCK:
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".radiance_sessions.",
+                                   suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(sessions, handle, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)          # atomic on POSIX and on Windows
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
 
 def _resolve_write_format(ui_format: str) -> str:
@@ -748,8 +781,7 @@ async def radiance_deliver_endpoint(request):
                 _sessions.append(_session_entry)
                 if len(_sessions) > 500:
                     _sessions = _sessions[-500:]
-                with open(_sessions_path, 'w') as _sf:
-                    json.dump(_sessions, _sf, indent=2)
+                _write_sessions_atomically(_sessions_path, _sessions)
                 logger.debug(f'[Deliver v3.0.0] Session logged → {_sessions_path}')
             except Exception as _e:
                 logger.debug(f'[Deliver v3.0.0] Session log failed (non-fatal): {_e}')
