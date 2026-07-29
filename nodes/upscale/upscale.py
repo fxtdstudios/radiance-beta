@@ -477,6 +477,48 @@ def _as_2x(upscale_fn: Any) -> Any:
     return _fn_2x
 
 
+_warned_blend_modes: set = set()
+
+
+def _tile_weight_map(blend_mode: str, tile_h: int, tile_w: int, overlap: int,
+                     device: torch.device) -> torch.Tensor:
+    """Per-tile blending weight for the requested mode.
+
+    "gaussian_feather" and "linear" are real and different. "laplacian_pyramid"
+    is not implemented -- a true Laplacian blend needs the tiles decomposed and
+    recombined per band, not a per-pixel weight -- so it falls back to the
+    Gaussian feather and says so once, rather than silently pretending.
+    """
+    mode = (blend_mode or "").lower()
+
+    if mode == "linear":
+        from radiance.core.tiling import blend_weight_2d
+        ov = max(int(overlap), 0)
+        return blend_weight_2d(
+            tile_h, tile_w,
+            overlap_top=ov, overlap_bottom=ov,
+            overlap_left=ov, overlap_right=ov,
+            device=device, dtype=torch.float32,
+        )
+
+    if mode not in ("gaussian_feather", "laplacian_pyramid"):
+        if mode not in _warned_blend_modes:
+            _warned_blend_modes.add(mode)
+            logger.warning(
+                "[Radiance/Upscale] Unknown blend_mode %r; using the Gaussian "
+                "feather.", blend_mode,
+            )
+    elif mode == "laplacian_pyramid" and mode not in _warned_blend_modes:
+        _warned_blend_modes.add(mode)
+        logger.info(
+            "[Radiance/Upscale] blend_mode='laplacian_pyramid' is not "
+            "implemented and uses the Gaussian feather. Choose 'linear' for a "
+            "genuinely different weighting."
+        )
+
+    return _build_gaussian_weight_map(tile_h, tile_w, overlap, device)
+
+
 def tiled_upscale(
     images:     torch.Tensor,                        # (B,H,W,C) float32 [0,1]
     upscale_fn: Any,                                  # callable: (B,H,W,C) → (B,H',W',C)
@@ -559,8 +601,13 @@ def tiled_upscale(
             utw  = tw * scale
             up_tile = up_tile[:, :uth, :utw, :]     # trim padding
 
-            # Build Gaussian weight map in scaled space
-            w_map  = _build_gaussian_weight_map(uth, utw, overlap * scale, device)
+            # Build the tile weight map in scaled space.
+            #
+            # `blend_mode` used to appear exactly once in this function -- in the
+            # signature -- so all three options produced the identical Gaussian
+            # feather while the node's info string reported back whichever mode
+            # the user had selected.
+            w_map  = _tile_weight_map(blend_mode, uth, utw, overlap * scale, device)
             w_map  = w_map.expand(B, 1, uth, utw)
 
             # Confidence: distance from tile centre (centre = confident; edges = less so)

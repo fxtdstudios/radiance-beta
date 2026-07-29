@@ -1333,8 +1333,22 @@ class RadianceRead:
                 "default": "Skip",
                 "tooltip": "How to handle missing sequence frames. Black inserts zero frames, Skip omits them, Error raises.",
             }),
-        }, "hidden": {
-            "reload": ("INT", {"default": 0, "tooltip": "Bump to force re-read."}),
+            # `reload` used to live in "hidden". ComfyUI only populates a hidden
+            # key when its VALUE is one of the magic strings (PROMPT, UNIQUE_ID,
+            # EXTRA_PNGINFO, ...) -- a widget spec there is simply dropped, so
+            # it never reached read() or IS_CHANGED. The frontend also builds
+            # widgets from required/optional only, so js/radiance_io.js could
+            # not find a widget named "reload" and bailed before adding the
+            # button. The RELOAD button has therefore never rendered, and a user
+            # whose file changed on disk without an mtime or size change (a
+            # network share, an atomic replace) had no way to force a re-read.
+            "reload": ("INT", {
+                "default": 0,
+                "min": 0,
+                "max": 2 ** 31 - 1,
+                "tooltip": "Bump to force a re-read of the file, for when the "
+                           "contents changed but the timestamp did not.",
+            }),
         }}
 
     @classmethod

@@ -845,9 +845,18 @@ def apply_pag_to_model(model, pag_scale: float):
         def pag_attention_patch(q, k, v, extra_options):
 
             cond_or_uncond = extra_options.get("cond_or_uncond", [0])
-            block_type = extra_options.get("block_type", "unknown")
 
-            if 1 not in cond_or_uncond or block_type != "middle":
+            # ComfyUI's attn1 patch sets extra_options["block"] = ("middle", i)
+            # plus "block_index". There is no "block_type" key -- this used to
+            # read `extra_options.get("block_type", "unknown")` and bail unless
+            # it equalled "middle", so the default never matched and the patch
+            # returned q, k, v unmodified on EVERY call while the line below
+            # still logged "PAG applied with scale ...". Read the key that
+            # exists, and tolerate either shape.
+            block = extra_options.get("block")
+            block_name = block[0] if isinstance(block, (tuple, list)) and block else block
+
+            if 1 not in cond_or_uncond or block_name != "middle":
                 return q, k, v
 
             k_out = k.clone()
@@ -865,14 +874,30 @@ def apply_pag_to_model(model, pag_scale: float):
                     start = idx * chunk_size
                     end = min(start + chunk_size, batch_size)
 
-                    k_out[start:end] = q[start:end]
-                    v_out[start:end] = q[start:end]
+                    # Blend by pag_scale rather than replacing outright.
+                    # `pag_scale` was previously used only as an on/off gate and
+                    # stashed in model_options where nothing read it, so 0.1 and
+                    # 5.0 produced bit-identical results.
+                    #
+                    # NOTE: this is a self-attention perturbation, not the full
+                    # Ahn et al. 2024 method -- true PAG needs a third forward
+                    # pass combined as eps_u + s(eps_c - eps_u) + s_pag(eps_c -
+                    # eps_p), which ComfyUI's patch API cannot express here. The
+                    # tooltip says so.
+                    w = float(min(max(pag_scale, 0.0), 1.0))
+                    k_out[start:end] = k[start:end] * (1.0 - w) + q[start:end] * w
+                    v_out[start:end] = v[start:end] * (1.0 - w) + q[start:end] * w
 
             return q, k_out, v_out
 
         model_pag.set_model_attn1_patch(pag_attention_patch)
 
-        logger.info(f"PAG applied with scale {pag_scale} (attention hook active)")
+        logger.info(
+            "PAG-style self-attention perturbation applied at scale %.3f. This "
+            "is not the full Ahn et al. 2024 method (no separate perturbed "
+            "forward pass); treat it as a mid-block attention guidance term.",
+            pag_scale,
+        )
         return model_pag
 
     except (AttributeError, RuntimeError, TypeError) as e:

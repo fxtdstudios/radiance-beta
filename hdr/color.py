@@ -35,6 +35,12 @@ from radiance.color.transfer import (
 
 logger = logging.getLogger("radiance.hdr.color")
 
+#: Scene-light value that BT.2100's HLG OETF maps to signal 0.75 — the reference
+#: white point (~203 nits on a 1000-nit display, per BT.2408). Diffuse white must
+#: land here, not at 1.0.
+_HLG_DIFFUSE_WHITE_SCENE = 0.26
+
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                      LUMINANCE WEIGHT CONSTANTS
@@ -551,7 +557,17 @@ class ColorSpaceConvert:
                 ),
                 "chromatic_adaptation": (
                     cls.CHROMATIC_ADAPTATIONS,
-                    {"default": "Bradford"},
+                    {
+                        "default": "Bradford",
+                        "tooltip": (
+                            "Chromatic adaptation method. NOTE: the D60<->D65 "
+                            "adaptation is already baked into the precomputed "
+                            "FAST_MATRICES this node converts with (Bradford), "
+                            "so changing this does not currently alter the "
+                            "output. Kept for workflow compatibility; selecting "
+                            "a non-Bradford method logs a warning."
+                        ),
+                    },
                 ),
                 "use_gpu": ("BOOLEAN", {"default": True,
                     "tooltip": "Run the effect on GPU via CUDA/MPS. Falls back to CPU if unavailable.",
@@ -727,6 +743,15 @@ class ColorSpaceConvert:
         use_gpu: bool = True,
     ) -> Tuple[torch.Tensor]:
 
+        # The conversion below goes through a Rec.709 hub using precomputed
+        # FAST_MATRICES, which already carry a Bradford D60<->D65 adaptation.
+        # `_get_gpu_adaptation_matrix` exists and is called from nowhere in the
+        # repo, so this widget has never changed a single pixel: "Bradford" and
+        # "None" return bit-identical tensors. Say so rather than letting a
+        # colourist believe they picked a CAT.
+        if chromatic_adaptation != "Bradford":
+            _warn_adaptation_is_baked_in(chromatic_adaptation)
+
         if source_space == target_space:
             # Still apply exposure/gamma if requested
             if exposure != 0.0 or gamma_adjust != 1.0:
@@ -850,6 +875,23 @@ _BRADFORD = np.array(
 def _xy_to_XYZ(xy) -> np.ndarray:
     x, y = xy
     return np.array([x / y, 1.0, (1.0 - x - y) / y], dtype=np.float64)
+
+
+_warned_adaptation_methods: set = set()
+
+
+def _warn_adaptation_is_baked_in(method: str) -> None:
+    """One warning per method per process — this is a config fact, not an event."""
+    if method in _warned_adaptation_methods:
+        return
+    _warned_adaptation_methods.add(method)
+    logger.warning(
+        "[Radiance] chromatic_adaptation=%r has no effect. The white-point "
+        "adaptation is baked into the precomputed conversion matrices "
+        "(Bradford), so every option on this widget produces identical output. "
+        "Selecting a different CAT would need the hub conversion rebuilt.",
+        method,
+    )
 
 
 def _chromatic_adaptation(src_xy, dst_xy) -> np.ndarray:
@@ -1471,7 +1513,30 @@ class ACES2OutputTransform:
             else:
                 peak_nits = 1000.0
         elif is_cinema:
-            peak_nits = 48.0  # DCI white
+            # 48 nits is the LUMINANCE OF CODE VALUE 1.0 on a DCI projector, not
+            # a scale factor on the scene. Feeding 48 here made peak_scale 0.48,
+            # so the tonescale knee landed at 0.432 with 0.048 of headroom and
+            # the shoulder saturated almost immediately: measured, ACEScg neutral
+            # 0.40 -> 0.75403, 0.50 -> 0.75405, 8.0 -> 0.75405. A theatrical DCP
+            # was flat above 0.4 scene-linear with a peak white of 0.754, i.e.
+            # about 27 nits instead of 48. DCI is a full-range [0,1] encode, so
+            # the tonescale runs SDR-normalised and the 48 belongs in the info
+            # string, not the maths.
+            peak_nits = 100.0
+        elif is_hlg:
+            # HLG is a RELATIVE system. BT.2100's OETF puts HLG reference white
+            # (diffuse white, ~203 nits on a 1000-nit display per BT.2408) at
+            # scene 0.26 -> signal 0.75, and signal 1.0 is the display peak.
+            #
+            # This branch used to fall through to `peak_luminance`, which
+            # defaults to 100, so the tonescale asymptoted at 1.0 and _hlg_encode
+            # mapped diffuse white straight to signal 1.0: measured 18% grey ->
+            # 127.5 nits (BT.2408 wants ~26) and diffuse white -> 1000 nits
+            # (wants ~203). Every HLG deliverable was roughly 5x over.
+            #
+            # Run the tonescale with diffuse white at 1.0 and its asymptote at
+            # 1/0.26, then scale by 0.26 before the OETF (see step 9).
+            peak_nits = 100.0 / _HLG_DIFFUSE_WHITE_SCENE
         else:
             peak_nits = peak_luminance
 
@@ -1496,7 +1561,8 @@ class ACES2OutputTransform:
         if is_pq:
             output = self._pq_encode(output, peak_nits)
         elif is_hlg:
-            output = self._hlg_encode(output)
+            # Place diffuse white at the BT.2100 reference point before the OETF.
+            output = self._hlg_encode(output * _HLG_DIFFUSE_WHITE_SCENE)
         elif is_cinema:
             # DCI gamma 2.6
             output = np.power(np.clip(output, 0, 1), 1 / 2.6)
@@ -1507,7 +1573,16 @@ class ACES2OutputTransform:
         output = np.clip(output, 0, 1)
 
         info = f"ACES 2.0 | {input_colorspace} → {output_transform}"
-        if is_hdr:
+        if is_cinema:
+            # 48 nits is the projector luminance of code value 1.0; the maths
+            # above runs SDR-normalised.
+            info += " | Peak: 48 nits (DCI white)"
+        elif is_hlg:
+            # HLG is relative — the display peak is a property of the monitor,
+            # not of this encode. What this transform fixes is where diffuse
+            # white lands relative to the OETF.
+            info += " | HLG relative (diffuse white at the BT.2100 reference)"
+        elif is_hdr:
             info += f" | Peak: {peak_nits} nits"
         info += f" | Surround: {surround}"
 
