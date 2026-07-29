@@ -67,6 +67,54 @@ comp application rather than round-tripping it.
 
 ---
 
+## Video
+
+### An untagged video is passed through, not decoded
+
+**What happens.** With `color_space` on Auto, Radiance reads the container's
+transfer characteristics and decodes accordingly. A file with no colour tags —
+which is most files an editor hands you — has nothing to read, so the values
+pass through as if they were already scene-linear. They are not: a Rec.709
+delivery is gamma encoded, and every exposure, blur and blend downstream is
+then operating on the wrong numbers.
+
+Radiance logs a warning naming the file when this happens. It does not guess,
+because guessing wrong is silent and guessing right is luck.
+
+**What to do.** Set `color_space` explicitly for untagged sources —
+`Rec.709 (BT.1886)` for a graded delivery, the camera curve for a log MOV.
+
+### Video decode is capped by RAM, not streamed
+
+**What happens.** A clip is decoded to a single batched tensor. 240 frames of
+4K RGBA float32 is about 31 GB. There is no windowed or streaming mode.
+
+**What to do.** Use `max_video_frames` and `proxy_scale` while building a
+graph, and process long clips in chunks with `start_frame` / `end_frame`.
+
+### Interlaced sources are not deinterlaced
+
+**What happens.** `field_order` is read and reported in the node's metadata, but
+no deinterlace is applied. An interlaced broadcast source arrives with combing.
+
+**What to do.** Deinterlace upstream (`ffmpeg -vf yadif`) or in your NLE.
+
+### `start_frame` means something different for video
+
+**What happens.** For a sequence it is the frame number in the filename, which
+is why it defaults to 1001. For a video it is a zero-based offset into the
+clip. Taken literally, the 1001 default would skip the first 1001 frames of
+every clip.
+
+Radiance treats a start past the end of the clip as "not set" and reads the
+whole thing, logging what it did. A start *inside* the clip is honoured as a
+deliberate trim.
+
+**What to do.** Nothing, unless you want a trim — in which case set
+`start_frame` to a frame number that exists in the clip.
+
+---
+
 ## Sampling
 
 ### PAG is not the published method

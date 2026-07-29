@@ -30,12 +30,34 @@ Radiance Read → colour transform → work → Radiance Write
 - **DPX needs OpenImageIO.** There is no Pillow plugin for it. The Digital
   Cinema nodes will tell you if the package is missing.
 
-## Known limitation
+## Reading video
+
+Video decodes through one raw ffmpeg pipe at the source's own bit depth — 10-bit
+ProRes 422, 12-bit ProRes 4444, DNxHR HQX and 10-bit HEVC all survive intact.
+
+- **ProRes 4444 alpha reaches the `mask` output.** 422 in any flavour has no
+  alpha channel; only 4444 and 4444 XQ do.
+- **`start_frame`, `end_frame` and `frame_step` apply to video**, on the clip's
+  own zero-based numbering. `start_frame` defaults to 1001 because that is the
+  sequence convention, so a start past the end of a clip is treated as unset
+  rather than decoding nothing.
+- **Colour tags are read.** On Auto, a file tagged `bt709`, `smpte2084` or
+  `arib-std-b67` decodes through the matching curve and the node logs which one.
+  An *untagged* file passes through unchanged and warns — a Rec.709 delivery is
+  not scene-linear, and Radiance will not guess for you.
+- **Read raises on failure.** A missing file, a corrupt MOV or a truncated clip
+  turns the node red instead of yielding black frames.
+
+## Known limitations
 
 The EXR reader ignores the display window, so an overscan render (a standard
 Nuke output) comes back offset and at the data-window resolution with no
 warning. Crop to the display window in your comp application before bringing
 overscan plates into Radiance.
+
+A clip is decoded to one batched tensor, so RAM is the ceiling — 240 frames of
+4K RGBA float32 is about 31 GB. Interlaced sources are reported but not
+deinterlaced.
 
 ## Nodes in this section (5)
 
@@ -43,7 +65,7 @@ overscan plates into Radiance.
 | :--- | :--- | :--- |
 | [DPX Read](#dpx-read) | `RadianceDigitalCinemaRead` |  |
 | [DPX Write](#dpx-write) | `RadianceDigitalCinemaWrite` |  |
-| [Read](#read) | `RadianceRead` | Read images or EXR sequences from disk into the pipeline. |
+| [Read](#read) | `RadianceRead` | Read an image, EXR, video or numbered sequence into the pipeline |
 | [Write](#write) | `RadianceWrite` | Write images or EXR sequences to disk with configurable format options. |
 | [Write EXR](#write-exr) | `RadianceEXRMultiPart` | Read or write multi-part OpenEXR files with named channel layers. |
 
@@ -108,7 +130,7 @@ Backward-compatible Digital Cinema writer shim.
 **Menu:** `FXTD STUDIOS/Radiance/Load & Save`  
 **Source:** `nodes_io.py`  
 
-Read images or EXR sequences from disk into the pipeline.
+Read an image, EXR, video or numbered sequence into the pipeline. Video decodes at the source bit depth through ffmpeg, keeps ProRes 4444 alpha on the mask output, and honours the file's colour tags.
 
 ### Inputs
 
@@ -117,11 +139,11 @@ Read images or EXR sequences from disk into the pipeline.
 | `browse` | Yes | choice of ``, `x.jpg` | `` |  | Browse or upload a file from disk. • Click the upload icon (📎) to open a native file picker. • Supports images (PNG, JPG, TIFF, EXR, DPX, HDR, WebP) and video (MP4, MOV, MXF, AVI, WebM, MKV). • Uploaded files are copied to ComfyUI's input• Leave blank and fill in 'path' below for absolute / network / sequence paths. |
 | `media_type` | No | choice of `Auto`, `Image`, `Video`, `Sequence` | `Auto` |  | Override auto-detection. Auto infers from path extension and pattern. |
 | `path` | No | `STRING` | `` |  | Optional — used only when 'browse' is left blank. Accepts any absolute path, UNC network path, or sequence pattern: Sequence patterns: /frames/f.%04d.exr · /frames/f.####.png · /dir/ Network paths: /mnt/nas/renders/shot or \\server\share\shot Format is auto-detected from extension. |
-| `color_space` | No | choice of `Auto / Linear (pass-through)`, `sRGB`, `ARRI LogC4`, `ARRI LogC3`, `Sony S-Log3`, `Panasonic V-Log`, `DaVinci Intermediate`, `ACEScg`, … (+1 more) | `Auto / Linear (pass-through)` |  | Decode the input from this color space to scene-linear before processing. |
-| `start_frame` | No | `INT` | `1001` | 0 – 99999 | First frame index (sequences only). |
-| `end_frame` | No | `INT` | `0` | 0 – 99999 | Last frame index (0 = read all frames). |
-| `frame_step` | No | `INT` | `1` | 1 – 100 | Step size — e.g. 2 reads every other frame. |
-| `max_video_frames` | No | `INT` | `0` | 0 – 99999 | Cap on decoded video frames (0 = all frames). Large videos use a lot of RAM. |
+| `color_space` | No | choice of `Auto / Linear (pass-through)`, `Rec.709 (BT.1886)`, `sRGB`, `ARRI LogC4`, `ARRI LogC3`, `Sony S-Log3`, `Panasonic V-Log`, `Canon Log 3`, … (+6 more) | `Auto / Linear (pass-through)` |  | Decode the input from this color space to scene-linear before processing. |
+| `start_frame` | No | `INT` | `1001` | 0 – 99999 | First frame to read. • Sequence: the frame number in the filename (1001 is the usual VFX start). • Video: a 0-based offset into the clip. The 1001 default is a sequence convention, so it is ignored for any clip shorter than that rather than reading nothing. |
+| `end_frame` | No | `INT` | `0` | 0 – 99999 | Last frame to read, inclusive. 0 = to the end. Applies to sequences and video. |
+| `frame_step` | No | `INT` | `1` | 1 – 100 | Step size — e.g. 2 reads every other frame. Applies to sequences and video. |
+| `max_video_frames` | No | `INT` | `0` | 0 – 99999 | Hard cap on decoded video frames (0 = all). Frames are float32 RGB in RAM: 240 frames of 4K RGBA is about 31 GB, so cap this while building a graph. |
 | `proxy_scale` | No | `FLOAT` | `0.0` | 0.0 – 1.0, step 0.05 | Downscale factor for proxy preview (0 = full resolution). 0.5 = half res for faster iteration. |
 | `missing_frames` | No | choice of `Error`, `Black`, `Skip` | `Skip` |  | How to handle missing sequence frames. Black inserts zero frames, Skip omits them, Error raises. |
 | `reload` | No | `INT` | `0` | 0 – 2147483647 | Bump to force a re-read of the file, for when the contents changed but the timestamp did not. |
@@ -130,8 +152,8 @@ Read images or EXR sequences from disk into the pipeline.
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `image` | `IMAGE` |  |
-| `mask` | `MASK` |  |
+| `image` | `IMAGE` | Frames as a batch. Scene-linear once color_space has decoded them. |
+| `mask` | `MASK` | Alpha. For a ProRes 4444 or any RGBA source this is the file's own matte; otherwise zeros. |
 
 ---
 
