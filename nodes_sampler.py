@@ -702,26 +702,48 @@ class RadianceSamplerPro:
             if idx >= len(s_vals) - 1:
                 continue
 
-            # Subsection of schedule from r_sigma down to the next waypoint
-            sub_sigmas = s_vals[idx:min(idx + restart_count + 2, len(s_vals))]
+            # Run the restart segment all the way back DOWN to the end of the
+            # schedule.
+            #
+            # This used to be `s_vals[idx : idx+restart_count+2]`, which stops a
+            # couple of steps in and leaves the latent partially noised. Measured
+            # on a 20-step Karras schedule (14.615 -> 0.0292): restart_sigma 2.0
+            # with count 2 returned a latent still at sigma 0.7913, and
+            # restart_sigma 5.0 left it at 2.6415. `_apply_restarts` is called
+            # after the main schedule has already finished, so the segment has to
+            # reach 0 or the output is simply noise.
+            sub_sigmas = s_vals[idx:]
             if len(sub_sigmas) < 2:
                 continue
 
             for _ in range(restart_count):
-                # Re-inject noise at r_sigma level
-                noise = torch.randn_like(result) * r_val
-                noisy = result + noise
+                # Xu et al. 2023 (Restart Sampling), Alg. 2: jumping from
+                # sigma_min back to sigma_max adds noise of variance
+                # sigma_max^2 - sigma_min^2. The old code used `randn * r_val`,
+                # i.e. a standard deviation of r_val with no subtraction.
+                sigma_max = float(r_val)
+                sigma_min = float(sub_sigmas[-1])
+                std = math.sqrt(max(sigma_max ** 2 - sigma_min ** 2, 0.0))
+                noisy = result + torch.randn_like(result) * std
                 try:
                     result = _sample_custom_progress_safe(
                         "RadianceSamplerPro restart",
                         model=model,
-                        noise=noisy,
+                        # ComfyUI applies model_sampling.noise_scaling(sigma0,
+                        # noise, latent_image) internally, which for EPS models
+                        # is `sigma0 * noise + latent_image`. Passing the noised
+                        # latent as `noise=` therefore amplified the SIGNAL by
+                        # (1 + sigma0) and scaled the noise by sigma0 on top --
+                        # at restart_sigma 2.0 that is a 3x signal gain with 4x
+                        # the intended noise. Hand it the already-noised latent
+                        # and a zero noise tensor instead.
+                        noise=torch.zeros_like(noisy),
                         cfg=cfg,
                         sampler=sampler_obj,
                         sigmas=sub_sigmas,
                         positive=positive,
                         negative=negative,
-                        latent_image=result,
+                        latent_image=noisy,
                         noise_mask=None,
                         callback=None,
                         disable_pbar=True,
