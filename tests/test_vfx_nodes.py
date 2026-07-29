@@ -91,7 +91,12 @@ def test_plate_suite():
     stabilizer = RadianceSubpixelStabilizer()
     stab_seq, disp = stabilizer.apply(seq, 0, 16)
     assert stab_seq.shape == (3, 32, 32, 3)
-    assert disp.shape == (3, 32, 32, 2)
+    # 3 channels, not 2. This assertion used to pin (3, 32, 32, 2), which is not
+    # a valid ComfyUI IMAGE -- and RETURN_TYPES declares displacements_xy as
+    # IMAGE, so wiring it into PreviewImage or any downstream node crashed on
+    # the missing third channel. Blue is the unused vector component.
+    assert disp.shape == (3, 32, 32, 3)
+    assert torch.equal(disp[..., 2], torch.zeros_like(disp[..., 2]))
 
 
 def test_inpainting_suite():

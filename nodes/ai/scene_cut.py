@@ -278,8 +278,26 @@ class RadianceSceneCutSplit:
         cut_data: str,
         shot_index: int,
     ):
-        data  = json.loads(cut_data)
-        shots = data["shots"]
+        # cut_data is a STRING widget with no default, so it arrives as "" for
+        # anyone who drops the node and queues before wiring the detector --
+        # json.loads("") raised a bare JSONDecodeError traceback. Fail with
+        # something that says what to connect instead.
+        try:
+            data = json.loads(cut_data) if cut_data and cut_data.strip() else {}
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "RadianceSceneCutSplit: `cut_data` is not valid JSON "
+                f"({exc.msg} at position {exc.pos}). Connect the `cut_data` "
+                "output of RadianceSceneCutDetect to this input."
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise ValueError(
+                "RadianceSceneCutSplit: `cut_data` must be a JSON object from "
+                f"RadianceSceneCutDetect, got {type(data).__name__}."
+            )
+
+        shots = data.get("shots") or []
 
         if not shots:
             return (images, 0, 0, images.shape[0] - 1,

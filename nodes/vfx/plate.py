@@ -113,7 +113,12 @@ class RadianceSubpixelStabilizer:
         F_ref = torch.fft.fft2(ref_windowed)
         
         stabilized = torch.zeros_like(image)
-        displacements = torch.zeros((B, H, W, 2), device=device) # stores dx, dy maps
+        # 3 channels, not 2. RETURN_TYPES declares this output as IMAGE, and a
+        # ComfyUI IMAGE is (B, H, W, 3|4) -- PreviewImage, SaveImage and every
+        # downstream node index channels 0..2 unconditionally, so a (B, H, W, 2)
+        # tensor crashed or rendered garbage the moment it was wired anywhere.
+        # Blue stays 0 so the map reads as the usual red=x / green=y vector view.
+        displacements = torch.zeros((B, H, W, 3), device=device)
         
         for i in range(B):
             if i == anchor_idx:
