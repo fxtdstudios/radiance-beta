@@ -149,6 +149,17 @@ the widget defaults to 1001 — fewer than 1001 files gives an empty list. Set
 
 `pip install OpenImageIO`. There is no Pillow plugin for DPX.
 
+### Read turns red instead of carrying on
+
+Correct as of 3.2.0. Every failure inside Read — a missing file, a corrupt MOV,
+an unreadable EXR — used to be caught and turned into an 8×8 black frame, so the
+node stayed green and the graph carried on and wrote a master out of black. It
+now raises, and the message names the file and the cause.
+
+The one case that still returns a frame rather than erroring is a Read with no
+path set at all, because a node you have just dropped on the canvas is not a
+failure.
+
 ---
 
 ## Video and ffmpeg
@@ -173,7 +184,63 @@ frames 15, 30, 45, 60, 75 and 90. Fixed in 3.2.0.
 
 A frame batch is the whole clip in memory — 240 frames of 4K RGBA float32 is
 about 31 GB. Use `max_video_frames` and `proxy_scale` on Read while building,
-and process in chunks for the final run.
+and `start_frame` / `end_frame` to process in chunks for the final run.
+
+### My ProRes 4444 has a matte but the mask output is empty
+
+Check the console — Read prints what it found:
+
+```
+[Radiance/Read] sh010_comp_v003.mov: 1920x1080 · 24 fps · 96 frames · prores ·
+                12-bit · alpha · trc=bt709 · tc=01:00:00:00
+```
+
+No `alpha` in that line means the file does not carry one. ProRes **422** in any
+flavour has no alpha channel; only 4444 and 4444 XQ do. If the vendor exported
+422 there is nothing to recover — ask for 4444.
+
+> On 3.1.x the alpha was decoded and then discarded, so a 4444 always came back
+> as three channels and the mask output was always zeros. Fixed in 3.2.0.
+
+### A MOV looks flat, or grading it behaves oddly
+
+The file is probably an untagged Rec.709 delivery being passed through as if it
+were scene-linear. Read says so:
+
+```
+WARNING  sh010.mov carries no colour tags, so its values are being passed
+         through as if they were already scene-linear.
+```
+
+Set `color_space` to `Rec.709 (BT.1886)` for a graded delivery, or to the camera
+curve for a log MOV. When a file *is* tagged, Auto follows the tag and logs
+which one it used.
+
+### Reading video is slow, or fills the disk with temp files
+
+Fixed in 3.2.0. Every frame used to be written to a temporary directory as a PNG
+and read back: measured on a 4-second 1080p ProRes 422 HQ clip, 25.0 s and about
+600 MB of scratch files, against 12.9 s and nothing on disk now.
+
+### A 10-bit or 12-bit source looks banded
+
+On 3.1.x the decoder used by the DCC handoff paths went through OpenCV, which
+returns 8-bit regardless of the source — a 12-bit ProRes 4444 lost four bits per
+component. Fixed in 3.2.0; everything above 8-bit is now carried at 16.
+
+### A clip ends earlier than it should
+
+3.2.0 raises rather than returning a short clip. If you see
+`ffmpeg stopped N bytes into frame M`, the file is truncated or corrupt —
+re-wrap it (`ffmpeg -i in.mov -c copy out.mov`) or get it again from the vendor.
+
+> On 3.1.x a decode that failed part-way through simply stopped and returned
+> whatever it had, with no error.
+
+### `.m2ts` / `.mts` / `.r3d` are not recognised
+
+Fixed in 3.2.0. The recognised-extension list had seven entries and card formats
+were not among them, so they fell through to the image reader.
 
 ---
 

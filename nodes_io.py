@@ -12,7 +12,11 @@ Supported READ
 ──────────────
   Image     .png .jpg .jpeg .tiff .tif .bmp .webp .dpx .hdr
   EXR       .exr  (single frame)
-  Video     .mp4 .mov .mxf .avi .webm .mkv  → batch of frames
+  Video     .mov .mxf .mp4 .m2ts .mkv .webm .avi … → batch of frames
+            Decoded through radiance.core.video: one raw ffmpeg pipe, at the
+            source's own bit depth (10/12/16-bit survive), with ProRes 4444
+            alpha carried through to the MASK output, exact frame ranges, and
+            the container's colour tags read rather than ignored.
   Sequence  any of the above with %04d / #### / * pattern, or a directory
 
 Supported WRITE
@@ -67,6 +71,7 @@ except ImportError:
     _HAS_OIIO = False
 
 from . import color_utils
+from .core.video import VIDEO_EXTENSIONS as _VIDEO_EXTENSIONS
 
 try:
     from .hdr.io import write_exr_robust, write_exr_multipart
@@ -147,14 +152,23 @@ OUTPUT_COLOR_SPACES = [
 ]
 
 # ── Input color spaces (for RadianceRead decode) ───────────────────────────
+# The list used to stop at ACEScct, which left no way to decode the three
+# things that arrive in a MOV more often than any camera log: a Rec.709
+# delivery, an HDR10 master, and an HLG broadcast file. Radiance already had
+# all three inverses in color/transfer.py; only the menu was missing them.
 INPUT_COLOR_SPACES = [
     "Auto / Linear (pass-through)",
+    "Rec.709 (BT.1886)",
     "sRGB",
     "ARRI LogC4",
     "ARRI LogC3",
     "Sony S-Log3",
     "Panasonic V-Log",
+    "Canon Log 3",
+    "RED Log3G10",
     "DaVinci Intermediate",
+    "PQ (ST.2084)",
+    "HLG (BT.2100)",
     "ACEScg",
     "ACEScct",
 ]
@@ -164,7 +178,11 @@ EXR_COMPRESSIONS = ["ZIP", "ZIPS", "PIZ", "RLE", "Uncompressed", "DWAA", "DWAB"]
 
 # ── Image file extensions ──────────────────────────────────────────────────
 _IMG_EXT  = {".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp", ".dpx", ".hdr"}
-_VID_EXT  = {".mp4", ".mov", ".mxf", ".avi", ".webm", ".mkv", ".m4v"}
+# Kept in one place, in core.video, so the browser filter, the path-kind
+# detector and the decoder cannot disagree about what counts as video. The old
+# seven-entry set here meant a .m2ts from a camera or a .mts off a card was
+# classified "unknown" and read as an image, which failed with no useful message.
+_VID_EXT  = set(_VIDEO_EXTENSIONS)
 _EXR_EXT  = {".exr"}
 
 
@@ -291,23 +309,42 @@ def _apply_output_colorspace(arr: np.ndarray, cs: str) -> np.ndarray:
     return arr
 
 
+def _rec709_to_linear(arr: np.ndarray) -> np.ndarray:
+    """BT.1886 decode — the display transfer function of a Rec.709 delivery.
+
+    A pure 2.4 power law with black at zero, which is what BT.1886 reduces to
+    when Lb = 0. This is the right inverse for a graded Rec.709 MOV or MP4;
+    it is *not* the BT.709 camera OETF, which nothing is actually encoded with.
+    """
+    return np.sign(arr) * np.power(np.abs(arr, dtype=np.float32), 2.4, dtype=np.float32)
+
+
+#: Input colour space name -> the function that takes it back to scene-linear.
+_INPUT_DECODERS = {
+    "Rec.709 (BT.1886)":     _rec709_to_linear,
+    "sRGB":                  lambda a: color_utils.srgb_to_linear(a),
+    "ARRI LogC4":            lambda a: color_utils.logc4_to_linear(a),
+    "ARRI LogC3":            lambda a: color_utils.logc3_to_linear(a),
+    "Sony S-Log3":           lambda a: color_utils.slog3_to_linear(a),
+    "Panasonic V-Log":       lambda a: color_utils.vlog_to_linear(a),
+    "Canon Log 3":           lambda a: color_utils.canonlog3_to_linear(a),
+    "RED Log3G10":           lambda a: color_utils.log3g10_to_linear(a),
+    "DaVinci Intermediate":  lambda a: color_utils.davinci_intermediate_to_linear(a),
+    "PQ (ST.2084)":          lambda a: color_utils.pq_to_linear(a),
+    "HLG (BT.2100)":         lambda a: color_utils.hlg_to_linear(a),
+    "ACEScct":               lambda a: color_utils.acescct_to_linear(a),
+}
+
+
 def _apply_input_colorspace(arr: np.ndarray, cs: str) -> np.ndarray:
     """Decode an input color space to scene-linear float32."""
     if cs in ("Auto / Linear (pass-through)", "ACEScg"):
         return arr
+    fn = _INPUT_DECODERS.get(cs)
+    if fn is None:
+        return arr
     try:
-        mapping = {
-            "sRGB":                  color_utils.srgb_to_linear,
-            "ARRI LogC4":            color_utils.logc4_to_linear,
-            "ARRI LogC3":            color_utils.logc3_to_linear,
-            "Sony S-Log3":           color_utils.slog3_to_linear,
-            "Panasonic V-Log":       color_utils.vlog_to_linear,
-            "DaVinci Intermediate":  color_utils.davinci_intermediate_to_linear,
-            "ACEScct":               color_utils.acescct_to_linear,
-        }
-        fn = mapping.get(cs)
-        if fn:
-            return fn(arr)
+        return fn(arr)
     except Exception as e:
         log.warning("Input color space decode '%s' failed: %s", cs, e)
     return arr
@@ -657,65 +694,177 @@ def _read_video(
     path: str,
     max_frames: int,
     input_cs: str,
-) -> Tuple[torch.Tensor, float, int, int, int, str]:
-    """Decode a video file to a batched IMAGE tensor using ffprobe/ffmpeg."""
-    if not _ffmpeg_ok():
-        raise RuntimeError("ffmpeg not found — install ffmpeg to read video files.")
+    start_frame: int = 0,
+    end_frame: int = 0,
+    frame_step: int = 1,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], float, int, int, int, str]:
+    """Decode a video file to a batched IMAGE tensor, plus its alpha if it has one.
 
-    # --- probe ---
-    probe_cmd = [
-        _ffprobe_bin(), "-v", "quiet", "-print_format", "json",
-        "-show_streams", path,
-    ]
-    try:
-        probe_out = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=30)
-        probe_data = json.loads(probe_out.stdout)
-        vstream = next(
-            (s for s in probe_data.get("streams", []) if s.get("codec_type") == "video"),
-            {},
-        )
-        fps_str = vstream.get("r_frame_rate", "24/1")
-        num, den = (float(x) for x in fps_str.split("/"))
-        fps = round(num / max(den, 1), 6)
-        w   = int(vstream.get("width", 0))
-        h   = int(vstream.get("height", 0))
-        nb_frames = int(vstream.get("nb_frames", 0))
-        meta = json.dumps({"fps": fps, "width": w, "height": h,
-                           "codec": vstream.get("codec_name", ""),
-                           "nb_frames": nb_frames})
-    except Exception as e:
-        log.warning("ffprobe failed (%s); using defaults", e)
-        fps, w, h, nb_frames = 24.0, 0, 0, 0
-        meta = "{}"
+    Everything here is delegated to :mod:`radiance.core.video`, which pipes raw
+    frames from ffmpeg at the source bit depth. The old implementation in this
+    slot wrote every frame to a temporary PNG and read them back: measured on a
+    4-second 1080p ProRes 422 HQ clip, 25.0 s and ~600 MB of scratch files
+    against 12.9 s and none. It also had no way to express a frame range, and it
+    silently dropped the alpha channel of every ProRes 4444.
 
-    # --- decode ---
-    vf_args = []
+    Returns
+    -------
+    (images, alpha, fps, width, height, frame_count, metadata_json)
+        ``alpha`` is None unless the file actually carries an alpha channel.
+    """
+    from .core import video as _video
+
+    info = _video.probe(path)
+
+    # A frame range on the *source* numbering. `end_frame` is inclusive, and 0
+    # means "to the end", which is how the sequence reader already behaves.
+    start = max(int(start_frame), 0)
+    if end_frame and end_frame >= start:
+        count = (int(end_frame) - start) // max(int(frame_step), 1) + 1
+    else:
+        count = 0
     if max_frames > 0:
-        vf_args = ["-vframes", str(max_frames)]
+        count = min(count, max_frames) if count else max_frames
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        frame_pat = os.path.join(tmpdir, "f%06d.png")
-        decode_cmd = [
-            _ffmpeg_bin(), "-v", "error", "-i", path,
-        ] + vf_args + [
-            "-vsync", "0", "-f", "image2", frame_pat,
-        ]
-        subprocess.run(decode_cmd, check=True, capture_output=True, timeout=300)
+    log.info("[Radiance/Read] %s: %s", os.path.basename(path), info.summary())
+    if info.frames_estimated:
+        log.debug(
+            "%s carries no frame count; %d is estimated from duration x fps.",
+            os.path.basename(path), info.frames,
+        )
 
-        frame_files = sorted(Path(tmpdir).glob("*.png"))
-        if not frame_files:
-            raise RuntimeError("ffmpeg produced no frames.")
+    arr, info = _video.decode(
+        path, start=start, count=count, step=max(int(frame_step), 1), info=info,
+    )
 
-        frames: List[torch.Tensor] = []
-        for fp in frame_files:
-            img_t, _ = _read_image(str(fp))
-            arr = _tensor_to_np(img_t)
-            arr = _apply_input_colorspace(arr, input_cs)
-            frames.append(torch.from_numpy(arr).unsqueeze(0))
+    # Split alpha off before the transfer decode. A matte is not light: running
+    # it through a log or gamma curve is the bug that made a 3.1.x tone map
+    # return an opaque pixel at 0.730.
+    alpha_np = None
+    if arr.shape[-1] == 4:
+        alpha_np = np.ascontiguousarray(arr[..., 3])
+        arr = np.ascontiguousarray(arr[..., :3])
 
-    batch = torch.cat(frames, dim=0)
-    _, h_, w_, _ = batch.shape
-    return batch, fps, w_, h_, len(frames), meta
+    resolved_cs = _resolve_video_colorspace(input_cs, info, path)
+    arr = _apply_input_colorspace(arr, resolved_cs)
+
+    batch = torch.from_numpy(np.ascontiguousarray(arr))
+    alpha_t = torch.from_numpy(alpha_np) if alpha_np is not None else None
+
+    n, h, w, _ = batch.shape
+    meta = dict(info.as_dict())
+    meta.update({
+        "kind": "video",
+        "decoded_frames": n,
+        "start_frame": start,
+        "frame_step": max(int(frame_step), 1),
+        "color_space": resolved_cs,
+        "color_space_requested": input_cs,
+        "alpha": alpha_t is not None,
+    })
+    return batch, alpha_t, info.fps_float, w, h, n, json.dumps(meta)
+
+
+#: The sequence-style default for `start_frame`. VFX sequences are numbered
+#: from 1001; a clip is numbered from 0, so the same widget means two things.
+_SEQUENCE_START_DEFAULT = 1001
+
+
+def _video_frame_range(path: str, start_frame: int, end_frame: int) -> Tuple[int, int]:
+    """Translate the sequence-style frame widgets onto a clip's own numbering.
+
+    `start_frame` defaults to 1001 because that is where a VFX image sequence
+    starts. A video's frames are numbered from zero, so taking the widget
+    literally would skip the first 1001 frames of every clip -- which, for
+    anything under about 40 seconds, means decoding nothing at all and
+    reporting an empty file. That is exactly the trap the directory-pattern
+    reader fell into.
+
+    So: a start beyond the end of the clip is treated as "the user never
+    touched this widget", and said out loud. A start inside the clip is
+    honoured, because then it is a deliberate trim.
+    """
+    from .core import video as _video
+
+    start = max(int(start_frame), 0)
+    end = max(int(end_frame), 0)
+    if start <= 0:
+        return 0, end
+
+    try:
+        info = _video.probe(path)
+    except Exception:  # the decoder will produce the real error in a moment
+        return 0, end
+
+    if info.frames > 0 and start >= info.frames:
+        if start == _SEQUENCE_START_DEFAULT:
+            log.debug(
+                "start_frame is at its sequence default (%d) and %s has only %d "
+                "frame(s), so the whole clip is being read.",
+                _SEQUENCE_START_DEFAULT, os.path.basename(path), info.frames,
+            )
+        else:
+            log.warning(
+                "[Radiance/Read] start_frame=%d is past the end of %s, which has "
+                "%d frame(s). Reading the whole clip instead. Video frames are "
+                "numbered from 0, unlike an image sequence.",
+                start, os.path.basename(path), info.frames,
+            )
+        return 0, end
+    return start, end
+
+
+def _resolve_video_colorspace(requested: str, info, path: str) -> str:
+    """Pick the decode curve for a video, honouring the file's own tags.
+
+    Nuke, Resolve and RV all read the container's transfer characteristics and
+    default to them. Radiance did not read them at all, so a Rec.709 delivery
+    was passed through as if it were scene-linear -- the values are gamma
+    encoded, so every subsequent exposure, blur and blend was operating on the
+    wrong numbers.
+
+    An explicit choice always wins. "Auto" now means what its label promises:
+    use the tag if there is one, and say so. An untagged file still passes
+    through unchanged, but now says that too, because a silent pass-through is
+    exactly how the mistake goes unnoticed.
+    """
+    from .core import video as _video
+
+    if requested != "Auto / Linear (pass-through)":
+        tagged = _video.suggest_transfer(info)
+        if tagged and tagged != requested:
+            log.warning(
+                "[Radiance/Read] %s is tagged %s (%s), but color_space is set to "
+                "%r. Using your setting. Clear it to Auto to follow the file.",
+                os.path.basename(path), info.color_transfer, tagged, requested,
+            )
+        return requested
+
+    suggestion = _video.suggest_transfer(info)
+    if suggestion and suggestion != "Auto / Linear (pass-through)":
+        log.info(
+            "[Radiance/Read] %s is tagged color_trc=%s; decoding it as %s. "
+            "Set color_space explicitly to override.",
+            os.path.basename(path), info.color_transfer, suggestion,
+        )
+        return suggestion
+
+    if info.color_transfer:
+        log.warning(
+            "[Radiance/Read] %s is tagged color_trc=%s, which Radiance has no "
+            "inverse for. Passing the values through unchanged -- they are not "
+            "scene-linear. Set color_space by hand.",
+            os.path.basename(path), info.color_transfer,
+        )
+    else:
+        log.warning(
+            "[Radiance/Read] %s carries no colour tags, so its values are being "
+            "passed through as if they were already scene-linear. If it is a "
+            "Rec.709 delivery or a camera log file, set color_space -- exposure "
+            "and blur are only correct in a linear space.",
+            os.path.basename(path),
+        )
+    return requested
 
 
 # ── Write input coercion ──────────────────────────────────────────────────
@@ -750,53 +899,26 @@ def _find_video_path(data: Any, _depth: int = 0) -> Optional[str]:
     return None
 
 
-def _load_video_to_numpy(path: str, max_frames: int = 0) -> np.ndarray:
-    """
-    Decode a video file path to (N, H, W, C) float32 via OpenCV if available,
-    otherwise via ffmpeg pipe.
-    """
-    # OpenCV fast path
-    try:
-        import cv2  # type: ignore
-        cap = cv2.VideoCapture(path)
-        frames_np: List[np.ndarray] = []
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frames_np.append(
-                cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-            )
-            if max_frames > 0 and len(frames_np) >= max_frames:
-                break
-        cap.release()
-        if frames_np:
-            return np.stack(frames_np, axis=0)
-    except Exception as e:
-        log.debug("OpenCV video decode failed (%s); falling back to ffmpeg", e)
+def _load_video_to_numpy(
+    path: str, max_frames: int = 0, *, alpha: bool = False
+) -> np.ndarray:
+    """Decode a video file path to (N, H, W, C) float32 at the source bit depth.
 
-    # ffmpeg fallback
-    if not _ffmpeg_ok():
-        raise RuntimeError("Neither OpenCV nor ffmpeg available to decode video.")
-    with tempfile.TemporaryDirectory() as tmp:
-        frame_pat = os.path.join(tmp, "f%06d.png")
-        cmd = [_ffmpeg_bin(), "-v", "error", "-i", path]
-        if max_frames > 0:
-            cmd += ["-vframes", str(max_frames)]
-        cmd += ["-vsync", "0", "-f", "image2", frame_pat]
-        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
-        pngs = sorted(Path(tmp).glob("*.png"))
-        if not pngs:
-            raise RuntimeError(f"ffmpeg produced no frames from {path!r}")
-        frames_np = []
-        for fp in pngs:
-            if _HAS_PIL:
-                arr = np.array(_PIL.open(str(fp)).convert("RGB"), dtype=np.float32) / 255.0
-            else:
-                import cv2  # type: ignore
-                arr = cv2.cvtColor(cv2.imread(str(fp)), cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-            frames_np.append(arr)
-    return np.stack(frames_np, axis=0)
+    This used to try OpenCV first, which was wrong twice over. OpenCV's
+    ``VideoCapture`` hands back 8-bit BGR whatever the source is -- a 12-bit
+    ProRes 4444 came out on an exact 1/255 grid, measured -- and when it failed
+    part-way through a clip the loop simply stopped, returning a short clip with
+    no error. A shot that quietly ends early is the kind of bug that survives
+    all the way to a review session.
+
+    Alpha is off by default here because the callers of this helper feed
+    DCC handoff paths that expect three channels; pass ``alpha=True`` to keep
+    the fourth when the file has one.
+    """
+    from .core import video as _video
+
+    arr, _info = _video.decode(path, count=max(int(max_frames), 0), alpha=alpha)
+    return arr
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1268,10 +1390,19 @@ class RadianceRead:
     """
 
     CATEGORY = "FXTD STUDIOS/Radiance/◎ IO & Delivery"
-    DESCRIPTION = "Read images or EXR sequences from disk into the pipeline."
+    DESCRIPTION = (
+        "Read an image, EXR, video or numbered sequence into the pipeline. "
+        "Video decodes at the source bit depth through ffmpeg, keeps ProRes "
+        "4444 alpha on the mask output, and honours the file's colour tags."
+    )
     FUNCTION     = "read"
     RETURN_TYPES = ("IMAGE", "MASK")
     RETURN_NAMES = ("image", "mask")
+    OUTPUT_TOOLTIPS = (
+        "Frames as a batch. Scene-linear once color_space has decoded them.",
+        "Alpha. For a ProRes 4444 or any RGBA source this is the file's own "
+        "matte; otherwise zeros.",
+    )
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1311,19 +1442,30 @@ class RadianceRead:
             }),
             "start_frame": ("INT", {
                 "default": 1001, "min": 0, "max": 99999,
-                "tooltip": "First frame index (sequences only).",
+                "tooltip": (
+                    "First frame to read.\n"
+                    "• Sequence: the frame number in the filename (1001 is the "
+                    "usual VFX start).\n"
+                    "• Video: a 0-based offset into the clip. The 1001 default "
+                    "is a sequence convention, so it is ignored for any clip "
+                    "shorter than that rather than reading nothing."
+                ),
             }),
             "end_frame": ("INT", {
                 "default": 0, "min": 0, "max": 99999,
-                "tooltip": "Last frame index (0 = read all frames).",
+                "tooltip": "Last frame to read, inclusive. 0 = to the end. Applies to sequences and video.",
             }),
             "frame_step": ("INT", {
                 "default": 1, "min": 1, "max": 100,
-                "tooltip": "Step size — e.g. 2 reads every other frame.",
+                "tooltip": "Step size — e.g. 2 reads every other frame. Applies to sequences and video.",
             }),
             "max_video_frames": ("INT", {
                 "default": 0, "min": 0, "max": 99999,
-                "tooltip": "Cap on decoded video frames (0 = all frames). Large videos use a lot of RAM.",
+                "tooltip": (
+                    "Hard cap on decoded video frames (0 = all). Frames are "
+                    "float32 RGB in RAM: 240 frames of 4K RGBA is about 31 GB, "
+                    "so cap this while building a graph."
+                ),
             }),
             "proxy_scale": ("FLOAT", {
                 "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
@@ -1394,7 +1536,6 @@ class RadianceRead:
 
         # Auto-detect or use explicit override
         kind = _path_kind(path) if media_type == "Auto" else media_type.lower()
-        empty_mask = torch.zeros(1, 8, 8)
 
         try:
             if kind == "image":
@@ -1426,12 +1567,24 @@ class RadianceRead:
                 return (img_t, mask_out)
 
             elif kind == "video":
-                batch, fps, w, h, n, meta = _read_video(path, max_video_frames, color_space)
+                v_start, v_end = _video_frame_range(path, start_frame, end_frame)
+                batch, alpha_t, fps, w, h, n, meta = _read_video(
+                    path, max_video_frames, color_space,
+                    start_frame=v_start, end_frame=v_end, frame_step=frame_step,
+                )
                 if proxy_scale > 0:
                     batch = torch.nn.functional.interpolate(
                         batch.movedim(-1, 1), scale_factor=proxy_scale, mode="bilinear"
                     ).movedim(1, -1)
-                return (batch, torch.zeros(n, h, w))
+                    if alpha_t is not None:
+                        alpha_t = torch.nn.functional.interpolate(
+                            alpha_t.unsqueeze(1), scale_factor=proxy_scale,
+                            mode="bilinear",
+                        ).squeeze(1)
+                    n, h, w, _ = batch.shape
+                # A ProRes 4444 matte now reaches the MASK output instead of
+                # being decoded and thrown away.
+                return (batch, alpha_t if alpha_t is not None else torch.zeros(n, h, w))
 
             elif kind == "sequence":
                 batch, w, h, n, fps, meta = _read_sequence(
@@ -1445,14 +1598,22 @@ class RadianceRead:
                 return (batch, torch.zeros(n, h, w))
 
             else:
-                log.warning("RadianceRead: unknown path type for '%s'", path)
-                blank = torch.zeros(1, 8, 8, 3)
-                return (blank, blank[..., 0])
+                raise ValueError(
+                    f"RadianceRead cannot tell what {path!r} is. Recognised: "
+                    f"images {sorted(_IMG_EXT)}, EXR, video {sorted(_VID_EXT)}, "
+                    "or a sequence pattern (/dir/f.%04d.exr, /dir/f.####.png, "
+                    "/dir/). Set media_type to override the detection."
+                )
 
         except Exception as e:
-            log.error("RadianceRead: %s", e)
-            blank = torch.zeros(1, 8, 8, 3)
-            return (blank, blank[..., 0])
+            # This used to log the error and hand back an 8x8 black frame, so a
+            # failed read produced a valid-looking image and a green node. A
+            # missing plate, a corrupt MOV and a wrong colour-space name all
+            # arrived downstream as black, and the graph carried on to write a
+            # master out of it. Raising is what every other application in a
+            # facility does, and what ComfyUI's error panel is for.
+            log.error("RadianceRead: %s: %s", type(e).__name__, e)
+            raise RuntimeError(f"RadianceRead failed on {path!r}: {e}") from e
 
 
 # ═══════════════════════════════════════════════════════════════════════════

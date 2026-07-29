@@ -28,6 +28,18 @@ with AgX, or exported through the ACES 2.0 Cinema or HLG transforms.
   the viewer's JS and the handler's Python and diffs them in both directions.
 - **`core/ffmpeg.py`** — resolves ffmpeg from `RADIANCE_FFMPEG`, then PATH, then
   the binary `imageio-ffmpeg` ships.
+- **`core/video.py`** — one video decoder for the whole package. Probes the
+  container for frame rate, frame count, bit depth, alpha, colour range, matrix,
+  primaries, transfer characteristics, rotation, field order and start timecode,
+  then decodes through a single raw ffmpeg pipe. `tests/test_video_read.py`
+  encodes real ProRes 4444, ProRes 422 HQ and H.264 fixtures and decodes them
+  back — 73 tests.
+- **Frame ranges on video.** `start_frame`, `end_frame` and `frame_step` now
+  apply to clips as well as sequences, selecting on the decoder's own frame
+  counter so the range is exact for long-GOP codecs too.
+- **Six more input colour spaces on Read** — Rec.709 (BT.1886), Canon Log 3,
+  RED Log3G10, PQ (ST.2084), HLG (BT.2100). The inverses were already in
+  `color/transfer.py`; only the menu was missing them.
 - **`core/tiling.py`** — shared tile blending weights with correct border
   handling.
 - **A real-torch gate in the test suite.** The MagicMock torch stub defeated
@@ -70,6 +82,46 @@ with AgX, or exported through the ACES 2.0 Cinema or HLG transforms.
   files.
 - The session log is now written atomically under a lock; concurrent deliveries
   used to lose entries and a crash mid-write discarded the whole history.
+
+### Fixed — video read
+
+The Read node's video path did not behave the way any other application in a
+facility behaves. Every item below is measured against the fixtures in
+`tests/test_video_read.py`.
+
+- **ProRes 4444 alpha was decoded and thrown away.** Frames came back through an
+  RGB-only reader, so a vendor plate with a matte arrived as three channels and
+  the `mask` output was always zeros. The file's alpha now reaches `mask`.
+- **The second decoder quantised everything to 8 bits.** `_load_video_to_numpy`
+  — used by the DCC handoff paths — tried OpenCV first, and OpenCV returns 8-bit
+  BGR regardless of the source. A 12-bit ProRes 4444 came back on an exact 1/255
+  grid, losing four bits per component. It now shares one decoder with Read.
+- **Decoding wrote a PNG per frame to a temp directory and read them back.** A
+  4-second 1080p ProRes 422 HQ clip: 25.0 s and roughly 600 MB of scratch files,
+  against 12.9 s and nothing on disk now.
+- **A decode that failed part-way through returned a short clip with no error.**
+  OpenCV's read loop just stopped. Both a truncated file and a non-zero ffmpeg
+  exit now raise, and the message quotes ffmpeg's own stderr.
+- **Every failure in Read became an 8×8 black frame.** A missing plate, a
+  corrupt MOV and an unrecognised path all logged an error, returned black, and
+  left the node green — so the graph carried on and wrote a master out of it.
+  Read now raises. A Read with no path set still returns a frame, because a node
+  just added to the canvas is not a failure.
+- **The container's colour tags were never read.** A Rec.709 delivery was passed
+  through as if it were scene-linear, so every downstream exposure, blur and
+  blend operated on gamma-encoded values. On Auto, a tagged file now decodes
+  through the matching curve and says which. An untagged file still passes
+  through, but warns instead of doing it silently.
+- **`nb_frames` of 0 was reported as the frame count** for MXF and the many MOVs
+  that carry no count. It now falls back to `duration × fps` and marks the
+  number estimated.
+- **`r_frame_rate` parsing raised on a bare `"30"`** and took the width and
+  height down with it, because one `except` covered the whole probe.
+- **The recognised-extension list had seven entries**, so `.m2ts`, `.mts`,
+  `.r3d`, `.braw` and friends were classified "unknown" and handed to the image
+  reader. One list now serves the browser, the detector and the decoder.
+- **The fixed 300-second decode timeout** turned any long clip into a spurious
+  failure. There is no cap by default.
 
 ### Fixed — performance and stability
 
