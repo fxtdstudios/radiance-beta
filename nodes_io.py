@@ -1689,7 +1689,30 @@ class RadianceWrite:
         )
 
     def _out_path(self, base: str, ext: str, overwrite: bool) -> Path:
-        p = Path(base).with_suffix(ext)
+        """Append `ext` to `base`, without Path.with_suffix's truncation.
+
+        `with_suffix` REPLACES everything after the last dot in the final path
+        component. VFX filenames are full of dots -- sh010.comp, plate.v2,
+        bg.matte -- and `base` here is "<dir>/<filename>_v0001", so
+        "sh010.comp_v0001" has a "suffix" of ".comp_v0001" and every version
+        collapsed onto the same "sh010.exr". With overwrite defaulting to True,
+        each render silently destroyed the previously approved one and reported
+        success with the truncated path.
+
+        An empty `base` was worse: Path("") is Path("."), whose name is "", and
+        with_suffix raised `ValueError: PosixPath('.') has an empty name` --
+        an opaque crash for the ordinary case of leaving `filename` blank.
+        """
+        p = Path(base)
+        stem = p.name
+        if not stem or stem in (".", ".."):
+            raise ValueError(
+                "RadianceWrite: no output filename. Set the `filename` widget, "
+                "or give `output_path` a full file path rather than a directory."
+            )
+        if not stem.lower().endswith(ext.lower()):
+            stem += ext
+        p = p.with_name(stem)
         if not overwrite:
             p = _unique_path(p)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -2154,7 +2177,13 @@ class RadianceDigitalCinemaWrite:
         return {
             "required": {
                 "images": ("IMAGE",),
-                "output_path": ("STRING", {"default": ""}),
+                # Same default as RadianceWrite, which this node delegates to.
+                # It used to default to "", so dropping the node and queueing
+                # crashed inside pathlib instead of writing anything.
+                "output_path": ("STRING", {
+                    "default": str(Path.home() / "radiance_output"),
+                    "placeholder": "/output/render  or  Z:/renders/shot",
+                }),
             },
             "optional": {
                 "format": (WRITE_FORMATS, {"default": "IMG │ EXR (16-bit half)"}),

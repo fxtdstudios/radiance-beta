@@ -58,6 +58,24 @@ class LRUCache:
         self._cache.clear()
         logger.info("Model cache cleared")
 
+    def __getitem__(self, key: str):
+        """Dict-style read, so a `cache[key]` left over from the dict this
+        class replaced raises KeyError rather than TypeError.
+
+        It mattered: nodes/upscale/upscale.py did `_FACE_MODEL_CACHE[key]`
+        after the dict -> GPUModelCache refactor. TypeError was swallowed by a
+        broad `except Exception` that logged at DEBUG, so RetinaFace detection
+        silently never ran and face restore fell through to the Haar cascade
+        while still reporting success.
+        """
+        value = self.get(key)
+        if value is None and not self.has(key):
+            raise KeyError(key)
+        return value
+
+    def __setitem__(self, key: str, obj) -> None:
+        self.put(key, obj)
+
     def __contains__(self, key: str) -> bool:
         return key in self._cache
 

@@ -2313,7 +2313,9 @@ def _detect_faces(
             model    = init_detection_model("retinaface_resnet50", half=False,
                                             model_rootpath=_get_models_dir("facedetection"))
             _FACE_MODEL_CACHE.put(cache_key, model)
-        det = _FACE_MODEL_CACHE[cache_key]
+        det = _FACE_MODEL_CACHE.get(cache_key)
+        if det is None:
+            raise RuntimeError("RetinaFace model missing from the cache after load")
         import numpy as np
         bboxes_scores = det.detect_faces(img_u8, 0.97)
         if bboxes_scores is not None and len(bboxes_scores):

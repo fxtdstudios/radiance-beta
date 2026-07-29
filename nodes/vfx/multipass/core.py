@@ -959,6 +959,16 @@ def _albedo_retinex(
     albedo_rgb  = (img.float() * scale).clamp(min=0.0)
     B    = albedo_rgb.shape[0]
     flat = albedo_rgb[...,:3].reshape(B, -1)
+    # torch.quantile refuses inputs above 2**24 elements per row. A UHD frame is
+    # 2160*3840*3 = 24,883,200, so this raised
+    # "RuntimeError: quantile() input tensor is too large" on every 4K plate and
+    # took the whole Multipass Master node with it. Subsample above the cap --
+    # the same treatment nodes/generate/engine.py already applies -- which for a
+    # 0.995 quantile over millions of samples is statistically indistinguishable.
+    _QUANTILE_MAX = 2 ** 24
+    if flat.shape[1] > _QUANTILE_MAX:
+        stride = (flat.shape[1] + _QUANTILE_MAX - 1) // _QUANTILE_MAX
+        flat = flat[:, ::stride]
     p995 = torch.quantile(flat, 0.995, dim=1).view(B,1,1,1).clamp(min=1e-8)
     return (albedo_rgb / p995).clamp(0.0, 1.0).to(img.dtype)
 
