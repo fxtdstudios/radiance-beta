@@ -10,8 +10,10 @@ ComfyUI loaded 100.
 A count in a README is the kind of thing nobody checks by hand and everybody
 believes, so check it here.
 """
+import importlib.util
 import pathlib
 import re
+import sys
 
 import pytest
 
@@ -128,3 +130,61 @@ def test_the_changelog_records_the_known_limitations():
     assert "Known limitations" in section
     for topic in ("tone scale", "chromatic_adaptation", "laplacian_pyramid"):
         assert topic in section, f"the {topic!r} limitation is not documented"
+
+# ── The generated reference must be current ────────────────────────────────
+
+def test_the_generated_reference_is_up_to_date():
+    """`tools/generate_docs.py --check` in test form.
+
+    The node pages are generated from the live catalog. If someone adds a node,
+    changes a default or edits a tooltip without regenerating, this fails and
+    names the stale file.
+    """
+    import radiance
+
+    if radiance._LOAD_RESULT.failures:
+        pytest.skip("environment is short a runtime dependency")
+
+    sys.path.insert(0, str(_ROOT / "tools"))
+    spec = importlib.util.spec_from_file_location(
+        "_radiance_docgen", _ROOT / "tools" / "generate_docs.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    stale = []
+    for rel, text in sorted(mod.build(radiance).items()):
+        path = _ROOT / rel
+        if not path.exists() or path.read_text(encoding="utf-8") != text:
+            stale.append(rel)
+    assert not stale, (
+        f"{stale} are out of date. Run: python tools/generate_docs.py --stubs"
+    )
+
+
+@pytest.mark.parametrize("page", [
+    "README.md", "quickstart.md", "concepts.md", "color-management.md",
+    "viewer-and-delivery.md", "workflows.md", "nodes.md", "limitations.md",
+    "troubleshooting.md", "glossary.md", "developer.md", "coverage.md",
+])
+def test_every_page_the_index_promises_exists(page):
+    assert (_ROOT / "docs" / page).is_file(), f"docs/{page} is linked but missing"
+
+
+def test_no_internal_doc_link_is_broken():
+    """Relative markdown links inside docs/ must resolve."""
+    broken = []
+    docs = _ROOT / "docs"
+    for md in sorted(docs.rglob("*.md")):
+        for target in re.findall(r"\]\((?!https?:|#)([^)#]+)", md.read_text(encoding="utf-8")):
+            resolved = (md.parent / target).resolve()
+            if not resolved.exists():
+                broken.append(f"{md.relative_to(_ROOT)} -> {target}")
+    assert not broken, "broken relative links: " + "; ".join(broken)
+
+
+def test_the_limitations_page_covers_what_the_changelog_admits():
+    """The two must not disagree about what is broken."""
+    limitations = _src("docs/limitations.md")
+    for topic in ("Daniele Evo", "chromatic_adaptation", "laplacian_pyramid",
+                  "Lucas", "display window"):
+        assert topic in limitations, f"{topic!r} is missing from the limitations page"

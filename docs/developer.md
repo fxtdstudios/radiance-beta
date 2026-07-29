@@ -26,7 +26,7 @@ The registry utility merges each package's `NODE_CLASS_MAPPINGS` and `NODE_DISPL
 
 ## Node Authoring Rules
 
-Follow [CODE_STYLE.md](../CODE_STYLE.md). The short version:
+Follow [CODE_STYLE.md](dev/CODE_STYLE.md). The short version:
 
 | Rule | Requirement |
 | :--- | :--- |

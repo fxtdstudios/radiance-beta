@@ -2,210 +2,188 @@
 
 # Upscale
 
-Image and video upscaling, tiling, confidence outputs, and face restoration for high-resolution finishing workflows.
+Image and video upscaling with HDR and colour awareness, tiling, and face
+restoration.
 
-## Typical workflow
+## Typical graph
 
 ```text
-Image/video batch -> Upscale Tiler -> Upscale Image / Video -> Face Restore -> Viewer / Write
+Read → Upscale Image (tiled) → Write
 ```
 
 ## Before you use these nodes
 
-- Tile large images when VRAM is tight.
-- Inspect confidence and face masks; restoration can overcorrect identity or fine texture.
-- Add grain after upscale/restoration when matching a plate.
-- **Scene-linear / HDR input:** Upscale Image and Upscale Video expose `hdr_mode` (`auto`/`preserve`/`clamp`) — `preserve` tonemaps (Reinhard) before super-resolution and re-expands after, so highlights above 1.0 survive — and `color_encoding` (`passthrough` / `linear<->sRGB` / `linear<->LogC3`) which round-trips through a display transfer so the LDR-trained SR networks see the domain they expect. Leave both on defaults (`auto` / `passthrough`) for display-referred input.
+- **Backends work in display-referred space.** Feeding scene-linear values
+  straight in will not do what you want. Use the node's HDR and colour-encoding
+  options so it encodes, upscales and decodes around the model.
+- **Models download on first use** and are cached under your ComfyUI models
+  directory. The first run of a tier is slow and needs network access.
+- **Tiling is memory-safe by design.** Each tile is computed on the GPU and
+  accumulated on the CPU, so peak VRAM is one tile regardless of output size.
+- **`blend_mode`:** `gaussian_feather` and `linear` are genuinely different
+  weightings. `laplacian_pyramid` is not implemented and falls back to the
+  Gaussian feather, logging once when it does.
 
-## Nodes in this section
+## Known limitations
 
-| Node | Internal key | Purpose |
+The Tier 3 diffusion backend is fixed at 4× and ignores the `scale` widget; at
+`scale = 2` the result is the top-left quarter of a 4× upscale. `mode =
+"creative"` selects that tier regardless of the scale you asked for.
+
+## Nodes in this section (4)
+
+| Node | Key | What it does |
 | :--- | :--- | :--- |
-| [◎ Upscale Tiler](#upscale-tiler) | `RadianceUpscaleTiler` | Upscale Tiler. |
-| [◎ Upscale Image](#upscale-image) | `RadianceUpscaleImage` | Upscale Image. |
-| [◎ Upscale Video](#upscale-video) | `RadianceUpscaleVideo` | Upscale Video. |
-| [◎ Upscale Face Restore](#upscale-face-restore) | `RadianceUpscaleFaceRestore` | Upscale Face Restore. |
+| [Upscale Face Restore](#upscale-face-restore) | `RadianceUpscaleFaceRestore` | Restore and enhance facial detail using a face restoration model. |
+| [Upscale Image](#upscale-image) | `RadianceUpscaleImage` | Upscale a still image using a selected super-resolution model. |
+| [Upscale Tiler](#upscale-tiler) | `RadianceUpscaleTiler` | Tile large images into overlapping patches for memory-safe upscaling. |
+| [Upscale Video](#upscale-video) | `RadianceUpscaleVideo` | Upscale a video sequence using a selected super-resolution model. |
 
-## ◎ Upscale Tiler
+---
 
-**Internal key:** `RadianceUpscaleTiler`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Upscale`  
-**Source:** `nodes/upscale/upscale.py`
-**Function:** `run`
+## Upscale Face Restore
 
-### What it does
+**Node key:** `RadianceUpscaleFaceRestore`  
+**Menu:** `FXTD STUDIOS/Radiance/Upscale`  
+**Source:** `nodes/upscale/upscale.py`  
 
-Upscale Tiler.
-
-### When to use it
-
-Use `◎ Upscale Tiler` when the graph reaches the Upscale Tiler step in a upscale workflow.
+Restore and enhance facial detail using a face restoration model.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `operation` | Yes | `ENUM: Tile, ColourFix` | `Tile` | - |
-| `images` | Optional | `IMAGE` | - | Input image batch (B,H,W,C) float32. |
-| `scale` | Optional | `(_SCALE_CHOICES, {'default': '4×', 'tooltip': 'Upscale factor. 8× uses two cascaded 4× passes.'})` | - | - |
-| `tile_size` | Optional | `INT` | `512` | Tile side in input pixels. Smaller = less VRAM. |
-| `overlap` | Optional | `INT` | `128` | Tile overlap in input pixels. ≥20% of tile_size recommended. |
-| `blend_mode` | Optional | `(_BLEND_CHOICES, {'default': 'laplacian_pyramid', 'tooltip': 'laplacian_pyramid: best quality. gaussian_feather: fast. linear: simple.'})` | - | - |
-| `upscale_model` | Optional | `UPSCALE_MODEL` | - | Any ComfyUI UPSCALE_MODEL. Leave empty to use built-in Real-ESRGAN. |
-| `model_tier` | Optional | `(_TIER_CHOICES, {'default': 'tier1_fast    (Real-ESRGAN — GAN, ms/frame)', 'tooltip': 'Built-in model tier when no upscale_model is connected.'})` | - | - |
-| `source` | Optional | `IMAGE` | - | Upscaled image with colour drift (ColourFix mode). |
-| `reference` | Optional | `IMAGE` | - | Original pre-upscale image — colour reference (ColourFix mode). |
-| `cf_strength` | Optional | `FLOAT` | `1.0` | ColourFix strength: 0 = off, 1 = full CDF match. |
-| `n_bins` | Optional | `INT` | `512` | Histogram resolution (ColourFix mode). |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `images` | Yes | `IMAGE` |  |  | Upscaled image batch (B,H,W,C) float32. |
+| `face_model` | Yes | choice of `auto (CodeFormer → GFPGAN → skip)`, `codeformer`, `gfpgan_v1.4`, `skip (detection only)` | `auto (CodeFormer → GFPGAN → skip)` |  | Face restoration model. Auto tries CodeFormer first, falls back to GFPGAN, skips if neither is available. |
+| `fidelity_weight` | Yes | `FLOAT` | `0.75` | 0.0 – 1.0, step 0.05 | CodeFormer fidelity: 0 = maximum enhancement (creative), 1 = faithful to input (precise). 0.5–0.8 is recommended for most upscaled content. |
+| `blend_radius` | Yes | `INT` | `20` | 0 – 80, step 4 | Gaussian feather radius in pixels at face crop edge. Higher = softer transition. 0 = hard paste. |
+| `face_pad_frac` | Yes | `FLOAT` | `0.25` | 0.0 – 0.6, step 0.05 | Extra padding around each detected face bbox (fraction of face width/height). 0.25 = 25%. |
+| `min_face_px` | Yes | `INT` | `64` | 16 – 256, step 16 | Smallest face (in pixels) to process. Smaller faces are skipped. |
+| `colour_correct` | Yes | `BOOLEAN` | `True` |  | Apply histogram-match colour correction after restoration to cancel diffusion colour drift. |
+| `colour_strength` | Yes | `FLOAT` | `0.8` | 0.0 – 1.0, step 0.05 | Strength of histogram-match correction. 1.0 = full match to input colours. |
+| `original_images` | No | `IMAGE` |  |  | Original (pre-upscale) images for colour reference. Used by histogram-match correction. Leave disconnected to use the restored images as self-reference. |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `image_a` | `IMAGE` | Output produced by the `image_a` socket. |
-| `image_b` | `IMAGE` | Output produced by the `image_b` socket. |
-| `info` | `STRING` | Output produced by the `info` socket. |
+| `restored` | `IMAGE` |  |
+| `face_mask` | `IMAGE` |  |
+| `pass_info` | `STRING` |  |
 
-### Practical notes
+---
 
-- The node returns `image_a` (`IMAGE`), `image_b` (`IMAGE`), `info` (`STRING`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## Upscale Image
 
-## ◎ Upscale Image
+**Node key:** `RadianceUpscaleImage`  
+**Menu:** `FXTD STUDIOS/Radiance/Upscale`  
+**Source:** `nodes/upscale/upscale.py`  
 
-**Internal key:** `RadianceUpscaleImage`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Upscale`  
-**Source:** `nodes/upscale/upscale.py`
-**Function:** `run`
-
-### What it does
-
-Upscale Image.
-
-### When to use it
-
-Use `◎ Upscale Image` when the graph reaches the Upscale Image step in a upscale workflow.
+Upscale a still image using a selected super-resolution model.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `operation` | Yes | `ENUM: Upscale, Route` | `Upscale` | - |
-| `images` | Yes | `IMAGE` | - | Input image batch. |
-| `scale` | Optional | `(_SCALE_CHOICES, {'default': '4×'})` | - | - |
-| `mode` | Optional | `(_MODE_CHOICES, {'default': 'precise', 'tooltip': 'precise: Real-ESRGAN fidelity-first. creative: diffusion detail hallucination (requires VRAM). balanced: GAN upscale + light sharpening.'})` | - | - |
-| `tile_size` | Optional | `INT` | `512` | Tile size in input pixels. Reduce if OOM. |
-| `overlap` | Optional | `INT` | `128` | - |
-| `sharpness_boost` | Optional | `FLOAT` | `0.0` | Unsharp mask strength applied after upscale. |
-| `denoise_pre` | Optional | `FLOAT` | `0.0` | Gaussian pre-denoise strength. |
-| `upscale_model` | Optional | `UPSCALE_MODEL` | - | - |
-| `model_tier` | Optional | `(_TIER_CHOICES, {'default': 'auto', 'tooltip': "Model tier. 'auto' selects based on content analysis."})` | - | - |
-| `diffusion_steps` | Optional | `INT` | `20` | - |
-| `diffusion_noise_level` | Optional | `INT` | `20` | - |
-| `guidance_scale` | Optional | `FLOAT` | `7.5` | - |
-| `enhancement_prompt` | Optional | `STRING` | `` | Text prompt for creative mode diffusion steering. |
-| `prefer_speed` | Optional | `BOOLEAN` | `False` | Always recommend Tier 1 fast regardless of content. |
-| `sample_frame` | Optional | `INT` | `0` | Index of frame to analyse (for Route operation). |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `operation` | Yes | choice of `Upscale`, `Route` | `Upscale` |  |  |
+| `images` | Yes | `IMAGE` |  |  | Input image batch. |
+| `scale` | No | choice of `2×`, `4×`, `8× (tile cascade)` | `4×` |  |  |
+| `hdr_mode` | No | choice of `auto`, `preserve`, `clamp` | `auto` |  | Scene-linear / HDR handling. auto: preserve range when input exceeds 1.0, else clamp. preserve: Reinhard tonemap before SR and re-expand after (keeps highlights >1.0). clamp: legacy [0,1] (LDR). |
+| `color_encoding` | No | choice of `passthrough`, `linear<->sRGB`, `linear<->LogC3` | `passthrough` |  | Encode scene-linear -> display (sRGB/LogC3) before SR and decode after, so the LDR-trained network sees the domain it expects. passthrough: feed pixels unchanged. |
+| `mode` | No | choice of `precise`, `creative`, `balanced` | `precise` |  | precise: Real-ESRGAN fidelity-first. creative: diffusion detail hallucination (requires VRAM). balanced: GAN upscale + light sharpening. |
+| `tile_size` | No | `INT` | `512` | 128 – 1024, step 64 | Tile size in input pixels. Reduce if OOM. |
+| `overlap` | No | `INT` | `128` | 32 – 256, step 32 |  |
+| `sharpness_boost` | No | `FLOAT` | `0.0` | 0.0 – 1.0, step 0.05 | Unsharp mask strength applied after upscale. |
+| `denoise_pre` | No | `FLOAT` | `0.0` | 0.0 – 1.0, step 0.05 | Gaussian pre-denoise strength. |
+| `upscale_model` | No | `UPSCALE_MODEL` |  |  |  |
+| `model_tier` | No | choice of `auto`, `tier1_fast    (Real-ESRGAN — GAN, ms/frame)`, `tier2_quality (HAT-L — transformer SOTA PSNR)`, `tier2_quality (SwinIR-L — transformer quality)`, `tier3_creative (SD x4 — diffusion hallucination)`, `tier3_creative (SeedVR2 — one-step video diffusion)` | `auto` |  | Model tier. 'auto' selects based on content analysis. |
+| `diffusion_steps` | No | `INT` | `20` | 1 – 50 |  |
+| `diffusion_noise_level` | No | `INT` | `20` | 0 – 350, step 10 |  |
+| `guidance_scale` | No | `FLOAT` | `7.5` | 1.0 – 20.0, step 0.5 |  |
+| `enhancement_prompt` | No | `STRING` | `` |  | Text prompt for creative mode diffusion steering. |
+| `prefer_speed` | No | `BOOLEAN` | `False` |  | Always recommend Tier 1 fast regardless of content. |
+| `sample_frame` | No | `INT` | `0` | 0 – 9999 | Index of frame to analyse (for Route operation). |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `image_a` | `IMAGE` | Output produced by the `image_a` socket. |
-| `image_b` | `IMAGE` | Output produced by the `image_b` socket. |
-| `info` | `STRING` | Output produced by the `info` socket. |
-| `data1` | `STRING` | Output produced by the `data1` socket. |
-| `data2` | `STRING` | Output produced by the `data2` socket. |
+| `image_a` | `IMAGE` |  |
+| `image_b` | `IMAGE` |  |
+| `info` | `STRING` |  |
+| `data1` | `STRING` |  |
+| `data2` | `STRING` |  |
 
-### Practical notes
+---
 
-- The node returns `image_a` (`IMAGE`), `image_b` (`IMAGE`), `info` (`STRING`), `data1` (`STRING`), `data2` (`STRING`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## Upscale Tiler
 
-## ◎ Upscale Video
+**Node key:** `RadianceUpscaleTiler`  
+**Menu:** `FXTD STUDIOS/Radiance/Upscale`  
+**Source:** `nodes/upscale/upscale.py`  
 
-**Internal key:** `RadianceUpscaleVideo`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Upscale`  
-**Source:** `nodes/upscale/upscale.py`
-**Function:** `upscale_video`
-
-### What it does
-
-Upscale Video.
-
-### When to use it
-
-Use `◎ Upscale Video` when the graph reaches the Upscale Video step in a upscale workflow.
+Tile large images into overlapping patches for memory-safe upscaling.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `frames` | Yes | `IMAGE` | - | Video frame batch (B,H,W,C) float32. B = frame count. |
-| `scale` | Yes | `(_SCALE_CHOICES, {'default': '4×'})` | - | - |
-| `tile_size` | Yes | `INT` | `512` | - |
-| `overlap_spatial` | Yes | `INT` | `128` | Spatial tile overlap in input pixels. |
-| `window_size` | Yes | `INT` | `16` | Temporal window (frames processed together). Larger = better consistency but more VRAM. |
-| `overlap_temporal` | Yes | `INT` | `4` | Frames shared between adjacent windows. Minimum 1 for seam-free stitching. |
-| `flow_compensation` | Yes | `BOOLEAN` | `True` | Use Lucas-Kanade optical flow to warp reference frames before blending temporal window seams. |
-| `sharpness_boost` | Yes | `FLOAT` | `0.0` | - |
-| `upscale_model` | Optional | `UPSCALE_MODEL` | - | - |
-| `model_tier` | Optional | `(_TIER_CHOICES, {'default': 'tier1_fast    (Real-ESRGAN — GAN, ms/frame)', 'tooltip': "Select 'SeedVR2' for best temporal consistency on video. Requires seedvr2 or diffusers package."})` | - | - |
-| `enhancement_prompt` | Optional | `STRING` | `` | Text prompt for Tier 3 diffusion steering (e.g. 'cinematic film grain, detailed textures'). |
-| `diffusion_steps` | Optional | `INT` | `1` | Diffusion inference steps. SeedVR2 uses 1 (one-step); SD x4 upscaler recommended 15-25. |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `operation` | Yes | choice of `Tile`, `ColourFix` | `Tile` |  |  |
+| `images` | No | `IMAGE` |  |  | Input image batch (B,H,W,C) float32. |
+| `scale` | No | choice of `2×`, `4×`, `8× (tile cascade)` | `4×` |  | Upscale factor. 8× uses two cascaded 4× passes. |
+| `tile_size` | No | `INT` | `512` | 128 – 2048, step 64 | Tile side in input pixels. Smaller = less VRAM. |
+| `overlap` | No | `INT` | `128` | 32 – 512, step 32 | Tile overlap in input pixels. ≥20% of tile_size recommended. |
+| `blend_mode` | No | choice of `laplacian_pyramid`, `gaussian_feather`, `linear` | `laplacian_pyramid` |  | laplacian_pyramid: best quality. gaussian_feather: fast. linear: simple. |
+| `upscale_model` | No | `UPSCALE_MODEL` |  |  | Any ComfyUI UPSCALE_MODEL. Leave empty to use built-in Real-ESRGAN. |
+| `model_tier` | No | choice of `auto`, `tier1_fast    (Real-ESRGAN — GAN, ms/frame)`, `tier2_quality (HAT-L — transformer SOTA PSNR)`, `tier2_quality (SwinIR-L — transformer quality)`, `tier3_creative (SD x4 — diffusion hallucination)`, `tier3_creative (SeedVR2 — one-step video diffusion)` | `tier1_fast (Real-ESRGAN — GAN, ms/frame)` |  | Built-in model tier when no upscale_model is connected. |
+| `source` | No | `IMAGE` |  |  | Upscaled image with colour drift (ColourFix mode). |
+| `reference` | No | `IMAGE` |  |  | Original pre-upscale image — colour reference (ColourFix mode). |
+| `cf_strength` | No | `FLOAT` | `1.0` | 0.0 – 1.0, step 0.05 | ColourFix strength: 0 = off, 1 = full CDF match. |
+| `n_bins` | No | `INT` | `512` | 64 – 2048, step 64 | Histogram resolution (ColourFix mode). |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `upscaled` | `IMAGE` | Output produced by the `upscaled` socket. |
-| `confidence_map` | `IMAGE` | Output produced by the `confidence_map` socket. |
-| `pass_info` | `STRING` | Output produced by the `pass_info` socket. |
+| `image_a` | `IMAGE` |  |
+| `image_b` | `IMAGE` |  |
+| `info` | `STRING` |  |
 
-### Practical notes
+---
 
-- The node returns `upscaled` (`IMAGE`), `confidence_map` (`IMAGE`), `pass_info` (`STRING`).
-- Keep frame count and latent shape metadata consistent through the video graph.
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## Upscale Video
 
-## ◎ Upscale Face Restore
+**Node key:** `RadianceUpscaleVideo`  
+**Menu:** `FXTD STUDIOS/Radiance/Upscale`  
+**Source:** `nodes/upscale/upscale.py`  
 
-**Internal key:** `RadianceUpscaleFaceRestore`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Upscale`  
-**Source:** `nodes/upscale/upscale.py`
-**Function:** `restore_faces`
-
-### What it does
-
-Upscale Face Restore.
-
-### When to use it
-
-Use `◎ Upscale Face Restore` when the graph reaches the Upscale Face Restore step in a upscale workflow.
+Upscale a video sequence using a selected super-resolution model.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `images` | Yes | `IMAGE` | - | Upscaled image batch (B,H,W,C) float32. |
-| `face_model` | Yes | `(_FACE_MODEL_CHOICES, {'default': 'auto (CodeFormer → GFPGAN → skip)', 'tooltip': 'Face restoration model. Auto tries CodeFormer first, falls back to GFPGAN, skips if neither is available.'})` | - | - |
-| `fidelity_weight` | Yes | `FLOAT` | `0.75` | CodeFormer fidelity: 0 = maximum enhancement (creative), 1 = faithful to input (precise). 0.5–0.8 is recommended for most upscaled content. |
-| `blend_radius` | Yes | `INT` | `20` | Gaussian feather radius in pixels at face crop edge. Higher = softer transition. 0 = hard paste. |
-| `face_pad_frac` | Yes | `FLOAT` | `0.25` | Extra padding around each detected face bbox (fraction of face width/height). 0.25 = 25%. |
-| `min_face_px` | Yes | `INT` | `64` | Smallest face (in pixels) to process. Smaller faces are skipped. |
-| `colour_correct` | Yes | `BOOLEAN` | `True` | Apply histogram-match colour correction after restoration to cancel diffusion colour drift. |
-| `colour_strength` | Yes | `FLOAT` | `0.8` | Strength of histogram-match correction. 1.0 = full match to input colours. |
-| `original_images` | Optional | `IMAGE` | - | Original (pre-upscale) images for colour reference. Used by histogram-match correction. Leave disconnected to use the restored images as self-reference. |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `frames` | Yes | `IMAGE` |  |  | Video frame batch (B,H,W,C) float32. B = frame count. |
+| `scale` | Yes | choice of `2×`, `4×`, `8× (tile cascade)` | `4×` |  |  |
+| `tile_size` | Yes | `INT` | `512` | 128 – 1024, step 64 |  |
+| `overlap_spatial` | Yes | `INT` | `128` | 32 – 256, step 32 | Spatial tile overlap in input pixels. |
+| `window_size` | Yes | `INT` | `16` | 4 – 64, step 4 | Temporal window (frames processed together). Larger = better consistency but more VRAM. |
+| `overlap_temporal` | Yes | `INT` | `4` | 1 – 16 | Frames shared between adjacent windows. Minimum 1 for seam-free stitching. |
+| `flow_compensation` | Yes | `BOOLEAN` | `True` |  | Use Lucas-Kanade optical flow to warp reference frames before blending temporal window seams. |
+| `sharpness_boost` | Yes | `FLOAT` | `0.0` | 0.0 – 1.0, step 0.05 |  |
+| `upscale_model` | No | `UPSCALE_MODEL` |  |  |  |
+| `model_tier` | No | choice of `auto`, `tier1_fast    (Real-ESRGAN — GAN, ms/frame)`, `tier2_quality (HAT-L — transformer SOTA PSNR)`, `tier2_quality (SwinIR-L — transformer quality)`, `tier3_creative (SD x4 — diffusion hallucination)`, `tier3_creative (SeedVR2 — one-step video diffusion)` | `tier1_fast (Real-ESRGAN — GAN, ms/frame)` |  | Select 'SeedVR2' for best temporal consistency on video. Requires seedvr2 or diffusers package. |
+| `enhancement_prompt` | No | `STRING` | `` |  | Text prompt for Tier 3 diffusion steering (e.g. 'cinematic film grain, detailed textures'). |
+| `diffusion_steps` | No | `INT` | `1` | 1 – 50 | Diffusion inference steps. SeedVR2 uses 1 (one-step); SD x4 upscaler recommended 15-25. |
+| `hdr_mode` | No | choice of `auto`, `preserve`, `clamp` | `auto` |  | Scene-linear / HDR handling. auto: preserve range when input exceeds 1.0, else clamp. preserve: Reinhard tonemap before SR and re-expand after. clamp: legacy [0,1] (LDR). |
+| `color_encoding` | No | choice of `passthrough`, `linear<->sRGB`, `linear<->LogC3` | `passthrough` |  | Encode scene-linear -> display (sRGB/LogC3) before SR and decode after. passthrough: feed pixels unchanged. |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `restored` | `IMAGE` | Output produced by the `restored` socket. |
-| `face_mask` | `IMAGE` | Output produced by the `face_mask` socket. |
-| `pass_info` | `STRING` | Output produced by the `pass_info` socket. |
+| `upscaled` | `IMAGE` |  |
+| `confidence_map` | `IMAGE` |  |
+| `pass_info` | `STRING` |  |
 
-### Practical notes
-
-- The node returns `restored` (`IMAGE`), `face_mask` (`IMAGE`), `pass_info` (`STRING`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+---
