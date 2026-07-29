@@ -365,7 +365,7 @@ class RadianceMCP:
                 return ("Error: sequence_path is required when source=Sequence.", "")
             end = frame_end if frame_end > 0 else 0
             try:
-                batch, w, h, n, seq_fps, _ = _read_sequence(
+                batch, _alpha, w, h, n, seq_fps, _ = _read_sequence(
                     sequence_path, frame_start, end, 1, "Linear (none)", "Skip"
                 )
                 frames = batch.detach().cpu().float().numpy()

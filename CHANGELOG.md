@@ -45,6 +45,25 @@ with AgX, or exported through the ACES 2.0 Cinema or HLG transforms.
 - **A real-torch gate in the test suite.** The MagicMock torch stub defeated
   every self-skip idiom in use; CI had been red for seventeen days behind a
   stale `--ignore` list.
+- **`core/formats.py`** — the extension tables are built from what the installed
+  backends actually register, not from a list someone typed. 9 image extensions
+  became 64 on a stock install. Installing OpenImageIO adds DPX, Cineon, ARRI
+  and camera raw without a code change, and an unsupported file now says which
+  package would open it.
+- **`core/exr.py`** — multi-part and multi-layer EXR. A Nuke or Arnold render
+  with `diffuse`, `specular`, `Z` and `N` reads every layer through a `layer`
+  widget, populated from the file itself by `/radiance/media/layers`.
+- **Sequence auto-detection.** Picking `sh010.1004.png` reads the whole
+  sequence and reports its real range, the way Nuke's Read does.
+  `media_type = Image` is the escape hatch.
+- **A third output, `info`** — JSON describing what was actually read:
+  resolution, frame count and range, bit depth, codec, EXR layers and windows,
+  colour tags, timecode. Nuke's metadata tab, as a wire. Appended last, so
+  workflows saved against the two-output version keep working.
+- **`on_error`, `raw` and `premultiplied` on Read.** Nuke's error policy, raw
+  bypass and unpremultiply, with the same defaults Nuke uses.
+- **The Read node hides widgets that do not apply** to the detected media type,
+  and draws the file's format, range and layers on itself.
 
 ### Fixed — colour
 
@@ -122,6 +141,32 @@ facility behaves. Every item below is measured against the fixtures in
   reader. One list now serves the browser, the detector and the decoder.
 - **The fixed 300-second decode timeout** turned any long clip into a spurious
   failure. There is no cap by default.
+
+### Fixed — reading files at all
+
+- **Nine hand-typed image extensions decided what the node would open.** TGA,
+  SGI, PPM, PGM, JP2, PCX and ICO were classified "unknown" and refused —
+  measured, every one of them decoded correctly through the reader underneath.
+  They never reached it.
+- **A multi-layer EXR was rejected, and the message blamed the file.** A Nuke or
+  Arnold render with AOVs — the normal output of both — raised "which
+  RadianceRead does not support". Every layer now reads.
+- **A depth-only or data-only EXR raised.** A Z pass is a render output, not a
+  malformed file.
+- **The EXR reader ignored the display window.** An overscan render came back at
+  the data-window resolution and offset with no warning. It is now conformed to
+  the display window; `raw` keeps the overscan. This was on the known-limitations
+  page.
+- **A sequence's alpha was discarded**, exactly like the ProRes 4444 case:
+  `img_t, _ = _read_image(p)` for every frame. An RGBA PNG or EXR sequence came
+  back with an empty mask.
+- **A sequence numbered from anything but 1001 read nothing**, because
+  `start_frame` defaults to the VFX convention. A start outside the range that
+  exists on disk is now treated as unset, and said out loud.
+- **The frontend's video-extension list disagreed with Python in both
+  directions** — it listed `.webp`, which is a still, and omitted `.mxf` — so
+  the wrong widgets were shown for the files this pack exists to open. One list
+  now, with a test that fails if they drift.
 
 ### Fixed — performance and stability
 

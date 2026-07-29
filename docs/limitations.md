@@ -46,14 +46,17 @@ selector is never consulted.
 **What to do.** Leave it on Bradford. Selecting anything else logs a warning
 once per session. If you need a different CAT, do the conversion in OCIO.
 
-### The EXR reader ignores the display window
+### EXR overscan is flattened, not carried
 
-**What happens.** Radiance reads the data window and reshapes to it. An overscan
-render — standard Nuke output, where the data window is larger than the display
-window — comes back at the data-window resolution and offset, with no warning.
+**Fixed in 3.2.0, with a caveat.** The reader used to return the data window at
+its own resolution and offset, so an overscan render — standard Nuke output —
+came back the wrong size with no warning. It is now conformed to the display
+window: overscan is cropped, a short data window is padded, and the log says so.
 
-**What to do.** Crop to the display window in your comp application before
-bringing overscan plates into Radiance.
+**The caveat.** Nuke carries both windows through the whole graph as a bounding
+box. ComfyUI has one rectangle per image, so the overscan is *discarded* rather
+than kept out of frame. If you need it, set `raw` on the Read node — you get the
+data window untouched, at its own resolution.
 
 ### Alpha association is not tracked on EXR read or write
 
