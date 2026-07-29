@@ -444,6 +444,49 @@ class ColorSpaceConvert:
 
     # Industry-standard precomputed matrices
     FAST_MATRICES = {
+        # ── The three spaces that used to fall through ──────────────────
+        #
+        # `_get_primaries_key` returns "ACES2065-1", "DCI-P3" and "Display_P3"
+        # verbatim, and no "<name>_to_Rec709" key existed for them -- so the
+        # lookup below missed, logged a warning nobody reads, and applied NO
+        # primaries transform at all. Three of the twelve advertised spaces
+        # therefore returned the Rec.709 result byte-identically: (1,0,0) in
+        # ACES2065-1 gave [0.613097, 0.070194, 0.020616] where AP0->AP1 should
+        # give [1.4514, -0.0766, 0.0083].
+        #
+        # Derived from the published primaries and white points, Bradford-
+        # adapted to D65 where the source white differs (AP0 is D60, DCI-P3 is
+        # the DCI white). Each one maps [1,1,1] to [1,1,1] exactly.
+        "ACES2065-1_to_Rec709": np.array([
+            [2.5216861867, -1.1341309882, -0.3875551985],
+            [-0.2764799142, 1.3727190877, -0.0962391734],
+            [-0.0153780650, -0.1529753359, 1.1683534008],
+        ], dtype=np.float32),
+        "Rec709_to_ACES2065-1": np.array([
+            [0.4396329819, 0.3829886982, 0.1773783199],
+            [0.0897764430, 0.8134394287, 0.0967841283],
+            [0.0175411704, 0.1115465533, 0.8709122763],
+        ], dtype=np.float32),
+        "DCI-P3_to_Rec709": np.array([
+            [1.1575164062, -0.1549623781, -0.0025540281],
+            [-0.0415000715, 1.0455679231, -0.0040678515],
+            [-0.0180500390, -0.0785782727, 1.0966283116],
+        ], dtype=np.float32),
+        "Rec709_to_DCI-P3": np.array([
+            [0.8685797397, 0.1289191385, 0.0025011218],
+            [0.0345404103, 0.9618113864, 0.0036482034],
+            [0.0167714290, 0.0710399978, 0.9121885732],
+        ], dtype=np.float32),
+        "Display_P3_to_Rec709": np.array([
+            [1.2249401763, -0.2249401763, 0.0000000000],
+            [-0.0420569547, 1.0420569547, -0.0000000000],
+            [-0.0196375546, -0.0786360456, 1.0982736001],
+        ], dtype=np.float32),
+        "Rec709_to_Display_P3": np.array([
+            [0.8224619687, 0.1775380313, -0.0000000000],
+            [0.0331941989, 0.9668058011, -0.0000000000],
+            [0.0170826307, 0.0723974407, 0.9105199286],
+        ], dtype=np.float32),
         "sRGB_to_ACEScg": np.array(
             [
                 [0.613097, 0.339523, 0.047379],

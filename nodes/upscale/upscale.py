@@ -519,6 +519,32 @@ def _tile_weight_map(blend_mode: str, tile_h: int, tile_w: int, overlap: int,
     return _build_gaussian_weight_map(tile_h, tile_w, overlap, device)
 
 
+def _compute_device(images: torch.Tensor) -> torch.device:
+    """The device the upscale should RUN on, not the one the tensor arrived on.
+
+    Every entry point here used `images.device`. A ComfyUI IMAGE is always
+    CPU-resident, so that unconditionally selected the CPU and the built-in
+    upscalers ran a Real-ESRGAN forward pass in fp32 on the processor: one 4K
+    plate at 4x is roughly 66 TFLOP, about ten minutes a frame against ~5
+    seconds on a GPU. `image/upscale.py` already asked ComfyUI for the torch
+    device; this brings the rest of the pack in line.
+
+    Falls back to the input's own device when ComfyUI is not importable (tests,
+    standalone use) so nothing changes off-runtime.
+    """
+    try:
+        from comfy import model_management  # type: ignore
+
+        return model_management.get_torch_device()
+    except Exception:
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        mps = getattr(torch.backends, "mps", None)
+        if mps is not None and mps.is_available():
+            return torch.device("mps")
+        return images.device
+
+
 def tiled_upscale(
     images:     torch.Tensor,                        # (B,H,W,C) float32 [0,1]
     upscale_fn: Any,                                  # callable: (B,H,W,C) → (B,H',W',C)
@@ -622,10 +648,15 @@ def tiled_upscale(
             oy0, ox0 = y0 * scale, x0 * scale
             oy1, ox1 = oy0 + uth, ox0 + utw
 
-            up_bchw = up_tile.permute(0, 3, 1, 2)           # (B,C,H,W)
+            # The upscale runs on the compute device (see _compute_device) while
+            # the accumulators stay on the input's device, so peak VRAM is one
+            # tile rather than the whole output. Bring each tile back before
+            # accumulating -- without this the += is a cross-device op and
+            # raises as soon as the model is not on the CPU.
+            up_bchw = up_tile.permute(0, 3, 1, 2).to(out_acc.device)   # (B,C,H,W)
             out_acc [:, :, oy0:oy1, ox0:ox1]  += up_bchw * w_map
             wgt_acc [:, :, oy0:oy1, ox0:ox1]  += w_map
-            conf_acc[:, :, oy0:oy1, ox0:ox1]  += conf_t * w_map
+            conf_acc[:, :, oy0:oy1, ox0:ox1]  += conf_t.to(conf_acc.device) * w_map
 
     # Normalise by accumulated weights
     wgt_acc  = wgt_acc.clamp(min=1e-8)
@@ -1461,9 +1492,7 @@ class RadianceUpscaleTiler:
         # Clamp overlap to at most 40% of tile_size
         overlap = min(overlap, tile_size // 2)
 
-        device = images.device
-        if device.type == "cpu":
-            device = torch.device("cpu")
+        device = _compute_device(images)
 
         # ── Build upscale function ───────────────────────────────────────────
         _fn, model_label = _build_upscale_fn(
@@ -1770,7 +1799,7 @@ class RadianceUpscaleImage:
         # ── Select backend ────────────────────────────────────────────────────
         scale_int  = {"2×": 2, "4×": 4, "8× (tile cascade)": 4}[scale]
         do_double  = scale == "8× (tile cascade)"
-        device     = images.device
+        device     = _compute_device(images)
 
         # Mode → tier mapping: creative forces Tier 3, precise/balanced use selected tier
         effective_tier = model_tier if upscale_model is None else "auto"
@@ -2079,16 +2108,28 @@ class RadianceUpscaleVideo:
             t_weights = torch.ones(Fw, dtype=torch.float32)
             if Fw > 1:
                 half       = overlap_temporal
-                # Ramp up at start (skip for the first window -- sin(0) == 0,
-                # so applying it there leaves frame 0 with zero accumulated
-                # weight and it renders pure black after normalisation).
+                # Half-sample offset, so the ramp is never exactly zero.
+                #
+                # This was `sin(pi * i / (2*half))`, which is 0 at i=0. With
+                # `step = window_size - overlap_temporal`, an overlap of 1 makes
+                # consecutive windows share exactly one frame -- and that frame
+                # got the ramp-DOWN tail of the previous window (also i=0, also
+                # 0) and the ramp-UP head of this one. Both weights zero, so
+                # after normalisation the frame rendered pure black. Measured at
+                # B=100, window=16, overlap=1: frames 15, 30, 45, 60, 75 and 90
+                # were fully black. 1 is the widget minimum and the tooltip
+                # recommends it.
+                #
+                # Offsetting by half a sample keeps the smooth sine shape, makes
+                # every weight strictly positive, and leaves the two overlapping
+                # ramps summing to a sane value for the normalisation below.
                 if wi > 0:
                     for i in range(min(half, Fw)):
-                        t_weights[i] = math.sin(math.pi * i / (2 * half))
-                # Ramp down at end (skip if first or last window)
+                        t_weights[i] = math.sin(math.pi * (i + 0.5) / (2 * half))
+                # Ramp down at end (skip if last window)
                 if wi < n_windows - 1:
                     for i in range(min(half, Fw)):
-                        t_weights[Fw - 1 - i] = math.sin(math.pi * i / (2 * half))
+                        t_weights[Fw - 1 - i] = math.sin(math.pi * (i + 0.5) / (2 * half))
             t_weights = t_weights.view(Fw, 1, 1, 1)
 
             # ── Spatial upscale for this window ──────────────────────────────
@@ -2830,7 +2871,7 @@ class RadianceUpscaleFaceRestore:
 
         t0     = time.time()
         B, H, W, C = images.shape
-        device = images.device
+        device = _compute_device(images)
         result = images.clone()
 
         # ── Resolve model key ─────────────────────────────────────────────────

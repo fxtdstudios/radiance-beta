@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import io
 import base64
@@ -1142,8 +1143,19 @@ async def list_workflows(request):
 
 @_route("get", "/radiance/projects/dashboard")
 async def project_manager_dashboard(request):
+    """Build the dashboard payload OFF the event loop.
+
+    `_dashboard_payload` walks the entire ComfyUI output tree with a stat() per
+    entry and fully unzips every .rad it finds. That ran inline on aiohttp's
+    loop, so a studio output/ directory with a few hundred thousand frames froze
+    ComfyUI's websocket for the whole walk: progress bar, node highlighting,
+    queue view and /prompt all stalled mid-render, with nothing to indicate the
+    dashboard was the cause.
+    """
     try:
-        return web.json_response(_dashboard_payload())
+        loop = asyncio.get_running_loop()
+        payload = await loop.run_in_executor(None, _dashboard_payload)
+        return web.json_response(payload)
     except Exception as e:
         logger.exception("[Radiance] project_manager_dashboard failed")
         return web.json_response({"error": str(e)}, status=500)

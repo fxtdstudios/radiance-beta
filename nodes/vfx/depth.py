@@ -23,8 +23,14 @@ DEPTH_MODELS = {
 # Thread-safe cache for loaded models, keyed by (model_id, device_str).
 # Separate entries per device prevent the in-place .to(device) race
 # where two callers on different devices mutate the same nn.Module.
-_model_cache: dict = {}   # key: (model_id, device_str) -> model
-_processor_cache: dict = {}  # key: model_id -> processor
+# Bounded LRU, not a plain dict. All three Depth Anything V2 tiers resident is
+# ~1.83 GB pinned for the process lifetime, invisible to ComfyUI's model
+# manager -- the sampler OOMs later with no obvious culprit. GPUModelCache
+# moves an evicted module back to CPU before dropping it.
+from radiance.model.cache import GPUModelCache  # noqa: E402
+
+_model_cache = GPUModelCache(max_size=1)   # key: (model_id, device_str) -> model
+_processor_cache: dict = {}  # key: model_id -> processor (small, CPU-only)
 _cache_lock = threading.RLock()
 
 
@@ -95,10 +101,10 @@ def download_and_load_model(model_size: str, device: torch.device):
                 model.eval()
 
             # Store already on the target device
-            _model_cache[cache_key] = model.to(device)
+            _model_cache.put(cache_key, model.to(device))
             logger.info(f"Depth model cached on {device_str}: {model_id}")
 
-        model     = _model_cache[cache_key]
+        model     = _model_cache.get(cache_key)
         processor = _processor_cache[model_id]
 
     # model is already on the correct device — no further .to() needed
