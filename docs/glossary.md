@@ -172,5 +172,6 @@ external models, Tier 3 an SD ×4 diffusion upscaler.
 | `OCIO` | Standard OCIO config path. Radiance honours it. |
 | `RADIANCE_VIEWER_CACHE_BYTES` | Byte budget for the viewer frame cache. Default 2 GB. |
 | `RADIANCE_CACHE_SIZE` | Entry count for the model caches. |
+| `RADIANCE_READ_ROOTS` | Directories the Read node's frontend may inspect over HTTP for the layer dropdown and info line, OS path separator between entries. The node itself still reads any path you give it; this bounds only the browser-facing route. |
 | `RADIANCE_LOG_LEVEL` | `DEBUG` for tracebacks on import failures and swallowed errors. |
 | `RADIANCE_DEV` | Enables the training node group. |

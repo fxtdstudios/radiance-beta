@@ -36,8 +36,13 @@ function setWidgetVisible(widget, visible, node) {
  *          version derives the group from the format's prefix directly.
  */
 
-// FIX 5: Single source-of-truth for video extensions — mirrors Python read().
-const VIDEO_EXTENSIONS = [".mp4", ".mov", ".gif", ".webp", ".avi", ".mkv", ".webm"];
+// Mirrors radiance/core/video.py VIDEO_EXTENSIONS exactly. The previous seven
+// entries disagreed with Python in both directions -- it listed ".webp", which
+// Python reads as a still image, and omitted ".mxf", ".m2ts" and everything
+// else a camera writes -- so the frontend hid the wrong widgets for the files
+// this pack exists to open. tests/test_read_surface.py parses both lists and
+// fails if they drift apart again.
+const VIDEO_EXTENSIONS = [".asf", ".avi", ".braw", ".dv", ".flv", ".gif", ".m2ts", ".m2v", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".mts", ".mxf", ".ogv", ".r3d", ".ts", ".vob", ".webm", ".wmv", ".y4m", ".yuv"];
 
 // FIX 6: Intercept browser file inputs to allow selecting images, videos, and high-fidelity sequences (EXR/DPX/HDR)
 try {
@@ -190,22 +195,154 @@ app.registerExtension({
 	name: "Radiance.IO",
 	async beforeRegisterNodeDef(nodeType, nodeData, app) {
 
-		// ── RadianceRead: Reload button ─────────────────────────────
+		// ── RadianceRead ────────────────────────────────────────────
+		// Fifteen widgets, most of which do not apply to whatever you just
+		// picked. Nuke's Read shows you the file's format, range and layers
+		// and hides the rest; this does the same three things:
+		//   1. RELOAD button
+		//   2. only the widgets that apply to the detected media type
+		//   3. an info line, and a layer dropdown filled from the actual file
 		if (nodeData.name === "RadianceRead") {
 			const onNodeCreated = nodeType.prototype.onNodeCreated;
 			nodeType.prototype.onNodeCreated = function () {
 				const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
+				const node = this;
 
-				// Find the hidden reload widget
-				const reloadWidget = this.widgets.find(w => w.name === "reload");
-				if (!reloadWidget) return r;
+				const reloadWidget = node.widgets?.find(w => w.name === "reload");
+				if (reloadWidget) {
+					node.addWidget("button", "RELOAD", "reload", () => {
+						reloadWidget.value = (reloadWidget.value || 0) + 1;
+						node.__radianceReadRefresh?.(true);
+						node.setDirtyCanvas(true);
+					});
+				}
 
-				this.addWidget("button", "RELOAD", "reload", () => {
-					reloadWidget.value = (reloadWidget.value || 0) + 1;
-					this.setDirtyCanvas(true);
-				});
+				const get = (name) => node.widgets?.find(w => w.name === name);
+				const browseW = get("browse");
+				const pathW = get("path");
+				const mediaW = get("media_type");
+				const layerW = get("layer");
 
+				// The layer widget is a STRING on the Python side on purpose --
+				// ComfyUI validates a combo's value against the list it was
+				// built with, so a workflow saved with layer="diffuse" would
+				// refuse to load on a machine whose INPUT_TYPES never saw that
+				// file. Here it gains a dropdown; the value stays a string, and
+				// typing a layer name by hand still works.
+				if (layerW) {
+					layerW.options = layerW.options || {};
+					layerW.__radianceChoices = ["auto"];
+				}
+
+				const setLayerChoices = (choices) => {
+					if (!layerW) return;
+					layerW.__radianceChoices = choices?.length ? choices : ["auto"];
+					// Offer them through the widget's own value cycle so the
+					// user can click through without typing.
+					layerW.options.values = layerW.__radianceChoices;
+				};
+
+				const resolvedPath = () => {
+					const b = (browseW?.value || "").trim();
+					if (b && b !== "none") return b;
+					return (pathW?.value || "").trim();
+				};
+
+				const kindOf = (p) => {
+					const v = (p || "").toLowerCase();
+					if (/[%#*]/.test(v) || v.endsWith("/") || v.endsWith("\\")) return "sequence";
+					if (v.endsWith(".exr") || v.endsWith(".sxr")) return "exr";
+					if (VIDEO_EXTENSIONS.some(e => v.endsWith(e))) return "video";
+					if (v) return "image";
+					return "";
+				};
+
+				node.__radianceReadInfo = "";
+
+				const applyVisibility = () => {
+					const chosen = (mediaW?.value || "Auto");
+					const kind = chosen === "Auto" ? kindOf(resolvedPath()) : chosen.toLowerCase();
+					const isVid = kind === "video";
+					const isSeq = kind === "sequence";
+					const isExr = kind === "exr";
+					const framed = isVid || isSeq;
+
+					setWidgetVisible(get("start_frame"), framed, node);
+					setWidgetVisible(get("end_frame"), framed, node);
+					setWidgetVisible(get("frame_step"), framed, node);
+					setWidgetVisible(get("max_video_frames"), isVid, node);
+					setWidgetVisible(get("missing_frames"), isSeq, node);
+					setWidgetVisible(layerW, isExr || isSeq, node);
+					// Premultiplied is only meaningful where an alpha can exist.
+					setWidgetVisible(get("premultiplied"), kind !== "video" || isExr, node);
+					setWidgetVisible(reloadWidget, false, node);
+				};
+
+				let pending = null;
+				const refresh = (force) => {
+					applyVisibility();
+					const p = resolvedPath();
+					if (!p) { node.__radianceReadInfo = ""; node.setDirtyCanvas(true); return; }
+					if (!force && p === node.__radianceReadLastPath) return;
+					node.__radianceReadLastPath = p;
+
+					clearTimeout(pending);
+					pending = setTimeout(async () => {
+						try {
+							const q = `?path=${encodeURIComponent(p)}`;
+							const res = await fetch(`/radiance/media/info${q}`);
+							if (res.ok) {
+								const data = await res.json();
+								node.__radianceReadInfo = data.summary || data.error || "";
+							} else {
+								// 403 outside the allowed roots is expected on a
+								// facility NAS. The node still reads the file; it
+								// just cannot preview what is in it from here.
+								node.__radianceReadInfo = "";
+							}
+							if (kindOf(p) === "exr") {
+								const lres = await fetch(`/radiance/media/layers${q}`);
+								if (lres.ok) setLayerChoices((await lres.json()).layers);
+							}
+						} catch (e) {
+							node.__radianceReadInfo = "";
+						}
+						node.setDirtyCanvas(true);
+					}, 120);
+				};
+				node.__radianceReadRefresh = refresh;
+
+				for (const w of [browseW, pathW, mediaW]) {
+					if (!w) continue;
+					const prev = w.callback;
+					w.callback = function (...args) {
+						const out = prev ? prev.apply(this, args) : undefined;
+						refresh(false);
+						return out;
+					};
+				}
+
+				setTimeout(() => refresh(true), 50);
 				return r;
+			};
+
+			// The info line, drawn where Nuke's Read puts its format readout.
+			const onDrawForeground = nodeType.prototype.onDrawForeground;
+			nodeType.prototype.onDrawForeground = function (ctx) {
+				onDrawForeground?.apply(this, arguments);
+				if (this.flags?.collapsed || !this.__radianceReadInfo) return;
+				ctx.save();
+				ctx.font = "11px monospace";
+				ctx.fillStyle = "#8ab4d8";
+				ctx.textAlign = "left";
+				const max = Math.max(40, this.size[0] - 20);
+				let text = this.__radianceReadInfo;
+				while (text.length > 8 && ctx.measureText(text).width > max) {
+					text = text.slice(0, -2);
+				}
+				if (text !== this.__radianceReadInfo) text += "…";
+				ctx.fillText(text, 10, this.size[1] - 6);
+				ctx.restore();
 			};
 		}
 

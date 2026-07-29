@@ -183,8 +183,17 @@ def test_no_internal_doc_link_is_broken():
 
 
 def test_the_limitations_page_covers_what_the_changelog_admits():
-    """The two must not disagree about what is broken."""
-    limitations = _src("docs/limitations.md")
+    """The two must not disagree about what is broken.
+
+    Whitespace is normalised before matching: a topic that happens to fall
+    across a line break in the prose is still documented, and a test that says
+    otherwise is testing the line wrapping.
+
+    'display window' was on this list until 3.2.0, when the reader started
+    conforming to it. What remains is that the overscan is discarded rather
+    than carried as a bounding box, so 'overscan' is the topic now.
+    """
+    limitations = " ".join(_src("docs/limitations.md").split())
     for topic in ("Daniele Evo", "chromatic_adaptation", "laplacian_pyramid",
-                  "Lucas", "display window"):
+                  "Lucas", "overscan"):
         assert topic in limitations, f"{topic!r} is missing from the limitations page"

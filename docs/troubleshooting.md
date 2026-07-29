@@ -136,14 +136,37 @@ There is no recovery for files already lost.
 
 ### An overscan EXR comes back offset and the wrong size
 
-The reader uses the data window and ignores the display window. Crop in your
-comp application first. See [Known Limitations](limitations.md).
+Fixed in 3.2.0. The reader used the data window and ignored the display window.
+It now conforms to the display window and logs that it did. Set `raw` on the Read
+node to get the data window untouched instead.
+
+### "has no standard R/G/B channels"
+
+Gone in 3.2.0. A multi-layer AOV render and a depth-only pass both read now. Pick
+which layer with the `layer` widget — with the frontend loaded it is a dropdown
+listing what is actually in the file, and `auto` takes the beauty.
+
+The `info` output lists every layer the file contains, if you want to see them
+without clicking.
 
 ### A directory or glob sequence pattern reads nothing
 
-`start_frame` is treated as a list index for `/dir/` and `*.exr` patterns, and
-the widget defaults to 1001 — fewer than 1001 files gives an empty list. Set
-`start_frame` to 0, or use a `%04d` / `####` pattern, where it is a frame number.
+Fixed in 3.2.0. `start_frame` defaults to 1001 because that is where a VFX
+sequence starts, and a start outside the range that exists on disk is now
+treated as unset rather than reading an empty list.
+
+### I picked one frame and got the whole sequence
+
+By design as of 3.2.0, and what Nuke does. If a picked file has numbered
+siblings, Read offers the range and logs what it found. Set `media_type` to
+**Image** for exactly the one frame.
+
+### A format I know is readable is refused
+
+3.2.0 builds the recognised-extension table from what your install actually
+registers — 64 image formats on a stock Pillow, against nine hand-typed ones
+before. If a format is still refused, the error names the package that would
+open it (`pip install OpenImageIO` covers DPX, Cineon, ARRI and camera raw).
 
 ### DPX write fails
 
