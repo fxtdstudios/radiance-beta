@@ -2,96 +2,185 @@
 
 # Quickstart
 
-This page gets Radiance installed and shows the safest first graphs for end users.
+Install Radiance, confirm it loaded, and build three graphs that each do
+something useful. Twenty minutes end to end.
 
-## Install
+---
 
-Install Radiance inside the same Python environment used by ComfyUI.
+## 1. Install
+
+Install into **the same Python environment ComfyUI uses**. Radiance relies on
+ComfyUI's existing PyTorch and does not install its own.
+
+### ComfyUI Manager
+
+Search for **Radiance** and install. Restart ComfyUI.
+
+### Manual
 
 ```bash
 cd ComfyUI/custom_nodes
 git clone https://github.com/fxtdstudios/radiance.git
 cd radiance
-pip install -r requirements.txt
 ```
 
-Platform-specific requirement files are available:
+Then the requirements file for your platform:
 
-| Platform | File |
+```bash
+pip install -r requirements_windows.txt      # Windows
+pip install -r requirements_linux.txt        # Ubuntu / Linux
+pip install -r requirements_mac_silicon.txt  # macOS Apple Silicon
+```
+
+On Ubuntu, OpenCV also wants a few system libraries:
+
+```bash
+sudo apt-get install -y libgl1 libglib2.0-0
+```
+
+### What each dependency unlocks
+
+| Package | Without it |
 | :--- | :--- |
-| Windows | `requirements_windows.txt` |
-| Apple Silicon | `requirements_mac_silicon.txt` |
-| Linux | `requirements_linux.txt` |
+| `OpenEXR` | No EXR read or write — the core of the pack |
+| `OpenImageIO` | No DPX |
+| `opencolorio` | No OCIO transforms; the built-in matrices still work |
+| `imageio-ffmpeg` | Video export needs ffmpeg on PATH instead |
+| `transformers` | No Depth Anything V2 |
+| `defusedxml` | CDL XML parsing falls back to the standard parser |
 
-ComfyUI normally provides `torch`; Radiance validates required dependencies at runtime.
+---
 
-## First Image Graph
+## 2. Confirm it loaded
 
-Use this when you want a reliable image load, inspect, process, and save path.
+Start ComfyUI and look for this in the console:
+
+```
+Radiance: successfully loaded 109 nodes (v3.2.0)
+```
+
+If instead you see an **ERROR** naming modules that failed to import, read it —
+it tells you which dependency is missing and which nodes are therefore absent.
+A short count means missing nodes, not a cosmetic issue:
+
+```
+Radiance: loaded 59 of at least 109 expected nodes (v3.2.0) - 50 missing (46% of
+the catalog). This is a failed start, not a small one: check the import errors
+above, then re-run with RADIANCE_LOG_LEVEL=DEBUG for tracebacks.
+```
+
+Radiance nodes live under **FXTD STUDIOS/Radiance** in the node menu, or type
+`radiance` in the search.
+
+---
+
+## 3. Get the models (optional)
+
+The HDR VAE decoders use trained **RUDRA** weights from
+[fxtdstudios/RUDRA](https://huggingface.co/fxtdstudios/RUDRA). Put the
+`.safetensors` files in `ComfyUI/models/radiance/` — create the folder if it does
+not exist — and keep the original filenames.
+
+```bash
+pip install -U "huggingface_hub[cli]"
+huggingface-cli download fxtdstudios/RUDRA --local-dir "ComfyUI/models/radiance"
+```
+
+Download only the decoders for the base models you use. Without them, HDR VAE
+decode falls back to the standard VAE and the output is display-referred rather
+than scene-linear.
+
+Upscale models download on first use into your ComfyUI models directory.
+
+---
+
+## 4. Your first graph — read, look, write
+
+The shortest useful graph. It proves your install handles EXR and colour
+correctly.
 
 ```mermaid
 flowchart LR
-    A["◎ Radiance Read"] --> B["◎ Radiance Viewer"]
-    B --> C["◎ Radiance Grade"]
-    C --> D["◎ Radiance Write"]
+    A["◎ Read"] --> B["◎ Radiance Viewer"]
+    A --> C["◎ Write"]
 ```
 
-Checklist:
+1. Add **◎ Read**. Point `browse` at an image, or put a path in `path`.
+2. Set **`color_space`** to match the file. For a render EXR leave it on
+   `Auto / Linear (pass-through)`. For a JPEG or PNG choose `sRGB`. This is the
+   single most important setting in the graph — see
+   [Colour Management](color-management.md).
+3. Add **◎ Radiance Viewer** and connect the image.
+4. Add **◎ Write**, connect the image, set `output_path` and `filename`, choose
+   `IMG │ EXR (16-bit half)`.
+5. Queue.
 
-| Check | Recommendation |
-| :--- | :--- |
-| Source format | Use EXR/TIFF when preserving high bit depth. |
-| Preview | Use `◎ Radiance Viewer` or `◎ HDR Monitor` before final export. |
-| Output | Use EXR for float/HDR results and PNG/JPEG only for review proxies. |
+You should see the image in the Viewer and find the EXR on disk. If the picture
+looks flat and grey, your `color_space` is wrong.
 
-## First HDR Graph
+---
 
-Use this when working with high dynamic range imagery or recovering highlight detail.
+## 5. Second graph — generate in HDR
 
 ```mermaid
 flowchart LR
-    A["◎ Radiance Read"] --> B["◎ HDR Auto Log Select"]
-    A --> C["◎ HDR Color Pipeline"]
-    B --> C
-    C --> D["Generate / Sampler / VFX"]
-    D --> E["◎ HDR Monitor"]
-    D --> F["◎ Radiance Write"]
+    A["◎ Radiance Read Models"] --> B["◎ Cinematic Prompt Encoder"]
+    B --> C["◎ Radiance Sampler"]
+    C --> D["◎ HDR VAE Decode"]
+    D --> E["◎ Radiance Viewer"]
+    D --> F["◎ Write · EXR"]
 ```
 
-Important:
+The Sampler hides widgets that do not apply to the detected model, so it will
+look different for Flux than for SDXL. On Flux, leave `cfg` at 1.0.
 
-| Setting | Why |
-| :--- | :--- |
-| Working color space | Decide before grading or model processing. |
-| Compression / log choice | Keep consistent across HDR conditioning and recovery. |
-| Output container | Save EXR when values above `1.0` matter. |
+**HDR VAE Decode** with a RUDRA decoder gives you a scene-linear result with
+highlight information above 1.0 — that is what makes the EXR worth keeping.
 
-## First DCC Handoff
+Drag [`workflows/start.json`](../workflows/start.json) onto the canvas for a
+ready-made version of this.
 
-Use this when sending a processed frame or sequence to Nuke or DaVinci Resolve.
+---
+
+## 6. Third graph — grade and deliver
 
 ```mermaid
 flowchart LR
-    A["Processed image"] --> B["◎ Radiance Write"]
-    B --> C["◎ Radiance Send to Nuke"]
-    B --> D["◎ Radiance Send to DaVinci Resolve"]
+    A["◎ Read"] --> B["◎ Grade"]
+    B --> C["◎ Radiance Viewer"]
+    C -->|"RENDER"| D["master + sidecars"]
 ```
 
-For Nuke, start the local Radiance listener in Nuke first:
+1. Read a plate as scene-linear.
+2. Grade it — exposure first, then the rest.
+3. Open the Viewer, refine the grade in its panel, set the delivery format and
+   path, press **RENDER**.
 
-```python
-exec(open("/path/to/ComfyUI/custom_nodes/radiance/scripts/start_nuke_server.py").read())
-```
+What you grade in the Viewer is what gets written, along with a CDL, an AMF, a
+JSON metadata file and a thumbnail. See
+[Viewer and Delivery](viewer-and-delivery.md).
 
-For Resolve, Radiance exports a folder handoff that can be imported into the Resolve media pool.
+---
 
-## Where Nodes Appear
+## 7. Where to go next
 
-Radiance nodes are grouped under:
+| If you want to | Read |
+| :--- | :--- |
+| Understand scene-linear, alpha, HDR | [Concepts](concepts.md) |
+| Get colour right for a specific deliverable | [Colour Management](color-management.md) |
+| Review and export properly | [Viewer and Delivery](viewer-and-delivery.md) |
+| Copy a production recipe | [Workflows](workflows.md) |
+| Look up a node's parameters | [Node Reference](nodes.md) |
+| Know what does not work as labelled | [Known Limitations](limitations.md) |
+| Fix something | [Troubleshooting](troubleshooting.md) |
 
-```text
-FXTD STUDIOS/Radiance
-```
+---
 
-The node display names normally start with `◎` so they are easy to search in ComfyUI.
+## Quick sanity checklist
 
+- [ ] Console says `successfully loaded 109 nodes`, no ERROR
+- [ ] `color_space` on Read matches the actual file
+- [ ] Working in scene-linear, encoding once at the end
+- [ ] Masters written as EXR, proxies as PNG/MP4
+- [ ] QC node run before delivering
+- [ ] Read [Known Limitations](limitations.md) before trusting the ACES label

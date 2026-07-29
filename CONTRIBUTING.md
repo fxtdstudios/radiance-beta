@@ -48,7 +48,7 @@ radiance/
 ├── requirements_linux.txt
 ├── requirements_mac_silicon.txt
 ├── pyproject.toml           # Package metadata, test config, coverage config
-├── CODE_STYLE.md            # Detailed style guide
+├── docs/dev/CODE_STYLE.md   # Detailed style guide
 └── CONTRIBUTING.md          # This file
 ```
 
@@ -145,7 +145,7 @@ def test_input_types():
    - `fix/bug-description`
    - `docs/update-readme`
 2. **Checklist**:
-   - [ ] Code follows `CODE_STYLE.md`
+   - [ ] Code follows `docs/dev/CODE_STYLE.md`
    - [ ] Added tooltips to all widgets
    - [ ] Used `◎` icon in display name
    - [ ] Added / updated test file in `tests/`

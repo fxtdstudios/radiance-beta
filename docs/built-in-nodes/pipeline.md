@@ -2,220 +2,155 @@
 
 # Pipeline and Studio
 
-Project containers, blend composites, local MCP bridge, Nuke send, and Resolve handoff.
+Project, shot and asset management, and handoff to Nuke and DaVinci Resolve.
 
-## Typical workflow
+## Typical graph
 
 ```text
-Project Manager -> processing graph -> Write -> Nuke Send / DaVinci Send / MCP Bridge
+Project Manager (organise) → work → Send to Nuke / Send to Resolve
 ```
 
 ## Before you use these nodes
 
-- Treat bridge nodes as local studio tools and verify host, port, and token settings.
-- Use project containers for repeatable shot and version handling.
-- Resolve handoff is folder based by default; live scripting requires the Resolve helper.
+- **The dashboards open in-canvas**, as an overlay on the ComfyUI graph rather
+  than a separate browser tab. Launch them from the Project Manager node.
+- **The Nuke bridge is local and structured.** It binds to `127.0.0.1` and
+  accepts a fixed set of production actions. It does not evaluate arbitrary
+  Python — that path was removed in 3.2.0 after it was found to be exploitable
+  through its own blocklist.
+- **Resolve handoff is a folder drop.** Radiance writes PNG, TIFF or EXR into a
+  directory that Resolve imports; there is no live link.
+- **Write first, send second.** Both bridges hand over media that already
+  exists on disk.
 
-## Nodes in this section
+## Nodes in this section (4)
 
-| Node | Internal key | Purpose |
+| Node | Key | What it does |
 | :--- | :--- | :--- |
-| [◎ Project Manager](#project-manager) | `RadianceProjectManager` | Pipeline project manager — save, list, load, delete, and inspect .rad workflow containers. |
-| [◎ Blend Composite](#blend-composite) | `RadianceBlendComposite` | Composite two images using industry-standard blend modes. |
-| [◎ Radiance MCP Bridge](#radiance-mcp-bridge) | `RadianceMCP` | Local bridge node for pipeline and DCC handoff actions. |
-| [◎ Radiance Send to Nuke](#radiance-send-to-nuke) | `RadianceNukeSend` | Exports and sends media to a local Nuke listener. |
-| [◎ Radiance Send to DaVinci Resolve](#radiance-send-to-davinci-resolve) | `RadianceDaVinciSend` | Exports media into a DaVinci Resolve handoff folder. |
+| [Export to Nuke](#export-to-nuke) | `RadianceNukeSend` | Export image as EXR and write a .nk Read-node snippet for direct Nuke import |
+| [Export to Resolve](#export-to-resolve) | `RadianceDaVinciSend` | Export the current image to a DaVinci Resolve shared media folder for manual import |
+| [MCP Bridge](#mcp-bridge) | `RadianceMCP` | MCP Bridge — Export frames as EXR/video for DCC consumption, or start a TCP bridge server for command/control between ComfyUI and DCC apps. |
+| [Project Manager](#project-manager) | `RadianceProjectManager` | Save the current workflow graph as a .rad container with artist and version metadata. |
 
-## ◎ Project Manager
+---
 
-**Internal key:** `RadianceProjectManager`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Pipeline`  
-**Source:** `nodes_workspace.py`
-**Function:** `run`
+## Export to Nuke
 
-### What it does
+**Node key:** `RadianceNukeSend`  
+**Menu:** `FXTD STUDIOS/Radiance/Pipeline`  
+**Source:** `nodes/pipeline/studio_integrations.py`  
+**Output node** — runs even with nothing connected downstream.  
 
-Pipeline project manager — save, list, load, delete, and inspect .rad workflow containers.
-
-### When to use it
-
-Use `◎ Project Manager` when the graph reaches the Project Manager step in a pipeline and studio workflow.
+Export image as EXR and write a .nk Read-node snippet for direct Nuke import. Optionally push to a running Nuke instance via the Radiance TCP listener.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `filename` | Optional | `STRING` | `` | Workflow filename stem (version appended automatically). |
-| `artist` | Optional | `STRING` | `` | Artist name saved in workflow metadata. |
-| `version` | Optional | `INT` | `1` | Version number for the saved workflow. |
-
-### Outputs
-
-This node does not declare named runtime outputs in the source catalog.
-
-### Practical notes
-
-- Keep this node in the part of the graph indicated by its group workflow and inspect all report or metadata outputs when debugging.
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
-
-## ◎ Blend Composite
-
-**Internal key:** `RadianceBlendComposite`  
-**Category:** `FXTD STUDIOS/Radiance/◎ VFX`  
-**Source:** `nodes/pipeline/overlay.py`
-**Function:** `composite`
-
-### What it does
-
-Composite two images using industry-standard blend modes.
-
-### When to use it
-
-Use `◎ Blend Composite` when the graph reaches the Blend Composite step in a pipeline and studio workflow.
-
-### Inputs
-
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `base` | Yes | `IMAGE` | - | Bottom layer (background). |
-| `blend` | Yes | `IMAGE` | - | Top layer (foreground). |
-| `mode` | Yes | `(BLEND_MODES, {'default': 'Normal'})` | - | - |
-| `opacity` | Yes | `FLOAT` | `1.0` | Overall strength of the blend layer. |
-| `mask` | Optional | `MASK` | - | Optional per-pixel mask (grayscale). White = full blend, Black = base only. |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `image` | Yes | `IMAGE` |  |  | Frame to export. A batch is written as a numbered EXR sequence. |
+| `nuke_folder` | Yes | `STRING` | `` |  | Output folder for image + .nk file. Created if missing. |
+| `filename` | Yes | `STRING` | `radiance_out` |  | Base name for the EXR file(s). |
+| `frame_start` | No | `INT` | `1001` | 0 – 999999 | Starting frame number for the EXR sequence. |
+| `push_to_nuke` | No | `BOOLEAN` | `False` |  | If True and Nuke listener is running, auto-create a Read node via TCP. |
+| `nuke_host` | No | `STRING` | `127.0.0.1` |  | Nuke listener host (used only when push_to_nuke=True). |
+| `nuke_port` | No | `INT` | `1986` | 1024 – 65535 | Nuke listener port (used only when push_to_nuke=True). |
+| `half_float` | No | `BOOLEAN` | `True` |  | Write 16-bit half EXR (True) or 32-bit float EXR (False). |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `image` | `IMAGE` | Output produced by the `image` socket. |
+| `status` | `STRING` |  |
+| `render_path` | `STRING` |  |
 
-### Practical notes
+---
 
-- The node returns `image` (`IMAGE`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## Export to Resolve
 
-## ◎ Radiance MCP Bridge
+**Node key:** `RadianceDaVinciSend`  
+**Menu:** `FXTD STUDIOS/Radiance/Pipeline`  
+**Source:** `nodes/pipeline/studio_integrations.py`  
+**Output node** — runs even with nothing connected downstream.  
 
-**Internal key:** `RadianceMCP`  
-**Category:** `FXTD STUDIOS/Radiance/07 Pipeline & DCC`  
-**Source:** `nodes/pipeline/dcc.py`
-**Function:** `run`
-
-### What it does
-
-Local bridge node for pipeline and DCC handoff actions.
-
-### When to use it
-
-Use `◎ Radiance MCP Bridge` when the graph reaches the MCP Bridge step in a pipeline and studio workflow.
+Export the current image to a DaVinci Resolve shared media folder for manual import. Supports 8-bit PNG, 16-bit TIFF, and EXR output formats.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `mode` | Yes | `(_MCP_MODES, {'default': 'Export Frames', 'tooltip': 'Export Frames = save EXR/video for DCC. Bridge Server = start TCP control server.'})` | - | - |
-| `source` | Yes | `(_SOURCES, {'default': 'Auto', 'tooltip': 'Auto = try Images, then Video, then Sequence. Select explicitly to avoid ambiguity.'})` | - | - |
-| `target` | Yes | `(_DCC_TARGETS, {'default': 'Nuke', 'tooltip': 'Target DCC application (metadata hint).'})` | - | - |
-| `output_path` | Yes | `STRING` | `` | Output directory for EXR frames (Export mode) or bridge log (Bridge mode). |
-| `format` | Yes | `(_EXR_FORMATS, {'default': 'EXR (16-bit half)', 'tooltip': 'EXR bit depth. +H.264 or +ProRes also generates a video file.'})` | - | - |
-| `images` | Optional | `IMAGE` | - | Batch of frames to export (used when source is Images or Auto). |
-| `video_path` | Optional | `STRING` | `` | Path to a video file (.mp4, .mov, etc.) to decode and export (source=Video or Auto). |
-| `sequence_path` | Optional | `STRING` | `` | Path/pattern to an image sequence e.g. /frames/frame.%04d.exr (source=Sequence or Auto). |
-| `fps` | Optional | `FLOAT` | `24.0` | Frame rate for video export. |
-| `frame_start` | Optional | `INT` | `1001` | Starting frame number for EXR sequence export. |
-| `frame_end` | Optional | `INT` | `0` | Last frame index (0 = read all found frames, for sequences only). |
-| `filename_prefix` | Optional | `STRING` | `frame` | Prefix for EXR filenames (e.g. frame_1001.exr). |
-| `bridge_port` | Optional | `INT` | `1987` | TCP port for Bridge Server (default 1987). |
-| `bridge_host` | Optional | `STRING` | `127.0.0.1` | Bind address (127.0.0.1 = loopback only; 0.0.0.0 = all interfaces). |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `image` | Yes | `IMAGE` |  |  | Frame to export. Batches write numbered files. |
+| `resolve_folder` | Yes | `STRING` | `` |  | DaVinci Resolve shared media folder. Created if missing. |
+| `filename` | Yes | `STRING` | `radiance_out` |  | Base filename (no extension). |
+| `bit_depth` | Yes | choice of `16bit`, `8bit`, `EXR` | `16bit` |  | Output bit depth. EXR writes 16-bit half-float. |
+| `frame_start` | No | `INT` | `1001` | 0 – 999999 | Starting frame number for numbered sequences. |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `status` | `STRING` | Output produced by the `status` socket. |
-| `render_path` | `STRING` | Output produced by the `render_path` socket. |
+| `status` | `STRING` |  |
+| `render_path` | `STRING` |  |
 
-### Practical notes
+---
 
-- The node returns `status` (`STRING`), `render_path` (`STRING`).
-- Confirm host, port, output path, and token settings before running bridge actions.
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## MCP Bridge
 
-## ◎ Radiance Send to Nuke
+**Node key:** `RadianceMCP`  
+**Menu:** `FXTD STUDIOS/Radiance/Pipeline`  
+**Source:** `nodes/pipeline/dcc.py`  
+**Output node** — runs even with nothing connected downstream.  
 
-**Internal key:** `RadianceNukeSend`  
-**Category:** `FXTD STUDIOS/Radiance/07 Pipeline & DCC`  
-**Source:** `nodes/pipeline/studio_integrations.py`
-**Function:** `run`
-
-### What it does
-
-Exports and sends media to a local Nuke listener.
-
-### When to use it
-
-Use `◎ Radiance Send to Nuke` near the end of the graph after the image, sequence, or metadata is ready for delivery.
+MCP Bridge — Export frames as EXR/video for DCC consumption, or start a TCP bridge server for command/control between ComfyUI and DCC apps.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `image` | Yes | `IMAGE` | - | Frame to export. A batch is written as a numbered EXR sequence. |
-| `nuke_folder` | Yes | `STRING` | `` | Output folder for image + .nk file. Created if missing. |
-| `filename` | Yes | `STRING` | `radiance_out` | Base name for the EXR file(s). |
-| `frame_start` | Optional | `INT` | `1001` | Starting frame number for the EXR sequence. |
-| `push_to_nuke` | Optional | `BOOLEAN` | `False` | If True and Nuke listener is running, auto-create a Read node via TCP. |
-| `nuke_host` | Optional | `STRING` | `127.0.0.1` | Nuke listener host (used only when push_to_nuke=True). |
-| `nuke_port` | Optional | `INT` | `1986` | Nuke listener port (used only when push_to_nuke=True). |
-| `half_float` | Optional | `BOOLEAN` | `True` | Write 16-bit half EXR (True) or 32-bit float EXR (False). |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `mode` | Yes | choice of `Export Frames`, `Bridge Server` | `Export Frames` |  | Export Frames = save EXR/video for DCC. Bridge Server = start TCP control server. |
+| `source` | Yes | choice of `Auto`, `Images`, `Video`, `Sequence` | `Auto` |  | Auto = try Images, then Video, then Sequence. Select explicitly to avoid ambiguity. |
+| `target` | Yes | choice of `Nuke`, `Resolve`, `Fusion` | `Nuke` |  | Target DCC application (metadata hint). |
+| `output_path` | Yes | `STRING` | `` |  | Output directory for EXR frames (Export mode) or bridge log (Bridge mode). |
+| `format` | Yes | choice of `EXR (16-bit half)`, `EXR (32-bit float)`, `EXR + H.264 MP4`, `EXR + ProRes MOV` | `EXR (16-bit half)` |  | EXR bit depth. +H.264 or +ProRes also generates a video file. |
+| `images` | No | `IMAGE` |  |  | Batch of frames to export (used when source is Images or Auto). |
+| `video_path` | No | `STRING` | `` |  | Path to a video file (.mp4, .mov, etc.) to decode and export (source=Video or Auto). |
+| `sequence_path` | No | `STRING` | `` |  | Path/pattern to an image sequence e.g. /frames/frame.%04d.exr (source=Sequence or Auto). |
+| `fps` | No | `FLOAT` | `24.0` | 1.0 – 240.0, step 0.001 | Frame rate for video export. |
+| `frame_start` | No | `INT` | `1001` | 0 – 999999 | Starting frame number for EXR sequence export. |
+| `frame_end` | No | `INT` | `0` | 0 – 999999 | Last frame index (0 = read all found frames, for sequences only). |
+| `filename_prefix` | No | `STRING` | `frame` |  | Prefix for EXR filenames (e.g. frame_1001.exr). |
+| `bridge_port` | No | `INT` | `1987` | 1024 – 65535 | TCP port for Bridge Server (default 1987). |
+| `bridge_host` | No | `STRING` | `127.0.0.1` |  | Bind address (127.0.0.1 = loopback only; 0.0.0.0 = all interfaces). |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `status` | `STRING` | Output produced by the `status` socket. |
-| `render_path` | `STRING` | Output produced by the `render_path` socket. |
+| `status` | `STRING` |  |
+| `render_path` | `STRING` |  |
 
-### Practical notes
+---
 
-- The node returns `status` (`STRING`), `render_path` (`STRING`).
-- Confirm host, port, output path, and token settings before running bridge actions.
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## Project Manager
 
-## ◎ Radiance Send to DaVinci Resolve
+**Node key:** `RadianceProjectManager`  
+**Menu:** `FXTD STUDIOS/Radiance/Core`  
+**Source:** `nodes_workspace.py`  
+**Output node** — runs even with nothing connected downstream.  
 
-**Internal key:** `RadianceDaVinciSend`  
-**Category:** `FXTD STUDIOS/Radiance/07 Pipeline & DCC`  
-**Source:** `nodes/pipeline/studio_integrations.py`
-**Function:** `run`
-
-### What it does
-
-Exports media into a DaVinci Resolve handoff folder.
-
-### When to use it
-
-Use `◎ Radiance Send to DaVinci Resolve` near the end of the graph after the image, sequence, or metadata is ready for delivery.
+Save the current workflow graph as a .rad container with artist and version metadata.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `image` | Yes | `IMAGE` | - | Frame to export. Batches write numbered files. |
-| `resolve_folder` | Yes | `STRING` | `` | DaVinci Resolve shared media folder. Created if missing. |
-| `filename` | Yes | `STRING` | `radiance_out` | Base filename (no extension). |
-| `bit_depth` | Yes | `ENUM: 16bit, 8bit, EXR` | `16bit` | Output bit depth. EXR writes 16-bit half-float. |
-| `frame_start` | Optional | `INT` | `1001` | Starting frame number for numbered sequences. |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `filename` | No | `STRING` | `` |  | Workflow filename stem (version appended automatically). |
+| `artist` | No | `STRING` | `` |  | Artist name saved in workflow metadata. |
+| `version` | No | `INT` | `1` | 1 – 9999 | Version number for the saved workflow. |
+
+Hidden inputs supplied by ComfyUI: `extra_pnginfo`, `prompt`.
 
 ### Outputs
 
-| Output | Type | Description |
-| :--- | :--- | :--- |
-| `status` | `STRING` | Output produced by the `status` socket. |
-| `render_path` | `STRING` | Output produced by the `render_path` socket. |
+None — this node is a terminal (it writes, sends, or displays).
 
-### Practical notes
-
-- The node returns `status` (`STRING`), `render_path` (`STRING`).
-- Confirm host, port, output path, and token settings before running bridge actions.
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+---
