@@ -82,12 +82,34 @@ Radiance Read → colour transform → work → Radiance Write
 - **DPX needs OpenImageIO.** There is no Pillow plugin for it. The Digital
   Cinema nodes will tell you if the package is missing.
 
-## Known limitation
+## Reading video
+
+Video decodes through one raw ffmpeg pipe at the source's own bit depth — 10-bit
+ProRes 422, 12-bit ProRes 4444, DNxHR HQX and 10-bit HEVC all survive intact.
+
+- **ProRes 4444 alpha reaches the `mask` output.** 422 in any flavour has no
+  alpha channel; only 4444 and 4444 XQ do.
+- **`start_frame`, `end_frame` and `frame_step` apply to video**, on the clip's
+  own zero-based numbering. `start_frame` defaults to 1001 because that is the
+  sequence convention, so a start past the end of a clip is treated as unset
+  rather than decoding nothing.
+- **Colour tags are read.** On Auto, a file tagged `bt709`, `smpte2084` or
+  `arib-std-b67` decodes through the matching curve and the node logs which one.
+  An *untagged* file passes through unchanged and warns — a Rec.709 delivery is
+  not scene-linear, and Radiance will not guess for you.
+- **Read raises on failure.** A missing file, a corrupt MOV or a truncated clip
+  turns the node red instead of yielding black frames.
+
+## Known limitations
 
 The EXR reader ignores the display window, so an overscan render (a standard
 Nuke output) comes back offset and at the data-window resolution with no
 warning. Crop to the display window in your comp application before bringing
 overscan plates into Radiance.
+
+A clip is decoded to one batched tensor, so RAM is the ceiling — 240 frames of
+4K RGBA float32 is about 31 GB. Interlaced sources are reported but not
+deinterlaced.
 """,
     "Generate, Loaders, and Sampling": """
 Model loading, prompt construction, sampling, and HDR-aware latent decoding.
