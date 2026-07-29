@@ -145,7 +145,11 @@ Read an image, EXR, video or numbered sequence into the pipeline. Video decodes 
 | `frame_step` | No | `INT` | `1` | 1 – 100 | Step size — e.g. 2 reads every other frame. Applies to sequences and video. |
 | `max_video_frames` | No | `INT` | `0` | 0 – 99999 | Hard cap on decoded video frames (0 = all). Frames are float32 RGB in RAM: 240 frames of 4K RGBA is about 31 GB, so cap this while building a graph. |
 | `proxy_scale` | No | `FLOAT` | `0.0` | 0.0 – 1.0, step 0.05 | Downscale factor for proxy preview (0 = full resolution). 0.5 = half res for faster iteration. |
-| `missing_frames` | No | choice of `Error`, `Black`, `Skip` | `Skip` |  | How to handle missing sequence frames. Black inserts zero frames, Skip omits them, Error raises. |
+| `missing_frames` | No | choice of `Error`, `Black`, `Skip` | `Skip` |  | A frame inside a sequence that is not on disk. Black inserts a zero frame, Skip omits it, Error raises. For a read that fails outright, see on_error. |
+| `layer` | No | `STRING` | `auto` |  | Which EXR layer to read. 'auto' takes the beauty, or the first colour layer, or — for a data-only file such as a Z-depth pass — the first layer of any kind. With the frontend loaded this is a dropdown listing the layers actually in the selected file. |
+| `on_error` | No | choice of `Error`, `Black frame` | `Error` |  | What to do when the read fails — file missing, corrupt, unreadable. • Error: the node goes red and the queue stops. What Nuke and every other application does, and the default. • Black frame: return black and carry on. This is what 3.1.x always did, silently, which is how a black master got delivered. |
+| `raw` | No | `BOOLEAN` | `False` |  | Hand back exactly what is stored in the file: no colour space decode, and no conform to the EXR display window (so overscan is preserved). Nuke's 'raw data'. |
+| `premultiplied` | No | `BOOLEAN` | `False` |  | Tick when the file's RGB is already multiplied by its alpha — the EXR convention — and you want it divided back out on read. Off by default, matching Nuke, because turning it on changes pixels. |
 | `reload` | No | `INT` | `0` | 0 – 2147483647 | Bump to force a re-read of the file, for when the contents changed but the timestamp did not. |
 
 ### Outputs
@@ -153,7 +157,8 @@ Read an image, EXR, video or numbered sequence into the pipeline. Video decodes 
 | Output | Type | Description |
 | :--- | :--- | :--- |
 | `image` | `IMAGE` | Frames as a batch. Scene-linear once color_space has decoded them. |
-| `mask` | `MASK` | Alpha. For a ProRes 4444 or any RGBA source this is the file's own matte; otherwise zeros. |
+| `mask` | `MASK` | Alpha. For a ProRes 4444, an RGBA EXR or an RGBA sequence this is the file's own matte; otherwise zeros. |
+| `info` | `STRING` | JSON describing what was actually read: resolution, frame count and range, bit depth, codec, EXR layers and windows, colour tags, timecode. Nuke's metadata tab, as a wire you can plug in. |
 
 ---
 
