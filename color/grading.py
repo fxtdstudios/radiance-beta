@@ -113,6 +113,18 @@ def apply_grading(
     lift: float = 0.0,
     saturation: float = 1.0,
     temperature: float = 6500.0,
+    # Viewer-matched white balance.
+    #
+    # The WebGL viewer's TEMP/TINT sliders are a plain additive shift in [-2, 2]
+    # (`shift.r += temp; shift.b -= temp; shift.g -= tint`), while `temperature`
+    # above is a Kelvin white-balance multiply. The delivery handler used to
+    # fabricate Kelvin from the slider (6500 + t*3500) and pass that, so the
+    # export applied a completely different curve from the one on screen -- and
+    # `tint` had nowhere to go at all, so the green/magenta axis was dropped
+    # from every master. Pass these instead when matching the viewer; leave
+    # `temperature` at 6500 in that case.
+    temp_shift: float = 0.0,
+    tint_shift: float = 0.0,
     # Extended Resolve-style controls (v3.2 sync)
     offset: float = 0.0,  # global additive offset (applied first)
     contrast: float = 1.0,  # contrast multiplier (pivoted)
@@ -140,6 +152,13 @@ def apply_grading(
     passthrough IMAGE output matches what the WebGL viewer displays.
     """
     out = img.astype(np.float32, copy=True)
+
+    # Alpha is not a colour. Exposure, contrast and shadows/highlights below all
+    # used to operate on the whole array, so a 50% matte came back at 1.059 with
+    # exposure +1 and contrast 1.3 -- an over-1.0 "opacity" that clips to fully
+    # opaque on write. Lift/gain/gamma, saturation, hue and gamut compression
+    # were already [..., :3]-guarded; these three were not.
+    _has_alpha = out.ndim == 3 and out.shape[2] >= 4
     
     # Pre-grading luma for luma_mix
     luma_orig = None
@@ -165,6 +184,8 @@ def apply_grading(
         and abs(highlights) < 0.001
         and abs(hue_shift) < 0.1
         and abs(temperature - 6500.0) < 10.0
+        and abs(temp_shift) < 0.001
+        and abs(tint_shift) < 0.001
         and lut_name == "None"
         and abs(luma_mix - 1.0) < 0.001
         and _arr_at_identity(gamma_rgb, 1.0)
@@ -179,7 +200,10 @@ def apply_grading(
     # ── 1. Offset (global additive shift — handled inside do_lift_gamma_gain)
     # ── 2. Exposure (Linear part)
     if abs(exposure) > 0.001:
-        out *= np.float32(2.0**exposure)
+        if _has_alpha:
+            out[..., :3] *= np.float32(2.0**exposure)
+        else:
+            out *= np.float32(2.0**exposure)
 
     # ── 3. White Balance
     if abs(temperature - 6500.0) > 10.0 and out.ndim == 3 and out.shape[2] >= 3:
@@ -187,6 +211,16 @@ def apply_grading(
         out[..., 0] *= np.float32(r_mult)
         out[..., 1] *= np.float32(g_mult)
         out[..., 2] *= np.float32(b_mult)
+
+    # Viewer-matched additive shift. Byte-for-byte the shader's applyTempTint:
+    #   shift.r += temp;  shift.b -= temp;  shift.g -= tint
+    # RGB only -- alpha is not a colour and must not be shifted.
+    if (abs(temp_shift) > 0.001 or abs(tint_shift) > 0.001) \
+            and out.ndim == 3 and out.shape[2] >= 3:
+        out[..., 0] += np.float32(temp_shift)
+        out[..., 1] -= np.float32(tint_shift)
+        out[..., 2] -= np.float32(temp_shift)
+        np.clip(out[..., :3], 0.0, 65504.0, out=out[..., :3])
 
     # ── 4. Lift / Gain / Gamma (Resolve-style, per-channel aware)
     def do_lift_gamma_gain(color: np.ndarray) -> np.ndarray:
@@ -248,7 +282,11 @@ def apply_grading(
 
     # ── 5. Contrast
     if abs(contrast - 1.0) > 0.001:
-        out = (out - np.float32(pivot)) * np.float32(contrast) + np.float32(pivot)
+        if _has_alpha:
+            out[..., :3] = (out[..., :3] - np.float32(pivot)) \
+                * np.float32(contrast) + np.float32(pivot)
+        else:
+            out = (out - np.float32(pivot)) * np.float32(contrast) + np.float32(pivot)
 
     # ── 6. Shadows / Highlights
     if (
@@ -259,9 +297,16 @@ def apply_grading(
         luma = 0.2126 * out[..., 0] + 0.7152 * out[..., 1] + 0.0722 * out[..., 2]
         s_weight = np.power(np.clip(1.0 - luma, 0.0, 1.0), 2.0)[..., np.newaxis]
         h_weight = np.power(np.clip(luma, 0.0, 1.0), 2.0)[..., np.newaxis]
-        out *= 1.0 + np.float32(shadows) * s_weight * 0.5
-        out *= 1.0 + np.float32(highlights) * h_weight * 0.5
-        out = np.maximum(out, 0.0)
+        _s = 1.0 + np.float32(shadows) * s_weight * 0.5
+        _h = 1.0 + np.float32(highlights) * h_weight * 0.5
+        if _has_alpha:
+            out[..., :3] *= _s
+            out[..., :3] *= _h
+            np.maximum(out[..., :3], 0.0, out=out[..., :3])
+        else:
+            out *= _s
+            out *= _h
+            out = np.maximum(out, 0.0)
 
     # ── 6.5 Gamut Compression
     if gamut_compression and out.ndim == 3 and out.shape[2] >= 3:

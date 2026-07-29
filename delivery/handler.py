@@ -48,6 +48,53 @@ _UI_TO_WRITE_COLORSPACE = {
 }
 
 
+#: Every grading key `/radiance/deliver` reads out of the payload.
+#:
+#: This list is the contract between js/radiance_viewer.js and this module, and
+#: it went out of sync silently: the viewer sent 11 keys while this file read 6
+#: more that never arrived -- shadows, highlights, hue_shift, lut_name,
+#: lut_intensity and gamut_compression -- each falling back to its identity
+#: default. All six are live viewer controls driving real shader uniforms, so a
+#: colourist could set Shadows -0.60 and Highlights +0.35, press RENDER, and get
+#: a master with neither, a 200 response and "EXPORT COMPLETE" on the HUD. In
+#: the other direction `tint` was sent and read nowhere.
+#:
+#: tests/test_delivery_contract.py compares this list against the keys the JS
+#: actually sends, in both directions, so the two cannot drift again.
+GRADE_PAYLOAD_KEYS = (
+    "exposure", "gamma", "gain", "lift", "offset",
+    "contrast", "pivot", "saturation", "temperature", "tint",
+    "colorScience", "lumaMix",
+    "shadows", "highlights", "hue_shift",
+    "lut_name", "lut_intensity", "gamut_compression",
+    "grain", "bloom", "halation", "diffusion", "denoise",
+)
+
+_warned_missing_grade_keys = False
+
+
+def _warn_on_missing_grade_keys(grading: dict) -> None:
+    """Say so when the payload is short of what the grade reads.
+
+    Once per process: a missing key is a client/server version mismatch, not a
+    per-frame condition, and the whole point is that it should be impossible to
+    miss rather than impossible to ignore.
+    """
+    global _warned_missing_grade_keys
+    if _warned_missing_grade_keys:
+        return
+    missing = [k for k in GRADE_PAYLOAD_KEYS if k not in (grading or {})]
+    if missing:
+        _warned_missing_grade_keys = True
+        logger.warning(
+            "[Radiance] The delivery payload is missing %d grading key(s): %s. "
+            "Those controls will export at their default value even if they are "
+            "set in the viewer. This usually means the browser is running a "
+            "cached older radiance_viewer.js -- hard-refresh ComfyUI.",
+            len(missing), ", ".join(missing),
+        )
+
+
 def _resolve_write_format(ui_format: str) -> str:
     if ui_format in _UI_TO_WRITE_FORMAT:
         return _UI_TO_WRITE_FORMAT[ui_format]
@@ -291,10 +338,23 @@ async def radiance_deliver_endpoint(request):
             except (TypeError, ValueError):
                 return [default_scalar] * length
 
+        # Every key this function reads. The viewer must send all of them --
+        # `_warn_on_missing_grade_keys` says so out loud rather than letting a
+        # silent .get() default turn a colourist's decision into a no-op.
+        _warn_on_missing_grade_keys(grading)
+
         exposure    = safe_float(grading.get('exposure'), 0.0)
         saturation  = safe_float(grading.get('saturation'), 1.0)
-        _temp_internal = safe_float(grading.get('temperature'), 0.0)
-        temperature = 6500.0 + _temp_internal * 3500.0
+
+        # TEMP/TINT are the viewer's additive sliders in [-2, 2], not Kelvin.
+        # This used to be `temperature = 6500.0 + temp * 3500.0`, feeding a
+        # Kelvin white-balance multiply that has nothing to do with the shader's
+        # `shift.r += temp` -- so the export applied a different curve from the
+        # one on screen. `tint` was read nowhere at all, so the green/magenta
+        # axis was silently dropped from every master.
+        temp_shift  = safe_float(grading.get('temperature'), 0.0)
+        tint_shift  = safe_float(grading.get('tint'), 0.0)
+        temperature = 6500.0
         contrast    = safe_float(grading.get('contrast'), 1.0)
         pivot       = safe_float(grading.get('pivot'), 0.18)
         shadows     = safe_float(grading.get('shadows'), 0.0)
@@ -342,6 +402,8 @@ async def radiance_deliver_endpoint(request):
                     lift=0.0,
                     saturation=saturation,
                     temperature=temperature,
+                    temp_shift=temp_shift,
+                    tint_shift=tint_shift,
                     offset=0.0,
                     contrast=contrast,
                     pivot=pivot,

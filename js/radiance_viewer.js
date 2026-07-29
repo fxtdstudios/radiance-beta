@@ -4009,6 +4009,18 @@ class RadianceViewer {
                             temperature: this.temperature,
                             tint: this.tint,
                             colorScience: this.colorScience || 0,
+                            lumaMix: this.lumaMix !== undefined ? this.lumaMix : 1.0,
+                            // These six were read by delivery/handler.py and never
+                            // sent, so every one of them exported at its identity
+                            // default while the viewer showed the graded result.
+                            // See GRADE_PAYLOAD_KEYS in delivery/handler.py —
+                            // tests/test_delivery_contract.py now diffs the two.
+                            shadows: this.shadows || 0.0,
+                            highlights: this.highlights || 0.0,
+                            hue_shift: this.hueShift || 0.0,
+                            lut_name: this.displayLut || 'None',
+                            lut_intensity: this.lutIntensity !== undefined ? this.lutIntensity : 1.0,
+                            gamut_compression: !!this.gamutCompression,
                             // FX params — must match viewer for what-you-see = what-you-export
                             grain: this.grain || 0.0,
                             bloom: this.bloom || 0.0,
