@@ -4,21 +4,27 @@
 
 This ledger is generated from the grouped Radiance node catalog used by the documentation. Dynamic `.gizmo` nodes are runtime-generated and are not counted as fixed catalog nodes.
 
+> Nine of these node classes existed in the source from v3.0 but were never
+> listed in a group's mapping dict, so ComfyUI never showed them. They were
+> registered in 3.2.0. Four more (the tone-map pair and the SDR→HDR pair)
+> were live but missing from this ledger. The totals now match
+> `NODE_CLASS_MAPPINGS` exactly — `tests/test_docs_coverage.py` checks it.
+
 ## Summary
 
 | Group | Count |
 | :--- | ---: |
-| [IO and Delivery](built-in-nodes/io-delivery.md) | 4 |
-| [Generate, Loaders, and Sampling](built-in-nodes/generate.md) | 12 |
-| [Color](built-in-nodes/color.md) | 13 |
-| [HDR and ACES](built-in-nodes/hdr-aces.md) | 15 |
-| [VFX, Masks, Optics, and Multipass](built-in-nodes/vfx.md) | 24 |
+| [IO and Delivery](built-in-nodes/io-delivery.md) | 6 |
+| [Generate, Loaders, and Sampling](built-in-nodes/generate.md) | 13 |
+| [Color](built-in-nodes/color.md) | 15 |
+| [HDR and ACES](built-in-nodes/hdr-aces.md) | 19 |
+| [VFX, Masks, Optics, and Multipass](built-in-nodes/vfx.md) | 25 |
 | [Pipeline and Studio](built-in-nodes/pipeline.md) | 5 |
-| [Review, Viewer, and Preview](built-in-nodes/review.md) | 5 |
+| [Review, Viewer, and Preview](built-in-nodes/review.md) | 8 |
 | [Upscale](built-in-nodes/upscale.md) | 4 |
 | [Video](built-in-nodes/video.md) | 12 |
 | [AI Assist](built-in-nodes/ai-assist.md) | 2 |
-| **Total** | **96** |
+| **Total** | **109** |
 
 ## IO and Delivery
 
@@ -26,6 +32,9 @@ This ledger is generated from the grouped Radiance node catalog used by the docu
 - `RadianceWrite`
 - `RadianceEXRMultiPart`
 - `RadianceLoadImageMask`
+- `RadianceDigitalCinemaRead`
+- `RadianceDigitalCinemaWrite`
+
 
 ## Generate, Loaders, and Sampling
 
@@ -41,6 +50,8 @@ This ledger is generated from the grouped Radiance node catalog used by the docu
 - `RadianceRegionalGrid`
 - `RadianceResolution`
 - `RadianceDenoise`
+- `RadianceControlNetApply`
+
 
 ## Color
 
@@ -57,6 +68,9 @@ This ledger is generated from the grouped Radiance node catalog used by the docu
 - `RadianceGradeMatch`
 - `RadianceOCIOContext`
 - `RadianceQC`
+- `RadianceLUTApply`
+- `RadianceLUTBlend`
+
 
 ## HDR and ACES
 
@@ -75,6 +89,11 @@ This ledger is generated from the grouped Radiance node catalog used by the docu
 - `RadianceHDRSynthesisEngine`
 - `RadianceRelightEngine`
 - `RadianceHDRLatentEncoder`
+- `RadianceHDRToneMap`
+- `RadianceHDRExpandDynamicRange`
+- `RadianceSDRToHDRUniversal`
+- `RadianceSDRToHDRRecover`
+
 
 ## VFX, Masks, Optics, and Multipass
 
@@ -102,6 +121,8 @@ This ledger is generated from the grouped Radiance node catalog used by the docu
 - `RadianceEXRPassesWriter`
 - `RadianceMultipassRelight`
 - `RadianceMultipassComposite`
+- `RadianceBitDepthDegrade`
+
 
 ## Pipeline and Studio
 
@@ -118,6 +139,10 @@ This ledger is generated from the grouped Radiance node catalog used by the docu
 - `RadianceFocusPeaking`
 - `RadianceContactSheet`
 - `RadianceFrameStamp`
+- `RadiancePolicyGuard`
+- `RadianceFlipbookGIF`
+- `RadiancePreviewServer`
+
 
 ## Upscale
 

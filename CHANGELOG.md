@@ -2,6 +2,153 @@
 
 All notable changes to FXTD Radiance will be documented in this file.
 
+## [3.2.0] - 2026-07-29 ("Audit Release")
+
+A three-week audit, five independent review passes, and a new test harness that
+calls every node. The theme throughout: almost nothing here raised an error. The
+code ran, reported success, and produced the wrong result — which is why the
+existing 1,500-test suite had nothing to catch.
+
+**Upgrade note.** Colour output changes on several paths. If you have approved
+masters made with 3.1.x, re-check them before conforming new work against them —
+particularly anything graded through the Viewer's delivery panel, tone-mapped
+with AgX, or exported through the ACES 2.0 Cinema or HLG transforms.
+
+### Added
+
+- **109 nodes, up from 100.** Nine complete node classes were written and never
+  listed in any mapping dict, so they never reached ComfyUI's menu:
+  Bit-Depth Degrade, Policy Guard, LUT Apply, LUT Blend, Digital Cinema Read,
+  Digital Cinema Write, Flipbook GIF, Preview Server and ControlNet Apply.
+- **Per-node functional tests.** `tests/test_node_functional.py` builds inputs
+  from each node's own `INPUT_TYPES` and calls its `FUNCTION`, checking return
+  arity, IMAGE/MASK shape and dtype, and that inputs are not mutated in place.
+  80 nodes execute, 30 skip with a stated reason, none fail.
+- **A delivery payload contract.** `GRADE_PAYLOAD_KEYS` plus a test that parses
+  the viewer's JS and the handler's Python and diffs them in both directions.
+- **`core/ffmpeg.py`** — resolves ffmpeg from `RADIANCE_FFMPEG`, then PATH, then
+  the binary `imageio-ffmpeg` ships.
+- **`core/tiling.py`** — shared tile blending weights with correct border
+  handling.
+- **A real-torch gate in the test suite.** The MagicMock torch stub defeated
+  every self-skip idiom in use; CI had been red for seventeen days behind a
+  stale `--ignore` list.
+
+### Fixed — colour
+
+- **The delivery panel dropped half the grade.** Shadows, Highlights, Hue, LUT
+  and gamut compression were read by the exporter and never sent by the viewer,
+  so each exported at its identity default while the viewer showed it applied.
+  Tint was sent and read nowhere. Temperature used a Kelvin white-balance
+  multiply against the viewer's additive slider — a different curve entirely.
+- **ACES 2.0 Cinema** flat-lined above 0.4 scene-linear at a peak white of
+  ~27 nits instead of 48. **ACES 2.0 HLG** placed diffuse white at the display
+  peak: 18% grey rendered at ~127 nits where BT.2408 specifies ~26.
+- **AgX** applied its inset matrix untransposed, tinting every neutral (channel
+  spread 0.042 at 18% grey, 0.116 at 16.0), and double transfer-encoded its
+  output, raising the black floor to ~12/255 so pure black was unreachable.
+- **Alpha was tone-mapped, expanded and graded.** A 50% matte came back at
+  0.607, 0.214 or 1.059 depending on the path.
+- **Sony S-Log3's toe** used half the specified slope with a spurious offset:
+  black encoded to 0.127921 instead of 0.092864 (~36 code values at 10-bit).
+- **Colour Space Convert silently skipped the primaries transform** for
+  ACES2065-1, DCI-P3 and Display-P3 — three of twelve advertised spaces
+  returned the Rec.709 result unchanged.
+- DaVinci Intermediate, Canon Log 3 and RED Log3G10 rewritten to spec; the
+  DaVinci Wide Gamut and ARRI Wide Gamut 4 matrices had wrong third rows;
+  Bradford D65↔D60 adaptation added; the tone-scale shoulder rebuilt.
+
+### Fixed — output and data integrity
+
+- **Writing a versioned file could destroy the previous version.** `_out_path`
+  used `Path.with_suffix()`, which replaces everything after the last dot, so
+  `sh010.comp_v0001` and `sh010.comp_v0002` both wrote to `sh010.exr`. With
+  overwrite on by default, each render silently replaced the last approved one.
+- Legal-range limiting was ungated, squeezing 32-bit EXR masters into
+  [16/255, 235/255]. Vertical aspect ratios cropped instead of pillarboxing.
+- A wheel built on a working machine shipped that developer's own `.rad` shot
+  files.
+- The session log is now written atomically under a lock; concurrent deliveries
+  used to lose entries and a crash mid-write discarded the whole history.
+
+### Fixed — performance and stability
+
+- **The built-in upscalers ran on the CPU.** They selected `images.device`,
+  which is always CPU for a ComfyUI IMAGE — roughly ten minutes a frame at 4K
+  against about five seconds on a GPU.
+- **The delivery export blocked ComfyUI's websocket** for its whole duration:
+  grading, filters, a model upscale and ffmpeg all ran on the event loop. The
+  Project Manager dashboard did the same while walking the output tree.
+- `overlap_temporal=1` — the widget minimum, and the value the tooltip
+  recommends — produced fully black frames at every window boundary.
+- `torch.quantile`'s 2²⁴-element limit made the Multipass Master node fail on
+  every 4K plate.
+- The Sampler patched the loader's cached ModelPatcher in place whenever
+  `cfg <= 1.0` (the Flux default), leaking a stale patch into every later run;
+  and the second CFG patch overwrote the first rather than wrapping it.
+- Real-ESRGAN loaded with `strict=False` against mismatched layer names: 8 of
+  702 tensors matched and the model ran at near-random initialisation while the
+  log reported a successful load.
+- Tile blending ramped image borders as if they were seams, darkening the frame
+  perimeter.
+- Four unbounded GPU-resident model dictionaries replaced with bounded LRU
+  caches; `RADIANCE_CACHE_SIZE=0` no longer raises.
+
+### Fixed — controls that did nothing
+
+- **PAG** guarded on an `extra_options` key ComfyUI never sets, so the patch was
+  a no-op on every call while logging that it had been applied, and `pag_scale`
+  was a gate rather than a strength.
+- **Restart sampling** ran after the schedule had finished, passed its noised
+  latent through the wrong argument, used the wrong noise variance, and stopped
+  before returning to σ=0.
+- **`blend_mode`** appeared exactly once in the tiling function — in its own
+  signature.
+- **`chromatic_adaptation`** returned bit-identical output for every option.
+- **The Read node's RELOAD button** never rendered: `reload` was declared as a
+  hidden input, where ComfyUI only populates magic-string keys.
+
+### Security
+
+- Removed arbitrary code execution from the Nuke bridge. The guard was a
+  substring blocklist that a single space defeated (`open (` does not contain
+  `open(`), and that module chaining through the permitted `json` global
+  defeated outright. Structured commands and literal values only.
+- `torch.load(weights_only=True)` on every user-reachable checkpoint path.
+- `/radiance/ocio/load` accepted any absolute path on the host; it is now
+  contained to the bundled config, `$OCIO`, `RADIANCE_OCIO_ROOTS` and the
+  ComfyUI models tree.
+- Delivery history in the viewer is HTML-escaped.
+
+### Changed
+
+- Startup reports a shortfall as an ERROR naming each failed module. It used to
+  print "successfully loaded N nodes" whether N was 109 or 12.
+- `colour-science`, `einops` and `torchsde` removed from the runtime
+  dependencies — nothing imported them. `OpenImageIO` added to the three
+  platform requirements files, where it was missing despite being required for
+  DPX.
+- One implementation each of `escapeHtml` and the widget helpers, replacing five
+  and six diverged copies.
+- 49 exception handlers that silently swallowed failures now log at DEBUG with
+  the operation and exception type.
+
+### Known limitations
+
+- The ACES 2.0 tone scale is a log-space contrast of 1.55 with a tanh shoulder,
+  not the Daniele Evo curve the specification defines. 18% grey therefore sits
+  about 0.84 stop above the ACES 2.0 reference on SDR, and HLG diffuse white
+  lands at signal 0.915 rather than 0.75. The normalisation defects around it
+  are fixed; the curve itself is not yet the published one.
+- `blend_mode="laplacian_pyramid"` falls back to the Gaussian feather and logs
+  that it has done so.
+- `chromatic_adaptation` has no effect — the adaptation is baked into the
+  precomputed conversion matrices. The widget warns when set to a non-default.
+- Optical flow is single-scale Lucas–Kanade despite the DIS reference in its
+  docstring; it recovers about 1% of a 5-pixel displacement.
+- Scene-cut detection normalises scores by the batch maximum, so the threshold
+  has no absolute meaning and cut-free footage still reports cuts.
+
 ## [3.1.2] - 2026-07-02 ("GPU-First Release Candidate")
 
 GPU-first completion pass for HDR, RUDRA decode, denoise, motion/flow, upscale, and VFX finishing paths, plus the missing HDR tone-map node migration.

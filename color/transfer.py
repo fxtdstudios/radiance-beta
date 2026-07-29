@@ -142,7 +142,23 @@ def tensor_logc4_to_linear(tensor: torch.Tensor) -> torch.Tensor:
 
 # ── Sony S-Log3 ───────────────────────────────────────────────────────────────
 
-_TOE_SLOPE_SLOG3 = 76.2102946929 / (0.02125 * 1023.0)  # ≈ 3.5058, C0-continuous
+# Sony S-Log3 toe, per the Sony white paper:
+#
+#     x <  0.01125 :  (x * (171.2102946929 - 95) / 0.01125 + 95) / 1023
+#
+# i.e. a slope of 76.2102946929 / (0.01125 * 1023) = 6.6222 applied to x
+# DIRECTLY -- there is no +0.01 shift below the cut; that offset belongs to the
+# log branch only.
+#
+# This was 76.2102946929 / (0.02125 * 1023) = 3.5058 with a `+ 0.01` shift on
+# the input. Encode and decode were mutually consistent, so every round-trip
+# test passed, but the absolute mapping was wrong below 0.011 linear: black
+# encoded to 0.127921 instead of 0.092864 (≈36 code values at 10-bit), and
+# S-Log3 CV 0.130 decoded to +0.000593 where the spec gives +0.005608 -- a 9.5x
+# shadow crush. color/luts.py:194 already carried the correct curve, so the two
+# implementations in-tree disagreed.
+_TOE_SLOPE_SLOG3 = (171.2102946929 - 95.0) / (0.01125 * 1023.0)  # ≈ 6.6222
+_SLOG3_TOE_INTERCEPT = 95.0 / 1023.0
 
 
 def linear_to_slog3(img: np.ndarray) -> np.ndarray:
@@ -151,7 +167,7 @@ def linear_to_slog3(img: np.ndarray) -> np.ndarray:
     out = np.empty_like(img, dtype=np.float32)
     mask = img >= cut
     out[mask] = (420.0 + np.log10((img[mask] + 0.01) / 0.19) * 261.5) / 1023.0
-    out[~mask] = _TOE_SLOPE_SLOG3 * (img[~mask] + 0.01) + 95.0 / 1023.0
+    out[~mask] = _TOE_SLOPE_SLOG3 * img[~mask] + _SLOG3_TOE_INTERCEPT
     return out
 
 
@@ -160,7 +176,7 @@ def slog3_to_linear(img: np.ndarray) -> np.ndarray:
     out = np.empty_like(img, dtype=np.float32)
     mask = img >= cut_v
     out[mask] = 0.19 * np.power(10.0, (img[mask] * 1023.0 - 420.0) / 261.5) - 0.01
-    out[~mask] = (img[~mask] - 95.0 / 1023.0) / _TOE_SLOPE_SLOG3 - 0.01
+    out[~mask] = (img[~mask] - _SLOG3_TOE_INTERCEPT) / _TOE_SLOPE_SLOG3
     return out
 
 
@@ -168,14 +184,14 @@ def tensor_linear_to_slog3(tensor: torch.Tensor) -> torch.Tensor:
     cut = 0.011250
     tensor_clamped = tensor.clamp(min=-0.01)
     log_val = (420.0 + torch.log10((tensor_clamped + 0.01).clamp(min=1e-10) / 0.19) * 261.5) / 1023.0
-    lin_val = _TOE_SLOPE_SLOG3 * (tensor_clamped + 0.01) + 95.0 / 1023.0
+    lin_val = _TOE_SLOPE_SLOG3 * tensor_clamped + _SLOG3_TOE_INTERCEPT
     return torch.where(tensor_clamped >= cut, log_val, lin_val)
 
 
 def tensor_slog3_to_linear(tensor: torch.Tensor) -> torch.Tensor:
     cut_v = 171.2102946929 / 1023.0
     log_val = 0.19 * torch.pow(10.0, (tensor * 1023.0 - 420.0) / 261.5) - 0.01
-    lin_val = (tensor - 95.0 / 1023.0) / _TOE_SLOPE_SLOG3 - 0.01
+    lin_val = (tensor - _SLOG3_TOE_INTERCEPT) / _TOE_SLOPE_SLOG3
     return torch.where(tensor >= cut_v, log_val, lin_val)
 
 

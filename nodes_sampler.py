@@ -117,6 +117,21 @@ def _is_channel_mismatch_error(exc: BaseException) -> Optional[str]:
     return None
 
 
+def _existing_cfg_function(model):
+    """The sampler_cfg_function already registered on a ModelPatcher, or None.
+
+    ComfyUI's `set_model_sampler_cfg_function` writes to
+    `model.model_options["sampler_cfg_function"]`; there is no attribute of that
+    name. Two call sites here used `getattr(model, "model_sampler_cfg_function")`
+    and therefore always got None, so each later patch replaced the previous one
+    instead of wrapping it.
+    """
+    options = getattr(model, "model_options", None)
+    if isinstance(options, dict):
+        return options.get("sampler_cfg_function")
+    return None
+
+
 def _sample_custom_progress_safe(context: str, **kwargs):
     """Run Comfy sampling, retrying once with progress output disabled if stderr is broken."""
 
@@ -1017,14 +1032,23 @@ class RadianceSamplerPro:
                     f"CFG++ enabled but CFG is {cfg}. For Flux, CFG++ requires CFG > 1.0"
                 )
 
+        # Clone ONCE, before anything patches it.
+        #
+        # Each block below used to guard its own clone on a condition that
+        # assumed an earlier block had already cloned -- and the first of those
+        # only ran when `guidance_rescale_phi > 0 AND cfg > 1.0`. Flux defaults
+        # cfg to 1.0, so a user following this node's own tooltip
+        # ("recommended 0.7") patched the LOADER'S CACHED ModelPatcher in place.
+        # The patch, its `_step_counter` and its captured `_sdr_ref_lat` closure
+        # then persisted into every later queue and every other branch fed from
+        # that MODEL, and survived the user disconnecting the input.
+        model = model.clone()
+
         if pag_scale > 0:
             model = apply_pag_to_model(model, pag_scale)
 
         if guidance_rescale_phi > 0.0 and cfg > 1.0:
             phi = guidance_rescale_phi
-            model = (
-                model.clone() if pag_scale <= 0 else model
-            )                                
 
             def guidance_rescale_patch(args):
 
@@ -1045,12 +1069,18 @@ class RadianceSamplerPro:
             logger.info(f"Guidance Rescale applied (phi={phi:.2f})")
 
         if sdr_latent is not None and sdr_inject_steps > 0:
-            model = model.clone() if (pag_scale <= 0 and guidance_rescale_phi <= 0) else model
             _step_counter = [0]
             _sdr_ref_lat = sdr_latent.detach()
             
-            # Retrieve existing cfg patch if any
-            existing_cfg_fn = getattr(model, "model_sampler_cfg_function", None)
+            # ComfyUI's ModelPatcher.set_model_sampler_cfg_function stores the
+            # callable in `model.model_options["sampler_cfg_function"]`. There is
+            # no `model_sampler_cfg_function` ATTRIBUTE, so the old
+            # `getattr(model, "model_sampler_cfg_function", None)` was always
+            # None and the set_... call below OVERWROTE the guidance-rescale
+            # patch registered above instead of wrapping it. With rescale and an
+            # SDR reference both on, rescale silently did nothing while the log
+            # still said "Guidance Rescale applied".
+            existing_cfg_fn = _existing_cfg_function(model)
 
             def _sdr_post_cfg_patch(args):
                 denoised = existing_cfg_fn(args) if existing_cfg_fn is not None else args["denoised"]
@@ -1092,12 +1122,11 @@ class RadianceSamplerPro:
                     break
 
         if energy_mask is not None:
-            model = model.clone() if (pag_scale <= 0 and guidance_rescale_phi <= 0 and sdr_reference is None) else model
             _eps_mask = energy_mask.detach()
             _eps_priority = float(energy_priority)
             
-            # Retrieve existing CFG function (e.g., guidance_rescale or base)
-            existing_cfg_fn = getattr(model, "model_sampler_cfg_function", None)
+            # See the note above: read model_options, not a nonexistent attribute.
+            existing_cfg_fn = _existing_cfg_function(model)
 
             def _energy_prioritized_cfg_patch(args):
                 import torch.nn.functional as F
