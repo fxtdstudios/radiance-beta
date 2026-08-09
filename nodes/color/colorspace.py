@@ -169,31 +169,122 @@ class RadianceColorSpaceConvert:
             },
         }
 
-    @staticmethod
-    def _lin_to_logc3(img: torch.Tensor) -> torch.Tensor:
-        cut = 0.010591
-        a, b = 5.555556, 0.052272
-        c, d = 0.247190, 0.385537
-        e, f = 5.367655, 0.092809
-        lin = img * a + b
-        return torch.where(lin >= cut, c * torch.log10(lin + a * b) + d, e * lin + f)
+    # ── Analytical curve table ────────────────────────────────────────────
+    #
+    # AUDIT-FIX (2026-08): this node used to carry its own inline LogC3 that
+    # disagreed with the ARRI spec (18% grey encoded to 0.417 instead of
+    # 0.391, black to 0.271 instead of 0.093) AND with its own decode -- 0.18
+    # round-tripped through encode+decode to 0.060, a ~1.5-stop error. Worse,
+    # ten of the sixteen advertised spaces (ACEScc, ACEScct, LogC4, F-Log2,
+    # C-Log3, Log3G10, DaVinci Intermediate, BMD Gen5, V-Log, N-Log) had no
+    # analytical implementation at all: whenever OCIO was not configured --
+    # the default install -- the "conversion" silently returned the input
+    # unchanged. All curves now come from radiance.color.transfer and
+    # radiance.color.luts, the audited single source of truth, and an
+    # unsupported space raises instead of passing pixels through untouched.
+    #
+    # Convention: camera-log spaces are treated as transfer curves relative to
+    # the Rec.709-primaries working linear (matching color/luts.py). ACEScc,
+    # ACEScct and ACEScg additionally apply the Rec.709↔AP1 gamut matrix.
 
     @staticmethod
-    def _logc3_to_lin(img: torch.Tensor) -> torch.Tensor:
-        cut = 0.010591
-        a, b = 5.555556, 0.052272
-        c, d = 0.247190, 0.385537
-        e, f = 5.367655, 0.092809
-        log_cut = e * (cut * a + b) + f
-        return torch.where(img >= log_cut, (torch.pow(10.0, (img - d) / c) - a * b) / a, (img - f) / e)
+    def _via_numpy(fn, img: torch.Tensor) -> torch.Tensor:
+        arr = fn(img.detach().cpu().numpy().astype("float32"))
+        import numpy as _np
+        return torch.from_numpy(_np.ascontiguousarray(arr)).to(img.device, img.dtype)
 
-    @staticmethod
-    def _lin_to_srgb(img: torch.Tensor) -> torch.Tensor:
-        return torch.where(img <= 0.0031308, img * 12.92, 1.055 * img.clamp(min=0.0) ** (1.0 / 2.4) - 0.055)
+    def _to_acescg(self, img: torch.Tensor) -> torch.Tensor:
+        return torch.einsum('ij,...j->...i', self._M_709_TO_ACESCG.to(img.device), img)
 
-    @staticmethod
-    def _srgb_to_lin(img: torch.Tensor) -> torch.Tensor:
-        return torch.where(img <= 0.04045, img / 12.92, ((img + 0.055) / 1.055) ** 2.4)
+    def _from_acescg(self, img: torch.Tensor) -> torch.Tensor:
+        return torch.einsum('ij,...j->...i', self._M_ACESCG_TO_709.to(img.device), img)
+
+    def _encode_from_linear(self, img: torch.Tensor, space: str) -> torch.Tensor:
+        """Working linear (Rec.709 primaries, D65) → `space`."""
+        from radiance.color import transfer as _tf
+        from radiance.color import luts as _luts
+        if space == "Linear sRGB (D65)":
+            return img
+        if space == "sRGB (OETF encoded)":
+            return _tf.tensor_linear_to_srgb(img)
+        if space == "Rec.709 (OETF encoded)":
+            # True BT.709 camera OETF -- previously aliased to the sRGB curve.
+            abs_t, sign = img.abs(), img.sign()
+            high = 1.099 * torch.pow(abs_t.clamp(min=1e-10), 0.45) - 0.099
+            return torch.where(abs_t < 0.018, abs_t * 4.5, high) * sign
+        if space == "Rec.709 / BT.1886":
+            return img.clamp(min=0.0) ** (1.0 / 2.4)
+        if space == "ACEScg":
+            return self._to_acescg(img)
+        if space == "ACEScc":
+            return _tf.tensor_linear_to_acescc(self._to_acescg(img))
+        if space == "ACEScct":
+            return _tf.tensor_linear_to_acescct(self._to_acescg(img))
+        if space == "LogC3 (ARRI EI800)":
+            return _tf.tensor_linear_to_logc3(img)
+        if space == "LogC4 (ARRI Alexa 35)":
+            return _tf.tensor_linear_to_logc4(img)
+        if space == "C-Log3 (Canon)":
+            return _tf.tensor_linear_to_canonlog3(img)
+        if space == "Log3G10 (RED IPP2)":
+            return _tf.tensor_linear_to_log3g10(img)
+        if space == "DaVinci Intermediate":
+            return _tf.tensor_linear_to_davinci_intermediate(img)
+        if space == "V-Log (Panasonic)":
+            return _tf.tensor_linear_to_vlog(img)
+        if space == "F-Log2 (Fujifilm)":
+            return self._via_numpy(_luts._lut_flog2, img)
+        if space == "BMD Film Gen5":
+            return self._via_numpy(_luts._lut_bmd_gen5, img)
+        if space == "N-Log (Nikon)":
+            return self._via_numpy(_luts._lut_nlog, img)
+        raise ValueError(
+            f"RadianceColorSpaceConvert: no analytical transform for "
+            f"{space!r} and no OCIO config is loaded. Refusing to pass "
+            f"pixels through unchanged.")
+
+    def _decode_to_linear(self, img: torch.Tensor, space: str) -> torch.Tensor:
+        """`space` → working linear (Rec.709 primaries, D65)."""
+        from radiance.color import transfer as _tf
+        from radiance.color import luts as _luts
+        if space == "Linear sRGB (D65)":
+            return img
+        if space == "sRGB (OETF encoded)":
+            return _tf.tensor_srgb_to_linear(img)
+        if space == "Rec.709 (OETF encoded)":
+            abs_t, sign = img.abs(), img.sign()
+            high = torch.pow(((abs_t + 0.099) / 1.099).clamp(min=1e-10), 1.0 / 0.45)
+            return torch.where(abs_t < 0.081, abs_t / 4.5, high) * sign
+        if space == "Rec.709 / BT.1886":
+            return img.clamp(min=0.0) ** 2.4
+        if space == "ACEScg":
+            return self._from_acescg(img)
+        if space == "ACEScc":
+            return self._from_acescg(_tf.tensor_acescc_to_linear(img))
+        if space == "ACEScct":
+            return self._from_acescg(_tf.tensor_acescct_to_linear(img))
+        if space == "LogC3 (ARRI EI800)":
+            return _tf.tensor_logc3_to_linear(img)
+        if space == "LogC4 (ARRI Alexa 35)":
+            return _tf.tensor_logc4_to_linear(img)
+        if space == "C-Log3 (Canon)":
+            return _tf.tensor_canonlog3_to_linear(img)
+        if space == "Log3G10 (RED IPP2)":
+            return _tf.tensor_log3g10_to_linear(img)
+        if space == "DaVinci Intermediate":
+            return _tf.tensor_davinci_intermediate_to_linear(img)
+        if space == "V-Log (Panasonic)":
+            return _tf.tensor_vlog_to_linear(img)
+        if space == "F-Log2 (Fujifilm)":
+            return self._via_numpy(_luts._idt_flog2, img)
+        if space == "BMD Film Gen5":
+            return self._via_numpy(_luts._idt_bmd_gen5, img)
+        if space == "N-Log (Nikon)":
+            return self._via_numpy(_luts._idt_nlog, img)
+        raise ValueError(
+            f"RadianceColorSpaceConvert: no analytical transform for "
+            f"{space!r} and no OCIO config is loaded. Refusing to pass "
+            f"pixels through unchanged.")
 
     def _try_ocio(self, img: torch.Tensor, src: str, dst: str) -> torch.Tensor | None:
         mgr = get_ocio_manager()
@@ -249,34 +340,8 @@ class RadianceColorSpaceConvert:
         result = self._try_ocio(image, effective_src, effective_dst)
 
         if result is None:
-            result = image.clone()
-
-            def _encode(img, space):
-                if space in ("sRGB (OETF encoded)", "Rec.709 (OETF encoded)"):
-                    return self._lin_to_srgb(img)
-                elif space == "Rec.709 / BT.1886":
-                    return img.clamp(min=0.0) ** (1.0 / 2.4)
-                elif space == "LogC3 (ARRI EI800)":
-                    return self._lin_to_logc3(img)
-                elif space == "ACEScg":
-                    M = self._M_709_TO_ACESCG.to(img.device)
-                    return torch.einsum('ij,...j->...i', M, img)
-                return img
-
-            def _decode(img, space):
-                if space in ("sRGB (OETF encoded)", "Rec.709 (OETF encoded)"):
-                    return self._srgb_to_lin(img)
-                elif space == "Rec.709 / BT.1886":
-                    return img.clamp(min=0.0) ** 2.4
-                elif space == "LogC3 (ARRI EI800)":
-                    return self._logc3_to_lin(img)
-                elif space == "ACEScg":
-                    M = self._M_ACESCG_TO_709.to(img.device)
-                    return torch.einsum('ij,...j->...i', M, img)
-                return img
-
-            linear = _decode(result, effective_src)
-            result = _encode(linear, effective_dst)
+            linear = self._decode_to_linear(image, effective_src)
+            result = self._encode_from_linear(linear, effective_dst)
 
         if strength < 1.0:
             result = torch.lerp(image, result, strength)
