@@ -51,6 +51,11 @@ OPTIONAL_DEPENDENCIES: Tuple[DependencySpec, ...] = (
     DependencySpec("transformers", "transformers", "Depth Anything V2", "pip install transformers"),
     DependencySpec("defusedxml", "defusedxml", "secure CDL XML parsing", "pip install defusedxml"),
     DependencySpec("OpenImageIO", "OpenImageIO", "DPX read/write", "pip install OpenImageIO"),
+    # AUDIT-FIX (2026-08): tifffile is the ONLY writer for "TIFF (16-bit)" and
+    # "TIFF (32-bit float)" and the only depth probe on the read side, yet it
+    # was declared nowhere -- without it the 32-bit float TIFF write silently
+    # produced an 8-bit file.
+    DependencySpec("tifffile", "tifffile", "16/32-bit TIFF read & write", "pip install tifffile"),
     DependencySpec("PyOpenColorIO", "opencolorio", "OCIO color transforms", "pip install opencolorio"),
     DependencySpec("imageio_ffmpeg", "imageio-ffmpeg", "bundled ffmpeg for video export",
                    "pip install imageio-ffmpeg"),

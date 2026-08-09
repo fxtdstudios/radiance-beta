@@ -370,6 +370,55 @@ def tensor_acescct_to_linear(tensor: torch.Tensor) -> torch.Tensor:
     return torch.where(tensor > _ACESCCT_CUT_ENCODED, log_val, lin_val)
 
 
+# ── ACEScc ────────────────────────────────────────────────────────────────────
+# S-2014-003. Pure log2 encoding with a small-value fold; unlike ACEScct there
+# is no linear toe segment. AUDIT-FIX (2026-08): previously absent -- the only
+# node advertising ACEScc silently returned its input unchanged.
+
+_ACESCC_MIN = (np.log2(2.0 ** -16) + 9.72) / 17.52          # x <= 0 pins here
+_ACESCC_FOLD = 2.0 ** -15
+_ACESCC_MAX_ENCODED = (np.log2(65504.0) + 9.72) / 17.52
+
+
+def linear_to_acescc(img: np.ndarray) -> np.ndarray:
+    img = np.asarray(img, dtype=np.float32)
+    out = np.empty_like(img, dtype=np.float32)
+    neg = img <= 0.0
+    fold = (~neg) & (img < _ACESCC_FOLD)
+    rest = img >= _ACESCC_FOLD
+    out[neg] = _ACESCC_MIN
+    out[fold] = (np.log2(2.0 ** -16 + img[fold] * 0.5) + 9.72) / 17.52
+    out[rest] = (np.log2(img[rest]) + 9.72) / 17.52
+    return out
+
+
+def acescc_to_linear(img: np.ndarray) -> np.ndarray:
+    img = np.asarray(img, dtype=np.float32)
+    out = np.empty_like(img, dtype=np.float32)
+    low = img <= ((9.72 - 15.0) / 17.52)
+    high = img >= _ACESCC_MAX_ENCODED
+    mid = (~low) & (~high)
+    out[low] = (np.power(2.0, img[low] * 17.52 - 9.72) - 2.0 ** -16) * 2.0
+    out[mid] = np.power(2.0, img[mid] * 17.52 - 9.72)
+    out[high] = 65504.0
+    return out
+
+
+def tensor_linear_to_acescc(tensor: torch.Tensor) -> torch.Tensor:
+    fold_val = (torch.log2(2.0 ** -16 + tensor.clamp(min=0.0) * 0.5) + 9.72) / 17.52
+    log_val = (torch.log2(tensor.clamp(min=_ACESCC_FOLD)) + 9.72) / 17.52
+    out = torch.where(tensor >= _ACESCC_FOLD, log_val, fold_val)
+    return torch.where(tensor <= 0.0, torch.full_like(tensor, float(_ACESCC_MIN)), out)
+
+
+def tensor_acescc_to_linear(tensor: torch.Tensor) -> torch.Tensor:
+    pow_val = torch.pow(2.0, tensor * 17.52 - 9.72)
+    low_val = (pow_val - 2.0 ** -16) * 2.0
+    out = torch.where(tensor <= (9.72 - 15.0) / 17.52, low_val, pow_val)
+    return torch.where(
+        tensor >= float(_ACESCC_MAX_ENCODED), torch.full_like(tensor, 65504.0), out)
+
+
 # ── DaVinci Intermediate ──────────────────────────────────────────────────────
 
 # Blackmagic DaVinci Intermediate, per the published specification.
