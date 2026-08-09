@@ -392,6 +392,14 @@ def _is_16bit_rgb_source(path: str, ext: str) -> bool:
             with tifffile.TiffFile(path) as tf:
                 page = tf.pages[0]
                 return page.dtype == np.uint16 and page.samplesperpixel in (3, 4)
+    except ImportError:
+        # AUDIT-FIX (2026-08): without tifffile a deep TIFF silently fell
+        # through to Pillow's 8-bit path -- a 16-bit plate read back crushed
+        # to 8-bit precision with no indication anywhere. Warn, loudly.
+        log.warning(
+            "[Radiance] Cannot probe %s for 16-bit depth: tifffile is not "
+            "installed (pip install tifffile). If this file is 16-bit it will "
+            "be read at 8-bit precision.", os.path.basename(path))
     except Exception as _exc:
         log.debug(
             "[Radiance] _is_16bit_rgb_source(): ignoring %s from `if ext == '.png':`: %s",
@@ -408,6 +416,14 @@ def _is_float32_tiff(path: str) -> bool:
         import tifffile  # type: ignore
         with tifffile.TiffFile(path) as tf:
             return tf.pages[0].dtype == np.float32
+    except ImportError:
+        # AUDIT-FIX (2026-08): see _is_16bit_rgb_source -- a float TIFF read
+        # without tifffile ends up in Pillow, which either fails or reads it
+        # at 8-bit; either way the user should know why.
+        log.warning(
+            "[Radiance] Cannot probe %s for 32-bit float depth: tifffile is "
+            "not installed (pip install tifffile).", os.path.basename(path))
+        return False
     except Exception:
         return False
 
@@ -534,6 +550,37 @@ def _read_exr_with_info(path: str, layer: Optional[str] = None, raw: bool = Fals
 
 # ── Sequence read ─────────────────────────────────────────────────────────
 
+def _trailing_frame_number(path: str) -> Optional[int]:
+    """Last run of digits in the stem: shot_v002.1042 → 1042, img007 → 7."""
+    m = re.search(r"(\d+)\D*$", Path(path).stem)
+    return int(m.group(1)) if m else None
+
+
+def _window_listed_files(
+    files: List[str], start: int, end: int, step: int
+) -> List[str]:
+    """Apply a start/end/step frame window to an explicit file list.
+
+    start/end are FRAME NUMBERS (widget semantics, default 1001..end-of-shot),
+    not list indices. When the filenames carry frame numbers, the window is
+    reconciled against the range on disk the same way the pattern path does:
+    a window that does not intersect the files falls back to the full range
+    rather than returning nothing. Files without frame numbers are returned
+    positionally with only the step applied.
+    """
+    if not files:
+        return files
+    step = max(1, step)
+    nums = [_trailing_frame_number(f) for f in files]
+    if any(n is None for n in nums) or nums != sorted(nums):
+        # No consistent numbering: positional, step only.
+        return files[::step]
+    first, last = nums[0], nums[-1]
+    s = start if first <= start <= last else first
+    e = end if s <= end <= last else last
+    return [f for f, n in zip(files, nums) if s <= n <= e and (n - s) % step == 0]
+
+
 def _resolve_sequence_paths(
     pattern: str,
     start: int,
@@ -550,17 +597,23 @@ def _resolve_sequence_paths(
       /path/frame.*.png     → sorted glob
       /path/               → directory: sorted image files
     """
+    # AUDIT-FIX (2026-08): directory and glob inputs used to slice the sorted
+    # file list by LIST INDEX with the widget's frame-number defaults --
+    # files[1001:99999] -- so every directory read of a normal-length sequence
+    # returned an empty list and raised "No frames found". Frame numbers are
+    # now parsed from the filenames and start/end are reconciled against the
+    # range actually on disk, matching the %04d/#### pattern path.
     if os.path.isdir(pattern):
         exts = list(_IMG_EXT | _EXR_EXT)
         files = sorted(
-            f for f in Path(pattern).iterdir()
+            str(f) for f in Path(pattern).iterdir()
             if f.suffix.lower() in exts
         )
-        return [str(f) for f in files][start:end:step] if end > 0 else [str(f) for f in files]
+        return _window_listed_files(files, start, end, step)
 
     if "*" in pattern:
         import glob
-        return sorted(glob.glob(pattern))[start:end:step]
+        return _window_listed_files(sorted(glob.glob(pattern)), start, end, step)
 
     # Hash style #### → %04d
     hash_match = re.search(r"(#+)", pattern)
@@ -1027,25 +1080,32 @@ def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str, quality: int = 18
         # anyway; tifffile handles both 2D and 3D arrays natively.
         try:
             import tifffile  # type: ignore
-            tifffile.imwrite(str(path), arr_u16)
-            return
-        except ImportError:
-            # Fallback: save 8-bit. Not silent -- a 16-bit request quietly
-            # becoming 8-bit is exactly the kind of downgrade this module's
-            # EXR writer refuses to do (see _save_exr's docstring).
-            log.warning("16-bit write requested for '%s' but tifffile is not installed; "
-                        "falling back to 8-bit.", path)
-            arr_f32 = np.clip(arr_f32, 0, 1)
+        except ImportError as _exc:
+            # AUDIT-FIX (2026-08): this used to log a warning and write 8-bit
+            # anyway. A "16-bit" master that is actually 8-bit is a silent
+            # quality downgrade of a production asset -- the same downgrade
+            # this module's EXR writer refuses to do (see _save_exr).
+            raise ImportError(
+                f"Writing {fmt!r} requires tifffile (pip install tifffile). "
+                "Refusing to silently downgrade a 16-bit write to 8-bit."
+            ) from _exc
+        tifffile.imwrite(str(path), arr_u16)
+        return
     if "32-bit" in fmt:
         try:
             import tifffile  # type: ignore
-            tifffile.imwrite(str(path), arr_f32.astype(np.float32))
-            return
         except ImportError as _exc:
-            log.debug(
-                "[Radiance] _save_pil_image(): ignoring %s from `import tifffile`: %s",
-                type(_exc).__name__, _exc,
-            )
+            # AUDIT-FIX (2026-08): this used to swallow the ImportError at
+            # DEBUG level and fall through to the 8-bit Pillow path below --
+            # a float TIFF master silently written with 8-bit precision and
+            # hard-clipped HDR values, discovered by the round-trip test only
+            # because the test environment happened to lack tifffile.
+            raise ImportError(
+                f"Writing {fmt!r} requires tifffile (pip install tifffile). "
+                "Refusing to silently downgrade a 32-bit float write to 8-bit."
+            ) from _exc
+        tifffile.imwrite(str(path), arr_f32.astype(np.float32))
+        return
 
     arr_u8 = (np.clip(arr_f32, 0, 1) * 255).astype(np.uint8)
     pil = _PIL.fromarray(arr_u8)

@@ -2,6 +2,43 @@
 
 All notable changes to FXTD Radiance will be documented in this file.
 
+## [3.2.1] - 2026-08-09 ("Full Audit")
+
+**Upgrade note.** Colour output changes for any graph that used
+`RadianceColorSpaceConvert` with a camera-log or ACES space — those
+conversions previously did nothing (see below). Re-check affected masters.
+16/32-bit TIFF writes now require `tifffile` (`pip install tifffile`) instead
+of silently writing 8-bit.
+
+### Fixed
+
+- **Colour Space Convert did real conversions for only 6 of its 16 spaces.**
+  Without an OCIO config — the default install — ACEScc, ACEScct, LogC4,
+  F-Log2, C-Log3, Log3G10, DaVinci Intermediate, BMD Film Gen5, V-Log and
+  N-Log silently returned the input unchanged. The node's own inline LogC3
+  was also wrong: 18% grey encoded to 0.417 instead of ARRI's 0.391, and its
+  decode disagreed with its own encode, so a LogC3 round trip lost ~1.5 stops.
+  All curves now come from `color/transfer.py` / `color/luts.py` (verified
+  against published 18%-grey code values, round-trip exact), Rec.709 OETF is
+  the real BT.709 camera curve rather than an alias of sRGB, ACEScc/ACEScct
+  apply the Rec.709↔AP1 gamut matrix, and a space with no analytical path
+  raises instead of passing pixels through untouched.
+- **16-bit and 32-bit float TIFF writes refuse to downgrade.** `tifffile` is
+  the only writer for these formats but was never declared as a dependency;
+  without it a 32-bit float request silently produced an 8-bit clipped file
+  (the 16-bit path at least logged a warning). Both now raise with an install
+  hint, the reader warns when it cannot probe TIFF depth, and `tifffile` is
+  listed by the Environment Guard.
+- **Directory and glob sequence reads always came back empty.** The file list
+  was sliced by list index with the widget's frame-number defaults
+  (`files[1001:99999]`). Frame numbers are now parsed from filenames and the
+  window is reconciled against the range on disk, matching the `####` path.
+- **The test suite could not see colour-node bugs.** The conftest OCIO mock
+  reported `is_loaded` as a truthy `MagicMock`, so nodes "converted" via a
+  no-op mock processor and every colour test through them validated an
+  identity transform. The mock now reports `is_loaded = False` and a
+  regression test pins it.
+
 ## [3.2.0] - 2026-07-29 ("Audit Release")
 
 A three-week audit, five independent review passes, and a new test harness that

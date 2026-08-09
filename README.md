@@ -4,7 +4,7 @@
 
 **Professional VFX, HDR color science, review, and DCC handoff for ComfyUI.**
 
-[![Version](https://img.shields.io/badge/version-3.2.0-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
+[![Version](https://img.shields.io/badge/version-3.2.1-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
 [![Nodes](https://img.shields.io/badge/nodes-109-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)

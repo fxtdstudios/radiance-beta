@@ -195,7 +195,15 @@ if "server" not in sys.modules:
     sys.modules["server"] = _server
 
 _radiance_ocio_stub = types.ModuleType("radiance.radiance_ocio")
-_radiance_ocio_stub.get_ocio_manager = MagicMock(return_value=MagicMock())
+# AUDIT-FIX (2026-08): the manager mock must report is_loaded=False. A bare
+# MagicMock() is truthy for every attribute, so RadianceColorSpaceConvert's
+# _try_ocio() saw is_loaded=True, got a MagicMock "processor" whose applyRGB
+# was a no-op, and returned the INPUT UNCHANGED -- every colour-space test
+# through the node was silently validating an identity transform. With
+# is_loaded=False the nodes exercise their real analytical fallback in tests.
+_ocio_mgr_mock = MagicMock()
+_ocio_mgr_mock.is_loaded = False
+_radiance_ocio_stub.get_ocio_manager = MagicMock(return_value=_ocio_mgr_mock)
 _radiance_ocio_stub.HAS_OCIO = False
 sys.modules.setdefault("radiance.radiance_ocio", _radiance_ocio_stub)
 

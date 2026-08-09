@@ -166,6 +166,9 @@ _ENVIRONMENTAL = (
     ("Please install", "an optional dependency is not installed here"),
     ("network access is blocked", "needs a model download; blocked in tests"),
     ("requires", "a declared prerequisite is absent in the test env"),
+    # A loader that rejects the harness's fabricated empty path with a clear
+    # message is failing GRACEFULLY -- that is the behaviour we want.
+    ("must not be empty", "requires a real file path the harness cannot fabricate"),
 )
 
 

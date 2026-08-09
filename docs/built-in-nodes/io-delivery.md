@@ -112,7 +112,7 @@ Backward-compatible Digital Cinema writer shim.
 | Input | Required | Type | Default | Range | Description |
 | :--- | :---: | :--- | :--- | :--- | :--- |
 | `images` | Yes | `IMAGE` |  |  |  |
-| `output_path` | Yes | `STRING` | `/root/radiance_output` |  |  |
+| `output_path` | Yes | `STRING` | `/sessions/elegant-vibrant-planck/radiance_output` |  |  |
 | `format` | No | choice of `IMG │ PNG (8-bit)`, `IMG │ PNG (16-bit)`, `IMG │ JPEG`, `IMG │ TIFF (16-bit)`, `IMG │ TIFF (32-bit float)`, `IMG │ DPX`, `IMG │ WEBP`, `IMG │ EXR (16-bit half)`, … (+14 more) | `IMG │ EXR (16-bit half)` |  |  |
 | `filename` | No | `STRING` | `` |  |  |
 
@@ -136,7 +136,7 @@ Read an image, EXR, video or numbered sequence into the pipeline. Video decodes 
 
 | Input | Required | Type | Default | Range | Description |
 | :--- | :---: | :--- | :--- | :--- | :--- |
-| `browse` | Yes | choice of ``, `x.jpg` | `` |  | Browse or upload a file from disk. • Click the upload icon (📎) to open a native file picker. • Supports images (PNG, JPG, TIFF, EXR, DPX, HDR, WebP) and video (MP4, MOV, MXF, AVI, WebM, MKV). • Uploaded files are copied to ComfyUI's input• Leave blank and fill in 'path' below for absolute / network / sequence paths. |
+| `browse` | Yes | choice of ``, `404_mobile.png`, `dialog.png`, `index_desktop.png`, `index_mobile.png`, `radiance_full.png` | `` |  | Browse or upload a file from disk. • Click the upload icon (📎) to open a native file picker. • Supports images (PNG, JPG, TIFF, EXR, DPX, HDR, WebP) and video (MP4, MOV, MXF, AVI, WebM, MKV). • Uploaded files are copied to ComfyUI's input• Leave blank and fill in 'path' below for absolute / network / sequence paths. |
 | `media_type` | No | choice of `Auto`, `Image`, `Video`, `Sequence` | `Auto` |  | Override auto-detection. Auto infers from path extension and pattern. |
 | `path` | No | `STRING` | `` |  | Optional — used only when 'browse' is left blank. Accepts any absolute path, UNC network path, or sequence pattern: Sequence patterns: /frames/f.%04d.exr · /frames/f.####.png · /dir/ Network paths: /mnt/nas/renders/shot or \\server\share\shot Format is auto-detected from extension. |
 | `color_space` | No | choice of `Auto / Linear (pass-through)`, `Rec.709 (BT.1886)`, `sRGB`, `ARRI LogC4`, `ARRI LogC3`, `Sony S-Log3`, `Panasonic V-Log`, `Canon Log 3`, … (+6 more) | `Auto / Linear (pass-through)` |  | Decode the input from this color space to scene-linear before processing. |
@@ -176,7 +176,7 @@ Write images or EXR sequences to disk with configurable format options.
 | Input | Required | Type | Default | Range | Description |
 | :--- | :---: | :--- | :--- | :--- | :--- |
 | `image` | Yes | `*` |  |  | Accepts any ComfyUI output: IMAGE tensor, batched video frames, VHSor any dict/list carrying a video path. |
-| `output_path` | Yes | `STRING` | `/root/radiance_output` |  | Output directory + filename stem. Extension is appended automatically based on format. For sequences: frame number and extension are appended (e.g. /out/frame_0001.exr). Network paths are fully supported — use the path as mounted on this machine: Linux / Mac → /mnt/nas/renders/shot_001 Windows UNC → \\server\share\renders\shot_001 Windows drive→ Z:\renders\shot_001 The directory is created automatically (mkdir -p) if it does not exist. Write permissions on the share are required. |
+| `output_path` | Yes | `STRING` | `/sessions/elegant-vibrant-planck/radiance_output` |  | Output directory + filename stem. Extension is appended automatically based on format. For sequences: frame number and extension are appended (e.g. /out/frame_0001.exr). Network paths are fully supported — use the path as mounted on this machine: Linux / Mac → /mnt/nas/renders/shot_001 Windows UNC → \\server\share\renders\shot_001 Windows drive→ Z:\renders\shot_001 The directory is created automatically (mkdir -p) if it does not exist. Write permissions on the share are required. |
 | `format` | Yes | choice of `IMG │ PNG (8-bit)`, `IMG │ PNG (16-bit)`, `IMG │ JPEG`, `IMG │ TIFF (16-bit)`, `IMG │ TIFF (32-bit float)`, `IMG │ DPX`, `IMG │ WEBP`, `IMG │ EXR (16-bit half)`, … (+14 more) | `IMG │ EXR (16-bit half)` |  | Output format. Extension is appended automatically. |
 | `filename` | No | `STRING` | `` |  | Output filename stem (version appended automatically). Leave empty to use output_path as the full stem. |
 | `version` | No | `INT` | `1` | 0 – 9999 | Version number appended to filename (e.g. shot_001_v0001). |
