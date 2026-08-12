@@ -8,10 +8,15 @@ from radiance.nodes.color.cdl import (
     RadianceCDLImport,
     RadianceCDLExport,
 )
+from radiance.color.lut import (
+    RadianceLUTApply,
+    RadianceLUTBlend,
+)
 from radiance.nodes.color.colorspace import (
     RadianceWhiteBalance,
     RadianceColorSpaceConvert,
     RadianceACESTransform,
+    RadianceBitDepthDegrade,
 )
 from radiance.nodes.color.curves import (
     RadianceHueCurves,
@@ -27,7 +32,7 @@ from radiance.nodes.color.ocio import (
 )
 from radiance.nodes.color.qc import (
     RadianceQC,
-    RadianceQCExport,
+    RadiancePolicyGuard,
 )
 
 logger = logging.getLogger("radiance.nodes.color")
@@ -46,6 +51,13 @@ NODE_CLASS_MAPPINGS = {
     "RadianceGradeMatch": RadianceGradeMatch,
     "RadianceOCIOContext": RadianceOCIOContext,
     "RadianceQC": RadianceQC,
+    # The v3 reorganisation transcribed these mapping dicts by hand and dropped
+    # entries on the way. The classes were written, complete and importable the
+    # whole time -- they simply never appeared in ComfyUI's node menu.
+    "RadianceBitDepthDegrade": RadianceBitDepthDegrade,
+    "RadiancePolicyGuard": RadiancePolicyGuard,
+    "RadianceLUTApply": RadianceLUTApply,
+    "RadianceLUTBlend": RadianceLUTBlend,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {

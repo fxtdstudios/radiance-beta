@@ -58,3 +58,32 @@ CONTRIBUTING.md
 NODES.md
 splash_screen.html
 .hypothesis/
+
+# Internal dev artifacts — must not ship to the registry (audit 2026-07)
+bug_report_reply_draft.md
+PACKAGE_REVIEW.md
+.codex-backup-*/
+.agents/
+
+# Session scratch and local caches — never part of a registry archive.
+.ruff_cache/
+.phase3-dist/
+.phase3-dist-final/
+.phase3-venv/
+.agents/
+.codex-backup-*/
+_audit_tmp/
+_to_delete/
+*.patch
+
+# Audit and review write-ups live on GitHub, not in the registry archive.
+AUDIT.md
+VIEWER_REPORT.md
+BATCH3_REPORT.md
+PACKAGE_REVIEW.md
+KNOWN_ISSUES.md
+
+# Developer-only saved workflows. The starter graph and TEMPLATES/ ship;
+# anything else under workflows/ is the local user's project data.
+workflows/*.rad
+workflows/.asset_thumbs/

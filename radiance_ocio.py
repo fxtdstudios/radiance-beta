@@ -60,8 +60,11 @@ def _find_file(directory: str, filename: str) -> Optional[str]:
             sub = os.path.join(directory, entry, filename)
             if os.path.isfile(sub):
                 return sub
-    except OSError:
-        pass
+    except OSError as _exc:
+        logger.debug(
+            "[Radiance] _find_file(): ignoring %s from `for entry in os.listdir(directory):`: %s",
+            type(_exc).__name__, _exc,
+        )
     return None
 
 
@@ -549,6 +552,39 @@ class OCIOConfigManager:
 _ocio_manager: Optional[OCIOConfigManager] = None
 
 
+#: Directories an OCIO config may be loaded from over the HTTP route.
+#:
+#: Defaults to the bundled ACES config and the ComfyUI models tree. Add more
+#: with RADIANCE_OCIO_ROOTS (os.pathsep-separated), or with the standard $OCIO
+#: environment variable, which a studio will already have set.
+def _allowed_ocio_roots():
+    roots = [os.path.join(os.path.dirname(os.path.abspath(__file__)), "ACES")]
+    for var in ("RADIANCE_OCIO_ROOTS", "OCIO"):
+        value = os.environ.get(var, "")
+        for part in value.split(os.pathsep):
+            part = part.strip().strip('"')
+            if not part:
+                continue
+            roots.append(part if os.path.isdir(part) else os.path.dirname(part))
+    try:
+        import folder_paths  # type: ignore
+        roots.append(folder_paths.models_dir)
+    except Exception:
+        pass
+    return [os.path.abspath(os.path.expanduser(r)) for r in roots if r]
+
+
+def _is_inside_allowed_ocio_root(path: str) -> bool:
+    resolved = os.path.realpath(path)
+    for root in _allowed_ocio_roots():
+        try:
+            if os.path.commonpath([resolved, os.path.realpath(root)]) == os.path.realpath(root):
+                return True
+        except ValueError:      # different drives on Windows
+            continue
+    return False
+
+
 def get_ocio_manager() -> OCIOConfigManager:
     """Get or create the global OCIO config manager."""
     global _ocio_manager
@@ -594,11 +630,29 @@ def register_ocio_routes():
                     {"error": "Missing 'path' parameter", "status": "error"}
                 )
 
-            # Security: resolve and validate path
-            config_path = os.path.abspath(config_path)
+            # Containment, not just resolution.
+            #
+            # The comment here said "resolve and validate path" and then only
+            # called abspath + isfile, so this unauthenticated route accepted an
+            # arbitrary absolute path and answered "File not found" or "loaded"
+            # -- a file-existence oracle for anything on the host, and an
+            # invitation to hand a parser a file it was never meant to see.
+            config_path = os.path.abspath(os.path.expanduser(config_path))
+            if not _is_inside_allowed_ocio_root(config_path):
+                logger.warning(
+                    "[Radiance OCIO] Rejected a config load outside the allowed "
+                    "roots: %s", config_path,
+                )
+                return web.json_response(
+                    {"error": "Path is outside the allowed OCIO directories. "
+                              "Set RADIANCE_OCIO_ROOTS to add locations.",
+                     "status": "error"},
+                    status=403,
+                )
             if not os.path.isfile(config_path):
                 return web.json_response(
-                    {"error": f"File not found: {config_path}", "status": "error"}
+                    {"error": f"File not found: {config_path}", "status": "error"},
+                    status=404,
                 )
 
             mgr = get_ocio_manager()

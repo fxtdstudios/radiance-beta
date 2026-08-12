@@ -61,6 +61,9 @@ if not _HAS_COLOR_UTILS:
         )
         _HAS_COLOR_UTILS = True
     except ImportError:
+        # Deliberately silent: this is the second of two optional import paths
+        # for the colour helpers, and it runs at module scope before `logger`
+        # exists. _HAS_COLOR_UTILS stays False and every caller checks it.
         pass
 
 logger = logging.getLogger("radiance.hdr.io")
@@ -69,8 +72,10 @@ logger = logging.getLogger("radiance.hdr.io")
 #                           EXR CONSTANTS & HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-MAX_BATCH_SIZE = 1000
-MAX_IMAGE_DIMENSION = 32768
+# AUDIT-FIX (2026-08): MAX_BATCH_SIZE / MAX_IMAGE_DIMENSION duplicates removed.
+# They were stale copies (1000 / 32768) of the authoritative viewer limits in
+# radiance/viewer_utils.py (9999 / 16384), referenced by nothing -- a drift
+# trap for anyone who imported the wrong pair.
 
 EXR_PIXEL_TYPE = {"UINT": 0, "HALF": 1, "FLOAT": 2}
 EXR_LINE_ORDER = {"INCREASING_Y": 0, "DECREASING_Y": 1, "RANDOM_Y": 2}

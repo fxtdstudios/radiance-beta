@@ -105,8 +105,11 @@ def _download_model(url: str, target_path: str, folder_type: str,
         try:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
-        except OSError:
-            pass
+        except OSError as _exc:
+            logger.debug(
+                "[Radiance] _download_model(): ignoring %s from `if os.path.exists(tmp_path):`: %s",
+                type(_exc).__name__, _exc,
+            )
         return False
 
 

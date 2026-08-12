@@ -45,6 +45,14 @@ class RadianceWebGLRenderer extends RadianceRenderer {
         this._frameCache = new Map();
         const _devMem = (typeof navigator !== 'undefined' && navigator.deviceMemory) || 4;
         this._frameCacheMaxSize = _devMem >= 16 ? 24 : _devMem >= 8 ? 16 : _devMem >= 4 ? 8 : 4;
+        // AUDIT-FIX (2026-08): count-based eviction alone is resolution-blind.
+        // 24 cached frames is 400 MB at 1080p fp16 but 6.8 GB at 8K fp16 --
+        // OOM long before the count limit is reached. Evict by BYTES as well,
+        // budget scaled to (an approximation of) machine size. Both limits
+        // apply; whichever is hit first evicts.
+        this._frameCacheBytes = 0;
+        this._frameCacheByteBudget =
+            (_devMem >= 16 ? 3.0 : _devMem >= 8 ? 2.0 : _devMem >= 4 ? 1.0 : 0.5) * 1024 * 1024 * 1024;
 
         this.init();
     }
@@ -157,6 +165,9 @@ class RadianceWebGLRenderer extends RadianceRenderer {
                 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
                 gl.bindFramebuffer(gl.FRAMEBUFFER, this.scopeFBO);
                 gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.scopeTex, 0);
+                this._scopeFBOType = gl.UNSIGNED_BYTE;
+            } else {
+                this._scopeFBOType = precFmt.type;
             }
         }
 
@@ -198,9 +209,34 @@ class RadianceWebGLRenderer extends RadianceRenderer {
         gl.drawArrays(gl.POINTS, 0, this.scopePointCount);
         gl.disable(gl.BLEND);
 
-        // Read pixels — reuse pre-allocated buffer to avoid GC pressure (v3.1 PERF)
+        // Read pixels — reuse pre-allocated buffers to avoid GC pressure (v3.1 PERF)
+        //
+        // The type must match the colour attachment. This was hard-coded to
+        // UNSIGNED_BYTE while the scope FBO is created at pipelinePrecision,
+        // which defaults to f32 -> RGBA32F. Per WebGL2, RGBA/UNSIGNED_BYTE is
+        // only a valid ReadPixels pair for a NORMALIZED FIXED-POINT buffer, so
+        // on every GPU with EXT_color_buffer_float (i.e. all desktop GPUs) the
+        // call raised INVALID_OPERATION and left the buffer untouched --
+        // waveform, vectorscope, histogram, parade and chromaticity all stayed
+        // black or stale. The RGBA8 fallback above never fired because a float
+        // FBO *is* FRAMEBUFFER_COMPLETE.
         const pixels = this._scopePixels;
-        gl.readPixels(0, 0, size, size, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        const fboType = this._scopeFBOType || gl.UNSIGNED_BYTE;
+        if (fboType === gl.UNSIGNED_BYTE) {
+            gl.readPixels(0, 0, size, size, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        } else {
+            if (!this._scopePixelsF32 || this._scopePixelsF32.length !== size * size * 4) {
+                this._scopePixelsF32 = new Float32Array(size * size * 4);
+            }
+            const fpix = this._scopePixelsF32;
+            gl.readPixels(0, 0, size, size, gl.RGBA, gl.FLOAT, fpix);
+            // Scope points are additively blended in [0,1]; saturate to 8-bit
+            // for the ImageData copy below.
+            for (let i = 0; i < fpix.length; i++) {
+                const v = fpix[i];
+                pixels[i] = v <= 0 ? 0 : (v >= 1 ? 255 : (v * 255) | 0);
+            }
+        }
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.viewport(0, 0, this.canvas.width, this.canvas.height);
 
@@ -800,9 +836,29 @@ class RadianceWebGLRenderer extends RadianceRenderer {
 
     // ── v3.0 #8: LRU GPU Frame Texture Cache ─────────────────────────────────
     /**
+     * Evict LRU entries until both the count limit and the byte budget can
+     * accommodate `incomingBytes`. O(evicted) via Map insertion-order.
+     */
+    _evictFrameCacheFor(incomingBytes) {
+        while (this._frameCache.size > 0 &&
+               (this._frameCache.size >= this._frameCacheMaxSize ||
+                this._frameCacheBytes + incomingBytes > this._frameCacheByteBudget)) {
+            const lruId = this._frameCache.keys().next().value;
+            const lruEntry = this._frameCache.get(lruId);
+            if (lruEntry) {
+                if (this.gl && lruEntry.tex) this.gl.deleteTexture(lruEntry.tex);
+                this._frameCacheBytes -= (lruEntry.bytes || 0);
+            }
+            this._frameCache.delete(lruId);
+        }
+        if (this._frameCacheBytes < 0) this._frameCacheBytes = 0;
+    }
+
+    /**
      * Upload a float16 frame and cache it by frameId.
      * LRU eviction is O(1) using Map insertion-order: the first key in the Map
      * is always the least-recently-used entry (delete-on-access + re-insert).
+     * Eviction is both count- and byte-budget-based (see _evictFrameCacheFor).
      */
     loadFloat16TextureCached(frameId, fp16data, width, height, channels) {
         if (this._frameCache.has(frameId)) {
@@ -817,16 +873,14 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             return entry.tex;
         }
 
-        // Evict LRU (first entry) if at capacity
-        if (this._frameCache.size >= this._frameCacheMaxSize) {
-            const lruId = this._frameCache.keys().next().value;
-            const lruEntry = this._frameCache.get(lruId);
-            if (lruEntry && this.gl) this.gl.deleteTexture(lruEntry.tex);
-            this._frameCache.delete(lruId);
-        }
+        const bytes = width * height * (channels || 4) * 2;
+        this._evictFrameCacheFor(bytes);
 
         const tex = this.loadFloat16Texture(fp16data, width, height, channels);
-        if (tex) this._frameCache.set(frameId, { tex });
+        if (tex) {
+            this._frameCache.set(frameId, { tex, bytes });
+            this._frameCacheBytes += bytes;
+        }
         return tex;
     }
 
@@ -846,16 +900,14 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             return entry.tex;
         }
 
-        // Evict LRU (first entry) if at capacity
-        if (this._frameCache.size >= this._frameCacheMaxSize) {
-            const lruId = this._frameCache.keys().next().value;
-            const lruEntry = this._frameCache.get(lruId);
-            if (lruEntry && this.gl) this.gl.deleteTexture(lruEntry.tex);
-            this._frameCache.delete(lruId);
-        }
+        const bytes = width * height * (channels || 4) * 4;
+        this._evictFrameCacheFor(bytes);
 
         const tex = this.loadFloat32Texture(data, width, height, channels);
-        if (tex) this._frameCache.set(frameId, { tex });
+        if (tex) {
+            this._frameCache.set(frameId, { tex, bytes });
+            this._frameCacheBytes += bytes;
+        }
         return tex;
     }
 
@@ -1146,6 +1198,7 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             this._attribCache.clear();
             this._uniformValueCache.clear();
             this._frameCache.clear();
+            this._frameCacheBytes = 0;
             this.programs = {};
             this.textures = {};
             this.framebuffers = {};
@@ -3398,6 +3451,21 @@ vec3 getDenoiseColor(vec2 uv) {
             return null;
         }
 
+        // AUDIT-FIX (2026-08): fail BEFORE upload with an actionable message.
+        // Beyond MAX_TEXTURE_SIZE (8192 on many GPUs, 16384 on most desktop
+        // cards) texImage2D fails post-hoc into a black frame with only a
+        // cryptic GL error code. 8K DCI (8192 wide) sits exactly on the
+        // common limit; 12K+ plates exceed it everywhere.
+        const maxTex = this._maxTextureSize ||
+            (this._maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 8192);
+        if (width > maxTex || height > maxTex) {
+            console.error(
+                `[Radiance] Frame ${width}x${height} exceeds this GPU's texture ` +
+                `limit (${maxTex}px). Use the node's proxy_scale or downscale ` +
+                `upstream to view it; full-res data is unaffected.`);
+            return null;
+        }
+
         // WebGL2 requires EXT_color_buffer_float for some float texture operations
         if (!this.extColorBufferFloat) {
             console.warn('[Radiance] EXT_color_buffer_float not supported, float texture rendering might fail');
@@ -3465,6 +3533,18 @@ vec3 getDenoiseColor(vec2 uv) {
 
         if (!this.isWebGL2) {
             console.warn('[Radiance] Float16 textures require WebGL2');
+            return null;
+        }
+
+        // AUDIT-FIX (2026-08): same proactive texture-limit guard as
+        // loadFloat32Texture -- see the comment there.
+        const maxTex = this._maxTextureSize ||
+            (this._maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 8192);
+        if (width > maxTex || height > maxTex) {
+            console.error(
+                `[Radiance] Frame ${width}x${height} exceeds this GPU's texture ` +
+                `limit (${maxTex}px). Use the node's proxy_scale or downscale ` +
+                `upstream to view it; full-res data is unaffected.`);
             return null;
         }
 
@@ -3737,6 +3817,7 @@ vec3 getDenoiseColor(vec2 uv) {
             if (entry.tex) gl.deleteTexture(entry.tex);
         });
         this._frameCache.clear();
+        this._frameCacheBytes = 0;
 
         // Also clear active image textures if they were part of a sequence
         if (this.textures.image) {
@@ -4165,6 +4246,20 @@ vec3 getDenoiseColor(vec2 uv) {
         // Clear uniform caches
         this._uniformCache.clear();
         this._uniformValueCache.clear();
+
+        // Null the maps. They previously kept the now-invalid handles, so a
+        // scope debounce that fired after teardown passed the
+        // `if (!this.gl || !this.programs[mode]) return;` guard and issued
+        // useProgram/bindTexture on deleted objects -- INVALID_OPERATION spam
+        // and a corrupted GL state shared with everything else on the page.
+        this.textures = {};
+        this.programs = {};
+
+        // Explicitly release the driver context. Without this the context is
+        // only reclaimed on GC, which browsers do lazily; ~16 add/delete cycles
+        // hit Chrome's context limit and it starts killing the OLDEST context,
+        // which may be the live viewer or ComfyUI's own canvas.
+        try { this.gl.getExtension('WEBGL_lose_context')?.loseContext(); } catch (e) { /* best effort */ }
 
         console.log('[Radiance] WebGL renderer destroyed — all GPU resources released');
     }

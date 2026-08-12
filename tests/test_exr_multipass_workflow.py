@@ -22,6 +22,13 @@ import numpy as np
 _RADIANCE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _RADIANCE_ROOT)
 
+_STUBBED_MODULE_NAMES = (
+    "torch", "folder_paths", "radiance", "radiance.hdr", "radiance.hdr.utils",
+    "radiance.color_utils", "radiance.color", "radiance.color.transfer",
+    "radiance.color.matrices", "radiance.path_utils", "radiance.hdr.io",
+)
+_PREVIOUS_MODULES = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+
 try:
     import OpenEXR  # noqa: F401
     HAS_OPENEXR = True
@@ -92,6 +99,14 @@ _io_spec.loader.exec_module(_io_mod)
 
 write_exr_openexr = _io_mod.write_exr_openexr
 write_exr_multipart = _io_mod.write_exr_multipart
+
+# The loaded functions retain their module globals; restore the process module
+# table so this lightweight import harness cannot poison unrelated tests.
+for _name, _previous in _PREVIOUS_MODULES.items():
+    if _previous is None:
+        sys.modules.pop(_name, None)
+    else:
+        sys.modules[_name] = _previous
 
 WORKFLOW = {"nodes": [{"id": 1, "type": "RadianceEXRPassesWriter"}], "version": 0.4}
 PROMPT = {"1": {"class_type": "RadianceEXRPassesWriter", "inputs": {}}}

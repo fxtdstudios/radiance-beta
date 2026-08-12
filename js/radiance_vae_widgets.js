@@ -1,19 +1,13 @@
 /**
  * radiance_vae_widgets.js
- * v2.0 — Radiance HDR VAE Decode widget sync (Compress(Log)-only controls)
+ * v3.0 — Radiance HDR VAE Decode mode-aware widget sync
  *
  * WHAT THIS FIXES:
  *
- *   Caveat 2 (Compress Log-only controls):
- *     display_tonemap/source_space/decode_noise_scale only apply to
- *     Compress(Log) decode output -- hidden otherwise. inverse_tonemap is the
- *     reverse (hidden IN Compress(Log), where its own block never runs).
- *     hdr_scale_factor is hidden unless target_space is scene-referred (else
- *     silently ignored). hdr_output remains active in every hdr_mode
- *     (verified in hdr/vae.py) so it stays visible and unmarked. export_rhdr
- *     only captures genuinely extra (pre-tonemap) data in Compress(Log) + an
- *     active tonemap curve -- outside that it would just duplicate the image
- *     output, so it's forced off and hidden there too.
+ *   decode_mode owns the color contract. Sampler mode hides log-only controls
+ *   and RHDR export. Direct HDR / RUDRA exposes the log profile, decode noise,
+ *   HDR scale, and opt-in RHDR precision while the backend fixes output to
+ *   scene-linear Linear with no display tonemap.
  *
  *   temporal_overlap is hidden unless temporal_size > 0 (its own tooltip:
  *   "Only active when temporal_size > 0").
@@ -41,6 +35,18 @@
 
 import { app } from "../../scripts/app.js";
 
+import {
+    forceWidgetReinsert as _forceWidgetReinsert,
+    setWidgetVisible as _setWidgetVisible,
+    getWidget,
+} from "./radiance_widget_utils.js";
+
+// Widget helpers now live in radiance_widget_utils.js; this module's only
+// local difference was the "number" fallback type, which is passed through.
+function setWidgetVisible(widget, visible, node) {
+    return _setWidgetVisible(widget, visible, node, { fallbackType: "number" });
+}
+
 // ALBABIT-FIX: v1.0 matched node.type against the display-name string
 // "◎ Radiance HDR VAE Decode" instead of the class key ("RadianceHDRVAEDecode")
 // -- confirmed via live browser console that node.type is always the class
@@ -52,6 +58,7 @@ const TARGET_NODE = "RadianceHDRVAEDecode";
 
 // Widget name constants
 const W_HDR_OUTPUT       = "hdr_output";
+const W_DECODE_MODE      = "decode_mode";
 const W_DISPLAY_TONEMAP  = "display_tonemap";
 const W_HDR_MODE         = "hdr_mode";
 const W_EXPORT_RHDR      = "export_rhdr";
@@ -85,10 +92,6 @@ const BLOWOUT_MARKER = " ⚠ overexp risk";
 const RUDRA_FALLBACK_MARKER = " ⚠ VAE fallback";
 
 /** Return widget by name from a node, or null. */
-function getWidget(node, name) {
-    return node.widgets?.find(w => w.name === name) ?? null;
-}
-
 // Same convention as radiance_resolution.js's _setLabelMarker: cache the
 // original label once, then swap between origLabel and origLabel+marker.
 // Renders identically on the legacy LiteGraph canvas and the Vue frontend.
@@ -100,69 +103,6 @@ function _setLabelMarker(widget, marker) {
     if (widget.label !== wanted) widget.label = wanted;
 }
 
-// ── Widget visibility helpers (same pattern as radiance_sampler.js) ──
-// ALBABIT-FIX: hidden unless their condition holds (verified against
-// hdr/vae.py): target_stops needs `inverse_tonemap and hdr_mode !=
-// "Compress (Log)"`; rhdr_precision needs `export_rhdr`; decoder_size needs
-// `rudra_decoder=="Enabled"`; display_tonemap/source_space/decode_noise_scale
-// all need `hdr_mode == "Compress (Log)"` (tonemap block, log decompression
-// curve, and noise-injection gate are each individually conditioned on it);
-// inverse_tonemap needs the OPPOSITE (`hdr_mode != "Compress (Log)"` --
-// its own block never runs otherwise); hdr_scale_factor needs target_space to
-// be scene-referred (silently ignored-with-warning otherwise). hdr_output is
-// NOT hidden -- it's active in every hdr_mode, unlike v1.0's incorrect
-// "Compress-Log only" grouping. export_rhdr's condition is below (separate,
-// since it's also forced off, not just hidden).
-function _forceWidgetReinsert(widget, node) {
-    if (!node?.widgets) return;
-    const idx = node.widgets.indexOf(widget);
-    if (idx === -1) return;
-    node.widgets.splice(idx, 1);
-    node.widgets.splice(idx, 0, widget);
-}
-
-function setWidgetVisible(widget, visible, node) {
-    if (!widget) return false;
-
-    const wasHidden = widget.hidden === true || widget.type === "hidden";
-
-    if (!widget.options) widget.options = {};
-    widget.options.hidden = !visible;
-    widget.hidden = !visible;
-
-    if (visible) {
-        if (widget.type === "hidden") {
-            widget.type = widget._origType || "number";
-            if (widget._origComputeSize !== undefined) {
-                widget.computeSize = widget._origComputeSize;
-            } else {
-                delete widget.computeSize;
-            }
-            delete widget._origComputeSize;
-            widget.computedHeight = widget._origComputedHeight ?? 32;
-            delete widget._origComputedHeight;
-        }
-    } else {
-        if (widget.type !== "hidden") {
-            widget._origType = widget.type;
-            widget._origComputeSize = widget.computeSize;
-            widget._origComputedHeight = widget.computedHeight;
-            widget.type = "hidden";
-            widget.computeSize = () => [0, -4];
-            widget.computedHeight = 4;
-        }
-    }
-
-    // Only reinsert on an actual hidden/type transition -- reinserting
-    // unconditionally on every call (even a no-op) destroys and recreates the
-    // widget's Vue component every time, which interrupts in-progress typing
-    // in neighbouring widgets when this runs on the 250ms poll below.
-    if (wasHidden !== !visible) {
-        _forceWidgetReinsert(widget, node);
-        return true;
-    }
-    return false;
-}
 
 function refreshNodeSize(node) {
     if (!node.computeSize) return;
@@ -178,6 +118,7 @@ function refreshNodeSize(node) {
  * Sync all dependent widget states based on current hdr_output + hdr_mode.
  */
 function syncWidgets(node) {
+    const decodeModeW     = getWidget(node, W_DECODE_MODE);
     const hdrOutputW      = getWidget(node, W_HDR_OUTPUT);
     const displayTmW      = getWidget(node, W_DISPLAY_TONEMAP);
     const hdrModeW        = getWidget(node, W_HDR_MODE);
@@ -194,36 +135,39 @@ function syncWidgets(node) {
     const temporalSizeW   = getWidget(node, W_TEMPORAL_SIZE);
     const temporalOverlapW = getWidget(node, W_TEMPORAL_OVERLAP);
 
-    if (!hdrOutputW) return;
+    if (!decodeModeW) return;
 
     const hdrMode = hdrModeW?.value ?? "";
-    const isCompressLog = hdrMode === "Compress (Log)";
+    if (rudraDecoderW?.value === "Enabled" && decodeModeW.value !== "Direct HDR / RUDRA") {
+        decodeModeW.value = "Direct HDR / RUDRA";
+    }
+    const directHDR = decodeModeW.value === "Direct HDR / RUDRA";
+    const isCompressLog = directHDR || hdrMode === "Compress (Log)";
+    // Overexposure-risk marking happens post-execution in onExecuted below
+    // (merged from beta/main): risk depends on radiance_meta, only known once
+    // the decode has actually run — not derivable from widget values here.
     const displayTmVal = displayTmW?.value ?? "ACES Filmic";
     const targetSpaceVal = targetSpaceW?.value ?? "sRGB";
 
-    // ALBABIT-FIX: BLOWOUT_MARKER moved to onExecuted (post-execution only)
-    // below. Risk depends on radiance_meta, only known once decode runs, not
-    // from widget values here. See file header for the full rationale.
-
+    // decode_mode owns these values at execution: sampler mode is Clip/sRGB,
+    // direct mode is Compress(Log)/Linear with no display tonemap.
+    // MERGE-PORT (beta/main 9a5ac88): gate the node resize on actual
+    // visibility transitions so the 250 ms poll stays a no-op at rest.
     let changed = false;
-    if (setWidgetVisible(displayTmW, isCompressLog, node)) changed = true;
+    if (setWidgetVisible(hdrModeW, false, node)) changed = true;
+    if (setWidgetVisible(hdrOutputW, false, node)) changed = true;
+    if (setWidgetVisible(displayTmW, false, node)) changed = true;
+    if (setWidgetVisible(targetSpaceW, !directHDR, node)) changed = true;
+    if (setWidgetVisible(exportRhdrW, directHDR, node)) changed = true;
+    if (!directHDR && exportRhdrW?.value) exportRhdrW.value = false;
 
-    // ALBABIT-FIX: force export_rhdr off before reading its value below, so
-    // rhdr_precision's visibility (which depends on it) reflects the forced
-    // state in the same pass instead of lagging one sync behind.
-    const rhdrRedundant = !isCompressLog || displayTmVal === "None";
-    if (rhdrRedundant && exportRhdrW?.value) {
-        exportRhdrW.value = false;
-    }
-    if (setWidgetVisible(exportRhdrW, !rhdrRedundant, node)) changed = true;
-
-    if (setWidgetVisible(targetStopsW, !!inverseTmW?.value && !isCompressLog, node)) changed = true;
+    if (setWidgetVisible(targetStopsW, !!inverseTmW?.value && !directHDR, node)) changed = true;
     if (setWidgetVisible(rhdrPrecisionW, !!exportRhdrW?.value, node)) changed = true;
     if (setWidgetVisible(decoderSizeW, rudraDecoderW?.value === "Enabled", node)) changed = true;
-    if (setWidgetVisible(sourceSpaceW, isCompressLog, node)) changed = true;
-    if (setWidgetVisible(decodeNoiseW, isCompressLog, node)) changed = true;
-    if (setWidgetVisible(inverseTmW, !isCompressLog, node)) changed = true;
-    if (setWidgetVisible(hdrScaleW, !DISPLAY_READY_SPACES.has(targetSpaceVal), node)) changed = true;
+    if (setWidgetVisible(sourceSpaceW, directHDR, node)) changed = true;
+    if (setWidgetVisible(decodeNoiseW, directHDR, node)) changed = true;
+    if (setWidgetVisible(inverseTmW, !directHDR, node)) changed = true;
+    if (setWidgetVisible(hdrScaleW, directHDR, node)) changed = true;
 
     // ALBABIT-FIX: temporal_overlap is only read inside `if latent.ndim == 5
     // and temporal_size > 0:` (hdr/vae.py:2763) -- matches its own tooltip
@@ -245,11 +189,13 @@ app.registerExtension({
             const self = this;
 
             const hdrOutputW = getWidget(this, W_HDR_OUTPUT);
-            if (!hdrOutputW) return;
+            const decodeModeW = getWidget(this, W_DECODE_MODE);
+            if (!decodeModeW) return;
 
             // Wire callbacks for instant feedback on the driver widgets.
             [
                 hdrOutputW,
+                decodeModeW,
                 getWidget(this, W_HDR_MODE),
                 getWidget(this, W_DISPLAY_TONEMAP),
                 getWidget(this, W_INVERSE_TONEMAP),

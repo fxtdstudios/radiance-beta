@@ -43,10 +43,14 @@ class RadianceSDRtoHDRExpand:
         luma = 0.2126 * RGB[..., 0] + 0.7152 * RGB[..., 1] + 0.0722 * RGB[..., 2]
         
         diff = luma - threshold
+        # AUDIT-FIX (2026-08): this mask was computed and then never used --
+        # the `smoothness` widget was a dead control (relu() below already
+        # hard-gates the expansion at the threshold). It now feathers the
+        # expansion onset as the tooltip has always promised.
         mask = torch.sigmoid(diff / max(smoothness, 0.0001)) if smoothness > 0 else (diff > 0).float()
-        
+
         highlight_amt = F.relu(diff)
-        expansion = (highlight_amt ** expansion_gamma) * expansion_gain
+        expansion = (highlight_amt ** expansion_gamma) * expansion_gain * mask
         
         luma_safe = torch.clamp(luma, min=1e-6)
         ratio = RGB / luma_safe.unsqueeze(-1)

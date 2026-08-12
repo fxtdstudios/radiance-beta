@@ -462,6 +462,24 @@
           "type": "MASK",
           "links": [],
           "slot_index": 1
+        },
+        {
+          "name": "shadow_mask",
+          "type": "MASK",
+          "links": [],
+          "slot_index": 2
+        },
+        {
+          "name": "highlight_confidence",
+          "type": "MASK",
+          "links": [],
+          "slot_index": 3
+        },
+        {
+          "name": "shadow_confidence",
+          "type": "MASK",
+          "links": [],
+          "slot_index": 4
         }
       ],
       "properties": {
@@ -476,7 +494,13 @@
         0.85,
         "Linear",
         "rudra_turbo",
-        1.0
+        1.0,
+        "Video Frames",
+        0.05,
+        "Expand",
+        0.98,
+        5,
+        ""
       ],
       "title": "SDR → HDR Universal (math path for video)"
     },
@@ -564,7 +588,7 @@
       },
       "widgets_values": [
         "PQ (HDR10)",
-        1000,
+        "1000",
         203.0,
         1.0,
         false

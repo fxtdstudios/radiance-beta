@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "radiance"
 description = "Professional VFX, HDR color science, review, and DCC handoff nodes for ComfyUI."
-version = "3.1.2"
+version = "3.2.1"
 readme = "README.md"
 license = "GPL-3.0-only"
 license-files = ["LICENSE"]
@@ -49,15 +49,18 @@ dependencies = [
     "OpenEXR>=3.2.0,<4.0.0",
     "OpenImageIO>=3.0.0,<4.0.0",
     "opencolorio>=2.3.0,<3.0.0",
-    "colour-science>=0.4.4,<1.0.0",
     "transformers>=4.36.0,<5.0.0",
     "scipy>=1.10.0,<2.0.0",
     "defusedxml>=0.7.1,<1.0.0",
     "imageio-ffmpeg>=0.4.9",
     "tqdm>=4.66.0",
     "aiohttp>=3.8.0",
-    "einops>=0.7.0,<1.0.0",
-    "torchsde>=0.2.5,<1.0.0",
+    # Sole writer/depth-probe for 16-bit and 32-bit float TIFF. Without it the
+    # Write node refuses deep-TIFF requests rather than silently emitting 8-bit.
+    "tifffile>=2023.7.10",
+    # colour-science, einops and torchsde used to sit here. Nothing in the
+    # package imports any of them, so they only ever cost install time and
+    # resolver conflicts. colour-science is still offered via the `full` extra.
 ]
 
 [project.optional-dependencies]
@@ -74,6 +77,7 @@ test = [
     "opencv-python-headless>=4.7",
     "safetensors>=0.4.0",
     "tqdm>=4.66",
+    "tifffile>=2023.7.10",
 ]
 # Full production stack (installed in ComfyUI custom_nodes environment)
 full = [
@@ -81,6 +85,7 @@ full = [
     "OpenEXR>=3.0",
     "OpenImageIO>=3.0",
     "opencolorio>=2.2",
+    "tifffile>=2023.7.10",
     "colour-science>=0.4",
     "transformers>=4.35",
     "diffusers>=0.25",
@@ -148,10 +153,19 @@ radiance = [
     "js/*.css",
     "js/*.html",
     "js/*.mjs",
+    # Ship the starter graph and the shipped templates only.
+    #
+    # These globs used to be workflows/*.rad and workflows/*/*.rad, which swept
+    # up whatever the developer happened to have saved: a build made on a
+    # working machine shipped that person's own shot files, and .versions/
+    # snapshots with them. .gitignore already calls workflows/*.rad "user /
+    # project data (keep local; not shipped in the package)" -- the package-data
+    # globs just did not agree with it.
     "workflows/*.json",
-    "workflows/*.rad",
-    "workflows/*/*.json",
-    "workflows/*/*.rad",
+    "workflows/official/*.json",
+    "workflows/TEMPLATES/*.json",
+    "workflows/TEMPLATES/*.rad",
+    "scripts/training/train_temporal_rudra.py",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────

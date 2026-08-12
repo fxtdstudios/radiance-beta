@@ -28,8 +28,11 @@ try:
     from ..gpu_utils import gpu_laplacian_pyramid_blend, gpu_local_contrast
 
     GPU_UTILS_AVAILABLE = True
-except ImportError:
-    pass
+except ImportError as _exc:
+    logger.debug(
+        "[Radiance] hdr/processing.py: ignoring %s from `from ..gpu_utils import gpu_laplacian_pyramid_blend, gpu_loc…`: %s",
+        type(_exc).__name__, _exc,
+    )
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                          HDR EXPOSURE BLENDING

@@ -28,6 +28,12 @@ from nodes_curves import (
     NODE_DISPLAY_NAME_MAPPINGS,
 )
 
+# This module already gates its torch-dependent tests correctly (they skip
+# cleanly against conftest's stub), so opt out of the automatic module-level
+# skip and keep the rest of the file running on the no-torch CI matrix.
+RADIANCE_TORCH_GATED = True
+
+
 
 def _t(b=1, h=4, w=4, fill=0.5):
     return torch.full((b, h, w, 3), fill, dtype=torch.float32)

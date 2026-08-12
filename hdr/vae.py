@@ -246,6 +246,33 @@ LOG_PROFILE_HDR_PARAMS: Dict[str, Tuple[float, float, float, float]] = {
 # Default for unknown log profiles (same as LogC4 — safe middle ground)
 LOG_PROFILE_HDR_DEFAULT = (0.96, 1.08, 0.80, 0.55)
 
+
+def _restore_alpha_channel(img: torch.Tensor, alpha: Optional[torch.Tensor]) -> torch.Tensor:
+    if alpha is None:
+        return img
+    alpha_f = alpha.float()
+    if alpha_f.dim() == 3:
+        alpha_f = alpha_f.unsqueeze(0)
+    if alpha_f.dim() != 4 or alpha_f.shape[-1] < 1:
+        raise ValueError("Alpha must have shape (B,H,W) or (B,H,W,C).")
+    alpha_ch = alpha_f[..., :1]
+    if alpha_ch.shape[1:3] != img.shape[1:3]:
+        alpha_ch = F.interpolate(
+            alpha_ch.permute(0, 3, 1, 2),
+            size=(img.shape[1], img.shape[2]),
+            mode="bilinear", align_corners=False,
+        ).permute(0, 2, 3, 1)
+    if alpha_ch.shape[0] != img.shape[0]:
+        if alpha_ch.shape[0] == 1:
+            alpha_ch = alpha_ch.expand(img.shape[0], -1, -1, -1)
+        else:
+            raise ValueError(
+                f"Alpha batch must be 1 or match decoded frames ({img.shape[0]}), got {alpha_ch.shape[0]}."
+            )
+    if alpha_ch.device != img.device:
+        alpha_ch = alpha_ch.to(img.device)
+    return torch.cat([img[..., :3], alpha_ch], dim=-1)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # v2.4: Per-profile decode_noise_scale defaults
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1379,12 +1406,12 @@ class RadianceVAE4KEncode:
 
         # v2.0 Feature 3: Handle 5D video latents (B, F, H, W, C)
         is_video = pixels.ndim == 5
-        
+
         # Check if the VAE natively supports 3D latents (e.g., Wan Video, Cosmos)
         is_3d_vae = False
         if hasattr(vae, "latent_dim") and getattr(vae, "latent_dim") == 3:
             is_3d_vae = True
-            
+
         if is_video and not is_3d_vae:
             # v2.3.1 FIX (V-B16): renamed the frame-count local from `F` to
             # `num_frames`. `F` is the module-level alias for torch.nn.functional
@@ -1873,7 +1900,7 @@ class RadianceVAE4KDecode:
         """
         latent = samples["samples"]
 
-        b, c = latent.shape[0], latent.shape[1]
+        b = latent.shape[0]
         lat_h, lat_w = latent.shape[-2], latent.shape[-1]
         device = latent.device
         # v2.1 FIX (BUG-42): Use detected vae_factor instead of hardcoded 8.
@@ -1919,14 +1946,14 @@ class RadianceVAE4KDecode:
                     if turbo_decoder is not None:
                         if next(turbo_decoder.parameters()).device != tile_lat.device:
                             turbo_decoder.to(tile_lat.device)
-                        
+
                         _tlat = tile_lat
                         if _tlat.ndim == 5:
                             _B, _C, _F, _H, _W = _tlat.shape
                             _tlat = _tlat.permute(0, 2, 1, 3, 4).reshape(_B * _F, _C, _H, _W).contiguous()
                             if _tile_video_frames is None:
                                 _tile_video_frames = _F
-                        
+
                         # Process in chunks to prevent cuDNN/VRAM hard-crashes on large batches
                         _chunk_size = 4
                         _tile_outputs = []
@@ -2631,12 +2658,12 @@ class RadianceVAE4KDecode:
 
         # v2.1 Video Support: Check for 5D video latent (B, C, F, H, W)
         is_video = latent.ndim == 5
-        
+
         # Check if the VAE natively supports 3D latents (e.g., Wan Video, Cosmos)
         is_3d_vae = False
         if hasattr(vae, "latent_dim") and getattr(vae, "latent_dim") == 3:
             is_3d_vae = True
-            
+
         if is_video and not is_3d_vae:
             # v2.3.1 FIX (V-B15): renamed frame-count local from `F` to
             # `num_frames`. `F` is torch.nn.functional at module scope; the
@@ -2747,7 +2774,7 @@ class RadianceVAE4KDecode:
 
             return (all_frames, json.dumps(meta_json, indent=2), latent_fmt)
 
-        b, c = latent.shape[0], latent.shape[1]
+        b = latent.shape[0]
         lat_h, lat_w = latent.shape[-2], latent.shape[-1]
         pix_h, pix_w = lat_h * vae_factor, lat_w * vae_factor
 
@@ -2811,19 +2838,54 @@ class RadianceVAE4KDecode:
                     self._frame_decode_active = _quiet_prev
 
                 if t_ov > 0 and len(chunk_imgs) > 1:
-                    trimmed = []
-                    for i, (t1, t2, ch) in enumerate(chunk_imgs):
-                        if i < len(chunk_imgs) - 1:
-                            pix_per_lat = ch.shape[0] / max(1, t2 - t1)
-                            pix_ov = max(1, round(t_ov * pix_per_lat))
-                            trimmed.append(ch[:max(1, ch.shape[0] - pix_ov)])
+                    prev_t2 = chunk_imgs[0][1]
+                    img_out = chunk_imgs[0][2]
+                    for t1, t2, chunk_img in chunk_imgs[1:]:
+                        overlap_lat = max(0, prev_t2 - t1)
+                        pix_per_lat = chunk_img.shape[0] / max(1, t2 - t1)
+                        overlap_frames = min(
+                            img_out.shape[0], chunk_img.shape[0],
+                            max(0, round(overlap_lat * pix_per_lat)),
+                        )
+                        if overlap_frames > 0:
+                            weights = torch.linspace(
+                                0.0, 1.0, overlap_frames + 2,
+                                device=chunk_img.device, dtype=chunk_img.dtype,
+                            )[1:-1].view(-1, 1, 1, 1)
+                            blended = img_out[-overlap_frames:] * (1.0 - weights) + chunk_img[:overlap_frames] * weights
+                            img_out = torch.cat([img_out[:-overlap_frames], blended, chunk_img[overlap_frames:]], dim=0)
                         else:
-                            trimmed.append(ch)
-                    img_out = torch.cat(trimmed, dim=0)
+                            img_out = torch.cat([img_out, chunk_img], dim=0)
+                        prev_t2 = max(prev_t2, t2)
                 else:
                     img_out = torch.cat([ch for _, _, ch in chunk_imgs], dim=0)
 
-                return (img_out, json.dumps({"temporal_chunks": len(t_chunks)}), latent_fmt)
+                img_out = _restore_alpha_channel(img_out, alpha)
+                temporal_meta = {
+                    "temporal_chunks": len(t_chunks),
+                    "frames": img_out.shape[0],
+                    "alpha_restored": alpha is not None,
+                }
+                if export_rhdr:
+                    output_dir = folder_paths.get_temp_directory()
+                    rhdr_filenames = []
+                    for frame_index in range(img_out.shape[0]):
+                        filename = self._save_rhdr(
+                            img_out[frame_index, ..., :3].float().cpu().numpy(),
+                            output_dir,
+                            prefix=f"radiance_4k_f{frame_index:04d}",
+                            precision=rhdr_precision,
+                        )
+                        if filename:
+                            rhdr_filenames.append(filename)
+                    if rhdr_filenames:
+                        temporal_meta["rhdr_export"] = rhdr_filenames
+                        temporal_meta["rhdr_precision"] = rhdr_precision
+                return (
+                    img_out,
+                    json.dumps(temporal_meta),
+                    latent_fmt,
+                )
 
         logger.info(
             f"[Radiance 4K Decode v2.3] Latent: {lat_w}x{lat_h} -> "
@@ -2881,13 +2943,13 @@ class RadianceVAE4KDecode:
                 if turbo_decoder is not None:
                     if next(turbo_decoder.parameters()).device != latent.device:
                         turbo_decoder.to(latent.device)
-                    
+
                     _lat = latent
                     if _lat.ndim == 5:
                         _B, _C, _F, _H, _W = _lat.shape
                         _lat = _lat.permute(0, 2, 1, 3, 4).reshape(_B * _F, _C, _H, _W).contiguous()
                         decoded_video_frames = _F
-                    
+
                     # Process in chunks to prevent cuDNN/VRAM hard-crashes on large batches
                     _chunk_size = 4
                     _outputs = []
@@ -2895,7 +2957,7 @@ class RadianceVAE4KDecode:
                         _chunk = _lat[i:i+_chunk_size]
                         _outputs.append(turbo_decoder(_chunk).float())
                     img = torch.cat(_outputs, dim=0)
-                    
+
                     if img.shape[1] == 3:
                         img = img.permute(0, 2, 3, 1)
                 else:
@@ -2942,8 +3004,11 @@ class RadianceVAE4KDecode:
                         f"If the decode looks too bright, change source_space to 'sRGB'. "
                         f"This warning is suppressed when hdr_mode='Compress (Log)'."
                     )
-            except Exception:
-                pass
+            except Exception as _exc:
+                logger.debug(
+                    "[Radiance] decode(): ignoring %s from `_sample_px = img[0].reshape(-1, img.shape[-1]) if img.ndim =…`: %s",
+                    type(_exc).__name__, _exc,
+                )
 
         # v2.3: Pre-transform NaN/Inf guard — mode-aware, unconditional.
         # Previously gated on source_space == "Linear", which let NaN values
@@ -3000,8 +3065,11 @@ class RadianceVAE4KDecode:
                 meta = json.loads(crop_padding)
                 pad_h = meta.get("pad_h", 0)
                 pad_w = meta.get("pad_w", 0)
-            except (json.JSONDecodeError, TypeError):
-                pass
+            except (json.JSONDecodeError, TypeError) as _exc:
+                logger.debug(
+                    "[Radiance] decode(): ignoring %s from `meta = json.loads(crop_padding)`: %s",
+                    type(_exc).__name__, _exc,
+                )
 
         if pad_h > 0 or pad_w > 0:
             crop_h = img.shape[1] - pad_h
@@ -3009,24 +3077,7 @@ class RadianceVAE4KDecode:
             img = img[:, :crop_h, :crop_w, :]
             logger.info(f"[Radiance 4K v2.3] Cropped padding: {pad_h}h, {pad_w}w -> {crop_w}x{crop_h}")
 
-        # Restore alpha
-        if alpha is not None:
-            alpha_f = alpha.float()
-            if alpha_f.dim() == 3:
-                alpha_f = alpha_f.unsqueeze(0)
-            alpha_ch = alpha_f[..., :1]
-            if alpha_ch.shape[1:3] != img.shape[1:3]:
-                alpha_ch = F.interpolate(
-                    alpha_ch.permute(0, 3, 1, 2),
-                    size=(img.shape[1], img.shape[2]),
-                    mode="bilinear", align_corners=False,
-                ).permute(0, 2, 3, 1)
-            if alpha_ch.shape[0] != img.shape[0]:
-                alpha_ch = alpha_ch.expand(img.shape[0], -1, -1, -1)
-            # Ensure alpha is on the same device as img (GPU for turbo, usually CPU for VAE)
-            if alpha_ch.device != img.device:
-                alpha_ch = alpha_ch.to(img.device)
-            img = torch.cat([img, alpha_ch], dim=-1)
+        img = _restore_alpha_channel(img, alpha)
 
         # Export .rhdr — one sidecar per frame for video, single file for stills
         # BUG 1 FIX: RHDR must be scene-linear float data (Radiance Viewer uses it
@@ -3271,4 +3322,3 @@ class RadianceVAE4KRoundtrip:
         }
 
         return (img, latent, json.dumps(combined_meta, indent=2))
-

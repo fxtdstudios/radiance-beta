@@ -29,7 +29,7 @@ def _write_and_read(tmp_path, image_np, fmt, **write_kwargs):
     writer.write(image=img_t, output_path=out_path, format=fmt, overwrite=True, **write_kwargs)
     produced = list(tmp_path.glob("test_out*"))
     assert produced, f"No file produced for format {fmt!r}"
-    img_out, mask_out = reader.read(path=str(produced[0]))
+    img_out, mask_out, _info = reader.read(path=str(produced[0]))
     return img_out[0].numpy(), mask_out, produced[0]
 
 
@@ -93,7 +93,7 @@ class TestAlphaRoundTrip:
                      mask=torch.from_numpy(mask), overwrite=True)
         produced = list(tmp_path.glob("alpha_out*"))
         assert produced
-        _, mask_out = reader.read(path=str(produced[0]))
+        _, mask_out, _info = reader.read(path=str(produced[0]))
         assert mask_out is not None and mask_out.abs().max().item() > 0.5, \
             f"{fmt}: alpha not written/read correctly"
 
@@ -108,7 +108,7 @@ class Test16BitPrecisionPreservation:
         rgb16 = (np.random.default_rng(2).random((16, 16, 3)) * 65535).astype(np.uint16)
         path = tmp_path / "rgb16.png"
         cv2.imwrite(str(path), cv2.cvtColor(rgb16, cv2.COLOR_RGB2BGR))
-        img_out, _ = nodes_io.RadianceRead().read(path=str(path))
+        img_out, _mask, _info = nodes_io.RadianceRead().read(path=str(path))
         readback = (img_out[0].numpy() * 65535).round().astype(np.int32)
         assert np.abs(readback - rgb16.astype(np.int32)).max() <= 1
 
@@ -117,7 +117,7 @@ class Test16BitPrecisionPreservation:
         rgb8 = (np.random.default_rng(3).random((16, 16, 3)) * 255).astype(np.uint8)
         path = tmp_path / "rgb8.png"
         PIL.fromarray(rgb8).save(path)
-        img_out, _ = nodes_io.RadianceRead().read(path=str(path))
+        img_out, _mask, _info = nodes_io.RadianceRead().read(path=str(path))
         readback = (img_out[0].numpy() * 255).round().astype(np.int32)
         assert np.abs(readback - rgb8.astype(np.int32)).max() <= 1
 
@@ -192,15 +192,40 @@ class TestSequenceRoundTrip:
 
 
 class TestErrorHandling:
-    def test_depth_only_exr_raises_clear_error(self, tmp_path):
-        """Regression: used to raise a bare TypeError from OpenEXR, caught
-        silently by RadianceRead.read()'s outer handler and surfaced only as
-        a black image with no indication of the actual cause."""
+    def test_depth_only_exr_reads_instead_of_raising(self, tmp_path):
+        """This test used to assert the opposite, and the opposite was wrong.
+
+        Through 3.2.0's audit the reader raised on any EXR without R/G/B, with a
+        message telling the user their file was unsupported:
+
+            '...' has no standard R/G/B channels (found: ['Z']). This looks like
+            a depth/data-only or multi-layer AOV file, which RadianceRead does
+            not support -- it only reads standard RGB(A) EXR.
+
+        That was an improvement on the bare TypeError it replaced, but a Z pass
+        is a normal render output, not a malformed file. Refusing the format the
+        package exists to serve, and blaming the file, is the wrong way round.
+        The reader now returns the layer.
+        """
         OpenEXR = pytest.importorskip("OpenEXR")
         path = tmp_path / "depth_only.exr"
         z = np.random.default_rng(8).random((8, 8)).astype(np.float32)
         OpenEXR.File(
             {"compression": OpenEXR.ZIP_COMPRESSION, "type": OpenEXR.scanlineimage}, {"Z": z}
         ).write(str(path))
-        with pytest.raises(ValueError, match="R/G/B"):
+
+        image, mask = nodes_io._read_exr_single(str(path))
+        assert image.shape == (1, 8, 8, 3)
+        assert mask is None, "a depth pass has no alpha"
+        # The single channel is replicated so it is viewable; the values are the
+        # depth values, untouched.
+        np.testing.assert_allclose(image[0, ..., 0].numpy(), z, rtol=0, atol=1e-6)
+        assert np.allclose(image[0, ..., 0], image[0, ..., 2])
+
+    def test_an_exr_with_no_readable_channel_still_names_the_problem(self, tmp_path):
+        """The error path that remains: a file we genuinely cannot open."""
+        path = tmp_path / "not_really.exr"
+        path.write_bytes(b"\x76\x2f\x31\x01" + b"\x00" * 64)
+        with pytest.raises(Exception) as excinfo:
             nodes_io._read_exr_single(str(path))
+        assert "not_really.exr" in str(excinfo.value)

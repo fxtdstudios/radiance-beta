@@ -364,6 +364,10 @@ class RadianceRegionalGrid:
             },
         }
 
+    # Calls clip.encode_from_tokens; CLIP parameters require grad after .eval().
+
+    @torch.no_grad()
+
     def apply_grid(self, base_cond: list, clip, grid_prompts: str,
                    columns: int = 2, rows: int = 1,
                    cell_strength: float = 1.0,

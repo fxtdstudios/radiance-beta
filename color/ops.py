@@ -95,6 +95,14 @@ M_ACESCG_TO_REC709 = torch.tensor([
     [-0.0240033, -0.1289690,  1.1529723],
 ], dtype=torch.float32)
 
+# Rec.709 (sRGB D65) → ACES2065-1 (AP0 D60) — Bradford adapted.
+# Matches hdr/vae.py and the ACES interchange transform used by Radiance.
+M_REC709_TO_ACES2065_1 = torch.tensor([
+    [0.4339316, 0.3762584, 0.1898100],
+    [0.0886227, 0.8131989, 0.0981784],
+    [0.0177087, 0.1095613, 0.8727300],
+], dtype=torch.float32)
+
 # DCI-P3 (D65) → BT.2020
 M_P3D65_TO_BT2020 = torch.tensor([
     [ 0.7539397,  0.1986815,  0.0473788],
@@ -261,6 +269,7 @@ __all__ = [
     # Torch matrices
     "M_REC709_TO_BT2020", "M_BT2020_TO_REC709",
     "M_REC709_TO_ACESCG", "M_ACESCG_TO_REC709",
+    "M_REC709_TO_ACES2065_1",
     "M_P3D65_TO_BT2020",
     "M_ACESCG_TO_XYZ_D60", "M_XYZ_D60_TO_ACESCG",
     # Functions

@@ -12,11 +12,22 @@ from .utils import (
 logger = logging.getLogger("radiance.hdr.tonemap")
 
 # ─── AgX working space matrices (Blender/Troy Sobotka, BSD-licensed) ─────────
-# sRGB linear -> AgX working space, transposed for einsum('ij,...j->...i').
+#
+# sRGB linear -> AgX working space, in the orientation `einsum('ij,...j->...i')`
+# wants, i.e. rows of M such that `out = M @ rgb`.
+#
+# The comment here used to claim "transposed for einsum" while the literal was
+# the GLSL column-major form copied verbatim as rows. That orientation is not
+# white-preserving: as coded, `M @ [1,1,1]` was (0.9272, 1.0353, 1.0375), so
+# every neutral picked up a warm cast that grew with exposure — measured channel
+# spread 0.042 at 0.18 scene-linear and 0.116 at 16.0, roughly 350-600x the
+# error of the correct orientation. `M.T @ [1,1,1]` is (1.00014, 0.99996,
+# 0.99995), which is the white-preserving one, so the values below are the
+# transpose of what was here.
 _AGX_M_IN_VALUES = (
-    (0.842479062253094, 0.0423282422610123, 0.0423756549057051),
-    (0.0784335999999992, 0.878468636469772, 0.0784336000000002),
-    (0.0792237451477643, 0.0791661274605434, 0.879142973793104),
+    (0.842479062253094, 0.0784335999999992, 0.0792237451477643),
+    (0.0423282422610123, 0.878468636469772, 0.0791661274605434),
+    (0.0423756549057051, 0.0784336000000002, 0.879142973793104),
 )
 
 # PyTorch versions (lazy-init to avoid device conflict)
@@ -96,6 +107,15 @@ class HDRExpandDynamicRange:
         # GPU-accelerated implementation
         img = image.float()
 
+        # Alpha is a coverage value, not a colour: it must not be linearised,
+        # expanded or ratio-scaled. This whole path used to run on the full
+        # array, so `tensor_srgb_to_linear` alone took a 50% matte to 0.214 and
+        # the highlight ratio moved it again. Split it off and reattach it
+        # untouched, the same way nodes/hdr/colorspace.py already does.
+        _alpha = img[..., 3:] if img.shape[-1] >= 4 else None
+        if _alpha is not None:
+            img = img[..., :3]
+
         # 1. Convert to linear using tensor helper
         linear = tensor_srgb_to_linear(img, source_gamma)
 
@@ -157,6 +177,9 @@ class HDRExpandDynamicRange:
             ratio = ratio.unsqueeze(-1)
 
             linear = linear * ratio
+
+        if _alpha is not None:
+            linear = torch.cat([linear, _alpha], dim=-1)
 
         return (linear,)
 
@@ -347,8 +370,22 @@ class HDRToneMap:
             # 2. Log2 inset: working range →  AgX scene (−10 … +6.5 EV)
             x_log = (torch.log2(x_agx.clamp(min=1e-10)) - (-10.0)) / (6.5 - (-10.0))
             x_log = x_log.clamp(0.0, 1.0)
-            # 3. Sigmoid contrast curve (fitted to AgX CDL, Troy Sobotka)
-            x_sig = x_log / (1.0 + torch.abs(x_log - 0.5) * 2.0)
+            # 3. Sigmoid contrast curve (fitted to AgX CDL, Troy Sobotka).
+            #
+            # This previously read:
+            #     x_sig = x_log / (1.0 + torch.abs(x_log - 0.5) * 2.0)
+            # For x_log > 0.5 the denominator is exactly 2*x_log, so the whole
+            # expression reduces to x/(2x) = 0.5 -- every scene-linear value
+            # above 2**(0.5*16.5-10) = 0.2973 collapsed to flat mid-grey. A sky
+            # at 5.0 and a specular at 100.0 came out identical.
+            #
+            # Replaced with a genuine symmetric sigmoid, which is monotonic over
+            # the whole domain and agrees with the intended shape near 0.5.
+            _p = 1.7   # shoulder/toe firmness
+            _d = x_log - 0.5
+            x_sig = 0.5 + _d / torch.pow(
+                1.0 + torch.pow((2.0 * _d.abs()).clamp(min=1e-8), _p), 1.0 / _p
+            )
             x_sig = (x_sig - 0.5) * 1.5 + 0.5   # approx CDL slope
             x_sig = x_sig.clamp(0.0, 1.0)
             # 4. Back to display sRGB
@@ -382,6 +419,14 @@ class HDRToneMap:
             img = image.to(torch.device("cuda"), non_blocking=True).float()
         else:
             img = image.float()
+
+        # Alpha must survive the operator, the contrast, the saturation and
+        # above all the gamma encode. Running it through the full stack took an
+        # opaque pixel to 0.730 and a 50% matte to 0.607 -- the plate came back
+        # 27% transparent with no error anywhere.
+        _alpha = img[..., 3:] if img.shape[-1] >= 4 else None
+        if _alpha is not None:
+            img = img[..., :3]
 
         # Apply exposure
         img = img * (2.0**exposure)
@@ -420,8 +465,18 @@ class HDRToneMap:
             result = luma + saturation * (result - luma)
 
         # Apply gamma (display encoding — must be the final step)
+        #
+        # AgX is the exception: its sigmoid already emits display code values,
+        # so the pow() here was a SECOND transfer encode on top. Measured with
+        # it: scene 0.00 -> 0.0477 (a black floor of ~12/255, pure black
+        # unreachable), 0.02 -> 0.4845, 0.18 -> 0.7042. filmic_aces on the same
+        # input gives 0.1260 and 0.5486. A near-black pixel rendered at 48% grey.
         result = torch.clamp(result, 0, 1)
-        result = torch.pow(result, 1.0 / gamma)
+        if str(operator).lower() != "agx":
+            result = torch.pow(result, 1.0 / gamma)
+
+        if _alpha is not None:
+            result = torch.cat([result, _alpha.to(result.dtype)], dim=-1)
 
         return (result,)
 

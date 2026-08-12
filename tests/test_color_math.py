@@ -293,13 +293,16 @@ class TestCanonLog3Numpy:
 
     def test_midgray_placement(self):
         """
-        Canon Log3: 18% gray → ~0.336 per current implementation.
-        NOTE: Canon's published spec states 0.343, but the implementation's
-        constants (a=14.98325, c=0.36726845) give ≈0.336. A future fix should
-        re-derive the constants to match the official spec exactly.
+        Canon Log3: 18% gray → 0.343371 per Canon's published spec.
+
+        This previously asserted ~0.336 with a note that the constants did not
+        match the spec and "a future fix should re-derive" them. That fix has
+        now landed: the implementation was missing the x/0.9 reflectance
+        scaling and was using the negative-branch intercept on the positive
+        log branch. The assertion tracks the spec, not the implementation.
         """
         enc = cu.linear_to_canonlog3(np.array([0.18], dtype=np.float32))
-        np.testing.assert_allclose(enc[0], 0.336, atol=5e-3)
+        np.testing.assert_allclose(enc[0], 0.343371, atol=1e-4)
 
     def test_roundtrip(self):
         assert_roundtrip(
@@ -318,13 +321,15 @@ class TestLog3G10Numpy:
 
     def test_midgray_placement(self):
         """
-        Log3G10: 18% gray → ~0.338 per current implementation.
-        NOTE: RED's published spec states 18% gray at ~0.333 (1/3), but the
-        implementation's constants (a=0.224282, b=155.975327) give ≈0.338.
-        A future fix should re-derive to match RED's official LogCam spec.
+        Log3G10: 18% gray → 1/3 exactly, per RED's published spec.
+
+        This previously asserted ~0.338 with a note that a future fix should
+        re-derive the constants. That fix has now landed: Log3G10 v2 is a
+        single continuous curve over (x + 0.01), and the implementation was
+        dropping that shift and substituting a linear toe.
         """
         enc = cu.linear_to_log3g10(np.array([0.18], dtype=np.float32))
-        np.testing.assert_allclose(enc[0], 0.338, atol=5e-3)
+        np.testing.assert_allclose(enc[0], 1.0 / 3.0, atol=1e-4)
 
     def test_roundtrip(self):
         """

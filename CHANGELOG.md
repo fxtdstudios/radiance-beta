@@ -2,6 +2,341 @@
 
 All notable changes to FXTD Radiance will be documented in this file.
 
+## [3.2.1] - 2026-08-09 ("Full Audit")
+
+**Upgrade note.** Colour output changes for any graph that used
+`RadianceColorSpaceConvert` with a camera-log or ACES space — those
+conversions previously did nothing (see below). Re-check affected masters.
+16/32-bit TIFF writes now require `tifffile` (`pip install tifffile`) instead
+of silently writing 8-bit.
+
+### Added
+
+- **Inline video preview on Read.** MP4/MOV/WebM the browser can decode play
+  directly on the node (`/radiance/media/preview`, with seeking); ProRes,
+  DNxHR and other production codecs fall back to a first-frame poster
+  (`/radiance/media/poster`). Same allowed-roots policy as the info routes.
+- **Resolved-path readout on Write.** The node now shows exactly what will
+  land on disk — output_path + filename + version + format combined by the
+  same Python logic that writes, via `/radiance/media/resolve_write` — plus
+  a note line ("frame 1 only" for IMG formats with a batch, "DNxHR is written
+  into an MXF container", sequence start frame). A contract test writes real
+  files and fails if prediction and reality drift.
+
+### HDR family
+
+- **SDR to HDR Expand: `smoothness` did nothing.** The feathering mask was
+  computed and then never applied — a dead control since the node shipped.
+  It now feathers the expansion onset as its tooltip promises.
+- **SDR to HDR Prepare: the feathered inpainting mask drifted up-left** by
+  ~2× the feather radius (32 px at the default 16) with dark bands on the
+  right/bottom — the blur loop re-padded asymmetrically after passes 2–3.
+  The AI was being guided to repair pixels offset from the actual clipped
+  highlights. Symmetric per-pass padding; centroid pinned by test.
+- **Fast-VAE tiled decode: tiles were butt-joined.** Each tile decoded with
+  overlap context but pasted hard against its neighbour; VAE decoders are
+  not shift-invariant at their borders, so seams showed on flat gradients.
+  Tiles now accumulate under a raised-cosine weight and normalise — a test
+  proves tiled output equals untiled output exactly.
+
+### Viewer
+
+- **VRAM frame cache now evicts by bytes, not just frame count.** The LRU
+  held 4–24 frames regardless of size — 400 MB at 1080p but ~7 GB at 8K,
+  an out-of-memory long before the count limit was reached. Eviction now
+  also respects a byte budget (0.5–3 GB, scaled to machine memory).
+- **Frames beyond the GPU's texture limit fail loudly, before upload.**
+  8K DCI (8192 px) sits exactly on many GPUs' `MAX_TEXTURE_SIZE`; anything
+  over it used to produce a black frame and a cryptic GL error code. The
+  viewer now reports the frame size, the GPU's limit, and that `proxy_scale`
+  is the way to view it — full-resolution data is unaffected.
+- Removed stale `MAX_BATCH_SIZE`/`MAX_IMAGE_DIMENSION` duplicates from
+  `hdr/io.py`; `viewer_utils.py` (9999 frames / 16384 px) is the single
+  source.
+
+### Changed
+
+- **`overwrite` on Write now defaults to OFF.** Destroying an existing file
+  must be an explicit choice; when off, a unique suffix is appended instead.
+- Read greys out `color_space` when `raw (no transform)` is selected — the
+  reader ignores it, and the UI now says so instead of looking live.
+- Write hides `broadcast_safe` for float formats (EXR/HDR/32f TIFF/DPX),
+  matching the Python side which already refuses to legal-range-clamp them;
+  `version` displays as `v0001` alongside the number.
+
+### Fixed
+
+- **Colour Space Convert did real conversions for only 6 of its 16 spaces.**
+  Without an OCIO config — the default install — ACEScc, ACEScct, LogC4,
+  F-Log2, C-Log3, Log3G10, DaVinci Intermediate, BMD Film Gen5, V-Log and
+  N-Log silently returned the input unchanged. The node's own inline LogC3
+  was also wrong: 18% grey encoded to 0.417 instead of ARRI's 0.391, and its
+  decode disagreed with its own encode, so a LogC3 round trip lost ~1.5 stops.
+  All curves now come from `color/transfer.py` / `color/luts.py` (verified
+  against published 18%-grey code values, round-trip exact), Rec.709 OETF is
+  the real BT.709 camera curve rather than an alias of sRGB, ACEScc/ACEScct
+  apply the Rec.709↔AP1 gamut matrix, and a space with no analytical path
+  raises instead of passing pixels through untouched.
+- **16-bit and 32-bit float TIFF writes refuse to downgrade.** `tifffile` is
+  the only writer for these formats but was never declared as a dependency;
+  without it a 32-bit float request silently produced an 8-bit clipped file
+  (the 16-bit path at least logged a warning). Both now raise with an install
+  hint, the reader warns when it cannot probe TIFF depth, and `tifffile` is
+  listed by the Environment Guard.
+- **Directory and glob sequence reads always came back empty.** The file list
+  was sliced by list index with the widget's frame-number defaults
+  (`files[1001:99999]`). Frame numbers are now parsed from filenames and the
+  window is reconciled against the range on disk, matching the `####` path.
+- **The test suite could not see colour-node bugs.** The conftest OCIO mock
+  reported `is_loaded` as a truthy `MagicMock`, so nodes "converted" via a
+  no-op mock processor and every colour test through them validated an
+  identity transform. The mock now reports `is_loaded = False` and a
+  regression test pins it.
+
+## [3.2.0] - 2026-07-29 ("Audit Release")
+
+A three-week audit, five independent review passes, and a new test harness that
+calls every node. The theme throughout: almost nothing here raised an error. The
+code ran, reported success, and produced the wrong result — which is why the
+existing 1,500-test suite had nothing to catch.
+
+**Upgrade note.** Colour output changes on several paths. If you have approved
+masters made with 3.1.x, re-check them before conforming new work against them —
+particularly anything graded through the Viewer's delivery panel, tone-mapped
+with AgX, or exported through the ACES 2.0 Cinema or HLG transforms.
+
+### Added
+
+- **109 nodes, up from 100.** Nine complete node classes were written and never
+  listed in any mapping dict, so they never reached ComfyUI's menu:
+  Bit-Depth Degrade, Policy Guard, LUT Apply, LUT Blend, Digital Cinema Read,
+  Digital Cinema Write, Flipbook GIF, Preview Server and ControlNet Apply.
+- **Per-node functional tests.** `tests/test_node_functional.py` builds inputs
+  from each node's own `INPUT_TYPES` and calls its `FUNCTION`, checking return
+  arity, IMAGE/MASK shape and dtype, and that inputs are not mutated in place.
+  80 nodes execute, 30 skip with a stated reason, none fail.
+- **A delivery payload contract.** `GRADE_PAYLOAD_KEYS` plus a test that parses
+  the viewer's JS and the handler's Python and diffs them in both directions.
+- **`core/ffmpeg.py`** — resolves ffmpeg from `RADIANCE_FFMPEG`, then PATH, then
+  the binary `imageio-ffmpeg` ships.
+- **`core/video.py`** — one video decoder for the whole package. Probes the
+  container for frame rate, frame count, bit depth, alpha, colour range, matrix,
+  primaries, transfer characteristics, rotation, field order and start timecode,
+  then decodes through a single raw ffmpeg pipe. `tests/test_video_read.py`
+  encodes real ProRes 4444, ProRes 422 HQ and H.264 fixtures and decodes them
+  back — 73 tests.
+- **Frame ranges on video.** `start_frame`, `end_frame` and `frame_step` now
+  apply to clips as well as sequences, selecting on the decoder's own frame
+  counter so the range is exact for long-GOP codecs too.
+- **Six more input colour spaces on Read** — Rec.709 (BT.1886), Canon Log 3,
+  RED Log3G10, PQ (ST.2084), HLG (BT.2100). The inverses were already in
+  `color/transfer.py`; only the menu was missing them.
+- **`core/tiling.py`** — shared tile blending weights with correct border
+  handling.
+- **A real-torch gate in the test suite.** The MagicMock torch stub defeated
+  every self-skip idiom in use; CI had been red for seventeen days behind a
+  stale `--ignore` list.
+- **`core/formats.py`** — the extension tables are built from what the installed
+  backends actually register, not from a list someone typed. 9 image extensions
+  became 64 on a stock install. Installing OpenImageIO adds DPX, Cineon, ARRI
+  and camera raw without a code change, and an unsupported file now says which
+  package would open it.
+- **`core/exr.py`** — multi-part and multi-layer EXR. A Nuke or Arnold render
+  with `diffuse`, `specular`, `Z` and `N` reads every layer through a `layer`
+  widget, populated from the file itself by `/radiance/media/layers`.
+- **Sequence auto-detection.** Picking `sh010.1004.png` reads the whole
+  sequence and reports its real range, the way Nuke's Read does.
+  `media_type = Image` is the escape hatch.
+- **A third output, `info`** — JSON describing what was actually read:
+  resolution, frame count and range, bit depth, codec, EXR layers and windows,
+  colour tags, timecode. Nuke's metadata tab, as a wire. Appended last, so
+  workflows saved against the two-output version keep working.
+- **`on_error`, `raw` and `premultiplied` on Read.** Nuke's error policy, raw
+  bypass and unpremultiply, with the same defaults Nuke uses.
+- **The Read node hides widgets that do not apply** to the detected media type,
+  and draws the file's format, range and layers on itself.
+
+### Fixed — colour
+
+- **The delivery panel dropped half the grade.** Shadows, Highlights, Hue, LUT
+  and gamut compression were read by the exporter and never sent by the viewer,
+  so each exported at its identity default while the viewer showed it applied.
+  Tint was sent and read nowhere. Temperature used a Kelvin white-balance
+  multiply against the viewer's additive slider — a different curve entirely.
+- **ACES 2.0 Cinema** flat-lined above 0.4 scene-linear at a peak white of
+  ~27 nits instead of 48. **ACES 2.0 HLG** placed diffuse white at the display
+  peak: 18% grey rendered at ~127 nits where BT.2408 specifies ~26.
+- **AgX** applied its inset matrix untransposed, tinting every neutral (channel
+  spread 0.042 at 18% grey, 0.116 at 16.0), and double transfer-encoded its
+  output, raising the black floor to ~12/255 so pure black was unreachable.
+- **Alpha was tone-mapped, expanded and graded.** A 50% matte came back at
+  0.607, 0.214 or 1.059 depending on the path.
+- **Sony S-Log3's toe** used half the specified slope with a spurious offset:
+  black encoded to 0.127921 instead of 0.092864 (~36 code values at 10-bit).
+- **Colour Space Convert silently skipped the primaries transform** for
+  ACES2065-1, DCI-P3 and Display-P3 — three of twelve advertised spaces
+  returned the Rec.709 result unchanged.
+- DaVinci Intermediate, Canon Log 3 and RED Log3G10 rewritten to spec; the
+  DaVinci Wide Gamut and ARRI Wide Gamut 4 matrices had wrong third rows;
+  Bradford D65↔D60 adaptation added; the tone-scale shoulder rebuilt.
+
+### Fixed — output and data integrity
+
+- **Writing a versioned file could destroy the previous version.** `_out_path`
+  used `Path.with_suffix()`, which replaces everything after the last dot, so
+  `sh010.comp_v0001` and `sh010.comp_v0002` both wrote to `sh010.exr`. With
+  overwrite on by default, each render silently replaced the last approved one.
+- Legal-range limiting was ungated, squeezing 32-bit EXR masters into
+  [16/255, 235/255]. Vertical aspect ratios cropped instead of pillarboxing.
+- A wheel built on a working machine shipped that developer's own `.rad` shot
+  files.
+- The session log is now written atomically under a lock; concurrent deliveries
+  used to lose entries and a crash mid-write discarded the whole history.
+
+### Fixed — video read
+
+The Read node's video path did not behave the way any other application in a
+facility behaves. Every item below is measured against the fixtures in
+`tests/test_video_read.py`.
+
+- **ProRes 4444 alpha was decoded and thrown away.** Frames came back through an
+  RGB-only reader, so a vendor plate with a matte arrived as three channels and
+  the `mask` output was always zeros. The file's alpha now reaches `mask`.
+- **The second decoder quantised everything to 8 bits.** `_load_video_to_numpy`
+  — used by the DCC handoff paths — tried OpenCV first, and OpenCV returns 8-bit
+  BGR regardless of the source. A 12-bit ProRes 4444 came back on an exact 1/255
+  grid, losing four bits per component. It now shares one decoder with Read.
+- **Decoding wrote a PNG per frame to a temp directory and read them back.** A
+  4-second 1080p ProRes 422 HQ clip: 25.0 s and roughly 600 MB of scratch files,
+  against 12.9 s and nothing on disk now.
+- **A decode that failed part-way through returned a short clip with no error.**
+  OpenCV's read loop just stopped. Both a truncated file and a non-zero ffmpeg
+  exit now raise, and the message quotes ffmpeg's own stderr.
+- **Every failure in Read became an 8×8 black frame.** A missing plate, a
+  corrupt MOV and an unrecognised path all logged an error, returned black, and
+  left the node green — so the graph carried on and wrote a master out of it.
+  Read now raises. A Read with no path set still returns a frame, because a node
+  just added to the canvas is not a failure.
+- **The container's colour tags were never read.** A Rec.709 delivery was passed
+  through as if it were scene-linear, so every downstream exposure, blur and
+  blend operated on gamma-encoded values. On Auto, a tagged file now decodes
+  through the matching curve and says which. An untagged file still passes
+  through, but warns instead of doing it silently.
+- **`nb_frames` of 0 was reported as the frame count** for MXF and the many MOVs
+  that carry no count. It now falls back to `duration × fps` and marks the
+  number estimated.
+- **`r_frame_rate` parsing raised on a bare `"30"`** and took the width and
+  height down with it, because one `except` covered the whole probe.
+- **The recognised-extension list had seven entries**, so `.m2ts`, `.mts`,
+  `.r3d`, `.braw` and friends were classified "unknown" and handed to the image
+  reader. One list now serves the browser, the detector and the decoder.
+- **The fixed 300-second decode timeout** turned any long clip into a spurious
+  failure. There is no cap by default.
+
+### Fixed — reading files at all
+
+- **Nine hand-typed image extensions decided what the node would open.** TGA,
+  SGI, PPM, PGM, JP2, PCX and ICO were classified "unknown" and refused —
+  measured, every one of them decoded correctly through the reader underneath.
+  They never reached it.
+- **A multi-layer EXR was rejected, and the message blamed the file.** A Nuke or
+  Arnold render with AOVs — the normal output of both — raised "which
+  RadianceRead does not support". Every layer now reads.
+- **A depth-only or data-only EXR raised.** A Z pass is a render output, not a
+  malformed file.
+- **The EXR reader ignored the display window.** An overscan render came back at
+  the data-window resolution and offset with no warning. It is now conformed to
+  the display window; `raw` keeps the overscan. This was on the known-limitations
+  page.
+- **A sequence's alpha was discarded**, exactly like the ProRes 4444 case:
+  `img_t, _ = _read_image(p)` for every frame. An RGBA PNG or EXR sequence came
+  back with an empty mask.
+- **A sequence numbered from anything but 1001 read nothing**, because
+  `start_frame` defaults to the VFX convention. A start outside the range that
+  exists on disk is now treated as unset, and said out loud.
+- **The frontend's video-extension list disagreed with Python in both
+  directions** — it listed `.webp`, which is a still, and omitted `.mxf` — so
+  the wrong widgets were shown for the files this pack exists to open. One list
+  now, with a test that fails if they drift.
+
+### Fixed — performance and stability
+
+- **The built-in upscalers ran on the CPU.** They selected `images.device`,
+  which is always CPU for a ComfyUI IMAGE — roughly ten minutes a frame at 4K
+  against about five seconds on a GPU.
+- **The delivery export blocked ComfyUI's websocket** for its whole duration:
+  grading, filters, a model upscale and ffmpeg all ran on the event loop. The
+  Project Manager dashboard did the same while walking the output tree.
+- `overlap_temporal=1` — the widget minimum, and the value the tooltip
+  recommends — produced fully black frames at every window boundary.
+- `torch.quantile`'s 2²⁴-element limit made the Multipass Master node fail on
+  every 4K plate.
+- The Sampler patched the loader's cached ModelPatcher in place whenever
+  `cfg <= 1.0` (the Flux default), leaking a stale patch into every later run;
+  and the second CFG patch overwrote the first rather than wrapping it.
+- Real-ESRGAN loaded with `strict=False` against mismatched layer names: 8 of
+  702 tensors matched and the model ran at near-random initialisation while the
+  log reported a successful load.
+- Tile blending ramped image borders as if they were seams, darkening the frame
+  perimeter.
+- Four unbounded GPU-resident model dictionaries replaced with bounded LRU
+  caches; `RADIANCE_CACHE_SIZE=0` no longer raises.
+
+### Fixed — controls that did nothing
+
+- **PAG** guarded on an `extra_options` key ComfyUI never sets, so the patch was
+  a no-op on every call while logging that it had been applied, and `pag_scale`
+  was a gate rather than a strength.
+- **Restart sampling** ran after the schedule had finished, passed its noised
+  latent through the wrong argument, used the wrong noise variance, and stopped
+  before returning to σ=0.
+- **`blend_mode`** appeared exactly once in the tiling function — in its own
+  signature.
+- **`chromatic_adaptation`** returned bit-identical output for every option.
+- **The Read node's RELOAD button** never rendered: `reload` was declared as a
+  hidden input, where ComfyUI only populates magic-string keys.
+
+### Security
+
+- Removed arbitrary code execution from the Nuke bridge. The guard was a
+  substring blocklist that a single space defeated (`open (` does not contain
+  `open(`), and that module chaining through the permitted `json` global
+  defeated outright. Structured commands and literal values only.
+- `torch.load(weights_only=True)` on every user-reachable checkpoint path.
+- `/radiance/ocio/load` accepted any absolute path on the host; it is now
+  contained to the bundled config, `$OCIO`, `RADIANCE_OCIO_ROOTS` and the
+  ComfyUI models tree.
+- Delivery history in the viewer is HTML-escaped.
+
+### Changed
+
+- Startup reports a shortfall as an ERROR naming each failed module. It used to
+  print "successfully loaded N nodes" whether N was 109 or 12.
+- `colour-science`, `einops` and `torchsde` removed from the runtime
+  dependencies — nothing imported them. `OpenImageIO` added to the three
+  platform requirements files, where it was missing despite being required for
+  DPX.
+- One implementation each of `escapeHtml` and the widget helpers, replacing five
+  and six diverged copies.
+- 49 exception handlers that silently swallowed failures now log at DEBUG with
+  the operation and exception type.
+
+### Known limitations
+
+- The ACES 2.0 tone scale is a log-space contrast of 1.55 with a tanh shoulder,
+  not the Daniele Evo curve the specification defines. 18% grey therefore sits
+  about 0.84 stop above the ACES 2.0 reference on SDR, and HLG diffuse white
+  lands at signal 0.915 rather than 0.75. The normalisation defects around it
+  are fixed; the curve itself is not yet the published one.
+- `blend_mode="laplacian_pyramid"` falls back to the Gaussian feather and logs
+  that it has done so.
+- `chromatic_adaptation` has no effect — the adaptation is baked into the
+  precomputed conversion matrices. The widget warns when set to a non-default.
+- Optical flow is single-scale Lucas–Kanade despite the DIS reference in its
+  docstring; it recovers about 1% of a 5-pixel displacement.
+- Scene-cut detection normalises scores by the batch maximum, so the threshold
+  has no absolute meaning and cut-free footage still reports cuts.
+
 ## [3.1.2] - 2026-07-02 ("GPU-First Release Candidate")
 
 GPU-first completion pass for HDR, RUDRA decode, denoise, motion/flow, upscale, and VFX finishing paths, plus the missing HDR tone-map node migration.

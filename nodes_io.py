@@ -12,7 +12,11 @@ Supported READ
 ──────────────
   Image     .png .jpg .jpeg .tiff .tif .bmp .webp .dpx .hdr
   EXR       .exr  (single frame)
-  Video     .mp4 .mov .mxf .avi .webm .mkv  → batch of frames
+  Video     .mov .mxf .mp4 .m2ts .mkv .webm .avi … → batch of frames
+            Decoded through radiance.core.video: one raw ffmpeg pipe, at the
+            source's own bit depth (10/12/16-bit survive), with ProRes 4444
+            alpha carried through to the MASK output, exact frame ranges, and
+            the container's colour tags read rather than ignored.
   Sequence  any of the above with %04d / #### / * pattern, or a directory
 
 Supported WRITE
@@ -67,6 +71,8 @@ except ImportError:
     _HAS_OIIO = False
 
 from . import color_utils
+from .core import formats as _formats
+from .core.video import VIDEO_EXTENSIONS as _VIDEO_EXTENSIONS
 
 try:
     from .hdr.io import write_exr_robust, write_exr_multipart
@@ -147,14 +153,23 @@ OUTPUT_COLOR_SPACES = [
 ]
 
 # ── Input color spaces (for RadianceRead decode) ───────────────────────────
+# The list used to stop at ACEScct, which left no way to decode the three
+# things that arrive in a MOV more often than any camera log: a Rec.709
+# delivery, an HDR10 master, and an HLG broadcast file. Radiance already had
+# all three inverses in color/transfer.py; only the menu was missing them.
 INPUT_COLOR_SPACES = [
     "Auto / Linear (pass-through)",
+    "Rec.709 (BT.1886)",
     "sRGB",
     "ARRI LogC4",
     "ARRI LogC3",
     "Sony S-Log3",
     "Panasonic V-Log",
+    "Canon Log 3",
+    "RED Log3G10",
     "DaVinci Intermediate",
+    "PQ (ST.2084)",
+    "HLG (BT.2100)",
     "ACEScg",
     "ACEScct",
 ]
@@ -163,9 +178,15 @@ INPUT_COLOR_SPACES = [
 EXR_COMPRESSIONS = ["ZIP", "ZIPS", "PIZ", "RLE", "Uncompressed", "DWAA", "DWAB"]
 
 # ── Image file extensions ──────────────────────────────────────────────────
-_IMG_EXT  = {".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp", ".dpx", ".hdr"}
-_VID_EXT  = {".mp4", ".mov", ".mxf", ".avi", ".webm", ".mkv", ".m4v"}
-_EXR_EXT  = {".exr"}
+# These three used to be hand-typed sets, and between them they decided what the
+# node would even attempt. Nine image extensions meant TGA, SGI, PPM, JP2 and
+# PCX were classified "unknown" and refused -- despite the reader underneath
+# opening every one of them correctly, measured. core.formats builds the tables
+# from what the installed backends actually register, so the answer tracks the
+# install instead of a list someone typed in 2024.
+_IMG_EXT  = _formats.image_extensions()
+_VID_EXT  = set(_VIDEO_EXTENSIONS)
+_EXR_EXT  = set(_formats.EXR_EXTENSIONS)
 
 
 # ── File browser helpers ──────────────────────────────────────────────────
@@ -242,8 +263,24 @@ def _tensor_to_np(t: torch.Tensor) -> np.ndarray:
     return arr[0] if arr.ndim == 4 else arr
 
 
+def _ffmpeg_bin() -> str:
+    """ffmpeg path, PATH first then the imageio-ffmpeg bundle."""
+    from .core.ffmpeg import require_ffmpeg
+    return require_ffmpeg()
+
+
+def _ffprobe_bin() -> str:
+    """ffprobe path. imageio-ffmpeg does not ship ffprobe, so this can be
+    absent even when ffmpeg is present; callers fall back to defaults."""
+    from .core.ffmpeg import ffprobe_exe
+    return ffprobe_exe() or "ffprobe"
+
+
 def _ffmpeg_ok() -> bool:
-    return shutil.which("ffmpeg") is not None
+    # shutil.which alone missed the ffmpeg that imageio-ffmpeg ships, which
+    # is the only one most Windows installs have.
+    from .core.ffmpeg import ffmpeg_available
+    return ffmpeg_available()
 
 
 def _apply_output_colorspace(arr: np.ndarray, cs: str) -> np.ndarray:
@@ -275,23 +312,42 @@ def _apply_output_colorspace(arr: np.ndarray, cs: str) -> np.ndarray:
     return arr
 
 
+def _rec709_to_linear(arr: np.ndarray) -> np.ndarray:
+    """BT.1886 decode — the display transfer function of a Rec.709 delivery.
+
+    A pure 2.4 power law with black at zero, which is what BT.1886 reduces to
+    when Lb = 0. This is the right inverse for a graded Rec.709 MOV or MP4;
+    it is *not* the BT.709 camera OETF, which nothing is actually encoded with.
+    """
+    return np.sign(arr) * np.power(np.abs(arr, dtype=np.float32), 2.4, dtype=np.float32)
+
+
+#: Input colour space name -> the function that takes it back to scene-linear.
+_INPUT_DECODERS = {
+    "Rec.709 (BT.1886)":     _rec709_to_linear,
+    "sRGB":                  lambda a: color_utils.srgb_to_linear(a),
+    "ARRI LogC4":            lambda a: color_utils.logc4_to_linear(a),
+    "ARRI LogC3":            lambda a: color_utils.logc3_to_linear(a),
+    "Sony S-Log3":           lambda a: color_utils.slog3_to_linear(a),
+    "Panasonic V-Log":       lambda a: color_utils.vlog_to_linear(a),
+    "Canon Log 3":           lambda a: color_utils.canonlog3_to_linear(a),
+    "RED Log3G10":           lambda a: color_utils.log3g10_to_linear(a),
+    "DaVinci Intermediate":  lambda a: color_utils.davinci_intermediate_to_linear(a),
+    "PQ (ST.2084)":          lambda a: color_utils.pq_to_linear(a),
+    "HLG (BT.2100)":         lambda a: color_utils.hlg_to_linear(a),
+    "ACEScct":               lambda a: color_utils.acescct_to_linear(a),
+}
+
+
 def _apply_input_colorspace(arr: np.ndarray, cs: str) -> np.ndarray:
     """Decode an input color space to scene-linear float32."""
     if cs in ("Auto / Linear (pass-through)", "ACEScg"):
         return arr
+    fn = _INPUT_DECODERS.get(cs)
+    if fn is None:
+        return arr
     try:
-        mapping = {
-            "sRGB":                  color_utils.srgb_to_linear,
-            "ARRI LogC4":            color_utils.logc4_to_linear,
-            "ARRI LogC3":            color_utils.logc3_to_linear,
-            "Sony S-Log3":           color_utils.slog3_to_linear,
-            "Panasonic V-Log":       color_utils.vlog_to_linear,
-            "DaVinci Intermediate":  color_utils.davinci_intermediate_to_linear,
-            "ACEScct":               color_utils.acescct_to_linear,
-        }
-        fn = mapping.get(cs)
-        if fn:
-            return fn(arr)
+        return fn(arr)
     except Exception as e:
         log.warning("Input color space decode '%s' failed: %s", cs, e)
     return arr
@@ -300,31 +356,17 @@ def _apply_input_colorspace(arr: np.ndarray, cs: str) -> np.ndarray:
 # ── Path type detection ────────────────────────────────────────────────────
 
 def _path_kind(path: str) -> str:
+    """Classify a path: "image" | "exr" | "video" | "sequence" | "unknown".
+
+    One owner, in core.formats, so the browse filter, this detector and the
+    readers cannot disagree about what a given extension is.
     """
-    Classify a path as: "image", "exr", "video", "sequence", or "unknown".
+    return _formats.classify(path)
 
-    Sequence detection:
-      - contains %04d / %d style printf format
-      - contains #### hash padding
-      - contains * glob
-      - path is a directory
-    """
-    p   = path.strip()
-    ext = Path(p).suffix.lower()
 
-    # Sequence patterns
-    is_seq = ("%0" in p or "##" in p or "*" in p or
-              re.search(r"%\d*d", p) or os.path.isdir(p))
-
-    if is_seq:
-        return "sequence"
-    if ext in _EXR_EXT:
-        return "exr"
-    if ext in _VID_EXT:
-        return "video"
-    if ext in _IMG_EXT:
-        return "image"
-    return "unknown"
+def _explain_unknown(path: str) -> str:
+    """Why a path was refused, and what would make it work."""
+    return _formats.explain_unsupported(path)
 
 
 # ── Image read ────────────────────────────────────────────────────────────
@@ -350,8 +392,19 @@ def _is_16bit_rgb_source(path: str, ext: str) -> bool:
             with tifffile.TiffFile(path) as tf:
                 page = tf.pages[0]
                 return page.dtype == np.uint16 and page.samplesperpixel in (3, 4)
-    except Exception:
-        pass
+    except ImportError:
+        # AUDIT-FIX (2026-08): without tifffile a deep TIFF silently fell
+        # through to Pillow's 8-bit path -- a 16-bit plate read back crushed
+        # to 8-bit precision with no indication anywhere. Warn, loudly.
+        log.warning(
+            "[Radiance] Cannot probe %s for 16-bit depth: tifffile is not "
+            "installed (pip install tifffile). If this file is 16-bit it will "
+            "be read at 8-bit precision.", os.path.basename(path))
+    except Exception as _exc:
+        log.debug(
+            "[Radiance] _is_16bit_rgb_source(): ignoring %s from `if ext == '.png':`: %s",
+            type(_exc).__name__, _exc,
+        )
     return False
 
 
@@ -363,6 +416,14 @@ def _is_float32_tiff(path: str) -> bool:
         import tifffile  # type: ignore
         with tifffile.TiffFile(path) as tf:
             return tf.pages[0].dtype == np.float32
+    except ImportError:
+        # AUDIT-FIX (2026-08): see _is_16bit_rgb_source -- a float TIFF read
+        # without tifffile ends up in Pillow, which either fails or reads it
+        # at 8-bit; either way the user should know why.
+        log.warning(
+            "[Radiance] Cannot probe %s for 32-bit float depth: tifffile is "
+            "not installed (pip install tifffile).", os.path.basename(path))
+        return False
     except Exception:
         return False
 
@@ -457,53 +518,68 @@ def _read_image(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     return img_t, mask_t
 
 
-def _read_exr_single(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-    """Read a single EXR file using OpenEXR → numpy → tensor."""
-    try:
-        import OpenEXR, Imath  # type: ignore
-        f    = OpenEXR.InputFile(path)
-        hdr  = f.header()
-        # ALBABIT-FIX: a depth/data-only EXR (e.g. just "Z", no R/G/B) used to
-        # raise TypeError: "There is no channel 'R' in the image" here, caught
-        # by RadianceRead.read()'s outer try/except and surfaced as a silent
-        # black image instead of a clear message.
-        if not {"R", "G", "B"} <= set(hdr["channels"]):
-            raise ValueError(
-                f"'{path}' has no standard R/G/B channels (found: {sorted(hdr['channels'])}). "
-                "This looks like a depth/data-only or multi-layer AOV file, which "
-                "RadianceRead does not support -- it only reads standard RGB(A) EXR."
-            )
-        dw   = hdr["dataWindow"]
-        w    = dw.max.x - dw.min.x + 1
-        h    = dw.max.y - dw.min.y + 1
-        pt   = Imath.PixelType(Imath.PixelType.FLOAT)
-        r    = np.frombuffer(f.channel("R", pt), dtype=np.float32).reshape(h, w)
-        g    = np.frombuffer(f.channel("G", pt), dtype=np.float32).reshape(h, w)
-        b    = np.frombuffer(f.channel("B", pt), dtype=np.float32).reshape(h, w)
-        arr  = np.stack([r, g, b], axis=-1)
-        mask = None
-        if "A" in hdr["channels"]:
-            a    = np.frombuffer(f.channel("A", pt), dtype=np.float32).reshape(h, w)
-            mask = _np_to_tensor(a)
-        return _np_to_tensor(arr), mask
-    except ImportError:
-        pass
+def _read_exr_single(
+    path: str,
+    layer: Optional[str] = None,
+    raw: bool = False,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Read one layer of an EXR, honouring the display window.
 
-    # Fallback: cv2 with OpenEXR flag
-    try:
-        import cv2  # type: ignore
-        arr = cv2.imread(path, cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
-        if arr is not None:
-            # EXR is scene-linear float; preserve magnitude (no normalization).
-            arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB).astype(np.float32)
-            return _np_to_tensor(arr), None
-    except Exception:
-        pass
+    Delegated to :mod:`radiance.core.exr`. What used to be here pulled R, G, B
+    and A out of part 0 and raised on anything else -- so a multi-layer AOV
+    render, which is the normal output of Nuke and Arnold, was rejected with a
+    message blaming the file. It also read the data window and reshaped to it,
+    so an overscan render came back offset and at the wrong resolution with no
+    warning.
+    """
+    from .core import exr as _exr
 
-    raise RuntimeError(f"Cannot read EXR '{path}': install OpenEXR or OpenCV with EXR support.")
+    rgb, alpha, _info, _name = _exr.read_layer(path, layer, raw=raw)
+    mask = _np_to_tensor(alpha) if alpha is not None else None
+    return _np_to_tensor(rgb), mask
+
+
+def _read_exr_with_info(path: str, layer: Optional[str] = None, raw: bool = False):
+    """As above, but also hands back the probe so the node can report it."""
+    from .core import exr as _exr
+
+    rgb, alpha, info, name = _exr.read_layer(path, layer, raw=raw)
+    mask = _np_to_tensor(alpha) if alpha is not None else None
+    return _np_to_tensor(rgb), mask, info, name
 
 
 # ── Sequence read ─────────────────────────────────────────────────────────
+
+def _trailing_frame_number(path: str) -> Optional[int]:
+    """Last run of digits in the stem: shot_v002.1042 → 1042, img007 → 7."""
+    m = re.search(r"(\d+)\D*$", Path(path).stem)
+    return int(m.group(1)) if m else None
+
+
+def _window_listed_files(
+    files: List[str], start: int, end: int, step: int
+) -> List[str]:
+    """Apply a start/end/step frame window to an explicit file list.
+
+    start/end are FRAME NUMBERS (widget semantics, default 1001..end-of-shot),
+    not list indices. When the filenames carry frame numbers, the window is
+    reconciled against the range on disk the same way the pattern path does:
+    a window that does not intersect the files falls back to the full range
+    rather than returning nothing. Files without frame numbers are returned
+    positionally with only the step applied.
+    """
+    if not files:
+        return files
+    step = max(1, step)
+    nums = [_trailing_frame_number(f) for f in files]
+    if any(n is None for n in nums) or nums != sorted(nums):
+        # No consistent numbering: positional, step only.
+        return files[::step]
+    first, last = nums[0], nums[-1]
+    s = start if first <= start <= last else first
+    e = end if s <= end <= last else last
+    return [f for f, n in zip(files, nums) if s <= n <= e and (n - s) % step == 0]
+
 
 def _resolve_sequence_paths(
     pattern: str,
@@ -521,17 +597,23 @@ def _resolve_sequence_paths(
       /path/frame.*.png     → sorted glob
       /path/               → directory: sorted image files
     """
+    # AUDIT-FIX (2026-08): directory and glob inputs used to slice the sorted
+    # file list by LIST INDEX with the widget's frame-number defaults --
+    # files[1001:99999] -- so every directory read of a normal-length sequence
+    # returned an empty list and raised "No frames found". Frame numbers are
+    # now parsed from the filenames and start/end are reconciled against the
+    # range actually on disk, matching the %04d/#### pattern path.
     if os.path.isdir(pattern):
         exts = list(_IMG_EXT | _EXR_EXT)
         files = sorted(
-            f for f in Path(pattern).iterdir()
+            str(f) for f in Path(pattern).iterdir()
             if f.suffix.lower() in exts
         )
-        return [str(f) for f in files][start:end:step] if end > 0 else [str(f) for f in files]
+        return _window_listed_files(files, start, end, step)
 
     if "*" in pattern:
         import glob
-        return sorted(glob.glob(pattern))[start:end:step]
+        return _window_listed_files(sorted(glob.glob(pattern)), start, end, step)
 
     # Hash style #### → %04d
     hash_match = re.search(r"(#+)", pattern)
@@ -539,7 +621,33 @@ def _resolve_sequence_paths(
         hashes = hash_match.group(1)
         pattern = pattern.replace(hashes, f"%0{len(hashes)}d")
 
-    frames = list(range(start, end + 1, step)) if end >= start else [start]
+    # Probe the directory once to learn which frame numbers actually exist.
+    # Walking the caller's upper bound blindly is not viable: "read all frames"
+    # arrives here as end=99999, which expanded a 5-frame sequence into ~99k
+    # slots, 98,994 of them phantoms, and blew up the downstream torch.cat.
+    available: set = set()
+    pad_match = re.search(r"%0(\d+)d", pattern)
+    if pad_match:
+        import glob as _glob
+        token = pad_match.group(0)
+        prefix, suffix = pattern.split(token, 1)
+        for hit in _glob.glob(pattern.replace(token, "[0-9]" * int(pad_match.group(1)))):
+            if hit.startswith(prefix) and hit.endswith(suffix):
+                num = hit[len(prefix):len(hit) - len(suffix)] if suffix else hit[len(prefix):]
+                if num.isdigit():
+                    available.add(int(num))
+
+    if available:
+        hi = min(end, max(available)) if end >= start else max(available)
+        frames = [f for f in range(start, hi + 1, step)]
+        # Requested window misses the sequence entirely (e.g. the default
+        # start_frame=1001 against a sequence numbered from 1) -- fall back to
+        # everything on disk rather than reporting a range full of holes.
+        if not any(f in available for f in frames):
+            frames = sorted(available)[::step]
+    else:
+        frames = list(range(start, end + 1, step)) if end >= start else [start]
+
     paths  = []
     missing = []
     for f in frames:
@@ -548,9 +656,11 @@ def _resolve_sequence_paths(
             paths.append(p)
         else:
             missing.append(p)
-            if missing_frames in ("Black", "Skip"):
+            if missing_frames == "Black":
                 paths.append(p)   # keep slot for black-frame insertion
             else:
+                # "Skip" means skip: keeping the slot here inserted an 8x8
+                # black tile that then failed to concatenate with real frames.
                 log.debug("Frame not found: %s", p)
 
     if missing_frames == "Error" and missing:
@@ -567,27 +677,92 @@ def _read_sequence(
     step: int,
     input_cs: str,
     missing_frames: str = "Skip",
-) -> Tuple[torch.Tensor, int, int, int, float, str]:
-    """Read a frame sequence → batched IMAGE tensor."""
+    layer: Optional[str] = None,
+    raw: bool = False,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], int, int, int, float, str]:
+    """Read a frame sequence into a batched IMAGE tensor, keeping its alpha.
+
+    The alpha used to be discarded here -- ``img_t, _ = _read_image(p)`` -- so a
+    sequence of RGBA PNGs or EXRs came back with an empty mask, exactly like the
+    ProRes 4444 case. A sequence with a matte is the other half of how plates
+    arrive.
+    """
     paths = _resolve_sequence_paths(pattern, start, end, step, missing_frames)
     if not paths:
         raise FileNotFoundError(f"No frames found for pattern: {pattern}")
 
-    frames: List[torch.Tensor] = []
+    frames: List[Optional[torch.Tensor]] = []
+    masks: List[Optional[torch.Tensor]] = []
+    blank_slots: List[int] = []
+    missing_paths: List[str] = []
     for p in paths:
         if os.path.isfile(p):
-            img_t, _ = _read_image(p)
+            if os.path.splitext(p)[1].lower() in _EXR_EXT:
+                img_t, mask_t = _read_exr_single(p, layer, raw)
+            else:
+                img_t, mask_t = _read_image(p)
             arr = _tensor_to_np(img_t)
-            arr = _apply_input_colorspace(arr, input_cs)
+            if not raw:
+                arr = _apply_input_colorspace(arr, input_cs)
             frames.append(torch.from_numpy(arr).unsqueeze(0))
+            masks.append(mask_t)
         else:
-            # Black frame for missing
-            blank = torch.zeros(1, 8, 8, 3)
-            frames.append(blank)
+            # Placeholder for a missing frame. Size it from a real frame below
+            # -- a fixed 8x8 tile cannot concatenate with the rest of the batch.
+            blank_slots.append(len(frames))
+            missing_paths.append(p)
+            frames.append(None)
+            masks.append(None)
 
-    batch  = torch.cat(frames, dim=0)   # (N, H, W, C)
+    real = next((f for f in frames if f is not None), None)
+    if real is None:
+        raise FileNotFoundError(f"No readable frames found for pattern: {pattern}")
+    for i in blank_slots:
+        frames[i] = torch.zeros_like(real)
+    if missing_paths:
+        log.warning(
+            "[Radiance/Read] %d frame(s) of %s are not on disk and were filled "
+            "with black: %s%s",
+            len(missing_paths), pattern,
+            ", ".join(os.path.basename(m) for m in missing_paths[:6]),
+            " ..." if len(missing_paths) > 6 else "",
+        )
+
+    batch = torch.cat(frames, dim=0)   # (N, H, W, C)
     _, h, w, _ = batch.shape
-    return batch, w, h, len(frames), 24.0, json.dumps({"frame_count": len(frames)})
+
+    # An alpha only survives if every frame that has one agrees on the shape.
+    # A sequence where half the frames carry a matte is a mistake worth saying
+    # out loud rather than papering over.
+    with_alpha = [m for m in masks if m is not None]
+    alpha_out = None
+    if with_alpha:
+        if len(with_alpha) != len(masks):
+            log.warning(
+                "[Radiance/Read] %d of %d frames in %s carry an alpha channel; "
+                "the missing ones are opaque in the mask output.",
+                len(with_alpha), len(masks), pattern,
+            )
+        filled = [
+            m if m is not None else torch.ones(1, h, w, dtype=with_alpha[0].dtype)
+            for m in masks
+        ]
+        try:
+            alpha_out = torch.cat(filled, dim=0)
+        except RuntimeError as exc:
+            log.warning("[Radiance/Read] alpha channels in %s do not share a "
+                        "shape (%s); mask output left empty.", pattern, exc)
+            alpha_out = None
+
+    meta = json.dumps({
+        "kind": "sequence",
+        "pattern": pattern,
+        "frame_count": len(frames),
+        "missing": [os.path.basename(m) for m in missing_paths],
+        "width": w, "height": h,
+        "alpha": alpha_out is not None,
+    })
+    return batch, alpha_out, w, h, len(frames), 24.0, meta
 
 
 # ── Video read ────────────────────────────────────────────────────────────
@@ -596,65 +771,177 @@ def _read_video(
     path: str,
     max_frames: int,
     input_cs: str,
-) -> Tuple[torch.Tensor, float, int, int, int, str]:
-    """Decode a video file to a batched IMAGE tensor using ffprobe/ffmpeg."""
-    if not _ffmpeg_ok():
-        raise RuntimeError("ffmpeg not found — install ffmpeg to read video files.")
+    start_frame: int = 0,
+    end_frame: int = 0,
+    frame_step: int = 1,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], float, int, int, int, str]:
+    """Decode a video file to a batched IMAGE tensor, plus its alpha if it has one.
 
-    # --- probe ---
-    probe_cmd = [
-        "ffprobe", "-v", "quiet", "-print_format", "json",
-        "-show_streams", path,
-    ]
-    try:
-        probe_out = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=30)
-        probe_data = json.loads(probe_out.stdout)
-        vstream = next(
-            (s for s in probe_data.get("streams", []) if s.get("codec_type") == "video"),
-            {},
-        )
-        fps_str = vstream.get("r_frame_rate", "24/1")
-        num, den = (float(x) for x in fps_str.split("/"))
-        fps = round(num / max(den, 1), 6)
-        w   = int(vstream.get("width", 0))
-        h   = int(vstream.get("height", 0))
-        nb_frames = int(vstream.get("nb_frames", 0))
-        meta = json.dumps({"fps": fps, "width": w, "height": h,
-                           "codec": vstream.get("codec_name", ""),
-                           "nb_frames": nb_frames})
-    except Exception as e:
-        log.warning("ffprobe failed (%s); using defaults", e)
-        fps, w, h, nb_frames = 24.0, 0, 0, 0
-        meta = "{}"
+    Everything here is delegated to :mod:`radiance.core.video`, which pipes raw
+    frames from ffmpeg at the source bit depth. The old implementation in this
+    slot wrote every frame to a temporary PNG and read them back: measured on a
+    4-second 1080p ProRes 422 HQ clip, 25.0 s and ~600 MB of scratch files
+    against 12.9 s and none. It also had no way to express a frame range, and it
+    silently dropped the alpha channel of every ProRes 4444.
 
-    # --- decode ---
-    vf_args = []
+    Returns
+    -------
+    (images, alpha, fps, width, height, frame_count, metadata_json)
+        ``alpha`` is None unless the file actually carries an alpha channel.
+    """
+    from .core import video as _video
+
+    info = _video.probe(path)
+
+    # A frame range on the *source* numbering. `end_frame` is inclusive, and 0
+    # means "to the end", which is how the sequence reader already behaves.
+    start = max(int(start_frame), 0)
+    if end_frame and end_frame >= start:
+        count = (int(end_frame) - start) // max(int(frame_step), 1) + 1
+    else:
+        count = 0
     if max_frames > 0:
-        vf_args = ["-vframes", str(max_frames)]
+        count = min(count, max_frames) if count else max_frames
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        frame_pat = os.path.join(tmpdir, "f%06d.png")
-        decode_cmd = [
-            "ffmpeg", "-v", "error", "-i", path,
-        ] + vf_args + [
-            "-vsync", "0", "-f", "image2", frame_pat,
-        ]
-        subprocess.run(decode_cmd, check=True, capture_output=True, timeout=300)
+    log.info("[Radiance/Read] %s: %s", os.path.basename(path), info.summary())
+    if info.frames_estimated:
+        log.debug(
+            "%s carries no frame count; %d is estimated from duration x fps.",
+            os.path.basename(path), info.frames,
+        )
 
-        frame_files = sorted(Path(tmpdir).glob("*.png"))
-        if not frame_files:
-            raise RuntimeError("ffmpeg produced no frames.")
+    arr, info = _video.decode(
+        path, start=start, count=count, step=max(int(frame_step), 1), info=info,
+    )
 
-        frames: List[torch.Tensor] = []
-        for fp in frame_files:
-            img_t, _ = _read_image(str(fp))
-            arr = _tensor_to_np(img_t)
-            arr = _apply_input_colorspace(arr, input_cs)
-            frames.append(torch.from_numpy(arr).unsqueeze(0))
+    # Split alpha off before the transfer decode. A matte is not light: running
+    # it through a log or gamma curve is the bug that made a 3.1.x tone map
+    # return an opaque pixel at 0.730.
+    alpha_np = None
+    if arr.shape[-1] == 4:
+        alpha_np = np.ascontiguousarray(arr[..., 3])
+        arr = np.ascontiguousarray(arr[..., :3])
 
-    batch = torch.cat(frames, dim=0)
-    _, h_, w_, _ = batch.shape
-    return batch, fps, w_, h_, len(frames), meta
+    resolved_cs = _resolve_video_colorspace(input_cs, info, path)
+    arr = _apply_input_colorspace(arr, resolved_cs)
+
+    batch = torch.from_numpy(np.ascontiguousarray(arr))
+    alpha_t = torch.from_numpy(alpha_np) if alpha_np is not None else None
+
+    n, h, w, _ = batch.shape
+    meta = dict(info.as_dict())
+    meta.update({
+        "kind": "video",
+        "decoded_frames": n,
+        "start_frame": start,
+        "frame_step": max(int(frame_step), 1),
+        "color_space": resolved_cs,
+        "color_space_requested": input_cs,
+        "alpha": alpha_t is not None,
+    })
+    return batch, alpha_t, info.fps_float, w, h, n, json.dumps(meta)
+
+
+#: The sequence-style default for `start_frame`. VFX sequences are numbered
+#: from 1001; a clip is numbered from 0, so the same widget means two things.
+_SEQUENCE_START_DEFAULT = 1001
+
+
+def _video_frame_range(path: str, start_frame: int, end_frame: int) -> Tuple[int, int]:
+    """Translate the sequence-style frame widgets onto a clip's own numbering.
+
+    `start_frame` defaults to 1001 because that is where a VFX image sequence
+    starts. A video's frames are numbered from zero, so taking the widget
+    literally would skip the first 1001 frames of every clip -- which, for
+    anything under about 40 seconds, means decoding nothing at all and
+    reporting an empty file. That is exactly the trap the directory-pattern
+    reader fell into.
+
+    So: a start beyond the end of the clip is treated as "the user never
+    touched this widget", and said out loud. A start inside the clip is
+    honoured, because then it is a deliberate trim.
+    """
+    from .core import video as _video
+
+    start = max(int(start_frame), 0)
+    end = max(int(end_frame), 0)
+    if start <= 0:
+        return 0, end
+
+    try:
+        info = _video.probe(path)
+    except Exception:  # the decoder will produce the real error in a moment
+        return 0, end
+
+    if info.frames > 0 and start >= info.frames:
+        if start == _SEQUENCE_START_DEFAULT:
+            log.debug(
+                "start_frame is at its sequence default (%d) and %s has only %d "
+                "frame(s), so the whole clip is being read.",
+                _SEQUENCE_START_DEFAULT, os.path.basename(path), info.frames,
+            )
+        else:
+            log.warning(
+                "[Radiance/Read] start_frame=%d is past the end of %s, which has "
+                "%d frame(s). Reading the whole clip instead. Video frames are "
+                "numbered from 0, unlike an image sequence.",
+                start, os.path.basename(path), info.frames,
+            )
+        return 0, end
+    return start, end
+
+
+def _resolve_video_colorspace(requested: str, info, path: str) -> str:
+    """Pick the decode curve for a video, honouring the file's own tags.
+
+    Nuke, Resolve and RV all read the container's transfer characteristics and
+    default to them. Radiance did not read them at all, so a Rec.709 delivery
+    was passed through as if it were scene-linear -- the values are gamma
+    encoded, so every subsequent exposure, blur and blend was operating on the
+    wrong numbers.
+
+    An explicit choice always wins. "Auto" now means what its label promises:
+    use the tag if there is one, and say so. An untagged file still passes
+    through unchanged, but now says that too, because a silent pass-through is
+    exactly how the mistake goes unnoticed.
+    """
+    from .core import video as _video
+
+    if requested != "Auto / Linear (pass-through)":
+        tagged = _video.suggest_transfer(info)
+        if tagged and tagged != requested:
+            log.warning(
+                "[Radiance/Read] %s is tagged %s (%s), but color_space is set to "
+                "%r. Using your setting. Clear it to Auto to follow the file.",
+                os.path.basename(path), info.color_transfer, tagged, requested,
+            )
+        return requested
+
+    suggestion = _video.suggest_transfer(info)
+    if suggestion and suggestion != "Auto / Linear (pass-through)":
+        log.info(
+            "[Radiance/Read] %s is tagged color_trc=%s; decoding it as %s. "
+            "Set color_space explicitly to override.",
+            os.path.basename(path), info.color_transfer, suggestion,
+        )
+        return suggestion
+
+    if info.color_transfer:
+        log.warning(
+            "[Radiance/Read] %s is tagged color_trc=%s, which Radiance has no "
+            "inverse for. Passing the values through unchanged -- they are not "
+            "scene-linear. Set color_space by hand.",
+            os.path.basename(path), info.color_transfer,
+        )
+    else:
+        log.warning(
+            "[Radiance/Read] %s carries no colour tags, so its values are being "
+            "passed through as if they were already scene-linear. If it is a "
+            "Rec.709 delivery or a camera log file, set color_space -- exposure "
+            "and blur are only correct in a linear space.",
+            os.path.basename(path),
+        )
+    return requested
 
 
 # ── Write input coercion ──────────────────────────────────────────────────
@@ -689,53 +976,26 @@ def _find_video_path(data: Any, _depth: int = 0) -> Optional[str]:
     return None
 
 
-def _load_video_to_numpy(path: str, max_frames: int = 0) -> np.ndarray:
-    """
-    Decode a video file path to (N, H, W, C) float32 via OpenCV if available,
-    otherwise via ffmpeg pipe.
-    """
-    # OpenCV fast path
-    try:
-        import cv2  # type: ignore
-        cap = cv2.VideoCapture(path)
-        frames_np: List[np.ndarray] = []
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frames_np.append(
-                cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-            )
-            if max_frames > 0 and len(frames_np) >= max_frames:
-                break
-        cap.release()
-        if frames_np:
-            return np.stack(frames_np, axis=0)
-    except Exception as e:
-        log.debug("OpenCV video decode failed (%s); falling back to ffmpeg", e)
+def _load_video_to_numpy(
+    path: str, max_frames: int = 0, *, alpha: bool = False
+) -> np.ndarray:
+    """Decode a video file path to (N, H, W, C) float32 at the source bit depth.
 
-    # ffmpeg fallback
-    if not _ffmpeg_ok():
-        raise RuntimeError("Neither OpenCV nor ffmpeg available to decode video.")
-    with tempfile.TemporaryDirectory() as tmp:
-        frame_pat = os.path.join(tmp, "f%06d.png")
-        cmd = ["ffmpeg", "-v", "error", "-i", path]
-        if max_frames > 0:
-            cmd += ["-vframes", str(max_frames)]
-        cmd += ["-vsync", "0", "-f", "image2", frame_pat]
-        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
-        pngs = sorted(Path(tmp).glob("*.png"))
-        if not pngs:
-            raise RuntimeError(f"ffmpeg produced no frames from {path!r}")
-        frames_np = []
-        for fp in pngs:
-            if _HAS_PIL:
-                arr = np.array(_PIL.open(str(fp)).convert("RGB"), dtype=np.float32) / 255.0
-            else:
-                import cv2  # type: ignore
-                arr = cv2.cvtColor(cv2.imread(str(fp)), cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-            frames_np.append(arr)
-    return np.stack(frames_np, axis=0)
+    This used to try OpenCV first, which was wrong twice over. OpenCV's
+    ``VideoCapture`` hands back 8-bit BGR whatever the source is -- a 12-bit
+    ProRes 4444 came out on an exact 1/255 grid, measured -- and when it failed
+    part-way through a clip the loop simply stopped, returning a short clip with
+    no error. A shot that quietly ends early is the kind of bug that survives
+    all the way to a review session.
+
+    Alpha is off by default here because the callers of this helper feed
+    DCC handoff paths that expect three channels; pass ``alpha=True`` to keep
+    the fourth when the file has one.
+    """
+    from .core import video as _video
+
+    arr, _info = _video.decode(path, count=max(int(max_frames), 0), alpha=alpha)
+    return arr
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -820,22 +1080,32 @@ def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str, quality: int = 18
         # anyway; tifffile handles both 2D and 3D arrays natively.
         try:
             import tifffile  # type: ignore
-            tifffile.imwrite(str(path), arr_u16)
-            return
-        except ImportError:
-            # Fallback: save 8-bit. Not silent -- a 16-bit request quietly
-            # becoming 8-bit is exactly the kind of downgrade this module's
-            # EXR writer refuses to do (see _save_exr's docstring).
-            log.warning("16-bit write requested for '%s' but tifffile is not installed; "
-                        "falling back to 8-bit.", path)
-            arr_f32 = np.clip(arr_f32, 0, 1)
+        except ImportError as _exc:
+            # AUDIT-FIX (2026-08): this used to log a warning and write 8-bit
+            # anyway. A "16-bit" master that is actually 8-bit is a silent
+            # quality downgrade of a production asset -- the same downgrade
+            # this module's EXR writer refuses to do (see _save_exr).
+            raise ImportError(
+                f"Writing {fmt!r} requires tifffile (pip install tifffile). "
+                "Refusing to silently downgrade a 16-bit write to 8-bit."
+            ) from _exc
+        tifffile.imwrite(str(path), arr_u16)
+        return
     if "32-bit" in fmt:
         try:
             import tifffile  # type: ignore
-            tifffile.imwrite(str(path), arr_f32.astype(np.float32))
-            return
-        except ImportError:
-            pass
+        except ImportError as _exc:
+            # AUDIT-FIX (2026-08): this used to swallow the ImportError at
+            # DEBUG level and fall through to the 8-bit Pillow path below --
+            # a float TIFF master silently written with 8-bit precision and
+            # hard-clipped HDR values, discovered by the round-trip test only
+            # because the test environment happened to lack tifffile.
+            raise ImportError(
+                f"Writing {fmt!r} requires tifffile (pip install tifffile). "
+                "Refusing to silently downgrade a 32-bit float write to 8-bit."
+            ) from _exc
+        tifffile.imwrite(str(path), arr_f32.astype(np.float32))
+        return
 
     arr_u8 = (np.clip(arr_f32, 0, 1) * 255).astype(np.uint8)
     pil = _PIL.fromarray(arr_u8)
@@ -1112,7 +1382,7 @@ def _save_video_ffmpeg(
         raw = (np.clip(frames, 0, 1) * 255).astype(np.uint8).tobytes()
 
     cmd = [
-        "ffmpeg", "-v", "error", "-y",
+        _ffmpeg_bin(), "-v", "error", "-y",
         "-f", "rawvideo", "-vcodec", "rawvideo",
         "-s", f"{w}x{h}", "-pix_fmt", src_pix_fmt,
         "-r", str(fps),
@@ -1204,10 +1474,24 @@ class RadianceRead:
     """
 
     CATEGORY = "FXTD STUDIOS/Radiance/◎ IO & Delivery"
-    DESCRIPTION = "Read images or EXR sequences from disk into the pipeline."
+    DESCRIPTION = (
+        "Read an image, EXR, video or numbered sequence into the pipeline. "
+        "Video decodes at the source bit depth through ffmpeg, keeps ProRes "
+        "4444 alpha on the mask output, and honours the file's colour tags."
+    )
     FUNCTION     = "read"
-    RETURN_TYPES = ("IMAGE", "MASK")
-    RETURN_NAMES = ("image", "mask")
+    # `info` is appended last on purpose: ComfyUI links outputs by index, so
+    # every workflow saved against the two-output version keeps working.
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
+    RETURN_NAMES = ("image", "mask", "info")
+    OUTPUT_TOOLTIPS = (
+        "Frames as a batch. Scene-linear once color_space has decoded them.",
+        "Alpha. For a ProRes 4444, an RGBA EXR or an RGBA sequence this is the "
+        "file's own matte; otherwise zeros.",
+        "JSON describing what was actually read: resolution, frame count and "
+        "range, bit depth, codec, EXR layers and windows, colour tags, "
+        "timecode. Nuke's metadata tab, as a wire you can plug in.",
+    )
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1247,19 +1531,30 @@ class RadianceRead:
             }),
             "start_frame": ("INT", {
                 "default": 1001, "min": 0, "max": 99999,
-                "tooltip": "First frame index (sequences only).",
+                "tooltip": (
+                    "First frame to read.\n"
+                    "• Sequence: the frame number in the filename (1001 is the "
+                    "usual VFX start).\n"
+                    "• Video: a 0-based offset into the clip. The 1001 default "
+                    "is a sequence convention, so it is ignored for any clip "
+                    "shorter than that rather than reading nothing."
+                ),
             }),
             "end_frame": ("INT", {
                 "default": 0, "min": 0, "max": 99999,
-                "tooltip": "Last frame index (0 = read all frames).",
+                "tooltip": "Last frame to read, inclusive. 0 = to the end. Applies to sequences and video.",
             }),
             "frame_step": ("INT", {
                 "default": 1, "min": 1, "max": 100,
-                "tooltip": "Step size — e.g. 2 reads every other frame.",
+                "tooltip": "Step size — e.g. 2 reads every other frame. Applies to sequences and video.",
             }),
             "max_video_frames": ("INT", {
                 "default": 0, "min": 0, "max": 99999,
-                "tooltip": "Cap on decoded video frames (0 = all frames). Large videos use a lot of RAM.",
+                "tooltip": (
+                    "Hard cap on decoded video frames (0 = all). Frames are "
+                    "float32 RGB in RAM: 240 frames of 4K RGBA is about 31 GB, "
+                    "so cap this while building a graph."
+                ),
             }),
             "proxy_scale": ("FLOAT", {
                 "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
@@ -1267,10 +1562,81 @@ class RadianceRead:
             }),
             "missing_frames": (["Error", "Black", "Skip"], {
                 "default": "Skip",
-                "tooltip": "How to handle missing sequence frames. Black inserts zero frames, Skip omits them, Error raises.",
+                "tooltip": (
+                    "A frame inside a sequence that is not on disk. Black "
+                    "inserts a zero frame, Skip omits it, Error raises.\n"
+                    "For a read that fails outright, see on_error."
+                ),
             }),
-        }, "hidden": {
-            "reload": ("INT", {"default": 0, "tooltip": "Bump to force re-read."}),
+            # ── Nuke-parity controls ────────────────────────────────────
+            # A STRING rather than a combo on purpose. The layer list depends
+            # on the file, and ComfyUI validates a combo's value against the
+            # list it was built with -- so a workflow saved with layer="diffuse"
+            # would fail to load on a machine where INPUT_TYPES had not seen
+            # that file. js/radiance_io.js turns this into a dropdown populated
+            # from /radiance/exr_layers, and a typed name still works with no
+            # frontend at all.
+            "layer": ("STRING", {
+                "default": "auto",
+                "multiline": False,
+                "placeholder": "auto · rgba · diffuse · specular · Z · N",
+                "tooltip": (
+                    "Which EXR layer to read. 'auto' takes the beauty, or the "
+                    "first colour layer, or — for a data-only file such as a "
+                    "Z-depth pass — the first layer of any kind.\n"
+                    "With the frontend loaded this is a dropdown listing the "
+                    "layers actually in the selected file."
+                ),
+            }),
+            "on_error": (["Error", "Black frame"], {
+                "default": "Error",
+                "tooltip": (
+                    "What to do when the read fails — file missing, corrupt, "
+                    "unreadable.\n"
+                    "• Error: the node goes red and the queue stops. What Nuke "
+                    "and every other application does, and the default.\n"
+                    "• Black frame: return black and carry on. This is what "
+                    "3.1.x always did, silently, which is how a black master "
+                    "got delivered."
+                ),
+            }),
+            "raw": ("BOOLEAN", {
+                "default": False,
+                "label_on": "raw (no transform)",
+                "label_off": "managed",
+                "tooltip": (
+                    "Hand back exactly what is stored in the file: no colour "
+                    "space decode, and no conform to the EXR display window "
+                    "(so overscan is preserved). Nuke's 'raw data'."
+                ),
+            }),
+            "premultiplied": ("BOOLEAN", {
+                "default": False,
+                "label_on": "premultiplied (unpremult on read)",
+                "label_off": "straight alpha",
+                "tooltip": (
+                    "Tick when the file's RGB is already multiplied by its "
+                    "alpha — the EXR convention — and you want it divided back "
+                    "out on read. Off by default, matching Nuke, because "
+                    "turning it on changes pixels."
+                ),
+            }),
+            # `reload` used to live in "hidden". ComfyUI only populates a hidden
+            # key when its VALUE is one of the magic strings (PROMPT, UNIQUE_ID,
+            # EXTRA_PNGINFO, ...) -- a widget spec there is simply dropped, so
+            # it never reached read() or IS_CHANGED. The frontend also builds
+            # widgets from required/optional only, so js/radiance_io.js could
+            # not find a widget named "reload" and bailed before adding the
+            # button. The RELOAD button has therefore never rendered, and a user
+            # whose file changed on disk without an mtime or size change (a
+            # network share, an atomic replace) had no way to force a re-read.
+            "reload": ("INT", {
+                "default": 0,
+                "min": 0,
+                "max": 2 ** 31 - 1,
+                "tooltip": "Bump to force a re-read of the file, for when the "
+                           "contents changed but the timestamp did not.",
+            }),
         }}
 
     @classmethod
@@ -1284,8 +1650,11 @@ class RadianceRead:
             try:
                 stat = os.stat(resolved)
                 return f"{resolved}:{stat.st_mtime}:{stat.st_size}:reload{reload}"
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug(
+                    "[Radiance] IS_CHANGED(): ignoring %s from `stat = os.stat(resolved)`: %s",
+                    type(_exc).__name__, _exc,
+                )
         return float("nan")
 
     def read(
@@ -1300,78 +1669,201 @@ class RadianceRead:
         max_video_frames: int = 0,
         proxy_scale: float = 0.0,
         missing_frames: str = "Skip",
+        layer: str = "auto",
+        on_error: str = "Error",
+        raw: bool = False,
+        premultiplied: bool = False,
         reload: int = 0,
     ):
         # ── Resolve path: browse takes priority over manual path ──────────
-        resolved = _resolve_browse(browse) or strip_path_quotes(path)
-        path = resolved
+        path = _resolve_browse(browse) or strip_path_quotes(path)
 
         if not path:
-            log.warning("RadianceRead: no path provided — returning empty frame")
+            # Not a failure: a node just dropped on the canvas has no file yet.
+            log.debug("RadianceRead: no path set yet")
             blank = torch.zeros(1, 8, 8, 3)
-            return (blank, blank[..., 0])
-
-        # Auto-detect or use explicit override
-        kind = _path_kind(path) if media_type == "Auto" else media_type.lower()
-        empty_mask = torch.zeros(1, 8, 8)
+            return (blank, blank[..., 0], json.dumps({"kind": "empty"}))
 
         try:
-            if kind == "image":
-                img_t, mask_t = _read_image(path)
-                arr = _tensor_to_np(img_t)
-                arr = _apply_input_colorspace(arr, color_space)
-                img_t = _np_to_tensor(arr)
-                _, h, w, _ = img_t.shape
-                meta = json.dumps({"kind": "image", "path": path,
-                                   "width": w, "height": h, "color_space": color_space})
-                mask_out = mask_t if mask_t is not None else torch.zeros(1, h, w)
-                if proxy_scale > 0:
-                    img_t = torch.nn.functional.interpolate(
-                        img_t.movedim(-1, 1), scale_factor=proxy_scale, mode="bilinear"
-                    ).movedim(1, -1)
-                return (img_t, mask_out)
-
-            elif kind == "exr":
-                img_t, mask_t = _read_exr_single(path)
-                arr = _tensor_to_np(img_t)
-                arr = _apply_input_colorspace(arr, color_space)
-                img_t = _np_to_tensor(arr)
-                _, h, w, _ = img_t.shape
-                mask_out = mask_t if mask_t is not None else torch.zeros(1, h, w)
-                if proxy_scale > 0:
-                    img_t = torch.nn.functional.interpolate(
-                        img_t.movedim(-1, 1), scale_factor=proxy_scale, mode="bilinear"
-                    ).movedim(1, -1)
-                return (img_t, mask_out)
-
-            elif kind == "video":
-                batch, fps, w, h, n, meta = _read_video(path, max_video_frames, color_space)
-                if proxy_scale > 0:
-                    batch = torch.nn.functional.interpolate(
-                        batch.movedim(-1, 1), scale_factor=proxy_scale, mode="bilinear"
-                    ).movedim(1, -1)
-                return (batch, torch.zeros(n, h, w))
-
-            elif kind == "sequence":
-                batch, w, h, n, fps, meta = _read_sequence(
-                    path, start_frame, end_frame if end_frame > 0 else 99999,
-                    frame_step, color_space, missing_frames,
-                )
-                if proxy_scale > 0:
-                    batch = torch.nn.functional.interpolate(
-                        batch.movedim(-1, 1), scale_factor=proxy_scale, mode="bilinear"
-                    ).movedim(1, -1)
-                return (batch, torch.zeros(n, h, w))
-
-            else:
-                log.warning("RadianceRead: unknown path type for '%s'", path)
-                blank = torch.zeros(1, 8, 8, 3)
-                return (blank, blank[..., 0])
-
-        except Exception as e:
-            log.error("RadianceRead: %s", e)
+            image, mask, info = self._read_resolved(
+                path, media_type, color_space, start_frame, end_frame,
+                frame_step, max_video_frames, missing_frames, layer, raw,
+            )
+        except Exception as exc:
+            log.error("RadianceRead: %s: %s", type(exc).__name__, exc)
+            if on_error == "Error":
+                # 3.1.x caught everything here and handed back an 8x8 black
+                # frame, so a missing plate, a corrupt MOV and a wrong layer
+                # name all arrived downstream as black with the node still
+                # green -- and the graph carried on and wrote a master out of
+                # it. Raising is what Nuke, Resolve and RV all do.
+                raise RuntimeError(f"RadianceRead failed on {path!r}: {exc}") from exc
+            log.warning(
+                "[Radiance/Read] on_error is 'Black frame', so a black 8x8 "
+                "frame is being substituted for %s. Nothing downstream can "
+                "tell this apart from a genuinely black plate.", path,
+            )
             blank = torch.zeros(1, 8, 8, 3)
-            return (blank, blank[..., 0])
+            return (blank, blank[..., 0], json.dumps(
+                {"kind": "error", "path": path, "error": str(exc)}))
+
+        # ── Shared post-processing ────────────────────────────────────────
+        if premultiplied and mask is not None and float(mask.abs().max()) > 0:
+            image = _unpremultiply(image, mask)
+            info["unpremultiplied"] = True
+
+        if proxy_scale > 0:
+            image = torch.nn.functional.interpolate(
+                image.movedim(-1, 1), scale_factor=proxy_scale, mode="bilinear",
+            ).movedim(1, -1)
+            if mask is not None:
+                mask = torch.nn.functional.interpolate(
+                    mask.unsqueeze(1), scale_factor=proxy_scale, mode="bilinear",
+                ).squeeze(1)
+            info["proxy_scale"] = proxy_scale
+
+        n, h, w, _ = image.shape
+        info.update({"frames": n, "width": w, "height": h,
+                     "alpha": mask is not None,
+                     "color_space": "raw (untransformed)" if raw else color_space})
+        if mask is None:
+            mask = torch.zeros(n, h, w)
+
+        log.info("[Radiance/Read] %s", _describe_read(info))
+        return (image, mask, json.dumps(info, default=str))
+
+    # ── per-kind dispatch ─────────────────────────────────────────────────
+
+    def _read_resolved(
+        self, path, media_type, color_space, start_frame, end_frame,
+        frame_step, max_video_frames, missing_frames, layer, raw,
+    ):
+        """Return (image, mask_or_None, info_dict). Raises on any failure."""
+        kind = _path_kind(path) if media_type == "Auto" else media_type.lower()
+
+        # Nuke opens shot.1001.exr and offers you the whole sequence. Radiance
+        # read one frame and left you to type a %04d pattern by hand. If the
+        # picked file has numbered siblings, this is a sequence.
+        if kind in ("image", "exr") and media_type == "Auto":
+            detected = _formats.detect_sequence(path)
+            if detected is not None:
+                log.info(
+                    "[Radiance/Read] %s is one frame of a sequence: %s. Reading "
+                    "the whole range. Set media_type to Image for just this frame.",
+                    os.path.basename(path), detected.summary(),
+                )
+                path, kind = detected.pattern, "sequence"
+                start_frame, end_frame = _sequence_frame_range(
+                    detected, start_frame, end_frame)
+
+        if kind == "image":
+            image, mask = _read_image(path)
+            if not raw:
+                image = _np_to_tensor(
+                    _apply_input_colorspace(_tensor_to_np(image), color_space))
+            return image, mask, {"kind": "image", "path": path}
+
+        if kind == "exr":
+            image, mask, exr_info, chosen = _read_exr_with_info(path, layer, raw)
+            if not raw:
+                image = _np_to_tensor(
+                    _apply_input_colorspace(_tensor_to_np(image), color_space))
+            return image, mask, {
+                "kind": "exr", "path": path, "layer": chosen,
+                "layers": exr_info.layer_names, "parts": exr_info.parts,
+                "compression": exr_info.compression,
+                "data_window": [exr_info.width, exr_info.height],
+                "display_window": [exr_info.display_width, exr_info.display_height],
+                "overscan": exr_info.has_overscan,
+                "attributes": exr_info.attributes or {},
+            }
+
+        if kind == "video":
+            v_start, v_end = _video_frame_range(path, start_frame, end_frame)
+            batch, alpha, _fps, _w, _h, _n, meta = _read_video(
+                path, max_video_frames, "Auto / Linear (pass-through)" if raw
+                else color_space,
+                start_frame=v_start, end_frame=v_end, frame_step=frame_step,
+            )
+            return batch, alpha, json.loads(meta)
+
+        if kind == "sequence":
+            detected = _formats.describe_pattern(path)
+            if detected is not None:
+                start_frame, end_frame = _sequence_frame_range(
+                    detected, start_frame, end_frame)
+            batch, alpha, _w, _h, _n, _fps, meta = _read_sequence(
+                path, start_frame, end_frame if end_frame > 0 else 99999,
+                frame_step, color_space, missing_frames, layer, raw,
+            )
+            info = json.loads(meta)
+            if detected is not None:
+                info["available_range"] = [detected.first, detected.last]
+            return batch, alpha, info
+
+        raise ValueError(f"RadianceRead cannot read {path!r}. {_explain_unknown(path)}")
+
+
+def _sequence_frame_range(detected, start_frame: int, end_frame: int):
+    """Reconcile the widget values with the range that is actually on disk.
+
+    `start_frame` defaults to 1001, which is right for a VFX sequence and wrong
+    for everything else. A start outside the range that exists is treated as
+    "not set" -- otherwise a sequence numbered from 1 reads nothing, which is
+    the documented directory-pattern trap in a new costume.
+    """
+    start = start_frame
+    if not (detected.first <= start <= detected.last):
+        if start not in (0, 1001):
+            log.warning(
+                "[Radiance/Read] start_frame=%d is outside the range on disk "
+                "(%d-%d); reading from %d instead.",
+                start, detected.first, detected.last, detected.first,
+            )
+        start = detected.first
+    end = end_frame
+    if end <= 0 or end > detected.last:
+        end = detected.last
+    return start, end
+
+
+def _unpremultiply(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Divide RGB by alpha, leaving fully transparent pixels alone.
+
+    EXR conventionally stores associated (premultiplied) alpha; ComfyUI's MASK
+    is straight by convention. Dividing by zero where alpha is zero would turn
+    the transparent region into NaN and poison every downstream operation, so
+    those pixels keep their stored value.
+    """
+    alpha = mask.unsqueeze(-1).to(image.dtype)
+    safe = torch.where(alpha > 1e-6, alpha, torch.ones_like(alpha))
+    out = torch.where(alpha > 1e-6, image / safe, image)
+    return out
+
+
+def _describe_read(info: dict) -> str:
+    """One console line, in the order a Nuke Read's info bar reads."""
+    bits = [os.path.basename(str(info.get("path", "")) or "?")]
+    if info.get("width"):
+        bits.append(f"{info['width']}x{info['height']}")
+    frames = info.get("frames", 0)
+    if frames and frames > 1:
+        bits.append(f"{frames} frames")
+    for key in ("kind", "codec", "layer"):
+        if info.get(key):
+            bits.append(str(info[key]))
+    if info.get("bit_depth"):
+        bits.append(f"{info['bit_depth']}-bit")
+    if info.get("alpha"):
+        bits.append("alpha")
+    if info.get("overscan"):
+        bits.append("overscan conformed")
+    if info.get("unpremultiplied"):
+        bits.append("unpremultiplied")
+    cs = info.get("color_space")
+    if cs:
+        bits.append(str(cs))
+    return " · ".join(bits)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1504,8 +1996,11 @@ class RadianceWrite:
                 "tooltip": "Clamp output to broadcast-legal range (16–235 luma) before saving.",
             }),
             "overwrite": ("BOOLEAN", {
-                "default": True,
-                "tooltip": "Overwrite existing files.  When disabled, a unique suffix is appended.",
+                # AUDIT-UX (2026-08): default was True. Destroying an existing
+                # file must be an explicit choice; with versioning built in and
+                # a unique-suffix fallback, the safe default costs nothing.
+                "default": False,
+                "tooltip": "Overwrite existing files.  When disabled (default), a unique suffix is appended instead of destroying the existing file.",
             }),
             "proxy_scale": ("FLOAT", {
                 "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
@@ -1622,7 +2117,30 @@ class RadianceWrite:
         )
 
     def _out_path(self, base: str, ext: str, overwrite: bool) -> Path:
-        p = Path(base).with_suffix(ext)
+        """Append `ext` to `base`, without Path.with_suffix's truncation.
+
+        `with_suffix` REPLACES everything after the last dot in the final path
+        component. VFX filenames are full of dots -- sh010.comp, plate.v2,
+        bg.matte -- and `base` here is "<dir>/<filename>_v0001", so
+        "sh010.comp_v0001" has a "suffix" of ".comp_v0001" and every version
+        collapsed onto the same "sh010.exr". With overwrite defaulting to True,
+        each render silently destroyed the previously approved one and reported
+        success with the truncated path.
+
+        An empty `base` was worse: Path("") is Path("."), whose name is "", and
+        with_suffix raised `ValueError: PosixPath('.') has an empty name` --
+        an opaque crash for the ordinary case of leaving `filename` blank.
+        """
+        p = Path(base)
+        stem = p.name
+        if not stem or stem in (".", ".."):
+            raise ValueError(
+                "RadianceWrite: no output filename. Set the `filename` widget, "
+                "or give `output_path` a full file path rather than a directory."
+            )
+        if not stem.lower().endswith(ext.lower()):
+            stem += ext
+        p = p.with_name(stem)
         if not overwrite:
             p = _unique_path(p)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -1680,11 +2198,26 @@ class RadianceWrite:
         # gating condition needed to change.
         alpha = _coerce_mask_to_alpha(mask, n, h, w) if mask is not None and ("EXR" in format or "PNG" in format) else None
 
-        # Apply color space + broadcast-safe clamp
+        # Apply color space + broadcast-safe clamp.
+        #
+        # The clamp is now gated on the output format. It used to be
+        # unconditional, so exporting "EXR (32-bit float)" with broadcast_safe
+        # on -- which the delivery panel defaults to -- clamped every pixel of a
+        # scene-referred master into [16/255, 235/255]: highlights destroyed,
+        # blacks lifted 6.3%, and the .exr extension making it look like a
+        # legitimate HDR deliverable. Legal-range limiting is a video/8-bit
+        # concept and must never touch a float or DPX deliverable.
+        _is_float_format = ("EXR" in format or "HDR" in format
+                            or "32-bit float" in format or "DPX" in format)
+        apply_legal_range = bool(broadcast_safe) and not _is_float_format
+        if broadcast_safe and _is_float_format:
+            log.info("RadianceWrite: broadcast_safe ignored for %s "
+                     "(legal-range limiting does not apply to float formats)", format)
+
         out_frames: List[np.ndarray] = []
         for i, fr in enumerate(frames):
             fr = _apply_output_colorspace(fr, color_space)
-            if broadcast_safe:
+            if apply_legal_range:
                 fr = np.clip(fr, 16/255.0, 235/255.0)
             if alpha is not None and fr.ndim == 3 and fr.shape[-1] == 3:
                 fr = np.concatenate([fr, alpha[i][..., None]], axis=-1)   # RGB -> RGBA
@@ -1712,7 +2245,10 @@ class RadianceWrite:
                 prompt, extra_pnginfo,
             )
             log.info("RadianceWrite: saved %d frame(s) → %s", count, saved)
-            return ()
+            # Return the saved path so programmatic callers (delivery/handler.py)
+            # can report it. ComfyUI ignores extra tuple entries for a node whose
+            # RETURN_TYPES is empty, so this is safe for graph use.
+            return (saved, count)
 
         except Exception as e:
             # Never silently swallow a delivery failure — surface it so the node
@@ -1724,8 +2260,11 @@ class RadianceWrite:
             if temp_audio_wav and os.path.exists(temp_audio_wav):
                 try:
                     os.unlink(temp_audio_wav)
-                except OSError:
-                    pass
+                except OSError as _exc:
+                    log.debug(
+                        "[Radiance] write(): ignoring %s from `os.unlink(temp_audio_wav)`: %s",
+                        type(_exc).__name__, _exc,
+                    )
 
     def _dispatch(
         self,
@@ -2030,7 +2569,7 @@ class RadianceDigitalCinemaRead:
             media_type = "Sequence"
 
         reader = RadianceRead()
-        img, mask = reader.read(
+        img, mask, read_info = reader.read(
             path=source_path,
             media_type=media_type,
             color_space="sRGB" if "sRGB" in input_colorspace else "Auto / Linear (pass-through)",
@@ -2050,6 +2589,13 @@ class RadianceDigitalCinemaRead:
             "input_colorspace": input_colorspace,
             "fps_override": fps_override,
         }
+        # Fold in what the reader actually found -- resolution, real frame
+        # count, codec, bit depth, colour tags, timecode -- rather than echoing
+        # back only the widget values it was given.
+        try:
+            shot_metadata["source"] = json.loads(read_info)
+        except (TypeError, ValueError) as _exc:
+            log.debug("[Radiance] DigitalCinemaRead: unreadable info payload: %s", _exc)
         return (img, mask, shot_metadata)
 
 
@@ -2066,7 +2612,13 @@ class RadianceDigitalCinemaWrite:
         return {
             "required": {
                 "images": ("IMAGE",),
-                "output_path": ("STRING", {"default": ""}),
+                # Same default as RadianceWrite, which this node delegates to.
+                # It used to default to "", so dropping the node and queueing
+                # crashed inside pathlib instead of writing anything.
+                "output_path": ("STRING", {
+                    "default": str(Path.home() / "radiance_output"),
+                    "placeholder": "/output/render  or  Z:/renders/shot",
+                }),
             },
             "optional": {
                 "format": (WRITE_FORMATS, {"default": "IMG │ EXR (16-bit half)"}),
@@ -2101,3 +2653,320 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceEXRMultiPart": "◎ Radiance EXR Multi-Part",
     "RadianceDigitalCinemaRead": "◎ Radiance Digital Cinema Read",
 }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# § 6  HTTP routes for the Read node's frontend
+# ═══════════════════════════════════════════════════════════════════════════
+
+#: Directories the /radiance/media/* routes may inspect.
+#:
+#: ComfyUI's own input/output/temp trees are always allowed, because that is
+#: where uploads land. A facility reads plates off a NAS, so add those mounts
+#: with RADIANCE_READ_ROOTS (os.pathsep-separated). Without it the layer
+#: dropdown falls back to a plain text field for paths outside the tree, which
+#: still works -- you type the layer name.
+_ENV_READ_ROOTS = "RADIANCE_READ_ROOTS"
+
+
+def _allowed_read_roots() -> List[str]:
+    roots: List[str] = []
+    try:
+        import folder_paths  # type: ignore
+
+        for attr in ("get_input_directory", "get_output_directory",
+                     "get_temp_directory"):
+            getter = getattr(folder_paths, attr, None)
+            if callable(getter):
+                roots.append(getter())
+        models = getattr(folder_paths, "models_dir", None)
+        if models:
+            roots.append(models)
+    except Exception as _exc:
+        log.debug("[Radiance] _allowed_read_roots(): no folder_paths: %s", _exc)
+    for part in os.environ.get(_ENV_READ_ROOTS, "").split(os.pathsep):
+        part = part.strip().strip('"')
+        if part:
+            roots.append(part)
+    return [os.path.abspath(os.path.expanduser(r)) for r in roots if r]
+
+
+def _is_inside_allowed_read_root(path: str) -> bool:
+    """Is this path somewhere the frontend is allowed to ask us to inspect?
+
+    The Read node itself opens any path the user types -- that is the job. This
+    check governs the *unauthenticated HTTP route* only, which would otherwise
+    be a file-existence oracle for the whole filesystem.
+    """
+    try:
+        resolved = os.path.realpath(path)
+    except (OSError, ValueError):
+        return False
+    for root in _allowed_read_roots():
+        try:
+            if os.path.commonpath([resolved, os.path.realpath(root)]) == \
+                    os.path.realpath(root):
+                return True
+        except ValueError:      # different drives on Windows
+            continue
+    return False
+
+
+def register_read_routes():
+    """Endpoints the Read node's widgets call: EXR layers, and media info."""
+    try:
+        from aiohttp import web
+        from server import PromptServer
+    except ImportError:
+        log.debug("[Radiance/Read] server not available; routes not registered")
+        return
+
+    if getattr(PromptServer.instance, "_radiance_read_routes_registered", False):
+        return
+    PromptServer.instance._radiance_read_routes_registered = True
+
+    def _resolve_query_path(request) -> Tuple[Optional[str], Optional[Any]]:
+        raw = (request.query.get("path") or "").strip()
+        if not raw:
+            return None, web.json_response({"error": "no path given"}, status=400)
+        candidate = _resolve_browse(raw) or strip_path_quotes(raw)
+        if not os.path.isfile(candidate):
+            return None, web.json_response(
+                {"error": "not a file", "path": candidate}, status=404)
+        if not _is_inside_allowed_read_root(candidate):
+            return None, web.json_response({
+                "error": "outside the allowed roots",
+                "hint": f"Set {_ENV_READ_ROOTS} to the directories Radiance may "
+                        f"inspect, os.pathsep-separated.",
+            }, status=403)
+        return candidate, None
+
+    @PromptServer.instance.routes.get("/radiance/media/layers")
+    async def read_layers_endpoint(request):
+        """Layer names inside an EXR, for the `layer` dropdown."""
+        path, error = _resolve_query_path(request)
+        if error is not None:
+            return error
+        if os.path.splitext(path)[1].lower() not in _EXR_EXT:
+            return web.json_response({"layers": [], "reason": "not an EXR"})
+        try:
+            from .core import exr as _exr
+
+            return web.json_response({"layers": ["auto"] + _exr.layer_choices(path)})
+        except Exception as exc:
+            log.debug("[Radiance/Read] layer probe failed for %s: %s", path, exc)
+            return web.json_response({"layers": [], "error": str(exc)})
+
+    @PromptServer.instance.routes.get("/radiance/media/info")
+    async def read_info_endpoint(request):
+        """What the file is, for the info line drawn on the node."""
+        path, error = _resolve_query_path(request)
+        if error is not None:
+            return error
+        try:
+            return web.json_response(_probe_for_ui(path))
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=200)
+
+    _MIME = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime",
+             ".mkv": "video/x-matroska", ".webm": "video/webm", ".avi": "video/x-msvideo"}
+
+    @PromptServer.instance.routes.get("/radiance/media/preview")
+    async def read_preview_endpoint(request):
+        """Stream a video file for the node's inline <video> preview.
+
+        FileResponse handles HTTP Range requests, so the browser can seek.
+        Whether the browser can DECODE it is its own problem -- H.264 MP4/MOV
+        will play; ProRes/DNxHR will fire the <video> element's error event,
+        and the frontend falls back to /radiance/media/poster.
+        """
+        path, error = _resolve_query_path(request)
+        if error is not None:
+            return error
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in _VID_EXT:
+            return web.json_response({"error": "not a video"}, status=400)
+        return web.FileResponse(
+            path, headers={"Content-Type": _MIME.get(ext, "application/octet-stream")})
+
+    @PromptServer.instance.routes.get("/radiance/media/poster")
+    async def read_poster_endpoint(request):
+        """First frame of a video as JPEG -- the preview for codecs the
+        browser cannot decode (ProRes, DNxHR, MXF...). Cached by mtime."""
+        path, error = _resolve_query_path(request)
+        if error is not None:
+            return error
+        if os.path.splitext(path)[1].lower() not in _VID_EXT:
+            return web.json_response({"error": "not a video"}, status=400)
+        try:
+            import hashlib
+            import tempfile
+            key = hashlib.sha256(
+                f"{os.path.realpath(path)}:{os.path.getmtime(path)}".encode()
+            ).hexdigest()[:24]
+            cache = os.path.join(tempfile.gettempdir(), f"radiance_poster_{key}.jpg")
+            if not os.path.isfile(cache):
+                import cv2  # type: ignore
+                cap = cv2.VideoCapture(path)
+                ok, frame = cap.read()
+                cap.release()
+                if not ok or frame is None:
+                    return web.json_response({"error": "cannot decode first frame"},
+                                             status=415)
+                h, w = frame.shape[:2]
+                if max(h, w) > 1024:            # poster, not a plate
+                    s = 1024.0 / max(h, w)
+                    frame = cv2.resize(frame, (int(w * s), int(h * s)))
+                cv2.imwrite(cache, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            return web.FileResponse(cache, headers={"Content-Type": "image/jpeg"})
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+    @PromptServer.instance.routes.get("/radiance/media/resolve_write")
+    async def resolve_write_endpoint(request):
+        """Predict RadianceWrite's output path for the node's UI readout.
+
+        Pure string computation -- no filesystem access, no directory
+        creation, so it is not a file-existence oracle and needs no root
+        check.
+        """
+        q = request.query
+        try:
+            prediction = _predict_write_target(
+                output_path=(q.get("output_path") or "").strip(),
+                format=(q.get("format") or "").strip(),
+                filename=(q.get("filename") or "").strip(),
+                version=int(q.get("version") or 1),
+                start_frame=int(q.get("start_frame") or 1001),
+                frame_padding=int(q.get("frame_padding") or 4),
+                overwrite=(q.get("overwrite", "false").lower() in ("1", "true")),
+            )
+            return web.json_response(prediction)
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=200)
+
+    log.debug("[Radiance/Read] HTTP routes registered: /radiance/media/*")
+
+
+def _predict_write_target(
+    output_path: str,
+    format: str,
+    filename: str = "",
+    version: int = 1,
+    start_frame: int = 1001,
+    frame_padding: int = 4,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    """Predict the path RadianceWrite will produce, for the node's UI readout.
+
+    Mirrors RadianceWrite.write()/_dispatch() path construction exactly --
+    tests/test_io_audit_regressions.py::TestWritePathPrediction writes real
+    files and fails if this drifts from what actually lands on disk. Pure
+    string computation: nothing is created or stat'd.
+    """
+    if not output_path:
+        return {"path": "", "note": "set output_path"}
+
+    base = output_path
+    if filename.strip():
+        base = str(Path(output_path) / f"{filename.strip()}_v{version:04d}")
+
+    stem = _fmt_stem(format)
+    note = ""
+
+    if format in _FMT_IMAGE:
+        ext_map = {
+            "PNG (8-bit)": ".png", "PNG (16-bit)": ".png", "JPEG": ".jpg",
+            "TIFF (16-bit)": ".tiff", "TIFF (32-bit float)": ".tiff",
+            "DPX": ".dpx", "WEBP": ".webp", "EXR (16-bit half)": ".exr",
+            "EXR (32-bit float)": ".exr", "Radiance HDR (.hdr)": ".hdr",
+        }
+        ext = ext_map.get(stem, "")
+        name = Path(base).name
+        if not name or name in (".", ".."):
+            return {"path": "", "note": "no filename: set the filename widget "
+                                        "or a full output_path"}
+        if not name.lower().endswith(ext):
+            name += ext
+        predicted = str(Path(base).with_name(name))
+        note = "single image — a multi-frame batch writes frame 1 only; use a SEQ or VID format for all frames"
+    elif format in _FMT_VIDEO:
+        vid_ext = {"MP4 (H.264)": ".mp4", "MP4 (H.265 10-bit)": ".mp4",
+                   "MOV (ProRes 422 HQ)": ".mov", "MOV (ProRes 4444)": ".mov",
+                   "MOV (DNxHR HQ)": ".mxf"}.get(stem, ".mp4")
+        predicted = base if base.lower().endswith(vid_ext) else base + vid_ext
+        if stem == "MOV (DNxHR HQ)":
+            note = "DNxHR is written into an MXF container"
+    elif format in _FMT_SEQ:
+        if "EXR" in stem:
+            ext = ".exr"
+        elif "TIFF" in stem:
+            ext = ".tiff"
+        elif "DPX" in stem:
+            ext = ".dpx"
+        elif "HDR" in stem:
+            ext = ".hdr"
+        else:
+            ext = ".png"
+        out_dir = Path(base)
+        hashes = "#" * frame_padding
+        predicted = str(out_dir / f"{out_dir.name}_{hashes}{ext}")
+        note = f"sequence starts at frame {start_frame}"
+    else:
+        return {"path": "", "note": f"unknown format {format!r}"}
+
+    if not overwrite:
+        note = (note + "  ·  " if note else "") + "unique suffix if the file exists"
+    return {"path": predicted, "note": note}
+
+
+def _probe_for_ui(path: str) -> Dict[str, Any]:
+    """A short, cheap description of a file for the node's info line."""
+    kind = _path_kind(path)
+    out: Dict[str, Any] = {"kind": kind, "name": os.path.basename(path)}
+
+    if kind == "video":
+        from .core import video as _video
+
+        info = _video.probe(path)
+        out.update(info.as_dict())
+        out["summary"] = info.summary()
+        return out
+
+    if kind == "exr":
+        from .core import exr as _exr
+
+        info = _exr.probe(path)
+        out.update({
+            "width": info.width, "height": info.height,
+            "display_width": info.display_width,
+            "display_height": info.display_height,
+            "overscan": info.has_overscan, "parts": info.parts,
+            "layers": info.layer_names, "compression": info.compression,
+            "summary": info.summary(),
+        })
+
+    sequence = _formats.detect_sequence(path)
+    if sequence is not None:
+        out.update({
+            "sequence": sequence.pattern,
+            "first": sequence.first, "last": sequence.last,
+            "frames": sequence.count, "missing": len(sequence.missing),
+            "summary": (out.get("summary", "") + " · " + sequence.summary()).strip(" ·"),
+        })
+    if "summary" not in out:
+        try:
+            image, mask = _read_image(path)
+            _, h, w, _ = image.shape
+            out.update({"width": w, "height": h, "alpha": mask is not None,
+                        "summary": f"{w}x{h}" + (" · alpha" if mask is not None else "")})
+        except Exception as exc:
+            out["summary"] = f"unreadable: {exc}"
+    return out
+
+
+# Auto-register on import, the same way the OCIO routes do.
+try:
+    register_read_routes()
+except Exception as _exc:  # pragma: no cover - server not present in tests
+    log.debug("[Radiance/Read] route registration deferred: %s", _exc)

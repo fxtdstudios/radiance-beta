@@ -2,562 +2,444 @@
 
 # Color
 
-Primary grading, CDL exchange, curves, white balance, color-space conversion, OCIO context, and QC checks.
+Grading, colour-space conversion, CDL, LUTs, curves, and QC. Everything here
+assumes you know which space your image is in — the nodes will not guess, and a
+transform applied to the wrong space is the single most common way to lose an
+afternoon.
 
-## Typical workflow
+## Typical graph
 
 ```text
-Radiance Read -> Color Space Convert / OCIO Context -> Grade / Curves / CDL -> QC -> Write
+Read (decode to scene-linear) → Grade / CDL / Curves → Colorspace Convert (to display) → Viewer
 ```
 
 ## Before you use these nodes
 
-- Choose source, working, and output color spaces deliberately; do not rely on viewport appearance.
-- Use CDL import/export for interchange with grading and comp tools.
-- Run QC after grade and before final output when clipping, bit depth, or broadcast limits matter.
+- **Grade in scene-linear.** Exposure is a multiply, and a multiply only means
+  "stops" in a linear space. Grading a gamma-encoded image gives you contrast
+  changes you did not ask for.
+- **Colorspace Convert is a primaries + transfer change**, not a look. It will
+  not make an image "correct"; it moves it between two spaces you name.
+- **CDL is ASC-standard** — slope, offset, power, saturation — and round-trips
+  through `.cc`/`.cdl` files for handoff to a grading system.
+- **QC before you deliver.** The QC node reports clipping, out-of-gamut pixels
+  and banding risk. Policy Guard turns a house standard into a pass/fail.
 
-## Nodes in this section
+## Known limitation
 
-| Node | Internal key | Purpose |
+`chromatic_adaptation` on Colorspace Convert has no effect — the D60↔D65
+adaptation is baked into the precomputed conversion matrices, and every option
+on the widget produces identical output. The node logs a warning if you set it
+to anything other than the default.
+
+## Nodes in this section (13)
+
+| Node | Key | What it does |
 | :--- | :--- | :--- |
-| [◎ Radiance CDL Transform](#radiance-cdl-transform) | `RadianceCDLTransform` | Adjusts image color, tone, or grading metadata in a production-friendly way. |
-| [◎ Radiance CDL Import](#radiance-cdl-import) | `RadianceCDLImport` | Adjusts image color, tone, or grading metadata in a production-friendly way. |
-| [◎ Radiance CDL Export](#radiance-cdl-export) | `RadianceCDLExport` | Writes or hands off the current result to a file, folder, preview, or DCC destination. |
-| [◎ Radiance White Balance](#radiance-white-balance) | `RadianceWhiteBalance` | Adjusts image color, tone, or grading metadata in a production-friendly way. |
-| [◎ Radiance Colorspace Convert](#radiance-colorspace-convert) | `RadianceColorSpaceConvert` | Performs the Radiance operation described by its inputs and outputs in the selected workflow group. |
-| [◎ Radiance ACES Transform](#radiance-aces-transform) | `RadianceACESTransform` | Performs the Radiance operation described by its inputs and outputs in the selected workflow group. |
-| [◎ Radiance Hue Curves](#radiance-hue-curves) | `RadianceHueCurves` | Adjusts image color, tone, or grading metadata in a production-friendly way. |
-| [◎ Radiance Curves](#radiance-curves) | `RadianceCurves` | Adjusts image color, tone, or grading metadata in a production-friendly way. |
-| [◎ Radiance Grade](#radiance-grade) | `RadianceGrade` | Adjusts image color, tone, or grading metadata in a production-friendly way. |
-| [◎ Radiance Apply Grade Info](#radiance-apply-grade-info) | `RadianceApplyGradeInfo` | Adjusts image color, tone, or grading metadata in a production-friendly way. |
-| [◎ Radiance Grade Match](#radiance-grade-match) | `RadianceGradeMatch` | Adjusts image color, tone, or grading metadata in a production-friendly way. |
-| [◎ Radiance OCIO Context](#radiance-ocio-context) | `RadianceOCIOContext` | Performs the Radiance operation described by its inputs and outputs in the selected workflow group. |
-| [◎ Radiance QC](#radiance-qc) | `RadianceQC` | Analyzes the image or workflow state and returns reports that help catch delivery problems. |
+| [Apply Grade Info](#apply-grade-info) | `RadianceApplyGradeInfo` | Apply a saved grade_info JSON to any image. |
+| [CDL](#cdl) | `RadianceCDLTransform` | Apply an ASC CDL (Slope/Offset/Power/Saturation) colour transform. |
+| [CDL Export](#cdl-export) | `RadianceCDLExport` | Export current CDL values to an ASC-compliant .cdl or .cc file. |
+| [CDL Import](#cdl-import) | `RadianceCDLImport` | Import an ASC CDL (.cdl / .cc / .ccc) file into pipeline metadata. |
+| [ColorLookup](#colorlookup) | `RadianceCurves` | RGB and luminance spline curve grading with customisable control points. |
+| [Grade](#grade) | `RadianceGrade` | Professional color grading with per-channel Lift/Gamma/Gain/Offset, Contrast, Saturation, cinematic presets, optional grade matching, and JSON preset file loading. |
+| [Grade Match](#grade-match) | `RadianceGradeMatch` | Match source image color statistics to a reference image using LAB mean/std matching. |
+| [HueCorrect](#huecorrect) | `RadianceHueCurves` | Per-hue selective colour adjustment using spline curves. |
+| [LUT](#lut) | `RadianceLUTApply` | Apply a 3D LUT (.cube) with trilinear or tetrahedral interpolation |
+| [OCIO ColorSpace](#ocio-colorspace) | `RadianceColorSpaceConvert` | Convert images between named colour spaces. |
+| [OCIO Context](#ocio-context) | `RadianceOCIOContext` | Set OpenColorIO context variables for environment-aware transforms. |
+| [RadianceLUTBlend](#radiancelutblend) | `RadianceLUTBlend` | Blend two LUTs with various blend modes for creative color grading. |
+| [White Balance](#white-balance) | `RadianceWhiteBalance` | Adjust white balance using a reference neutral or colour temperature. |
 
-## ◎ Radiance CDL Transform
+---
 
-**Internal key:** `RadianceCDLTransform`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Color`  
-**Source:** `nodes/color/cdl.py`
-**Function:** `apply`
+## Apply Grade Info
 
-### What it does
+**Node key:** `RadianceApplyGradeInfo`  
+**Menu:** `FXTD STUDIOS/Radiance/Color`  
+**Source:** `nodes/color/grade.py`  
 
-Adjusts image color, tone, or grading metadata in a production-friendly way.
-
-### When to use it
-
-Use `◎ Radiance CDL Transform` when the graph reaches the CDL Transform step in a color workflow.
+Apply a saved grade_info JSON to any image.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `image` | Yes | `IMAGE` | - | - |
-| `slope_r` | Yes | `FLOAT` | `1.0` | Red channel slope (gain). 1.0 = unity. |
-| `slope_g` | Yes | `FLOAT` | `1.0` | Green channel slope (gain). 1.0 = unity. |
-| `slope_b` | Yes | `FLOAT` | `1.0` | Blue channel slope (gain). 1.0 = unity. |
-| `offset_r` | Yes | `FLOAT` | `0.0` | Red channel offset. 0.0 = no shift. |
-| `offset_g` | Yes | `FLOAT` | `0.0` | Green channel offset. 0.0 = no shift. |
-| `offset_b` | Yes | `FLOAT` | `0.0` | Blue channel offset. 0.0 = no shift. |
-| `power_r` | Yes | `FLOAT` | `1.0` | Red channel power (gamma). |
-| `power_g` | Yes | `FLOAT` | `1.0` | Green channel power (gamma). |
-| `power_b` | Yes | `FLOAT` | `1.0` | Blue channel power (gamma). |
-| `saturation` | Yes | `FLOAT` | `1.0` | Global saturation. 1.0 = unity. |
-| `cdl_data` | Optional | `STRING` | - | JSON CDL data from RadianceCDLImport. |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `image` | Yes | `IMAGE` |  |  |  |
+| `grade_info` | Yes | `STRING` |  |  |  |
+| `strength` | No | `FLOAT` | `1.0` | 0.0 – 1.0, step 0.05 |  |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `image` | `IMAGE` | Output produced by the `image` socket. |
-| `cdl_info` | `STRING` | Output produced by the `cdl_info` socket. |
+| `image` | `IMAGE` |  |
+| `grade_info` | `STRING` |  |
 
-### Practical notes
+---
 
-- The node returns `image` (`IMAGE`), `cdl_info` (`STRING`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## CDL
 
-## ◎ Radiance CDL Import
+**Node key:** `RadianceCDLTransform`  
+**Menu:** `FXTD STUDIOS/Radiance/Color`  
+**Source:** `nodes/color/cdl.py`  
 
-**Internal key:** `RadianceCDLImport`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Color`  
-**Source:** `nodes/color/cdl.py`
-**Function:** `load`
-
-### What it does
-
-Adjusts image color, tone, or grading metadata in a production-friendly way.
-
-### When to use it
-
-Use `◎ Radiance CDL Import` when the graph reaches the CDL Import step in a color workflow.
+Apply an ASC CDL (Slope/Offset/Power/Saturation) colour transform.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `file_path` | Yes | `STRING` | `grading/shot_01.cdl` | Path to a .cdl, .cc, or .ccc file. |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `image` | Yes | `IMAGE` |  |  |  |
+| `slope_r` | Yes | `FLOAT` | `1.0` | 0.0 – 4.0, step 0.01 | Red channel slope (gain). 1.0 = unity. |
+| `slope_g` | Yes | `FLOAT` | `1.0` | 0.0 – 4.0, step 0.01 | Green channel slope (gain). 1.0 = unity. |
+| `slope_b` | Yes | `FLOAT` | `1.0` | 0.0 – 4.0, step 0.01 | Blue channel slope (gain). 1.0 = unity. |
+| `offset_r` | Yes | `FLOAT` | `0.0` | -1.0 – 1.0, step 0.001 | Red channel offset. 0.0 = no shift. |
+| `offset_g` | Yes | `FLOAT` | `0.0` | -1.0 – 1.0, step 0.001 | Green channel offset. 0.0 = no shift. |
+| `offset_b` | Yes | `FLOAT` | `0.0` | -1.0 – 1.0, step 0.001 | Blue channel offset. 0.0 = no shift. |
+| `power_r` | Yes | `FLOAT` | `1.0` | 0.01 – 4.0, step 0.01 | Red channel power (gamma). |
+| `power_g` | Yes | `FLOAT` | `1.0` | 0.01 – 4.0, step 0.01 | Green channel power (gamma). |
+| `power_b` | Yes | `FLOAT` | `1.0` | 0.01 – 4.0, step 0.01 | Blue channel power (gamma). |
+| `saturation` | Yes | `FLOAT` | `1.0` | 0.0 – 4.0, step 0.01 | Global saturation. 1.0 = unity. |
+| `cdl_data` | No | `STRING` |  |  | JSON CDL data from RadianceCDLImport. |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `cdl_data` | `STRING` | Output produced by the `cdl_data` socket. |
-| `slope_r` | `FLOAT` | Output produced by the `slope_r` socket. |
-| `slope_g` | `FLOAT` | Output produced by the `slope_g` socket. |
-| `slope_b` | `FLOAT` | Output produced by the `slope_b` socket. |
-| `offset_r` | `FLOAT` | Output produced by the `offset_r` socket. |
-| `offset_g` | `FLOAT` | Output produced by the `offset_g` socket. |
-| `offset_b` | `FLOAT` | Output produced by the `offset_b` socket. |
-| `power_r` | `FLOAT` | Output produced by the `power_r` socket. |
-| `power_g` | `FLOAT` | Output produced by the `power_g` socket. |
-| `power_b` | `FLOAT` | Output produced by the `power_b` socket. |
-| `saturation` | `FLOAT` | Output produced by the `saturation` socket. |
+| `image` | `IMAGE` |  |
+| `cdl_info` | `STRING` |  |
 
-### Practical notes
+---
 
-- The node returns `cdl_data` (`STRING`), `slope_r` (`FLOAT`), `slope_g` (`FLOAT`), `slope_b` (`FLOAT`), `offset_r` (`FLOAT`), `offset_g` (`FLOAT`), `offset_b` (`FLOAT`), `power_r` (`FLOAT`), `power_g` (`FLOAT`), `power_b` (`FLOAT`), `saturation` (`FLOAT`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## CDL Export
 
-## ◎ Radiance CDL Export
+**Node key:** `RadianceCDLExport`  
+**Menu:** `FXTD STUDIOS/Radiance/Color`  
+**Source:** `nodes/color/cdl.py`  
+**Output node** — runs even with nothing connected downstream.  
 
-**Internal key:** `RadianceCDLExport`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Color`  
-**Source:** `nodes/color/cdl.py`
-**Function:** `save`
-
-### What it does
-
-Writes or hands off the current result to a file, folder, preview, or DCC destination.
-
-### When to use it
-
-Use `◎ Radiance CDL Export` near the end of the graph after the image, sequence, or metadata is ready for delivery.
+Export current CDL values to an ASC-compliant .cdl or .cc file.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `file_path` | Yes | `STRING` | `grading/shot_01_output.cdl` | - |
-| `slope_r` | Yes | `FLOAT` | `1.0` | - |
-| `slope_g` | Yes | `FLOAT` | `1.0` | - |
-| `slope_b` | Yes | `FLOAT` | `1.0` | - |
-| `offset_r` | Yes | `FLOAT` | `0.0` | - |
-| `offset_g` | Yes | `FLOAT` | `0.0` | - |
-| `offset_b` | Yes | `FLOAT` | `0.0` | - |
-| `power_r` | Yes | `FLOAT` | `1.0` | - |
-| `power_g` | Yes | `FLOAT` | `1.0` | - |
-| `power_b` | Yes | `FLOAT` | `1.0` | - |
-| `saturation` | Yes | `FLOAT` | `1.0` | - |
-| `cdl_data` | Optional | `STRING` | - | - |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `file_path` | Yes | `STRING` | `grading/shot_01_output.cdl` |  |  |
+| `slope_r` | Yes | `FLOAT` | `1.0` | 0.0 – 4.0, step 0.001 |  |
+| `slope_g` | Yes | `FLOAT` | `1.0` | 0.0 – 4.0, step 0.001 |  |
+| `slope_b` | Yes | `FLOAT` | `1.0` | 0.0 – 4.0, step 0.001 |  |
+| `offset_r` | Yes | `FLOAT` | `0.0` | -1.0 – 1.0, step 0.0001 |  |
+| `offset_g` | Yes | `FLOAT` | `0.0` | -1.0 – 1.0, step 0.0001 |  |
+| `offset_b` | Yes | `FLOAT` | `0.0` | -1.0 – 1.0, step 0.0001 |  |
+| `power_r` | Yes | `FLOAT` | `1.0` | 0.01 – 4.0, step 0.001 |  |
+| `power_g` | Yes | `FLOAT` | `1.0` | 0.01 – 4.0, step 0.001 |  |
+| `power_b` | Yes | `FLOAT` | `1.0` | 0.01 – 4.0, step 0.001 |  |
+| `saturation` | Yes | `FLOAT` | `1.0` | 0.0 – 4.0, step 0.001 |  |
+| `cdl_data` | No | `STRING` |  |  |  |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `file_path` | `STRING` | Output produced by the `file_path` socket. |
+| `file_path` | `STRING` |  |
 
-### Practical notes
+---
 
-- The node returns `file_path` (`STRING`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## CDL Import
 
-## ◎ Radiance White Balance
+**Node key:** `RadianceCDLImport`  
+**Menu:** `FXTD STUDIOS/Radiance/Color`  
+**Source:** `nodes/color/cdl.py`  
 
-**Internal key:** `RadianceWhiteBalance`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Color`  
-**Source:** `nodes/color/colorspace.py`
-**Function:** `apply`
-
-### What it does
-
-Adjusts image color, tone, or grading metadata in a production-friendly way.
-
-### When to use it
-
-Use `◎ Radiance White Balance` when the graph reaches the White Balance step in a color workflow.
+Import an ASC CDL (.cdl / .cc / .ccc) file into pipeline metadata.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `image` | Yes | `IMAGE` | - | - |
-| `mode` | Yes | `ENUM: Temperature / Tint, Illuminant Adapt, Manual RGB Gain` | `Temperature / Tint` | - |
-| `preset` | Yes | `ENUM: Manual, Daylight (5500K), Tungsten (3200K), Fluorescent (4200K), Flash (6000K), Shade (7500K)` | `Manual` | - |
-| `temperature` | Yes | `FLOAT` | `6500.0` | - |
-| `tint` | Yes | `FLOAT` | `0.0` | - |
-| `src_illuminant` | Yes | `(list(_ILLUMINANT_XY.keys()), {'default': 'D65'})` | - | - |
-| `dst_illuminant` | Yes | `(list(_ILLUMINANT_XY.keys()), {'default': 'D50'})` | - | - |
-| `gain_r` | Yes | `FLOAT` | `1.0` | - |
-| `gain_g` | Yes | `FLOAT` | `1.0` | - |
-| `gain_b` | Yes | `FLOAT` | `1.0` | - |
-| `strength` | Yes | `FLOAT` | `1.0` | - |
-| `grade_info_in` | Optional | `STRING` | - | - |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `file_path` | Yes | `STRING` | `grading/shot_01.cdl` |  | Path to a .cdl, .cc, or .ccc file. |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `image` | `IMAGE` | Output produced by the `image` socket. |
-| `grade_info` | `STRING` | Output produced by the `grade_info` socket. |
+| `cdl_data` | `STRING` |  |
+| `slope_r` | `FLOAT` |  |
+| `slope_g` | `FLOAT` |  |
+| `slope_b` | `FLOAT` |  |
+| `offset_r` | `FLOAT` |  |
+| `offset_g` | `FLOAT` |  |
+| `offset_b` | `FLOAT` |  |
+| `power_r` | `FLOAT` |  |
+| `power_g` | `FLOAT` |  |
+| `power_b` | `FLOAT` |  |
+| `saturation` | `FLOAT` |  |
 
-### Practical notes
+---
 
-- The node returns `image` (`IMAGE`), `grade_info` (`STRING`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## ColorLookup
 
-## ◎ Radiance Colorspace Convert
+**Node key:** `RadianceCurves`  
+**Menu:** `FXTD STUDIOS/Radiance/Color`  
+**Source:** `nodes/color/curves.py`  
 
-**Internal key:** `RadianceColorSpaceConvert`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Color`  
-**Source:** `nodes/color/colorspace.py`
-**Function:** `apply`
-
-### What it does
-
-Performs the Radiance operation described by its inputs and outputs in the selected workflow group.
-
-### When to use it
-
-Use `◎ Radiance Colorspace Convert` when the graph reaches the Colorspace Convert step in a color workflow.
+RGB and luminance spline curve grading with customisable control points.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `image` | Yes | `IMAGE` | - | - |
-| `src_space` | Yes | `(cls._COLOR_SPACES, {'default': 'Linear sRGB (D65)'})` | - | - |
-| `dst_space` | Yes | `(cls._COLOR_SPACES, {'default': 'ACEScg'})` | - | - |
-| `direction` | Yes | `ENUM: Forward, Inverse` | `Forward` | - |
-| `strength` | Yes | `FLOAT` | `1.0` | - |
-| `grade_info_in` | Optional | `STRING` | - | - |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `image` | Yes | `IMAGE` |  |  |  |
+| `master` | Yes | `STRING` | `[[0.0,0.0],[0.25,0.25],[0.5,0.5],[0.75,0.75],[1.0,1.0]]` |  |  |
+| `red` | Yes | `STRING` | `[[0.0,0.0],[0.25,0.25],[0.5,0.5],[0.75,0.75],[1.0,1.0]]` |  |  |
+| `green` | Yes | `STRING` | `[[0.0,0.0],[0.25,0.25],[0.5,0.5],[0.75,0.75],[1.0,1.0]]` |  |  |
+| `blue` | Yes | `STRING` | `[[0.0,0.0],[0.25,0.25],[0.5,0.5],[0.75,0.75],[1.0,1.0]]` |  |  |
+| `strength` | Yes | `FLOAT` | `1.0` | 0.0 – 1.0, step 0.01 |  |
+| `grade_info_in` | No | `STRING` |  |  |  |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `image` | `IMAGE` | Output produced by the `image` socket. |
-| `grade_info` | `STRING` | Output produced by the `grade_info` socket. |
+| `image` | `IMAGE` |  |
+| `grade_info` | `STRING` |  |
 
-### Practical notes
+---
 
-- The node returns `image` (`IMAGE`), `grade_info` (`STRING`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## Grade
 
-## ◎ Radiance ACES Transform
+**Node key:** `RadianceGrade`  
+**Menu:** `FXTD STUDIOS/Radiance/Color`  
+**Source:** `nodes/color/grade.py`  
 
-**Internal key:** `RadianceACESTransform`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Color`  
-**Source:** `nodes/color/colorspace.py`
-**Function:** `apply`
-
-### What it does
-
-Performs the Radiance operation described by its inputs and outputs in the selected workflow group.
-
-### When to use it
-
-Use `◎ Radiance ACES Transform` when the graph reaches the ACES Transform step in a color workflow.
+Professional color grading with per-channel Lift/Gamma/Gain/Offset, Contrast, Saturation, cinematic presets, optional grade matching, and JSON preset file loading.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `image` | Yes | `IMAGE` | - | Scene-linear ACEScg image. |
-| `odt` | Yes | `(cls._ODT_OPTIONS, {'default': 'sRGB D65'})` | - | - |
-| `exposure_offset` | Yes | `FLOAT` | `0.0` | - |
-| `peak_nits` | Yes | `FLOAT` | `1000.0` | - |
-| `saturation` | Yes | `FLOAT` | `1.0` | - |
-| `grade_info_in` | Optional | `STRING` | - | - |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `image` | Yes | `IMAGE` |  |  | Input image to grade. |
+| `preset` | Yes | choice of `None (Custom)`, `Cinematic Teal & Orange`, `Bleach Bypass`, `Cross Process`, `Film Noir`, `Vintage Film`, `Cool Blue Hour`, `Golden Hour`, … (+5 more) | `None (Custom)` |  |  |
+| `preset_strength` | Yes | `FLOAT` | `1.0` | 0.0 – 1.0, step 0.05 |  |
+| `reference_image` | No | `IMAGE` |  |  | Optional reference image for automatic grade matching. |
+| `match_strength` | No | `FLOAT` | `1.0` | 0.0 – 1.0, step 0.05 |  |
+| `preset_file` | No | `STRING` | `` |  |  |
+| `lift_r` | No | `FLOAT` | `0.0` | -1.0 – 1.0, step 0.001 |  |
+| `lift_g` | No | `FLOAT` | `0.0` | -1.0 – 1.0, step 0.001 |  |
+| `lift_b` | No | `FLOAT` | `0.0` | -1.0 – 1.0, step 0.001 |  |
+| `gamma_r` | No | `FLOAT` | `1.0` | 0.01 – 5.0, step 0.001 |  |
+| `gamma_g` | No | `FLOAT` | `1.0` | 0.01 – 5.0, step 0.001 |  |
+| `gamma_b` | No | `FLOAT` | `1.0` | 0.01 – 5.0, step 0.001 |  |
+| `gain_r` | No | `FLOAT` | `1.0` | 0.0 – 5.0, step 0.001 |  |
+| `gain_g` | No | `FLOAT` | `1.0` | 0.0 – 5.0, step 0.001 |  |
+| `gain_b` | No | `FLOAT` | `1.0` | 0.0 – 5.0, step 0.001 |  |
+| `offset_r` | No | `FLOAT` | `0.0` | -1.0 – 1.0, step 0.001 |  |
+| `offset_g` | No | `FLOAT` | `0.0` | -1.0 – 1.0, step 0.001 |  |
+| `offset_b` | No | `FLOAT` | `0.0` | -1.0 – 1.0, step 0.001 |  |
+| `contrast` | No | `FLOAT` | `1.0` | 0.0 – 3.0, step 0.01 |  |
+| `pivot` | No | `FLOAT` | `0.5` | 0.0 – 1.0, step 0.01 |  |
+| `saturation` | No | `FLOAT` | `1.0` | 0.0 – 3.0, step 0.01 |  |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `image` | `IMAGE` | Output produced by the `image` socket. |
-| `aces_info` | `STRING` | Output produced by the `aces_info` socket. |
+| `image` | `IMAGE` |  |
+| `grade_info` | `STRING` |  |
 
-### Practical notes
+---
 
-- The node returns `image` (`IMAGE`), `aces_info` (`STRING`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## Grade Match
 
-## ◎ Radiance Hue Curves
+**Node key:** `RadianceGradeMatch`  
+**Menu:** `FXTD STUDIOS/Radiance/Color`  
+**Source:** `nodes/color/grade.py`  
 
-**Internal key:** `RadianceHueCurves`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Color`  
-**Source:** `nodes/color/curves.py`
-**Function:** `apply`
-
-### What it does
-
-Adjusts image color, tone, or grading metadata in a production-friendly way.
-
-### When to use it
-
-Use `◎ Radiance Hue Curves` when the graph reaches the Hue Curves step in a color workflow.
+Match source image color statistics to a reference image using LAB mean/std matching.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `image` | Yes | `IMAGE` | - | - |
-| `mode` | Yes | `ENUM: Hue vs Hue, Hue vs Saturation, Hue vs Luminance` | `Hue vs Hue` | - |
-| `control_points` | Yes | `STRING` | `[[0.0,0.0],[0.167,0.0],[0.333,0.0],[0.5,0.0],[0.667,0.0],[0.833,0.0],[1.0,0.0]]` | - |
-| `strength` | Yes | `FLOAT` | `1.0` | - |
-| `grade_info` | Optional | `STRING` | - | - |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `source` | Yes | `IMAGE` |  |  | Image to be matched. |
+| `reference` | Yes | `IMAGE` |  |  | Target image. |
+| `strength` | Yes | `FLOAT` | `1.0` | 0.0 – 1.0, step 0.05 |  |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `image` | `IMAGE` | Output produced by the `image` socket. |
+| `matched_image` | `IMAGE` |  |
+| `grade_info` | `STRING` |  |
 
-### Practical notes
+---
 
-- The node returns `image` (`IMAGE`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## HueCorrect
 
-## ◎ Radiance Curves
+**Node key:** `RadianceHueCurves`  
+**Menu:** `FXTD STUDIOS/Radiance/Color`  
+**Source:** `nodes/color/curves.py`  
 
-**Internal key:** `RadianceCurves`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Color`  
-**Source:** `nodes/color/curves.py`
-**Function:** `apply`
-
-### What it does
-
-Adjusts image color, tone, or grading metadata in a production-friendly way.
-
-### When to use it
-
-Use `◎ Radiance Curves` when the graph reaches the Curves step in a color workflow.
+Per-hue selective colour adjustment using spline curves.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `image` | Yes | `IMAGE` | - | - |
-| `master` | Yes | `('STRING', {'default': _default_pts, 'multiline': False})` | - | - |
-| `red` | Yes | `('STRING', {'default': _default_pts, 'multiline': False})` | - | - |
-| `green` | Yes | `('STRING', {'default': _default_pts, 'multiline': False})` | - | - |
-| `blue` | Yes | `('STRING', {'default': _default_pts, 'multiline': False})` | - | - |
-| `strength` | Yes | `FLOAT` | `1.0` | - |
-| `grade_info_in` | Optional | `STRING` | - | - |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `image` | Yes | `IMAGE` |  |  |  |
+| `mode` | Yes | choice of `Hue vs Hue`, `Hue vs Saturation`, `Hue vs Luminance` | `Hue vs Hue` |  |  |
+| `control_points` | Yes | `STRING` | `[[0.0,0.0],[0.167,0.0],[0.333,0.0],[0.5,0.0],[0.667,0.0],[0.833,0.0],[1.0,0.0]]` |  |  |
+| `strength` | Yes | `FLOAT` | `1.0` | 0.0 – 2.0, step 0.01 |  |
+| `grade_info` | No | `STRING` |  |  |  |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `image` | `IMAGE` | Output produced by the `image` socket. |
-| `grade_info` | `STRING` | Output produced by the `grade_info` socket. |
+| `image` | `IMAGE` |  |
 
-### Practical notes
+---
 
-- The node returns `image` (`IMAGE`), `grade_info` (`STRING`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## LUT
 
-## ◎ Radiance Grade
+**Node key:** `RadianceLUTApply`  
+**Menu:** `FXTD STUDIOS/Radiance/Color`  
+**Source:** `color/lut.py`  
 
-**Internal key:** `RadianceGrade`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Color`  
-**Source:** `nodes/color/grade.py`
-**Function:** `grade`
-
-### What it does
-
-Adjusts image color, tone, or grading metadata in a production-friendly way.
-
-### When to use it
-
-Use `◎ Radiance Grade` when the graph reaches the Grade step in a color workflow.
+Apply a 3D LUT (.cube) with trilinear or tetrahedral interpolation. Supports log-space input and HDR (unclamped) output.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `image` | Yes | `IMAGE` | - | Input image to grade. |
-| `preset` | Yes | `(preset_names, {'default': 'None (Custom)'})` | - | - |
-| `preset_strength` | Yes | `FLOAT` | `1.0` | - |
-| `reference_image` | Optional | `IMAGE` | - | Optional reference image for automatic grade matching. |
-| `match_strength` | Optional | `FLOAT` | `1.0` | - |
-| `preset_file` | Optional | `STRING` | `` | - |
-| `lift_r` | Optional | `FLOAT` | `0.0` | - |
-| `lift_g` | Optional | `FLOAT` | `0.0` | - |
-| `lift_b` | Optional | `FLOAT` | `0.0` | - |
-| `gamma_r` | Optional | `FLOAT` | `1.0` | - |
-| `gamma_g` | Optional | `FLOAT` | `1.0` | - |
-| `gamma_b` | Optional | `FLOAT` | `1.0` | - |
-| `gain_r` | Optional | `FLOAT` | `1.0` | - |
-| `gain_g` | Optional | `FLOAT` | `1.0` | - |
-| `gain_b` | Optional | `FLOAT` | `1.0` | - |
-| `offset_r` | Optional | `FLOAT` | `0.0` | - |
-| `offset_g` | Optional | `FLOAT` | `0.0` | - |
-| `offset_b` | Optional | `FLOAT` | `0.0` | - |
-| `contrast` | Optional | `FLOAT` | `1.0` | - |
-| `pivot` | Optional | `FLOAT` | `0.5` | - |
-| `saturation` | Optional | `FLOAT` | `1.0` | - |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `image` | Yes | `IMAGE` |  |  |  |
+| `lut_file` | Yes | choice of `No LUTs found` | `No LUTs found` |  |  |
+| `strength` | Yes | `FLOAT` | `1.0` | 0.0 – 1.0, step 0.01 |  |
+| `log_space` | Yes | `BOOLEAN` | `False` |  |  |
+| `log_encoding` | No | choice of `Log10`, `Log2`, `Natural Log (Ln)` | `Log10` |  |  |
+| `clamp_output` | No | `BOOLEAN` | `False` |  | Clamp to 0-1. Disable for HDR. |
+| `interpolation` | No | choice of `Trilinear`, `Tetrahedral` | `Trilinear` |  | Tetrahedral is more accurate but slightly slower |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `image` | `IMAGE` | Output produced by the `image` socket. |
-| `grade_info` | `STRING` | Output produced by the `grade_info` socket. |
+| `image` | `IMAGE` |  |
 
-### Practical notes
+---
 
-- The node returns `image` (`IMAGE`), `grade_info` (`STRING`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## OCIO ColorSpace
 
-## ◎ Radiance Apply Grade Info
+**Node key:** `RadianceColorSpaceConvert`  
+**Menu:** `FXTD STUDIOS/Radiance/Color`  
+**Source:** `nodes/color/colorspace.py`  
 
-**Internal key:** `RadianceApplyGradeInfo`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Color`  
-**Source:** `nodes/color/grade.py`
-**Function:** `apply`
-
-### What it does
-
-Adjusts image color, tone, or grading metadata in a production-friendly way.
-
-### When to use it
-
-Use `◎ Radiance Apply Grade Info` when the graph reaches the Apply Grade Info step in a color workflow.
+Convert images between named colour spaces.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `image` | Yes | `IMAGE` | - | - |
-| `grade_info` | Yes | `STRING` | - | - |
-| `strength` | Optional | `FLOAT` | `1.0` | - |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `image` | Yes | `IMAGE` |  |  |  |
+| `src_space` | Yes | choice of `Linear sRGB (D65)`, `ACEScg`, `ACEScc`, `ACEScct`, `sRGB (OETF encoded)`, `Rec.709 (OETF encoded)`, `Rec.709 / BT.1886`, `LogC3 (ARRI EI800)`, … (+8 more) | `Linear sRGB (D65)` |  |  |
+| `dst_space` | Yes | choice of `Linear sRGB (D65)`, `ACEScg`, `ACEScc`, `ACEScct`, `sRGB (OETF encoded)`, `Rec.709 (OETF encoded)`, `Rec.709 / BT.1886`, `LogC3 (ARRI EI800)`, … (+8 more) | `ACEScg` |  |  |
+| `direction` | Yes | choice of `Forward`, `Inverse` | `Forward` |  |  |
+| `strength` | Yes | `FLOAT` | `1.0` | 0.0 – 1.0, step 0.01 |  |
+| `grade_info_in` | No | `STRING` |  |  |  |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `image` | `IMAGE` | Output produced by the `image` socket. |
-| `grade_info` | `STRING` | Output produced by the `grade_info` socket. |
+| `image` | `IMAGE` |  |
+| `grade_info` | `STRING` |  |
 
-### Practical notes
+---
 
-- The node returns `image` (`IMAGE`), `grade_info` (`STRING`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## OCIO Context
 
-## ◎ Radiance Grade Match
+**Node key:** `RadianceOCIOContext`  
+**Menu:** `FXTD STUDIOS/Radiance/Color`  
+**Source:** `nodes/color/ocio.py`  
 
-**Internal key:** `RadianceGradeMatch`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Color`  
-**Source:** `nodes/color/grade.py`
-**Function:** `match`
-
-### What it does
-
-Adjusts image color, tone, or grading metadata in a production-friendly way.
-
-### When to use it
-
-Use `◎ Radiance Grade Match` when the graph reaches the Grade Match step in a color workflow.
+Set OpenColorIO context variables for environment-aware transforms.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `source` | Yes | `IMAGE` | - | Image to be matched. |
-| `reference` | Yes | `IMAGE` | - | Target image. |
-| `strength` | Yes | `FLOAT` | `1.0` | - |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `config_path` | Yes | `STRING` | `C:/ACES/config.ocio` |  |  |
+| `working_space` | Yes | `STRING` | `ACES - ACEScg` |  |  |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `matched_image` | `IMAGE` | Output produced by the `matched_image` socket. |
-| `grade_info` | `STRING` | Output produced by the `grade_info` socket. |
+| `ocio_context` | `RADIANCE_OCIO` |  |
 
-### Practical notes
+---
 
-- The node returns `matched_image` (`IMAGE`), `grade_info` (`STRING`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## RadianceLUTBlend
 
-## ◎ Radiance OCIO Context
+**Node key:** `RadianceLUTBlend`  
+**Menu:** `FXTD STUDIOS/Radiance/Color`  
+**Source:** `color/lut.py`  
 
-**Internal key:** `RadianceOCIOContext`  
-**Category:** `FXTD STUDIOS/Radiance/◎ Color`  
-**Source:** `nodes/color/ocio.py`
-**Function:** `set_context`
-
-### What it does
-
-Performs the Radiance operation described by its inputs and outputs in the selected workflow group.
-
-### When to use it
-
-Use `◎ Radiance OCIO Context` when the graph reaches the OCIO Context step in a color workflow.
+Blend two LUTs with various blend modes for creative color grading.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `config_path` | Yes | `STRING` | `C:/ACES/config.ocio` | - |
-| `working_space` | Yes | `STRING` | `ACES - ACEScg` | - |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `image` | Yes | `IMAGE` |  |  |  |
+| `lut_a` | Yes | choice of `No LUTs found` | `No LUTs found` |  |  |
+| `lut_b` | Yes | choice of `No LUTs found` | `No LUTs found` |  |  |
+| `blend_factor` | Yes | `FLOAT` | `0.5` | 0.0 – 1.0, step 0.01 | 0.0 = LUT A only, 1.0 = LUT B only |
+| `blend_mode` | Yes | choice of `Linear`, `Luminosity`, `Saturation`, `Hue` | `Linear` |  |  |
+| `strength` | No | `FLOAT` | `1.0` | 0.0 – 1.0, step 0.01 |  |
+| `clamp_output` | No | `BOOLEAN` | `False` |  | Clamp to 0-1. Disable for HDR. |
+| `log_space` | No | `BOOLEAN` | `False` |  | Decode log-encoded input before applying LUTs. |
+| `log_encoding` | No | choice of `Log10`, `Log2`, `Natural Log (Ln)` | `Log10` |  |  |
+| `interpolation` | No | choice of `Trilinear`, `Tetrahedral` | `Trilinear` |  |  |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `ocio_context` | `RADIANCE_OCIO` | Output produced by the `ocio_context` socket. |
+| `image` | `IMAGE` |  |
 
-### Practical notes
+---
 
-- The node returns `ocio_context` (`RADIANCE_OCIO`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+## White Balance
 
-## ◎ Radiance QC
+**Node key:** `RadianceWhiteBalance`  
+**Menu:** `FXTD STUDIOS/Radiance/Color`  
+**Source:** `nodes/color/colorspace.py`  
 
-**Internal key:** `RadianceQC`  
-**Category:** `FXTD STUDIOS/Radiance/◎ QC & Debug`  
-**Source:** `nodes/color/qc.py`
-**Function:** `run`
-
-### What it does
-
-Analyzes the image or workflow state and returns reports that help catch delivery problems.
-
-### When to use it
-
-Use `◎ Radiance QC` before final output or when debugging an unexpected result.
+Adjust white balance using a reference neutral or colour temperature.
 
 ### Inputs
 
-| Input | Required | Type | Default | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `mode` | Yes | `(cls.MODES, {'default': 'Analyze'})` | - | - |
-| `image` | Optional | `IMAGE` | - | - |
-| `black_threshold` | Optional | `FLOAT` | `0.0` | - |
-| `white_threshold` | Optional | `FLOAT` | `1.0` | - |
-| `overlay_opacity` | Optional | `FLOAT` | `0.5` | - |
-| `banding_threshold` | Optional | `FLOAT` | `5.0` | - |
-| `enable_focus_check` | Optional | `BOOLEAN` | `False` | - |
-| `enable_artifacts_check` | Optional | `BOOLEAN` | `True` | - |
-| `enable_noise_check` | Optional | `BOOLEAN` | `True` | - |
-| `fail_on_errors` | Optional | `BOOLEAN` | `False` | - |
-| `qc_report_json` | Optional | `STRING` | - | - |
-| `output_path` | Optional | `STRING` | `` | - |
-| `filename_prefix` | Optional | `STRING` | `qc_report` | - |
-| `export_format` | Optional | `ENUM: json, csv, html, all` | `json` | - |
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `image` | Yes | `IMAGE` |  |  |  |
+| `mode` | Yes | choice of `Temperature / Tint`, `Illuminant Adapt`, `Manual RGB Gain` | `Temperature / Tint` |  |  |
+| `preset` | Yes | choice of `Manual`, `Daylight (5500K)`, `Tungsten (3200K)`, `Fluorescent (4200K)`, `Flash (6000K)`, `Shade (7500K)` | `Manual` |  |  |
+| `temperature` | Yes | `FLOAT` | `6500.0` | 1667.0 – 25000.0, step 50.0 |  |
+| `tint` | Yes | `FLOAT` | `0.0` | -1.0 – 1.0, step 0.005 |  |
+| `src_illuminant` | Yes | choice of `D50`, `D55`, `D60`, `D65`, `D75`, `A`, `B`, `C`, … (+1 more) | `D65` |  |  |
+| `dst_illuminant` | Yes | choice of `D50`, `D55`, `D60`, `D65`, `D75`, `A`, `B`, `C`, … (+1 more) | `D50` |  |  |
+| `gain_r` | Yes | `FLOAT` | `1.0` | 0.0 – 4.0, step 0.001 |  |
+| `gain_g` | Yes | `FLOAT` | `1.0` | 0.0 – 4.0, step 0.001 |  |
+| `gain_b` | Yes | `FLOAT` | `1.0` | 0.0 – 4.0, step 0.001 |  |
+| `strength` | Yes | `FLOAT` | `1.0` | 0.0 – 1.0, step 0.01 |  |
+| `grade_info_in` | No | `STRING` |  |  |  |
 
 ### Outputs
 
 | Output | Type | Description |
 | :--- | :--- | :--- |
-| `image` | `IMAGE` | Output produced by the `image` socket. |
-| `text_report` | `STRING` | Output produced by the `text_report` socket. |
-| `json_report` | `STRING` | Output produced by the `json_report` socket. |
-| `status` | `STRING` | Output produced by the `status` socket. |
+| `image` | `IMAGE` |  |
+| `grade_info` | `STRING` |  |
 
-### Practical notes
-
-- The node returns `image` (`IMAGE`), `text_report` (`STRING`), `json_report` (`STRING`), `status` (`STRING`).
-- If a result looks wrong, add a viewer, QC, or diagnostic node immediately after this node so the problem is isolated close to its source.
+---
