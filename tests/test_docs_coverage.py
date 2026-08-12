@@ -152,12 +152,28 @@ def test_the_generated_reference_is_up_to_date():
     spec.loader.exec_module(mod)
 
     stale = []
+    evidence = []
     for rel, text in sorted(mod.build(radiance).items()):
         path = _ROOT / rel
-        if not path.exists() or path.read_text(encoding="utf-8") != text:
+        if not path.exists():
             stale.append(rel)
+            evidence.append(f"{rel}: file does not exist")
+        elif path.read_text(encoding="utf-8") != text:
+            stale.append(rel)
+            # AUDIT (2026-08): a bare filename told us nothing when CI's
+            # regeneration differed from a file that every local environment
+            # reproduced byte-for-byte. Carry the actual difference in the
+            # failure so the divergent environment identifies itself.
+            import difflib
+            diff = list(difflib.unified_diff(
+                path.read_text(encoding="utf-8").splitlines(),
+                text.splitlines(),
+                f"{rel} (committed)", f"{rel} (regenerated here)",
+                lineterm="", n=1))
+            evidence.append("\n".join(diff[:60]))
     assert not stale, (
-        f"{stale} are out of date. Run: python tools/generate_docs.py --stubs"
+        f"{stale} are out of date. Run: python tools/generate_docs.py --stubs\n"
+        "First divergence:\n" + "\n\n".join(evidence)
     )
 
 
