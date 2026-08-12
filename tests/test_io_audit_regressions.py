@@ -48,6 +48,58 @@ class TestTiffDepthHonesty:
                          format="IMG │ TIFF (16-bit)", overwrite=True)
 
 
+class TestWritePathPrediction:
+    """/radiance/media/resolve_write drives the Write node's on-node path
+    readout. If prediction drifts from what write() actually produces, the UI
+    lies about the destination -- these tests write real files and compare."""
+
+    def test_img_prediction_matches_write(self, tmp_path):
+        writer = nodes_io.RadianceWrite()
+        pred = nodes_io._predict_write_target(
+            output_path=str(tmp_path), format="IMG │ EXR (16-bit half)",
+            filename="shot", version=3, overwrite=True)
+        writer.write(image=torch.rand(1, 8, 8, 3), output_path=str(tmp_path),
+                     format="IMG │ EXR (16-bit half)", filename="shot",
+                     version=3, overwrite=True)
+        produced = [str(p) for p in tmp_path.glob("*.exr")]
+        assert produced == [pred["path"]]
+        assert "frame 1 only" in pred["note"]
+
+    def test_video_prediction_matches_write(self, tmp_path):
+        import shutil
+        if shutil.which("ffmpeg") is None:
+            pytest.skip("needs ffmpeg")
+        writer = nodes_io.RadianceWrite()
+        base = str(tmp_path / "clip")
+        pred = nodes_io._predict_write_target(
+            output_path=base, format="VID │ MP4 (H.264)", overwrite=True)
+        writer.write(image=torch.rand(4, 48, 48, 3), output_path=base,
+                     format="VID │ MP4 (H.264)", fps=24.0, overwrite=True)
+        produced = [str(p) for p in tmp_path.glob("*.mp4")]
+        assert produced == [pred["path"]]
+
+    def test_seq_prediction_matches_write(self, tmp_path):
+        writer = nodes_io.RadianceWrite()
+        base = str(tmp_path / "plate")
+        pred = nodes_io._predict_write_target(
+            output_path=base, format="SEQ │ EXR (32-bit float)",
+            start_frame=1001, frame_padding=4, overwrite=True)
+        writer.write(image=torch.rand(2, 8, 8, 3), output_path=base,
+                     format="SEQ │ EXR (32-bit float)", start_frame=1001,
+                     frame_padding=4, overwrite=True)
+        first = pred["path"].replace("####", "1001")
+        import os
+        assert os.path.isfile(first), (
+            f"predicted pattern {pred['path']} does not match written files: "
+            f"{sorted(os.listdir(tmp_path / 'plate'))}")
+
+    def test_overwrite_defaults_off(self):
+        spec = nodes_io.RadianceWrite.INPUT_TYPES()
+        assert spec["optional"]["overwrite"][1]["default"] is False, (
+            "overwrite must default to OFF: destroying an existing file has to "
+            "be an explicit choice (2026-08 audit)")
+
+
 class TestSequenceWindowing:
     """Directory/glob reads were sliced by list index with frame-number
     defaults (files[1001:99999]) and always came back empty."""

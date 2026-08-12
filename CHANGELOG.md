@@ -10,6 +10,44 @@ conversions previously did nothing (see below). Re-check affected masters.
 16/32-bit TIFF writes now require `tifffile` (`pip install tifffile`) instead
 of silently writing 8-bit.
 
+### Added
+
+- **Inline video preview on Read.** MP4/MOV/WebM the browser can decode play
+  directly on the node (`/radiance/media/preview`, with seeking); ProRes,
+  DNxHR and other production codecs fall back to a first-frame poster
+  (`/radiance/media/poster`). Same allowed-roots policy as the info routes.
+- **Resolved-path readout on Write.** The node now shows exactly what will
+  land on disk — output_path + filename + version + format combined by the
+  same Python logic that writes, via `/radiance/media/resolve_write` — plus
+  a note line ("frame 1 only" for IMG formats with a batch, "DNxHR is written
+  into an MXF container", sequence start frame). A contract test writes real
+  files and fails if prediction and reality drift.
+
+### Viewer
+
+- **VRAM frame cache now evicts by bytes, not just frame count.** The LRU
+  held 4–24 frames regardless of size — 400 MB at 1080p but ~7 GB at 8K,
+  an out-of-memory long before the count limit was reached. Eviction now
+  also respects a byte budget (0.5–3 GB, scaled to machine memory).
+- **Frames beyond the GPU's texture limit fail loudly, before upload.**
+  8K DCI (8192 px) sits exactly on many GPUs' `MAX_TEXTURE_SIZE`; anything
+  over it used to produce a black frame and a cryptic GL error code. The
+  viewer now reports the frame size, the GPU's limit, and that `proxy_scale`
+  is the way to view it — full-resolution data is unaffected.
+- Removed stale `MAX_BATCH_SIZE`/`MAX_IMAGE_DIMENSION` duplicates from
+  `hdr/io.py`; `viewer_utils.py` (9999 frames / 16384 px) is the single
+  source.
+
+### Changed
+
+- **`overwrite` on Write now defaults to OFF.** Destroying an existing file
+  must be an explicit choice; when off, a unique suffix is appended instead.
+- Read greys out `color_space` when `raw (no transform)` is selected — the
+  reader ignores it, and the UI now says so instead of looking live.
+- Write hides `broadcast_safe` for float formats (EXR/HDR/32f TIFF/DPX),
+  matching the Python side which already refuses to legal-range-clamp them;
+  `version` displays as `v0001` alongside the number.
+
 ### Fixed
 
 - **Colour Space Convert did real conversions for only 6 of its 16 spaces.**

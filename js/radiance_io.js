@@ -259,6 +259,62 @@ app.registerExtension({
 
 				node.__radianceReadInfo = "";
 
+				// ── Inline video preview ────────────────────────────────
+				// A real <video> for what the browser can decode (H.264/H.265
+				// MP4 & MOV, WebM); when the codec is beyond it (ProRes,
+				// DNxHR, MXF) the element's error event swaps in a poster
+				// JPEG of the first frame from /radiance/media/poster.
+				const previewBox = document.createElement("div");
+				previewBox.style.cssText =
+					"width:100%;aspect-ratio:16/9;background:#07070a;" +
+					"border-radius:8px;overflow:hidden;display:none;";
+				const videoEl = document.createElement("video");
+				videoEl.muted = true;
+				videoEl.loop = true;
+				videoEl.controls = true;
+				videoEl.playsInline = true;
+				videoEl.preload = "metadata";
+				videoEl.style.cssText = "width:100%;height:100%;object-fit:contain;";
+				const posterEl = document.createElement("img");
+				posterEl.style.cssText = "width:100%;height:100%;object-fit:contain;display:none;";
+				previewBox.appendChild(videoEl);
+				previewBox.appendChild(posterEl);
+				videoEl.addEventListener("error", () => {
+					// Browser cannot decode this codec; fall back to a still.
+					if (!node.__radiancePreviewPath) return;
+					videoEl.style.display = "none";
+					posterEl.style.display = "block";
+					posterEl.src = `/radiance/media/poster?path=${encodeURIComponent(node.__radiancePreviewPath)}`;
+				});
+				posterEl.addEventListener("error", () => {
+					previewBox.style.display = "none";   // nothing previewable
+				});
+				const previewWidget = node.addDOMWidget
+					? node.addDOMWidget("video_preview", "custom", previewBox, { serialize: false })
+					: null;
+
+				const setPreview = (p, isVid) => {
+					if (!previewWidget) return;
+					if (!isVid || !p) {
+						if (node.__radiancePreviewPath) {
+							node.__radiancePreviewPath = "";
+							videoEl.removeAttribute("src");
+							videoEl.load?.();
+							posterEl.removeAttribute("src");
+							previewBox.style.display = "none";
+							refreshNodeSize(node);
+						}
+						return;
+					}
+					if (node.__radiancePreviewPath === p) return;
+					node.__radiancePreviewPath = p;
+					posterEl.style.display = "none";
+					videoEl.style.display = "block";
+					previewBox.style.display = "block";
+					videoEl.src = `/radiance/media/preview?path=${encodeURIComponent(p)}`;
+					refreshNodeSize(node);
+				};
+
 				const applyVisibility = () => {
 					const chosen = (mediaW?.value || "Auto");
 					const kind = chosen === "Auto" ? kindOf(resolvedPath()) : chosen.toLowerCase();
@@ -276,6 +332,18 @@ app.registerExtension({
 					// Premultiplied is only meaningful where an alpha can exist.
 					setWidgetVisible(get("premultiplied"), kind !== "video" || isExr, node);
 					setWidgetVisible(reloadWidget, false, node);
+
+					// raw = "no transform": the colour-space dropdown is ignored
+					// by the Python reader, so say so instead of looking live.
+					const rawW = get("raw");
+					const csW = get("color_space");
+					if (csW) {
+						const isRaw = (rawW?.value || "") === "raw (no transform)";
+						csW.disabled = isRaw;
+						csW.label = isRaw ? "color_space (ignored — raw)" : "color_space";
+					}
+
+					setPreview(resolvedPath(), isVid);
 				};
 
 				let pending = null;
@@ -312,7 +380,7 @@ app.registerExtension({
 				};
 				node.__radianceReadRefresh = refresh;
 
-				for (const w of [browseW, pathW, mediaW]) {
+				for (const w of [browseW, pathW, mediaW, get("raw")]) {
 					if (!w) continue;
 					const prev = w.callback;
 					w.callback = function (...args) {
@@ -397,6 +465,43 @@ app.registerExtension({
 				const startFrameWidget   = node.widgets.find(w => w.name === "start_frame");
 				const framePaddingWidget = node.widgets.find(w => w.name === "frame_padding");
 				const audioSourceWidget  = node.widgets.find(w => w.name === "audio_source");
+				const broadcastWidget    = node.widgets.find(w => w.name === "broadcast_safe");
+				const versionWidget      = node.widgets.find(w => w.name === "version");
+				const outputPathWidget   = node.widgets.find(w => w.name === "output_path");
+				const filenameWidget     = node.widgets.find(w => w.name === "filename");
+				const overwriteWidget    = node.widgets.find(w => w.name === "overwrite");
+
+				// ── Resolved-path readout ───────────────────────────────
+				// output_path + filename + version + format combine invisibly;
+				// this asks the Python side (the same logic that will write)
+				// what will actually land on disk, and draws it on the node.
+				let resolvePending = null;
+				const refreshResolvedPath = () => {
+					clearTimeout(resolvePending);
+					resolvePending = setTimeout(async () => {
+						try {
+							const q = new URLSearchParams({
+								output_path: outputPathWidget?.value || "",
+								format: formatWidget?.value || "",
+								filename: filenameWidget?.value || "",
+								version: String(versionWidget?.value ?? 1),
+								start_frame: String(startFrameWidget?.value ?? 1001),
+								frame_padding: String(framePaddingWidget?.value ?? 4),
+								overwrite: String(!!overwriteWidget?.value),
+							});
+							const res = await fetch(`/radiance/media/resolve_write?${q}`);
+							if (res.ok) {
+								const data = await res.json();
+								node.__radianceWriteTarget = data.path || "";
+								node.__radianceWriteNote = data.note || "";
+							}
+						} catch (e) {
+							node.__radianceWriteTarget = "";
+							node.__radianceWriteNote = "";
+						}
+						node.setDirtyCanvas(true);
+					}, 150);
+				};
 
 				const updateWidgets = () => {
 					const fmt = formatWidget ? formatWidget.value : "";
@@ -404,6 +509,11 @@ app.registerExtension({
 					const isSeq = fmt.startsWith("SEQ");
 					const isVid = fmt.startsWith("VID");
 					const isExr = fmt.includes("EXR");
+					// Legal-range clamping is an 8-bit/video concept; the Python
+					// side ignores broadcast_safe for float formats (EXR, HDR,
+					// 32-bit float TIFF, DPX), so do not show it for them.
+					const isFloatFmt = isExr || fmt.includes("HDR") ||
+						fmt.includes("32-bit float") || fmt.includes("DPX");
 					// quality only actually does something for video CRF and
 					// JPEG/WEBP images (nodes_io.py::_save_pil_image) -- every
 					// other image/sequence format ignores it entirely.
@@ -414,6 +524,10 @@ app.registerExtension({
 							: isJpgWebp ? "quality (JPEG/WEBP)"
 							: "quality";
 					}
+					if (versionWidget) {
+						const v = Math.max(0, versionWidget.value | 0);
+						versionWidget.label = `version  (v${String(v).padStart(4, "0")})`;
+					}
 
 					setWidgetVisible(fpsWidget,          isVid, node);
 					setWidgetVisible(qualityWidget,       isVid || isJpgWebp, node);
@@ -421,8 +535,22 @@ app.registerExtension({
 					setWidgetVisible(startFrameWidget,    isSeq, node);
 					setWidgetVisible(framePaddingWidget,  isSeq, node);
 					setWidgetVisible(audioSourceWidget,   isVid, node);
+					setWidgetVisible(broadcastWidget,     !isFloatFmt, node);
 
 					refreshNodeSize(node);
+
+					// updateWidgets is also polled every 250 ms; only re-ask
+					// the server when an ingredient of the path changed.
+					const sig = [
+						outputPathWidget?.value, filenameWidget?.value,
+						versionWidget?.value, fmt,
+						startFrameWidget?.value, framePaddingWidget?.value,
+						overwriteWidget?.value,
+					].join(" ");
+					if (sig !== node.__radianceWriteSig) {
+						node.__radianceWriteSig = sig;
+						refreshResolvedPath();
+					}
 				};
 
 				if (formatWidget) {
@@ -448,6 +576,37 @@ app.registerExtension({
 
 				setTimeout(updateWidgets, 150);
 				return r;
+			};
+
+			// The resolved-path readout, drawn where Nuke's Write shows its
+			// file field: exactly what will land on disk, plus one note line.
+			const onDrawForegroundWrite = nodeType.prototype.onDrawForeground;
+			nodeType.prototype.onDrawForeground = function (ctx) {
+				onDrawForegroundWrite?.apply(this, arguments);
+				if (this.flags?.collapsed || !this.__radianceWriteTarget) return;
+				ctx.save();
+				ctx.font = "11px monospace";
+				ctx.textAlign = "left";
+				const max = Math.max(40, this.size[0] - 20);
+				const fit = (t) => {
+					let s = t;
+					// Elide from the LEFT: the tail of a path is the part that matters.
+					while (s.length > 8 && ctx.measureText("…" + s).width > max) {
+						s = s.slice(2);
+					}
+					return s === t ? t : "…" + s;
+				};
+				ctx.fillStyle = "#8fd18f";
+				ctx.fillText(fit(this.__radianceWriteTarget), 10, this.size[1] - 18);
+				if (this.__radianceWriteNote) {
+					ctx.fillStyle = "#98a4b8";
+					let note = this.__radianceWriteNote;
+					while (note.length > 8 && ctx.measureText(note).width > max) {
+						note = note.slice(0, -2);
+					}
+					ctx.fillText(note, 10, this.size[1] - 5);
+				}
+				ctx.restore();
 			};
 
 			// Re-apply after a saved workflow restores this node — onNodeCreated
