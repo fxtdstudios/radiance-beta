@@ -23,6 +23,22 @@ of silently writing 8-bit.
   into an MXF container", sequence start frame). A contract test writes real
   files and fails if prediction and reality drift.
 
+### HDR family
+
+- **SDR to HDR Expand: `smoothness` did nothing.** The feathering mask was
+  computed and then never applied — a dead control since the node shipped.
+  It now feathers the expansion onset as its tooltip promises.
+- **SDR to HDR Prepare: the feathered inpainting mask drifted up-left** by
+  ~2× the feather radius (32 px at the default 16) with dark bands on the
+  right/bottom — the blur loop re-padded asymmetrically after passes 2–3.
+  The AI was being guided to repair pixels offset from the actual clipped
+  highlights. Symmetric per-pass padding; centroid pinned by test.
+- **Fast-VAE tiled decode: tiles were butt-joined.** Each tile decoded with
+  overlap context but pasted hard against its neighbour; VAE decoders are
+  not shift-invariant at their borders, so seams showed on flat gradients.
+  Tiles now accumulate under a raised-cosine weight and normalise — a test
+  proves tiled output equals untiled output exactly.
+
 ### Viewer
 
 - **VRAM frame cache now evicts by bytes, not just frame count.** The LRU
