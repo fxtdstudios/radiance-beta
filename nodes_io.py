@@ -1996,8 +1996,11 @@ class RadianceWrite:
                 "tooltip": "Clamp output to broadcast-legal range (16–235 luma) before saving.",
             }),
             "overwrite": ("BOOLEAN", {
-                "default": True,
-                "tooltip": "Overwrite existing files.  When disabled, a unique suffix is appended.",
+                # AUDIT-UX (2026-08): default was True. Destroying an existing
+                # file must be an explicit choice; with versioning built in and
+                # a unique-suffix fallback, the safe default costs nothing.
+                "default": False,
+                "tooltip": "Overwrite existing files.  When disabled (default), a unique suffix is appended instead of destroying the existing file.",
             }),
             "proxy_scale": ("FLOAT", {
                 "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
@@ -2765,7 +2768,156 @@ def register_read_routes():
         except Exception as exc:
             return web.json_response({"error": str(exc)}, status=200)
 
+    _MIME = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime",
+             ".mkv": "video/x-matroska", ".webm": "video/webm", ".avi": "video/x-msvideo"}
+
+    @PromptServer.instance.routes.get("/radiance/media/preview")
+    async def read_preview_endpoint(request):
+        """Stream a video file for the node's inline <video> preview.
+
+        FileResponse handles HTTP Range requests, so the browser can seek.
+        Whether the browser can DECODE it is its own problem -- H.264 MP4/MOV
+        will play; ProRes/DNxHR will fire the <video> element's error event,
+        and the frontend falls back to /radiance/media/poster.
+        """
+        path, error = _resolve_query_path(request)
+        if error is not None:
+            return error
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in _VID_EXT:
+            return web.json_response({"error": "not a video"}, status=400)
+        return web.FileResponse(
+            path, headers={"Content-Type": _MIME.get(ext, "application/octet-stream")})
+
+    @PromptServer.instance.routes.get("/radiance/media/poster")
+    async def read_poster_endpoint(request):
+        """First frame of a video as JPEG -- the preview for codecs the
+        browser cannot decode (ProRes, DNxHR, MXF...). Cached by mtime."""
+        path, error = _resolve_query_path(request)
+        if error is not None:
+            return error
+        if os.path.splitext(path)[1].lower() not in _VID_EXT:
+            return web.json_response({"error": "not a video"}, status=400)
+        try:
+            import hashlib
+            import tempfile
+            key = hashlib.sha256(
+                f"{os.path.realpath(path)}:{os.path.getmtime(path)}".encode()
+            ).hexdigest()[:24]
+            cache = os.path.join(tempfile.gettempdir(), f"radiance_poster_{key}.jpg")
+            if not os.path.isfile(cache):
+                import cv2  # type: ignore
+                cap = cv2.VideoCapture(path)
+                ok, frame = cap.read()
+                cap.release()
+                if not ok or frame is None:
+                    return web.json_response({"error": "cannot decode first frame"},
+                                             status=415)
+                h, w = frame.shape[:2]
+                if max(h, w) > 1024:            # poster, not a plate
+                    s = 1024.0 / max(h, w)
+                    frame = cv2.resize(frame, (int(w * s), int(h * s)))
+                cv2.imwrite(cache, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            return web.FileResponse(cache, headers={"Content-Type": "image/jpeg"})
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+    @PromptServer.instance.routes.get("/radiance/media/resolve_write")
+    async def resolve_write_endpoint(request):
+        """Predict RadianceWrite's output path for the node's UI readout.
+
+        Pure string computation -- no filesystem access, no directory
+        creation, so it is not a file-existence oracle and needs no root
+        check.
+        """
+        q = request.query
+        try:
+            prediction = _predict_write_target(
+                output_path=(q.get("output_path") or "").strip(),
+                format=(q.get("format") or "").strip(),
+                filename=(q.get("filename") or "").strip(),
+                version=int(q.get("version") or 1),
+                start_frame=int(q.get("start_frame") or 1001),
+                frame_padding=int(q.get("frame_padding") or 4),
+                overwrite=(q.get("overwrite", "false").lower() in ("1", "true")),
+            )
+            return web.json_response(prediction)
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=200)
+
     log.debug("[Radiance/Read] HTTP routes registered: /radiance/media/*")
+
+
+def _predict_write_target(
+    output_path: str,
+    format: str,
+    filename: str = "",
+    version: int = 1,
+    start_frame: int = 1001,
+    frame_padding: int = 4,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    """Predict the path RadianceWrite will produce, for the node's UI readout.
+
+    Mirrors RadianceWrite.write()/_dispatch() path construction exactly --
+    tests/test_io_audit_regressions.py::TestWritePathPrediction writes real
+    files and fails if this drifts from what actually lands on disk. Pure
+    string computation: nothing is created or stat'd.
+    """
+    if not output_path:
+        return {"path": "", "note": "set output_path"}
+
+    base = output_path
+    if filename.strip():
+        base = str(Path(output_path) / f"{filename.strip()}_v{version:04d}")
+
+    stem = _fmt_stem(format)
+    note = ""
+
+    if format in _FMT_IMAGE:
+        ext_map = {
+            "PNG (8-bit)": ".png", "PNG (16-bit)": ".png", "JPEG": ".jpg",
+            "TIFF (16-bit)": ".tiff", "TIFF (32-bit float)": ".tiff",
+            "DPX": ".dpx", "WEBP": ".webp", "EXR (16-bit half)": ".exr",
+            "EXR (32-bit float)": ".exr", "Radiance HDR (.hdr)": ".hdr",
+        }
+        ext = ext_map.get(stem, "")
+        name = Path(base).name
+        if not name or name in (".", ".."):
+            return {"path": "", "note": "no filename: set the filename widget "
+                                        "or a full output_path"}
+        if not name.lower().endswith(ext):
+            name += ext
+        predicted = str(Path(base).with_name(name))
+        note = "single image — a multi-frame batch writes frame 1 only; use a SEQ or VID format for all frames"
+    elif format in _FMT_VIDEO:
+        vid_ext = {"MP4 (H.264)": ".mp4", "MP4 (H.265 10-bit)": ".mp4",
+                   "MOV (ProRes 422 HQ)": ".mov", "MOV (ProRes 4444)": ".mov",
+                   "MOV (DNxHR HQ)": ".mxf"}.get(stem, ".mp4")
+        predicted = base if base.lower().endswith(vid_ext) else base + vid_ext
+        if stem == "MOV (DNxHR HQ)":
+            note = "DNxHR is written into an MXF container"
+    elif format in _FMT_SEQ:
+        if "EXR" in stem:
+            ext = ".exr"
+        elif "TIFF" in stem:
+            ext = ".tiff"
+        elif "DPX" in stem:
+            ext = ".dpx"
+        elif "HDR" in stem:
+            ext = ".hdr"
+        else:
+            ext = ".png"
+        out_dir = Path(base)
+        hashes = "#" * frame_padding
+        predicted = str(out_dir / f"{out_dir.name}_{hashes}{ext}")
+        note = f"sequence starts at frame {start_frame}"
+    else:
+        return {"path": "", "note": f"unknown format {format!r}"}
+
+    if not overwrite:
+        note = (note + "  ·  " if note else "") + "unique suffix if the file exists"
+    return {"path": predicted, "note": note}
 
 
 def _probe_for_ui(path: str) -> Dict[str, Any]:

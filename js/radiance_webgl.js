@@ -45,6 +45,14 @@ class RadianceWebGLRenderer extends RadianceRenderer {
         this._frameCache = new Map();
         const _devMem = (typeof navigator !== 'undefined' && navigator.deviceMemory) || 4;
         this._frameCacheMaxSize = _devMem >= 16 ? 24 : _devMem >= 8 ? 16 : _devMem >= 4 ? 8 : 4;
+        // AUDIT-FIX (2026-08): count-based eviction alone is resolution-blind.
+        // 24 cached frames is 400 MB at 1080p fp16 but 6.8 GB at 8K fp16 --
+        // OOM long before the count limit is reached. Evict by BYTES as well,
+        // budget scaled to (an approximation of) machine size. Both limits
+        // apply; whichever is hit first evicts.
+        this._frameCacheBytes = 0;
+        this._frameCacheByteBudget =
+            (_devMem >= 16 ? 3.0 : _devMem >= 8 ? 2.0 : _devMem >= 4 ? 1.0 : 0.5) * 1024 * 1024 * 1024;
 
         this.init();
     }
@@ -828,9 +836,29 @@ class RadianceWebGLRenderer extends RadianceRenderer {
 
     // ── v3.0 #8: LRU GPU Frame Texture Cache ─────────────────────────────────
     /**
+     * Evict LRU entries until both the count limit and the byte budget can
+     * accommodate `incomingBytes`. O(evicted) via Map insertion-order.
+     */
+    _evictFrameCacheFor(incomingBytes) {
+        while (this._frameCache.size > 0 &&
+               (this._frameCache.size >= this._frameCacheMaxSize ||
+                this._frameCacheBytes + incomingBytes > this._frameCacheByteBudget)) {
+            const lruId = this._frameCache.keys().next().value;
+            const lruEntry = this._frameCache.get(lruId);
+            if (lruEntry) {
+                if (this.gl && lruEntry.tex) this.gl.deleteTexture(lruEntry.tex);
+                this._frameCacheBytes -= (lruEntry.bytes || 0);
+            }
+            this._frameCache.delete(lruId);
+        }
+        if (this._frameCacheBytes < 0) this._frameCacheBytes = 0;
+    }
+
+    /**
      * Upload a float16 frame and cache it by frameId.
      * LRU eviction is O(1) using Map insertion-order: the first key in the Map
      * is always the least-recently-used entry (delete-on-access + re-insert).
+     * Eviction is both count- and byte-budget-based (see _evictFrameCacheFor).
      */
     loadFloat16TextureCached(frameId, fp16data, width, height, channels) {
         if (this._frameCache.has(frameId)) {
@@ -845,16 +873,14 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             return entry.tex;
         }
 
-        // Evict LRU (first entry) if at capacity
-        if (this._frameCache.size >= this._frameCacheMaxSize) {
-            const lruId = this._frameCache.keys().next().value;
-            const lruEntry = this._frameCache.get(lruId);
-            if (lruEntry && this.gl) this.gl.deleteTexture(lruEntry.tex);
-            this._frameCache.delete(lruId);
-        }
+        const bytes = width * height * (channels || 4) * 2;
+        this._evictFrameCacheFor(bytes);
 
         const tex = this.loadFloat16Texture(fp16data, width, height, channels);
-        if (tex) this._frameCache.set(frameId, { tex });
+        if (tex) {
+            this._frameCache.set(frameId, { tex, bytes });
+            this._frameCacheBytes += bytes;
+        }
         return tex;
     }
 
@@ -874,16 +900,14 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             return entry.tex;
         }
 
-        // Evict LRU (first entry) if at capacity
-        if (this._frameCache.size >= this._frameCacheMaxSize) {
-            const lruId = this._frameCache.keys().next().value;
-            const lruEntry = this._frameCache.get(lruId);
-            if (lruEntry && this.gl) this.gl.deleteTexture(lruEntry.tex);
-            this._frameCache.delete(lruId);
-        }
+        const bytes = width * height * (channels || 4) * 4;
+        this._evictFrameCacheFor(bytes);
 
         const tex = this.loadFloat32Texture(data, width, height, channels);
-        if (tex) this._frameCache.set(frameId, { tex });
+        if (tex) {
+            this._frameCache.set(frameId, { tex, bytes });
+            this._frameCacheBytes += bytes;
+        }
         return tex;
     }
 
@@ -1174,6 +1198,7 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             this._attribCache.clear();
             this._uniformValueCache.clear();
             this._frameCache.clear();
+            this._frameCacheBytes = 0;
             this.programs = {};
             this.textures = {};
             this.framebuffers = {};
@@ -3426,6 +3451,21 @@ vec3 getDenoiseColor(vec2 uv) {
             return null;
         }
 
+        // AUDIT-FIX (2026-08): fail BEFORE upload with an actionable message.
+        // Beyond MAX_TEXTURE_SIZE (8192 on many GPUs, 16384 on most desktop
+        // cards) texImage2D fails post-hoc into a black frame with only a
+        // cryptic GL error code. 8K DCI (8192 wide) sits exactly on the
+        // common limit; 12K+ plates exceed it everywhere.
+        const maxTex = this._maxTextureSize ||
+            (this._maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 8192);
+        if (width > maxTex || height > maxTex) {
+            console.error(
+                `[Radiance] Frame ${width}x${height} exceeds this GPU's texture ` +
+                `limit (${maxTex}px). Use the node's proxy_scale or downscale ` +
+                `upstream to view it; full-res data is unaffected.`);
+            return null;
+        }
+
         // WebGL2 requires EXT_color_buffer_float for some float texture operations
         if (!this.extColorBufferFloat) {
             console.warn('[Radiance] EXT_color_buffer_float not supported, float texture rendering might fail');
@@ -3493,6 +3533,18 @@ vec3 getDenoiseColor(vec2 uv) {
 
         if (!this.isWebGL2) {
             console.warn('[Radiance] Float16 textures require WebGL2');
+            return null;
+        }
+
+        // AUDIT-FIX (2026-08): same proactive texture-limit guard as
+        // loadFloat32Texture -- see the comment there.
+        const maxTex = this._maxTextureSize ||
+            (this._maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 8192);
+        if (width > maxTex || height > maxTex) {
+            console.error(
+                `[Radiance] Frame ${width}x${height} exceeds this GPU's texture ` +
+                `limit (${maxTex}px). Use the node's proxy_scale or downscale ` +
+                `upstream to view it; full-res data is unaffected.`);
             return null;
         }
 
@@ -3765,6 +3817,7 @@ vec3 getDenoiseColor(vec2 uv) {
             if (entry.tex) gl.deleteTexture(entry.tex);
         });
         this._frameCache.clear();
+        this._frameCacheBytes = 0;
 
         // Also clear active image textures if they were part of a sequence
         if (this.textures.image) {
