@@ -33,6 +33,20 @@ Artists get 32-bit, HDR, and ACES image tools, professional viewers, and VFX nod
 - Dynamic Gizmos — collapse any group of nodes into a single reusable custom node.
 - Secure-by-default handoff to Nuke and DaVinci Resolve.
 
+## In action
+
+**The Radiance Viewer** — WebGPU-accelerated review at FP32/RGBA32F end to end: EXR channel and layer inspection, ACES 1.3 display pipeline, exposure/tone/colour controls with lift-gamma-gain wheels, scopes (histogram, waveform, vectorscope, parade), false colour, zebra, HDR heatmap, A/B compare with wipe, difference and blink, and a sequence timeline with per-frame thumbnails.
+
+<div align="center">
+<img src="viewer.png" width="920" alt="Radiance Viewer — inspector, colour transform, tone and colour wheels, scopes, sequence timeline">
+</div>
+
+**A generation-to-review graph** — Loader → Prompt → Resolution → Sampler → VAE Decode (HDR) in Direct HDR / RUDRA mode → Viewer. The decode stays scene-linear the whole way; the Viewer applies the display transform, so what you grade is what the file actually contains.
+
+<div align="center">
+<img src="basic_workflow.png" width="920" alt="Radiance graph: Loader, Prompt, Resolution, Sampler, HDR VAE Decode with RUDRA, and the Viewer node">
+</div>
+
 ## Installation
 
 ### ComfyUI Manager / Comfy Registry
