@@ -57,7 +57,12 @@ export function getWidget(node, name) {
  *        this ran. Pass the type that module's widgets actually are.
  */
 export function setWidgetVisible(widget, visible, node, options = {}) {
-    if (!widget) return;
+    if (!widget) return false;
+
+    // MERGE-PORT (beta/main 9a5ac88): remember the prior state so the Vue
+    // remount below only happens on a real transition, and so callers can
+    // batch layout work behind a boolean.
+    const wasHidden = widget.hidden === true || widget.type === "hidden";
 
     const fallbackType = options.fallbackType ?? "text";
 
@@ -116,7 +121,17 @@ export function setWidgetVisible(widget, visible, node, options = {}) {
         }
     }
 
-    forceWidgetReinsert(widget, node);
+    // MERGE-PORT (beta/main 9a5ac88): reinsert ONLY on an actual
+    // hidden/visible transition. The old unconditional reinsert destroyed and
+    // recreated every widget's Vue component on each call — running on the
+    // 250 ms polls, that interrupted in-progress typing in neighbouring
+    // widgets. Returns true when the visibility actually changed so callers
+    // can skip node-resize work on no-op calls.
+    if (wasHidden !== !visible) {
+        forceWidgetReinsert(widget, node);
+        return true;
+    }
+    return false;
 }
 
 export default { forceWidgetReinsert, getWidget, setWidgetVisible };

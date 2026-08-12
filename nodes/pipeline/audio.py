@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from radiance.secret_utils import resolve_secret
+from radiance.path_utils import strip_path_quotes
 
 logger = logging.getLogger("radiance.audio_cut")
 
@@ -69,7 +70,8 @@ def _validate_audio_path(filepath: str) -> str:
     - File exists and is a regular file (not a symlink to an unsafe target)
     - Extension is in the allowlist
     """
-    if not filepath or not filepath.strip():
+    filepath = strip_path_quotes(filepath)
+    if not filepath:
         raise ValueError("Audio file path must not be empty.")
     if len(filepath) > _MAX_PATH_LEN:
         raise ValueError(f"Audio file path exceeds maximum length ({_MAX_PATH_LEN}).")

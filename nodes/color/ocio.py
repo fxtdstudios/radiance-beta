@@ -2,6 +2,7 @@ import os
 import logging
 import folder_paths
 from radiance.radiance_ocio import get_ocio_manager, HAS_OCIO
+from radiance.path_utils import strip_path_quotes
 
 logger = logging.getLogger("radiance.ocio")
 
@@ -29,6 +30,7 @@ class RadianceOCIOContext:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Color"
 
     def set_context(self, config_path, working_space):
+        config_path = strip_path_quotes(config_path)
         mgr = get_ocio_manager()
         if not HAS_OCIO:
             logger.warning("[OCIO Context] PyOpenColorIO not installed.")

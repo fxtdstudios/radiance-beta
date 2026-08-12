@@ -168,15 +168,15 @@ Universal loader v3.3 — streamlined to be extremely visual and modular. Auto-d
 
 | Input | Required | Type | Default | Range | Description |
 | :--- | :---: | :--- | :--- | :--- | :--- |
-| `preset` | Yes | choice of `Custom`, `Flux Dev`, `Flux Schnell`, `Flux Dev (Low VRAM)`, `Chroma`, `Flux.2`, `SD3.5 Large`, `SD3.5 Medium`, … (+9 more) | `Custom` |  | Quick-configure for common architectures. Overrides model_type, dtypes, offload_mode, and hints which CLIP slots are needed. |
+| `preset` | Yes | choice of `Custom`, `AuraFlow`, `Chroma`, `Flux.1`, `Flux.1 (Low VRAM)`, `Flux.2`, `Flux.2 (Low VRAM)`, `Lumina2`, … (+5 more) | `Custom` |  | Quick-configure for common architectures. Overrides model_type, dtypes, offload_mode, and hints which CLIP slots are needed. |
 | `unet_name` | Yes | choice (empty) |  |  | Main diffusion model (UNET / DiT / Transformer). |
 | `weight_dtype` | Yes | choice of `default`, `fp8_e4m3fn`, `fp8_e5m2`, `fp16`, `bf16`, `fp32` | `default` |  | UNET weight precision. fp8_e4m3fn saves ~40% VRAM vs fp16. |
-| `model_type` | Yes | choice of `Auto-Detect`, `flux`, `sd3`, `sd3.5`, `sdxl`, `sd1.5`, `lumina2`, `z_image`, … (+6 more) | `Auto-Detect` |  | 'Auto-Detect' reads the checkpoint's key names to determine architecture. Override manually if detection fails. |
-| `vae_name` | Yes | choice (empty) |  |  | VAE for encoding/decoding latents. |
+| `model_type` | Yes | choice of `Auto-Detect`, `flux`, `sd3`, `sd3.5`, `sdxl`, `sd1.5`, `lumina2`, `z_image`, … (+5 more) | `Auto-Detect` |  | 'Auto-Detect' reads the checkpoint's key names to determine architecture. Override manually if detection fails. |
+| `vae_name` | Yes | choice of `Baked VAE (from UNET)` | `Baked VAE (from UNET)` |  | VAE for encoding/decoding latents. 'Baked VAE (from UNET)' extracts it from the checkpoint, for architectures whose standard release bundles the VAE into the main file instead of shipping it separately. |
 | `clip_l` | No | choice of `None` | `None` |  | CLIP-L (text encoder). Used by: SD1.5, SDXL, Flux, SD3. |
 | `clip_g` | No | choice of `None` | `None` |  | CLIP-G (text encoder). Used by: SDXL, SD3, SD3.5. |
-| `t5xxl` | No | choice of `None` | `None` |  | T5-XXL (text encoder). Used by: Flux, SD3, SD3.5, Wan, PixArt, LTX (pre-2.3). |
-| `llm_encoder` | No | choice of `None` | `None` |  | LLM encoder. Used by: Kolors/HunyuanVideo (ChatGLM3), LTX 2.3 (Gemma 3). |
+| `t5xxl` | No | choice of `None`, `Baked (from UNET)` | `None` |  | T5-XXL (text encoder). Used by: Flux, SD3, SD3.5, Wan, PixArt, LTX (pre-2.3). 'Baked (from UNET)' loads it from the main checkpoint -- AuraFlow ships no standalone text encoder file. |
+| `llm_encoder` | No | choice of `None` | `None` |  | LLM encoder. Used by: HunyuanVideo (Llava-Llama3), LTX 2.3 (Gemma 3), Lumina2 (Gemma-2), Z-Image (Qwen3), Flux.2 (Mistral-3/Qwen3). |
 | `text_projection` | No | choice of `None`, `Baked (from UNET)` | `None` |  | Text projection matrix. Used by: LTX 2.3 (with Gemma 3 llm_encoder). 'Baked (from UNET)' loads it from the main LTX 2.3 checkpoint, like the native LTXV Audio Text Encoder Loader. |
 | `clip_dtype` | No | choice of `default`, `fp16`, `bf16`, `fp8_e4m3fn`, `fp32` | `default` |  | CLIP weight precision. Independent from UNET. For Flux T5XXL: fp8 saves ~4.7 GB vs fp16. |
 | `offload_mode` | No | choice of `none`, `cpu_offload`, `sequential` | `none` |  | none = GPU only. cpu_offload = CLIP loaded to CPU RAM. sequential = enable ComfyUI sequential CPU offload (8–12 GB GPUs). |
@@ -318,7 +318,7 @@ Professional resolution selector with internal preview card. Outputs empty LATEN
 | `width` | Yes | `INT` | `1024` | 64 – 16384, step 8 | Custom width (only used when preset is 'Custom'). Auto-aligned to 8px (32px for LTX Video). |
 | `height` | Yes | `INT` | `1024` | 64 – 16384, step 8 | Custom height (only used when preset is 'Custom'). Auto-aligned to 8px (32px for LTX Video). |
 | `orientation` | Yes | choice of `As Preset`, `Landscape`, `Portrait`, `Square` | `As Preset` |  | Override orientation. 'As Preset' uses the preset's native orientation. |
-| `model_type` | Yes | choice of `Manual`, `Flux / SD3 / Lumina2 / Z-Image (16ch)`, `SDXL / SD 1.5 / PixArt / Aura Flow / Kolors (4ch)`, `Chroma (16ch)`, `Cosmos World (16ch)`, `CogVideoX (16ch)`, `Mochi (12ch)`, `LTXV (128ch)`, … (+3 more) | `Manual` |  | Drives pixel alignment, video-latent shape, frame-count rules, and latent_format for the selected model family. Flux/SD3/Cosmos = 16ch. SDXL/SD 1.5 = 4ch. Mochi = 12ch. 'Manual' applies no alignment/frame-count constraints — use the 'latent_channels' input to set channels for experimental/unlisted models. |
+| `model_type` | Yes | choice of `Manual`, `Flux / SD3 / Lumina2 / Z-Image (16ch)`, `SDXL / SD 1.5 / PixArt / Aura Flow (4ch)`, `Chroma (16ch)`, `Cosmos World (16ch)`, `CogVideoX (16ch)`, `Mochi (12ch)`, `LTXV (128ch)`, … (+4 more) | `Manual` |  | Drives pixel alignment, video-latent shape, frame-count rules, latent_format, and the Est. VRAM readout. Flux/SD3/Cosmos = 16ch. SDXL/SD 1.5 = 4ch. Mochi = 12ch. 'Manual': no alignment/frame-count constraints; use 'latent_channels' for experimental/unlisted models. Est. VRAM assumes a full load; actual usage may be lower with DynamicVRAM/CPU offload active. |
 | `batch_size` | Yes | `INT` | `1` | 1 – 64 | Number of latent frames in batch. |
 | `scale_factor` | No | `FLOAT` | `1.0` | 0.1 – 4.0, step 0.1 | Scale the resolution by this factor after preset/custom. 0.5 = half res, 2.0 = double res. Applied before alignment. |
 | `latent_channels` | No | `INT` | `0` | 0 – 256 | Override latent channel count. 0 = use model_type default. Common: 4 (SD/SDXL), 12 (Mochi), 16 (Flux/SD3/Cosmos). Set manually for custom architectures. |
@@ -364,7 +364,7 @@ v3.0.0 — Universal diffusion sampler. Auto-detects model type (Flux, SD3, SDXL
 | `positive` | Yes | `CONDITIONING` |  |  |  |
 | `negative` | Yes | `CONDITIONING` |  |  |  |
 | `latent_image` | Yes | `LATENT` |  |  |  |
-| `preset` | Yes | choice of `None`, `Custom`, `[F] Flux txt2img`, `[F] Flux img2img`, `[F] Flux Inpaint`, `[F] Flux High-Res Fix`, `[F] Flux Fast (12 steps)`, `[F] Flux Quality (28 steps)`, … (+17 more) | `None` |  |  |
+| `preset` | Yes | choice of `Auto`, `Custom`, `[F] Flux txt2img`, `[F] Flux img2img`, `[F] Flux Inpaint`, `[F] Flux High-Res Fix`, `[F] Flux Fast (12 steps)`, `[F] Flux Quality (28 steps)`, … (+17 more) | `Auto` |  |  |
 | `steps` | Yes | `INT` | `20` | 1 – 200 | Total denoising steps. More steps = higher quality but slower. 20–30 is typical for most samplers. |
 | `start_step` | Yes | `INT` | `0` | 0 – 200 | Start step (0 = beginning) |
 | `end_step` | Yes | `INT` | `0` | 0 – 200 | End step (0 = use total steps) |
@@ -380,7 +380,7 @@ v3.0.0 — Universal diffusion sampler. Auto-detects model type (Flux, SD3, SDXL
 | `flux_guidance_profile` | Yes | choice of `Static`, `Dynamic (Creative Start/End)` | `Static` |  |  |
 | `seed` | Yes | `INT` | `0` | 0 – 18446744073709551615 | Random seed for reproducible results. Use the control below it (randomize / increment / fixed) to vary the seed between runs. |
 | `pag_scale` | Yes | `FLOAT` | `0.0` | 0.0 – 5.0, step 0.1 | PAG strength (0=off). Perturbs attention for better prompt adherence. |
-| `model_type` | Yes | choice of `auto`, `flux`, `flux2`, `flux2-klein`, `sd3`, `sd3.5`, `sdxl`, `sd15`, … (+11 more) | `auto` |  |  |
+| `model_type` | Yes | choice of `auto`, `flux`, `flux2`, `flux2-klein`, `sd3`, `sd3.5`, `sdxl`, `sd1.5`, … (+11 more) | `auto` |  |  |
 | `sigma_blend_steps` | Yes | `INT` | `0` | 0 – 10 | Smooth sigma transition steps at phase-shift boundary |
 | `guidance_rescale_phi` | Yes | `FLOAT` | `0.0` | 0.0 – 1.0, step 0.05 | Guidance rescale (Imagen). 0=off, 0.7=recommended for SDXL. Prevents oversaturation at high CFG. |
 | `preview_method` | Yes | choice of `None`, `TAESD`, `Latent2RGB` | `None` |  |  |
@@ -412,7 +412,7 @@ v3.0.0 — Universal diffusion sampler. Auto-detects model type (Flux, SD3, SDXL
 | `sdr_blend` | No | `FLOAT` | `0.35` | 0.0 – 1.0, step 0.05 |  |
 | `sdr_inject_steps` | No | `INT` | `6` | 0 – 100 |  |
 | `sdr_decay` | No | `FLOAT` | `0.65` | 0.0 – 1.0, step 0.05 |  |
-| `model_meta` | No | `STRING` | `` |  | Optional: connect RadianceUnifiedLoader's model_meta output. Only used when preset='None'/'Custom' and model_type='auto'. Refines cfg/guidance/steps beyond what the loaded model's architecture alone can tell -- e.g. distinguishing Flux.2 Klein Base from Klein distilled, which are architecturally identical. |
+| `model_meta` | No | `STRING` | `` |  | Optional: connect RadianceUnifiedLoader's model_meta output. Only used when preset='Auto'/'Custom' and model_type='auto'. Refines cfg/guidance/steps beyond what the loaded model's architecture alone can tell -- e.g. distinguishing Flux.2 Klein Base from Klein distilled, which are architecturally identical. |
 
 ### Outputs
 

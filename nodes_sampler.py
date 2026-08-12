@@ -30,8 +30,8 @@ try:
         DYNAMIC_GUIDANCE_EARLY_THRESHOLD, DYNAMIC_GUIDANCE_LATE_THRESHOLD, 
         DYNAMIC_GUIDANCE_RAMP_WIDTH, GUIDANCE_RESCALE_PHI, 
         SIGMA_DISCONTINUITY_THRESHOLD, PAG_DEFAULT_SCALE, PAG_LAYER_NAMES, 
-        CFG_PLUS_PLUS_DEFAULT_SCALE, CFG_GUIDANCE_MODELS, 
-        DYNAMIC_CFG_EARLY_MULTIPLIER, DYNAMIC_CFG_LATE_MULTIPLIER, 
+        CFG_PLUS_PLUS_DEFAULT_SCALE,
+        DYNAMIC_CFG_EARLY_MULTIPLIER, DYNAMIC_CFG_LATE_MULTIPLIER,
         DYNAMIC_CFG_EARLY_THRESHOLD, DYNAMIC_CFG_LATE_THRESHOLD, MODEL_TYPES, 
         VIDEO_MODEL_TYPES, GUIDANCE_EMBED_MODELS, CFG_GUIDED_MODELS, 
         PREVIEW_METHODS, NOISE_TYPES, CLIP_TARGETS,
@@ -41,7 +41,7 @@ try:
         parse_model_meta, refine_distillation_from_meta,
         gradual_sigma_blend, log_tensor, SigmaIndexer, SamplingStage,
         apply_flux_guidance, compute_dynamic_guidance, compute_dynamic_cfg,
-        compute_base_sigmas, WORKFLOW_PRESETS, flux_shift_sigmas, get_flux_sigmas,
+        compute_base_sigmas, WORKFLOW_PRESETS, flux_shift_sigmas, get_flux_sigmas, get_sd_turbo_sigmas,
         validate_step_range, apply_pag_to_model, AYS_ANCHORS, get_ays_sigmas,
         guidance_rescale_cfg, correct_sigma_end, apply_cfg_plus_plus,
         build_sigma_report, _temporally_correlate, _perlin_noise, _perlin_noise_2d,
@@ -56,7 +56,7 @@ except (ImportError, ValueError):
         DYNAMIC_GUIDANCE_EARLY_THRESHOLD, DYNAMIC_GUIDANCE_LATE_THRESHOLD,
         DYNAMIC_GUIDANCE_RAMP_WIDTH, GUIDANCE_RESCALE_PHI,
         SIGMA_DISCONTINUITY_THRESHOLD, PAG_DEFAULT_SCALE, PAG_LAYER_NAMES,
-        CFG_PLUS_PLUS_DEFAULT_SCALE, CFG_GUIDANCE_MODELS,
+        CFG_PLUS_PLUS_DEFAULT_SCALE,
         DYNAMIC_CFG_EARLY_MULTIPLIER, DYNAMIC_CFG_LATE_MULTIPLIER,
         DYNAMIC_CFG_EARLY_THRESHOLD, DYNAMIC_CFG_LATE_THRESHOLD, MODEL_TYPES,
         VIDEO_MODEL_TYPES, GUIDANCE_EMBED_MODELS, CFG_GUIDED_MODELS,
@@ -67,7 +67,7 @@ except (ImportError, ValueError):
         parse_model_meta, refine_distillation_from_meta,
         gradual_sigma_blend, log_tensor, SigmaIndexer, SamplingStage,
         apply_flux_guidance, compute_dynamic_guidance, compute_dynamic_cfg,
-        compute_base_sigmas, WORKFLOW_PRESETS, flux_shift_sigmas, get_flux_sigmas,
+        compute_base_sigmas, WORKFLOW_PRESETS, flux_shift_sigmas, get_flux_sigmas, get_sd_turbo_sigmas,
         validate_step_range, apply_pag_to_model, AYS_ANCHORS, get_ays_sigmas,
         guidance_rescale_cfg, correct_sigma_end, apply_cfg_plus_plus,
         build_sigma_report, _temporally_correlate, _perlin_noise, _perlin_noise_2d,
@@ -185,7 +185,7 @@ class RadianceSamplerPro:
                 "positive": ("CONDITIONING",),
                 "negative": ("CONDITIONING",),
                 "latent_image": ("LATENT",),
-                "preset": (WORKFLOW_PRESETS, {"default": "None"}),
+                "preset": (WORKFLOW_PRESETS, {"default": "Auto"}),
                 "steps": ("INT", {"default": 20, "min": 1, "max": 200, "step": 1,
                     "tooltip": "Total denoising steps. More steps = higher quality but slower. 20–30 is typical for most samplers."
                 }),
@@ -458,7 +458,7 @@ class RadianceSamplerPro:
                     {
                         "default": "", "forceInput": True,
                         "tooltip": "Optional: connect RadianceUnifiedLoader's model_meta output. "
-                                   "Only used when preset='None'/'Custom' and model_type='auto'. "
+                                   "Only used when preset='Auto'/'Custom' and model_type='auto'. "
                                    "Refines cfg/guidance/steps beyond what the loaded model's "
                                    "architecture alone can tell -- e.g. distinguishing Flux.2 Klein "
                                    "Base from Klein distilled, which are architecturally identical.",
@@ -488,7 +488,7 @@ class RadianceSamplerPro:
     )
 
     def _apply_presets(self, preset, **kwargs):
-        if preset in ("None", "Custom"):
+        if preset in ("Auto", "Custom"):
             return kwargs
 
         if preset not in WORKFLOW_PRESETS:
@@ -534,13 +534,14 @@ class RadianceSamplerPro:
         # redundant on top of the per-field "still at generic default" checks
         # below, which already protect any field the user set by hand,
         # regardless of how model_type itself was determined.
-        if preset in ("None", "Custom"):
+        if preset in ("Auto", "Custom"):
             defaults = get_model_defaults(detected_type)
             distilled = refine_distillation_from_meta(detected_type, meta_unet_file)
 
-            # Apply defaults if user has them at "default" values
+            # Apply defaults if user has them at "default" values -- distilled
+            # (e.g. SDXL/SD3.5 Turbo) takes priority over the generic default.
             if kwargs.get('cfg') == 1.0 and detected_type != "flux":
-                kwargs['cfg'] = defaults.get("cfg", kwargs['cfg'])
+                kwargs['cfg'] = (distilled or {}).get("cfg", defaults.get("cfg", kwargs['cfg']))
 
             # ALBABIT-FIX: "detected_type != flux" used to gate this whole block
             # off for Flux.1 -- harmless when guidance always matched (3.5 ==
@@ -554,16 +555,26 @@ class RadianceSamplerPro:
                 if model_default_guidance > 0 or defaults.get("guidance_type") != "embedding":
                     kwargs['flux_guidance'] = model_default_guidance
 
-            if kwargs.get('steps') == 20 and distilled:
-                kwargs['steps'] = distilled["steps"]
-                logger.info(f"Auto-applied steps={kwargs['steps']} for {detected_type} (from model_meta)")
+            # ALBABIT-FIX: "steps" isn't always present in either dict (e.g.
+            # Krea Dev's override is guidance-only; most architectures have no
+            # generic default at all, steps stays manual) -- distilled takes
+            # priority, defaults is a generic per-architecture fallback (only
+            # a few architectures define one, e.g. Chroma).
+            if kwargs.get('steps') == 20:
+                model_default_steps = (distilled or {}).get("steps", defaults.get("steps"))
+                if model_default_steps is not None:
+                    kwargs['steps'] = model_default_steps
+                    logger.info(f"Auto-applied steps={kwargs['steps']} for {detected_type} (from model_meta)")
 
             default_shift = defaults.get("shift", 1.0)
             if kwargs.get('flux_shift') == 1.0 and default_shift != 1.0:
                 kwargs['flux_shift'] = default_shift
                 logger.info(f"Auto-applied shift={kwargs['flux_shift']} for {detected_type}")
 
-            default_sampler = defaults.get("sampler", kwargs['sampler'])
+            # ALBABIT-FIX: didn't check distilled -- SDXL Turbo's sampler
+            # override (euler_ancestral) was silently ignored here, unlike
+            # cfg/steps above which already checked it first.
+            default_sampler = (distilled or {}).get("sampler", defaults.get("sampler", kwargs['sampler']))
             if kwargs.get('sampler') == "euler" and default_sampler != "euler":
                 kwargs['sampler'] = default_sampler
                 logger.info(f"Auto-applied sampler={kwargs['sampler']} for {detected_type}")
@@ -576,7 +587,7 @@ class RadianceSamplerPro:
                 logger.info(f"Auto scheduler: {kwargs['scheduler']} → {auto_scheduler}")
                 kwargs['scheduler'] = auto_scheduler
 
-        return detected_type, kwargs
+        return detected_type, kwargs, meta_unet_file
 
     def _prepare_noise(self, latent_samples, seed, noise_type, noise_override, device, frames):
         if noise_override is not None:
@@ -594,7 +605,7 @@ class RadianceSamplerPro:
     def _prepare_sigmas(self, model, detected_type, steps, denoise, flux_shift,
                         scheduler, ays_schedule, terminal_sigma_to_zero,
                         force_exact_steps, sigmas_override, device,
-                        custom_ays_anchors=None):
+                        custom_ays_anchors=None, use_sd_turbo_schedule=False):
         if sigmas_override is not None:
             # ALBABIT-FIX: restore informational log when sigmas_override is active
             logger.info(
@@ -628,6 +639,12 @@ class RadianceSamplerPro:
                         model, scheduler, steps, denoise, flux_shift,
                         force_full=terminal_sigma_to_zero, force_exact=force_exact_steps,
                     )
+            elif use_sd_turbo_schedule:
+                # ALBABIT-FIX: SD-Turbo/SDXL-Turbo's own discrete 10-timestep
+                # schedule (see get_sd_turbo_sigmas) -- only reached when the
+                # user hasn't explicitly asked for AYS instead.
+                sigmas = get_sd_turbo_sigmas(model, steps, denoise)
+                logger.info(f"Using SD-Turbo discrete schedule ({steps} steps, denoise={denoise:.2f})")
             else:
                 sigmas = get_flux_sigmas(
                     model, scheduler, steps, denoise, flux_shift,
@@ -868,6 +885,26 @@ class RadianceSamplerPro:
         t_start = time.time()
         timings: Dict[str, float] = {}
 
+        # ALBABIT-FIX: refiner_model swaps only the MODEL mid-run, never the
+        # CONDITIONING -- a mismatched context_dim crashes deep in the sampling
+        # loop with a cryptic PyTorch shape error. Fail early and clearly
+        # instead (e.g. SDXL Base's 2048-dim clip_l+clip_g conditioning vs
+        # Refiner's 1280-dim clip_g-only).
+        if refiner_model is not None and positive:
+            try:
+                refiner_dim = refiner_model.model.model_config.unet_config.get("context_dim")
+                cond_dim = positive[0][0].shape[-1]
+            except AttributeError:
+                refiner_dim = cond_dim = None
+            if refiner_dim is not None and refiner_dim != cond_dim:
+                raise RuntimeError(
+                    f"refiner_model expects conditioning with {refiner_dim} dimensions, "
+                    f"but positive/negative were encoded with {cond_dim}.\n\n"
+                    f"Encode the prompt with a CLIP compatible with refiner_model "
+                    f"(e.g. SDXL Refiner needs its own clip_g-only encode, not the "
+                    f"Base model's clip_l+clip_g)."
+                )
+
         # 1. Apply Presets
         params = self._apply_presets(preset, 
             steps=steps, cfg=cfg, sampler=sampler, scheduler=scheduler, 
@@ -880,12 +917,19 @@ class RadianceSamplerPro:
         sampler_mode, ays_schedule, model_type = params['sampler_mode'], params['ays_schedule'], params['model_type']
 
         # 2. Model Detection & Default Calibration
-        detected_type, params = self._configure_model_and_defaults(model, model_type, preset,
+        detected_type, params, meta_unet_file = self._configure_model_and_defaults(model, model_type, preset,
             model_meta=model_meta, cfg=cfg, flux_guidance=flux_guidance, flux_shift=flux_shift,
             sampler=sampler, scheduler=scheduler, scheduler_mode=scheduler_mode, steps=steps)
 
         cfg, flux_guidance, flux_shift = params['cfg'], params['flux_guidance'], params['flux_shift']
         sampler, scheduler, steps = params['sampler'], params['scheduler'], params['steps']
+
+        # ALBABIT-FIX: SD-Turbo/SDXL-Turbo were only distilled at 10 fixed
+        # discrete timesteps -- standard continuous schedulers pick sigma
+        # values the model was never trained to be good at (see
+        # get_sd_turbo_sigmas). Same "sdxl" + "turbo" filename detection
+        # already used for the cfg/steps/sampler override above.
+        use_sd_turbo_schedule = detected_type == "sdxl" and "turbo" in meta_unet_file.lower()
 
         # 3. Latent Preparation
         if not isinstance(latent_image, dict) or "samples" not in latent_image:
@@ -961,6 +1005,7 @@ class RadianceSamplerPro:
             flux_shift, scheduler, ays_schedule, terminal_sigma_to_zero,
             force_exact_steps, sigmas_override, device,
             custom_ays_anchors=custom_ays_anchors,
+            use_sd_turbo_schedule=use_sd_turbo_schedule,
         )
         timings["prepare_sigmas"] = time.time() - t0
 
@@ -1185,7 +1230,7 @@ class RadianceSamplerPro:
                 secondary_sampler = "dpmpp_2m"
                 secondary_scheduler = None                       
 
-                flow_match_types = GUIDANCE_EMBED_MODELS | {"wan", "hunyuan_video"}
+                flow_match_types = GUIDANCE_EMBED_MODELS | {"wan", "wan_ti2v", "hunyuan_video"}
                 if detected_type in flow_match_types:
                     logger.warning(
                         f"WARNING: DPM solvers are generally incompatible with {detected_type}'s "

@@ -184,10 +184,29 @@ try {
 	console.warn("[Radiance.IO] Failed to patch HTMLImageElement.src", e);
 }
 
+// Hook Element.prototype.setAttribute as a fail-safe uploader fallback —
+// img.setAttribute("src", ...) bypasses the HTMLImageElement.src property
+// hook above. (Restored from beta/main; the inline widget helpers that used
+// to follow it live in radiance_widget_utils.js now.)
+try {
+	const originalSetAttribute = Element.prototype.setAttribute;
+	Element.prototype.setAttribute = function (name, value) {
+		let resolved = value;
+		if (name === "src" && this.tagName === "IMG") {
+			resolved = resolvePlaceholder(value);
+		}
+		return originalSetAttribute.call(this, name, resolved);
+	};
+} catch (e) {
+	console.warn("[Radiance.IO] Failed to patch Element.prototype.setAttribute", e);
+}
 function refreshNodeSize(node) {
 	if (!node.computeSize) return;
 	const sz = node.computeSize();
-	node.setSize([Math.max(node.size[0], sz[0]), sz[1]]);
+	const newWidth = Math.max(node.size[0], sz[0]);
+	const newHeight = sz[1];
+	if (node.size[0] === newWidth && node.size[1] === newHeight) return;
+	node.setSize([newWidth, newHeight]);
 	node.setDirtyCanvas(true, true);
 }
 
@@ -529,15 +548,16 @@ app.registerExtension({
 						versionWidget.label = `version  (v${String(v).padStart(4, "0")})`;
 					}
 
-					setWidgetVisible(fpsWidget,          isVid, node);
-					setWidgetVisible(qualityWidget,       isVid || isJpgWebp, node);
-					setWidgetVisible(exrCompWidget,       isExr, node);
-					setWidgetVisible(startFrameWidget,    isSeq, node);
-					setWidgetVisible(framePaddingWidget,  isSeq, node);
-					setWidgetVisible(audioSourceWidget,   isVid, node);
-					setWidgetVisible(broadcastWidget,     !isFloatFmt, node);
+					let changed = false;
+					if (setWidgetVisible(fpsWidget,          isVid, node)) changed = true;
+					if (setWidgetVisible(qualityWidget,       isVid || isJpgWebp, node)) changed = true;
+					if (setWidgetVisible(exrCompWidget,       isExr, node)) changed = true;
+					if (setWidgetVisible(startFrameWidget,    isSeq, node)) changed = true;
+					if (setWidgetVisible(framePaddingWidget,  isSeq, node)) changed = true;
+					if (setWidgetVisible(audioSourceWidget,   isVid, node)) changed = true;
+					if (setWidgetVisible(broadcastWidget,     !isFloatFmt, node)) changed = true;
 
-					refreshNodeSize(node);
+					if (changed) refreshNodeSize(node);
 
 					// updateWidgets is also polled every 250 ms; only re-ask
 					// the server when an ingredient of the path changed.
@@ -546,7 +566,7 @@ app.registerExtension({
 						versionWidget?.value, fmt,
 						startFrameWidget?.value, framePaddingWidget?.value,
 						overwriteWidget?.value,
-					].join(" ");
+					].join(" ");
 					if (sig !== node.__radianceWriteSig) {
 						node.__radianceWriteSig = sig;
 						refreshResolvedPath();

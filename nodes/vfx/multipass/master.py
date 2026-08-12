@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional, Tuple, List
 import numpy as np
 
 from ....performance import perf_finish, perf_start
-from ....core.system.path_utils import get_safe_output_dir, safe_join
+from ....core.system.path_utils import get_safe_output_dir, safe_join, strip_path_quotes
 
 # Core library imports
 from .core import (
@@ -526,6 +526,9 @@ class RadianceEXRPassesWriter:
         import tempfile
         import shutil
 
+        output_path = strip_path_quotes(output_path)
+        remote_path = strip_path_quotes(remote_path)
+
         # Determine target directory
         if _HAS_FOLDER_PATHS:
             base_dir = folder_paths.get_output_directory()
@@ -536,7 +539,7 @@ class RadianceEXRPassesWriter:
         # with no anti-traversal protection for relative output_path values.
         # get_safe_output_dir() is the same helper RadianceWrite/RadianceEXRMultiPart
         # already use for this exact pattern.
-        out_dir = get_safe_output_dir(base_dir, output_path.strip(), allow_absolute=True)
+        out_dir = get_safe_output_dir(base_dir, output_path, allow_absolute=True)
 
         prefix = filename_prefix.strip()
         if not prefix or prefix in (".", "..") or os.path.basename(prefix) != prefix:
@@ -619,9 +622,10 @@ class RadianceEXRPassesWriter:
             saved_paths.append(filepath)
 
             # Best effort copy to remote/NAS path
-            if remote_path.strip():
+            if remote_path:
                 try:
-                    remote_dir = get_safe_output_dir(remote_path.strip(), "", allow_absolute=True)
+                    remote_dir = get_safe_output_dir(
+                        strip_path_quotes(remote_path).strip(), "", allow_absolute=True)
                     os.makedirs(remote_dir, exist_ok=True)
                     dest = safe_join(remote_dir, filename)
                     shutil.copy2(filepath, dest)

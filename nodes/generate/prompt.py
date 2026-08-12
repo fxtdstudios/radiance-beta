@@ -2,7 +2,7 @@
 ◎ Radiance Cinematic Prompt Encoder — v3.0.0
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Production-grade cinematic prompt builder with direct CLIP/T5 encoding.
-Auto-selects prose for Flux/T5/Kolors and structured keywords for SD1.5/SDXL.
+Auto-selects prose for Flux/T5 and structured keywords for SD1.5/SDXL.
 
 v2.4.0 Changelog (from audit):
 ───────────────────────────────────────
@@ -831,12 +831,12 @@ DEFAULT_YEAR: int = int(os.environ.get("RADIANCE_DEFAULT_YEAR",
 
 # These architectures use T5/LLM encoders that prefer natural language prose.
 # Comma-separated keyword chains perform significantly worse on them.
-PROSE_ARCHS = {"flux", "sd3", "sd3.5", "wan", "ltxv", "ltxav", "pixart", "kolors",  # ALBABIT-FIX: "ltx" → "ltxv"
+PROSE_ARCHS = {"flux", "sd3", "sd3.5", "wan", "ltxv", "ltxav", "pixart",  # ALBABIT-FIX: "ltx" → "ltxv"
                "hunyuan_video", "aura_flow"}
 
 # Architectures where negative prompts have near-zero practical effect.
 # (CFG guidance in these models operates differently; negatives waste token budget.)
-_WEAK_NEG_ARCHS = {"flux", "wan", "ltxv", "ltxav", "hunyuan_video", "kolors"}  # ALBABIT-FIX: "ltx" → "ltxv"
+_WEAK_NEG_ARCHS = {"flux", "wan", "ltxv", "ltxav", "hunyuan_video"}  # ALBABIT-FIX: "ltx" → "ltxv"
 
 
 @functools.lru_cache(maxsize=4)
@@ -942,9 +942,10 @@ def _detect_arch_from_clip(clip, target_arch: str,
     # Wan / PixArt / other T5-only
     if "t5xxl" in keys:
         return "wan"
-    # Generic LLM (Kolors, HunyuanVideo)
+    # Generic LLM (HunyuanVideo, Lumina2, Z-Image) -- "hunyuan_video" here is
+    # just a representative prose-style architecture, not a precise match.
     if "llm" in keys:
-        return "kolors"
+        return "hunyuan_video"
     # SDXL: dual CLIP
     if "g" in keys and "l" in keys:
         return "sdxl"
@@ -1096,7 +1097,7 @@ def _build_prose_prompt(
 ) -> str:
     """
     Build a natural-language prose prompt for T5/LLM-based architectures
-    (Flux, SD3, Kolors, PixArt, Wan, LTX, HunyuanVideo).
+    (Flux, SD3, PixArt, Wan, LTX, HunyuanVideo).
     These encoders respond much better to flowing sentences than comma chains.
 
     v2.4.0 [BUG-C4]: scientificize() now applied BEFORE weight wrapping.

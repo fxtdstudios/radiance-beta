@@ -6,6 +6,8 @@ import xml.etree.ElementTree as std_ET
 import defusedxml.ElementTree as ET
 from typing import Dict, Any, Tuple
 
+from radiance.path_utils import strip_path_quotes
+
 logger = logging.getLogger("radiance.cdl")
 
 class RadianceCDLTransform:
@@ -89,6 +91,7 @@ class RadianceCDLImport:
         }
 
     def load(self, file_path):
+        file_path = strip_path_quotes(file_path)
         if not os.path.isfile(file_path):
             logger.error(f"[CDL Import] File not found: {file_path}")
             return (json.dumps({}), 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0)
@@ -143,6 +146,7 @@ class RadianceCDLExport:
 
     def save(self, file_path, slope_r, slope_g, slope_b, offset_r, offset_g, offset_b,
              power_r, power_g, power_b, saturation, cdl_data=None):
+        file_path = strip_path_quotes(file_path)
         if cdl_data:
             try:
                 d = json.loads(cdl_data)

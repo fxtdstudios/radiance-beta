@@ -142,7 +142,6 @@ VAE_FACTOR_MAP: Dict[str, int] = {
     "StableCascadeStageB": 4,
     "Wan": 8,
     "CogVideo": 8,
-    "StepVideo": 8,
     "Cosmos": 8,
     "HunyuanVideo": 8,
     # Most modern image models: 8

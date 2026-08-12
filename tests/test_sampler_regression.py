@@ -52,6 +52,31 @@ class TestSamplerRegression(unittest.TestCase):
         base_sigmas = torch.linspace(1.0, 0.0, steps + 1)
         self.assertFalse(torch.allclose(sigmas, base_sigmas), "Sigmas should have been shifted (different from linear)")
 
+    def test_sd_turbo_sigmas_mirrors_comfyui_node(self):
+        """get_sd_turbo_sigmas mirrors ComfyUI's own SDTurboScheduler node exactly
+        (comfy_extras/nodes_custom_sampler.py) -- 10 fixed discrete timesteps
+        (99, 199, ..., 999), picked from the end as denoise decreases."""
+        from sampler_utils import get_sd_turbo_sigmas
+
+        class _FakeModelSampling:
+            def sigma(self, timesteps):
+                return timesteps.float() / 999.0
+
+        class _FakeModel:
+            def get_model_object(self, name):
+                return _FakeModelSampling()
+
+        # denoise=1.0 -> start_step=0 -> first (highest-noise) timestep = 999
+        sigmas = get_sd_turbo_sigmas(_FakeModel(), steps=1, denoise=1.0)
+        self.assertEqual(len(sigmas), 2)  # 1 step + terminal zero
+        self.assertAlmostEqual(sigmas[0].item(), 1.0, places=5)
+        self.assertEqual(sigmas[-1].item(), 0.0)
+
+        # Lower denoise starts further into the schedule -- lower initial noise.
+        sigmas_full = get_sd_turbo_sigmas(_FakeModel(), steps=4, denoise=1.0)
+        sigmas_half = get_sd_turbo_sigmas(_FakeModel(), steps=2, denoise=0.5)
+        self.assertLess(sigmas_half[0].item(), sigmas_full[0].item())
+
     def test_noise_reproducibility(self):
         """Verify all noise generators are reproducible with the same seed."""
         shape = (1, 4, 32, 32)

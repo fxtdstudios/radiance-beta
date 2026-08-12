@@ -44,7 +44,7 @@ function setWidgetVisible(widget, visible, node) {
 // when the user toggles frame_computation.
 // ALBABIT-FIX follow-up: mirrors VIDEO_MODEL_TYPES in resolution.py —
 // model_types that emit 5D video latents and should auto-enable "enable_video".
-const VIDEO_MODEL_TYPES_JS = new Set(["WAN (16ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)", "Cosmos World (16ch)", "CogVideoX (16ch)"]);
+const VIDEO_MODEL_TYPES_JS = new Set(["WAN (16ch)", "WAN TI2V (48ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)", "Cosmos World (16ch)", "CogVideoX (16ch)"]);
 
 // ALBABIT-FIX follow-up: mirrors SPATIAL_SCALE/_align_up in resolution.py —
 // recompute width/height instantly when model_type changes, instead of waiting
@@ -52,6 +52,9 @@ const VIDEO_MODEL_TYPES_JS = new Set(["WAN (16ch)", "LTXV (128ch)", "HunyuanVide
 const SPATIAL_SCALE_JS = {
     "LTXV (128ch)": 32,
     "Flux.2 / Flux.2 Klein (128ch)": 16,
+    // ALBABIT-FIX: WAN 2.2 TI2V-5B's VAE compresses 16x spatially (double
+    // standard WAN's 8x) -- real bug fix, see resolution.py's SPATIAL_SCALE.
+    "WAN TI2V (48ch)": 16,
     // ALBABIT-FIX: "Manual" -> scale=1, _alignUp is a no-op and the +/- step
     // becomes 1, so width/height are fully unconstrained.
     "Manual": 1,
@@ -124,11 +127,13 @@ function refreshNodeSize(node) {
 // active (both apply regardless of preset). "✎" = orientation/latent_channels
 // off their neutral default.
 function _setLabelMarker(widget, marked, marker) {
-    if (!widget) return;
-    if (widget._radOrigLabel === undefined && !marked) return;
+    if (!widget) return false;
+    if (widget._radOrigLabel === undefined && !marked) return false;
     if (widget._radOrigLabel === undefined) widget._radOrigLabel = widget.label ?? widget.name;
     const wanted = marked ? widget._radOrigLabel + marker : widget._radOrigLabel;
-    if (widget.label !== wanted) widget.label = wanted;
+    if (widget.label === wanted) return false;
+    widget.label = wanted;
+    return true;
 }
 
 function updateResolutionMarkers(node) {
@@ -142,15 +147,22 @@ function updateResolutionMarkers(node) {
     const scaleActive = scaleFactorW && parseFloat(scaleFactorW.value) !== 1.0;
     const mpActive     = mpTargetW && parseFloat(mpTargetW.value) > 0;
 
-    _setLabelMarker(scaleFactorW, scaleActive, " 📐");
-    _setLabelMarker(mpTargetW, mpActive, " 📐");
-    _setLabelMarker(widthW, scaleActive || mpActive, " 📐");
-    _setLabelMarker(heightW, scaleActive || mpActive, " 📐");
+    // ALBABIT-FIX: only redraw when a label actually changed -- this runs
+    // every 250ms via the polling loop (see onNodeCreated), and calling
+    // setDirtyCanvas unconditionally on every tick was the same "reassign
+    // even when unchanged" anti-pattern fixed in the Sampler's
+    // updateSigmaLocks() (radiance_sampler.js) after it interrupted manual
+    // widget typing there.
+    let changed = false;
+    if (_setLabelMarker(scaleFactorW, scaleActive, " 📐")) changed = true;
+    if (_setLabelMarker(mpTargetW, mpActive, " 📐")) changed = true;
+    if (_setLabelMarker(widthW, scaleActive || mpActive, " 📐")) changed = true;
+    if (_setLabelMarker(heightW, scaleActive || mpActive, " 📐")) changed = true;
 
-    _setLabelMarker(orientationW, orientationW && orientationW.value !== "As Preset", " ✎");
-    _setLabelMarker(latentChW, latentChW && parseInt(latentChW.value, 10) !== 0, " ✎");
+    if (_setLabelMarker(orientationW, orientationW && orientationW.value !== "As Preset", " ✎")) changed = true;
+    if (_setLabelMarker(latentChW, latentChW && parseInt(latentChW.value, 10) !== 0, " ✎")) changed = true;
 
-    node.setDirtyCanvas(true, true);
+    if (changed) node.setDirtyCanvas(true, true);
 }
 
 app.registerExtension({
