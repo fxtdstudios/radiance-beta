@@ -8,7 +8,8 @@ import {
 // Widget helpers now live in radiance_widget_utils.js; this module's only
 // local difference was the "number" fallback type, which is passed through.
 function setWidgetVisible(widget, visible, node) {
-    _setWidgetVisible(widget, visible, node, { fallbackType: "number" });
+    // Forward the changed-boolean — callers gate refreshNodeSize on it.
+    return _setWidgetVisible(widget, visible, node, { fallbackType: "number" });
 }
 
 /**
