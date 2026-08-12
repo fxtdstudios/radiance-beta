@@ -426,13 +426,36 @@ def decode_to_linear_realtime(
                 spatial_scale = int(2 ** getattr(decoder, "n_upsample", 3))
                 latent_tile = max(1, tile_size // spatial_scale)
                 latent_overlap = max(0, overlap // spatial_scale)
-                log_coded_bchw = torch.zeros(
-                    (B, 3, H * spatial_scale, W * spatial_scale),
-                    device=device,
-                    dtype=dtype,
-                )
-                
-                # Account for the model-specific VAE spatial factor in tile coordinates.
+                # AUDIT-FIX (2026-08): tiles used to be butt-joined -- each
+                # tile decoded with overlap CONTEXT but only its interior crop
+                # was pasted, hard edge against its neighbour. A VAE decoder
+                # is not shift-invariant at its receptive-field borders, so
+                # tile seams were visible on flat gradients (sky, walls).
+                # Now the full decoded tile (context included) is accumulated
+                # under a separable raised-cosine weight and normalised by the
+                # weight sum: overlap regions cross-fade instead of butting.
+                out_H, out_W = H * spatial_scale, W * spatial_scale
+                log_coded_bchw = torch.zeros((B, 3, out_H, out_W),
+                                             device=device, dtype=torch.float32)
+                weight_sum = torch.zeros((1, 1, out_H, out_W),
+                                         device=device, dtype=torch.float32)
+
+                def _cos_ramp(n: int, ramp: int, lo_edge: bool, hi_edge: bool):
+                    """1D weight: raised-cosine ramps on interior edges, flat 1
+                    on image borders (nothing to blend into there)."""
+                    w = torch.ones(n, device=device, dtype=torch.float32)
+                    r = min(ramp, n // 2)
+                    if r > 0:
+                        t = torch.linspace(0, 3.14159265, 2 * r,
+                                           device=device, dtype=torch.float32)
+                        ramp_up = 0.5 * (1.0 - torch.cos(t[:r]))
+                        if not lo_edge:
+                            w[:r] = ramp_up
+                        if not hi_edge:
+                            w[-r:] = ramp_up.flip(0)
+                    return w.clamp(min=1e-4)
+
+                ramp_px = max(1, latent_overlap * spatial_scale)
                 for i in range(0, H, latent_tile):
                     for j in range(0, W, latent_tile):
                         # Extract tile with overlap
@@ -440,19 +463,21 @@ def decode_to_linear_realtime(
                         sj = max(0, j - latent_overlap)
                         ei = min(H, i + latent_tile + latent_overlap)
                         ej = min(W, j + latent_tile + latent_overlap)
-                        
+
                         tile = x[:, :, si:ei, sj:ej]
-                        tile_out = _decode_with_optional_conditioning(decoder, tile, dr_proj)
-                        
-                        # Calculate crop for overlap
-                        oi = (i - si) * spatial_scale
-                        oj = (j - sj) * spatial_scale
-                        wi = min(tile_size, (ei - i) * spatial_scale)
-                        wj = min(tile_size, (ej - j) * spatial_scale)
-                        
-                        out_i = i * spatial_scale
-                        out_j = j * spatial_scale
-                        log_coded_bchw[:, :, out_i:out_i+wi, out_j:out_j+wj] = tile_out[:, :, oi:oi+wi, oj:oj+wj]
+                        tile_out = _decode_with_optional_conditioning(
+                            decoder, tile, dr_proj).float()
+
+                        th, tw = tile_out.shape[-2:]
+                        wy = _cos_ramp(th, ramp_px, si == 0, ei == H)
+                        wx = _cos_ramp(tw, ramp_px, sj == 0, ej == W)
+                        w2d = (wy[:, None] * wx[None, :])[None, None]
+
+                        oy, ox = si * spatial_scale, sj * spatial_scale
+                        log_coded_bchw[:, :, oy:oy + th, ox:ox + tw] += tile_out * w2d
+                        weight_sum[:, :, oy:oy + th, ox:ox + tw] += w2d
+
+                log_coded_bchw = (log_coded_bchw / weight_sum.clamp(min=1e-4)).to(dtype)
 
     # 3. Convert (B, 3, H, W) → (B, H, W, 3) float32
     log_coded = log_coded_bchw.permute(0, 2, 3, 1).float()

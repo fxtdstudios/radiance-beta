@@ -383,21 +383,21 @@ class RadianceSDRToHDRPrepare:
         # ── 5. Feather the inpainting mask ─────────────────────────────────
         out_mask = clip_mask.clone()
         if mask_feather > 0:
+            # AUDIT-FIX (2026-08): the old loop reflect-padded ONCE before the
+            # first pass, then after passes 2 and 3 restored the shrunken
+            # size by zero-padding only the right/bottom edges -- shifting the
+            # feathered mask up-left by ~2x the feather radius (32 px at the
+            # default 16) and injecting dark bands. An inpainting mask offset
+            # from the clipped highlights it marks guides the AI to repair
+            # the wrong pixels. Pad symmetrically inside the loop instead:
+            # size is exact after every pass, no shift, no bands.
             k = 2 * mask_feather + 1
-            padded = F.pad(
-                out_mask.unsqueeze(1).float(),
-                [mask_feather] * 4, mode="reflect"
-            )
-            # Gaussian blur approximated by repeated box filter
             box = torch.ones(1, 1, k, k, device=out_mask.device) / (k * k)
+            blurred = out_mask.unsqueeze(1).float()
             for _ in range(3):
-                padded = F.conv2d(padded, box, padding=0)
-                if padded.shape[-1] < out_mask.shape[-1]:
-                    # Pad back to original size after each pass
-                    ph = out_mask.shape[-2] - padded.shape[-2]
-                    pw = out_mask.shape[-1] - padded.shape[-1]
-                    padded = F.pad(padded, [0, pw, 0, ph])
-            out_mask = padded[:, 0, :out_mask.shape[-2], :out_mask.shape[-1]]
+                padded = F.pad(blurred, [mask_feather] * 4, mode="reflect")
+                blurred = F.conv2d(padded, box, padding=0)
+            out_mask = blurred[:, 0]
 
         logger.info(
             "RadianceSDRToHDRPrepare: eotf=%s  ratio=%.2f  boost=%.1f  peak_linear=%.3f",
