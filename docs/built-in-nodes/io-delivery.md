@@ -112,7 +112,7 @@ Backward-compatible Digital Cinema writer shim.
 | Input | Required | Type | Default | Range | Description |
 | :--- | :---: | :--- | :--- | :--- | :--- |
 | `images` | Yes | `IMAGE` |  |  |  |
-| `output_path` | Yes | `STRING` | `/sessions/elegant-vibrant-planck/radiance_output` |  |  |
+| `output_path` | Yes | `STRING` | `~/radiance_output` |  |  |
 | `format` | No | choice of `IMG │ PNG (8-bit)`, `IMG │ PNG (16-bit)`, `IMG │ JPEG`, `IMG │ TIFF (16-bit)`, `IMG │ TIFF (32-bit float)`, `IMG │ DPX`, `IMG │ WEBP`, `IMG │ EXR (16-bit half)`, … (+14 more) | `IMG │ EXR (16-bit half)` |  |  |
 | `filename` | No | `STRING` | `` |  |  |
 
@@ -176,7 +176,7 @@ Write images or EXR sequences to disk with configurable format options.
 | Input | Required | Type | Default | Range | Description |
 | :--- | :---: | :--- | :--- | :--- | :--- |
 | `image` | Yes | `*` |  |  | Accepts any ComfyUI output: IMAGE tensor, batched video frames, VHSor any dict/list carrying a video path. |
-| `output_path` | Yes | `STRING` | `/sessions/elegant-vibrant-planck/radiance_output` |  | Output directory + filename stem. Extension is appended automatically based on format. For sequences: frame number and extension are appended (e.g. /out/frame_0001.exr). Network paths are fully supported — use the path as mounted on this machine: Linux / Mac → /mnt/nas/renders/shot_001 Windows UNC → \\server\share\renders\shot_001 Windows drive→ Z:\renders\shot_001 The directory is created automatically (mkdir -p) if it does not exist. Write permissions on the share are required. |
+| `output_path` | Yes | `STRING` | `~/radiance_output` |  | Output directory + filename stem. Extension is appended automatically based on format. For sequences: frame number and extension are appended (e.g. /out/frame_0001.exr). Network paths are fully supported — use the path as mounted on this machine: Linux / Mac → /mnt/nas/renders/shot_001 Windows UNC → \\server\share\renders\shot_001 Windows drive→ Z:\renders\shot_001 The directory is created automatically (mkdir -p) if it does not exist. Write permissions on the share are required. |
 | `format` | Yes | choice of `IMG │ PNG (8-bit)`, `IMG │ PNG (16-bit)`, `IMG │ JPEG`, `IMG │ TIFF (16-bit)`, `IMG │ TIFF (32-bit float)`, `IMG │ DPX`, `IMG │ WEBP`, `IMG │ EXR (16-bit half)`, … (+14 more) | `IMG │ EXR (16-bit half)` |  | Output format. Extension is appended automatically. |
 | `filename` | No | `STRING` | `` |  | Output filename stem (version appended automatically). Leave empty to use output_path as the full stem. |
 | `version` | No | `INT` | `1` | 0 – 9999 | Version number appended to filename (e.g. shot_001_v0001). |

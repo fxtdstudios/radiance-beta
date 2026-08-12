@@ -428,11 +428,29 @@ def _describe_range(config: dict) -> str:
     return ", ".join(bits)
 
 
+def _portable_default(value):
+    """Render machine-dependent path defaults portably.
+
+    AUDIT-FIX (2026-08): RadianceWrite defaults output_path to
+    ``Path.home() / "radiance_output"``, so the generated reference embedded
+    whichever machine's home directory ran the generator —
+    ``/sessions/…`` locally, ``/home/runner`` on CI, ``C:\\Users\\…`` on
+    Windows — and the docs-freshness test could never pass on two different
+    machines at once. Home-anchored defaults are rendered as ``~/…``.
+    """
+    if isinstance(value, str):
+        import os
+        home = os.path.expanduser("~")
+        if home and home not in ("~", "/") and value.startswith(home):
+            return "~" + value[len(home):].replace("\\", "/")
+    return value
+
+
 def _default_of(kind, config: dict):
     if not isinstance(config, dict):
         config = {}
     if "default" in config:
-        return config["default"]
+        return _portable_default(config["default"])
     if _runtime_supplied(kind):
         return None
     if isinstance(kind, (list, tuple)) and kind:
