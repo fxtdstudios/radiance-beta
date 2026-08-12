@@ -136,7 +136,7 @@ Read an image, EXR, video or numbered sequence into the pipeline. Video decodes 
 
 | Input | Required | Type | Default | Range | Description |
 | :--- | :---: | :--- | :--- | :--- | :--- |
-| `browse` | Yes | choice of ``, `404_mobile.png`, `dialog.png`, `index_desktop.png`, `index_mobile.png`, `radiance_full.png` | `` |  | Browse or upload a file from disk. • Click the upload icon (📎) to open a native file picker. • Supports images (PNG, JPG, TIFF, EXR, DPX, HDR, WebP) and video (MP4, MOV, MXF, AVI, WebM, MKV). • Uploaded files are copied to ComfyUI's input• Leave blank and fill in 'path' below for absolute / network / sequence paths. |
+| `browse` | Yes | choice of `` | `` |  | Browse or upload a file from disk. • Click the upload icon (📎) to open a native file picker. • Supports images (PNG, JPG, TIFF, EXR, DPX, HDR, WebP) and video (MP4, MOV, MXF, AVI, WebM, MKV). • Uploaded files are copied to ComfyUI's input• Leave blank and fill in 'path' below for absolute / network / sequence paths. |
 | `media_type` | No | choice of `Auto`, `Image`, `Video`, `Sequence` | `Auto` |  | Override auto-detection. Auto infers from path extension and pattern. |
 | `path` | No | `STRING` | `` |  | Optional — used only when 'browse' is left blank. Accepts any absolute path, UNC network path, or sequence pattern: Sequence patterns: /frames/f.%04d.exr · /frames/f.####.png · /dir/ Network paths: /mnt/nas/renders/shot or \\server\share\shot Format is auto-detected from extension. |
 | `color_space` | No | choice of `Auto / Linear (pass-through)`, `Rec.709 (BT.1886)`, `sRGB`, `ARRI LogC4`, `ARRI LogC3`, `Sony S-Log3`, `Panasonic V-Log`, `Canon Log 3`, … (+6 more) | `Auto / Linear (pass-through)` |  | Decode the input from this color space to scene-linear before processing. |
@@ -188,7 +188,7 @@ Write images or EXR sequences to disk with configurable format options.
 | `frame_padding` | No | `INT` | `4` | 1 – 8 | Zero-padding width for frame numbers (e.g. 4 → 0001). |
 | `audio_source` | No | `STRING` | `` |  | Path to audio file to mux into video output (optional). Takes priority over the 'audio' input when both are set. |
 | `broadcast_safe` | No | `BOOLEAN` | `False` |  | Clamp output to broadcast-legal range (16–235 luma) before saving. |
-| `overwrite` | No | `BOOLEAN` | `True` |  | Overwrite existing files. When disabled, a unique suffix is appended. |
+| `overwrite` | No | `BOOLEAN` | `False` |  | Overwrite existing files. When disabled (default), a unique suffix is appended instead of destroying the existing file. |
 | `proxy_scale` | No | `FLOAT` | `0.0` | 0.0 – 1.0, step 0.05 | Downscale output by this factor for proxy preview (0 = full resolution). |
 | `audio` | No | `AUDIO` |  |  | Audio tensor from RadianceVideoLoader (muxed into video output). |
 | `mask` | No | `MASK` |  |  | Optional alpha/matte. When connected and the format is EXR or PNG, it is written as the alpha channel (RGBA). Ignored for other formats. |
