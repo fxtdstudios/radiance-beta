@@ -15,4 +15,7 @@ defusedxml>=0.7.1
 imageio-ffmpeg>=0.4.9
 tqdm>=4.66.0
 aiohttp>=3.8.0
+# Sole writer/depth-probe for 16-bit and 32-bit float TIFF — deep-TIFF writes
+# refuse to run without it rather than silently downgrading to 8-bit.
+tifffile>=2023.7.10
 
