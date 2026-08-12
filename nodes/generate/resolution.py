@@ -8,6 +8,8 @@ from typing import Dict, Any, Tuple
 
 import folder_paths
 
+from radiance.model.detect import _BASE_VRAM, _BASE_CLIP_VRAM
+
 logger = logging.getLogger("radiance.resolution")
 
 
@@ -59,7 +61,7 @@ PRESET_NAMES = ["Custom"] + list(PRESETS.keys())
 #    further differentiated beyond the existing SPATIAL_SCALE/LATENT_CHANNELS entries.
 
 # Model types that emit 5D latent (1, C, T, H, W)
-VIDEO_MODEL_TYPES = {"WAN (16ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)", "Cosmos World (16ch)", "CogVideoX (16ch)"}
+VIDEO_MODEL_TYPES = {"WAN (16ch)", "WAN TI2V (48ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)", "Cosmos World (16ch)", "CogVideoX (16ch)"}
 
 # Latent format string matching nodes_sampler.py latent_format input
 LATENT_FORMAT_MAP = {
@@ -73,9 +75,9 @@ LATENT_FORMAT_MAP = {
     # "flux" latent format with no other distinguishing entries anywhere in
     # resolution.py (SPATIAL_SCALE/TEMPORAL_SCALE/VIDEO_MODEL_TYPES all default).
     "Flux / SD3 / Lumina2 / Z-Image (16ch)": "flux",
-    # ALBABIT-FIX: merged with "PixArt / Aura Flow / Kolors (4ch)" — both are 4ch,
-    # 8px, "sdxl" latent format with no other distinguishing entries.
-    "SDXL / SD 1.5 / PixArt / Aura Flow / Kolors (4ch)": "sdxl",
+    # ALBABIT-FIX: SDXL/SD 1.5/PixArt/AuraFlow are all 4ch, 8px, "sdxl" latent
+    # format with no other distinguishing entries -- merged into one option.
+    "SDXL / SD 1.5 / PixArt / Aura Flow (4ch)": "sdxl",
     # ALBABIT-FIX: Chroma uses the Flux latent format (16ch, 8px spatial
     # compression) — matches sampler_utils.py's "chroma" -> "flux" mapping.
     "Chroma (16ch)": "chroma",
@@ -89,6 +91,10 @@ LATENT_FORMAT_MAP = {
     "LTXV (128ch)": "ltxav",
     # ALBABIT-FIX: Added model types matching the Radiance Video Loader / RUDRA decoder set
     "WAN (16ch)": "wan",
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B -- distinct 48ch VAE (comfy.latent_formats.Wan22),
+    # real bug fix (was silently defaulting to "WAN (16ch)"'s 16ch/8px, a
+    # wrong-shaped-latent crash risk at sampling for this checkpoint).
+    "WAN TI2V (48ch)": "wan_ti2v",
     # ALBABIT-FIX: "hunyuan_video" (not "hunyuan") to match sampler_utils.py model_type
     "HunyuanVideo (16ch)": "hunyuan_video",
     # ALBABIT-FIX: Flux.2 latent format (comfy.latent_formats.Flux2)
@@ -106,9 +112,7 @@ MODEL_TYPES = [
     # ALBABIT-FIX: merged "Flux / SD3 (16ch)" + "Lumina2 / Z-Image (16ch)" — both
     # 16ch/8px/"flux" with no other distinguishing entries in this file.
     "Flux / SD3 / Lumina2 / Z-Image (16ch)",
-    # ALBABIT-FIX: merged "SDXL / SD 1.5 (4ch)" + "PixArt / Aura Flow / Kolors (4ch)"
-    # — both 4ch/8px/"sdxl" with no other distinguishing entries in this file.
-    "SDXL / SD 1.5 / PixArt / Aura Flow / Kolors (4ch)",
+    "SDXL / SD 1.5 / PixArt / Aura Flow (4ch)",
     "Chroma (16ch)",
     "Cosmos World (16ch)",
     "CogVideoX (16ch)",
@@ -119,6 +123,9 @@ MODEL_TYPES = [
     "LTXV (128ch)",
     # ALBABIT-FIX: Added model types matching the Radiance Video Loader / RUDRA decoder set
     "WAN (16ch)",
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B -- previously had no dedicated option here at
+    # all, forcing users onto "WAN (16ch)" (wrong channel count/spatial scale).
+    "WAN TI2V (48ch)",
     "HunyuanVideo (16ch)",
     # ALBABIT-FIX: Flux.2 / Flux.2 Klein — 128ch latent like LTXV, but ×16 spatial
     # downscale (vs ×32 for LTXV) and no 5D/video handling.
@@ -131,7 +138,7 @@ ORIENTATIONS = ["As Preset", "Landscape", "Portrait", "Square"]
 LATENT_CHANNELS = {
     "Manual": 16,
     "Flux / SD3 / Lumina2 / Z-Image (16ch)": 16,
-    "SDXL / SD 1.5 / PixArt / Aura Flow / Kolors (4ch)": 4,
+    "SDXL / SD 1.5 / PixArt / Aura Flow (4ch)": 4,
     "Chroma (16ch)": 16,
     "Cosmos World (16ch)": 16,
     "CogVideoX (16ch)": 16,
@@ -140,6 +147,9 @@ LATENT_CHANNELS = {
     "LTXV (128ch)": 128,
     # ALBABIT-FIX: Added model types matching the Radiance Video Loader / RUDRA decoder set
     "WAN (16ch)": 16,
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B's VAE is comfy.latent_formats.Wan22 (48
+    # latent channels) -- real bug fix, see the model_type list comment above.
+    "WAN TI2V (48ch)": 48,
     "HunyuanVideo (16ch)": 16,
     # ALBABIT-FIX: Flux.2 latent is 128 channels (comfy.latent_formats.Flux2)
     "Flux.2 / Flux.2 Klein (128ch)": 128,
@@ -153,6 +163,12 @@ LATENT_CHANNELS = {
 SPATIAL_SCALE = {
     "LTXV (128ch)": 32,
     "Flux.2 / Flux.2 Klein (128ch)": 16,
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B's VAE trades channel depth for spatial
+    # compression -- comfy.latent_formats.Wan22 sets spacial_downscale_ratio=16
+    # (double the standard WAN's implicit 8x). Real bug fix: this model_type had
+    # no entry at all, silently falling back to the 8px default -- wrong latent
+    # size, not just a metadata inaccuracy.
+    "WAN TI2V (48ch)": 16,
     # ALBABIT-FIX: "Manual" uses scale=1 -> _align_up is a no-op, so width/height
     # are fully unconstrained (no rounding, +/- step of 1) for experimental models.
     "Manual": 1,
@@ -167,6 +183,11 @@ SPATIAL_SCALE = {
 TEMPORAL_SCALE = {
     "LTXV (128ch)": 8,
     "WAN (16ch)": 4,
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B keeps the same 4x temporal compression as
+    # standard WAN (comfy.latent_formats.Wan22 inherits temporal_downscale_ratio
+    # from Wan21, only spacial_downscale_ratio is overridden) -- listed
+    # explicitly for clarity even though it matches this table's own default.
+    "WAN TI2V (48ch)": 4,
     "HunyuanVideo (16ch)": 4,
     "CogVideoX (16ch)": 4,
     # ALBABIT-FIX: Mochi's VAE temporal compression is ×6 (nodes_mochi.py:
@@ -184,18 +205,13 @@ TEMPORAL_SCALE = {
 # ── VRAM Estimation Metadata ──────────────────────────────────────────────────
 # Bytes per latent element (ComfyUI usually uses float32 internally = 4 bytes)
 LATENT_ELEMENT_BYTES = 4
-# Typical VRAM overhead for a modern diffusion model pass (Geniune rough estimate in GB)
-MODEL_BASE_VRAM = {
-    "flux": 12.0,  # Flux is heavy
-    "sdxl": 4.5,   # SDXL is medium
-    "wan":  14.0,  # Video models are very heavy
-    "ltxav": 10.0,  # ALBABIT-FIX: renamed from "ltx" to match latent_format key
-    "hunyuan_video": 16.0,  # ALBABIT-FIX: renamed from "hunyuan" to match latent_format key
-    "flux2": 20.0,    # ALBABIT-FIX: Flux.2 base VRAM estimate (32B+ models)
-    # ALBABIT-FIX: Cosmos / CogVideoX / Mochi base VRAM estimates
-    "cosmos": 14.0, "cogvideox": 12.0, "mochi": 16.0,
-    "chroma": 12.0,  # ALBABIT-FIX: Chroma is Flux-sized (16ch, ~12GB base)
-}
+# ALBABIT-FIX: this used to be a separate MODEL_BASE_VRAM dict, hand-duplicated
+# from model/detect.py's _BASE_VRAM -- it drifted (missing the CLIP/text-encoder
+# cost entirely, plus several UNET numbers had gone stale vs _BASE_VRAM) causing
+# this node's "Est. VRAM" to disagree with the Loader's own estimate for the
+# same checkpoint (e.g. Flux.2: 20.0 GB shown here vs the Loader's real 28.0 GB,
+# UNET+CLIP). Reuses _BASE_VRAM/_BASE_CLIP_VRAM directly now -- one source of
+# truth, see _estimate_vram() below.
 
 LATENT_SCALE = 8  # VAE downscale factor
 
@@ -221,8 +237,11 @@ def _estimate_vram(w: int, h: int, c: int, b: int, format_key: str = "flux", spa
     latent_bytes = b * c * lw * lh * LATENT_ELEMENT_BYTES
     # Convert to GB
     latent_gb = latent_bytes / (1024**3)
-    # Model overhead
-    base_gb = MODEL_BASE_VRAM.get(format_key.lower(), 4.0)
+    # Model overhead: UNET + CLIP/text-encoder, same tables the Loader's own
+    # estimate_vram_usage() uses -- keeps this node's readout consistent with
+    # the Loader's, instead of a separately-drifting local table.
+    key = format_key.lower()
+    base_gb = _BASE_VRAM.get(key, 4.0) + _BASE_CLIP_VRAM.get(key, 2.0)
     # Total
     return latent_gb + base_gb
 
@@ -749,11 +768,12 @@ class RadianceResolution:
                         "default": "Manual",
                         "tooltip": (
                             "Drives pixel alignment, video-latent shape, frame-count "
-                            "rules, and latent_format for the selected model family. "
-                            "Flux/SD3/Cosmos = 16ch. SDXL/SD 1.5 = 4ch. Mochi = 12ch. "
-                            "'Manual' applies no alignment/frame-count constraints — "
-                            "use the 'latent_channels' input to set channels for "
-                            "experimental/unlisted models."
+                            "rules, latent_format, and the Est. VRAM readout.\n"
+                            "Flux/SD3/Cosmos = 16ch. SDXL/SD 1.5 = 4ch. Mochi = 12ch.\n"
+                            "'Manual': no alignment/frame-count constraints; use "
+                            "'latent_channels' for experimental/unlisted models.\n"
+                            "Est. VRAM assumes a full load; actual usage may be lower "
+                            "with DynamicVRAM/CPU offload active."
                         ),
                     },
                 ),

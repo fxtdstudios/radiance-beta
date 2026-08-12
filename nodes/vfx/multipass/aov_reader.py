@@ -26,6 +26,7 @@ import numpy as np
 import torch
 
 from .core import _flow_to_hsv_image
+from ....core.system.path_utils import strip_path_quotes
 
 logger = logging.getLogger("radiance.vfx_multipass.aov_reader")
 
@@ -321,7 +322,8 @@ class RadianceMultipassAOVReader:
         normal_layer: str = "auto",
         depth_layer: str = "auto",
     ) -> Tuple:
-        layers, h, w, window_metadata = _read_multilayer_exr(exr_path.strip())
+        exr_path = strip_path_quotes(exr_path)
+        layers, h, w, window_metadata = _read_multilayer_exr(exr_path)
 
         # Normalized lookup of available layers.
         norm_to_raw = {_norm_layer_name(k): k for k in layers}

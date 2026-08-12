@@ -9,21 +9,23 @@
  *   HDR scale, and opt-in RHDR precision while the backend fixes output to
  *   scene-linear Linear with no display tonemap.
  *
- *   Additional: hdr_output=True shows a warning on hdr_output's label when
- *   either (a) hdr_mode=Compress(Log) + display_tonemap=None (no tonemap
- *   applied, unbounded values) or (b) target_space is scene-referred (not
- *   sRGB/Raw) -- both make the ComfyUI preview look overexposed/wrong
- *   (intentional for VFX pipelines that consume the raw tensor downstream).
- *
  *   temporal_overlap is hidden unless temporal_size > 0 (its own tooltip:
  *   "Only active when temporal_size > 0").
  *
- *   Post-execution: rudra_decoder gets a warning when RUDRA fell all the way
- *   back to the standard VAE (no compatible checkpoint at all), or a shorter
- *   note when a cross-architecture checkpoint was silently substituted (e.g.
- *   wan -> flux, fast_vae.py's _DECODER_TYPE_FALLBACKS) -- both read from
- *   engine.py's "ui" channel via onExecuted, since only knowable once decode
- *   actually runs.
+ *   Post-execution (read from engine.py's "ui" channel via onExecuted, since
+ *   only knowable once decode actually runs):
+ *     - rudra_decoder gets a warning when RUDRA fell all the way back to the
+ *       standard VAE (no compatible checkpoint at all), or a shorter note
+ *       when a cross-architecture checkpoint was silently substituted (e.g.
+ *       wan -> flux, fast_vae.py's _DECODER_TYPE_FALLBACKS).
+ *     - hdr_output gets a warning when Compress(Log) ran with no
+ *       radiance_meta on the latent (no genuine HDR-encoded source upstream,
+ *       stripped by a sampler in between): the log-decompression curve then
+ *       inverts values that were never log-encoded, producing genuinely
+ *       wrong output. display_tonemap can't fix this, since hdr/vae.py
+ *       applies it AFTER the decompression. target_space alone is NOT
+ *       flagged: that's a ComfyUI-preview-only quirk, real output is
+ *       unaffected. Both confirmed against real decoded pixel values.
  *
  * INSTALL:
  *   Place this file in the same folder as radiance_bootstrap.js (the custom
@@ -42,7 +44,7 @@ import {
 // Widget helpers now live in radiance_widget_utils.js; this module's only
 // local difference was the "number" fallback type, which is passed through.
 function setWidgetVisible(widget, visible, node) {
-    _setWidgetVisible(widget, visible, node, { fallbackType: "number" });
+    return _setWidgetVisible(widget, visible, node, { fallbackType: "number" });
 }
 
 // ALBABIT-FIX: v1.0 matched node.type against the display-name string
@@ -101,10 +103,14 @@ function _setLabelMarker(widget, marker) {
     if (widget.label !== wanted) widget.label = wanted;
 }
 
+
 function refreshNodeSize(node) {
     if (!node.computeSize) return;
     const sz = node.computeSize();
-    node.setSize([Math.max(node.size[0], sz[0]), sz[1]]);
+    const newWidth = Math.max(node.size[0], sz[0]);
+    const newHeight = sz[1];
+    if (node.size[0] === newWidth && node.size[1] === newHeight) return;
+    node.setSize([newWidth, newHeight]);
     node.setDirtyCanvas(true, true);
 }
 
@@ -131,54 +137,44 @@ function syncWidgets(node) {
 
     if (!decodeModeW) return;
 
-    const hdrOut  = !!hdrOutputW.value;
     const hdrMode = hdrModeW?.value ?? "";
     if (rudraDecoderW?.value === "Enabled" && decodeModeW.value !== "Direct HDR / RUDRA") {
         decodeModeW.value = "Direct HDR / RUDRA";
     }
     const directHDR = decodeModeW.value === "Direct HDR / RUDRA";
     const isCompressLog = directHDR || hdrMode === "Compress (Log)";
-
-    // Guaranteed-overexposure warning: hdr_output=True skips the final [0,1]
-    // clamp in every hdr_mode, so the preview looks wrong for two independent
-    // reasons -- (a) hdr_mode=Compress(Log) + display_tonemap=None applies no
-    // tonemap at all, so raw decompressed HDR values pass through unbounded;
-    // (b) target_space is scene-referred (anything but sRGB/Raw), which
-    // ComfyUI's native preview always misinterprets as sRGB regardless of
-    // tonemap -- confirmed by target_space's own tooltip ("Requires
-    // hdr_output=True for true linear passthrough... Log/ACEScg/Rec.2020
-    // spaces are scene-referred — connect to a tonemap node before SaveImage").
+    // Overexposure-risk marking happens post-execution in onExecuted below
+    // (merged from beta/main): risk depends on radiance_meta, only known once
+    // the decode has actually run — not derivable from widget values here.
     const displayTmVal = displayTmW?.value ?? "ACES Filmic";
     const targetSpaceVal = targetSpaceW?.value ?? "sRGB";
-    const willBlowOut = hdrOut && (
-        (isCompressLog && displayTmVal === "None") ||
-        !DISPLAY_READY_SPACES.has(targetSpaceVal)
-    );
-    _setLabelMarker(hdrOutputW, willBlowOut ? BLOWOUT_MARKER : null);
 
     // decode_mode owns these values at execution: sampler mode is Clip/sRGB,
     // direct mode is Compress(Log)/Linear with no display tonemap.
-    setWidgetVisible(hdrModeW, false, node);
-    setWidgetVisible(hdrOutputW, false, node);
-    setWidgetVisible(displayTmW, false, node);
-    setWidgetVisible(targetSpaceW, !directHDR, node);
-    setWidgetVisible(exportRhdrW, directHDR, node);
+    // MERGE-PORT (beta/main 9a5ac88): gate the node resize on actual
+    // visibility transitions so the 250 ms poll stays a no-op at rest.
+    let changed = false;
+    if (setWidgetVisible(hdrModeW, false, node)) changed = true;
+    if (setWidgetVisible(hdrOutputW, false, node)) changed = true;
+    if (setWidgetVisible(displayTmW, false, node)) changed = true;
+    if (setWidgetVisible(targetSpaceW, !directHDR, node)) changed = true;
+    if (setWidgetVisible(exportRhdrW, directHDR, node)) changed = true;
     if (!directHDR && exportRhdrW?.value) exportRhdrW.value = false;
 
-    setWidgetVisible(targetStopsW, !!inverseTmW?.value && !directHDR, node);
-    setWidgetVisible(rhdrPrecisionW, !!exportRhdrW?.value, node);
-    setWidgetVisible(decoderSizeW, rudraDecoderW?.value === "Enabled", node);
-    setWidgetVisible(sourceSpaceW, directHDR, node);
-    setWidgetVisible(decodeNoiseW, directHDR, node);
-    setWidgetVisible(inverseTmW, !directHDR, node);
-    setWidgetVisible(hdrScaleW, directHDR, node);
+    if (setWidgetVisible(targetStopsW, !!inverseTmW?.value && !directHDR, node)) changed = true;
+    if (setWidgetVisible(rhdrPrecisionW, !!exportRhdrW?.value, node)) changed = true;
+    if (setWidgetVisible(decoderSizeW, rudraDecoderW?.value === "Enabled", node)) changed = true;
+    if (setWidgetVisible(sourceSpaceW, directHDR, node)) changed = true;
+    if (setWidgetVisible(decodeNoiseW, directHDR, node)) changed = true;
+    if (setWidgetVisible(inverseTmW, !directHDR, node)) changed = true;
+    if (setWidgetVisible(hdrScaleW, directHDR, node)) changed = true;
 
     // ALBABIT-FIX: temporal_overlap is only read inside `if latent.ndim == 5
     // and temporal_size > 0:` (hdr/vae.py:2763) -- matches its own tooltip
     // ("Only active when temporal_size > 0").
-    setWidgetVisible(temporalOverlapW, (parseInt(temporalSizeW?.value, 10) || 0) > 0, node);
+    if (setWidgetVisible(temporalOverlapW, (parseInt(temporalSizeW?.value, 10) || 0) > 0, node)) changed = true;
 
-    refreshNodeSize(node);
+    if (changed) refreshNodeSize(node);
 }
 
 app.registerExtension({
@@ -269,6 +265,14 @@ app.registerExtension({
             if (fellBack) marker = RUDRA_FALLBACK_MARKER;
             else if (substitutedType) marker = ` ⚠ ${substitutedType} ckpt`;
             _setLabelMarker(getWidget(this, W_RUDRA_DECODER), marker);
+
+            // ALBABIT-FIX: same "ui" side-channel convention, for hdr_output.
+            // engine.py computes log_overexposure_risk from radiance_meta
+            // (only known at decode time), so this only reflects the run that
+            // just finished, not the current widget values.
+            const overexpRisk = !!message?.log_overexposure_risk?.[0];
+            _setLabelMarker(getWidget(this, W_HDR_OUTPUT), overexpRisk ? BLOWOUT_MARKER : null);
+
             this.setDirtyCanvas?.(true, true);
         };
     },

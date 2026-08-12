@@ -377,17 +377,17 @@ Video loader v3.3 — for LTX 2.3, Wan, HunyuanVideo, etc. Supports Baked/standa
 
 | Input | Required | Type | Default | Range | Description |
 | :--- | :---: | :--- | :--- | :--- | :--- |
-| `preset` | Yes | choice of `Custom`, `HunyuanVideo`, `Wan 2.1`, `Wan 2.2`, `Wan 2.2 TI2V`, `LTX Video`, `LTX Video 13B`, `LTX Video 2.3`, … (+4 more) | `Custom` |  | Quick-configure for common architectures. Overrides model_type, dtypes, offload_mode, and hints which CLIP slots are needed. |
+| `preset` | Yes | choice of `Custom`, `CogVideoX`, `Cosmos World`, `HunyuanVideo`, `LTX Video`, `LTX Video (Low VRAM)`, `LTX Video 2.3`, `LTX Video 2.3 (Low VRAM)`, … (+6 more) | `Custom` |  | Quick-configure for common architectures. Overrides model_type, dtypes, offload_mode, and hints which CLIP slots are needed. |
 | `unet_name` | Yes | choice (empty) |  |  | Main diffusion model (UNET / DiT / Transformer). For WAN 2.2, select either the high_noise or low_noise file — the companion expert is detected automatically. The 'model' output always carries the high_noise expert and 'model_low_noise' always carries the low_noise expert, regardless of which file is selected. |
 | `weight_dtype` | Yes | choice of `default`, `fp8_e4m3fn`, `fp8_e5m2`, `fp16`, `bf16`, `fp32` | `default` |  | UNET weight precision. fp8_e4m3fn saves ~40% VRAM vs fp16. |
-| `model_type` | Yes | choice of `Auto-Detect`, `hunyuan_video`, `wan`, `ltxv`, `ltxav`, `cosmos`, `cogvideox`, `mochi` | `Auto-Detect` |  | 'Auto-Detect' reads the checkpoint's key names to determine architecture. Override manually if detection fails. |
+| `model_type` | Yes | choice of `Auto-Detect`, `hunyuan_video`, `wan`, `ltxv`, `ltxav`, `wan_ti2v`, `cosmos`, `cogvideox`, … (+1 more) | `Auto-Detect` |  | 'Auto-Detect' reads the checkpoint's key names to determine architecture. Override manually if detection fails. |
 | `vae_name` | Yes | choice of `Baked VAE (from UNET)` | `Baked VAE (from UNET)` |  | VAE for encoding/decoding latents. 'Baked VAE (from UNET)' extracts it from the checkpoint. |
 | `audio_vae_name` | No | choice of `None`, `Baked Audio VAE (from UNET)` | `None` |  | Audio VAE for LTX 2.3. Choose 'Baked' or a standalone safetensors file. |
 | `upscale_model_name` | No | choice of `None` | `None` |  | Latent Upscale Model (e.g. for LTX 2.3 or HunyuanVideo). |
 | `clip_l` | No | choice of `None` | `None` |  | CLIP-L (text encoder). Used by: SD1.5, SDXL, Flux, SD3. |
 | `clip_g` | No | choice of `None` | `None` |  | CLIP-G (text encoder). Used by: SDXL, SD3, SD3.5. |
-| `t5xxl` | No | choice of `None` | `None` |  | T5-XXL (text encoder). Used by: Flux, SD3, SD3.5, Wan, PixArt, LTX (pre-2.3). |
-| `llm_encoder` | No | choice of `None` | `None` |  | LLM encoder. Used by: Kolors/HunyuanVideo (ChatGLM3), LTX 2.3 (Gemma 3). |
+| `t5xxl` | No | choice of `None`, `Baked (from UNET)` | `None` |  | T5-XXL (text encoder). Used by: Flux, SD3, SD3.5, Wan, PixArt, LTX (pre-2.3). 'Baked (from UNET)' loads it from the main checkpoint -- AuraFlow ships no standalone text encoder file. |
+| `llm_encoder` | No | choice of `None` | `None` |  | LLM encoder. Used by: HunyuanVideo (Llava-Llama3), LTX 2.3 (Gemma 3), Lumina2 (Gemma-2), Z-Image (Qwen3), Flux.2 (Mistral-3/Qwen3). |
 | `text_projection` | No | choice of `None`, `Baked (from UNET)` | `None` |  | Text projection matrix. Used by: LTX 2.3 (with Gemma 3 llm_encoder). 'Baked (from UNET)' loads it from the main LTX 2.3 checkpoint, like the native LTXV Audio Text Encoder Loader. |
 | `clip_dtype` | No | choice of `default`, `fp16`, `bf16`, `fp8_e4m3fn`, `fp32` | `default` |  | CLIP weight precision. Independent from UNET. For Flux T5XXL: fp8 saves ~4.7 GB vs fp16. |
 | `offload_mode` | No | choice of `none`, `cpu_offload`, `sequential` | `none` |  | none = GPU only. cpu_offload = CLIP loaded to CPU RAM. sequential = enable ComfyUI sequential CPU offload (8–12 GB GPUs). |
