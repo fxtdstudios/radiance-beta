@@ -93,6 +93,19 @@ pip install -r requirements_mac_silicon.txt
 ### Verify
 
 Start ComfyUI and look for `Radiance: successfully loaded 109 nodes` in the log.
+A lower count means a node module failed to import — usually a missing optional
+dependency; the Environment Guard table printed at startup shows which.
+
+For a full machine-level check (every node executed on your GPU, VRAM peaks,
+RUDRA decoder benchmarks and scores), run:
+
+```bat
+cd ComfyUI
+python custom_nodes\radiance\tools\gpu_acceptance.py
+```
+
+It writes `gpu_acceptance_report.md` next to the script, and names any nodes
+missing on your install.
 
 ### Models (RUDRA decoders)
 
@@ -145,6 +158,8 @@ The Project Manager node keeps its launchers (open, save, and links) in a single
 ### Smart Interface
 
 - **Adaptive sampler.** The Radiance Sampler hides every parameter when no preset is selected, shows everything in Custom mode, and for a named preset shows only the parameters relevant to that model — so you only see the controls that matter.
+- **Inline video preview on Read.** MP4/MOV/WebM play directly on the node with scrubbing; production codecs the browser cannot decode (ProRes, DNxHR, MXF) fall back to a first-frame poster. Paths outside ComfyUI's folders need `RADIANCE_READ_ROOTS` (see Notes & Tips).
+- **Resolved-path readout on Write.** The node shows the exact path that will land on disk — output_path, filename, version and format combined by the same code that writes — plus a note line ("frame 1 only" when an IMG format receives a batch, sequence start frame, unique-suffix behaviour). `overwrite` defaults **off**: existing files get a unique suffix instead of being destroyed.
 - **In-canvas overlays.** Dashboards open over the graph and close with Esc, the dimmed background, or the close button, with an option to open in a full tab.
 - **Dynamic Gizmos.** Collapse any selection of nodes into a single styled custom node that you can save and reuse like any other node.
 - **Smart Backdrops.** Group nodes get a clear, tinted-glass background keyed to the node category instead of a near-invisible panel.
@@ -238,6 +253,13 @@ Radiance supports DaVinci Resolve through a folder handoff: the Send to DaVinci 
 
 - **Estimated VFX passes.** The Multipass Master extractor derives passes (albedo, roughness, ambient occlusion, segmentation ID, and more) from a single image — handy for 2D and generated footage, but not a substitute for true render passes. For ground-truth passes, feed a multilayer EXR through the Multipass AOV Reader. The segmentation output is a clustered matte, not a Cryptomatte.
 - **Super-resolution and color.** Upscale backends work in display-referred space. For scene-linear input, use the upscaler's HDR and color-encoding options to preserve your values.
+- **Previews from a NAS or server path.** The Read node opens any absolute path (local, mapped drive, UNC), but its inline preview/info widgets are served over unauthenticated HTTP routes restricted to ComfyUI's own folders. To preview media elsewhere, allow those roots explicitly (`;`-separated on Windows) and restart ComfyUI:
+
+  ```bat
+  setx RADIANCE_READ_ROOTS "Z:\renders;\\server\share\plates"
+  ```
+
+- **Upgrading from ≤ 3.2.0: re-check graded masters.** `RadianceColorSpaceConvert` previously performed no conversion at all for 10 of its 16 spaces (all camera-log and ACES working spaces) whenever no OCIO config was loaded — the default install. Anything that passed through those conversions was graded on unconverted pixels. Details in the [changelog](CHANGELOG.md).
 
 ## Known limitations
 
