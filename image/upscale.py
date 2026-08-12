@@ -6,6 +6,12 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import torch
 import torch.nn.functional as F
 import numpy as np
+
+from radiance.model.cache import GPUModelCache
+from radiance.core.tiling import (
+    blend_weight_2d, blend_weight_2d_np,
+    edge_overlaps_from_coords, clamp_overlap,
+)
 from typing import Tuple, Dict
 import math
 from enum import Enum
@@ -22,7 +28,10 @@ except ImportError:
 logger = logging.getLogger("radiance.image.upscale")
 
 # Global model cache to prevent re-initialization overhead
-_MODEL_CACHE = {}
+# Bounded LRU: this was an unbounded dict, and because self.model = model.to(device)
+# mutates the cached module in place, the dict held the GPU-resident object. The
+# user-facing unload_model toggle only cleared self.model, so it freed nothing.
+_MODEL_CACHE = GPUModelCache(max_size=2)
 _CACHE_LOCK = threading.RLock()
 
 # ALBABIT-FIX: SUPIR models are diffusion-based (not feedforward upscalers) and
@@ -72,8 +81,11 @@ def gaussian_blur_32bit(img: np.ndarray, sigma: float) -> np.ndarray:
             # Blur spatial dims only, not channels
             return gaussian_filter(img, sigma=[sigma, sigma, 0]).astype(np.float32)
         return gaussian_filter(img, sigma=sigma).astype(np.float32)
-    except ImportError:
-        pass
+    except ImportError as _exc:
+        logger.debug(
+            "[Radiance] gaussian_blur_32bit(): ignoring %s from `from scipy.ndimage import gaussian_filter`: %s",
+            type(_exc).__name__, _exc,
+        )
 
     # Pure numpy fallback: separable 1D convolution via np.convolve.
     # NOTE: scipy is strongly recommended for production use — the numpy path is
@@ -633,17 +645,35 @@ def process_tiles_32bit(
 
     out_h = int(h * scale_h)
     out_w = int(w * scale_w)
-    out_tile_size = int(tile_size * scale_h)
+    # (out_tile_size is no longer needed: blend weights are now built per tile
+    #  from the tile's own dimensions, so there is nothing to pre-size.)
     out_overlap = int(overlap * scale_h)
 
     # Initialize output and weight buffers
     output = np.zeros((out_h, out_w, channels), dtype=np.float32)
     weights = np.zeros((out_h, out_w), dtype=np.float32)
 
-    # Create blending weight
-    blend_weight = create_tile_weight(out_tile_size, out_overlap)
+    # Blend weights are built per tile so edges lying on the image border are
+    # NOT ramped (a border pixel is covered by one tile only, so a ramp that
+    # starts at 0 normalises to 0 -- a black frame around the output). At most
+    # nine distinct variants exist for a given tile size, so they are cached
+    # rather than rebuilt: the previous code hoisted a single weight out of the
+    # loop for speed, which is what made it border-blind.
+    _weight_cache: dict = {}
+
+    def _tile_weight(th, tw, y0, y1_, x0, x1_):
+        ov_t, ov_b, ov_l, ov_r = edge_overlaps_from_coords(
+            y0, y1_, x0, x1_, out_h, out_w, out_overlap
+        )
+        key = (th, tw, ov_t, ov_b, ov_l, ov_r)
+        w = _weight_cache.get(key)
+        if w is None:
+            w = blend_weight_2d_np(th, tw, ov_t, ov_b, ov_l, ov_r)
+            _weight_cache[key] = w
+        return w
 
     # Calculate tile positions
+    overlap = clamp_overlap(tile_size, overlap)
     stride = max(1, tile_size - overlap)
     # FIX 1: "max(1, out_tile_size - out_overlap)" was a bare expression —
     # result computed and immediately discarded. out_stride is never used;
@@ -699,13 +729,14 @@ def process_tiles_32bit(
             tile_h = out_y_end - out_y
             tile_w = out_x_end - out_x
 
-            # Trim blend_weight to match (handle off-by-one rounding)
-            weight = blend_weight[:tile_h, :tile_w]
+            weight = _tile_weight(tile_h, tile_w, out_y, out_y_end, out_x, out_x_end)
 
-            for c in range(channels):
-                output[out_y:out_y_end, out_x:out_x_end, c] += (
-                    processed[:tile_h, :tile_w, c] * weight
-                )
+            # Vectorised over channels: the per-channel Python loop that used to
+            # sit here made three strided passes and three kernel launches per
+            # tile for no benefit.
+            output[out_y:out_y_end, out_x:out_x_end, :] += (
+                processed[:tile_h, :tile_w, :channels] * weight[..., None]
+            )
             weights[out_y:out_y_end, out_x:out_x_end] += weight
 
     # Normalize
@@ -1970,8 +2001,11 @@ class RadianceAIUpscale:
             import nodes as _comfy_nodes
             _ncm = getattr(_comfy_nodes, "NODE_CLASS_MAPPINGS", {})
             loader_cls = _ncm.get("SUPIR_model_loader")
-        except (ImportError, AttributeError):
-            pass
+        except (ImportError, AttributeError) as _exc:
+            logger.debug(
+                "[Radiance] _load_supir_model(): ignoring %s from `import nodes as _comfy_nodes`: %s",
+                type(_exc).__name__, _exc,
+            )
 
         # Fallback: ComfyUI 0.19.x stores the module under its full directory path
         if loader_cls is None:
@@ -2056,8 +2090,11 @@ class RadianceAIUpscale:
                 for bucket in _tmp_buckets:
                     try:
                         fp.folder_names_and_paths[bucket][0].remove(model_dir)
-                    except (ValueError, KeyError):
-                        pass
+                    except (ValueError, KeyError) as _exc:
+                        logger.debug(
+                            "[Radiance] _load_supir_model(): ignoring %s from `fp.folder_names_and_paths[bucket][0].remove(model_dir)`: %s",
+                            type(_exc).__name__, _exc,
+                        )
 
             if not result or result[0] is None:
                 return None, "SUPIR_model_loader returned an empty result — check ComfyUI-SUPIR logs."
@@ -2066,7 +2103,7 @@ class RadianceAIUpscale:
             supir_model_obj = result[0]
             supir_vae_obj   = result[1]
             entry = ("supir", supir_model_obj, supir_vae_obj, supir_cls_map)
-            _MODEL_CACHE[model_name] = entry
+            _MODEL_CACHE.put(model_name, entry)
             logger.info(f"[RadianceAIUpscale] SUPIR loaded: {model_name} + {sdxl_model_name}")
             return entry, f"SUPIR loaded: {model_name} + {sdxl_model_name}"
 
@@ -2162,7 +2199,7 @@ class RadianceAIUpscale:
         with _CACHE_LOCK:
             # Check cache first
             if model_name in _MODEL_CACHE:
-                return _MODEL_CACHE[model_name], "Loaded (Cached)"
+                return _MODEL_CACHE.get(model_name), "Loaded (Cached)"
 
             try:
                 import folder_paths
@@ -2218,7 +2255,7 @@ class RadianceAIUpscale:
                     model_descriptor = spandrel.ModelLoader().load_from_state_dict(sd)
                     upscale_model = model_descriptor.model.eval()
 
-                    _MODEL_CACHE[model_name] = upscale_model
+                    _MODEL_CACHE.put(model_name, upscale_model)
                     return upscale_model, f"Loaded: {model_name}"
 
                 except Exception as e:
@@ -2403,6 +2440,11 @@ class RadianceAIUpscale:
                 return self._fallback_upscale(image, model_name)
 
             if unload_model:
+                # Drop the cache entry too. Clearing self.model alone left the
+                # module referenced by _MODEL_CACHE -- and since .to(device)
+                # mutates in place, that reference was the GPU-resident copy,
+                # so empty_cache() reclaimed nothing at all.
+                _MODEL_CACHE.pop(self.current_model_name or model_name)
                 self.model = None
                 self.current_model_name = None
                 if torch.cuda.is_available():
@@ -2450,9 +2492,11 @@ class RadianceAIUpscale:
                         (1, 1, new_h, new_w), dtype=torch.float32, device=device
                     )
 
-                    stride = tile_size - tile_overlap
+                    tile_overlap = clamp_overlap(tile_size, tile_overlap)
+                    stride = max(1, tile_size - tile_overlap)
                     tiles_x = max(1, math.ceil((w - tile_overlap) / stride))
                     tiles_y = max(1, math.ceil((h - tile_overlap) / stride))
+                    _tile_w_cache: dict = {}
 
                     logger.info(
                         f"Processing {tiles_x * tiles_y} tiles ({tiles_x}x{tiles_y})..."
@@ -2479,34 +2523,35 @@ class RadianceAIUpscale:
 
                             th, tw = tile_output.shape[2], tile_output.shape[3]
 
-                            weight_1d_h = torch.ones(
-                                th, dtype=torch.float32, device=device
+                            # Border-aware, and cached: at most nine distinct
+                            # weights exist for a tile size, but this rebuilt a
+                            # full-size outer product on every tile -- ~670MB of
+                            # allocator churn per 4K frame. The ramp also started
+                            # at 0 on image-border edges, blacking out the
+                            # outermost row and column of the result.
+                            _ov_t, _ov_b, _ov_l, _ov_r = edge_overlaps_from_coords(
+                                out_y1, out_y2, out_x1, out_x2,
+                                new_h, new_w, tile_overlap * scale,
                             )
-                            weight_1d_w = torch.ones(
-                                tw, dtype=torch.float32, device=device
-                            )
-
-                            if tile_overlap > 0:
-                                feather = min(tile_overlap * scale, th // 2, tw // 2)
-                                if feather > 0:
-                                    ramp = torch.linspace(0, 1, feather, device=device)
-                                    weight_1d_h[:feather] = ramp
-                                    weight_1d_h[-feather:] = ramp.flip(0)
-                                    weight_1d_w[:feather] = ramp
-                                    weight_1d_w[-feather:] = ramp.flip(0)
-
-                            tile_weight = (
-                                (weight_1d_h.unsqueeze(1) * weight_1d_w.unsqueeze(0))
-                                .unsqueeze(0)
-                                .unsqueeze(0)
-                            )
+                            _wkey = (th, tw, _ov_t, _ov_b, _ov_l, _ov_r)
+                            tile_weight = _tile_w_cache.get(_wkey)
+                            if tile_weight is None:
+                                tile_weight = blend_weight_2d(
+                                    th, tw, _ov_t, _ov_b, _ov_l, _ov_r,
+                                    device=device, dtype=torch.float32,
+                                )
+                                _tile_w_cache[_wkey] = tile_weight
 
                             output[:, :, out_y1:out_y2, out_x1:out_x2] += (
                                 tile_output * tile_weight
                             )
                             weight[:, :, out_y1:out_y2, out_x1:out_x2] += tile_weight
 
-                    output = output / (weight + 1e-8)
+                    # In-place: the non-in-place form allocated two more
+                    # full-resolution tensors (~2GB extra at 4K/4x) at the
+                    # moment model weights are also resident.
+                    weight.clamp_(min=1e-8)
+                    output.div_(weight)
                     result_img = output.permute(0, 2, 3, 1)  # Back to BHWC
 
                 # Expand back to original HDR range
@@ -2522,6 +2567,11 @@ class RadianceAIUpscale:
             info = f"Upscaled with {model_name} ({scale}x) [{mode}]"
 
             if unload_model:
+                # Drop the cache entry too. Clearing self.model alone left the
+                # module referenced by _MODEL_CACHE -- and since .to(device)
+                # mutates in place, that reference was the GPU-resident copy,
+                # so empty_cache() reclaimed nothing at all.
+                _MODEL_CACHE.pop(self.current_model_name or model_name)
                 self.model = None
                 self.current_model_name = None
                 if torch.cuda.is_available():

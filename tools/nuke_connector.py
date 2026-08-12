@@ -127,11 +127,17 @@ class NukeConnector:
             payload = command.encode("utf-8")
             if token:
                 # Protocol Version 2: MAGIC(4) + VERSION(1) + SIGNATURE(32) + LENGTH(4 LE) + PAYLOAD
+                # HMAC rather than SHA256(token || command) -- the bare-hash form
+                # was length-extendable and replayable. Must match the server.
+                import hmac
                 import hashlib
-                sig = hashlib.sha256((token + command).encode("utf-8")).digest()
+                sig = hmac.new(
+                    token.encode("utf-8"), command.encode("utf-8"), hashlib.sha256
+                ).digest()
                 header = HEADER_MAGIC + struct.pack("<B", 2) + sig + struct.pack("<I", len(payload))
             else:
-                # Protocol Version 1: MAGIC(4) + VERSION(1) + LENGTH(4 LE) + PAYLOAD
+                # Protocol Version 1 (unauthenticated). The server now refuses
+                # these; kept only so the failure is a clear server-side message.
                 header = HEADER_MAGIC + struct.pack("<BI", 1, len(payload))
 
             sock.sendall(header + payload)

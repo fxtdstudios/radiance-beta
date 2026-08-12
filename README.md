@@ -4,9 +4,9 @@
 
 **Professional VFX, HDR color science, review, and DCC handoff for ComfyUI.**
 
-[![Version](https://img.shields.io/badge/version-3.1.2-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
+[![Version](https://img.shields.io/badge/version-3.2.1-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
-[![Nodes](https://img.shields.io/badge/nodes-96-c8a96e?style=for-the-badge)](#node-map)
+[![Nodes](https://img.shields.io/badge/nodes-109-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
 [![Hugging Face](https://img.shields.io/badge/Hugging_Face-RUDRA_models-ffd21e?style=for-the-badge)](https://huggingface.co/fxtdstudios/RUDRA)
 
@@ -14,7 +14,7 @@ Radiance is a production-grade node pack for ComfyUI built around 32-bit float a
 
 Artists get 32-bit, HDR, and ACES image tools, professional viewers, and VFX nodes. Supervisors and coordinators get project, shot, asset, and workflow management built directly into the canvas.
 
-[Install](#installation) · [Capabilities](#capabilities) · [Node Map](#node-map) · [DCC Handoff](#dcc-handoff) · [Documentation](docs/README.md) · [Support](#support)
+[Install](#installation) · [Capabilities](#capabilities) · [Node Map](#node-map) · [DCC Handoff](#dcc-handoff) · [Known limitations](#known-limitations) · [Documentation](docs/README.md) · [Support](#support)
 
 </div>
 
@@ -92,7 +92,20 @@ pip install -r requirements_mac_silicon.txt
 
 ### Verify
 
-Start ComfyUI and look for `Radiance: successfully loaded 96 nodes` in the log.
+Start ComfyUI and look for `Radiance: successfully loaded 109 nodes` in the log.
+A lower count means a node module failed to import — usually a missing optional
+dependency; the Environment Guard table printed at startup shows which.
+
+For a full machine-level check (every node executed on your GPU, VRAM peaks,
+RUDRA decoder benchmarks and scores), run:
+
+```bat
+cd ComfyUI
+python custom_nodes\radiance\tools\gpu_acceptance.py
+```
+
+It writes `gpu_acceptance_report.md` next to the script, and names any nodes
+missing on your install.
 
 ### Models (RUDRA decoders)
 
@@ -145,6 +158,8 @@ The Project Manager node keeps its launchers (open, save, and links) in a single
 ### Smart Interface
 
 - **Adaptive sampler.** The Radiance Sampler hides every parameter when no preset is selected, shows everything in Custom mode, and for a named preset shows only the parameters relevant to that model — so you only see the controls that matter.
+- **Inline video preview on Read.** MP4/MOV/WebM play directly on the node with scrubbing; production codecs the browser cannot decode (ProRes, DNxHR, MXF) fall back to a first-frame poster. Paths outside ComfyUI's folders need `RADIANCE_READ_ROOTS` (see Notes & Tips).
+- **Resolved-path readout on Write.** The node shows the exact path that will land on disk — output_path, filename, version and format combined by the same code that writes — plus a note line ("frame 1 only" when an IMG format receives a batch, sequence start frame, unique-suffix behaviour). `overwrite` defaults **off**: existing files get a unique suffix instead of being destroyed.
 - **In-canvas overlays.** Dashboards open over the graph and close with Esc, the dimmed background, or the close button, with an option to open in a full tab.
 - **Dynamic Gizmos.** Collapse any selection of nodes into a single styled custom node that you can save and reuse like any other node.
 - **Smart Backdrops.** Group nodes get a clear, tinted-glass background keyed to the node category instead of a near-invisible panel.
@@ -199,16 +214,16 @@ FXTD STUDIOS/Radiance
 └─ Pipeline
 ```
 
-Radiance provides **96 nodes** (plus any Gizmos you create). Some nodes depend on optional packages and your ComfyUI environment.
+Radiance provides **109 nodes** (plus any Gizmos you create). Some nodes depend on optional packages and your ComfyUI environment.
 
 Node names follow standard compositing vocabulary under the **Radiance** menu — `Grade`, `CDL`, `OCIO ColorSpace`, `Roto`, `Defocus`, `Viewer`, `Read`/`Write` — so they read the way they do in Nuke or Flame. AI and generation nodes keep a `Radiance` prefix (`Radiance Sampler`, `Radiance VAE Decode`) to mark the diffusion layer. You can still find any node by typing "radiance" in the search.
 
 | Group | Examples |
 | :--- | :--- |
 | Core | Project Manager / Workspace, Resolution, workspace utilities |
-| Load & Save | Read, Write (EXR alpha and mask), image and mask loading, EXR multipart and sequence export |
+| Load & Save | Read, Write (EXR alpha and mask), image and mask loading, EXR multipart and sequence export, Digital Cinema (DPX) read and write |
 | Generate | Radiance Loader, Radiance Sampler, VAE Decode (HDR), prompt tools, LoRA stack, HDR LoRA, regional prompts |
-| Color | Grade, Grade Match, CDL, LUTs, Curves, Hue Curves, White Balance, Color Space Convert |
+| Color | Grade, Grade Match, CDL, LUT Apply / Blend, Curves, Hue Curves, White Balance, Color Space Convert, QC, Policy Guard |
 | HDR | ACES 2.0, OCIO, HDR VAE encode/decode, tone mapping, HDR synthesis, relight, QC |
 | VFX | Plate prep, masks, roto, depth, optics, motion, multipass, AOV reader (real EXR layers), relight |
 | Video | Video loader, prompt builder, sampler, text-to-video, image-to-video, routing, batch decode, export |
@@ -238,6 +253,34 @@ Radiance supports DaVinci Resolve through a folder handoff: the Send to DaVinci 
 
 - **Estimated VFX passes.** The Multipass Master extractor derives passes (albedo, roughness, ambient occlusion, segmentation ID, and more) from a single image — handy for 2D and generated footage, but not a substitute for true render passes. For ground-truth passes, feed a multilayer EXR through the Multipass AOV Reader. The segmentation output is a clustered matte, not a Cryptomatte.
 - **Super-resolution and color.** Upscale backends work in display-referred space. For scene-linear input, use the upscaler's HDR and color-encoding options to preserve your values.
+- **Previews from a NAS or server path.** The Read node opens any absolute path (local, mapped drive, UNC), but its inline preview/info widgets are served over unauthenticated HTTP routes restricted to ComfyUI's own folders. To preview media elsewhere, allow those roots explicitly (`;`-separated on Windows) and restart ComfyUI:
+
+  ```bat
+  setx RADIANCE_READ_ROOTS "Z:\renders;\\server\share\plates"
+  ```
+
+- **Upgrading from ≤ 3.2.0: re-check graded masters.** `RadianceColorSpaceConvert` previously performed no conversion at all for 10 of its 16 spaces (all camera-log and ACES working spaces) whenever no OCIO config was loaded — the default install. Anything that passed through those conversions was graded on unconverted pixels. Details in the [changelog](CHANGELOG.md).
+
+## Known limitations
+
+Kept here rather than in a tracker, because a control that quietly does nothing
+is worse than one that says so. Full detail in the [changelog](CHANGELOG.md).
+
+- **The ACES 2.0 tone scale is not the Daniele Evo curve.** It is a log-space
+  contrast of 1.55 with a tanh shoulder, so 18% grey sits about 0.84 stop above
+  the ACES 2.0 reference on SDR, and HLG diffuse white lands at signal 0.915
+  rather than 0.75. The normalisation defects around it were fixed in 3.2.0;
+  the curve itself has not been replaced yet. Grade by eye against a reference,
+  not by trusting the label.
+- **`blend_mode = "laplacian_pyramid"`** falls back to the Gaussian feather.
+  `"linear"` and `"gaussian_feather"` are genuinely different.
+- **`chromatic_adaptation` has no effect.** The white-point adaptation is baked
+  into the precomputed conversion matrices.
+- **Optical flow is single-scale Lucas–Kanade**, not DIS. It recovers roughly
+  1% of a 5-pixel displacement, so mask propagation is effectively static above
+  about 2 pixels of motion.
+- **Scene-cut detection normalises by the batch maximum**, so the threshold has
+  no absolute meaning and cut-free footage will still report cuts.
 
 ## Documentation
 

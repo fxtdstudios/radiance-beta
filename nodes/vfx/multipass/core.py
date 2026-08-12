@@ -2,9 +2,8 @@
 ◎ Radiance VFX Multipass Extractor  v3.0
 ════════════════════════════════════════════════════════════════════════════════
 
-Extracts industry-standard VFX compositing passes from a decoded float32 image.
-Designed to sit immediately after ◎ Radiance VAE Decode and produce named
-passes ready for Nuke, DaVinci Resolve, After Effects, or any EXR pipeline.
+Estimates compositing utility passes from a decoded float32 image. These are
+creative approximations unless replaced by renderer AOVs through the Reader.
 
 SIGNAL FLOW:
   IMAGE (float32 linear) ─► VFX Multipass v3.0 ─► beauty
@@ -26,9 +25,7 @@ SIGNAL FLOW:
                                                   ├─► roughness        (multi-scale spec sharpness)
                                                   ├─► transmission     (chroma dispersion + Fresnel)
                                                   ├─► motion_vector    (Lucas-Kanade optical flow)
-                                                  ├─► object_id_matte  (k-means crypto-style ID)
-                                                  ├─► pass_info        (STRING — human report)
-                                                  └─► pass_confidence  (STRING — JSON quality dict)
+                                                  └─► object_id_matte  (k-means segmentation ID)
 
 PASS SUMMARY v3.0:
   ┌───────────────────┬────────────────────────────────────────────────────────────┐
@@ -52,34 +49,24 @@ PASS SUMMARY v3.0:
   │ emission    v2.1  │ Z-score local brightness excess, colorfulness-weighted     │
   │ roughness   v2.1  │ Multi-scale specular sharpness ratio (inverted)            │
   │ transmission v2.1 │ Chromatic dispersion + Fresnel halo detection              │
-  │ motion_vec  v3.0  │ Lucas-Kanade optical flow (HSV, prev_frame optional)       │
+  │ motion_vec  v3.0  │ Lucas-Kanade raw XY flow, prev_frame optional              │
   │ object_id   v3.0  │ K-means color+spatial clustering → RGBA ID matte          │
-  │ pass_info         │ Human-readable stats report (STRING)                       │
-  │ pass_conf   v3.0  │ Per-pass quality confidence dict (STRING/JSON)             │
   └───────────────────┴────────────────────────────────────────────────────────────┘
 
 MOTION VECTOR (v3.0):
   Dense Lucas-Kanade optical flow — no OpenCV dependency, pure PyTorch.
   Connect prev_frame for true inter-frame flow. Without prev_frame the output
   is zero (static placeholder suitable for single-image workflows).
-  Visualization: HSV encoding — hue=direction, saturation=magnitude, value=1.
+  A separate visualization uses HSV hue/direction and value/magnitude.
   EXR raw channels: MV.X (horizontal px offset), MV.Y (vertical px offset).
 
 OBJECT ID MATTE (v3.0):
-  Cryptomatte-style per-object ID matte via k-means clustering on
+  Visual segmentation ID matte via k-means clustering on
   (R, G, B, luma, x_norm, y_norm) feature vectors.
   Each cluster receives a deterministic, visually-distinct RGBA color seeded
   by the golden-ratio hue spiral (maximally distinct hues at any K).
   Computation on max-192×192 downsampled image — keeps memory flat.
-  EXR: ID.R/G/B/A for Nuke Cryptomatte or manual matte extraction.
-
-PASS CONFIDENCE (v3.0):
-  JSON dictionary mapping pass name → float [0..1] quality estimate.
-  Scores: depth (0/1 binary), ao (variance), normal (well-defined ratio),
-          albedo (material colour spread), emission (peak outlier),
-          roughness (dynamic range), transmission (chroma shift),
-          edge (structural density), specular (contrast std-dev),
-          motion (mean magnitude relative to frame diagonal).
+  EXR: object_id.R/G/B/A for manual matte extraction. This is not Cryptomatte.
 
 DSINE AUTO-DISCOVER:
   Set dsine_model_path = "auto" to search ComfyUI model folders:
@@ -89,28 +76,26 @@ DSINE AUTO-DISCOVER:
 
 EXR EXPORT v3.0:
   Nuke/Resolve-compatible channel names:
-    beauty.RGBA  diffuse.RGB  specular.RGB  N.X/Y/Z  P.X/Y/Z
-    Z.R  AO.R  edge.R  albedo.RGB  emission.R  roughness.R  transmission.R
-    colorfulness.R  reflection.R  curvature.R  shadow.R  highlight.R  midtone.R
-    MV.X  MV.Y  MV_vis.RGB  ID.R  ID.G  ID.B  ID.A
+    beauty.RGBA  normal.NX/NY/NZ  Z  world_position.R/G/B
+    MV.X  MV.Y  object_id.R/G/B/A plus named RGB utility layers
 
 VERSION HISTORY:
   1.0 — Initial (Gaussian diffuse, depth concavity AO, Sobel edge)
   2.0 — Guided filter diffuse, SSAO, Scharr edges, normal map, curvature, world pos
   2.1 — Albedo (Retinex IID), Emission (Z-score glow), Roughness (spec sharpness),
         Transmission (chromatic dispersion + Fresnel)
-  3.0 — Motion vector (Lucas-Kanade), Object ID matte (k-means crypto-style),
-        Pass confidence scores (JSON), DSINE auto-discover
+  3.0 — Motion vector (Lucas-Kanade), Object ID matte (k-means), DSINE auto-discover
 """
 
 import os
-import json
 import math
 import logging
 import urllib.request
 from typing import Tuple, Dict, Any, Optional
 
 import torch
+
+from radiance.model.cache import GPUModelCache
 import torch.nn.functional as F
 import numpy as np
 
@@ -245,8 +230,11 @@ def _verify_or_report_sha256(dest: str, info: dict, key: str) -> bool:
         logger.error(f"[Radiance] CHECKSUM MISMATCH for '{key}' (expected {expected}, got {actual}) — removing.")
         try:
             os.remove(dest)
-        except OSError:
-            pass
+        except OSError as _exc:
+            logger.debug(
+                "[Radiance] _verify_or_report_sha256(): ignoring %s from `os.remove(dest)`: %s",
+                type(_exc).__name__, _exc,
+            )
         return False
     logger.info(f"[Radiance] ✓ sha256 verified for '{key}'")
     return True
@@ -369,6 +357,9 @@ def _box_filter_bhwc(x: torch.Tensor, r: int) -> torch.Tensor:
     if r <= 0:
         return x
     B, H, W, C = x.shape
+    r = min(r, H - 1, W - 1)
+    if r <= 0:
+        return x
     ks = 2 * r + 1
     x4 = x.float().permute(0,3,1,2).reshape(B*C, 1, H, W)
     x4 = F.pad(x4, (r,r,0,0), mode="reflect")
@@ -417,7 +408,14 @@ def _gaussian_blur_bhwc(img: torch.Tensor, sigma: float) -> torch.Tensor:
         return img
     B, H, W, C = img.shape
     k1d, ks = _build_gaussian_kernel(sigma, img.device, torch.float32)
-    pad = ks // 2
+    pad = min(ks // 2, H - 1, W - 1)
+    if pad <= 0:
+        return img
+    if ks != 2 * pad + 1:
+        center = ks // 2
+        k1d = k1d[center - pad:center + pad + 1]
+        k1d = k1d / k1d.sum()
+        ks = 2 * pad + 1
     x   = img.float().permute(0,3,1,2).reshape(B*C, 1, H, W)
     x   = F.pad(x, (pad,pad,0,0), mode="reflect")
     x   = F.conv2d(x, k1d.view(1,1,1,ks))
@@ -515,7 +513,8 @@ def _dsine_ensure_model() -> Optional[str]:
 
 
 # Module-level cache for the torch.hub DSINE model.
-_DSINE_HUB_CACHE: Dict[str, Any] = {}
+# Bounded LRU -- was an unbounded dict with no eviction path.
+_DSINE_HUB_CACHE = GPUModelCache(max_size=1)
 
 
 def _try_dsine_hub(img_bhwc: torch.Tensor, convention: str) -> "Optional[torch.Tensor]":
@@ -535,10 +534,10 @@ def _try_dsine_hub(img_bhwc: torch.Tensor, convention: str) -> "Optional[torch.T
                 trust_repo=True, force_reload=False, verbose=False,
             )
             model.eval()
-            _DSINE_HUB_CACHE["model"] = model
+            _DSINE_HUB_CACHE.put("model", model)
             logger.info("[Radiance] DSINE (torch.hub) ready.")
 
-        model  = _DSINE_HUB_CACHE["model"]
+        model  = _DSINE_HUB_CACHE.get("model")
         device = img_bhwc.device
         normals = []
         for b in range(img_bhwc.shape[0]):
@@ -634,7 +633,8 @@ def _normal_from_dsine(img_bhwc, dsine_model_path, convention):
 #  DEPTH ANYTHING V2 — AUTO-INFER (v3.0)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_DA_PIPELINE_CACHE: Dict[str, Any] = {}   # hf_model_id → loaded pipeline
+# Bounded LRU -- was an unbounded dict with no eviction path.
+_DA_PIPELINE_CACHE = GPUModelCache(max_size=2)   # hf_model_id → loaded pipeline
 
 
 def _depth_anything_v2_infer(
@@ -672,10 +672,10 @@ def _depth_anything_v2_infer(
                 model=hf_pipe_id,
                 device=0 if device.type == "cuda" else -1,
             )
-            _DA_PIPELINE_CACHE[hf_pipe_id] = pipe
+            _DA_PIPELINE_CACHE.put(hf_pipe_id, pipe)
             logger.info(f"[Radiance] Depth Anything V2 ({model_key}) ready.")
 
-        pipe = _DA_PIPELINE_CACHE[hf_pipe_id]
+        pipe = _DA_PIPELINE_CACHE.get(hf_pipe_id)
         depths = []
         for b in range(B):
             arr = (img_bhwc[b, ..., :3].float().clamp(0.0, 1.0).cpu().numpy() * 255).astype(np.uint8)
@@ -718,10 +718,10 @@ def _depth_anything_v2_infer(
             state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
             model.load_state_dict(state)
             model.eval()
-            _DA_PIPELINE_CACHE[cache_key] = model
+            _DA_PIPELINE_CACHE.put(cache_key, model)
             logger.info(f"[Radiance] Depth Anything V2 ({encoder}) loaded from {ckpt_path}")
 
-        model = _DA_PIPELINE_CACHE[cache_key].to(device)
+        model = _DA_PIPELINE_CACHE.get(cache_key).to(device)
 
         # Normalise to ImageNet stats expected by ViT backbone
         mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1,3,1,1)
@@ -787,15 +787,7 @@ def _world_position_from_depth(
     px = gu * thf * d
     py = -gv * thf * d
     pz = d
-    pos = torch.stack([px, py, pz], dim=-1)
-
-    for c in range(3):
-        ch  = pos[..., c]
-        mn  = ch.reshape(B,-1).min(dim=1).values.view(B,1,1)
-        mx  = ch.reshape(B,-1).max(dim=1).values.view(B,1,1)
-        pos[..., c] = (ch - mn) / (mx - mn).clamp(min=1e-8)
-
-    return pos.contiguous()
+    return torch.stack([px, py, pz], dim=-1).contiguous()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -835,38 +827,30 @@ def _ssao_multisampled(
     bv, bu = torch.meshgrid(gy, gx, indexing="ij")
     base   = torch.stack([bu, bv], dim=-1).unsqueeze(0).expand(B,-1,-1,-1)
 
-    pu = 2.0 / W;  pv = 2.0 / H
+    pu = 2.0 / W
+    pv = 2.0 / H
     d_bchw = d.unsqueeze(1)
 
     angles    = [2.0*math.pi*i/n_samples for i in range(n_samples)]
     r_factors = [0.4, 0.7, 1.0]
 
-    all_grids, all_dirs = [], []
+    ao_sum = torch.zeros_like(d)
+    sample_count = 0
     for rf in r_factors:
         r = radius_px * rf
         for ang in angles:
             ca, sa = math.cos(ang), math.sin(ang)
-            sg = base + torch.tensor([ca*r*pu, sa*r*pv], device=dev, dtype=torch.float32)
-            all_grids.append(sg)
-            all_dirs.append((ca, sa))
+            grid = base + torch.tensor([ca*r*pu, sa*r*pv], device=dev, dtype=torch.float32)
+            sampled = F.grid_sample(
+                d_bchw, grid, mode="bilinear", padding_mode="border", align_corners=True
+            ).squeeze(1)
+            occ = (d - sampled).clamp(min=0.0)
+            if Nx is not None:
+                occ = occ * (0.5 + 0.5*(Nx*ca+Ny*sa).clamp(min=0.0))
+            ao_sum.add_(occ)
+            sample_count += 1
 
-    n_tot   = len(all_grids)
-    gc      = torch.cat(all_grids, dim=0)
-    dr      = d_bchw.repeat(n_tot, 1, 1, 1)
-    ds      = F.grid_sample(dr, gc, mode="bilinear",
-                            padding_mode="border", align_corners=True)
-    ds      = ds.squeeze(1).view(n_tot, B, H, W)
-    db      = d.unsqueeze(0).expand(n_tot,-1,-1,-1)
-    occ     = (db - ds).clamp(min=0.0)
-
-    if Nx is not None:
-        wts = torch.stack(
-            [(0.5 + 0.5*(Nx*ca+Ny*sa).clamp(min=0.0)) for ca,sa in all_dirs],
-            dim=0
-        )
-        occ = occ * wts
-
-    ao   = occ.mean(dim=0)
+    ao = ao_sum / max(sample_count, 1)
     flat = ao.view(B,-1)
     mx   = flat.max(dim=1).values.view(B,1,1).clamp(min=1e-8)
     return (ao / mx * strength).clamp(0.0, 1.0)
@@ -978,6 +962,16 @@ def _albedo_retinex(
     albedo_rgb  = (img.float() * scale).clamp(min=0.0)
     B    = albedo_rgb.shape[0]
     flat = albedo_rgb[...,:3].reshape(B, -1)
+    # torch.quantile refuses inputs above 2**24 elements per row. A UHD frame is
+    # 2160*3840*3 = 24,883,200, so this raised
+    # "RuntimeError: quantile() input tensor is too large" on every 4K plate and
+    # took the whole Multipass Master node with it. Subsample above the cap --
+    # the same treatment nodes/generate/engine.py already applies -- which for a
+    # 0.995 quantile over millions of samples is statistically indistinguishable.
+    _QUANTILE_MAX = 2 ** 24
+    if flat.shape[1] > _QUANTILE_MAX:
+        stride = (flat.shape[1] + _QUANTILE_MAX - 1) // _QUANTILE_MAX
+        flat = flat[:, ::stride]
     p995 = torch.quantile(flat, 0.995, dim=1).view(B,1,1,1).clamp(min=1e-8)
     return (albedo_rgb / p995).clamp(0.0, 1.0).to(img.dtype)
 
@@ -1208,7 +1202,7 @@ def _object_id_matte(
     spatial_weight: float = 0.25,
 ) -> torch.Tensor:
     """
-    Cryptomatte-style per-object ID matte via k-means clustering.
+    Visual segmentation ID matte via k-means clustering; not Cryptomatte.
 
     Feature vector per pixel: [R, G, B, luma, x_norm*sw, y_norm*sw]
     Runs on ≤192×192 downsampled image to keep N·K memory-flat.
@@ -1256,18 +1250,26 @@ def _object_id_matte(
         init_i = torch.cat([init_i, extra])
     centroids = feat[:, init_i, :].clone()   # (B, K, 6)
 
-    # Lloyd's iterations — fully vectorised
+    # Chunk assignments so peak memory does not scale as B*N*K*features.
+    chunk_size = 4096
     for _ in range(n_iter):
-        diffs  = feat.unsqueeze(2) - centroids.unsqueeze(1)   # (B, N, K, 6)
-        labels = (diffs*diffs).sum(-1).argmin(-1)              # (B, N)
-        one_hot = F.one_hot(labels, K).float()                 # (B, N, K)
-        counts  = one_hot.sum(1)                               # (B, K)
-        new_c   = torch.bmm(one_hot.permute(0,2,1), feat) / (counts.unsqueeze(-1) + 1e-8)
-        empty   = (counts == 0).unsqueeze(-1).expand_as(centroids)
-        centroids = torch.where(empty, centroids, new_c)
+        sums = torch.zeros_like(centroids)
+        counts = torch.zeros(B, K, device=dev, dtype=torch.float32)
+        for start in range(0, N, chunk_size):
+            stop = min(start + chunk_size, N)
+            chunk = feat[:, start:stop]
+            labels = ((chunk.unsqueeze(2) - centroids.unsqueeze(1)) ** 2).sum(-1).argmin(-1)
+            for b in range(B):
+                sums[b].index_add_(0, labels[b], chunk[b])
+                counts[b].index_add_(0, labels[b], torch.ones(stop - start, device=dev))
+        new_c = sums / counts.clamp(min=1.0).unsqueeze(-1)
+        centroids = torch.where((counts == 0).unsqueeze(-1), centroids, new_c)
 
-    diffs  = feat.unsqueeze(2) - centroids.unsqueeze(1)
-    labels = (diffs*diffs).sum(-1).argmin(-1).reshape(B, H2, W2)
+    label_chunks = []
+    for start in range(0, N, chunk_size):
+        chunk = feat[:, start:min(start + chunk_size, N)]
+        label_chunks.append(((chunk.unsqueeze(2) - centroids.unsqueeze(1)) ** 2).sum(-1).argmin(-1))
+    labels = torch.cat(label_chunks, dim=1).reshape(B, H2, W2)
 
     if scale > 1:
         labels = F.interpolate(
@@ -1277,78 +1279,3 @@ def _object_id_matte(
     colors   = _cluster_id_colors(K, dev)    # (K, 4)
     id_matte = colors[labels]                 # (B, H, W, 4)
     return id_matte.to(img.dtype)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  PASS CONFIDENCE (v3.0)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _compute_pass_confidence(
-    depth_provided: bool,
-    normal_method: str,
-    pass_normal: torch.Tensor,
-    pass_ao: torch.Tensor,
-    pass_albedo: torch.Tensor,
-    pass_emission: torch.Tensor,
-    pass_roughness: torch.Tensor,
-    pass_transmission: torch.Tensor,
-    pass_specular: torch.Tensor,
-    edge_map: torch.Tensor,
-    motion_u: torch.Tensor,
-    motion_v: torch.Tensor,
-    pass_quality_hint: str = "",
-) -> str:
-    """
-    Per-pass quality confidence scores [0..1], returned as JSON string.
-
-    depth      — 1.0 if depth_map connected, 0.0 otherwise
-    ao         — AO map variance × 25 (structure richness)
-    normal_map — fraction of pixels with well-defined (near-unit) normal vectors
-    albedo     — mean absolute deviation from mean albedo (material colour spread)
-    emission   — peak emission value (0=no emitters, 1=strong)
-    roughness  — dynamic range of roughness map (spread = reliable)
-    transmission — peak chromatic shift value
-    edge       — fraction of pixels above 5% edge threshold (structural density)
-    specular   — specular contrast std-dev (spread = reliable)
-    motion     — mean flow magnitude relative to 10% of frame diagonal
-    """
-    with torch.no_grad():
-        conf: Dict[str, Any] = {}
-
-        conf["depth"] = 1.0 if depth_provided else 0.0
-
-        if depth_provided:
-            conf["ao"] = round(min(1.0, float(pass_ao[...,0].float().var()) * 25.0), 3)
-        else:
-            conf["ao"] = 0.0
-
-        N_dec = pass_normal.float() * 2.0 - 1.0
-        N_mag = torch.sqrt((N_dec**2).sum(-1))
-        conf["normal_map"]    = round(float((N_mag > 0.85).float().mean()), 3)
-        conf["normal_method"] = normal_method
-
-        alb      = pass_albedo[...,:3].float()
-        alb_mean = alb.mean(dim=(1,2,3), keepdim=True)
-        conf["albedo"] = round(min(1.0, float((alb - alb_mean).abs().mean()) * 6.0), 3)
-
-        conf["emission"]      = round(float(pass_emission[...,0].max()), 3)
-        conf["roughness"]     = round(min(1.0, float(pass_roughness[...,0].max())
-                                           - float(pass_roughness[...,0].min())), 3)
-        conf["transmission"]  = round(float(pass_transmission[...,0].max()), 3)
-        conf["edge"]          = round(float((edge_map.float() > 0.05).float().mean()), 3)
-        conf["specular"]      = round(min(1.0, float(pass_specular.float().std()) * 6.0), 3)
-
-        diag    = float(math.sqrt(motion_u.shape[1]**2 + motion_u.shape[2]**2))
-        mot_mag = float(torch.sqrt(motion_u**2 + motion_v**2).mean())
-        conf["motion"] = round(min(1.0, mot_mag / (diag * 0.1 + 1e-8)), 3)
-
-        if pass_quality_hint:
-            conf["_hint"] = pass_quality_hint
-
-    return json.dumps(conf, indent=2)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  MAIN NODE
-# ─────────────────────────────────────────────────────────────────────────────
-

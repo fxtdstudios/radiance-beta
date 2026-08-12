@@ -987,19 +987,73 @@ class TestCoverageSummary(unittest.TestCase):
             "Check that stubs are adequate or that source files parse cleanly."
         )
 
+    #: Node keys that appear in a NODE_CLASS_MAPPINGS literal in the source but
+    #: are deliberately not published to ComfyUI.
+    #:
+    #: This list was twelve entries long. Nine of them turned out to be complete,
+    #: importable node classes that the v3 reorganisation simply forgot to list
+    #: in a group's mapping dict — they are registered now. What remains is three
+    #: back-compat aliases: each points at a class that IS published under its
+    #: current key, so registering the old key would put a second, identical
+    #: entry in the node menu for no benefit.
+    #:
+    #: The list is a ratchet: it may shrink, and a shrink fails this test so the
+    #: entry gets removed, but it may never grow without someone editing here.
+    _KNOWN_UNREGISTERED = frozenset({
+        "RadianceImageLoader",   # nodes_loader.py — alias of RadianceUnifiedLoader
+        "RadianceControlApply",  # nodes_loader.py — alias of RadianceControlNetApply
+        "RadianceWorkspace",     # nodes_workspace.py — alias of RadianceProjectManager
+    })
+
+    @staticmethod
+    def _environment_load_failures():
+        """Labels of node groups this machine could not import at all."""
+        try:
+            import radiance
+        except Exception:  # pragma: no cover - package import is tested elsewhere
+            return ()
+        result = getattr(radiance, "_LOAD_RESULT", None)
+        return tuple(f.source.label for f in getattr(result, "failures", ()) or ())
+
     def test_all_keys_have_class(self):
-        """Every key discovered by AST must resolve to an actual class."""
+        """Every key discovered by AST must resolve to an actual class.
+
+        This used to call `warnings.warn` instead of asserting, which meant a
+        node could stop resolving entirely and the suite still reported green --
+        twelve of them had, and the warning text blamed "torch/GPU at runtime"
+        for what is really a registration gap. Assert against an explicit
+        ratchet instead, so new breakage fails and known breakage is visible.
+        """
         all_keys = set(_discover_node_keys_from_source().keys())
         missing = all_keys - set(_ALL_NODES.keys())
-        # Nodes that failed to import are acceptable during a CI run without
-        # torch/GPU — record them but do not fail the suite.
-        if missing:
-            import warnings
-            warnings.warn(
-                f"{len(missing)} nodes could not be imported (likely require "
-                f"torch/GPU/ComfyUI at runtime): {sorted(missing)[:10]}...",
-                stacklevel=2,
+
+        # A machine short a runtime dependency drops whole node groups, which
+        # would show up here as dozens of extra "missing" keys and drown the
+        # signal we actually want. That case has its own loud ERROR at startup
+        # (see radiance.report_node_load_health); skip rather than double-report.
+        degraded = self._environment_load_failures()
+        if degraded:
+            raise unittest.SkipTest(
+                "environment is missing runtime dependencies for: "
+                + ", ".join(degraded)
             )
+
+        regressions = missing - self._KNOWN_UNREGISTERED
+        self.assertFalse(
+            regressions,
+            f"{len(regressions)} node key(s) no longer resolve to a class and "
+            f"are not in the known-unregistered allowlist: {sorted(regressions)}. "
+            "Either wire the node into the package entry point or, if the drop "
+            "is deliberate, add it to _KNOWN_UNREGISTERED with a reason.",
+        )
+
+        fixed = self._KNOWN_UNREGISTERED - missing
+        self.assertFalse(
+            fixed,
+            f"{len(fixed)} node key(s) now resolve but are still listed in "
+            f"_KNOWN_UNREGISTERED: {sorted(fixed)}. Remove them from the "
+            "allowlist so it keeps ratcheting down.",
+        )
 
 
 # ── ACES colour science round-trip tests ─────────────────────────────────────

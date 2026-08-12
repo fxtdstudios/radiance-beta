@@ -1527,6 +1527,9 @@ def apply_style_preset(preset_name, current_settings):
     return updated
 
 
+# Inference only. .eval() does not clear requires_grad on parameters, so an
+# unguarded forward still builds and retains an autograd graph.
+@torch.no_grad()
 def _encode_tokens(clip, tokens):
     """
     Encode CLIP tokens into conditioning.

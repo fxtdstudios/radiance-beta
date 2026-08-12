@@ -46,6 +46,12 @@ from radiance.nodes_colorscience import (
     RadianceWhiteBalance,
 )
 
+# This module already gates its torch-dependent tests correctly (they skip
+# cleanly against conftest's stub), so opt out of the automatic module-level
+# skip and keep the rest of the file running on the no-torch CI matrix.
+RADIANCE_TORCH_GATED = True
+
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # _xy_to_XYZ

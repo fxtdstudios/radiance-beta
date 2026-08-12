@@ -31,7 +31,10 @@ if not hasattr(_nh, "pillow"):
 # ── Real torch check ──────────────────────────────────────────────────────────
 try:
     import torch
-    HAS_TORCH = True
+    # conftest.py installs a MagicMock stub under the name "torch" when the real
+    # package is absent, so a bare successful import proves nothing. The stub
+    # tags itself; anything else is the genuine article.
+    HAS_TORCH = not getattr(torch, "__radiance_stub__", False)
 except ImportError:
     HAS_TORCH = False
 

@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional, Tuple, List
 import numpy as np
 
 from ....performance import perf_finish, perf_start
-from ....core.system.path_utils import get_safe_output_dir, strip_path_quotes
+from ....core.system.path_utils import get_safe_output_dir, safe_join, strip_path_quotes
 
 # Core library imports
 from .core import (
@@ -24,13 +24,26 @@ from .core import (
 
 logger = logging.getLogger("radiance.vfx.multipass.master")
 
+
+def _match_optional_image(x: torch.Tensor, batch: int, height: int, width: int) -> torch.Tensor:
+    out = x.float()
+    if out.shape[1] != height or out.shape[2] != width:
+        out = F.interpolate(out.permute(0, 3, 1, 2), size=(height, width), mode="bilinear", align_corners=False).permute(0, 2, 3, 1)
+    if out.shape[0] == batch:
+        return out.contiguous()
+    if out.shape[0] == 1:
+        return out.expand(batch, -1, -1, -1).contiguous()
+    if out.shape[0] > batch:
+        return out[:batch].contiguous()
+    raise ValueError(f"Batch mismatch: expected {batch} frames or a single broadcast frame, got {out.shape[0]}")
+
 # Try importing EXR writer utilities from io/hdr
 try:
-    from ....hdr.io import write_exr_multipart, write_exr_openexr, check_openexr_available
+    from ....hdr.io import write_exr_multipart, write_exr_openexr
     _HAS_EXR = True
 except ImportError:
     try:
-        from hdr.io import write_exr_multipart, write_exr_openexr, check_openexr_available  # type: ignore[import]
+        from hdr.io import write_exr_multipart, write_exr_openexr  # type: ignore[import]
         _HAS_EXR = True
     except ImportError:
         _HAS_EXR = False
@@ -79,7 +92,7 @@ def _generate_cryptomatte_manifest(K: int) -> str:
         t_  = val * (1 - (1 - f) * sat)
         lut = [(val,t_,p_),(q_,val,p_),(p_,val,t_),(p_,q_,val),(t_,p_,val),(val,p_,q_)]
         r, g, b = lut[idx]
-        
+
         # Convert float RGB to 8-bit hex color string
         hex_color = f"{int(round(r*255)):02x}{int(round(g*255)):02x}{int(round(b*255)):02x}"
         manifest[f"cluster_{k}"] = hex_color
@@ -116,6 +129,10 @@ def _pass_channels_for_multilayer(name: str, image: np.ndarray) -> Dict[str, np.
         names = ["Z"]
     elif name == "normal":
         names = ["normal.NX", "normal.NY", "normal.NZ", "normal.A"][:count]
+    elif name == "motion_vector":
+        names = ["MV.X", "MV.Y"][:count]
+    elif name == "alpha":
+        names = ["A"]
     else:
         names = [f"{name}.{ch}" for ch in ["R", "G", "B", "A"][:count]]
 
@@ -147,7 +164,7 @@ def _write_exr_singlepart_multilayer(
 
 class RadianceMultipassMaster:
     CATEGORY = "FXTD STUDIOS/Radiance/VFX"
-    DESCRIPTION = "Master VFX Multipass Extractor: extracts 18+ high-fidelity physical, utility, and lighting passes from a single beauty image."
+    DESCRIPTION = "Estimate utility, material, and lighting passes from beauty, while preserving connected renderer AOVs."
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -159,21 +176,22 @@ class RadianceMultipassMaster:
                 "depth_map": ("IMAGE",),
                 "normal_map": ("IMAGE",),
                 "prev_frame": ("IMAGE",),
-                
+                "source_passes": ("RADIANCE_PASSES",),
+
                 # General Settings
                 "luma_weights": (list(_LUMA_WEIGHTS.keys()), {"default": "Rec.709 / sRGB"}),
-                
+
                 # Depth (Auto-download) Settings
                 "auto_depth_model": (_AUTO_DEPTH_CHOICES, {"default": "disabled"}),
                 "depth_near_is_white": ("BOOLEAN", {"default": True}),
                 "depth_scale": ("FLOAT", {"default": 10.0, "min": 0.01, "max": 1000.0, "step": 0.1}),
                 "fov_degrees": ("FLOAT", {"default": 60.0, "min": 10.0, "max": 120.0, "step": 1.0}),
-                
+
                 # Normals Settings
                 "dsine_model_path": ("STRING", {"default": "auto"}),
                 "normal_strength": ("FLOAT", {"default": 2.0, "min": 0.1, "max": 20.0, "step": 0.1}),
                 "normal_convention": (_NORMAL_CONVENTIONS, {"default": "OpenGL (Y-Up)"}),
-                
+
                 # PBR Settings
                 "albedo_shading_radius": ("FLOAT", {"default": 80.0, "min": 10.0, "max": 300.0, "step": 5.0}),
                 "albedo_eps": ("FLOAT", {"default": 0.001, "min": 0.0001, "max": 0.1, "step": 0.0005}),
@@ -181,12 +199,12 @@ class RadianceMultipassMaster:
                 "roughness_fine_radius": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 10.0, "step": 0.5}),
                 "roughness_coarse_radius": ("FLOAT", {"default": 15.0, "min": 3.0, "max": 60.0, "step": 1.0}),
                 "transmission_sensitivity": ("FLOAT", {"default": 2.0, "min": 0.5, "max": 10.0, "step": 0.25}),
-                
+
                 # Highpass Settings
                 "highpass_radius": ("FLOAT", {"default": 8.0, "min": 0.1, "max": 100.0, "step": 0.5}),
                 "highpass_strength": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),
                 "highpass_contrast": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 5.0, "step": 0.1}),
-                
+
                 # Lighting & Mask Settings
                 "shadow_threshold": ("FLOAT", {"default": 0.20, "min": 0.0, "max": 0.60, "step": 0.01}),
                 "highlight_threshold": ("FLOAT", {"default": 0.75, "min": 0.40, "max": 1.0, "step": 0.01}),
@@ -194,27 +212,28 @@ class RadianceMultipassMaster:
                 "ao_radius": ("FLOAT", {"default": 15.0, "min": 0.0, "max": 100.0, "step": 1.0}),
                 "ao_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.1}),
                 "ao_samples": ("INT", {"default": 8, "min": 4, "max": 32, "step": 4}),
-                
+
                 # Motion & ID Settings
                 "lk_window_radius": ("INT", {"default": 7, "min": 1, "max": 32}),
                 "motion_coherence": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 0.95, "step": 0.05}),
+                "batch_is_sequence": ("BOOLEAN", {"default": False}),
                 "object_id_segments": ("INT", {"default": 16, "min": 2, "max": 64}),
                 "object_id_spatial_weight": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 2.0, "step": 0.05}),
             }
         }
 
     RETURN_TYPES = (
-        "RADIANCE_PASSES", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", 
-        "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", 
-        "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE"
+        "RADIANCE_PASSES", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE",
+        "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE",
+        "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE"
     )
     RETURN_NAMES = (
-        "passes", "beauty", "albedo", "normal_map", "depth", "roughness", "specular", 
-        "metallic", "ao", "emission", "transmission", "highpass", "world_position", 
+        "passes", "beauty", "albedo", "normal_map", "depth", "roughness", "specular",
+        "metallic", "ao", "emission", "transmission", "highpass", "world_position",
         "curvature", "shadow_mask", "midtone_mask", "highlight_mask", "reflection_mask",
-        "motion_vector", "segmentation_id"
+        "motion_vector", "segmentation_id", "motion_visualization", "alpha"
     )
-    
+
     FUNCTION = "extract"
 
     def extract(
@@ -223,6 +242,7 @@ class RadianceMultipassMaster:
         depth_map: Optional[torch.Tensor] = None,
         normal_map: Optional[torch.Tensor] = None,
         prev_frame: Optional[torch.Tensor] = None,
+        source_passes: Optional[Dict[str, Any]] = None,
         luma_weights: str = "Rec.709 / sRGB",
         auto_depth_model: str = "disabled",
         depth_near_is_white: bool = True,
@@ -248,6 +268,7 @@ class RadianceMultipassMaster:
         ao_samples: int = 8,
         lk_window_radius: int = 7,
         motion_coherence: float = 0.5,
+        batch_is_sequence: bool = False,
         object_id_segments: int = 16,
         object_id_spatial_weight: float = 0.25,
     ) -> Tuple:
@@ -257,17 +278,18 @@ class RadianceMultipassMaster:
         _perf = perf_start(device)
         weights = _LUMA_WEIGHTS.get(luma_weights, _LUMA_WEIGHTS["Rec.709 / sRGB"])
         luma = _luminance(img, weights)
+        source_present = set(source_passes.get("_present", ())) if source_passes else set()
+        if source_passes and not source_present:
+            source_present = {k for k, v in source_passes.items() if isinstance(v, torch.Tensor) and not k.startswith("_")}
+        if depth_map is None and source_passes and "depth" in source_present:
+            depth_map = source_passes.get("depth")
+        if normal_map is None and source_passes and "normal" in source_present:
+            normal_map = source_passes.get("normal")
 
         # ── 1. Depth Map ──────────────────────────────────────────────────────
         depth_scalar: Optional[torch.Tensor] = None
         if depth_map is not None:
-            d_in = depth_map.float()
-            if d_in.shape[1] != H or d_in.shape[2] != W:
-                d_in = _to_3ch_image(
-                    F.interpolate(d_in[..., 0].unsqueeze(1), size=(H, W), mode="bilinear", align_corners=False).squeeze(1)
-                )
-            if d_in.shape[0] != B:
-                d_in = d_in[:B] if d_in.shape[0] >= B else d_in.expand(B, -1, -1, -1)
+            d_in = _match_optional_image(depth_map, B, H, W)
             pass_depth = d_in.contiguous()
             depth_scalar = pass_depth[..., 0]
         elif auto_depth_model != "disabled":
@@ -286,12 +308,12 @@ class RadianceMultipassMaster:
 
         # ── 2. Normals ────────────────────────────────────────────────────────
         if normal_map is not None:
-            n_in = normal_map.float()
-            if n_in.shape[1] != H or n_in.shape[2] != W:
-                n_in = F.interpolate(n_in.permute(0, 3, 1, 2), size=(H, W), mode="bilinear", align_corners=False).permute(0, 2, 3, 1)
-            if n_in.shape[0] != B:
-                n_in = n_in[:B] if n_in.shape[0] >= B else n_in.expand(B, -1, -1, -1)
-            pass_normal = n_in.contiguous()
+            n_in = _match_optional_image(normal_map, B, H, W)
+            signed_n = n_in[..., :3]
+            if float(signed_n.detach().min()) >= -0.001 and float(signed_n.detach().max()) <= 1.001:
+                signed_n = signed_n * 2.0 - 1.0
+            signed_n = signed_n / torch.sqrt((signed_n * signed_n).sum(dim=-1, keepdim=True).clamp(min=1e-8))
+            pass_normal = (signed_n * 0.5 + 0.5).contiguous()
         else:
             dsine_result = _normal_from_dsine(img, dsine_model_path, normal_convention)
             if dsine_result is not None:
@@ -322,7 +344,7 @@ class RadianceMultipassMaster:
         highlight_m = _threshold_mask(luma, highlight_threshold, mask_softness, above=True)
         midtone_m = (1.0 - shadow_m - highlight_m).clamp(min=0.0)
         _sum = (shadow_m + midtone_m + highlight_m).clamp(min=1e-8)
-        
+
         pass_shadow = _to_3ch_image(shadow_m / _sum)
         pass_midtone = _to_3ch_image(midtone_m / _sum)
         pass_highlight = _to_3ch_image(highlight_m / _sum)
@@ -348,19 +370,15 @@ class RadianceMultipassMaster:
 
         # ── 10. Motion Vectors ────────────────────────────────────────────────
         if prev_frame is not None:
-            pf_in = prev_frame.float()
-            if pf_in.shape[1] != H or pf_in.shape[2] != W:
-                pf_in = F.interpolate(pf_in.permute(0, 3, 1, 2), size=(H, W), mode="bilinear", align_corners=False).permute(0, 2, 3, 1)
-            if pf_in.shape[0] != B:
-                pf_in = pf_in[:B] if pf_in.shape[0] >= B else pf_in.expand(B, -1, -1, -1)
+            pf_in = _match_optional_image(prev_frame, B, H, W)
             prev_luma = _luminance(pf_in, weights)
             flow_u, flow_v = _optical_flow_lk(luma, prev_luma, window_radius=lk_window_radius)
-            
+
             # Apply temporal coherence / EMA smoothing to reduce sub-pixel jitter
-            if motion_coherence > 0.0:
+            if motion_coherence > 0.0 and batch_is_sequence:
                 smooth_u = torch.zeros_like(flow_u)
                 smooth_v = torch.zeros_like(flow_v)
-                
+
                 for b in range(B):
                     if b == 0:
                         smooth_u[0] = flow_u[0]
@@ -368,13 +386,15 @@ class RadianceMultipassMaster:
                     else:
                         smooth_u[b] = flow_u[b] * (1.0 - motion_coherence) + smooth_u[b-1] * motion_coherence
                         smooth_v[b] = flow_v[b] * (1.0 - motion_coherence) + smooth_v[b-1] * motion_coherence
-                
+
                 flow_u = smooth_u
                 flow_v = smooth_v
-                
-            pass_motion = _flow_to_hsv_image(flow_u, flow_v)
+
+            pass_motion = torch.stack([flow_u, flow_v, torch.zeros_like(flow_u)], dim=-1)
+            pass_motion_viz = _flow_to_hsv_image(flow_u, flow_v)
         else:
             pass_motion = torch.zeros(B, H, W, 3, device=device, dtype=torch.float32)
+            pass_motion_viz = torch.zeros_like(pass_motion)
 
         # ── 11. Object ID / Cryptomatte ───────────────────────────────────────
         pass_object_id = _object_id_matte(img, luma, n_segments=object_id_segments, spatial_weight=object_id_spatial_weight)
@@ -397,7 +417,15 @@ class RadianceMultipassMaster:
         out_highlight = pass_highlight.contiguous()
         out_reflection = pass_reflection.contiguous()
         out_motion = pass_motion.contiguous()
+        out_motion_viz = pass_motion_viz.contiguous()
         out_object_id = pass_object_id.contiguous()
+        out_alpha = (
+            _match_optional_image(source_passes["alpha"], B, H, W)[..., :1]
+            if source_passes and isinstance(source_passes.get("alpha"), torch.Tensor)
+            else beauty.float()[..., 3:4] if beauty.shape[-1] >= 4
+            else torch.ones(B, H, W, 1, device=device, dtype=torch.float32)
+        )
+        out_alpha = out_alpha.expand(-1, -1, -1, 3).contiguous()
 
         # ── Bundle dictionary ──
         passes_dict = {
@@ -419,14 +447,30 @@ class RadianceMultipassMaster:
             "highlight_mask": out_highlight,
             "reflection_mask": out_reflection,
             "motion_vector": out_motion,
+            "motion_visualization": out_motion_viz,
             "object_id": out_object_id,
+            "alpha": out_alpha,
         }
+        if source_passes:
+            for name in source_present:
+                value = source_passes.get(name)
+                if name in passes_dict and isinstance(value, torch.Tensor):
+                    passes_dict[name] = _match_optional_image(value, B, H, W)
+            for name, value in source_passes.items():
+                if name.startswith("_") and name != "_present":
+                    passes_dict[name] = value
+            passes_dict["_source_present"] = sorted(source_present)
+        passes_dict["_present"] = sorted(name for name, value in passes_dict.items() if isinstance(value, torch.Tensor))
 
         perf_finish(logger, "Multipass Extract", _perf, device)
         return (
-            passes_dict, out_beauty, out_albedo, out_normal, out_depth, out_roughness, out_specular,
-            out_metallic, out_ao, out_emission, out_transmission, out_highpass, out_world_pos,
-            out_curvature, out_shadow, out_midtone, out_highlight, out_reflection, out_motion, out_object_id
+            passes_dict, passes_dict["beauty"], passes_dict["albedo"], passes_dict["normal"],
+            passes_dict["depth"], passes_dict["roughness"], passes_dict["specular"],
+            passes_dict["metallic"], passes_dict["ao"], passes_dict["emission"],
+            passes_dict["transmission"], passes_dict["highpass"], passes_dict["world_position"],
+            passes_dict["curvature"], passes_dict["shadow_mask"], passes_dict["midtone_mask"],
+            passes_dict["highlight_mask"], passes_dict["reflection_mask"], passes_dict["motion_vector"],
+            passes_dict["object_id"], passes_dict["motion_visualization"], passes_dict["alpha"]
         )
 
 
@@ -497,6 +541,10 @@ class RadianceEXRPassesWriter:
         # already use for this exact pattern.
         out_dir = get_safe_output_dir(base_dir, output_path, allow_absolute=True)
 
+        prefix = filename_prefix.strip()
+        if not prefix or prefix in (".", "..") or os.path.basename(prefix) != prefix:
+            raise ValueError("[EXR Passes Writer] filename_prefix must be a filename, not a path.")
+
         # Standard Metadata dictionary
         meta: Dict[str, Any] = {
             "software": "Radiance VFX Multipass v3.1",
@@ -515,26 +563,44 @@ class RadianceEXRPassesWriter:
 
         # Retrieve beauty shape to detect batch size
         beauty = passes.get("beauty")
-        if beauty is None:
+        if not isinstance(beauty, torch.Tensor):
             raise ValueError("[EXR Passes Writer] passes dictionary must contain a 'beauty' tensor.")
+        if beauty.dim() != 4 or beauty.shape[-1] not in (1, 2, 3, 4):
+            raise ValueError("[EXR Passes Writer] beauty must have shape (B,H,W,C).")
 
-        B = beauty.shape[0]
+        B, H, W, _ = beauty.shape
+        numpy_parts: Dict[str, np.ndarray] = {}
+        for name, tensor in passes.items():
+            if name.startswith("_") or not isinstance(tensor, torch.Tensor):
+                continue
+            if tensor.dim() not in (3, 4):
+                raise ValueError(f"[EXR Passes Writer] pass '{name}' must have shape (H,W,C) or (B,H,W,C).")
+            shape = tensor.shape[-3:]
+            if shape[0] != H or shape[1] != W or shape[2] not in (1, 2, 3, 4):
+                raise ValueError(f"[EXR Passes Writer] pass '{name}' does not match beauty dimensions/channels.")
+            if tensor.dim() == 4 and tensor.shape[0] not in (1, B):
+                raise ValueError(f"[EXR Passes Writer] pass '{name}' batch must be 1 or {B}, got {tensor.shape[0]}.")
+            numpy_parts[name] = tensor.float().cpu().numpy()
 
-        # Extract frames as float32 numpy arrays (H, W, C)
-        def _get_frame(tensor: torch.Tensor, idx: int) -> np.ndarray:
-            frame_tensor = tensor[idx] if tensor.dim() == 4 else tensor
-            return frame_tensor.float().cpu().numpy()
+        data_passes = {"depth", "world_position", "motion_vector", "object_id"}
+        if data_passes.intersection(numpy_parts):
+            if compression.upper() in {"B44", "B44A", "DWAA", "DWAB"}:
+                raise ValueError("[EXR Passes Writer] lossy compression is not allowed with data AOVs; use ZIP, ZIPS, PIZ, RLE, or Uncompressed.")
+            if "16" in bit_depth:
+                logger.info("[EXR Passes Writer] Promoting data-AOV file to 32-bit float.")
+                bit_depth = "32-bit Float"
 
         saved_paths: List[str] = []
 
         # Iterate over each frame in batch
         for b in range(B):
             frame_num = str(frame_index + b).zfill(4)
-            filepath = os.path.join(out_dir, f"{filename_prefix}.{frame_num}.exr")
-            
+            filename = f"{prefix}.{frame_num}.exr"
+            filepath = safe_join(out_dir, filename)
+
             parts: Dict[str, np.ndarray] = {}
-            for name, tensor in passes.items():
-                parts[name] = _get_frame(tensor, b)
+            for name, array in numpy_parts.items():
+                parts[name] = array[0 if array.ndim == 4 and array.shape[0] == 1 else b] if array.ndim == 4 else array
 
             # Normalise compression label
             comp = "None" if compression.lower() == "uncompressed" else compression
@@ -558,8 +624,10 @@ class RadianceEXRPassesWriter:
             # Best effort copy to remote/NAS path
             if remote_path:
                 try:
-                    dest = os.path.join(remote_path, f"{filename_prefix}.{frame_num}.exr")
-                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    remote_dir = get_safe_output_dir(
+                        strip_path_quotes(remote_path).strip(), "", allow_absolute=True)
+                    os.makedirs(remote_dir, exist_ok=True)
+                    dest = safe_join(remote_dir, filename)
                     shutil.copy2(filepath, dest)
                     logger.info("[EXR Passes Writer] Copied to remote → %s", dest)
                 except Exception as ex:

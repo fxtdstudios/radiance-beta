@@ -1,5 +1,16 @@
 import { app } from "../../scripts/app.js";
 
+import {
+    forceWidgetReinsert as _forceWidgetReinsert,
+    setWidgetVisible as _setWidgetVisible,
+} from "./radiance_widget_utils.js";
+
+// Widget helpers now live in radiance_widget_utils.js; this module's only
+// local difference was the "number" fallback type, which is passed through.
+function setWidgetVisible(widget, visible, node) {
+    return _setWidgetVisible(widget, visible, node, { fallbackType: "number" });
+}
+
 const PRESET_CONFIGS = {
     "→ Flux txt2img": {
         steps: 25, cfg: 1.0, sampler: "euler", scheduler: "simple",
@@ -269,74 +280,6 @@ const SIGMA_OVERRIDE_WIDGETS = [
     "terminal_sigma_to_zero", "ays_schedule", "custom_ays_anchors", "force_exact_steps",
 ];
 
-// ── 1. Widget visibility helpers ──
-// ALBABIT-FIX: three-mechanism pattern for Nodes 2.0 + Legacy LiteGraph:
-//   1. widget.options.hidden  — Nodes 2.0 Vue filter
-//   2. widget.hidden          — LiteGraph getLayoutWidgets() exclusion
-//   3. widget.type="hidden" + computeSize=[0,-4] + computedHeight=4 — physical height collapse
-
-// Force Vue to destroy and recreate a widget's component instance by doing a real
-// remove+re-insert in the reactive array. A splice(0,0) no-op only notifies Vue that
-// the array changed but Vue's vdom differ may reuse the existing component instance
-// (same object reference) and skip re-reading changed properties like `type`.
-// A true remove+insert forces Vue to treat it as a new item → fresh component mount.
-function _forceWidgetReinsert(widget, node) {
-    if (!node?.widgets) return;
-    const idx = node.widgets.indexOf(widget);
-    if (idx === -1) return;
-    node.widgets.splice(idx, 1);          // remove → Vue destroys component instance
-    node.widgets.splice(idx, 0, widget);  // re-insert → Vue creates fresh instance
-}
-
-function setWidgetVisible(widget, visible, node) {
-    if (!widget) return;
-
-    // ALBABIT-FIX: only reinsert (destroys/recreates the Vue component, see
-    // below) on a real hidden/type transition -- redundant reinserts were
-    // interrupting in-progress widget typing (see applyFolding's comment).
-    const wasHidden = widget.hidden === true || widget.type === "hidden";
-
-    if (!widget.options) widget.options = {};
-    widget.options.hidden = !visible;
-    widget.hidden = !visible;
-
-    if (visible) {
-        if (widget.type === "hidden") {
-            widget.type = widget._origType || "number";
-            if (widget._origComputeSize !== undefined) {
-                widget.computeSize = widget._origComputeSize;
-            } else {
-                delete widget.computeSize;
-            }
-            delete widget._origComputeSize;
-            // ALBABIT-FIX: set a positive default height BEFORE reinserting so Vue
-            // renders the widget at a valid size on first mount (undefined → "undefinedpx"
-            // in CSS collapses to 0 on page load when Vue hasn't computed heights yet).
-            // The deferred cleanup in toggleFields() deletes this after Vue's first pass
-            // so Vue can recompute the real height without ghost-space artefacts.
-            widget.computedHeight = widget._origComputedHeight ?? 32;
-            delete widget._origComputedHeight;
-        }
-    } else {
-        if (widget.type !== "hidden") {
-            widget._origType = widget.type;
-            widget._origComputeSize = widget.computeSize;
-            widget._origComputedHeight = widget.computedHeight;
-            widget.type = "hidden";
-            widget.computeSize = () => [0, -4];
-            widget.computedHeight = 4;
-        }
-    }
-
-    // A no-op splice(0,0) alone doesn't make Vue re-read a mounted widget's
-    // type/hidden -- only a real reinsert does. Returns whether that
-    // happened so callers (applyFolding) can skip their own redraw work.
-    if (wasHidden !== !visible) {
-        _forceWidgetReinsert(widget, node);
-        return true;
-    }
-    return false;
-}
 
 // ── 2. Resize and redraw helper ──
 function refreshNodeSize(node) {

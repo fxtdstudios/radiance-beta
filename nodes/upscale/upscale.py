@@ -58,6 +58,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from radiance.model.cache import GPUModelCache
+
 logger = logging.getLogger("radiance.upscale")
 
 
@@ -223,8 +225,11 @@ def _verify_or_report_sha256(dest: str, info: Dict[str, Any], key: str) -> bool:
         )
         try:
             os.remove(dest)
-        except OSError:
-            pass
+        except OSError as _exc:
+            logger.debug(
+                "[Radiance] _verify_or_report_sha256(): ignoring %s from `os.remove(dest)`: %s",
+                type(_exc).__name__, _exc,
+            )
         return False
     logger.info(f"[Radiance/Upscale] sha256 verified for {key}")
     return True
@@ -310,8 +315,11 @@ def _download_upscale_model(key: str, force: bool = False) -> Optional[str]:
             return None
         logger.info(f"[Radiance/Upscale] OK huggingface_hub -> {dest}")
         return dest
-    except ImportError:
-        pass
+    except ImportError as _exc:
+        logger.debug(
+            "[Radiance] _download_upscale_model(): ignoring %s from `from huggingface_hub import hf_hub_download`: %s",
+            type(_exc).__name__, _exc,
+        )
     except Exception as e:
         logger.warning(f"[Radiance/Upscale] hf_hub failed: {e}; falling back to urllib")
 
@@ -421,6 +429,122 @@ def _laplacian_pyramid_blend(lo: torch.Tensor,
     return _collapse(blend)
 
 
+def _load_state_dict_reporting(net: nn.Module, state: dict, label: str) -> nn.Module:
+    """
+    Non-strict load that reports what it dropped.
+
+    Some upstream basicsr checkpoints legitimately carry extra tensors (codebook
+    or discriminator weights) that the inference architecture does not declare,
+    so strict=True is not appropriate on those paths. A *silent* partial load
+    is, however, exactly how the Real-ESRGAN loader shipped a randomly
+    initialised network while logging success -- so log the mismatch and warn
+    when the overlap is implausibly small.
+    """
+    result = net.load_state_dict(state, strict=False)
+    missing, unexpected = list(result.missing_keys), list(result.unexpected_keys)
+    total = len(net.state_dict())
+    loaded = total - len(missing)
+    if missing or unexpected:
+        logger.warning(
+            "[Radiance/Upscale] %s: loaded %d/%d tensors "
+            "(%d missing, %d unexpected in checkpoint)",
+            label, loaded, total, len(missing), len(unexpected),
+        )
+    if total and loaded / total < 0.5:
+        logger.error(
+            "[Radiance/Upscale] %s: only %.1f%% of weights loaded — output will "
+            "be unusable. This usually means the checkpoint does not match the "
+            "architecture.", label, 100.0 * loaded / total,
+        )
+    return net
+
+
+def _as_2x(upscale_fn: Any) -> Any:
+    """
+    Wrap a 4x upscale callable so it returns a 2x result.
+
+    The "8x (tile cascade)" mode runs two passes. Both passes previously used
+    the raw 4x model with scale=4, which yields 16x, not 8x -- a 1024px input
+    came out at 16384px and the accumulators alone were several GB. The second
+    pass must contribute 2x, which we obtain by running the 4x model (keeping
+    the detail benefit of the cascade) and area-downsampling by half.
+    """
+    def _fn_2x(tile: torch.Tensor) -> torch.Tensor:
+        out = upscale_fn(tile)                       # (B, H*4, W*4, C)
+        out = out.permute(0, 3, 1, 2)
+        out = F.interpolate(out, scale_factor=0.5, mode="area")
+        return out.permute(0, 2, 3, 1).contiguous()
+    return _fn_2x
+
+
+_warned_blend_modes: set = set()
+
+
+def _tile_weight_map(blend_mode: str, tile_h: int, tile_w: int, overlap: int,
+                     device: torch.device) -> torch.Tensor:
+    """Per-tile blending weight for the requested mode.
+
+    "gaussian_feather" and "linear" are real and different. "laplacian_pyramid"
+    is not implemented -- a true Laplacian blend needs the tiles decomposed and
+    recombined per band, not a per-pixel weight -- so it falls back to the
+    Gaussian feather and says so once, rather than silently pretending.
+    """
+    mode = (blend_mode or "").lower()
+
+    if mode == "linear":
+        from radiance.core.tiling import blend_weight_2d
+        ov = max(int(overlap), 0)
+        return blend_weight_2d(
+            tile_h, tile_w,
+            overlap_top=ov, overlap_bottom=ov,
+            overlap_left=ov, overlap_right=ov,
+            device=device, dtype=torch.float32,
+        )
+
+    if mode not in ("gaussian_feather", "laplacian_pyramid"):
+        if mode not in _warned_blend_modes:
+            _warned_blend_modes.add(mode)
+            logger.warning(
+                "[Radiance/Upscale] Unknown blend_mode %r; using the Gaussian "
+                "feather.", blend_mode,
+            )
+    elif mode == "laplacian_pyramid" and mode not in _warned_blend_modes:
+        _warned_blend_modes.add(mode)
+        logger.info(
+            "[Radiance/Upscale] blend_mode='laplacian_pyramid' is not "
+            "implemented and uses the Gaussian feather. Choose 'linear' for a "
+            "genuinely different weighting."
+        )
+
+    return _build_gaussian_weight_map(tile_h, tile_w, overlap, device)
+
+
+def _compute_device(images: torch.Tensor) -> torch.device:
+    """The device the upscale should RUN on, not the one the tensor arrived on.
+
+    Every entry point here used `images.device`. A ComfyUI IMAGE is always
+    CPU-resident, so that unconditionally selected the CPU and the built-in
+    upscalers ran a Real-ESRGAN forward pass in fp32 on the processor: one 4K
+    plate at 4x is roughly 66 TFLOP, about ten minutes a frame against ~5
+    seconds on a GPU. `image/upscale.py` already asked ComfyUI for the torch
+    device; this brings the rest of the pack in line.
+
+    Falls back to the input's own device when ComfyUI is not importable (tests,
+    standalone use) so nothing changes off-runtime.
+    """
+    try:
+        from comfy import model_management  # type: ignore
+
+        return model_management.get_torch_device()
+    except Exception:
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        mps = getattr(torch.backends, "mps", None)
+        if mps is not None and mps.is_available():
+            return torch.device("mps")
+        return images.device
+
+
 def tiled_upscale(
     images:     torch.Tensor,                        # (B,H,W,C) float32 [0,1]
     upscale_fn: Any,                                  # callable: (B,H,W,C) → (B,H',W',C)
@@ -503,8 +627,13 @@ def tiled_upscale(
             utw  = tw * scale
             up_tile = up_tile[:, :uth, :utw, :]     # trim padding
 
-            # Build Gaussian weight map in scaled space
-            w_map  = _build_gaussian_weight_map(uth, utw, overlap * scale, device)
+            # Build the tile weight map in scaled space.
+            #
+            # `blend_mode` used to appear exactly once in this function -- in the
+            # signature -- so all three options produced the identical Gaussian
+            # feather while the node's info string reported back whichever mode
+            # the user had selected.
+            w_map  = _tile_weight_map(blend_mode, uth, utw, overlap * scale, device)
             w_map  = w_map.expand(B, 1, uth, utw)
 
             # Confidence: distance from tile centre (centre = confident; edges = less so)
@@ -519,10 +648,15 @@ def tiled_upscale(
             oy0, ox0 = y0 * scale, x0 * scale
             oy1, ox1 = oy0 + uth, ox0 + utw
 
-            up_bchw = up_tile.permute(0, 3, 1, 2)           # (B,C,H,W)
+            # The upscale runs on the compute device (see _compute_device) while
+            # the accumulators stay on the input's device, so peak VRAM is one
+            # tile rather than the whole output. Bring each tile back before
+            # accumulating -- without this the += is a cross-device op and
+            # raises as soon as the model is not on the CPU.
+            up_bchw = up_tile.permute(0, 3, 1, 2).to(out_acc.device)   # (B,C,H,W)
             out_acc [:, :, oy0:oy1, ox0:ox1]  += up_bchw * w_map
             wgt_acc [:, :, oy0:oy1, ox0:ox1]  += w_map
-            conf_acc[:, :, oy0:oy1, ox0:ox1]  += conf_t * w_map
+            conf_acc[:, :, oy0:oy1, ox0:ox1]  += conf_t.to(conf_acc.device) * w_map
 
     # Normalise by accumulated weights
     wgt_acc  = wgt_acc.clamp(min=1e-8)
@@ -547,21 +681,23 @@ class _RRDBNet(nn.Module):
     """
 
     class _ResidualDenseBlock(nn.Module):
+        # NOTE: submodule names MUST match basicsr's ResidualDenseBlock
+        # (conv1..conv5) or official Real-ESRGAN checkpoints will not load.
         def __init__(self, nf: int = 64, gc: int = 32):
             super().__init__()
-            self.c1 = nn.Conv2d(nf,        gc,        3, 1, 1)
-            self.c2 = nn.Conv2d(nf + gc,   gc,        3, 1, 1)
-            self.c3 = nn.Conv2d(nf + 2*gc, gc,        3, 1, 1)
-            self.c4 = nn.Conv2d(nf + 3*gc, gc,        3, 1, 1)
-            self.c5 = nn.Conv2d(nf + 4*gc, nf,        3, 1, 1)
+            self.conv1 = nn.Conv2d(nf,        gc,        3, 1, 1)
+            self.conv2 = nn.Conv2d(nf + gc,   gc,        3, 1, 1)
+            self.conv3 = nn.Conv2d(nf + 2*gc, gc,        3, 1, 1)
+            self.conv4 = nn.Conv2d(nf + 3*gc, gc,        3, 1, 1)
+            self.conv5 = nn.Conv2d(nf + 4*gc, nf,        3, 1, 1)
             self.act = nn.LeakyReLU(0.2, inplace=True)
 
         def forward(self, x):
-            x1 = self.act(self.c1(x))
-            x2 = self.act(self.c2(torch.cat([x, x1], 1)))
-            x3 = self.act(self.c3(torch.cat([x, x1, x2], 1)))
-            x4 = self.act(self.c4(torch.cat([x, x1, x2, x3], 1)))
-            x5 = self.c5(torch.cat([x, x1, x2, x3, x4], 1))
+            x1 = self.act(self.conv1(x))
+            x2 = self.act(self.conv2(torch.cat([x, x1], 1)))
+            x3 = self.act(self.conv3(torch.cat([x, x1, x2], 1)))
+            x4 = self.act(self.conv4(torch.cat([x, x1, x2, x3], 1)))
+            x5 = self.conv5(torch.cat([x, x1, x2, x3, x4], 1))
             return x5 * 0.2 + x
 
     class _RRDB(nn.Module):
@@ -578,39 +714,57 @@ class _RRDBNet(nn.Module):
     def __init__(self, in_nc: int = 3, out_nc: int = 3, nf: int = 64,
                  nb: int = 23, scale: int = 4, gc: int = 32):
         super().__init__()
-        self.scale    = scale
-        self.conv_first = nn.Conv2d(in_nc, nf, 3, 1, 1)
+        self.scale = scale
+        # basicsr folds sub-4x scales into the input via pixel_unshuffle rather
+        # than varying the upsampler, so conv_first widens instead. Reproducing
+        # this exactly is what lets official checkpoints load with strict=True.
+        if scale == 2:
+            first_in = in_nc * 4
+        elif scale == 1:
+            first_in = in_nc * 16
+        else:
+            first_in = in_nc
+        self.conv_first = nn.Conv2d(first_in, nf, 3, 1, 1)
         self.body       = nn.Sequential(*[_RRDBNet._RRDB(nf, gc) for _ in range(nb)])
         self.conv_body  = nn.Conv2d(nf, nf, 3, 1, 1)
 
-        # Upsampling: 2× per stage
-        n_up = int(math.log2(scale))
-        ups  = []
-        for _ in range(n_up):
-            ups += [nn.Conv2d(nf, nf * 4, 3, 1, 1), nn.PixelShuffle(2),
-                    nn.LeakyReLU(0.2, inplace=True)]
-        self.upsample   = nn.Sequential(*ups)
+        # Upsampling: always two nearest-interpolate + conv stages (basicsr
+        # naming: conv_up1 / conv_up2). NOT PixelShuffle -- the previous
+        # implementation used PixelShuffle under the name `upsample`, which
+        # matched no checkpoint key and was silently discarded.
+        self.conv_up1   = nn.Conv2d(nf, nf, 3, 1, 1)
+        self.conv_up2   = nn.Conv2d(nf, nf, 3, 1, 1)
         self.conv_hr    = nn.Conv2d(nf, nf, 3, 1, 1)
         self.conv_last  = nn.Conv2d(nf, out_nc, 3, 1, 1)
         self.act        = nn.LeakyReLU(0.2, inplace=True)
 
     def forward(self, x):
-        fea  = self.conv_first(x)
+        if self.scale == 2:
+            fea = F.pixel_unshuffle(x, downscale_factor=2)
+        elif self.scale == 1:
+            fea = F.pixel_unshuffle(x, downscale_factor=4)
+        else:
+            fea = x
+        fea  = self.conv_first(fea)
         body = self.conv_body(self.body(fea))
         fea  = fea + body
-        fea  = self.upsample(fea)
+        fea  = self.act(self.conv_up1(F.interpolate(fea, scale_factor=2, mode="nearest")))
+        fea  = self.act(self.conv_up2(F.interpolate(fea, scale_factor=2, mode="nearest")))
         return self.conv_last(self.act(self.conv_hr(fea)))
 
 
 # Model cache:  key → loaded nn.Module (on correct device)
-_MODEL_CACHE: Dict[str, nn.Module] = {}
+# Bounded LRU rather than an unbounded dict: this previously grew without
+# limit and had no eviction path anywhere in the file, so every model tried
+# in a session stayed resident in VRAM for the process lifetime.
+_MODEL_CACHE = GPUModelCache(max_size=2)
 
 
 def _load_realesrgan(model_key: str, scale: int, device: torch.device) -> nn.Module:
     """Load Real-ESRGAN weights into RRDBNet, cache result."""
     cache_id = f"{model_key}@{device}"
     if cache_id in _MODEL_CACHE:
-        return _MODEL_CACHE[cache_id]
+        return _MODEL_CACHE.get(cache_id)
 
     # Anime 6B uses nb=6; standard uses nb=23
     nb = 6 if "anime" in model_key else 23
@@ -631,9 +785,14 @@ def _load_realesrgan(model_key: str, scale: int, device: torch.device) -> nn.Mod
     # Strip 'module.' prefix if saved with DataParallel
     state = {k.replace("module.", ""): v for k, v in state.items()}
 
-    net.load_state_dict(state, strict=False)
+    # strict=True is deliberate. This previously loaded with strict=False, which
+    # silently accepted a key-name mismatch: 8 of 702 tensors matched and the
+    # remaining 694 were dropped, leaving the network at ~random init while the
+    # log still reported a successful load. A checkpoint that does not fit the
+    # architecture must fail loudly so the caller can fall back.
+    net.load_state_dict(state, strict=True)
     net.eval().to(device)
-    _MODEL_CACHE[cache_id] = net
+    _MODEL_CACHE.put(cache_id, net)
     logger.info(f"[Radiance/Upscale] Loaded {model_key} (nb={nb}, scale={scale}x)")
     return net
 
@@ -673,7 +832,10 @@ def _bicubic_upscale(tile_bhwc: torch.Tensor, scale: int) -> torch.Tensor:
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Separate cache for spandrel models (they wrap nn.Module differently)
-_SPANDREL_CACHE: Dict[str, Any] = {}
+# Bounded LRU rather than an unbounded dict: this previously grew without
+# limit and had no eviction path anywhere in the file, so every model tried
+# in a session stayed resident in VRAM for the process lifetime.
+_SPANDREL_CACHE = GPUModelCache(max_size=2)
 
 
 def _load_spandrel(ckpt_path: str, device: torch.device) -> Any:
@@ -684,14 +846,14 @@ def _load_spandrel(ckpt_path: str, device: torch.device) -> Any:
     """
     cache_id = f"{ckpt_path}@{device}"
     if cache_id in _SPANDREL_CACHE:
-        return _SPANDREL_CACHE[cache_id]
+        return _SPANDREL_CACHE.get(cache_id)
 
     try:
         from spandrel import ModelLoader  # type: ignore
         loader = ModelLoader(device=device)
         model  = loader.load_from_file(ckpt_path)
         model.eval()
-        _SPANDREL_CACHE[cache_id] = model
+        _SPANDREL_CACHE.put(cache_id, model)
         arch = getattr(model, "architecture", type(model).__name__)
         logger.info(f"[Radiance/Upscale] spandrel loaded [{arch}]: {ckpt_path}")
         return model
@@ -749,12 +911,15 @@ def _load_tier2(model_key: str, scale: int, device: torch.device) -> Any:
             num_heads=[6,6,6,6,6,6], mlp_ratio=2, upsampler='pixelshuffle',
             resi_connection='1conv',
         )
-        net.load_state_dict(state, strict=False)
+        _load_state_dict_reporting(net, state, "basicsr SwinIR")
         net.eval().to(device)
         logger.info(f"[Radiance/Upscale] basicsr SwinIR loaded: {ckpt_path}")
         return net
-    except ImportError:
-        pass
+    except ImportError as _exc:
+        logger.debug(
+            "[Radiance] _load_tier2(): ignoring %s from `from basicsr.archs.swinir_arch import SwinIR`: %s",
+            type(_exc).__name__, _exc,
+        )
     except Exception as e:
         logger.warning(f"[Radiance/Upscale] basicsr SwinIR load failed: {e}")
 
@@ -766,7 +931,10 @@ def _load_tier2(model_key: str, scale: int, device: torch.device) -> Any:
 #  TIER 3 — Diffusion creative upscaling  (SD x4 / SeedVR2)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_DIFFUSION_PIPE_CACHE: Dict[str, Any] = {}
+# Bounded LRU rather than an unbounded dict: this previously grew without
+# limit and had no eviction path anywhere in the file, so every model tried
+# in a session stayed resident in VRAM for the process lifetime.
+_DIFFUSION_PIPE_CACHE = GPUModelCache(max_size=1)
 
 
 def _load_sd_x4_pipeline(device: torch.device) -> Any:
@@ -776,7 +944,7 @@ def _load_sd_x4_pipeline(device: torch.device) -> Any:
     """
     cache_key = f"sd_x4@{device}"
     if cache_key in _DIFFUSION_PIPE_CACHE:
-        return _DIFFUSION_PIPE_CACHE[cache_key]
+        return _DIFFUSION_PIPE_CACHE.get(cache_key)
 
     try:
         from diffusers import StableDiffusionUpscalePipeline  # type: ignore
@@ -795,7 +963,7 @@ def _load_sd_x4_pipeline(device: torch.device) -> Any:
                 pipe.enable_xformers_memory_efficient_attention()
             except Exception as exc:
                 logger.warning("[nodes_upscale] _load_sd_x4_pipeline: %s", exc)
-        _DIFFUSION_PIPE_CACHE[cache_key] = pipe
+        _DIFFUSION_PIPE_CACHE.put(cache_key, pipe)
         logger.info("[Radiance/Upscale] SD x4 upscaler pipeline ready")
         return pipe
     except ImportError:
@@ -862,17 +1030,20 @@ def _load_seedvr2_pipeline(device: torch.device) -> Any:
     """
     cache_key = f"seedvr2@{device}"
     if cache_key in _DIFFUSION_PIPE_CACHE:
-        return _DIFFUSION_PIPE_CACHE[cache_key]
+        return _DIFFUSION_PIPE_CACHE.get(cache_key)
 
     # Attempt 1: numz/ComfyUI-SeedVR2_VideoUpscaler node package
     try:
         import seedvr2  # type: ignore
         pipe = seedvr2.load_pipeline(device=str(device))
-        _DIFFUSION_PIPE_CACHE[cache_key] = pipe
+        _DIFFUSION_PIPE_CACHE.put(cache_key, pipe)
         logger.info("[Radiance/Upscale] SeedVR2 pipeline loaded")
         return pipe
-    except ImportError:
-        pass
+    except ImportError as _exc:
+        logger.debug(
+            "[Radiance] _load_seedvr2_pipeline(): ignoring %s from `import seedvr2`: %s",
+            type(_exc).__name__, _exc,
+        )
     except Exception as e:
         logger.warning(f"[Radiance/Upscale] SeedVR2 load attempt failed: {e}")
 
@@ -884,7 +1055,7 @@ def _load_seedvr2_pipeline(device: torch.device) -> Any:
             torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
         )
         pipe = pipe.to(device)
-        _DIFFUSION_PIPE_CACHE[cache_key] = pipe
+        _DIFFUSION_PIPE_CACHE.put(cache_key, pipe)
         logger.info("[Radiance/Upscale] SeedVR2 (diffusers) pipeline loaded")
         return pipe
     except Exception as e:
@@ -1321,9 +1492,7 @@ class RadianceUpscaleTiler:
         # Clamp overlap to at most 40% of tile_size
         overlap = min(overlap, tile_size // 2)
 
-        device = images.device
-        if device.type == "cpu":
-            device = torch.device("cpu")
+        device = _compute_device(images)
 
         # ── Build upscale function ───────────────────────────────────────────
         _fn, model_label = _build_upscale_fn(
@@ -1340,7 +1509,7 @@ class RadianceUpscaleTiler:
         # ── Optional second pass for 8× ──────────────────────────────────────
         if do_double:
             upscaled, conf2 = tiled_upscale(
-                upscaled, _fn, scale=4,
+                upscaled, _as_2x(_fn), scale=2,
                 tile_size=tile_size * 4, overlap=overlap * 4, blend_mode=blend_mode,
             )
             confidence = (confidence + F.interpolate(
@@ -1630,7 +1799,7 @@ class RadianceUpscaleImage:
         # ── Select backend ────────────────────────────────────────────────────
         scale_int  = {"2×": 2, "4×": 4, "8× (tile cascade)": 4}[scale]
         do_double  = scale == "8× (tile cascade)"
-        device     = images.device
+        device     = _compute_device(images)
 
         # Mode → tier mapping: creative forces Tier 3, precise/balanced use selected tier
         effective_tier = model_tier if upscale_model is None else "auto"
@@ -1659,7 +1828,7 @@ class RadianceUpscaleImage:
 
         if do_double:
             upscaled, conf2 = tiled_upscale(
-                upscaled, _fn, scale=4,
+                upscaled, _as_2x(_fn), scale=2,
                 tile_size=tile_size * 4, overlap=overlap * 4,
             )
             confidence = (confidence + F.interpolate(
@@ -1939,13 +2108,28 @@ class RadianceUpscaleVideo:
             t_weights = torch.ones(Fw, dtype=torch.float32)
             if Fw > 1:
                 half       = overlap_temporal
-                # Ramp up at start
-                for i in range(min(half, Fw)):
-                    t_weights[i] = math.sin(math.pi * i / (2 * half))
-                # Ramp down at end (skip if first or last window)
+                # Half-sample offset, so the ramp is never exactly zero.
+                #
+                # This was `sin(pi * i / (2*half))`, which is 0 at i=0. With
+                # `step = window_size - overlap_temporal`, an overlap of 1 makes
+                # consecutive windows share exactly one frame -- and that frame
+                # got the ramp-DOWN tail of the previous window (also i=0, also
+                # 0) and the ramp-UP head of this one. Both weights zero, so
+                # after normalisation the frame rendered pure black. Measured at
+                # B=100, window=16, overlap=1: frames 15, 30, 45, 60, 75 and 90
+                # were fully black. 1 is the widget minimum and the tooltip
+                # recommends it.
+                #
+                # Offsetting by half a sample keeps the smooth sine shape, makes
+                # every weight strictly positive, and leaves the two overlapping
+                # ramps summing to a sane value for the normalisation below.
+                if wi > 0:
+                    for i in range(min(half, Fw)):
+                        t_weights[i] = math.sin(math.pi * (i + 0.5) / (2 * half))
+                # Ramp down at end (skip if last window)
                 if wi < n_windows - 1:
                     for i in range(min(half, Fw)):
-                        t_weights[Fw - 1 - i] = math.sin(math.pi * i / (2 * half))
+                        t_weights[Fw - 1 - i] = math.sin(math.pi * (i + 0.5) / (2 * half))
             t_weights = t_weights.view(Fw, 1, 1, 1)
 
             # ── Spatial upscale for this window ──────────────────────────────
@@ -1958,7 +2142,7 @@ class RadianceUpscaleVideo:
             # ── Optional: 8× second pass ─────────────────────────────────────
             if do_double:
                 up_window, cw2 = tiled_upscale(
-                    up_window, _fn, scale=4,
+                    up_window, _as_2x(_fn), scale=2,
                     tile_size=tile_size * 4, overlap=overlap_spatial * 4,
                 )
                 conf_window = (conf_window + F.interpolate(
@@ -2181,7 +2365,10 @@ _UPSCALE_MODEL_REGISTRY.update({
 _FACE_RESTORE_SIZE = 512
 
 # Model cache for face restore models (separate from upscale cache)
-_FACE_MODEL_CACHE: Dict[str, Any] = {}
+# Bounded LRU rather than an unbounded dict: this previously grew without
+# limit and had no eviction path anywhere in the file, so every model tried
+# in a session stayed resident in VRAM for the process lifetime.
+_FACE_MODEL_CACHE = GPUModelCache(max_size=2)
 
 
 # ── Face Detection ────────────────────────────────────────────────────────────
@@ -2213,8 +2400,10 @@ def _detect_faces(
             det_path = _download_upscale_model("retinaface_resnet50")
             model    = init_detection_model("retinaface_resnet50", half=False,
                                             model_rootpath=_get_models_dir("facedetection"))
-            _FACE_MODEL_CACHE[cache_key] = model
-        det = _FACE_MODEL_CACHE[cache_key]
+            _FACE_MODEL_CACHE.put(cache_key, model)
+        det = _FACE_MODEL_CACHE.get(cache_key)
+        if det is None:
+            raise RuntimeError("RetinaFace model missing from the cache after load")
         import numpy as np
         bboxes_scores = det.detect_faces(img_u8, 0.97)
         if bboxes_scores is not None and len(bboxes_scores):
@@ -2267,7 +2456,7 @@ def _load_face_restore_model(model_key: str, device: torch.device) -> Any:
     """
     cache_id = f"{model_key}@{device}"
     if cache_id in _FACE_MODEL_CACHE:
-        return _FACE_MODEL_CACHE[cache_id]
+        return _FACE_MODEL_CACHE.get(cache_id)
 
     ckpt_path = _download_upscale_model(model_key)
     if ckpt_path is None:
@@ -2276,10 +2465,13 @@ def _load_face_restore_model(model_key: str, device: torch.device) -> Any:
     # ── spandrel (handles CodeFormer and GFPGAN automatically) ───────────────
     try:
         model = _load_spandrel(ckpt_path, device)
-        _FACE_MODEL_CACHE[cache_id] = model
+        _FACE_MODEL_CACHE.put(cache_id, model)
         return model
-    except RuntimeError:
-        pass
+    except RuntimeError as _exc:
+        logger.debug(
+            "[Radiance] _load_face_restore_model(): ignoring %s from `model = _load_spandrel(ckpt_path, device)`: %s",
+            type(_exc).__name__, _exc,
+        )
 
     # ── basicsr CodeFormer arch ───────────────────────────────────────────────
     if "codeformer" in model_key:
@@ -2291,9 +2483,9 @@ def _load_face_restore_model(model_key: str, device: torch.device) -> Any:
             )
             state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
             state = state.get("params_ema", state.get("params", state))
-            net.load_state_dict(state, strict=False)
+            _load_state_dict_reporting(net, state, "basicsr CodeFormer")
             net.eval().to(device)
-            _FACE_MODEL_CACHE[cache_id] = net
+            _FACE_MODEL_CACHE.put(cache_id, net)
             logger.info("[Radiance/FaceRestore] basicsr CodeFormer loaded")
             return net
         except (ImportError, Exception) as e:
@@ -2307,7 +2499,7 @@ def _load_face_restore_model(model_key: str, device: torch.device) -> Any:
                 model_path=ckpt_path, upscale=1, arch="clean", channel_multiplier=2,
                 bg_upsampler=None, device=device,
             )
-            _FACE_MODEL_CACHE[cache_id] = restorer
+            _FACE_MODEL_CACHE.put(cache_id, restorer)
             logger.info("[Radiance/FaceRestore] gfpgan GFPGANer loaded")
             return restorer
         except (ImportError, Exception) as e:
@@ -2679,7 +2871,7 @@ class RadianceUpscaleFaceRestore:
 
         t0     = time.time()
         B, H, W, C = images.shape
-        device = images.device
+        device = _compute_device(images)
         result = images.clone()
 
         # ── Resolve model key ─────────────────────────────────────────────────

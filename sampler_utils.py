@@ -6,6 +6,7 @@ import gc
 import json
 from typing import Tuple, Dict, Any, Optional, List
 from dataclasses import dataclass, field
+from radiance.core.tiling import blend_weight_2d, edge_overlaps_from_coords, clamp_overlap
 
 import comfy.samplers
 import comfy.sample
@@ -395,8 +396,11 @@ class SigmaCache:
             try:
                 if hasattr(model, "model") and hasattr(model.model, "model_config"):
                     config_name = type(model.model.model_config).__name__
-            except (AttributeError, RuntimeError):
-                pass
+            except (AttributeError, RuntimeError) as _exc:
+                logger.debug(
+                    "[Radiance] _make_key(): ignoring %s from `if hasattr(model, 'model') and hasattr(model.model, 'model_c…`: %s",
+                    type(_exc).__name__, _exc,
+                )
 
             return (config_name, round(sigma_max, 6), round(sigma_min, 6), scheduler, total_steps)
         except (AttributeError, RuntimeError):
@@ -973,9 +977,18 @@ def apply_pag_to_model(model, pag_scale: float):
         def pag_attention_patch(q, k, v, extra_options):
 
             cond_or_uncond = extra_options.get("cond_or_uncond", [0])
-            block_type = extra_options.get("block_type", "unknown")
 
-            if 1 not in cond_or_uncond or block_type != "middle":
+            # ComfyUI's attn1 patch sets extra_options["block"] = ("middle", i)
+            # plus "block_index". There is no "block_type" key -- this used to
+            # read `extra_options.get("block_type", "unknown")` and bail unless
+            # it equalled "middle", so the default never matched and the patch
+            # returned q, k, v unmodified on EVERY call while the line below
+            # still logged "PAG applied with scale ...". Read the key that
+            # exists, and tolerate either shape.
+            block = extra_options.get("block")
+            block_name = block[0] if isinstance(block, (tuple, list)) and block else block
+
+            if 1 not in cond_or_uncond or block_name != "middle":
                 return q, k, v
 
             k_out = k.clone()
@@ -993,14 +1006,30 @@ def apply_pag_to_model(model, pag_scale: float):
                     start = idx * chunk_size
                     end = min(start + chunk_size, batch_size)
 
-                    k_out[start:end] = q[start:end]
-                    v_out[start:end] = q[start:end]
+                    # Blend by pag_scale rather than replacing outright.
+                    # `pag_scale` was previously used only as an on/off gate and
+                    # stashed in model_options where nothing read it, so 0.1 and
+                    # 5.0 produced bit-identical results.
+                    #
+                    # NOTE: this is a self-attention perturbation, not the full
+                    # Ahn et al. 2024 method -- true PAG needs a third forward
+                    # pass combined as eps_u + s(eps_c - eps_u) + s_pag(eps_c -
+                    # eps_p), which ComfyUI's patch API cannot express here. The
+                    # tooltip says so.
+                    w = float(min(max(pag_scale, 0.0), 1.0))
+                    k_out[start:end] = k[start:end] * (1.0 - w) + q[start:end] * w
+                    v_out[start:end] = v[start:end] * (1.0 - w) + q[start:end] * w
 
             return q, k_out, v_out
 
         model_pag.set_model_attn1_patch(pag_attention_patch)
 
-        logger.info(f"PAG applied with scale {pag_scale} (attention hook active)")
+        logger.info(
+            "PAG-style self-attention perturbation applied at scale %.3f. This "
+            "is not the full Ahn et al. 2024 method (no separate perturbed "
+            "forward pass); treat it as a mid-block attention guidance term.",
+            pag_scale,
+        )
         return model_pag
 
     except (AttributeError, RuntimeError, TypeError) as e:
@@ -1706,6 +1735,9 @@ def tile_sample(
         )
 
     B, C, H, W = latent_samples.shape
+    # An overlap >= tile_size collapses the stride to 1 and turns this into
+    # millions of tile inferences; only one of five tilers checked for it.
+    tile_overlap = clamp_overlap(tile_size, tile_overlap)
     step = max(1, tile_size - tile_overlap)
     device = latent_samples.device
 
@@ -1753,17 +1785,19 @@ def tile_sample(
         tw = x2 - x1
 
         if tile_blend == "feather":
-
-            wy = torch.ones(th, device=device)
-            wx = torch.ones(tw, device=device)
-            fade = min(tile_overlap, th // 2, tw // 2)
-            if fade > 0:
-                ramp = (1 - torch.cos(torch.linspace(0, math.pi, fade, device=device))) / 2
-                wy[:fade] = ramp
-                wy[-fade:] = ramp.flip(0)
-                wx[:fade] = ramp
-                wx[-fade:] = ramp.flip(0)
-            w_tile = (wy.unsqueeze(1) * wx.unsqueeze(0)).unsqueeze(0).unsqueeze(0)
+            # Border-aware feather via the shared helper. The previous inline
+            # ramp started at exactly 0 and was applied to all four edges of
+            # every tile, including edges lying on the image border -- those
+            # pixels are covered by no other tile, so dividing by the
+            # accumulated weight gave 0/1e-6 == 0 and produced a black band
+            # around the whole latent (8 image pixels wide after the VAE).
+            ov_t, ov_b, ov_l, ov_r = edge_overlaps_from_coords(
+                y1, y2, x1, x2, H, W, tile_overlap
+            )
+            w_tile = blend_weight_2d(
+                th, tw, ov_t, ov_b, ov_l, ov_r,
+                device=device, dtype=latent_samples.dtype,
+            )
         elif tile_blend == "gaussian":
             sigma_h = th / 4.0
             sigma_w = tw / 4.0

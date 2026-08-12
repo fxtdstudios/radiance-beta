@@ -325,6 +325,12 @@ if "folder_paths" not in sys.modules:
 
 # ── Load nodes_sampler.py ─────────────────────────────────────────────────────
 import importlib.util as _ilu
+
+# This module already gates its torch-dependent tests correctly (they skip
+# cleanly against conftest's stub), so opt out of the automatic module-level
+# skip and keep the rest of the file running on the no-torch CI matrix.
+RADIANCE_TORCH_GATED = True
+
 _nspec = _ilu.spec_from_file_location("nodes_sampler", os.path.join(_ROOT, "nodes_sampler.py"))
 _ns_mod = _ilu.module_from_spec(_nspec)
 sys.modules["nodes_sampler"] = _ns_mod

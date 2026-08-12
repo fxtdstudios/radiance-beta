@@ -117,6 +117,21 @@ def _is_channel_mismatch_error(exc: BaseException) -> Optional[str]:
     return None
 
 
+def _existing_cfg_function(model):
+    """The sampler_cfg_function already registered on a ModelPatcher, or None.
+
+    ComfyUI's `set_model_sampler_cfg_function` writes to
+    `model.model_options["sampler_cfg_function"]`; there is no attribute of that
+    name. Two call sites here used `getattr(model, "model_sampler_cfg_function")`
+    and therefore always got None, so each later patch replaced the previous one
+    instead of wrapping it.
+    """
+    options = getattr(model, "model_options", None)
+    if isinstance(options, dict):
+        return options.get("sampler_cfg_function")
+    return None
+
+
 def _sample_custom_progress_safe(context: str, **kwargs):
     """Run Comfy sampling, retrying once with progress output disabled if stderr is broken."""
 
@@ -719,26 +734,48 @@ class RadianceSamplerPro:
             if idx >= len(s_vals) - 1:
                 continue
 
-            # Subsection of schedule from r_sigma down to the next waypoint
-            sub_sigmas = s_vals[idx:min(idx + restart_count + 2, len(s_vals))]
+            # Run the restart segment all the way back DOWN to the end of the
+            # schedule.
+            #
+            # This used to be `s_vals[idx : idx+restart_count+2]`, which stops a
+            # couple of steps in and leaves the latent partially noised. Measured
+            # on a 20-step Karras schedule (14.615 -> 0.0292): restart_sigma 2.0
+            # with count 2 returned a latent still at sigma 0.7913, and
+            # restart_sigma 5.0 left it at 2.6415. `_apply_restarts` is called
+            # after the main schedule has already finished, so the segment has to
+            # reach 0 or the output is simply noise.
+            sub_sigmas = s_vals[idx:]
             if len(sub_sigmas) < 2:
                 continue
 
             for _ in range(restart_count):
-                # Re-inject noise at r_sigma level
-                noise = torch.randn_like(result) * r_val
-                noisy = result + noise
+                # Xu et al. 2023 (Restart Sampling), Alg. 2: jumping from
+                # sigma_min back to sigma_max adds noise of variance
+                # sigma_max^2 - sigma_min^2. The old code used `randn * r_val`,
+                # i.e. a standard deviation of r_val with no subtraction.
+                sigma_max = float(r_val)
+                sigma_min = float(sub_sigmas[-1])
+                std = math.sqrt(max(sigma_max ** 2 - sigma_min ** 2, 0.0))
+                noisy = result + torch.randn_like(result) * std
                 try:
                     result = _sample_custom_progress_safe(
                         "RadianceSamplerPro restart",
                         model=model,
-                        noise=noisy,
+                        # ComfyUI applies model_sampling.noise_scaling(sigma0,
+                        # noise, latent_image) internally, which for EPS models
+                        # is `sigma0 * noise + latent_image`. Passing the noised
+                        # latent as `noise=` therefore amplified the SIGNAL by
+                        # (1 + sigma0) and scaled the noise by sigma0 on top --
+                        # at restart_sigma 2.0 that is a 3x signal gain with 4x
+                        # the intended noise. Hand it the already-noised latent
+                        # and a zero noise tensor instead.
+                        noise=torch.zeros_like(noisy),
                         cfg=cfg,
                         sampler=sampler_obj,
                         sigmas=sub_sigmas,
                         positive=positive,
                         negative=negative,
-                        latent_image=result,
+                        latent_image=noisy,
                         noise_mask=None,
                         callback=None,
                         disable_pbar=True,
@@ -752,6 +789,9 @@ class RadianceSamplerPro:
 
     # ── AVControl — SDR Reference Conditioning ───────────────────────────────
 
+    # Inference only. .eval() does not clear requires_grad on parameters, so an
+# unguarded forward still builds and retains an autograd graph.
+    @torch.no_grad()
     def _encode_sdr_reference(self, ref, vae, work):
         res = vae.encode(ref)
         ref_latent = res["samples"]
@@ -1037,14 +1077,23 @@ class RadianceSamplerPro:
                     f"CFG++ enabled but CFG is {cfg}. For Flux, CFG++ requires CFG > 1.0"
                 )
 
+        # Clone ONCE, before anything patches it.
+        #
+        # Each block below used to guard its own clone on a condition that
+        # assumed an earlier block had already cloned -- and the first of those
+        # only ran when `guidance_rescale_phi > 0 AND cfg > 1.0`. Flux defaults
+        # cfg to 1.0, so a user following this node's own tooltip
+        # ("recommended 0.7") patched the LOADER'S CACHED ModelPatcher in place.
+        # The patch, its `_step_counter` and its captured `_sdr_ref_lat` closure
+        # then persisted into every later queue and every other branch fed from
+        # that MODEL, and survived the user disconnecting the input.
+        model = model.clone()
+
         if pag_scale > 0:
             model = apply_pag_to_model(model, pag_scale)
 
         if guidance_rescale_phi > 0.0 and cfg > 1.0:
             phi = guidance_rescale_phi
-            model = (
-                model.clone() if pag_scale <= 0 else model
-            )                                
 
             def guidance_rescale_patch(args):
 
@@ -1065,12 +1114,18 @@ class RadianceSamplerPro:
             logger.info(f"Guidance Rescale applied (phi={phi:.2f})")
 
         if sdr_latent is not None and sdr_inject_steps > 0:
-            model = model.clone() if (pag_scale <= 0 and guidance_rescale_phi <= 0) else model
             _step_counter = [0]
             _sdr_ref_lat = sdr_latent.detach()
             
-            # Retrieve existing cfg patch if any
-            existing_cfg_fn = getattr(model, "model_sampler_cfg_function", None)
+            # ComfyUI's ModelPatcher.set_model_sampler_cfg_function stores the
+            # callable in `model.model_options["sampler_cfg_function"]`. There is
+            # no `model_sampler_cfg_function` ATTRIBUTE, so the old
+            # `getattr(model, "model_sampler_cfg_function", None)` was always
+            # None and the set_... call below OVERWROTE the guidance-rescale
+            # patch registered above instead of wrapping it. With rescale and an
+            # SDR reference both on, rescale silently did nothing while the log
+            # still said "Guidance Rescale applied".
+            existing_cfg_fn = _existing_cfg_function(model)
 
             def _sdr_post_cfg_patch(args):
                 denoised = existing_cfg_fn(args) if existing_cfg_fn is not None else args["denoised"]
@@ -1112,12 +1167,11 @@ class RadianceSamplerPro:
                     break
 
         if energy_mask is not None:
-            model = model.clone() if (pag_scale <= 0 and guidance_rescale_phi <= 0 and sdr_reference is None) else model
             _eps_mask = energy_mask.detach()
             _eps_priority = float(energy_priority)
             
-            # Retrieve existing CFG function (e.g., guidance_rescale or base)
-            existing_cfg_fn = getattr(model, "model_sampler_cfg_function", None)
+            # See the note above: read model_options, not a nonexistent attribute.
+            existing_cfg_fn = _existing_cfg_function(model)
 
             def _energy_prioritized_cfg_patch(args):
                 import torch.nn.functional as F

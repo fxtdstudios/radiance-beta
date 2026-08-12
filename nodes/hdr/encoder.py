@@ -176,6 +176,9 @@ class RadianceHDRTurboEncoder:
     FUNCTION      = "encode"
     CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
 
+    # VAE encode builds an autograd graph unless guarded: .eval() does not
+    # freeze parameters, so requires_grad stays True on every weight.
+    @torch.no_grad()
     def encode(self, image: torch.Tensor, vae, compression_ratio: float, exposure_offset: float):
         # 1. Exposure offset in scene-linear light
         img = image * (2.0 ** exposure_offset)
@@ -416,6 +419,9 @@ class RadianceHDRLatentEncoder:
             },
         }
 
+    # VAE encode builds an autograd graph unless guarded: .eval() does not
+    # freeze parameters, so requires_grad stays True on every weight.
+    @torch.no_grad()
     def encode(
         self,
         image: "torch.Tensor",

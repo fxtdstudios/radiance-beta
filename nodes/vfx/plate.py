@@ -113,7 +113,12 @@ class RadianceSubpixelStabilizer:
         F_ref = torch.fft.fft2(ref_windowed)
         
         stabilized = torch.zeros_like(image)
-        displacements = torch.zeros((B, H, W, 2), device=device) # stores dx, dy maps
+        # 3 channels, not 2. RETURN_TYPES declares this output as IMAGE, and a
+        # ComfyUI IMAGE is (B, H, W, 3|4) -- PreviewImage, SaveImage and every
+        # downstream node index channels 0..2 unconditionally, so a (B, H, W, 2)
+        # tensor crashed or rendered garbage the moment it was wired anywhere.
+        # Blue stays 0 so the map reads as the usual red=x / green=y vector view.
+        displacements = torch.zeros((B, H, W, 3), device=device)
         
         for i in range(B):
             if i == anchor_idx:
@@ -169,8 +174,11 @@ class RadianceSubpixelStabilizer:
                 denom_x = val_0_n1 + val_0_p1 - 2 * val_0_0
                 if abs(denom_x) > 1e-5:
                     dx_sub += (val_0_n1 - val_0_p1) / (2 * denom_x)
-            except Exception:
-                pass
+            except Exception as _exc:
+                logger.debug(
+                    "[Radiance] apply(): ignoring %s from `y_indices = [(dy_int + offset) % H for offset in [-1, 0, 1]]`: %s",
+                    type(_exc).__name__, _exc,
+                )
                 
             # Clamp maximum shifts to prevent wild drift on noise
             dx = max(min(dx_sub, float(max_shift)), -float(max_shift))
