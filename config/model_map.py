@@ -49,6 +49,74 @@ RADIANCE_MODEL_MAP: dict = {
         "url": "https://huggingface.co/Lightricks/LTX-2/resolve/main/vae/diffusion_pytorch_model.safetensors",
         "type": "vae",
     },
+    # LTX-2.5 (huggingface.co/Lightricks/LTX-2.5, gated repo -- request access
+    # first). Dev = full/flexible-CFG; Distilled = fixed 8-step, CFG=1 required.
+    "ltx-2.5-22b-dev-transformer-bf16.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/diffusion_models/ltx-2.5-22b-dev-transformer-bf16.safetensors",
+        "type": "diffusion_models",
+    },
+    "ltx-2.5-22b-dev-transformer-comfy-int8-convrot.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/diffusion_models/ltx-2.5-22b-dev-transformer-comfy-int8-convrot.safetensors",
+        "type": "diffusion_models",
+    },
+    "ltx-2.5-22b-distilled-transformer-bf16.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors",
+        "type": "diffusion_models",
+    },
+    "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+        "type": "diffusion_models",
+    },
+    # ALBABIT-FIX: needs Blackwell GPU + ltx-kernels pipeline -- not usable via
+    # plain ComfyUI today, listed for completeness only.
+    "ltx-2.5-22b-distilled-transformer-nvfp4.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/diffusion_models/ltx-2.5-22b-distilled-transformer-nvfp4.safetensors",
+        "type": "diffusion_models",
+    },
+    # Text encoder -- projection layer is baked in (single CLIP slot), unlike 2.3.
+    "gemma4-12b-with-proj-ltx-2.5-bf16.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors",
+        "type": "text_encoders",
+    },
+    "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+        "type": "text_encoders",
+    },
+    "ltx-2.5-video-vae-bf16.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/vae/ltx-2.5-video-vae-bf16.safetensors",
+        "type": "vae",
+    },
+    # "faster, lighter" per the repo's own README -- recommended for balanced/low-VRAM use.
+    "ltx-2.5-video-vae-conv-bf16.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/vae/ltx-2.5-video-vae-conv-bf16.safetensors",
+        "type": "vae",
+    },
+    "ltx-2.5-audio-vae-bf16.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/vae/ltx-2.5-audio-vae-bf16.safetensors",
+        "type": "vae",
+    },
+    "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+        "type": "latent_upscale_models",
+    },
+    # ALBABIT-FIX: 2x temporal/duration upscale at the latent level -- genuinely
+    # new vs 2.3, not wired into any Radiance node yet.
+    "ltx-2.5-latent-temporal-upscaler-x2-bf16-1.0.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/latent_upscale_models/ltx-2.5-latent-temporal-upscaler-x2-bf16-1.0.safetensors",
+        "type": "latent_upscale_models",
+    },
+    # ALBABIT-FIX: powers "Auto Duration" (frame-count prediction from the
+    # prompt), loaded via ModelPatchLoader + LTXVDurationPredictor (core
+    # ComfyUI). Not wired into any Radiance node yet.
+    "ltx-2.5-duration-head-bf16.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/model_patches/ltx-2.5-duration-head-bf16.safetensors",
+        "type": "model_patches",
+    },
+    # Official 2.5 equivalent of ltx-2.3-22b-distilled-1.1's distillation LoRA.
+    "ltx-2.5-22b-distilled-lora-450-bf16.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/loras/ltx-2.5-22b-distilled-lora-450-bf16.safetensors",
+        "type": "loras",
+    },
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -518,6 +586,20 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "fp8_e4m3fn",
     },
+    # ALBABIT-FIX: LTX 2.5 reuses "ltxav" -- same 128ch latent format, confirmed
+    # from the transformer's patchify_proj.weight shape [4096, 128]. Detection
+    # is capability-based (recombine_audio_and_video_latents), not version-string
+    # based, so no new model_type is needed. See project_radiance_ltx25 memory.
+    "LTX Video 2.5": {
+        "model_type": "ltxav",
+        "weight_dtype": "default",
+        "clip_dtype": "default",
+    },
+    "LTX Video 2.5 (Low VRAM)": {
+        "model_type": "ltxav",
+        "weight_dtype": "fp8_e4m3fn",
+        "clip_dtype": "fp8_e4m3fn",
+    },
     "Lumina2": {
         "model_type": "lumina2",
         "weight_dtype": "fp16",
@@ -619,6 +701,8 @@ VIDEO_PRESET_NAMES: set = {
     "LTX Video (Low VRAM)",
     "LTX Video 2.3",
     "LTX Video 2.3 (Low VRAM)",
+    "LTX Video 2.5",
+    "LTX Video 2.5 (Low VRAM)",
     "Mochi",
     "Wan 2.1",
     "Wan 2.1 (Low VRAM)",
