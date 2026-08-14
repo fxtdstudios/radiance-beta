@@ -108,13 +108,15 @@ const PRESET_CONFIGS = {
     // Distilled), matching the existing "▶ LTX 2.3 LowRes/HighRes" convention,
     // rather than the official T2V template's distilled-specific values
     // (cfg=1, 8+3 manual-sigma steps) used in an earlier draft of this preset.
-    // Same steps/cfg/sampler/denoise/flux_shift as the 2.3 pair -- Dev has no
-    // official Comfy-Org template of its own to source from, and 2.3's Dev
-    // numbers are the closest verified reference available. HighRes will
-    // likely move to a real Manual Sigmas schedule later; calibrated on plain
-    // steps for now, same as 2.3.
+    // Same steps/cfg/denoise/flux_shift as the 2.3 pair -- Dev has no official
+    // Comfy-Org template of its own to source from, and 2.3's Dev numbers are
+    // the closest verified reference available. HighRes will likely move to a
+    // real Manual Sigmas schedule later; calibrated on plain steps for now,
+    // same as 2.3. sampler is the one field NOT mirrored from 2.3: verified
+    // directly against the official 2.5 T2V template (both KSamplerSelect
+    // nodes), which uses euler_ancestral regardless of Dev/Distilled framing.
     "▶ LTX 2.5 LowRes (20 steps)": {
-        steps: 20, start_step: 0, end_step: 0, cfg: 3.0, audio_cfg: 0.0, sampler: "euler",
+        steps: 20, start_step: 0, end_step: 0, cfg: 3.0, audio_cfg: 0.0, sampler: "euler_ancestral",
         sampler_mode: "Standard", phase_split: 0.0, scheduler: "simple",
         scheduler_mode: "Manual", denoise: 1.0, flux_shift: 3.0,
         flux_guidance: 0.0, flux_guidance_profile: "Static", add_noise: true,
@@ -127,7 +129,7 @@ const PRESET_CONFIGS = {
         description: "LTX 2.5 (Dev) LowRes. Same base settings as LTX 2.3 LowRes — 20-step base generation.",
     },
     "▶ LTX 2.5 HighRes (40 steps)": {
-        steps: 40, start_step: 0, end_step: 0, cfg: 1.0, audio_cfg: 0.0, sampler: "euler",
+        steps: 40, start_step: 0, end_step: 0, cfg: 1.0, audio_cfg: 0.0, sampler: "euler_ancestral",
         sampler_mode: "Standard", phase_split: 0.0, scheduler: "simple",
         scheduler_mode: "Manual", denoise: 0.45, flux_shift: 6.0,
         flux_guidance: 0.0, flux_guidance_profile: "Static", add_noise: true,
@@ -765,6 +767,21 @@ function _findModelMetaSourceNode(node) {
     return originNode;
 }
 
+// ALBABIT-FIX: LTX-AV two-stage workflows chain two separate Sampler nodes
+// (LowRes -> LTXVLatentUpsampler -> HighRes) -- model_meta alone can't tell
+// them apart, both read the same Loader. What CAN tell them apart is what
+// feeds latent_image: an upscaler node means this Sampler is the HighRes
+// stage. Same "follow the link back" technique as _findModelMetaSourceNode.
+const LTX_AV_UPSCALE_STAGE_NODE_TYPES = new Set(["LTXVLatentUpsampler"]);
+function _isLtxAvHighResStage(node) {
+    const input = node.inputs?.find(i => i.name === "latent_image");
+    if (!input || !input.link) return false;
+    const link = app.graph.links[input.link];
+    if (!link) return false;
+    const originNode = app.graph.getNodeById(link.origin_id);
+    return !!originNode && LTX_AV_UPSCALE_STAGE_NODE_TYPES.has(originNode.type);
+}
+
 // ALBABIT-FIX: some checkpoints need settings that differ from their
 // model_type's generic default -- only the exact filename can tell them
 // apart. Verified against official model cards. "turbo" needs detectedType
@@ -794,6 +811,24 @@ function _deriveDistillationOverride(filename, detectedType) {
     // .z_image above, same for both Base and Turbo).
     if (detectedType === "z_image" && f.includes("turbo")) return { cfg: 1.0, steps: 8 };
     return null;
+}
+
+// ALBABIT-FIX: LTX 2.3/2.5 Dev/Distilled community values were too
+// inconsistent to trust for a filename-based override (see the comment
+// above _deriveDistillationOverride), but reusing the already-vetted
+// "LTX 2.3/2.5 LowRes/HighRes" preset objects as the Auto-mode default is
+// safe -- same values a user would get picking the preset by hand, just
+// applied automatically per stage (see _isLtxAvHighResStage above). Version
+// (2.3 vs 2.5) still only resolvable from the filename, same as elsewhere.
+function _resolveLtxAvStageDefaults(unetName, isHighRes) {
+    if (!unetName) return null;
+    const f = unetName.toLowerCase();
+    const version = f.includes("2.5") ? "2.5" : f.includes("2.3") ? "2.3" : null;
+    if (!version) return null;
+    const key = isHighRes
+        ? `▶ LTX ${version} HighRes (40 steps)`
+        : `▶ LTX ${version} LowRes (20 steps)`;
+    return PRESET_CONFIGS[key] ?? null;
 }
 
 // ALBABIT-FIX: mirrors config/model_map.py's CHECKPOINT_PRESETS[...]["model_type"]
@@ -969,10 +1004,12 @@ function _markLinkedWidget(widget, linked, inSync) {
 }
 
 // ALBABIT-FIX: extends the guidance/steps sync (above) to model_type/cfg/
-// sampler/scheduler/flux_shift, resolved from the linked Loader's preset/
-// model_type. Gated on preset (Auto/Custom) only -- not model_type=="auto"
-// too, since the per-field checks in _syncAutoValue() already protect any
-// field the user deliberately set (mirrors nodes_sampler.py).
+// sampler/scheduler/flux_shift/denoise, resolved from the linked Loader's
+// preset/model_type (plus, for LTX-AV, which Sampler stage this node is --
+// see _isLtxAvHighResStage). Gated on preset (Auto/Custom) only -- not
+// model_type=="auto" too, since the per-field checks in _syncAutoValue()
+// already protect any field the user deliberately set (mirrors
+// nodes_sampler.py).
 function updateModelMetaDefaults(node) {
     if (!node.widgets) return;
     const presetW = node.widgets.find(w => w.name === "preset");
@@ -984,6 +1021,12 @@ function updateModelMetaDefaults(node) {
     const detectedType = _resolveLoaderModelType(sourceNode);
     const override = _deriveDistillationOverride(unetName, detectedType);
     const modelDefaults = MODEL_TYPE_SAMPLING_DEFAULTS[detectedType] ?? null;
+    // ALBABIT-FIX: stage-aware LTX-AV defaults (see _isLtxAvHighResStage /
+    // _resolveLtxAvStageDefaults above) take priority over the generic
+    // ltxav MODEL_TYPE_SAMPLING_DEFAULTS entry when resolvable.
+    const ltxavStage = detectedType === "ltxav"
+        ? _resolveLtxAvStageDefaults(unetName, _isLtxAvHighResStage(node))
+        : null;
     // ALBABIT-FIX: the scheduler widget's actual value is ignored server-side
     // for this case (a dedicated discrete schedule is used instead, see
     // get_sd_turbo_sigmas), so there's no specific value to sync it to, just
@@ -1002,11 +1045,16 @@ function updateModelMetaDefaults(node) {
 
     const pairs = [
         [modelTypeW, validModelType],
-        [node.widgets.find(w => w.name === "flux_guidance"), override?.flux_guidance ?? modelDefaults?.guidance],
-        [node.widgets.find(w => w.name === "steps"), override?.steps ?? modelDefaults?.steps],
-        [node.widgets.find(w => w.name === "cfg"), override?.cfg ?? modelDefaults?.cfg],
-        [node.widgets.find(w => w.name === "sampler"), override?.sampler ?? modelDefaults?.sampler],
-        [node.widgets.find(w => w.name === "flux_shift"), modelDefaults?.flux_shift],
+        [node.widgets.find(w => w.name === "flux_guidance"), override?.flux_guidance ?? ltxavStage?.flux_guidance ?? modelDefaults?.guidance],
+        [node.widgets.find(w => w.name === "steps"), override?.steps ?? ltxavStage?.steps ?? modelDefaults?.steps],
+        [node.widgets.find(w => w.name === "cfg"), override?.cfg ?? ltxavStage?.cfg ?? modelDefaults?.cfg],
+        [node.widgets.find(w => w.name === "sampler"), override?.sampler ?? ltxavStage?.sampler ?? modelDefaults?.sampler],
+        [node.widgets.find(w => w.name === "flux_shift"), ltxavStage?.flux_shift ?? modelDefaults?.flux_shift],
+        // ALBABIT-FIX: denoise isn't part of the generic per-architecture
+        // tables (only meaningful for LTX-AV's two-stage LowRes/HighRes
+        // split so far) -- undefined everywhere else, same as any other
+        // unresolved field above.
+        [node.widgets.find(w => w.name === "denoise"), ltxavStage?.denoise],
     ];
 
     let changed = false;
@@ -1022,7 +1070,7 @@ function updateModelMetaDefaults(node) {
         _syncAutoValue(schedulerW, undefined); // no value to track/force -- link only
         if (_markLinkedWidget(schedulerW, true, true)) changed = true;
     } else {
-        const schedulerDefault = modelDefaults?.scheduler;
+        const schedulerDefault = ltxavStage?.scheduler ?? modelDefaults?.scheduler;
         if (_syncAutoValue(schedulerW, schedulerDefault)) changed = true;
         const linked = schedulerDefault !== undefined;
         const inSync = linked && schedulerW && schedulerW.value === schedulerDefault;
@@ -1357,7 +1405,15 @@ app.registerExtension({
             const origConnect = this.onConnectionsChange;
             this.onConnectionsChange = function (...args) {
                 if (origConnect) origConnect.apply(this, args);
-                toggleFields(this);
+                // ALBABIT-FIX: defer instead of calling toggleFields() synchronously
+                // here. This handler runs as part of LiteGraph's own link-drag
+                // completion; toggleFields() can hide/show widgets (Vue remount via
+                // forceWidgetReinsert), and doing that at the exact instant a link is
+                // still being finalized can leave LiteGraph's own drag-state stuck
+                // (surfaces as a persistent "Already dragging links." error on the
+                // next attempt). The 250ms poll below re-syncs everything shortly
+                // after anyway, so deferring one tick loses nothing.
+                setTimeout(() => toggleFields(this), 0);
             };
 
             // ALBABIT-FIX: polls because onConnectionsChange only fires on link
