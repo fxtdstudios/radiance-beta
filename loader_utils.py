@@ -415,6 +415,17 @@ def load_unet_and_baked_vae(
                     )
                     t_vae0 = time.time()
                     vae = out[2]
+                    # ALBABIT-FIX: load_state_dict_guess_config silently returns
+                    # vae=None when the checkpoint has no baked VAE weights,
+                    # instead of raising. Without this check, the code below
+                    # logged a fake success and the real failure only surfaced
+                    # much later at VAE Decode with a confusing NoneType error.
+                    if vae is None:
+                        raise RuntimeError(
+                            f"'{unet_name}' has no VAE weights baked in — "
+                            f"select a standalone vae_name file instead of "
+                            f"'Baked VAE (from UNET)'."
+                        )
                     if getattr(vae, "patcher", None) is not None:
                         vae.patcher.cached_patcher_init = (
                             comfy.sd.load_checkpoint_vae_patcher,
@@ -438,6 +449,17 @@ def load_unet_and_baked_vae(
                 model = out[0]
                 t_vae0 = time.time()
                 vae = out[2]
+                # ALBABIT-FIX: same silent-None gap as the extract_audio_vae
+                # branch above -- checkpoints with no baked VAE (e.g. LTX 2.5's
+                # transformer file, confirmed via safetensors header: only a
+                # model.diffusion_model prefix, no vae-like tensors) would
+                # otherwise report a fake success here.
+                if vae is None:
+                    raise RuntimeError(
+                        f"'{unet_name}' has no VAE weights baked in — "
+                        f"select a standalone vae_name file instead of "
+                        f"'Baked VAE (from UNET)'."
+                    )
                 vae_time = time.time() - t_vae0
                 logger.info("VAE extracted natively from UNET")
                 info_lines.append(f"VAE: Baked from UNET ({vae_time:.1f}s)")
