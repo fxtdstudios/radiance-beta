@@ -762,6 +762,7 @@ const LOADER_PRESET_MODEL_TYPE = {
     "Wan 2.2": "wan", "Wan 2.2 (Low VRAM)": "wan", "Wan 2.2 TI2V": "wan_ti2v",
     "LTX Video": "ltxv", "LTX Video (Low VRAM)": "ltxv",
     "LTX Video 2.3": "ltxav", "LTX Video 2.3 (Low VRAM)": "ltxav",
+    "LTX Video 2.5": "ltxav", "LTX Video 2.5 (Low VRAM)": "ltxav",
     "Cosmos World": "cosmos", "CogVideoX": "cogvideox", "Mochi": "mochi",
     "PixArt Sigma": "pixart", "AuraFlow": "aura_flow",
     "Lumina2": "lumina2", "Z-Image": "z_image",

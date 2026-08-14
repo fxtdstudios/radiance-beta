@@ -45,6 +45,12 @@ const PRESET_SLOTS = {
     "LTX Video (Low VRAM)": ["llm_encoder"],
     "LTX Video 2.3": ["llm_encoder", "text_projection"],
     "LTX Video 2.3 (Low VRAM)": ["llm_encoder", "text_projection"],
+    // ALBABIT-FIX: unlike 2.3, the 2.5 text encoder file bakes the projection
+    // layer in (confirmed via safetensors header: a text_embedding_projection
+    // tensor group lives inside gemma4-12b-with-proj-*.safetensors) -- only
+    // one CLIP slot needed, same as pre-2.3 "LTX Video".
+    "LTX Video 2.5": ["llm_encoder"],
+    "LTX Video 2.5 (Low VRAM)": ["llm_encoder"],
     "Lumina2": ["llm_encoder"],
     "Mochi": ["t5xxl"],
     "PixArt Sigma": ["t5xxl"],
@@ -287,6 +293,48 @@ const PRESET_CONFIGS = {
         "extra_widgets": ["upscale_model_name", "offload_mode"],
         "offload_mode": "cpu_offload",
         "upscale_hints": ["ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "ltx-2.3-spatial-upscaler-x2-1.0.safetensors", "ltx-2.3", "ltx_2.3", "latent_upsampler", "upsampler"],
+    },
+    "LTX Video 2.5": {
+        // ALBABIT-FIX: Dev listed first (max quality, flexible CFG per the HF
+        // repo's own README), Distilled as fallback -- same convention as LTX
+        // 2.3's own preset. bf16 preferred over the comfy-int8-convrot
+        // quantization within each tier.
+        "unet_hints":    ["ltx-2.5-22b-dev-transformer-bf16.safetensors", "ltx-2.5-22b-dev-transformer-comfy-int8-convrot.safetensors", "ltx-2.5-22b-distilled-transformer-bf16.safetensors", "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors", "ltx-2.5-22b-dev", "ltx-2.5-22b-distilled", "ltx-2.5", "ltx_2.5"],
+        // ALBABIT-FIX: confirmed via safetensors header inspection -- the 2.5
+        // transformer checkpoint has no baked VAE (only a single
+        // model.diffusion_model prefix, no vae-like tensor group), unlike some
+        // 2.3 checkpoints. "Baked VAE (from UNET)" kept as a low-priority
+        // fallback only, not assumed to work.
+        "vae_hints":     ["ltx-2.5-video-vae-bf16.safetensors", "ltx-2.5-video-vae-conv-bf16.safetensors", "ltx-2.5-video-vae", "ltx_2.5_video", "Baked VAE (from UNET)"],
+        "audio_vae_hints": ["ltx-2.5-audio-vae-bf16.safetensors", "ltx-2.5-audio-vae", "ltx_2.5_audio"],
+        "clip_hints":    {
+            "llm_encoder": ["gemma4-12b-with-proj-ltx-2.5-bf16.safetensors", "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors", "gemma4-12b-with-proj-ltx-2.5", "gemma4", "gemma_4"],
+        },
+        "extra_widgets": ["upscale_model_name", "audio_vae_name"],
+        // ALBABIT-FIX: spatial upscaler only -- matches 2.3's convention (the
+        // 2x latent upscale feeding the HighRes stage). The new temporal
+        // upscaler (ltx-2.5-latent-temporal-upscaler-x2) isn't wired into any
+        // Radiance node yet -- not hinted here, see project_radiance_ltx25 memory.
+        "upscale_hints": ["ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors", "ltx-2.5-spatial-upscaler", "ltx-2.5", "ltx_2.5", "latent_upsampler", "upsampler"],
+    },
+    "LTX Video 2.5 (Low VRAM)": {
+        // ALBABIT-FIX: Distilled int8 first (lightest real option), same
+        // "lightest file first" convention as LTX 2.3's Low VRAM sibling.
+        "unet_hints":    ["ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors", "ltx-2.5-22b-distilled-transformer-bf16.safetensors", "ltx-2.5-22b-distilled", "ltx-2.5-22b-dev-transformer-comfy-int8-convrot.safetensors", "ltx-2.5", "ltx_2.5"],
+        // ALBABIT-FIX: video-vae-conv is the repo README's own "faster,
+        // lighter" recommendation for balanced/low-VRAM use -- listed first
+        // here, unlike the quality-first preset above.
+        "vae_hints":     ["ltx-2.5-video-vae-conv-bf16.safetensors", "ltx-2.5-video-vae-bf16.safetensors", "ltx-2.5-video-vae", "ltx_2.5_video", "Baked VAE (from UNET)"],
+        "audio_vae_hints": ["ltx-2.5-audio-vae-bf16.safetensors", "ltx-2.5-audio-vae", "ltx_2.5_audio"],
+        "clip_hints":    {
+            "llm_encoder": ["gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors", "gemma4-12b-with-proj-ltx-2.5-bf16.safetensors", "gemma4-12b-with-proj-ltx-2.5", "gemma4", "gemma_4"],
+        },
+        // ALBABIT-FIX: "Low VRAM" presets force offload_mode -- expose the
+        // widget so the user can still override it, same convention as every
+        // other "(Low VRAM)" sibling in this file.
+        "extra_widgets": ["upscale_model_name", "audio_vae_name", "offload_mode"],
+        "offload_mode": "cpu_offload",
+        "upscale_hints": ["ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors", "ltx-2.5-spatial-upscaler", "ltx-2.5", "ltx_2.5", "latent_upsampler", "upsampler"],
     },
     "Lumina2": {
         "unet_hints":    ["lumina2", "lumina-2", "lumina_2"],
