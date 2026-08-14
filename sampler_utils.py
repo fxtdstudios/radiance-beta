@@ -855,8 +855,10 @@ WORKFLOW_PRESETS = [
     "[V] WAN txt2vid (30 steps)",
     "[V] WAN img2vid (20 steps)",
     "[V] LTX-Video (25 steps)",
-    "[V] LTX 2.3 LowRes (20 steps)",                                                
-    "[V] LTX 2.3 HighRes (40 steps)",                                                     
+    "[V] LTX 2.3 LowRes (20 steps)",
+    "[V] LTX 2.3 HighRes (40 steps)",
+    "[V] LTX 2.5 LowRes (20 steps)",
+    "[V] LTX 2.5 HighRes (40 steps)",
     "[V] HunyuanVideo (30 steps)",
 
     "[Q] Draft (4-step / AYS)",

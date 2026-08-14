@@ -399,6 +399,17 @@ class RadianceSamplerPro:
                     "FLOAT",
                     {"default": 1.0, "min": 0.0, "max": 20.0, "step": 0.1},
                 ),
+                "audio_cfg": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 100.0,
+                        "step": 0.1,
+                        "tooltip": "LTX-AV only (e.g. LTX 2.5): separate CFG scale for the audio "
+                                   "half of the latent. 0 = same as cfg (single-CFG, pre-2.5 behavior).",
+                    },
+                ),
                 "sampler": (comfy.samplers.KSampler.SAMPLERS,),
                 "sampler_mode": (SamplerMode.ALL, {"default": SamplerMode.STANDARD}),
                 "phase_split": (
@@ -1019,6 +1030,7 @@ class RadianceSamplerPro:
         start_step: int,
         end_step: int,
         cfg: float,
+        audio_cfg: float,
         sampler: str,
         sampler_mode: str,
         phase_split: float,
@@ -1366,6 +1378,58 @@ class RadianceSamplerPro:
                 "[Energy Guidance] %d energy mask(s) attached, all at priority=0 — "
                 "EPS is a no-op, not registering a patch.", len(energy_layers),
             )
+
+        # ── LTX-AV Dual CFG (audio_cfg) ──────────────────────────────────────
+        # Mirrors comfy's own LTXVDualCFGGuider (comfy_extras/nodes_lt.py,
+        # Guider_LTXAVDualCFG): separate CFG scales for the video and audio
+        # halves of a packed LTX-AV latent, applied on the flat tensor
+        # comfy.utils.pack_latents() produces (video elements first, then
+        # audio -- confirmed against pack_latents/unpack_latents in comfy/utils.py).
+        # audio_cfg == 0 (sentinel) or == cfg means "same as cfg" -- skip the
+        # patch, identical to pre-audio_cfg behavior (plain single CFG).
+        if is_ltx_av and _HAS_NESTED_TENSOR and audio_cfg > 0.0 and not math.isclose(audio_cfg, cfg):
+            _v_numel = None
+            if getattr(work_latent, "is_nested", False):
+                parts = work_latent.unbind()
+                if len(parts) >= 2:
+                    _v_numel = math.prod(parts[0].shape[1:])
+            if _v_numel is None:
+                logger.warning(
+                    "[Radiance] audio_cfg=%.2f set but the latent isn't a nested "
+                    "audio+video tensor -- ignoring (using cfg=%.2f for both).",
+                    audio_cfg, cfg,
+                )
+            elif _existing_cfg_function(model) is not None:
+                # ALBABIT-FIX: guidance_rescale_patch / _sdr_post_cfg_patch /
+                # _energy_prioritized_cfg_patch above are registered through
+                # set_model_sampler_cfg_function -- the single-slot, noise-space
+                # "cfg_result = x - fn(args)" contract (comfy/samplers.py
+                # cfg_function) -- but their own math is denoised-space and
+                # returns a denoised value directly, so whenever one of them is
+                # active cfg_result ends up as x - denoised instead of the
+                # intended denoised value. Pre-existing bug, out of scope here.
+                # Composing dual_cfg's noise-space math on top of that would be
+                # meaningless, so skip cleanly instead of compounding it.
+                logger.warning(
+                    "[Radiance] audio_cfg set alongside guidance_rescale_phi/SDR/"
+                    "energy-prioritized sampling -- these share one CFG-function "
+                    "slot and can't compose. audio_cfg ignored for this run."
+                )
+            else:
+                _video_cfg, _audio_cfg, _v = cfg, audio_cfg, _v_numel
+
+                def _ltx_av_dual_cfg_patch(args):
+                    cond, uncond = args["cond"], args["uncond"]
+                    out = uncond + (cond - uncond) * _video_cfg
+                    out[..., _v:] = uncond[..., _v:] + (cond[..., _v:] - uncond[..., _v:]) * _audio_cfg
+                    return out
+
+                model.set_model_sampler_cfg_function(_ltx_av_dual_cfg_patch, disable_cfg1_optimization=True)
+                logger.info(
+                    "[Radiance] LTX-AV dual CFG active (video_cfg=%.2f, audio_cfg=%.2f).",
+                    _video_cfg, _audio_cfg,
+                )
+
         if SamplerMode.is_phase_shift(sampler_mode) and detected_type in VIDEO_MODEL_TYPES:
             logger.warning(
                 f"[v3.0.0] Phase-Shift mode is not supported for video model '{detected_type}' — "

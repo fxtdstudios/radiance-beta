@@ -104,6 +104,41 @@ const PRESET_CONFIGS = {
         terminal_sigma_to_zero: true, force_exact_steps: true,
         description: "High-Res upscale. Uses Euler by default. If using a LoRA, adjust denoise as needed.",
     },
+    // ALBABIT-FIX: Albabit's call -- prioritise the Dev checkpoint (not
+    // Distilled), matching the existing "▶ LTX 2.3 LowRes/HighRes" convention,
+    // rather than the official T2V template's distilled-specific values
+    // (cfg=1, 8+3 manual-sigma steps) used in an earlier draft of this preset.
+    // Same steps/cfg/sampler/denoise/flux_shift as the 2.3 pair -- Dev has no
+    // official Comfy-Org template of its own to source from, and 2.3's Dev
+    // numbers are the closest verified reference available. HighRes will
+    // likely move to a real Manual Sigmas schedule later; calibrated on plain
+    // steps for now, same as 2.3.
+    "▶ LTX 2.5 LowRes (20 steps)": {
+        steps: 20, start_step: 0, end_step: 0, cfg: 3.0, audio_cfg: 0.0, sampler: "euler",
+        sampler_mode: "Standard", phase_split: 0.0, scheduler: "simple",
+        scheduler_mode: "Manual", denoise: 1.0, flux_shift: 3.0,
+        flux_guidance: 0.0, flux_guidance_profile: "Static", add_noise: true,
+        return_with_leftover_noise: false, seed: 0, control_after_generate: "fixed",
+        pag_scale: 0.0, model_type: "ltxav", sigma_blend_steps: 0, ays_schedule: false,
+        guidance_rescale_phi: 0.0, preview_method: "None", noise_type: "Gaussian",
+        conditioning_clip_target: "Auto",
+        tile_mode: false, refiner_start_step: 0, latent_format: "",
+        terminal_sigma_to_zero: true, force_exact_steps: true,
+        description: "LTX 2.5 (Dev) LowRes. Same base settings as LTX 2.3 LowRes — 20-step base generation.",
+    },
+    "▶ LTX 2.5 HighRes (40 steps)": {
+        steps: 40, start_step: 0, end_step: 0, cfg: 1.0, audio_cfg: 0.0, sampler: "euler",
+        sampler_mode: "Standard", phase_split: 0.0, scheduler: "simple",
+        scheduler_mode: "Manual", denoise: 0.45, flux_shift: 6.0,
+        flux_guidance: 0.0, flux_guidance_profile: "Static", add_noise: true,
+        return_with_leftover_noise: false, seed: 0, control_after_generate: "fixed",
+        pag_scale: 0.0, model_type: "ltxav", sigma_blend_steps: 0, ays_schedule: false,
+        guidance_rescale_phi: 0.0, preview_method: "None", noise_type: "Gaussian",
+        conditioning_clip_target: "Auto",
+        tile_mode: false, refiner_start_step: 0, latent_format: "",
+        terminal_sigma_to_zero: true, force_exact_steps: true,
+        description: "LTX 2.5 (Dev) HighRes upscale. Same base settings as LTX 2.3 HighRes — will likely move to Manual Sigmas later.",
+    },
     "▶ HunyuanVideo (30 steps)": {
         steps: 30, cfg: 6.0, sampler: "euler", scheduler: "simple",
         denoise: 1.0, flux_shift: 7.0, flux_guidance: 0.0,
@@ -152,7 +187,9 @@ const PRESET_CONFIGS = {
 
 const LTX_PRESETS = [
     "▶ LTX 2.3 LowRes (20 steps)",
-    "▶ LTX 2.3 HighRes (40 steps)"
+    "▶ LTX 2.3 HighRes (40 steps)",
+    "▶ LTX 2.5 LowRes (20 steps)",
+    "▶ LTX 2.5 HighRes (40 steps)"
 ];
 
 // Model taxonomy — mirrors sampler_utils.py so the UI folds the same way the
@@ -238,7 +275,7 @@ function resolveModelType(presetVal, modelTypeVal) {
     // LTX workflow, causing Flux/WAN presets to be falsely classified as isLTX and
     // hiding flux_guidance / tile widgets even for non-LTX presets.
     const p = (presetVal || "").toLowerCase();
-    if (LTX_PRESETS.includes(presetVal) || p.includes("ltx 2.3")) return "ltxav";
+    if (LTX_PRESETS.includes(presetVal) || p.includes("ltx 2.3") || p.includes("ltx 2.5")) return "ltxav";
     if (p.includes("ltx"))      return "ltxv";
     if (p.includes("wan"))      return "wan";
     if (p.includes("hunyuan"))  return "hunyuan_video";
@@ -507,6 +544,12 @@ function applyFolding(node) {
         LTX_INCOMPATIBLE_WIDGETS.forEach(name => hiddenNames.add(name));
     }
 
+    // 3.5f. audio_cfg (LTX 2.5 dual-CFG) is default-hidden -- only the two
+    // dedicated LTX 2.5 presets show it. LTX 2.3 keeps plain cfg (2.3 has no
+    // separate audio CFG scale), and since 2.3/2.5 both reuse model_type
+    // "ltxav", the preset name is the only signal that can tell them apart.
+    if (!presetVal.toLowerCase().includes("ltx 2.5")) hiddenNames.add("audio_cfg");
+
     // ── Apply the final state in one pass (preset_info / control_after_generate
     // are never added to hiddenNames, so they stay visible automatically) ──
     let visChanged = false;
@@ -514,7 +557,7 @@ function applyFolding(node) {
         if (setWidgetVisible(w, !hiddenNames.has(w.name), node)) visChanged = true;
     });
 
-    // 3.5f. sampler_mode combo: filter out individual choices that are dead
+    // 3.5g. sampler_mode combo: filter out individual choices that are dead
     // for the current state, rather than hiding the whole widget (Standard
     // and the Phase-Shift options remain meaningful for most models).
     // Mutates the combo's own option list -- a different mechanism from
@@ -552,7 +595,12 @@ function applyFolding(node) {
 
 function updateUILocks(node, presetName) {
     if (!node.widgets) return;
-    const isLTX = LTX_PRESETS.includes(presetName);
+    // ALBABIT-FIX: LTX_PRESETS holds the unicode-marker keys ("▶ LTX 2.3 …"),
+    // but presetName here is the raw backend combo value ("[V] LTX 2.3 …"),
+    // so this literal-equality check was always false -- dead code, no LTX
+    // widget was ever actually locked. resolveModelType() already does the
+    // real (substring-based) match; reuse it instead of a second stale check.
+    const isLTX = resolveModelType(presetName, "auto") === "ltxav";
     const isCustom = presetName === "Auto" || presetName === "Custom";
 
     node.widgets.forEach((widget) => {
