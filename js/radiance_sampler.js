@@ -768,11 +768,16 @@ function _findModelMetaSourceNode(node) {
 }
 
 // ALBABIT-FIX: LTX-AV two-stage workflows chain two separate Sampler nodes
-// (LowRes -> LTXVLatentUpsampler -> HighRes) -- model_meta alone can't tell
-// them apart, both read the same Loader. What CAN tell them apart is what
-// feeds latent_image: an upscaler node means this Sampler is the HighRes
-// stage. Same "follow the link back" technique as _findModelMetaSourceNode.
-const LTX_AV_UPSCALE_STAGE_NODE_TYPES = new Set(["LTXVLatentUpsampler"]);
+// (LowRes -> LTXVLatentUpsampler -> LTXVConcatAVLatent -> HighRes) -- model_meta
+// alone can't tell them apart, both read the same Loader. What CAN tell them
+// apart is what feeds latent_image directly. Initially checked only for
+// LTXVLatentUpsampler, but the official template shows the upscaler's output
+// always passes through LTXVConcatAVLatent (recombines the upscaled video with
+// audio) before reaching the Sampler -- confirmed against video_ltx2_5_t2v.json
+// (LTXVLatentUpsampler id 348 -> LTXVConcatAVLatent id 340 -> Sampler's
+// latent_image, same link chain). Albabit caught the resulting bug (HighRes
+// Auto still showing LowRes' steps=20) by checking what was actually wired.
+const LTX_AV_UPSCALE_STAGE_NODE_TYPES = new Set(["LTXVLatentUpsampler", "LTXVConcatAVLatent"]);
 function _isLtxAvHighResStage(node) {
     const input = node.inputs?.find(i => i.name === "latent_image");
     if (!input || !input.link) return false;
