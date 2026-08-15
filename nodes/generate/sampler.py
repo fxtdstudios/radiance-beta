@@ -117,21 +117,6 @@ def _is_channel_mismatch_error(exc: BaseException) -> Optional[str]:
     return None
 
 
-def _existing_cfg_function(model):
-    """The sampler_cfg_function already registered on a ModelPatcher, or None.
-
-    ComfyUI's `set_model_sampler_cfg_function` writes to
-    `model.model_options["sampler_cfg_function"]`; there is no attribute of that
-    name. Two call sites here used `getattr(model, "model_sampler_cfg_function")`
-    and therefore always got None, so each later patch replaced the previous one
-    instead of wrapping it.
-    """
-    options = getattr(model, "model_options", None)
-    if isinstance(options, dict):
-        return options.get("sampler_cfg_function")
-    return None
-
-
 ENERGY_MASK_KEY = "radiance_energy_mask"
 ENERGY_PRIORITY_KEY = "radiance_energy_priority"
 ENERGY_LAYERS_KEY = "radiance_energy_layers"
@@ -215,22 +200,26 @@ def _collect_energy_layers(positive) -> List[Tuple["torch.Tensor", float]]:
     return layers
 
 
-def _make_energy_cfg_patch(layers, existing_cfg_fn=None):
-    """Build the EPS sampler_cfg_function from one or more energy layers.
+def _make_energy_cfg_patch(layers):
+    """Build the EPS sampler_post_cfg_function from one or more energy layers.
 
     *layers* is a sequence of ``(mask, priority)`` pairs, as returned by
     `_collect_energy_layers`.
 
     Scales the guidance vector (cond − uncond) by ``1 + Σ priority_i · mask_i``,
-    leaving unmasked regions at the sampler's own cfg, then hands the modified
-    args to whatever cfg function was already registered (guidance rescale, SDR
-    anchor) so the patches compose instead of clobbering each other.
+    leaving unmasked regions at the sampler's own cfg.
 
     Summing is what makes chained Energy Mask nodes stack. It also means a
     stack of negative priorities can drive the modifier below zero, which would
     *invert* guidance rather than suppress it — a much louder artefact than the
     user asked for — so the sum is floored at −1 before the +1, i.e. the
     modifier is clamped to ``[0, ∞)``.
+
+    # ALBABIT-FIX: registered via set_model_sampler_post_cfg_function (a list
+    # ComfyUI chains automatically), not the single-slot sampler_cfg_function
+    # -- no more manual existing_cfg_fn chaining needed to compose with
+    # guidance rescale / SDR, and the args["denoised"] this receives already
+    # reflects any earlier post-cfg patch's effect.
 
     Shape handling is deliberately rank-agnostic. The previous version
     unpacked `B, C, H_l, W_l = cond.shape`, which raises ValueError on the
@@ -298,22 +287,11 @@ def _make_energy_cfg_patch(layers, existing_cfg_fn=None):
         if cond.ndim < 4 or cond.shape != uncond.shape:
             # Unknown latent layout — pass through untouched rather than
             # corrupting the sample.
-            if existing_cfg_fn is not None:
-                return existing_cfg_fn(args)
             return args["denoised"]
 
         eps_modifier = (1.0 + _energy_field(cond)).clamp_min(0.0)
         cond_eps = uncond + (cond - uncond) * eps_modifier
-
-        # Update args so downstream cfg functions (e.g. rescale) inherit the
-        # boosted prediction.
-        new_args = args.copy()
-        new_args["cond_denoised"] = cond_eps
-        new_args["denoised"] = uncond + cfg_val * (cond_eps - uncond)
-
-        if existing_cfg_fn is not None:
-            return existing_cfg_fn(new_args)
-        return new_args["denoised"]
+        return uncond + cfg_val * (cond_eps - uncond)
 
     return _energy_prioritized_cfg_patch
 
@@ -1293,13 +1271,21 @@ class RadianceSamplerPro:
         if guidance_rescale_phi > 0.0 and cfg > 1.0:
             phi = guidance_rescale_phi
 
+            # ALBABIT-FIX: was registered via set_model_sampler_cfg_function --
+            # the single-slot, noise-space "cfg_result = x - fn(args)" contract
+            # (comfy/samplers.py cfg_function()). This patch's math is
+            # denoised-space and returned a denoised value directly, so
+            # cfg_result silently became x - denoised instead of the intended
+            # rescaled value whenever this was active. The correct API for a
+            # denoised-space patch is set_model_sampler_post_cfg_function (a
+            # list, args["denoised"] in / return value out directly -- see
+            # comfy/samplers.py:600-603). Also now reads args["denoised"]
+            # (the running post-cfg value) instead of recomputing the plain
+            # cfg blend from scratch, so it correctly rescales whatever SDR/
+            # EPS produced if they're chained ahead of it.
             def guidance_rescale_patch(args):
-
+                guided = args["denoised"]
                 cond = args["cond_denoised"]
-                uncond = args["uncond_denoised"]
-                cfg_val = args["cond_scale"]
-
-                guided = uncond + cfg_val * (cond - uncond)
 
                 dims = list(range(1, guided.ndim))
                 guided_std = guided.std(dim=dims, keepdim=True).clamp(min=1e-6)
@@ -1308,25 +1294,24 @@ class RadianceSamplerPro:
                 rescaled = guided * (cond_std / guided_std)
                 return rescaled * phi + guided * (1.0 - phi)
 
-            model.set_model_sampler_cfg_function(guidance_rescale_patch)
+            model.set_model_sampler_post_cfg_function(guidance_rescale_patch)
             logger.info(f"Guidance Rescale applied (phi={phi:.2f})")
 
         if sdr_latent is not None and sdr_inject_steps > 0:
             _step_counter = [0]
             _sdr_ref_lat = sdr_latent.detach()
-            
-            # ComfyUI's ModelPatcher.set_model_sampler_cfg_function stores the
-            # callable in `model.model_options["sampler_cfg_function"]`. There is
-            # no `model_sampler_cfg_function` ATTRIBUTE, so the old
-            # `getattr(model, "model_sampler_cfg_function", None)` was always
-            # None and the set_... call below OVERWROTE the guidance-rescale
-            # patch registered above instead of wrapping it. With rescale and an
-            # SDR reference both on, rescale silently did nothing while the log
-            # still said "Guidance Rescale applied".
-            existing_cfg_fn = _existing_cfg_function(model)
 
+            # ALBABIT-FIX: same wrong-API bug as guidance_rescale_patch above --
+            # this was registered via set_model_sampler_cfg_function (the
+            # noise-space single slot) despite already being written in
+            # denoised-space, post-cfg style (its own name says "post_cfg").
+            # The manual existing_cfg_fn chaining hack was compensating for
+            # that single slot clobbering whatever was registered before it;
+            # set_model_sampler_post_cfg_function is a list ComfyUI chains
+            # automatically, so args["denoised"] already reflects any earlier
+            # post-cfg patch's effect and the manual chaining isn't needed.
             def _sdr_post_cfg_patch(args):
-                denoised = existing_cfg_fn(args) if existing_cfg_fn is not None else args["denoised"]
+                denoised = args["denoised"]
                 step = _step_counter[0]
                 _step_counter[0] += 1
                 if step >= sdr_inject_steps:
@@ -1351,7 +1336,7 @@ class RadianceSamplerPro:
                         return denoised
                 return (1.0 - blend) * denoised + blend * ref
 
-            model.set_model_sampler_cfg_function(_sdr_post_cfg_patch)
+            model.set_model_sampler_post_cfg_function(_sdr_post_cfg_patch)
             logger.info(f"[SDR Conditioning] Registered post-CFG SDR anchor patch (steps={sdr_inject_steps}, blend={sdr_blend:.2f}, decay={sdr_decay:.2f})")
 
         # ── Energy-Prioritized Sampling (EPS) Detection ──────────────────────
@@ -1362,11 +1347,13 @@ class RadianceSamplerPro:
         active_layers = [(m, p) for m, p in energy_layers if p != 0.0]
 
         if active_layers:
-            # See the note above: read model_options, not a nonexistent attribute.
-            existing_cfg_fn = _existing_cfg_function(model)
-
-            model.set_model_sampler_cfg_function(
-                _make_energy_cfg_patch(active_layers, existing_cfg_fn)
+            # ALBABIT-FIX: same wrong-API bug as the two patches above --
+            # was registered via set_model_sampler_cfg_function (noise-space
+            # single slot) despite computing a denoised-space result. Moved to
+            # set_model_sampler_post_cfg_function, which also removes the need
+            # for _make_energy_cfg_patch's own existing_cfg_fn chaining.
+            model.set_model_sampler_post_cfg_function(
+                _make_energy_cfg_patch(active_layers)
             )
             logger.info(
                 "[Energy Guidance] Registered Energy-Prioritized Sampling (EPS) patch "
@@ -1387,6 +1374,13 @@ class RadianceSamplerPro:
         # audio -- confirmed against pack_latents/unpack_latents in comfy/utils.py).
         # audio_cfg == 0 (sentinel) or == cfg means "same as cfg" -- skip the
         # patch, identical to pre-audio_cfg behavior (plain single CFG).
+        # ALBABIT-FIX: this registers on set_model_sampler_cfg_function (the
+        # single-slot, noise-space contract) -- now that guidance_rescale_patch/
+        # _sdr_post_cfg_patch/_energy_prioritized_cfg_patch above have been
+        # moved to set_model_sampler_post_cfg_function (a different slot,
+        # applied AFTER this one produces the base cfg_result), the two
+        # systems compose correctly instead of fighting over the same slot;
+        # no compatibility guard needed anymore.
         if is_ltx_av and _HAS_NESTED_TENSOR and audio_cfg > 0.0 and not math.isclose(audio_cfg, cfg):
             _v_numel = None
             if getattr(work_latent, "is_nested", False):
@@ -1398,22 +1392,6 @@ class RadianceSamplerPro:
                     "[Radiance] audio_cfg=%.2f set but the latent isn't a nested "
                     "audio+video tensor -- ignoring (using cfg=%.2f for both).",
                     audio_cfg, cfg,
-                )
-            elif _existing_cfg_function(model) is not None:
-                # ALBABIT-FIX: guidance_rescale_patch / _sdr_post_cfg_patch /
-                # _energy_prioritized_cfg_patch above are registered through
-                # set_model_sampler_cfg_function -- the single-slot, noise-space
-                # "cfg_result = x - fn(args)" contract (comfy/samplers.py
-                # cfg_function) -- but their own math is denoised-space and
-                # returns a denoised value directly, so whenever one of them is
-                # active cfg_result ends up as x - denoised instead of the
-                # intended denoised value. Pre-existing bug, out of scope here.
-                # Composing dual_cfg's noise-space math on top of that would be
-                # meaningless, so skip cleanly instead of compounding it.
-                logger.warning(
-                    "[Radiance] audio_cfg set alongside guidance_rescale_phi/SDR/"
-                    "energy-prioritized sampling -- these share one CFG-function "
-                    "slot and can't compose. audio_cfg ignored for this run."
                 )
             else:
                 _video_cfg, _audio_cfg, _v = cfg, audio_cfg, _v_numel
