@@ -774,11 +774,44 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
                             upscale_model.load_sd(sd)
                         elif "post_upsample_res_blocks.0.conv2.bias" in sd:
                             from comfy.ldm.lightricks.latent_upsampler import LatentUpsampler
+                            # ALBABIT-FIX: bind only `disable_weight_init`, not `comfy` itself --
+                            # this function already references the top-level `comfy` import
+                            # (comfy.model_management below); a local `import comfy.ops` here
+                            # would make Python treat `comfy` as local for the WHOLE function
+                            # (a name assigned anywhere in a function is local everywhere in
+                            # it), breaking every earlier `comfy.*` reference with "cannot
+                            # access local variable 'comfy'" -- confirmed live (it broke the
+                            # Audio VAE load right above this branch, unrelated code that
+                            # merely shares the same function).
+                            from comfy.ops import disable_weight_init
+                            from comfy.model_patcher import CoreModelPatcher
                             config = json.loads(metadata["config"])
-                            upscale_model = LatentUpsampler.from_config(config).to(
+                            # ALBABIT-FIX: from_config() requires `operations` (added upstream
+                            # since this was written) -- same call pattern ComfyUI's own
+                            # comfy_extras/nodes_hunyuan.py uses. Without it, every LTX 2.5
+                            # spatial-upscaler load raised "missing 1 required positional
+                            # argument: 'operations'", silently caught here and reported as a
+                            # load failure, leaving upscale_model None -- LTXVLatentUpsampler
+                            # would then crash on a HighRes stage with "'NoneType' object has
+                            # no attribute 'load_device'".
+                            upscale_model = LatentUpsampler.from_config(config, operations=disable_weight_init).to(
                                 dtype=comfy.model_management.vae_dtype(allowed_dtypes=[torch.bfloat16, torch.float32])
                             )
-                            upscale_model.load_state_dict(sd)
+                            # ALBABIT-FIX: the raw nn.Module has no `.load_device` --
+                            # LTXVLatentUpsampler (the node that consumes this output) reads
+                            # that straight off the returned object, so it must be a real
+                            # ModelPatcher, not the bare model. Same wrap ComfyUI's own
+                            # nodes_hunyuan.py does for this exact class: archive dtypes,
+                            # wrap in CoreModelPatcher, THEN load_state_dict on the raw model
+                            # (assign=True lets dynamic/quantized weights bind without a copy).
+                            comfy.model_management.archive_model_dtypes(upscale_model)
+                            upscale_model_patcher = CoreModelPatcher(
+                                upscale_model,
+                                load_device=comfy.model_management.get_torch_device(),
+                                offload_device=comfy.model_management.unet_offload_device(),
+                            )
+                            upscale_model.load_state_dict(sd, assign=upscale_model_patcher.is_dynamic())
+                            upscale_model = upscale_model_patcher
                         else:
                             logger.warning(f"❌ Unrecognized upscale model architecture for: '{upscale_model_name}'")
                             info_lines.append(f"UPSCALE MODEL: unrecognized architecture ({upscale_model_name})")
