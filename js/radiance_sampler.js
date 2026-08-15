@@ -767,24 +767,45 @@ function _findModelMetaSourceNode(node) {
     return originNode;
 }
 
-// ALBABIT-FIX: LTX-AV two-stage workflows chain two separate Sampler nodes
-// (LowRes -> LTXVLatentUpsampler -> LTXVConcatAVLatent -> HighRes) -- model_meta
-// alone can't tell them apart, both read the same Loader. What CAN tell them
-// apart is what feeds latent_image directly. Initially checked only for
-// LTXVLatentUpsampler, but the official template shows the upscaler's output
-// always passes through LTXVConcatAVLatent (recombines the upscaled video with
-// audio) before reaching the Sampler -- confirmed against video_ltx2_5_t2v.json
-// (LTXVLatentUpsampler id 348 -> LTXVConcatAVLatent id 340 -> Sampler's
-// latent_image, same link chain). Albabit caught the resulting bug (HighRes
-// Auto still showing LowRes' steps=20) by checking what was actually wired.
-const LTX_AV_UPSCALE_STAGE_NODE_TYPES = new Set(["LTXVLatentUpsampler", "LTXVConcatAVLatent"]);
+// ALBABIT-FIX: LTX-AV two-stage workflows chain two separate Sampler nodes.
+// LTXVConcatAVLatent (recombines video+audio) sits directly in front of
+// latent_image in BOTH stages, not just HighRes -- Albabit confirmed this by
+// tracing his actual workflow, so the original one-hop check ("is my direct
+// predecessor an upscale-stage node?") always found Concat first and called
+// every stage HighRes. The real chains, traced link-by-link in his workflow
+// JSON:
+//   LowRes:  RadianceResolution -> ... -> LTXVImgToVideoInplace ->
+//            LTXVConcatAVLatent -> Sampler
+//   HighRes: ... -> LTXVLatentUpsampler -> LTXVImgToVideoInplace ->
+//            LTXVConcatAVLatent -> Sampler
+// LTXVLatentUpsampler is the only unambiguous "this is the HighRes stage"
+// signal; Concat and the I2V switch are pass-through nodes present on both
+// paths. Walk back a bounded number of hops looking for it, following
+// Concat's video_latent input specifically (not audio_latent -- the upscaler
+// never touches the audio half).
+const LTX_AV_UPSCALE_STAGE_MAX_HOPS = 6;
+function _nextLatentInputName(node) {
+    if (!node.inputs) return null;
+    if (node.inputs.some(i => i.name === "video_latent")) return "video_latent";
+    const latentInput = node.inputs.find(i => i.type === "LATENT");
+    return latentInput ? latentInput.name : null;
+}
 function _isLtxAvHighResStage(node) {
-    const input = node.inputs?.find(i => i.name === "latent_image");
-    if (!input || !input.link) return false;
-    const link = app.graph.links[input.link];
-    if (!link) return false;
-    const originNode = app.graph.getNodeById(link.origin_id);
-    return !!originNode && LTX_AV_UPSCALE_STAGE_NODE_TYPES.has(originNode.type);
+    let current = node;
+    let inputName = "latent_image";
+    for (let hop = 0; hop < LTX_AV_UPSCALE_STAGE_MAX_HOPS; hop++) {
+        const input = current.inputs?.find(i => i.name === inputName);
+        if (!input || !input.link) return false;
+        const link = app.graph.links[input.link];
+        if (!link) return false;
+        const originNode = app.graph.getNodeById(link.origin_id);
+        if (!originNode) return false;
+        if (originNode.type === "LTXVLatentUpsampler") return true;
+        current = originNode;
+        inputName = _nextLatentInputName(current);
+        if (!inputName) return false;
+    }
+    return false;
 }
 
 // ALBABIT-FIX: some checkpoints need settings that differ from their
