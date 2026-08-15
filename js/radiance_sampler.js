@@ -546,11 +546,15 @@ function applyFolding(node) {
         LTX_INCOMPATIBLE_WIDGETS.forEach(name => hiddenNames.add(name));
     }
 
-    // 3.5f. audio_cfg (LTX 2.5 dual-CFG) is default-hidden -- only the two
-    // dedicated LTX 2.5 presets show it. LTX 2.3 keeps plain cfg (2.3 has no
-    // separate audio CFG scale), and since 2.3/2.5 both reuse model_type
-    // "ltxav", the preset name is the only signal that can tell them apart.
-    if (!presetVal.toLowerCase().includes("ltx 2.5")) hiddenNames.add("audio_cfg");
+    // 3.5f. audio_cfg (LTX 2.5 dual-CFG) is default-hidden -- shown for the
+    // two dedicated LTX 2.5 presets, or under "Auto" when model_meta detects
+    // an LTX 2.5 filename (no named preset to key off there, so re-resolve
+    // the Loader link instead). LTX 2.3 keeps plain cfg (no separate audio
+    // CFG scale), and since 2.3/2.5 both reuse model_type "ltxav", the
+    // preset name / filename are the only signals that can tell them apart.
+    const showAudioCfg = presetVal.toLowerCase().includes("ltx 2.5")
+        || (presetVal === "Auto" && _isAutoDetectedLtx25(node));
+    if (!showAudioCfg) hiddenNames.add("audio_cfg");
 
     // ── Apply the final state in one pass (preset_info / control_after_generate
     // are never added to hiddenNames, so they stay visible automatically) ──
@@ -993,6 +997,16 @@ function _isSdTurboActive(node) {
     const unetName = sourceNode?.widgets?.find(w => w.name === "unet_name")?.value ?? "";
     const detectedType = _resolveLoaderModelType(sourceNode);
     return detectedType === "sdxl" && unetName.toLowerCase().includes("turbo");
+}
+
+// ALBABIT-FIX: same re-resolve-don't-cache pattern as _isSdTurboActive above.
+// Used to auto-show audio_cfg under "Auto" (no named preset) when model_meta
+// is wired to a Loader with an LTX 2.5 filename -- named presets already
+// handle their own visibility via presetVal, this only covers Auto.
+function _isAutoDetectedLtx25(node) {
+    const sourceNode = _findModelMetaSourceNode(node);
+    const unetName = sourceNode?.widgets?.find(w => w.name === "unet_name")?.value ?? "";
+    return unetName.toLowerCase().includes("2.5");
 }
 
 // ALBABIT-FIX: can't just check "is the widget still at its generic default"
