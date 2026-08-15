@@ -104,17 +104,10 @@ const PRESET_CONFIGS = {
         terminal_sigma_to_zero: true, force_exact_steps: true,
         description: "High-Res upscale. Uses Euler by default. If using a LoRA, adjust denoise as needed.",
     },
-    // ALBABIT-FIX: Albabit's call -- prioritise the Dev checkpoint (not
-    // Distilled), matching the existing "▶ LTX 2.3 LowRes/HighRes" convention,
-    // rather than the official T2V template's distilled-specific values
-    // (cfg=1, 8+3 manual-sigma steps) used in an earlier draft of this preset.
-    // Same steps/cfg/denoise/flux_shift as the 2.3 pair -- Dev has no official
-    // Comfy-Org template of its own to source from, and 2.3's Dev numbers are
-    // the closest verified reference available. HighRes will likely move to a
-    // real Manual Sigmas schedule later; calibrated on plain steps for now,
-    // same as 2.3. sampler is the one field NOT mirrored from 2.3: verified
-    // directly against the official 2.5 T2V template (both KSamplerSelect
-    // nodes), which uses euler_ancestral regardless of Dev/Distilled framing.
+    // ALBABIT-FIX: same steps/cfg/denoise/flux_shift as the LTX 2.3 pair --
+    // Dev has no official Comfy-Org template to source from. sampler is the
+    // one field NOT mirrored: verified against the official 2.5 T2V template
+    // (KSamplerSelect nodes), which uses euler_ancestral for both stages.
     "▶ LTX 2.5 LowRes (20 steps)": {
         steps: 20, start_step: 0, end_step: 0, cfg: 3.0, audio_cfg: 0.0, sampler: "euler_ancestral",
         sampler_mode: "Standard", phase_split: 0.0, scheduler: "simple",
@@ -548,10 +541,7 @@ function applyFolding(node) {
 
     // 3.5f. audio_cfg (LTX 2.5 dual-CFG) is default-hidden -- shown for the
     // two dedicated LTX 2.5 presets, or under "Auto" when model_meta detects
-    // an LTX 2.5 filename (no named preset to key off there, so re-resolve
-    // the Loader link instead). LTX 2.3 keeps plain cfg (no separate audio
-    // CFG scale), and since 2.3/2.5 both reuse model_type "ltxav", the
-    // preset name / filename are the only signals that can tell them apart.
+    // an LTX 2.5 filename. LTX 2.3 keeps plain cfg (no separate audio scale).
     const showAudioCfg = presetVal.toLowerCase().includes("ltx 2.5")
         || (presetVal === "Auto" && _isAutoDetectedLtx25(node));
     if (!showAudioCfg) hiddenNames.add("audio_cfg");
@@ -771,22 +761,11 @@ function _findModelMetaSourceNode(node) {
     return originNode;
 }
 
-// ALBABIT-FIX: LTX-AV two-stage workflows chain two separate Sampler nodes.
-// LTXVConcatAVLatent (recombines video+audio) sits directly in front of
-// latent_image in BOTH stages, not just HighRes -- Albabit confirmed this by
-// tracing his actual workflow, so the original one-hop check ("is my direct
-// predecessor an upscale-stage node?") always found Concat first and called
-// every stage HighRes. The real chains, traced link-by-link in his workflow
-// JSON:
-//   LowRes:  RadianceResolution -> ... -> LTXVImgToVideoInplace ->
-//            LTXVConcatAVLatent -> Sampler
-//   HighRes: ... -> LTXVLatentUpsampler -> LTXVImgToVideoInplace ->
-//            LTXVConcatAVLatent -> Sampler
-// LTXVLatentUpsampler is the only unambiguous "this is the HighRes stage"
-// signal; Concat and the I2V switch are pass-through nodes present on both
-// paths. Walk back a bounded number of hops looking for it, following
-// Concat's video_latent input specifically (not audio_latent -- the upscaler
-// never touches the audio half).
+// ALBABIT-FIX: LTXVConcatAVLatent sits directly in front of latent_image on
+// BOTH pipeline stages, not just HighRes, so a one-hop check always found it
+// first and misclassified every stage as HighRes. LTXVLatentUpsampler is the
+// only unambiguous HighRes signal; walk back a bounded number of hops through
+// the video_latent chain looking for it (never audio_latent).
 const LTX_AV_UPSCALE_STAGE_MAX_HOPS = 6;
 function _nextLatentInputName(node) {
     if (!node.inputs) return null;
@@ -843,13 +822,9 @@ function _deriveDistillationOverride(filename, detectedType) {
     return null;
 }
 
-// ALBABIT-FIX: LTX 2.3/2.5 Dev/Distilled community values were too
-// inconsistent to trust for a filename-based override (see the comment
-// above _deriveDistillationOverride), but reusing the already-vetted
-// "LTX 2.3/2.5 LowRes/HighRes" preset objects as the Auto-mode default is
-// safe -- same values a user would get picking the preset by hand, just
-// applied automatically per stage (see _isLtxAvHighResStage above). Version
-// (2.3 vs 2.5) still only resolvable from the filename, same as elsewhere.
+// ALBABIT-FIX: reuses the already-vetted "LTX 2.3/2.5 LowRes/HighRes" preset
+// objects as the Auto-mode default, applied per-stage (see
+// _isLtxAvHighResStage above) instead of a filename-based override.
 function _resolveLtxAvStageDefaults(unetName, isHighRes) {
     if (!unetName) return null;
     const f = unetName.toLowerCase();
@@ -1445,14 +1420,10 @@ app.registerExtension({
             const origConnect = this.onConnectionsChange;
             this.onConnectionsChange = function (...args) {
                 if (origConnect) origConnect.apply(this, args);
-                // ALBABIT-FIX: defer instead of calling toggleFields() synchronously
-                // here. This handler runs as part of LiteGraph's own link-drag
-                // completion; toggleFields() can hide/show widgets (Vue remount via
-                // forceWidgetReinsert), and doing that at the exact instant a link is
-                // still being finalized can leave LiteGraph's own drag-state stuck
-                // (surfaces as a persistent "Already dragging links." error on the
-                // next attempt). The 250ms poll below re-syncs everything shortly
-                // after anyway, so deferring one tick loses nothing.
+                // ALBABIT-FIX: deferred one tick -- calling toggleFields()
+                // synchronously here (mid LiteGraph link-drag completion) could
+                // leave its drag-state stuck ("Already dragging links." on the
+                // next attempt). The 250ms poll below re-syncs regardless.
                 setTimeout(() => toggleFields(this), 0);
             };
 

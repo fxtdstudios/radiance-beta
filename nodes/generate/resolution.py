@@ -166,13 +166,9 @@ LATENT_CHANNELS = {
 # but produced grossly oversized latents for LTXV (×32) and Flux.2 (×16).
 # 8 remains the default for any model_type not listed here.
 SPATIAL_SCALE = {
-    # ALBABIT-FIX: 32x spatial, confirmed identical for LTX 2.3 and 2.5 (an
-    # earlier LTX-2.5-specific entry here was based on a safetensors metadata
-    # comparison that turned out to describe the wrong VAE variant -- see
-    # comfy/sd.py's own hardcoded `downscale_ratio = (formula, 32, 32)` for
-    # the real diffusion-decoder class, and a real decode test: a 1280x720
-    # Resolution target came out 2560x1472 -- exactly 2x too large per axis --
-    # while a separate 16x entry was still in use).
+    # ALBABIT-FIX: 32x spatial, confirmed identical for LTX 2.3 and 2.5 against
+    # comfy/sd.py's hardcoded ratio for the real diffusion-decoder VAE class
+    # (a wrong 16x entry here once produced 2x-oversized output).
     "LTXV (128ch)": 32,
     "Flux.2 / Flux.2 Klein (128ch)": 16,
     # ALBABIT-FIX: WAN 2.2 TI2V-5B's VAE trades channel depth for spatial

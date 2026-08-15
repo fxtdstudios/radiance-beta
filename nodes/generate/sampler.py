@@ -1271,18 +1271,11 @@ class RadianceSamplerPro:
         if guidance_rescale_phi > 0.0 and cfg > 1.0:
             phi = guidance_rescale_phi
 
-            # ALBABIT-FIX: was registered via set_model_sampler_cfg_function --
-            # the single-slot, noise-space "cfg_result = x - fn(args)" contract
-            # (comfy/samplers.py cfg_function()). This patch's math is
-            # denoised-space and returned a denoised value directly, so
-            # cfg_result silently became x - denoised instead of the intended
-            # rescaled value whenever this was active. The correct API for a
-            # denoised-space patch is set_model_sampler_post_cfg_function (a
-            # list, args["denoised"] in / return value out directly -- see
-            # comfy/samplers.py:600-603). Also now reads args["denoised"]
-            # (the running post-cfg value) instead of recomputing the plain
-            # cfg blend from scratch, so it correctly rescales whatever SDR/
-            # EPS produced if they're chained ahead of it.
+            # ALBABIT-FIX: was on set_model_sampler_cfg_function (noise-space
+            # single slot), but this math is denoised-space -- cfg_result
+            # silently became x - denoised. Moved to the correct API,
+            # set_model_sampler_post_cfg_function (comfy/samplers.py:600-603),
+            # and now reads args["denoised"] directly instead of recomputing.
             def guidance_rescale_patch(args):
                 guided = args["denoised"]
                 cond = args["cond_denoised"]
@@ -1301,15 +1294,10 @@ class RadianceSamplerPro:
             _step_counter = [0]
             _sdr_ref_lat = sdr_latent.detach()
 
-            # ALBABIT-FIX: same wrong-API bug as guidance_rescale_patch above --
-            # this was registered via set_model_sampler_cfg_function (the
-            # noise-space single slot) despite already being written in
-            # denoised-space, post-cfg style (its own name says "post_cfg").
-            # The manual existing_cfg_fn chaining hack was compensating for
-            # that single slot clobbering whatever was registered before it;
-            # set_model_sampler_post_cfg_function is a list ComfyUI chains
-            # automatically, so args["denoised"] already reflects any earlier
-            # post-cfg patch's effect and the manual chaining isn't needed.
+            # ALBABIT-FIX: same wrong-API bug as guidance_rescale_patch above.
+            # Moved to set_model_sampler_post_cfg_function, a list ComfyUI
+            # chains automatically, so the manual existing_cfg_fn chaining
+            # hack (compensating for the old single-slot clobbering) is gone.
             def _sdr_post_cfg_patch(args):
                 denoised = args["denoised"]
                 step = _step_counter[0]
@@ -1367,20 +1355,13 @@ class RadianceSamplerPro:
             )
 
         # ── LTX-AV Dual CFG (audio_cfg) ──────────────────────────────────────
-        # Mirrors comfy's own LTXVDualCFGGuider (comfy_extras/nodes_lt.py,
-        # Guider_LTXAVDualCFG): separate CFG scales for the video and audio
-        # halves of a packed LTX-AV latent, applied on the flat tensor
-        # comfy.utils.pack_latents() produces (video elements first, then
-        # audio -- confirmed against pack_latents/unpack_latents in comfy/utils.py).
-        # audio_cfg == 0 (sentinel) or == cfg means "same as cfg" -- skip the
-        # patch, identical to pre-audio_cfg behavior (plain single CFG).
-        # ALBABIT-FIX: this registers on set_model_sampler_cfg_function (the
-        # single-slot, noise-space contract) -- now that guidance_rescale_patch/
-        # _sdr_post_cfg_patch/_energy_prioritized_cfg_patch above have been
-        # moved to set_model_sampler_post_cfg_function (a different slot,
-        # applied AFTER this one produces the base cfg_result), the two
-        # systems compose correctly instead of fighting over the same slot;
-        # no compatibility guard needed anymore.
+        # ALBABIT-FIX: mirrors comfy's own LTXVDualCFGGuider (comfy_extras/
+        # nodes_lt.py) -- separate CFG for the video/audio halves of a packed
+        # LTX-AV latent (video first, then audio, per comfy.utils.pack_latents).
+        # Registers on set_model_sampler_cfg_function (noise-space slot);
+        # composes cleanly with the 3 post-cfg patches above since they now
+        # occupy a different slot, applied after this one. audio_cfg == 0
+        # (sentinel) or == cfg skips the patch entirely (plain single CFG).
         if is_ltx_av and _HAS_NESTED_TENSOR and audio_cfg > 0.0 and not math.isclose(audio_cfg, cfg):
             _v_numel = None
             if getattr(work_latent, "is_nested", False):
