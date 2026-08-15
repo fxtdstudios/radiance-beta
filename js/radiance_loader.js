@@ -305,7 +305,13 @@ const PRESET_CONFIGS = {
         // model.diffusion_model prefix, no vae-like tensor group), unlike some
         // 2.3 checkpoints. "Baked VAE (from UNET)" kept as a low-priority
         // fallback only, not assumed to work.
-        "vae_hints":     ["ltx-2.5-video-vae-bf16.safetensors", "ltx-2.5-video-vae-conv-bf16.safetensors", "ltx-2.5-video-vae", "ltx_2.5_video", "Baked VAE (from UNET)"],
+        // ALBABIT-FIX: "video-vae-conv" deliberately NOT hinted -- it's a
+        // different VAE architecture (classic CausalVideoAutoencoder, not the
+        // CausalDiffusionVAE this preset's factors were calibrated against),
+        // with a different 16x/4x spatial/temporal compression Resolution
+        // has no way to detect per-file. Selecting it silently halves the
+        // output resolution. See project_radiance_ltx25 memory.
+        "vae_hints":     ["ltx-2.5-video-vae-bf16.safetensors", "ltx-2.5-video-vae", "ltx_2.5_video", "Baked VAE (from UNET)"],
         "audio_vae_hints": ["ltx-2.5-audio-vae-bf16.safetensors", "ltx-2.5-audio-vae", "ltx_2.5_audio"],
         "clip_hints":    {
             "llm_encoder": ["gemma4-12b-with-proj-ltx-2.5-bf16.safetensors", "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors", "gemma4-12b-with-proj-ltx-2.5", "gemma4", "gemma_4"],
@@ -321,10 +327,14 @@ const PRESET_CONFIGS = {
         // ALBABIT-FIX: Distilled int8 first (lightest real option), same
         // "lightest file first" convention as LTX 2.3's Low VRAM sibling.
         "unet_hints":    ["ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors", "ltx-2.5-22b-distilled-transformer-bf16.safetensors", "ltx-2.5-22b-distilled", "ltx-2.5-22b-dev-transformer-comfy-int8-convrot.safetensors", "ltx-2.5", "ltx_2.5"],
-        // ALBABIT-FIX: video-vae-conv is the repo README's own "faster,
-        // lighter" recommendation for balanced/low-VRAM use -- listed first
-        // here, unlike the quality-first preset above.
-        "vae_hints":     ["ltx-2.5-video-vae-conv-bf16.safetensors", "ltx-2.5-video-vae-bf16.safetensors", "ltx-2.5-video-vae", "ltx_2.5_video", "Baked VAE (from UNET)"],
+        // ALBABIT-FIX: "video-vae-conv" was hinted first here (the repo
+        // README's own "faster, lighter" recommendation for low-VRAM use) --
+        // removed. It's a different VAE architecture (16x/4x spatial/temporal
+        // compression, not the 32x/8x this preset's Resolution factors
+        // assume) that Resolution can't detect per-file. Was actually the
+        // DEFAULT match for this preset until this fix -- see
+        // project_radiance_ltx25 memory.
+        "vae_hints":     ["ltx-2.5-video-vae-bf16.safetensors", "ltx-2.5-video-vae", "ltx_2.5_video", "Baked VAE (from UNET)"],
         "audio_vae_hints": ["ltx-2.5-audio-vae-bf16.safetensors", "ltx-2.5-audio-vae", "ltx_2.5_audio"],
         "clip_hints":    {
             "llm_encoder": ["gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors", "gemma4-12b-with-proj-ltx-2.5-bf16.safetensors", "gemma4-12b-with-proj-ltx-2.5", "gemma4", "gemma_4"],
