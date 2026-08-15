@@ -86,11 +86,12 @@ RADIANCE_MODEL_MAP: dict = {
         "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/vae/ltx-2.5-video-vae-bf16.safetensors",
         "type": "vae",
     },
-    # "faster, lighter" per the repo's own README -- recommended for balanced/low-VRAM use.
-    "ltx-2.5-video-vae-conv-bf16.safetensors": {
-        "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/vae/ltx-2.5-video-vae-conv-bf16.safetensors",
-        "type": "vae",
-    },
+    # ALBABIT-FIX: "ltx-2.5-video-vae-conv-bf16.safetensors" (the repo README's
+    # "faster, lighter" recommendation) deliberately NOT catalogued -- it's a
+    # different VAE architecture (16x/4x spatial/temporal, not the 32x/8x
+    # Resolution assumes for LTX 2.5) that Radiance has no per-file way to
+    # detect, so auto-downloading/recommending it would silently halve the
+    # output resolution. See project_radiance_ltx25 memory.
     "ltx-2.5-audio-vae-bf16.safetensors": {
         "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/vae/ltx-2.5-audio-vae-bf16.safetensors",
         "type": "vae",

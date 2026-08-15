@@ -588,6 +588,26 @@ def load_standalone_vae(
 
     Returns ``(vae, vae_time, vae_cache_hit)``.
     """
+    # ALBABIT-FIX: "ltx-2.5-video-vae-conv-*" uses a different VAE architecture
+    # (classic CausalVideoAutoencoder, 16x/4x spatial/temporal compression)
+    # than the default LTX 2.5 VAE Resolution's "LTXV (128ch)" factors assume
+    # (32x/8x, the CausalDiffusionVAE the official templates actually use).
+    # Selecting it silently produces a video at half the intended resolution
+    # -- Radiance has no per-file detection to correct for it. Delisted from
+    # the Loader presets and RADIANCE_MODEL_MAP; this warns if picked
+    # manually anyway (e.g. a file downloaded before that fix). See
+    # project_radiance_ltx25 memory.
+    if "ltx-2.5-video-vae-conv" in vae_name.lower():
+        warn = (
+            f"⚠ '{vae_name}' uses a different VAE compression (16x spatial / "
+            f"4x temporal) than LTX 2.5's default VAE (32x/8x, what "
+            f"Resolution's 'LTXV (128ch)' assumes). The decoded video will "
+            f"come out at half the intended resolution. Use "
+            f"'ltx-2.5-video-vae-bf16.safetensors' instead."
+        )
+        logger.warning(warn)
+        info_lines.append(warn)
+
     t0 = time.time()
     vae_path = ensure_model_exists(vae_name, "vae", auto_download)
     if not vae_path:
