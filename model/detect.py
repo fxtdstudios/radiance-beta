@@ -212,14 +212,9 @@ _BASE_VRAM = {
     "flux": 12.0, "sd3": 10.0, "sd3.5": 12.0,
     "sdxl": 6.5, "sd1.5": 3.5,
     "hunyuan_video": 20.0, "wan": 14.0, "ltxv": 11.0,
-    # ALBABIT-FIX: "ltx" -> "ltxv". "ltxav" corrected 15.0->39.0 -- confirmed
-    # live twice (LTX 2.5 Dev bf16, 22B params, shared checkpoint size with
-    # 2.3's own Dev): ComfyUI's own "Model LTXAV prepared for dynamic VRAM
-    # loading" log reported 40048MB both times, not the ~15-23GB this table
-    # implied. 39.0 (bf16 baseline) x 0.6 (_DTYPE_MULT's fp8 factor) gives a
-    # slightly conservative ~23.4GB estimate for the Distilled/fp8 "Low VRAM"
-    # preset too (real observed staged size there was ~20GB) -- erring toward
-    # overestimating is the safer direction for a pre-flight VRAM warning.
+    # ALBABIT-FIX: "ltx" -> "ltxv". "ltxav" corrected 15.0->39.0 -- ComfyUI's
+    # own staging log reported 40048MB live (LTX 2.5 Dev bf16, 22B), not the
+    # ~15-23GB this table implied.
     "ltxav": 39.0,
     "pixart": 6.0, "aura_flow": 8.0,
     "lumina2": 12.0, "z_image": 14.0,
