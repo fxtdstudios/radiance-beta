@@ -93,6 +93,22 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ### Removed
 
+- **Six internal write-ups.** `AUDIT.md`, `FULL_AUDIT_2026-08.md`,
+  `BATCH3_REPORT.md`, `RELEASE_REVIEW.md`, `VIEWER_REPORT.md` and
+  `PACKAGE_REVIEW.md` were point-in-time reports that had already drifted from
+  the code — several listed as open bugs that had been fixed months earlier,
+  which is how the tiled-VAE blend stayed on the backlog after it was
+  corrected. What matters lives in the README's Status & to-do list,
+  `KNOWN_ISSUES.md` and this changelog; `.gitignore` now keeps their filenames
+  out.
+- **`gpu_acceptance_report.md` is no longer tracked.** `tools/gpu_acceptance.py`
+  writes it on every run — a generated artifact that should never have been
+  committed. Now ignored.
+- **Dead `.comfyignore` entries.** Thirty-two of its paths no longer existed. A
+  packaging exclusion list naming files that are already gone reads as
+  protection it is not providing, so the file was rewritten around what is
+  actually there plus deliberate glob guards.
+
 - **The `docs/` folder and its tooling.** Documentation now lives at
   [www.fxtdstudios.com](https://www.fxtdstudios.com) rather than in the
   repository. Removed with it: `tests/test_docs_coverage.py`,

@@ -377,6 +377,10 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
       was stale — the cosine ramp had already landed).
 - [x] First JavaScript coverage: 27 tests over the shared DOM and widget
       helpers, on `node --test`, wired into CI.
+- [x] Repository trimmed to what a user or contributor needs: the six internal
+      audit and review write-ups are gone, `.comfyignore` no longer lists files
+      that stopped existing, and the generated GPU report is ignored rather
+      than committed.
 - [x] Suite: 2284 passed / 0 failed / 60 skipped, plus 27 JS tests.
 
 ## Documentation

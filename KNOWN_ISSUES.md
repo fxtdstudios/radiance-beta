@@ -10,8 +10,8 @@ clear backlog.
   both a legacy top-level `nodes_*.py` and the organized `nodes/<group>/` package.
   Only one wins at registration (no duplicate menu entries), but maintaining two
   source files per node is the root cause of the route-registration issue below.
-  *Planned fix:* Phase 4 of `docs/dev/REFACTOR_PLAN.md` — retire the legacy shims,
-  keep the organized packages.
+  *Planned fix:* retire the legacy shims, keep the organized packages. Tracked
+  in the README's Status & to-do list.
 
 - **Route registration depends on idempotency guards.** Because the package can be
   imported under two names, aiohttp routes are guarded against double-registration
