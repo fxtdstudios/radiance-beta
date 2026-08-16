@@ -30,6 +30,7 @@
   "RadianceFocusPeaking",
   "RadianceFrameStamp",
   "RadianceGrade",
+  "RadianceGradeApply",
   "RadianceGradeMatch",
   "RadianceHDRAutoLogSelect",
   "RadianceHDRColorPipeline",

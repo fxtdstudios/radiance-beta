@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/version-3.2.1-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
-[![Nodes](https://img.shields.io/badge/nodes-110-c8a96e?style=for-the-badge)](#node-map)
+[![Nodes](https://img.shields.io/badge/nodes-111-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
 [![Hugging Face](https://img.shields.io/badge/Hugging_Face-RUDRA_models-ffd21e?style=for-the-badge)](https://huggingface.co/fxtdstudios/RUDRA)
 
@@ -106,7 +106,7 @@ pip install -r requirements_mac_silicon.txt
 
 ### Verify
 
-Start ComfyUI and look for `Radiance: successfully loaded 110 nodes` in the log.
+Start ComfyUI and look for `Radiance: successfully loaded 111 nodes` in the log.
 A lower count means a node module failed to import — usually a missing optional
 dependency; the Environment Guard table printed at startup shows which.
 
@@ -228,7 +228,7 @@ FXTD STUDIOS/Radiance
 └─ Pipeline
 ```
 
-Radiance provides **110 nodes** (plus any Gizmos you create). Some nodes depend on optional packages and your ComfyUI environment.
+Radiance provides **111 nodes** (plus any Gizmos you create). Some nodes depend on optional packages and your ComfyUI environment.
 
 Node names follow standard compositing vocabulary under the **Radiance** menu — `Grade`, `CDL`, `OCIO ColorSpace`, `Roto`, `Defocus`, `Viewer`, `Read`/`Write` — so they read the way they do in Nuke or Flame. AI and generation nodes keep a `Radiance` prefix (`Radiance Sampler`, `Radiance VAE Decode`) to mark the diffusion layer. You can still find any node by typing "radiance" in the search.
 
@@ -311,8 +311,9 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 - [ ] **Viewer JavaScript is unverified.** `radiance_viewer.js` and the WebGL /
       WebGPU renderers have no automated coverage at all — the suite stops at
       the Python boundary.
-- [ ] **Push the committed work.** Commits are on `release/cleanup`, tracking
-      `beta/release/cleanup`; run `git fetch beta --prune && git push`.
+- [ ] **The public repo is 2.5 months behind.** `fxtdstudios/radiance` `main`
+      is still at `64fee41` (2026-06-04); everything since lives in
+      `fxtdstudios/radiance-beta`. Decide when beta merges down to public.
 
 ### Correctness backlog
 
@@ -337,14 +338,13 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 
 - [ ] **Retire the legacy `nodes_*.py` layer.** ~39 node keys are defined twice;
       this is the root cause of the aiohttp double-registration guards.
-- [ ] **Replace heuristic menu classification** with an explicit per-node section
-      declaration. `nodes/branding.py` keyword-matches and misfiles edge cases;
-      `SECTION_OVERRIDES` is the current mitigation, not a fix.
 - [ ] **Split the monoliths** — `nodes/monitor/viewer.py`, `nodes_io.py`,
       `hdr/vae.py`.
 - [ ] **`delivery/handler.py` imports node classes**, inverting the library →
-      UI layering and making the delivery path hard to test in isolation.
-- [ ] Clarify the `Grade` / `Grade Apply` / `Apply Grade Info` naming overlap.
+      UI layering. Bigger than it looks: `RadianceWrite.write` is 118 lines
+      depending on module-level helpers inside `nodes_io.py`, and
+      `radiance.image` is replaced by a stub in `tests/conftest.py`, so this
+      untangles as part of splitting the monoliths rather than on its own.
 - [ ] Decide whether chained Energy Mask nodes should stack. Today the first one
       wins and the second is silently ignored.
 - [ ] `histogram` and `edge` scene-cut methods run on different score scales,
@@ -377,11 +377,19 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
       was stale — the cosine ramp had already landed).
 - [x] First JavaScript coverage: 27 tests over the shared DOM and widget
       helpers, on `node --test`, wired into CI.
+- [x] Four commits merged to `radiance-beta` `main` via PR #43.
+- [x] Menu placement is declared per node, not guessed. `NODE_SECTIONS` covers
+      all 111; the keyword classifier is a warning-only fallback, and a test
+      fails if a registered node is missing from the table.
+- [x] `RadianceGradeApply` published — a complete node with 16 documented
+      inputs that had been invisible in the menu, found because it had a
+      branding override but no registration. Now `Bake Viewer Grade`, which
+      also settles the Grade naming overlap.
 - [x] Repository trimmed to what a user or contributor needs: the six internal
       audit and review write-ups are gone, `.comfyignore` no longer lists files
       that stopped existing, and the generated GPU report is ignored rather
       than committed.
-- [x] Suite: 2284 passed / 0 failed / 60 skipped, plus 27 JS tests.
+- [x] Suite: 2298 passed / 0 failed / 60 skipped, plus 27 JS tests.
 
 ## Documentation
 

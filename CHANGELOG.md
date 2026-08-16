@@ -6,6 +6,29 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ### Added
 
+- **`RadianceGradeApply` reaches the menu**, published as **Bake Viewer Grade**.
+  It bakes the Viewer's grading maths into the tensor — a complete node with 16
+  documented inputs and a valid contract, listed in `viewer.py`'s own mappings
+  since v3, but never transcribed into `nodes/monitor/__init__.py`. It was
+  found because `nodes/branding.py` carried a menu-section override for it:
+  someone had classified a node nobody could place. Catalog 110 → 111.
+
+  Its label also settles the `Grade` / `Grade Apply` / `Apply Grade Info`
+  overlap — the menu now reads Grade, Grade Match, Apply Grade Info and Bake
+  Viewer Grade.
+
+- **Menu sections are declared, not guessed.** `NODE_SECTIONS` in
+  `nodes/branding.py` names the section for all 111 registered nodes.
+  `classify_menu_section`'s keyword rules ran in order and returned on the
+  first match, so `"mask"` was tested for VFX several rules before
+  `"conditioning"` was tested for Generate — which is how `RadianceEnergyMask`,
+  a node that feeds the sampler, landed in the VFX menu. The rules remain only
+  as a fallback for undeclared nodes, and they now log a warning when they run.
+  `tests/test_menu_sections.py` fails if a registered node is missing from the
+  table, so the next one is caught at commit time rather than by a user
+  hunting for their node.
+
+
 - **Energy Mask node (`RadianceEnergyMask`).** Energy-Prioritized Sampling has
   been in the sampler since v3.1, but nothing ever wrote the
   `radiance_energy_mask` key it reads, so no graph could reach it (#40). This
