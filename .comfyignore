@@ -1,89 +1,84 @@
-# Development-only files excluded from Comfy Registry packages.
-.git/
+# Files excluded from the Comfy Registry archive.
+#
+# Everything here stays on GitHub; none of it is needed by ComfyUI at runtime.
+# Entries are either paths that exist today or glob guards for artefacts a
+# developer may create locally. Dead entries were removed in the 2026-08
+# cleanup — a list naming files that no longer exist reads as coverage it does
+# not have.
+
+# ── VCS, CI and build output ────────────────────────────────────────────────
 .github/
-.hypothesis/
-.pytest_cache/
-__pycache__/
 build/
 dist/
 *.egg-info/
+node_modules/
+package.json
+package-lock.json
+
+# ── Caches and local scratch ────────────────────────────────────────────────
+__pycache__/
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+.codex-backup-*/
+# Session-scratch directory names. These do not exist right now and are kept
+# deliberately: tests/test_package_cleanup.py pins them, because each one has
+# appeared in this repo before and none of them may ever ship.
+_to_delete/
+_audit_tmp/
+.agents/
+.phase3-dist/
+.phase3-dist-final/
+.phase3-venv/
 *.log
 *.map
 *.tmp
 *.temp
-node_modules/
-scratch/
-MagicMock/
-rudra/
-js/docs/
-core/*.db
-workflows/.versions/
-workflows/GENERAL/dashboard_*.rad
-workflows/GENERAL/test_*_v*.rad
+*.bak
+*.patch
 
-# Tests and local validation assets stay on GitHub, not in the registry archive.
+# ── Tests and developer tooling ─────────────────────────────────────────────
 tests/
+js/tests/
+js/docs/
 tools/check_mojibake.py
 tools/check_release_ready.py
 tools/validate_hdr_pipeline.py
-ADR-*.md
-DEBUG-*.md
-SESSION_LOG.md
-RADIANCE_v*_RELEASE_NOTES.md
-*_audit.docx
-*.docx
-*.bak
-
-# Source maps / package-manager state are not needed by ComfyUI at runtime.
-package-lock.json
-package.json
-
-# Internal engineering reports & dev artifacts (kept on GitHub, excluded from registry)
-artifacts/
-PRE_RELEASE_REVIEW.md
-CLEANUP_REPORT.md
-radiance_hdr_vae_decode_report.md
-*.svg
-RELEASE_NOTES_*.md
-docs/site/
-
-# --- Release tidy (v3.1.1): dev docs, dev tooling, and stray files ---
-docs/dev/
-tools/clean.py
 tools/clean_release.py
-tools/restructure_phase1.py
-clean.ps1
-CODE_STYLE.md
+tools/gpu_acceptance.py
+
+# ── Repository documentation ────────────────────────────────────────────────
+# Node descriptions and input tooltips ship inside the package and ComfyUI
+# renders them on hover, so the reference travels with the nodes. The prose
+# lives at www.fxtdstudios.com.
 CONTRIBUTING.md
-NODES.md
-splash_screen.html
-.hypothesis/
-
-# Internal dev artifacts — must not ship to the registry (audit 2026-07)
-bug_report_reply_draft.md
-PACKAGE_REVIEW.md
-.codex-backup-*/
-.agents/
-
-# Session scratch and local caches — never part of a registry archive.
-.ruff_cache/
-.phase3-dist/
-.phase3-dist-final/
-.phase3-venv/
-.agents/
-.codex-backup-*/
-_audit_tmp/
-_to_delete/
-*.patch
-
-# Audit and review write-ups live on GitHub, not in the registry archive.
-AUDIT.md
-VIEWER_REPORT.md
-BATCH3_REPORT.md
-PACKAGE_REVIEW.md
 KNOWN_ISSUES.md
 
-# Developer-only saved workflows. The starter graph and TEMPLATES/ ship;
-# anything else under workflows/ is the local user's project data.
+# ── Internal write-ups, should any reappear ─────────────────────────────────
+# Audits, reviews and session logs go stale and mislead. Findings that matter
+# belong in the README's Status & to-do list, KNOWN_ISSUES.md or the changelog.
+AUDIT.md
+FULL_AUDIT_*.md
+BATCH*_REPORT.md
+RELEASE_REVIEW.md
+VIEWER_REPORT.md
+PACKAGE_REVIEW.md
+PRE_RELEASE_REVIEW.md
+CLEANUP_REPORT.md
+SESSION_LOG.md
+ADR-*.md
+DEBUG-*.md
+RELEASE_NOTES_*.md
+RADIANCE_v*_RELEASE_NOTES.md
+bug_report_reply_draft.md
+gpu_acceptance_report.md
+*.docx
+
+# ── Local project data ──────────────────────────────────────────────────────
+# The starter graph and TEMPLATES/ ship; anything else under workflows/ is the
+# user's own shot work. A wheel built on a working machine once shipped the
+# developer's shot files.
 workflows/*.rad
+workflows/.versions/
 workflows/.asset_thumbs/
+core/*.db
