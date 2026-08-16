@@ -311,31 +311,27 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 - [ ] **Viewer JavaScript is unverified.** `radiance_viewer.js` and the WebGL /
       WebGPU renderers have no automated coverage at all — the suite stops at
       the Python boundary.
-- [ ] **Commit the working tree.** A stale `.git/index.lock` blocks every write;
-      delete it, then commit. Several sessions of fixes are currently
-      unprotected.
-- [ ] **Reconcile with upstream.** `beta/main` is ~36 commits ahead and none of
-      the bugs fixed here are fixed there. Commit locally first, then rebase;
-      only `nodes/hdr/uplift_universal.py` and one `dcc.py` hunk conflict.
+- [ ] **Push the committed work.** Commits are on `release/cleanup`, tracking
+      `beta/release/cleanup`; run `git fetch beta --prune && git push`.
 
 ### Correctness backlog
 
-- [ ] **ACES 2.0 tone scale is an approximation**, not the Daniele Evo curve —
-      18% grey sits ~0.84 stop off reference on SDR. Grade against a reference,
-      not the label.
+- [ ] **Two ACES 2.0 tone scales disagree, and both are wrong somewhere.**
+      `RadianceACES2OutputTransform` (legacy) uses a log-contrast + tanh
+      approximation that holds 18% grey at ~18 nits on every peak — the right
+      shape, ~0.85 stop above the ~10 nit reference.
+      `RadianceACES2Tonescale` implements the real Daniele Evo curve but scales
+      grey *with* peak: 10 nits at SDR, 100 at 1000, 400 at 4000. On a 4000-nit
+      master that is 40x too bright in the midtones. Needs a decision on the
+      grey target before either is rewired to the other.
 - [ ] **RUDRA video decoders were trained on stills.** `wan` / `ltx-video` /
       `hunyuanvideo` checkpoints never saw multi-frame latents; real video falls
       back to math expansion. Needs retraining, not patching.
 - [ ] **`rudra_full_decoder_ltx-video_ema.safetensors` is truncated at source**
       (23.0 MB against a declared ~36.0 MB). The loader detects it and degrades;
       the file still needs re-exporting.
-- [ ] Scene-cut detection normalises by the batch maximum, so its threshold has
-      no absolute meaning.
-- [ ] Optical flow is single-scale Lucas–Kanade; mask propagation is effectively
-      static above ~2 px of motion.
-- [ ] Tiled VAE pastes tiles without blending.
-- [ ] Tier-3 upscale ignores its `scale` input.
-- [ ] Model auto-download happens without asking first.
+- [ ] Optical flow above ~8 px of motion is still unreliable; the pyramid is
+      bounded by the integration window, and going deeper measured worse.
 
 ### Structural debt
 
@@ -351,6 +347,9 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 - [ ] Clarify the `Grade` / `Grade Apply` / `Apply Grade Info` naming overlap.
 - [ ] Decide whether chained Energy Mask nodes should stack. Today the first one
       wins and the second is silently ignored.
+- [ ] `histogram` and `edge` scene-cut methods run on different score scales,
+      so one threshold widget cannot mean the same thing for both. Documented,
+      not yet unified.
 
 ### Done and verified
 
@@ -364,7 +363,25 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 - [x] Energy-Prioritized Sampling is reachable from a graph (#40) and no longer
       crashes on video latents.
 - [x] Nodes no longer write into the ComfyUI install directory.
-- [x] Suite: 2231 passed / 0 failed / 60 skipped.
+- [x] Scene-cut thresholds are absolute, so the same value means the same thing
+      on every clip and cut-free footage reports no cuts.
+- [x] Tier-3 upscale honours `scale` — 2x no longer returns the top-left
+      quarter of a 4x render.
+- [x] Optical flow is pyramidal: 1–5 px displacements recover to within 10%,
+      with 84–100% of the field inside half a pixel (was ~100% at 1 px, 17% at
+      3 px, 1% at 5 px).
+- [x] Model weights are never downloaded without consent —
+      `RADIANCE_ALLOW_DOWNLOADS=1` — through one gate shared by every
+      downloader. The multipass path previously had none.
+- [x] Tiled VAE blending verified seamless and pinned by a test (the open note
+      was stale — the cosine ramp had already landed).
+- [x] First JavaScript coverage: 27 tests over the shared DOM and widget
+      helpers, on `node --test`, wired into CI.
+- [x] Repository trimmed to what a user or contributor needs: the six internal
+      audit and review write-ups are gone, `.comfyignore` no longer lists files
+      that stopped existing, and the generated GPU report is ignored rather
+      than committed.
+- [x] Suite: 2284 passed / 0 failed / 60 skipped, plus 27 JS tests.
 
 ## Documentation
 

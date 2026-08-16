@@ -239,8 +239,14 @@ def _verify_or_report_sha256(dest: str, info: Dict[str, Any], key: str) -> bool:
 
 
 def _offline_mode() -> bool:
-    """True when auto-download is disabled (airgapped / studio offline)."""
-    return os.environ.get("RADIANCE_UPSCALE_OFFLINE", "").strip().lower() in ("1", "true", "yes", "on")
+    """True when auto-download is disabled (airgapped / studio offline).
+
+    Kept for backward compatibility. The decision now lives in
+    `radiance.core.consent`, which defaults to *ask first* rather than
+    download-unless-told-otherwise.
+    """
+    from radiance.core.consent import downloads_allowed, LEGACY_UPSCALE_OFFLINE_ENV
+    return not downloads_allowed(legacy_offline_env=LEGACY_UPSCALE_OFFLINE_ENV)
 
 
 def _apply_color_transfer(t: "torch.Tensor", encoding: str, decode: bool = False) -> "torch.Tensor":
@@ -277,8 +283,10 @@ def _download_upscale_model(key: str, force: bool = False) -> Optional[str]:
     Download an upscale model by registry key.
     Returns local file path or None on failure.
 
-    Set RADIANCE_UPSCALE_OFFLINE=1 to disable network access: the model must
-    already be present locally, otherwise a clear error is returned with the
+    Downloads require consent (see radiance.core.consent): set
+    RADIANCE_ALLOW_DOWNLOADS=1 to permit them. The legacy
+    RADIANCE_UPSCALE_OFFLINE=1 opt-out is still honoured. Without consent the
+    model must already be present locally, otherwise a clear error names the
     expected path so it can be placed manually.
     """
     if key not in _UPSCALE_MODEL_REGISTRY:
@@ -293,11 +301,14 @@ def _download_upscale_model(key: str, force: bool = False) -> Optional[str]:
         logger.debug(f"[Radiance/Upscale] Already present: {dest}")
         return dest
 
-    if _offline_mode():
-        logger.error(
-            f"[Radiance/Upscale] Offline mode (RADIANCE_UPSCALE_OFFLINE=1): "
-            f"'{key}' not found. Place '{info['filename']}' (~{info['size_mb']} MB) at: {dest}"
-        )
+    from radiance.core.consent import require_consent, LEGACY_UPSCALE_OFFLINE_ENV
+    if not require_consent(
+        info.get("note", key),
+        size_mb=info.get("size_mb"),
+        dest=dest,
+        url=info.get("url"),
+        legacy_offline_env=LEGACY_UPSCALE_OFFLINE_ENV,
+    ):
         return None
 
     logger.info(f"[Radiance/Upscale] Downloading {info['note']} (~{info['size_mb']} MB)...")
@@ -823,6 +834,30 @@ def _realesrgan_infer(net: nn.Module, tile_bhwc: torch.Tensor,
     return y.permute(0, 2, 3, 1)
 
 
+def _conform_to_scale(src_bhwc: torch.Tensor, out_bhwc: torch.Tensor, scale: int) -> torch.Tensor:
+    """Resize a backend's output to exactly `scale` x the source tile.
+
+    The Tier 3 diffusion backends are fixed-ratio: Stable Diffusion x4 always
+    returns 4x, whatever `scale` the node was asked for. `tiled_upscale` then
+    crops the tile to `H*scale x W*scale`, so at scale=2 the user got the
+    top-left quarter of a 4x render rather than a 2x render of the whole tile —
+    correlation with the input measured 0.0024.
+
+    Area resampling matches `_as_2x`, which solves the same fixed-ratio problem
+    for the 8x cascade.
+    """
+    th = src_bhwc.shape[1] * scale
+    tw = src_bhwc.shape[2] * scale
+    if out_bhwc.shape[1] == th and out_bhwc.shape[2] == tw:
+        return out_bhwc
+
+    mode = "area" if (out_bhwc.shape[1] > th or out_bhwc.shape[2] > tw) else "bicubic"
+    x = out_bhwc.permute(0, 3, 1, 2)
+    kw = {} if mode == "area" else {"align_corners": False}
+    y = F.interpolate(x, size=(th, tw), mode=mode, **kw)
+    return y.permute(0, 2, 3, 1).clamp(0, 1)
+
+
 def _bicubic_upscale(tile_bhwc: torch.Tensor, scale: int) -> torch.Tensor:
     """Pure bicubic fallback — used when no model is loaded."""
     x = tile_bhwc.permute(0, 3, 1, 2)
@@ -1271,7 +1306,9 @@ def _build_upscale_fn(
                 prefer_seedvr2=use_seedvr2,
             )
             if result is not None:
-                return result
+                # The diffusion backends are fixed 4x; the node may have been
+                # asked for 2x. Conform before tiled_upscale crops.
+                return _conform_to_scale(tile, result, scale_int)
             # Fallback: Real-ESRGAN
             logger.warning("[Radiance/Upscale] Diffusion unavailable, falling back to Tier 1")
             mk = "realesrgan_x4plus" if scale_int == 4 else "realesrgan_x2plus"
