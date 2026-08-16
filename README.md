@@ -14,7 +14,7 @@ Radiance is a production-grade node pack for ComfyUI built around 32-bit float a
 
 Artists get 32-bit, HDR, and ACES image tools, professional viewers, and VFX nodes. Supervisors and coordinators get project, shot, asset, and workflow management built directly into the canvas.
 
-[Install](#installation) · [Capabilities](#capabilities) · [Node Map](#node-map) · [DCC Handoff](#dcc-handoff) · [Known limitations](#known-limitations) · [Documentation](docs/README.md) · [Support](#support)
+[Install](#installation) · [Capabilities](#capabilities) · [Node Map](#node-map) · [DCC Handoff](#dcc-handoff) · [Known limitations](#known-limitations) · [Documentation](#documentation) · [Support](#support)
 
 </div>
 
@@ -351,8 +351,6 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 - [ ] Clarify the `Grade` / `Grade Apply` / `Apply Grade Info` naming overlap.
 - [ ] Decide whether chained Energy Mask nodes should stack. Today the first one
       wins and the second is silently ignored.
-- [ ] `docs/dev/` holds nine internal reports, including two duplicate v3.1
-      release notes and three superseded plans.
 
 ### Done and verified
 
@@ -366,17 +364,19 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 - [x] Energy-Prioritized Sampling is reachable from a graph (#40) and no longer
       crashes on video latents.
 - [x] Nodes no longer write into the ComfyUI install directory.
-- [x] Suite: 2254 passed / 0 failed / 60 skipped.
+- [x] Suite: 2231 passed / 0 failed / 60 skipped.
 
 ## Documentation
 
-Full documentation is available at [radiance.fxtd.org](https://radiance.fxtd.org) and in the repository docs at [docs/](docs/README.md). It covers setup, core concepts, workflow recipes, a complete node reference, and troubleshooting.
+Full documentation is available at [www.fxtdstudios.com](https://www.fxtdstudios.com) — setup, core concepts, workflow recipes, a complete node reference, and troubleshooting.
+
+Every node also carries its own description and per-input tooltips, which ComfyUI shows on hover, so the parameter reference travels with the package.
 
 ## Support
 
 - Issues: [GitHub Issues](https://github.com/fxtdstudios/radiance/issues)
-- Documentation: [radiance.fxtd.org](https://radiance.fxtd.org)
-- Studio: [fxtd.org](https://fxtd.org)
+- Documentation: [www.fxtdstudios.com](https://www.fxtdstudios.com)
+- Studio: [www.fxtdstudios.com](https://www.fxtdstudios.com)
 
 ## License
 

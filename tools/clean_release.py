@@ -4,7 +4,7 @@
 SAFE cleanup only: regenerable caches, confirmed dead/stray files, root
 documentation organization, and untracking runtime data. It deliberately does
 NOT move or rewrite any code modules, shims, or utilities — those require a
-separate, incremental, test-after migration (see docs/dev/RESTRUCTURE_PLAN.md).
+separate, incremental, test-after migration.
 
 Run from the repo root, on a branch:
 
@@ -32,11 +32,6 @@ JUNK_GLOBS = ["**/*.pyc", "**/*.pyo", "**/.DS_Store", "**/Thumbs.db", "**/*.swp"
 
 # Confirmed dead / stray files (verified unreferenced).
 DEAD_FILES = ["splash_screen.html", "tools/restructure_phase1.py"]
-
-# Root developer docs -> docs/dev/ (no code impact).
-DOC_MOVES = ["CLEANUP_REPORT.md", "CODE_STYLE.md", "PRE_RELEASE_REVIEW.md", "NODES.md",
-             "RADIANCE_v3.1_RELEASE_NOTES.md", "RELEASE_NOTES_v3.1.0.md",
-             "radiance_hdr_vae_decode_report.md"]
 
 # Tracked runtime data to stop tracking (kept on disk).
 UNTRACK = ["core/radiance_history.db"]
@@ -87,22 +82,6 @@ def remove_dead(apply):
     return n
 
 
-def move_docs(apply):
-    dest = ROOT / "docs" / "dev"
-    n = 0
-    for rel in DOC_MOVES:
-        src = ROOT / rel
-        if src.exists():
-            print(f"  move     {rel}  ->  docs/dev/{src.name}")
-            n += 1
-            if apply:
-                dest.mkdir(parents=True, exist_ok=True)
-                if not _git(["mv", "--", rel, f"docs/dev/{src.name}"]):
-                    try:
-                        shutil.move(str(src), str(dest / src.name))
-                    except OSError as e:
-                        print(f"           (skip move: {e})")
-    return n
 
 
 def untrack(apply):
@@ -125,9 +104,7 @@ def main() -> int:
     j = clean_junk(args.apply) or print("   (none)")
     print("\n2) Dead / stray files:")
     d = remove_dead(args.apply) or print("   (none)")
-    print("\n3) Root dev-docs -> docs/dev/:")
-    m = move_docs(args.apply) or print("   (none)")
-    print("\n4) Untrack runtime data:")
+    print("\n3) Untrack runtime data:")
     u = untrack(args.apply) or print("   (none)")
 
     mode = "APPLIED" if args.apply else "DRY RUN - no changes written"
