@@ -336,10 +336,18 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 
 ### Structural debt
 
-- [ ] **Retire the legacy `nodes_*.py` layer.** ~39 node keys are defined twice;
-      this is the root cause of the aiohttp double-registration guards.
-- [ ] **Split the monoliths** — `nodes/monitor/viewer.py`, `nodes_io.py`,
-      `hdr/vae.py`.
+- [ ] **Retire the legacy `nodes_*.py` layer.** Measured 2026-08-16, and the
+      earlier "~39 keys defined twice" was wrong: of 46 root modules, **34 are
+      already pure re-export shims** and only **12 still publish nodes of their
+      own** — 34 keys, of which exactly **one** (`RadianceViewer`) is genuinely
+      dual-published. So this is a migration of twelve named files, not a
+      hunt for duplicates: `nodes_cdl` (3), `nodes_colorscience` (4),
+      `nodes_curves` (2), `nodes_grade` (3), `nodes_io` (5), `nodes_loader` (6),
+      `nodes_ocio` (1), `nodes_qc` (2), `nodes_radiance_viewer` (1),
+      `nodes_realtime_preview` (5), `nodes_sampler` (1), `nodes_workspace` (1).
+      Seven modules carry aiohttp route-registration guards because of it.
+- [ ] **Split the monoliths** — `hdr/vae.py` (3324 lines), `nodes_io.py`
+      (2972), `nodes/monitor/viewer.py` (1220).
 - [ ] **`delivery/handler.py` imports node classes**, inverting the library →
       UI layering. Bigger than it looks: `RadianceWrite.write` is 118 lines
       depending on module-level helpers inside `nodes_io.py`, and
