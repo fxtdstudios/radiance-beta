@@ -14,12 +14,15 @@ Search aliases keep every node discoverable by typing "radiance".
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, MutableMapping
 
 BRAND = "Radiance"
 DISPLAY_PREFIX = "◎ Radiance"  # retained for backward-compatible imports
 MENU_ROOT = "FXTD STUDIOS/Radiance"
+
+logger = logging.getLogger("radiance.branding")
 
 MENU_STRUCTURE = {
     "Core": "Manager, workspace, resolution, and everyday Radiance utilities.",
@@ -45,15 +48,163 @@ GENERATION_SECTIONS: set = set()
 # Marketing words stripped from any node label.
 _MARKETING = re.compile(r"\b(Pro|Smart|Ultra|Cinematic)\b", re.IGNORECASE)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Declared menu section, per node.
+#
+#  This table is the answer; `classify_menu_section`'s keyword rules are only
+#  the fallback for a node that is not listed here.
+#
+#  The keyword classifier was the primary mechanism until 2026-08. It reads the
+#  node key, display name, module path and category as one string and returns on
+#  the first rule that matches, which makes placement depend on rule ORDER
+#  rather than on anything about the node. "mask" is tested for VFX several
+#  rules before "conditioning" is tested for Generate, so RadianceEnergyMask —
+#  which produces CONDITIONING for the sampler — landed one menu away from the
+#  only node that reads it. Every such case had to be discovered by eye and
+#  patched into SECTION_OVERRIDES afterwards.
+#
+#  Declaring the section removes the guess. Adding a node to this table is one
+#  line, and `tests/test_menu_sections.py` fails if a registered node is
+#  missing from it, so the omission is caught at commit time rather than by a
+#  user wondering where their node went.
+# ─────────────────────────────────────────────────────────────────────────────
+
+NODE_SECTIONS = {
+    # ── Color ─────────────────────────────────────────────────────────────
+    "RadianceApplyGradeInfo": "Color",
+    "RadianceCDLExport": "Color",
+    "RadianceCDLImport": "Color",
+    "RadianceCDLTransform": "Color",
+    "RadianceColorSpaceConvert": "Color",
+    "RadianceCurves": "Color",
+    "RadianceGrade": "Color",
+    "RadianceGradeApply": "Color",
+    "RadianceGradeMatch": "Color",
+    "RadianceHueCurves": "Color",
+    "RadianceLUTApply": "Color",
+    "RadianceLUTBlend": "Color",
+    "RadianceOCIOContext": "Color",
+    "RadianceWhiteBalance": "Color",
+    # ── Core ──────────────────────────────────────────────────────────────
+    "RadianceProjectManager": "Core",
+    # ── Generate ──────────────────────────────────────────────────────────
+    "RadianceCinematicPromptEncoder": "Generate",
+    "RadianceControlNetApply": "Generate",
+    "RadianceDenoise": "Generate",
+    "RadianceEnergyMask": "Generate",
+    "RadianceHDRLatentEncoder": "Generate",
+    "RadianceHDRVAEDecode": "Generate",
+    "RadianceLoraStack": "Generate",
+    "RadianceRegionalGrid": "Generate",
+    "RadianceRegionalPrompt": "Generate",
+    "RadianceResolution": "Generate",
+    "RadianceSamplerPro": "Generate",
+    "RadianceUnifiedLoader": "Generate",
+    # ── HDR ───────────────────────────────────────────────────────────────
+    "RadianceACES2OutputTransformFull": "HDR",
+    "RadianceACES2ReachGamutCompress": "HDR",
+    "RadianceACES2Tonescale": "HDR",
+    "RadianceACESTransform": "HDR",
+    "RadianceClipDetector": "HDR",
+    "RadianceHDRAutoLogSelect": "HDR",
+    "RadianceHDRColorPipeline": "HDR",
+    "RadianceHDRDiagnostics": "HDR",
+    "RadianceHDREncode": "HDR",
+    "RadianceHDRExpandDynamicRange": "HDR",
+    "RadianceHDRHighlightComposite": "HDR",
+    "RadianceHDRLoRAApply": "HDR",
+    "RadianceHDRLoRALoader": "HDR",
+    "RadianceHDRSynthesisEngine": "HDR",
+    "RadianceHDRToneMap": "HDR",
+    "RadianceSDRToHDRPrepare": "HDR",
+    "RadianceSDRToHDRRecover": "HDR",
+    "RadianceSDRToHDRUniversal": "HDR",
+    "RadianceSDRtoHDRExpand": "HDR",
+    # ── Load & Save ───────────────────────────────────────────────────────
+    "RadianceDigitalCinemaRead": "Load & Save",
+    "RadianceDigitalCinemaWrite": "Load & Save",
+    "RadianceEXRMultiPart": "Load & Save",
+    "RadianceRead": "Load & Save",
+    "RadianceWrite": "Load & Save",
+    # ── Pipeline ──────────────────────────────────────────────────────────
+    "RadianceDaVinciSend": "Pipeline",
+    "RadianceMCP": "Pipeline",
+    "RadianceNukeSend": "Pipeline",
+    # ── Review ────────────────────────────────────────────────────────────
+    "RadianceContactSheet": "Review",
+    "RadianceFlipbookGIF": "Review",
+    "RadianceFocusPeaking": "Review",
+    "RadianceFrameStamp": "Review",
+    "RadianceHDRMonitor": "Review",
+    "RadianceLiteViewer": "Review",
+    "RadiancePolicyGuard": "Review",
+    "RadiancePreviewServer": "Review",
+    "RadianceQC": "Review",
+    "RadianceViewer": "Review",
+    # ── Upscale ───────────────────────────────────────────────────────────
+    "RadianceUpscaleFaceRestore": "Upscale",
+    "RadianceUpscaleImage": "Upscale",
+    "RadianceUpscaleTiler": "Upscale",
+    "RadianceUpscaleVideo": "Upscale",
+    # ── VFX ───────────────────────────────────────────────────────────────
+    "RadianceAnamorphicStreaks": "VFX",
+    "RadianceBitDepthDegrade": "VFX",
+    "RadianceBlendComposite": "VFX",
+    "RadianceChromaticAberration": "VFX",
+    "RadianceDepthMapGenerator": "VFX",
+    "RadianceEXRPassesWriter": "VFX",
+    "RadianceFilmGrain": "VFX",
+    "RadianceHDRCrop": "VFX",
+    "RadianceHDRGrainMatcher": "VFX",
+    "RadianceHDRStitch": "VFX",
+    "RadianceLensDistortion": "VFX",
+    "RadianceLinearMatting": "VFX",
+    "RadianceLoadImageMask": "VFX",
+    "RadianceMotionBlur": "VFX",
+    "RadianceMultiMaskVisualPicker": "VFX",
+    "RadianceMultipassAOVReader": "VFX",
+    "RadianceMultipassComposite": "VFX",
+    "RadianceMultipassMaster": "VFX",
+    "RadianceMultipassRelight": "VFX",
+    "RadianceOpticalFlow": "VFX",
+    "RadianceRelightEngine": "VFX",
+    "RadianceSAMGenerator": "VFX",
+    "RadianceSAMModelLoader": "VFX",
+    "RadianceSceneCutDetect": "VFX",
+    "RadianceSceneCutSplit": "VFX",
+    "RadianceSubpixelStabilizer": "VFX",
+    "RadianceTemporalStitchStabilizer": "VFX",
+    "RadianceVectorMaskDraw": "VFX",
+    "RadianceVignette": "VFX",
+    # ── Video ─────────────────────────────────────────────────────────────
+    "RadianceI2VPipeline": "Video",
+    "RadianceT2VPipeline": "Video",
+    "RadianceVideoAssembler": "Video",
+    "RadianceVideoBatchDecode": "Video",
+    "RadianceVideoCondMerge": "Video",
+    "RadianceVideoExport": "Video",
+    "RadianceVideoFrameRouter": "Video",
+    "RadianceVideoHDRConditioner": "Video",
+    "RadianceVideoHDRDecode": "Video",
+    "RadianceVideoLatentNoise": "Video",
+    "RadianceVideoLoader": "Video",
+    "RadianceVideoMaskPropagator": "Video",
+    "RadianceVideoModelInfo": "Video",
+    "RadianceVideoSampler": "Video",
+}
+
+
 # Per-node section overrides for nodes the keyword classifier mis-files.
 SECTION_OVERRIDES = {
-    "RadianceNDISender": "Pipeline",        # network output, not generation
-    "RadianceHDRVAEDecode": "Generate",     # diffusion VAE -> Radiance-badged
-    "RadianceHDRLatentEncoder": "Generate", # diffusion VAE encode
-    "RadianceGradeApply": "Color",          # color op, not review
-    "RadianceEnergyMask": "Generate",       # writes CONDITIONING for the
-                                            # sampler; "mask" alone files it
-                                            # under VFX, away from Sampler Pro
+    # Kept only for nodes that exist in the source but are NOT registered, so
+    # their placement is already decided if they are ever published. Everything
+    # registered is declared in NODE_SECTIONS above instead.
+    #
+    # RadianceGradeApply used to live here while unregistered — the override
+    # was the only sign anyone knew the node existed. It is published now.
+    "RadianceNDISender": "Pipeline",        # written, not registered; network
+                                            # output, not generation
 }
 
 # Exact label overrides keyed by node class id. The value is the BASE label
@@ -188,10 +339,25 @@ def _inject_search_aliases(node_class: Any, node_key: str, raw: Any) -> None:
 
 
 def classify_menu_section(node_key: str, node_class: Any, display_name: str) -> str:
-    """Classify a node into the public Radiance menu taxonomy."""
+    """The menu section for a node.
+
+    Declared placement wins. The keyword rules below are a fallback for nodes
+    that have not been added to NODE_SECTIONS, and they warn when they run,
+    because a guessed placement is how RadianceEnergyMask ended up in VFX.
+    """
 
     if node_key in SECTION_OVERRIDES:
         return SECTION_OVERRIDES[node_key]
+
+    declared = NODE_SECTIONS.get(node_key)
+    if declared is not None:
+        return declared
+
+    logger.warning(
+        "[Radiance] '%s' has no declared menu section; falling back to keyword "
+        "matching, which guesses. Add it to NODE_SECTIONS in nodes/branding.py.",
+        node_key,
+    )
 
     module_name = getattr(node_class, "__module__", "") or ""
     current_category = str(getattr(node_class, "CATEGORY", "") or "")

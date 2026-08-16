@@ -523,6 +523,12 @@ async def radiance_deliver_endpoint(request):
             # ─── AI Upscale (2x) ──────────────────────────────────────────
             if upscale_2x:
                 try:
+                    # LAYERING: delivery reaching up into the node surface.
+                    # The class is really defined in radiance/image/upscale.py,
+                    # but tests/conftest.py replaces `radiance.image` with a
+                    # stub exposing only `defects`, so importing the real
+                    # submodule here would break under the harness. Untangling
+                    # that is part of the monolith split, not a local fix.
                     from radiance.nodes_upscale import RadianceAIUpscale
                     upscaler = RadianceAIUpscale()
                     graded_tensor, _ = upscaler.upscale(
@@ -614,6 +620,13 @@ async def radiance_deliver_endpoint(request):
                 logger.warning("[radiance.delivery.handler]: %s", exc)
 
             # ─── Save using RadianceWrite Logic ────────────────────────────
+            #
+            # LAYERING: this is the delivery path reaching up into the node
+            # layer, which is backwards — it is why the handler cannot be
+            # tested without importing ComfyUI's node surface. The writer body
+            # is 118 lines in nodes_io.py and depends on module-level helpers
+            # in that same file, so extracting it is part of splitting that
+            # monolith rather than a local fix. Tracked in the README.
             from radiance.nodes_io import RadianceWrite
             writer = RadianceWrite()
 
