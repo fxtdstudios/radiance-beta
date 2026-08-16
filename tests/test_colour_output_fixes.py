@@ -102,11 +102,20 @@ def test_hlg_reference_constant_is_documented():
 # ── 3. The paths that were already right must stay right ────────────────────
 
 @pytest.mark.real_torch
+# Updated 2026-08-16 when 18% grey was anchored to the ACES 2.0 reference.
+# These are not "whatever the code now prints" — each is derivable:
+#   SDR  0.18 -> 0.3492 = the sRGB encode of 10.000 nits on a 100-nit display
+#                         (1.055*0.10^(1/2.4)-0.055), the ACES 2.0 SDR grey.
+#                         The old 0.4610 encoded ~18 nits, 0.85 stop bright.
+#   PQ   0.18 -> 0.3298 = the PQ signal for 14.512 nits, the ACES 2.0 value at
+#                         a 1000-nit peak. The old 0.3478 was PQ for 17.97.
+#   PQ   8.00 -> 0.7518 unchanged: the highlight end of the curve did not move,
+#                         only where the midtone sits on it.
 @pytest.mark.parametrize("transform,scene,expected", [
-    (_SDR, 0.18, 0.4610),
-    (_SDR, 0.50, 0.9438),
-    (_PQ1000, 0.18, 0.3478),
-    (_PQ1000, 1.00, 0.6047),
+    (_SDR, 0.18, 0.3492),
+    (_SDR, 0.50, 0.7284),
+    (_PQ1000, 0.18, 0.3298),
+    (_PQ1000, 1.00, 0.5827),
     (_PQ1000, 8.00, 0.7518),
 ])
 def test_sdr_and_pq_are_untouched_by_the_hlg_and_cinema_fix(transform, scene, expected):

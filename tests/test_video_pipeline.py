@@ -124,7 +124,7 @@ class TestSceneCutDetectNode:
         import torch
         t = torch.from_numpy(frames)
         cut_data, shot_count, plot = self.cls().detect(
-            t, threshold=0.3, min_shot_frames=8, method="combined"
+            t, distance_threshold=0.3, min_shot_frames=8, method="combined"
         )
         assert isinstance(cut_data, str)
         assert isinstance(shot_count, int)

@@ -144,7 +144,7 @@ class _DanieleEvoParams:
     # Default ACES 2.0 parameters (per Academy reference design)
     G          = 1.15    # contrast exponent
     SCENE_GREY = 0.18    # 18% grey in scene-linear
-    GREY_TGT   = 0.10    # display grey as fraction of peak (10 nits out of 100)
+    GREY_TGT   = None    # resolved per peak from the published ACES 2.0 table
     TOE_SCENE  = 0.04    # linear toe threshold
 
     def __init__(
@@ -152,9 +152,18 @@ class _DanieleEvoParams:
         peak_nits: float  = 100.0,
         g:         float  = G,
         scene_grey: float = SCENE_GREY,
-        grey_target: float = GREY_TGT,
+        grey_target: float = None,
         toe_scene:  float = TOE_SCENE,
     ):
+        # grey_target used to default to a flat 0.10 — 10% of peak, whatever
+        # the peak was — so 18% grey rendered at 10 nits on SDR but 400 nits on
+        # a 4000-nit master, nearly 24x the ACES 2.0 reference. The published
+        # table has grey rising gently (10.0 / 14.5 / 16.8 nits at 100 / 1000 /
+        # 4000), not tracking the display.
+        if grey_target is None:
+            from radiance.hdr.tonescale import aces2_midgrey_fraction
+            grey_target = aces2_midgrey_fraction(peak_nits)
+
         self.n          = peak_nits / 100.0   # normalised peak
         self.g          = g
         self.scene_grey = scene_grey

@@ -4,7 +4,7 @@
 
 **Professional VFX, HDR color science, review, and DCC handoff for ComfyUI.**
 
-[![Version](https://img.shields.io/badge/version-3.2.1-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
+[![Version](https://img.shields.io/badge/version-3.3.0-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
 [![Nodes](https://img.shields.io/badge/nodes-111-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
@@ -317,14 +317,6 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 
 ### Correctness backlog
 
-- [ ] **Two ACES 2.0 tone scales disagree, and both are wrong somewhere.**
-      `RadianceACES2OutputTransform` (legacy) uses a log-contrast + tanh
-      approximation that holds 18% grey at ~18 nits on every peak — the right
-      shape, ~0.85 stop above the ~10 nit reference.
-      `RadianceACES2Tonescale` implements the real Daniele Evo curve but scales
-      grey *with* peak: 10 nits at SDR, 100 at 1000, 400 at 4000. On a 4000-nit
-      master that is 40x too bright in the midtones. Needs a decision on the
-      grey target before either is rewired to the other.
 - [ ] **RUDRA video decoders were trained on stills.** `wan` / `ltx-video` /
       `hunyuanvideo` checkpoints never saw multi-frame latents; real video falls
       back to math expansion. Needs retraining, not patching.
@@ -372,7 +364,9 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
       crashes on video latents.
 - [x] Nodes no longer write into the ComfyUI install directory.
 - [x] Scene-cut thresholds are absolute, so the same value means the same thing
-      on every clip and cut-free footage reports no cuts.
+      on every clip and cut-free footage reports no cuts. The widget was
+      renamed to `distance_threshold` so a saved value cannot be silently
+      reinterpreted under the new meaning.
 - [x] Tier-3 upscale honours `scale` — 2x no longer returns the top-left
       quarter of a 4x render.
 - [x] Optical flow is pyramidal: 1–5 px displacements recover to within 10%,
@@ -386,6 +380,13 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 - [x] First JavaScript coverage: 27 tests over the shared DOM and widget
       helpers, on `node --test`, wired into CI.
 - [x] Four commits merged to `radiance-beta` `main` via PR #43.
+- [x] **Both ACES 2.0 tone scales hit the published reference.** 18% grey now
+      lands at 10.000 / 13.193 / 14.512 / 15.747 / 16.824 nits at peaks of
+      100 / 500 / 1000 / 2000 / 4000, matching the ACES Output Transform table
+      exactly. Previously the Daniele Evo node scaled grey with the display
+      (400 nits at a 4000-nit peak, ~24x reference) and the legacy transform
+      held it at ~18 nits everywhere (~0.85 stop bright at SDR). HLG keeps its
+      BT.2408 anchor, which is a different and equally deliberate reference.
 - [x] Menu placement is declared per node, not guessed. `NODE_SECTIONS` covers
       all 111; the keyword classifier is a warning-only fallback, and a test
       fails if a registered node is missing from the table.
@@ -397,7 +398,9 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
       audit and review write-ups are gone, `.comfyignore` no longer lists files
       that stopped existing, and the generated GPU report is ignored rather
       than committed.
-- [x] Suite: 2298 passed / 0 failed / 60 skipped, plus 27 JS tests.
+- [x] Suite: 2326 passed / 0 failed / 60 skipped, plus 27 JS tests.
+- [x] Released as **3.3.0**, not a patch: five changes alter what an unchanged
+      graph does, and the changelog leads with them.
 
 ## Documentation
 
