@@ -84,6 +84,30 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ### Fixed
 
+- **Both ACES 2.0 tone scales now hit the published reference.** Radiance
+  shipped two of them and they disagreed by up to 24x.
+  `RadianceACES2Tonescale` used the real Daniele Evo curve but pinned 18% grey
+  to a flat 10% *of peak*, so grey tracked the display: 10 nits at SDR, 100 at
+  1000, 400 at 4000. `RadianceACES2OutputTransform` used a log-contrast + tanh
+  approximation that held grey at ~18 nits on every peak — right in kind,
+  ~0.85 stop bright at SDR.
+
+  There was no judgement call: ACES 2.0 publishes the mapping. An ACES value of
+  0.18 lands at 10.000 / 13.193 / 14.512 / 15.747 / 16.824 nits at peaks of
+  100 / 500 / 1000 / 2000 / 4000 — the midtone barely moves while the
+  highlights extend. `hdr/tonescale.py` carries that table; the Daniele Evo
+  parameterisation derives its grey target from it, and the legacy transform
+  solves an input gain that puts grey on the same value while keeping its
+  highlight roll-off.
+
+  **Upgrade note.** SDR and PQ output changes: 18% grey encodes to sRGB 0.3492
+  instead of 0.4610, and to PQ 0.3298 instead of 0.3478. Both new values are
+  independently derivable — 0.3492 is the sRGB encode of 10 nits, 0.3298 is the
+  PQ signal for 14.512 nits. Re-check any master graded against the old
+  midtone. HLG is deliberately unchanged: it is anchored to BT.2408 reference
+  grey (signal 0.38, ~26 nits) and passes a synthetic peak into the curve, so
+  the ACES table does not apply to it.
+
 - **Scene-cut thresholds were relative to the batch.** `detect_cuts` divided
   every clip's scores by that clip's own maximum before comparing to
   `threshold`, so the largest inter-frame delta in *any* footage was forced to
