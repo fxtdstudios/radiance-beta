@@ -186,15 +186,25 @@ def _tonescale(rgb, peak):
     )
 
 
-def test_midgrey_is_peak_independent():
+def test_midgrey_tracks_the_aces_reference_not_the_peak():
     """
     18% grey rendered at 1.80 nits on a 1000-nit target and 0.45 on a 4000-nit
     one -- raising the peak made the whole picture darker.
+
+    The original fix asserted the midtone was peak-INDEPENDENT (within 1 nit
+    across peaks). That was the right instinct and slightly too strong: ACES
+    2.0 publishes 14.512 nits at 1000 and 16.824 at 4000, so it does rise a
+    little -- about 2.3 nits, deliberately -- while the highlights extend by
+    3000. Pinning the published values covers the original regression and the
+    "grey scales with peak" one in the same assertion.
     """
+    from radiance.hdr.tonescale import aces2_midgrey_nits
+
     rgb = np.full((1, 1, 1, 3), 0.18, dtype=np.float32)
-    nits = [float(_tonescale(rgb.copy(), p)[0, 0, 0, 0] * 100.0) for p in (1000.0, 4000.0)]
-    assert abs(nits[0] - nits[1]) < 1.0, f"18% grey moved with peak: {nits}"
-    assert 5.0 < nits[0] < 40.0, f"18% grey at an implausible {nits[0]} nits"
+    for peak in (100.0, 1000.0, 4000.0):
+        nits = float(_tonescale(rgb.copy(), peak)[0, 0, 0, 0] * 100.0)
+        assert nits == pytest.approx(aces2_midgrey_nits(peak), abs=0.05), \
+            f"18% grey at {nits:.2f} nits on a {peak:.0f}-nit target"
 
 
 def test_tonescale_reaches_requested_peak():

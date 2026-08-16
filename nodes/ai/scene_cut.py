@@ -154,7 +154,7 @@ class RadianceSceneCutDetect:
                 "images": ("IMAGE", {
                     "tooltip": "Full video sequence as IMAGE batch.",
                 }),
-                "threshold": ("FLOAT", {
+                "distance_threshold": ("FLOAT", {
                     "default": 0.35, "min": 0.01, "max": 2.0, "step": 0.01,
                     "tooltip": (
                         "Absolute inter-frame distance for a cut — the same "
@@ -214,10 +214,20 @@ class RadianceSceneCutDetect:
     def detect(
         self,
         images: torch.Tensor,
-        threshold: float,
+        distance_threshold: float,
         min_shot_frames: int,
         method: str,
     ):
+        # Renamed from `threshold` in 3.3.0, deliberately.
+        #
+        # The value's MEANING changed — it used to be a fraction of the clip's
+        # own maximum, it is now an absolute inter-frame distance — while the
+        # widget kept the same name and range. A saved workflow would have
+        # carried its old number across and quietly detected different cuts,
+        # with nothing to see. ComfyUI drops a stored value whose key no longer
+        # exists, so renaming turns a silent reinterpretation into a visible
+        # reset to the new default, which the user can see and re-tune.
+        threshold = distance_threshold
         frames = images.detach().cpu().float().numpy()  # (B,H,W,3)
         cuts, scores = detect_cuts(frames, threshold, min_shot_frames, method)
         shot_count = len(cuts)

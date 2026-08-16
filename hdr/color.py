@@ -1,4 +1,5 @@
 import torch
+import math
 import numpy as np
 import logging
 from typing import Tuple, Dict, Any
@@ -1357,12 +1358,69 @@ class ACES2OutputTransform:
 
         return result
 
+    @staticmethod
+    def _tanh_tonescale_scalar(x, peak_scale, contrast, toe_power=2.0, pivot=0.18):
+        """The per-channel curve of `_apply_tonescale_drt`, for one value.
+
+        Used to probe where 18% grey lands so the input can be scaled to put
+        it on the ACES 2.0 reference. This duplicates the chain in the main
+        loop deliberately — the loop is vectorised over an image and this is
+        called once on a scalar. `test_aces2_reference_grey.py` asserts the two
+        agree, so the copy cannot drift silently.
+        """
+        channel = max(float(x), 1e-10)
+
+        log_contrast = np.log2(channel / pivot) * contrast
+        channel_contrast = float(np.power(2.0, log_contrast) * pivot)
+
+        cc_p = np.power(channel_contrast, toe_power)
+        channel_toe = float(
+            np.power(cc_p / (cc_p + np.power(0.01, toe_power)), 1.0 / toe_power)
+            * channel_contrast
+        )
+
+        knee = min(1.0, 0.9 * peak_scale)
+        headroom = max(peak_scale - knee, 1e-6)
+        if channel_toe < knee:
+            return channel_toe
+        return float(knee + headroom * np.tanh((channel_toe - knee) / headroom))
+
+    def _tanh_tonescale_grey(self, peak_scale, surround_factor):
+        """Where 18% scene grey lands on the uncorrected curve."""
+        return self._tanh_tonescale_scalar(0.18, peak_scale, 1.55 * surround_factor)
+
+    def _solve_grey_gain(self, target, peak_scale, surround_factor):
+        """Input gain g such that curve(0.18 * g) == target.
+
+        Scaling the input by target/curve(0.18) is not enough: the curve is
+        non-linear, so the correction has to be solved rather than computed.
+        The curve is monotonic in x, so bisection converges reliably and this
+        runs once per call, not per pixel.
+        """
+        contrast = 1.55 * surround_factor
+        f = lambda g: self._tanh_tonescale_scalar(0.18 * g, peak_scale, contrast)
+
+        lo, hi = 1e-4, 1.0
+        while f(hi) < target and hi < 1e6:
+            hi *= 2.0
+        if f(hi) < target:            # curve cannot reach it (peak too low)
+            return hi
+
+        for _ in range(60):
+            mid = math.sqrt(lo * hi)  # geometric: the curve is log-ish in x
+            if f(mid) < target:
+                lo = mid
+            else:
+                hi = mid
+        return math.sqrt(lo * hi)
+
     def _apply_tonescale_drt(
         self,
         rgb: np.ndarray,
         peak_luminance: float = 100.0,
         surround: str = "Dim",
         is_hdr: bool = False,
+        grey_anchor: bool = True,
     ) -> np.ndarray:
         """
         Apply ACES 2.0 DRT-style tonescale.
@@ -1377,6 +1435,28 @@ class ACES2OutputTransform:
         surround_factor = {"Dark": 0.9, "Dim": 1.0, "Average": 1.1}.get(surround, 1.0)
 
         peak_scale = peak_luminance / 100.0
+
+        # Anchor 18% grey where ACES 2.0 puts it.
+        #
+        # The log-contrast + tanh shaping below is an approximation of the
+        # reference DRT, and it held grey at ~18 nits on every peak: the right
+        # behaviour in kind (ACES 2.0 does keep the midtone nearly still as the
+        # display gets brighter) but ~0.85 stop above the 10-nit SDR reference.
+        # Scaling the input so 0.18 lands on the published value keeps the
+        # curve's highlight roll-off while putting the midtone where a
+        # reference monitor would.
+        from radiance.hdr.tonescale import aces2_midgrey_nits
+
+        _target_grey = aces2_midgrey_nits(peak_luminance) / 100.0
+        # HLG opts out: it passes a synthetic peak (100 / diffuse-white-scene
+        # = ~385) to shape the curve, not a display luminance, and its grey is
+        # governed by BT.2408 — reference grey at signal 0.38, about 26 nits on
+        # a 1000-nit HLG display — not by the ACES table. Anchoring it here
+        # moved HLG grey to signal 0.31 and broke that deliberate calibration.
+        if grey_anchor:
+            _grey_gain = self._solve_grey_gain(_target_grey, peak_scale, surround_factor)
+            rgb = rgb * _grey_gain
+
         contrast = 1.55 * surround_factor
         pivot = 0.18
         toe_power = 2.0
@@ -1586,7 +1666,8 @@ class ACES2OutputTransform:
         # 6. Apply DRT tonescale
         # v2.1 FIX: Pass is_hdr flag so tonescale preserves HDR headroom
         tonemapped = self._apply_tonescale_drt(
-            img, peak_luminance=peak_nits, surround=surround, is_hdr=is_hdr
+            img, peak_luminance=peak_nits, surround=surround, is_hdr=is_hdr,
+            grey_anchor=not is_hlg,
         )
 
         # 7. Convert to output color space
