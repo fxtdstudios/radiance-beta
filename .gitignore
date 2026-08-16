@@ -146,10 +146,3 @@ preview/
 # A test that stubs folder_paths with a bare MagicMock once made models_dir a
 # truthy Mock; joining it produced a literal directory of that name.
 MagicMock/
-
-# ── Internal contributor docs — local reference, not published ──
-# Written 2026-08-16. Deliberately kept out of the repo: they describe repo
-# internals, in-flight debt and failure history rather than how to use the
-# package. Delete these two lines to publish them.
-docs/architecture.md
-docs/developer.md
