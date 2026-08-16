@@ -311,8 +311,9 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 - [ ] **Viewer JavaScript is unverified.** `radiance_viewer.js` and the WebGL /
       WebGPU renderers have no automated coverage at all — the suite stops at
       the Python boundary.
-- [ ] **Push the committed work.** Commits are on `release/cleanup`, tracking
-      `beta/release/cleanup`; run `git fetch beta --prune && git push`.
+- [ ] **The public repo is 2.5 months behind.** `fxtdstudios/radiance` `main`
+      is still at `64fee41` (2026-06-04); everything since lives in
+      `fxtdstudios/radiance-beta`. Decide when beta merges down to public.
 
 ### Correctness backlog
 
@@ -377,6 +378,7 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
       was stale — the cosine ramp had already landed).
 - [x] First JavaScript coverage: 27 tests over the shared DOM and widget
       helpers, on `node --test`, wired into CI.
+- [x] Four commits merged to `radiance-beta` `main` via PR #43.
 - [x] Repository trimmed to what a user or contributor needs: the six internal
       audit and review write-ups are gone, `.comfyignore` no longer lists files
       that stopped existing, and the generated GPU report is ignored rather
