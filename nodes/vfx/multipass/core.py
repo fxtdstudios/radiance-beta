@@ -267,7 +267,19 @@ def _download_model(key: str, force: bool = False) -> Optional[str]:
         return dest
 
     size_mb = info["size_mb"]
-    logger.info(f"[Radiance] ── Auto-downloading: {info['note']}")
+
+    # This path had no consent gate of any kind: selecting a Depth Anything V2
+    # size or dsine_model_path="auto" and queueing would start the fetch.
+    from radiance.core.consent import require_consent
+    if not require_consent(
+        info.get("note", key),
+        size_mb=size_mb,
+        dest=dest,
+        url=info.get("url"),
+    ):
+        return None
+
+    logger.info(f"[Radiance] ── Downloading: {info['note']}")
     logger.info(f"[Radiance]   Size   : ~{size_mb} MB")
     logger.info(f"[Radiance]   Dest   : {dest}")
     logger.info(f"[Radiance]   Source : {info['url']}")
@@ -1074,31 +1086,45 @@ def _transmission_mask(
 #  MOTION VECTOR — Lucas-Kanade (v3.0)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _optical_flow_lk(
-    frame1: torch.Tensor,
-    frame2: Optional[torch.Tensor],
-    window_radius: int = 7,
+def _warp_by_flow(img: torch.Tensor, u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """Sample (B,H,W) *img* at each pixel displaced by (u, v) pixels.
+
+    Used to warp frame2 back towards frame1 between pyramid levels, so each
+    level only has to solve for the small residual motion its linearisation
+    can actually represent.
+    """
+    B, H, W = img.shape
+    dev, dt = img.device, img.dtype
+
+    ys, xs = torch.meshgrid(
+        torch.arange(H, device=dev, dtype=dt),
+        torch.arange(W, device=dev, dtype=dt),
+        indexing="ij",
+    )
+    # grid_sample wants normalised [-1, 1] coordinates.
+    gx = (xs.unsqueeze(0) + u) / max(W - 1, 1) * 2.0 - 1.0
+    gy = (ys.unsqueeze(0) + v) / max(H - 1, 1) * 2.0 - 1.0
+    grid = torch.stack([gx, gy], dim=-1)
+
+    warped = F.grid_sample(
+        img.unsqueeze(1), grid,
+        mode="bilinear", padding_mode="border", align_corners=True,
+    )
+    return warped.squeeze(1)
+
+
+def _lk_step(
+    f1: torch.Tensor,
+    f2: torch.Tensor,
+    window_radius: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """One windowed least-squares Lucas-Kanade solve, no pyramid.
+
+    Solves the 2x2 per-pixel system over a (2r+1)^2 integration window:
+      [SIx^2  SIxIy] [u]   [-SIxIt]
+      [SIxIy  SIy^2] [v] = [-SIyIt]
     """
-    Dense Lucas-Kanade optical flow via windowed least-squares (pure PyTorch).
-
-    Solves the 2×2 per-pixel system over a (2r+1)² integration window:
-      [ΣIx²  ΣIxIy] [u]   [-ΣIxIt]
-      [ΣIxIy ΣIy² ] [v] = [-ΣIyIt]
-
-    Returns (u, v): (B,H,W) flow in pixel units.
-    Returns zeros when frame2 is None (static / single-frame mode).
-    """
-    B, H, W = frame1.shape
-    dev = frame1.device
-
-    if frame2 is None:
-        zero = torch.zeros(B, H, W, device=dev, dtype=torch.float32)
-        return zero, zero
-
-    r  = max(1, window_radius)
-    f1 = frame1.float()
-    f2 = frame2.float()
+    r = max(1, window_radius)
 
     Ix, Iy = _scharr_gradient(f1)
     It     = f2 - f1
@@ -1119,11 +1145,93 @@ def _optical_flow_lk(
 
     u = (A12 * b2 - A22 * b1) / det_r
     v = (A12 * b1 - A11 * b2) / det_r
+    return u, v
+
+
+def _optical_flow_lk(
+    frame1: torch.Tensor,
+    frame2: Optional[torch.Tensor],
+    window_radius: int = 7,
+    levels: int = 4,
+    iterations: int = 6,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Dense pyramidal Lucas-Kanade optical flow (pure PyTorch).
+
+    Returns (u, v): (B,H,W) flow in pixel units.
+    Returns zeros when frame2 is None (static / single-frame mode).
+
+    Why the pyramid: a single windowed LK solve linearises the brightness
+    constancy equation as `It = f2 - f1`, which only holds while the
+    displacement stays inside the gradient's support — a couple of pixels.
+    The previous single-scale implementation therefore recovered roughly all
+    of a 1 px shift, 17% of 3 px and 1% of 5 px, which made mask propagation
+    effectively static on anything but the slowest moves.
+
+    Coarse-to-fine fixes that without changing the solver: at level L the
+    image is 2^L smaller, so a 8 px displacement looks like 0.5 px and is
+    inside the linear regime. Each level warps frame2 by the flow accumulated
+    so far and solves only for the residual, refining `iterations` times.
+    """
+    if frame2 is None:
+        B, H, W = frame1.shape
+        zero = torch.zeros(B, H, W, device=frame1.device, dtype=torch.float32)
+        return zero, zero
+
+    f1_full = frame1.float()
+    f2_full = frame2.float()
+    B, H, W = f1_full.shape
+
+    # Stop shrinking before the image is smaller than the integration window.
+    #
+    # Letting the radius shrink with the level to allow a deeper pyramid was
+    # tried and measured worse: a 2 px window on a coarse level is too noisy,
+    # and the bad estimate propagates down. A fixed window with more
+    # refinement iterations is both more accurate and more stable.
+    min_side = max(8, 2 * max(1, window_radius) + 1)
+    max_levels = 1
+    while max_levels < max(1, levels) and min(H, W) // (2 ** max_levels) >= min_side:
+        max_levels += 1
+
+    def _down(x, factor):
+        if factor == 1:
+            return x
+        h, w = max(1, H // factor), max(1, W // factor)
+        return F.interpolate(
+            x.unsqueeze(1), size=(h, w), mode="bilinear", align_corners=False
+        ).squeeze(1)
+
+    u = torch.zeros(B, max(1, H // (2 ** (max_levels - 1))),
+                    max(1, W // (2 ** (max_levels - 1))),
+                    device=f1_full.device, dtype=torch.float32)
+    v = torch.zeros_like(u)
+
+    for level in range(max_levels - 1, -1, -1):
+        factor = 2 ** level
+        f1 = _down(f1_full, factor)
+        f2 = _down(f2_full, factor)
+        lh, lw = f1.shape[-2:]
+
+        if u.shape[-2:] != (lh, lw):
+            # Moving down a level doubles the pixel scale, so the flow
+            # magnitude has to be rescaled as well as resampled.
+            sy = lh / u.shape[-2]
+            sx = lw / u.shape[-1]
+            u = F.interpolate(u.unsqueeze(1), size=(lh, lw),
+                              mode="bilinear", align_corners=False).squeeze(1) * sx
+            v = F.interpolate(v.unsqueeze(1), size=(lh, lw),
+                              mode="bilinear", align_corners=False).squeeze(1) * sy
+
+        for _ in range(max(1, iterations)):
+            f2_warped = _warp_by_flow(f2, u, v)
+            du, dv = _lk_step(f1, f2_warped, window_radius)
+            # Bound a single increment so a textureless window cannot throw
+            # the estimate across the frame in one step.
+            u = u + du.clamp(-1.0, 1.0)
+            v = v + dv.clamp(-1.0, 1.0)
 
     max_disp = max(H, W) * 0.5
-    u = u.clamp(-max_disp, max_disp)
-    v = v.clamp(-max_disp, max_disp)
-    return u, v
+    return u.clamp(-max_disp, max_disp), v.clamp(-max_disp, max_disp)
 
 
 def _hsv_to_rgb_tensor(h: torch.Tensor, s: torch.Tensor, v: torch.Tensor) -> torch.Tensor:

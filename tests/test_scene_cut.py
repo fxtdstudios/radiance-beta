@@ -203,7 +203,12 @@ class TestDetectCuts(unittest.TestCase):
         frames = np.zeros((16, 8, 8, 3), dtype=np.float32)
         frames[:8, :, :4, :] = 1.0   # shot A: vertical edge at col 4
         frames[8:, :4, :, :] = 1.0   # shot B: horizontal edge at row 4
-        cuts, _ = detect_cuts(frames, method="edge", threshold=0.3, min_shot_frames=4)
+        # threshold is now an ABSOLUTE distance, and the edge metric runs on a
+        # smaller scale than the histogram one — an orientation flip like this
+        # scores ~0.22. Under the old batch-max normalisation any non-zero
+        # score could be pushed over any threshold, which is exactly why the
+        # number was meaningless.
+        cuts, _ = detect_cuts(frames, method="edge", threshold=0.15, min_shot_frames=4)
         self.assertGreater(len(cuts), 1)
 
     def test_methods_combined(self):
