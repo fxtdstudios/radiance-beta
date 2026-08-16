@@ -35,6 +35,10 @@ class ENV:
     # Console log theme (pro | minimalist | classic | cyberpunk | matrix | compact)
     RADIANCE_LOG_THEME = "RADIANCE_LOG_THEME"
 
+    # Console log level (DEBUG | INFO | WARNING | ERROR). The startup shortfall
+    # error tells users to set this for tracebacks, so it has to be real.
+    RADIANCE_LOG_LEVEL = "RADIANCE_LOG_LEVEL"
+
     # Internal flags that must be set before OpenCV/OpenMP-backed imports.
     KMP_DUPLICATE_LIB_OK = "KMP_DUPLICATE_LIB_OK"
     OPENCV_IO_ENABLE_OPENEXR = "OPENCV_IO_ENABLE_OPENEXR"

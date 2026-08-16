@@ -195,8 +195,11 @@ def _get_comfy_models_dir(subdir: str) -> str:
     """
     try:
         import folder_paths  # type: ignore
+        # isinstance, not truthiness: a test that stubs folder_paths with a
+        # bare MagicMock makes `models_dir` a truthy Mock, and joining it
+        # created a literal "MagicMock/mock.models_dir/<id>/" tree on disk.
         base = getattr(folder_paths, "models_dir", None)
-        if base:
+        if isinstance(base, str) and base:
             path = os.path.join(base, subdir)
             os.makedirs(path, exist_ok=True)
             return path
@@ -475,7 +478,7 @@ def _dsine_auto_discover() -> Optional[str]:
         import folder_paths  # type: ignore
         search_dirs = []
         models_root = getattr(folder_paths, "models_dir", None)
-        if models_root:
+        if isinstance(models_root, str) and models_root:
             search_dirs.append(os.path.join(models_root, "normal_estimation"))
         for key in ("checkpoints", "vae"):
             if hasattr(folder_paths, "get_folder_paths"):

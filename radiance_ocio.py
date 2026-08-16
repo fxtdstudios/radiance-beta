@@ -568,7 +568,9 @@ def _allowed_ocio_roots():
             roots.append(part if os.path.isdir(part) else os.path.dirname(part))
     try:
         import folder_paths  # type: ignore
-        roots.append(folder_paths.models_dir)
+        _models_dir = getattr(folder_paths, "models_dir", None)
+        if isinstance(_models_dir, str) and _models_dir:
+            roots.append(_models_dir)
     except Exception:
         pass
     return [os.path.abspath(os.path.expanduser(r)) for r in roots if r]

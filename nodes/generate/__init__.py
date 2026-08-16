@@ -20,6 +20,7 @@ from radiance.nodes.generate.prompt import (
 from radiance.nodes.generate.regional import RadianceRegionalPrompt, RadianceRegionalGrid
 from radiance.nodes.generate.resolution import RadianceResolution
 from radiance.nodes.generate.denoise import RadianceDenoise
+from radiance.nodes.generate.energy import RadianceEnergyMask
 
 logger = logging.getLogger("radiance.nodes.generate")
 
@@ -39,6 +40,7 @@ NODE_CLASS_MAPPINGS = {
     "RadianceRegionalGrid": RadianceRegionalGrid,
     "RadianceResolution": RadianceResolution,
     "RadianceDenoise": RadianceDenoise,
+    "RadianceEnergyMask": RadianceEnergyMask,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -55,6 +57,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceRegionalGrid": "◎ Regional Grid",
     "RadianceResolution": "◎ Resolution",
     "RadianceDenoise": "◎ Denoise",
+    "RadianceEnergyMask": "◎ Energy Mask",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

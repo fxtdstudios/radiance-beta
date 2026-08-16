@@ -176,8 +176,11 @@ def _get_models_dir(subdir: str) -> str:
     """Return ComfyUI models/<subdir> or ~/.cache/radiance fallback."""
     try:
         import folder_paths  # type: ignore
+        # isinstance, not truthiness: a test that stubs folder_paths with a
+        # bare MagicMock makes `models_dir` a truthy Mock, and joining it
+        # created a literal "MagicMock/mock.models_dir/<id>/" tree on disk.
         base = getattr(folder_paths, "models_dir", None)
-        if base:
+        if isinstance(base, str) and base:
             path = os.path.join(base, subdir)
             os.makedirs(path, exist_ok=True)
             return path

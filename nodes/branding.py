@@ -51,6 +51,9 @@ SECTION_OVERRIDES = {
     "RadianceHDRVAEDecode": "Generate",     # diffusion VAE -> Radiance-badged
     "RadianceHDRLatentEncoder": "Generate", # diffusion VAE encode
     "RadianceGradeApply": "Color",          # color op, not review
+    "RadianceEnergyMask": "Generate",       # writes CONDITIONING for the
+                                            # sampler; "mask" alone files it
+                                            # under VFX, away from Sampler Pro
 }
 
 # Exact label overrides keyed by node class id. The value is the BASE label

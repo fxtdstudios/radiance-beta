@@ -31,12 +31,13 @@ Ahn et al. 2024 — there is no separate perturbed forward pass. Restart samplin
 follows Xu et al. Alg. 2 as of 3.2.0, but it re-runs the whole tail of the
 schedule, so it is not cheap.
 
-## Nodes in this section (11)
+## Nodes in this section (12)
 
 | Node | Key | What it does |
 | :--- | :--- | :--- |
 | [ControlNet](#controlnet) | `RadianceControlNetApply` | Apply a ControlNet conditioning signal to the Radiance sampler. |
 | [Denoise](#denoise) | `RadianceDenoise` | Ultimate professional-grade 32-bit float spatial-temporal denoising node |
+| [Energy Mask](#energy-mask) | `RadianceEnergyMask` | Attach an energy mask to conditioning for Energy-Prioritized Sampling. |
 | [LoRA Stack](#lora-stack) | `RadianceLoraStack` | Compose up to 5 LoRAs into an accumulating LORA_STACK |
 | [Loader](#loader) | `RadianceUnifiedLoader` | Universal loader v3.3 — streamlined to be extremely visual and modular |
 | [Prompt](#prompt) | `RadianceCinematicPromptEncoder` | v3.2 — Professional cinematic encoder |
@@ -116,6 +117,34 @@ Ultimate professional-grade 32-bit float spatial-temporal denoising node. Splits
 | Output | Type | Description |
 | :--- | :--- | :--- |
 | `image` | `IMAGE` |  |
+
+---
+
+## Energy Mask
+
+**Node key:** `RadianceEnergyMask`  
+**Menu:** `FXTD STUDIOS/Radiance/Generate`  
+**Source:** `nodes/generate/energy.py`  
+
+Attach an energy mask to conditioning for Energy-Prioritized Sampling.
+
+### Inputs
+
+| Input | Required | Type | Default | Range | Description |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| `conditioning` | Yes | `CONDITIONING` |  |  | Positive conditioning. Connect the output to RadianceSamplerPro's `positive`. |
+| `mask` | Yes | `MASK` |  |  | High-energy region. White = boosted guidance, black = untouched. Resized to the latent grid at sampling time, so any resolution works. |
+| `priority` | Yes | `FLOAT` | `0.5` | -1.0 – 4.0, step 0.05 | Local guidance bonus inside the mask. Effective CFG there is cfg × (1 + priority). 0 disables EPS; negative softens the region. |
+| `invert` | Yes | `BOOLEAN` | `False` |  | Swap masked and unmasked regions before applying priority. |
+| `normalize` | Yes | `BOOLEAN` | `False` |  | Rescale the mask so its darkest pixel is 0 and brightest is 1. Use for luminance or depth passes that are not already in [0,1]. |
+| `gain` | Yes | `FLOAT` | `1.0` | 0.0 – 4.0, step 0.05 | Multiplier applied to the mask before clamping to [0,1]. Hardens a soft mask. |
+
+### Outputs
+
+| Output | Type | Description |
+| :--- | :--- | :--- |
+| `conditioning` | `CONDITIONING` |  |
+| `mask` | `MASK` |  |
 
 ---
 
