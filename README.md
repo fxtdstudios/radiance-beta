@@ -317,14 +317,6 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 
 ### Correctness backlog
 
-- [ ] **Two ACES 2.0 tone scales disagree, and both are wrong somewhere.**
-      `RadianceACES2OutputTransform` (legacy) uses a log-contrast + tanh
-      approximation that holds 18% grey at ~18 nits on every peak — the right
-      shape, ~0.85 stop above the ~10 nit reference.
-      `RadianceACES2Tonescale` implements the real Daniele Evo curve but scales
-      grey *with* peak: 10 nits at SDR, 100 at 1000, 400 at 4000. On a 4000-nit
-      master that is 40x too bright in the midtones. Needs a decision on the
-      grey target before either is rewired to the other.
 - [ ] **RUDRA video decoders were trained on stills.** `wan` / `ltx-video` /
       `hunyuanvideo` checkpoints never saw multi-frame latents; real video falls
       back to math expansion. Needs retraining, not patching.
@@ -386,6 +378,13 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 - [x] First JavaScript coverage: 27 tests over the shared DOM and widget
       helpers, on `node --test`, wired into CI.
 - [x] Four commits merged to `radiance-beta` `main` via PR #43.
+- [x] **Both ACES 2.0 tone scales hit the published reference.** 18% grey now
+      lands at 10.000 / 13.193 / 14.512 / 15.747 / 16.824 nits at peaks of
+      100 / 500 / 1000 / 2000 / 4000, matching the ACES Output Transform table
+      exactly. Previously the Daniele Evo node scaled grey with the display
+      (400 nits at a 4000-nit peak, ~24x reference) and the legacy transform
+      held it at ~18 nits everywhere (~0.85 stop bright at SDR). HLG keeps its
+      BT.2408 anchor, which is a different and equally deliberate reference.
 - [x] Menu placement is declared per node, not guessed. `NODE_SECTIONS` covers
       all 111; the keyword classifier is a warning-only fallback, and a test
       fails if a registered node is missing from the table.
@@ -397,7 +396,7 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
       audit and review write-ups are gone, `.comfyignore` no longer lists files
       that stopped existing, and the generated GPU report is ignored rather
       than committed.
-- [x] Suite: 2298 passed / 0 failed / 60 skipped, plus 27 JS tests.
+- [x] Suite: 2326 passed / 0 failed / 60 skipped, plus 27 JS tests.
 
 ## Documentation
 
