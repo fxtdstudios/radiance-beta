@@ -135,3 +135,21 @@ batch2.patch
 
 # Caches, build output and local virtualenvs — never part of the source tree
 .phase3-venv/
+
+# ── Node output written into the source tree (cleanup 2026-08) ──
+# Two path widgets defaulted to bare relative strings, so running those nodes
+# (or the tests that exercise them) wrote into the process working directory.
+# The defaults are now anchored to ComfyUI's output/ folder, but keep these
+# ignored so a stale checkout cannot commit them.
+grading/
+preview/
+# A test that stubs folder_paths with a bare MagicMock once made models_dir a
+# truthy Mock; joining it produced a literal directory of that name.
+MagicMock/
+
+# ── Internal contributor docs — local reference, not published ──
+# Written 2026-08-16. Deliberately kept out of the repo: they describe repo
+# internals, in-flight debt and failure history rather than how to use the
+# package. Delete these two lines to publish them.
+docs/architecture.md
+docs/developer.md

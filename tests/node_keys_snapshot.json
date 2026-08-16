@@ -24,6 +24,7 @@
   "RadianceDigitalCinemaWrite",
   "RadianceEXRMultiPart",
   "RadianceEXRPassesWriter",
+  "RadianceEnergyMask",
   "RadianceFilmGrain",
   "RadianceFlipbookGIF",
   "RadianceFocusPeaking",

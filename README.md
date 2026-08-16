@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/version-3.2.1-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
-[![Nodes](https://img.shields.io/badge/nodes-109-c8a96e?style=for-the-badge)](#node-map)
+[![Nodes](https://img.shields.io/badge/nodes-110-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
 [![Hugging Face](https://img.shields.io/badge/Hugging_Face-RUDRA_models-ffd21e?style=for-the-badge)](https://huggingface.co/fxtdstudios/RUDRA)
 
@@ -106,7 +106,7 @@ pip install -r requirements_mac_silicon.txt
 
 ### Verify
 
-Start ComfyUI and look for `Radiance: successfully loaded 109 nodes` in the log.
+Start ComfyUI and look for `Radiance: successfully loaded 110 nodes` in the log.
 A lower count means a node module failed to import — usually a missing optional
 dependency; the Environment Guard table printed at startup shows which.
 
@@ -228,7 +228,7 @@ FXTD STUDIOS/Radiance
 └─ Pipeline
 ```
 
-Radiance provides **109 nodes** (plus any Gizmos you create). Some nodes depend on optional packages and your ComfyUI environment.
+Radiance provides **110 nodes** (plus any Gizmos you create). Some nodes depend on optional packages and your ComfyUI environment.
 
 Node names follow standard compositing vocabulary under the **Radiance** menu — `Grade`, `CDL`, `OCIO ColorSpace`, `Roto`, `Defocus`, `Viewer`, `Read`/`Write` — so they read the way they do in Nuke or Flame. AI and generation nodes keep a `Radiance` prefix (`Radiance Sampler`, `Radiance VAE Decode`) to mark the diffusion layer. You can still find any node by typing "radiance" in the search.
 
@@ -295,6 +295,78 @@ is worse than one that says so. Full detail in the [changelog](CHANGELOG.md).
   about 2 pixels of motion.
 - **Scene-cut detection normalises by the batch maximum**, so the threshold has
   no absolute meaning and cut-free footage will still report cuts.
+
+## Status & to-do
+
+Where the project actually stands, so nothing is carried in someone's head.
+Ticked items are done and verified; unticked ones are the backlog.
+Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
+[changelog](CHANGELOG.md).
+
+### Blocking a release
+
+- [ ] **Nothing has ever run in live ComfyUI on a GPU.** Every number in the
+      audits is CPU and headless. Until a real graph renders a real frame, the
+      verdict stays *ready with conditions*.
+- [ ] **Viewer JavaScript is unverified.** `radiance_viewer.js` and the WebGL /
+      WebGPU renderers have no automated coverage at all — the suite stops at
+      the Python boundary.
+- [ ] **Commit the working tree.** A stale `.git/index.lock` blocks every write;
+      delete it, then commit. Several sessions of fixes are currently
+      unprotected.
+- [ ] **Reconcile with upstream.** `beta/main` is ~36 commits ahead and none of
+      the bugs fixed here are fixed there. Commit locally first, then rebase;
+      only `nodes/hdr/uplift_universal.py` and one `dcc.py` hunk conflict.
+
+### Correctness backlog
+
+- [ ] **ACES 2.0 tone scale is an approximation**, not the Daniele Evo curve —
+      18% grey sits ~0.84 stop off reference on SDR. Grade against a reference,
+      not the label.
+- [ ] **RUDRA video decoders were trained on stills.** `wan` / `ltx-video` /
+      `hunyuanvideo` checkpoints never saw multi-frame latents; real video falls
+      back to math expansion. Needs retraining, not patching.
+- [ ] **`rudra_full_decoder_ltx-video_ema.safetensors` is truncated at source**
+      (23.0 MB against a declared ~36.0 MB). The loader detects it and degrades;
+      the file still needs re-exporting.
+- [ ] Scene-cut detection normalises by the batch maximum, so its threshold has
+      no absolute meaning.
+- [ ] Optical flow is single-scale Lucas–Kanade; mask propagation is effectively
+      static above ~2 px of motion.
+- [ ] Tiled VAE pastes tiles without blending.
+- [ ] Tier-3 upscale ignores its `scale` input.
+- [ ] Model auto-download happens without asking first.
+
+### Structural debt
+
+- [ ] **Retire the legacy `nodes_*.py` layer.** ~39 node keys are defined twice;
+      this is the root cause of the aiohttp double-registration guards.
+- [ ] **Replace heuristic menu classification** with an explicit per-node section
+      declaration. `nodes/branding.py` keyword-matches and misfiles edge cases;
+      `SECTION_OVERRIDES` is the current mitigation, not a fix.
+- [ ] **Split the monoliths** — `nodes/monitor/viewer.py`, `nodes_io.py`,
+      `hdr/vae.py`.
+- [ ] **`delivery/handler.py` imports node classes**, inverting the library →
+      UI layering and making the delivery path hard to test in isolation.
+- [ ] Clarify the `Grade` / `Grade Apply` / `Apply Grade Info` naming overlap.
+- [ ] Decide whether chained Energy Mask nodes should stack. Today the first one
+      wins and the second is silently ignored.
+- [ ] `docs/dev/` holds nine internal reports, including two duplicate v3.1
+      release notes and three superseded plans.
+
+### Done and verified
+
+- [x] EXR 32-bit round-trip is bit-exact, including negatives and values > 1.
+- [x] All 16 colour spaces hit published 18%-grey values (a P0 fix — 10 of them
+      were silently identity without an OCIO config).
+- [x] Video frame counts are exact, 1–100 frames, H.264 / H.265-10bit / ProRes.
+- [x] Sequence reading is correct by frame number for `####`, `%04d` and ranges.
+- [x] Memory is flat across 150 × 1080p runs.
+- [x] Security: `weights_only` loads, sha256-pinned downloads, no `shell=True`.
+- [x] Energy-Prioritized Sampling is reachable from a graph (#40) and no longer
+      crashes on video latents.
+- [x] Nodes no longer write into the ComfyUI install directory.
+- [x] Suite: 2254 passed / 0 failed / 60 skipped.
 
 ## Documentation
 

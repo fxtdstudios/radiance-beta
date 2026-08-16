@@ -4,7 +4,7 @@ Radiance is a production node pack for ComfyUI built around 32-bit float and
 HDR/ACES image pipelines: VFX plate preparation, colour management, review
 tooling, in-canvas studio dashboards, and handoff to Nuke and DaVinci Resolve.
 
-**Version 3.2.0 · 109 nodes.**
+**Version 3.2.1 · 110 nodes.**
 
 Written for the people who have to make a shot work — artists, technical
 directors, colour pipeline engineers — and for developers extending the pack. It

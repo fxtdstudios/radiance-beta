@@ -139,8 +139,11 @@ def _checkpoint_candidates(checkpoint_path: str = "") -> list[Path]:
         return [Path(env_path).expanduser()]
     try:
         import folder_paths
-        root = Path(folder_paths.models_dir) / "radiance"
-    except ImportError:
+        _models_dir = getattr(folder_paths, "models_dir", None)
+        if not isinstance(_models_dir, str) or not _models_dir:
+            raise ImportError("folder_paths.models_dir is not a usable path")
+        root = Path(_models_dir) / "radiance"
+    except (ImportError, TypeError):
         root = Path(__file__).resolve().parent / "models" / "radiance"
     return [
         root / "temporal_rudra_residual_ema.safetensors",

@@ -15,7 +15,7 @@ never been added to this ledger.
 | Group | Count |
 | :--- | ---: |
 | [Color](built-in-nodes/color.md) | 13 |
-| [Generate, Loaders, and Sampling](built-in-nodes/generate.md) | 11 |
+| [Generate, Loaders, and Sampling](built-in-nodes/generate.md) | 12 |
 | [HDR and ACES](built-in-nodes/hdr-aces.md) | 19 |
 | [IO and Delivery](built-in-nodes/io-delivery.md) | 5 |
 | [Pipeline and Studio](built-in-nodes/pipeline.md) | 4 |
@@ -23,7 +23,7 @@ never been added to this ledger.
 | [Upscale](built-in-nodes/upscale.md) | 4 |
 | [VFX, Masks, Optics, and Multipass](built-in-nodes/vfx.md) | 29 |
 | [Video](built-in-nodes/video.md) | 14 |
-| **Total** | **109** |
+| **Total** | **110** |
 
 ## Color
 
@@ -45,6 +45,7 @@ never been added to this ledger.
 
 - `RadianceControlNetApply`
 - `RadianceDenoise`
+- `RadianceEnergyMask`
 - `RadianceLoraStack`
 - `RadianceUnifiedLoader`
 - `RadianceCinematicPromptEncoder`
@@ -163,7 +164,7 @@ never been added to this ledger.
 
 ## Documentation gaps
 
-33 of 109 nodes are missing a `DESCRIPTION`, an
+32 of 110 nodes are missing a `DESCRIPTION`, an
 input tooltip, or both. Those appear as blank cells in the reference
 tables above and as an empty hover in ComfyUI itself, so this list is
 the honest backlog rather than a silent gap.
@@ -172,7 +173,6 @@ the honest backlog rather than a silent gap.
 | :--- | :---: | ---: |
 | `RadianceApplyGradeInfo` | yes | 0 of 3 |
 | `RadianceBitDepthDegrade` | yes | 0 of 6 |
-| `RadianceCDLExport` | yes | 0 of 12 |
 | `RadianceColorSpaceConvert` | yes | 0 of 6 |
 | `RadianceCurves` | yes | 0 of 7 |
 | `RadianceDigitalCinemaRead` | **no** | 0 of 6 |
