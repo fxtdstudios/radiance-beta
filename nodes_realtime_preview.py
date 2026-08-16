@@ -39,7 +39,7 @@ from radiance.color_utils import (
     tensor_to_numpy  as _to_numpy,
     numpy_to_tensor  as _to_tensor,
 )
-from radiance.path_utils import strip_path_quotes
+from radiance.path_utils import resolve_output_path, strip_path_quotes
 
 log = logging.getLogger("radiance.preview")
 
@@ -516,7 +516,11 @@ class RadianceFlipbookGIF:
                 "images": ("IMAGE",),
                 "save_path": ("STRING", {
                     "default": "preview/flipbook.gif",
-                    "tooltip": "Output .gif path. Directory is created automatically.",
+                    "tooltip": (
+                        "Output .gif path. A relative path is written under ComfyUI's "
+                        "output/ folder; absolute paths are used as given. The "
+                        "directory is created automatically."
+                    ),
                 }),
                 "fps": ("FLOAT", {
                     "default": 12.0, "min": 1.0, "max": 60.0, "step": 0.5,
@@ -575,7 +579,7 @@ class RadianceFlipbookGIF:
                 pil_img = pil_img.resize((new_w, new_h), _PilImage.LANCZOS)
             pil_frames.append(pil_img.convert("P", dither=dith_mode))
 
-        path = Path(strip_path_quotes(save_path))
+        path = Path(resolve_output_path(save_path))
         if not path.suffix:
             path = path.with_suffix(".gif")
         path.parent.mkdir(parents=True, exist_ok=True)

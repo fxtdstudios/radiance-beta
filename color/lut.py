@@ -142,17 +142,23 @@ class RadianceLUTApply:
 
             # Safe check avoiding KeyError if 'luts' isn't registered
             if "luts" not in folder_paths.folder_names_and_paths:
-                # Attempt to register standard models/luts path
-                luts_path = os.path.join(folder_paths.models_dir, "luts")
-                if os.path.exists(luts_path):
-                    folder_paths.add_model_folder_path("luts", luts_path)
-                else:
-                    # Create if it doesn't exist to prevent future errors
-                    try:
-                        os.makedirs(luts_path, exist_ok=True)
-                        folder_paths.add_model_folder_path("luts", luts_path)
-                    except Exception:
-                        return ["No LUTs found"]
+                # isinstance, not truthiness: a test that stubs folder_paths
+                # with a bare MagicMock makes models_dir a truthy Mock, and
+                # joining it created a literal "MagicMock/mock.models_dir/<id>/"
+                # tree on disk. This runs from INPUT_TYPES(), so it fired on
+                # every catalog load.
+                models_dir = getattr(folder_paths, "models_dir", None)
+                if not isinstance(models_dir, str) or not models_dir:
+                    return ["No LUTs found"]
+
+                luts_path = os.path.join(models_dir, "luts")
+                if not os.path.isdir(luts_path):
+                    # Do NOT create it here. ComfyUI calls INPUT_TYPES() on
+                    # every node at startup and on every /object_info request;
+                    # a widget enumerator must not have filesystem side
+                    # effects. The directory is created on demand instead.
+                    return ["No LUTs found"]
+                folder_paths.add_model_folder_path("luts", luts_path)
 
             luts = folder_paths.get_filename_list("luts")
             return luts if luts else ["No LUTs found"]

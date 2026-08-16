@@ -132,6 +132,135 @@ def _existing_cfg_function(model):
     return None
 
 
+ENERGY_MASK_KEY = "radiance_energy_mask"
+ENERGY_PRIORITY_KEY = "radiance_energy_priority"
+
+
+def _find_energy_mask(positive) -> Tuple[Optional["torch.Tensor"], float]:
+    """The energy mask carried by a CONDITIONING list, or (None, 0.0).
+
+    Written by RadianceEnergyMask. The first entry carrying the key wins, so
+    chaining two producers does not stack — documented on that node.
+
+    Kept at module scope so the tests can exercise the real parser instead of
+    re-implementing it: the original tests copied this loop into the test body
+    and asserted on their own copy, which meant they passed no matter what
+    this file did.
+    """
+    if not isinstance(positive, list):
+        return None, 0.0
+
+    for entry in positive:
+        if not isinstance(entry, (tuple, list)) or len(entry) < 2:
+            continue
+        cond_dict = entry[1]
+        if not isinstance(cond_dict, dict) or ENERGY_MASK_KEY not in cond_dict:
+            continue
+
+        mask = cond_dict[ENERGY_MASK_KEY]
+        if not isinstance(mask, torch.Tensor) or mask.numel() == 0:
+            logger.warning(
+                "[Energy Guidance] Ignoring '%s': expected a non-empty tensor, got %r.",
+                ENERGY_MASK_KEY, type(mask).__name__,
+            )
+            continue
+
+        try:
+            priority = float(cond_dict.get(ENERGY_PRIORITY_KEY, 1.0))
+        except (TypeError, ValueError):
+            logger.warning("[Energy Guidance] Non-numeric energy priority; defaulting to 1.0.")
+            priority = 1.0
+
+        return mask.detach(), priority
+
+    return None, 0.0
+
+
+def _make_energy_cfg_patch(mask, priority: float, existing_cfg_fn=None):
+    """Build the EPS sampler_cfg_function.
+
+    Scales the guidance vector (cond − uncond) by (1 + priority·mask) inside
+    the mask, leaving unmasked regions at the sampler's own cfg, then hands
+    the modified args to whatever cfg function was already registered
+    (guidance rescale, SDR anchor) so the patches compose instead of
+    clobbering each other.
+
+    Shape handling is deliberately rank-agnostic. The previous version
+    unpacked `B, C, H_l, W_l = cond.shape`, which raises ValueError on the
+    5-D (B, C, T, H, W) latents every video model here produces — WAN,
+    Hunyuan, LTX — so EPS would have crashed the sampler on video the moment
+    a producer existed. It also called `mask.expand(B, ...)` on a mask whose
+    batch was neither 1 nor B, which expand() cannot do.
+    """
+    _eps_mask = mask.detach() if hasattr(mask, "detach") else mask
+    _eps_priority = float(priority)
+    # Resizing the mask is per-step work that only depends on the latent
+    # geometry, which never changes mid-sample. Cache it.
+    _cache: Dict[Any, Any] = {}
+
+    def _aligned_mask(cond):
+        key = (tuple(cond.shape), str(cond.device), str(cond.dtype))
+        cached = _cache.get(key)
+        if cached is not None:
+            return cached
+
+        import torch.nn.functional as F
+
+        B = cond.shape[0]
+        H_l, W_l = cond.shape[-2], cond.shape[-1]
+
+        m = _eps_mask.to(device=cond.device, dtype=cond.dtype)
+        # MASK is (H,W) or (B,H,W); a latent-shaped mask may arrive as
+        # (B,1,H,W) and a video mask as (B,1,T,H,W). Only the trailing two
+        # dims are spatial, so fold everything else into the batch axis.
+        m = m.reshape(-1, 1, m.shape[-2], m.shape[-1])
+
+        if m.shape[-2] != H_l or m.shape[-1] != W_l:
+            m = F.interpolate(m, size=(H_l, W_l), mode="bilinear", align_corners=False)
+
+        if m.shape[0] != B:
+            # expand() only broadcasts from 1. For any other mismatch (a
+            # 3-frame mask against a 4-latent batch) fall back to the first
+            # mask rather than raising in the middle of sampling.
+            m = m[:1].expand(B, -1, -1, -1)
+
+        if cond.ndim > 4:
+            # (B,1,H,W) → (B,1,1,…,H,W) so the modifier broadcasts across the
+            # temporal axis as well as channels.
+            m = m.reshape(B, 1, *([1] * (cond.ndim - 4)), H_l, W_l)
+
+        _cache.clear()
+        _cache[key] = m
+        return m
+
+    def _energy_prioritized_cfg_patch(args):
+        cond = args["cond_denoised"]
+        uncond = args["uncond_denoised"]
+        cfg_val = args["cond_scale"]
+
+        if cond.ndim < 4 or cond.shape != uncond.shape:
+            # Unknown latent layout — pass through untouched rather than
+            # corrupting the sample.
+            if existing_cfg_fn is not None:
+                return existing_cfg_fn(args)
+            return args["denoised"]
+
+        eps_modifier = 1.0 + _eps_priority * _aligned_mask(cond)
+        cond_eps = uncond + (cond - uncond) * eps_modifier
+
+        # Update args so downstream cfg functions (e.g. rescale) inherit the
+        # boosted prediction.
+        new_args = args.copy()
+        new_args["cond_denoised"] = cond_eps
+        new_args["denoised"] = uncond + cfg_val * (cond_eps - uncond)
+
+        if existing_cfg_fn is not None:
+            return existing_cfg_fn(new_args)
+        return new_args["denoised"]
+
+    return _energy_prioritized_cfg_patch
+
+
 def _sample_custom_progress_safe(context: str, **kwargs):
     """Run Comfy sampling, retrying once with progress output disabled if stderr is broken."""
 
@@ -1157,61 +1286,21 @@ class RadianceSamplerPro:
             logger.info(f"[SDR Conditioning] Registered post-CFG SDR anchor patch (steps={sdr_inject_steps}, blend={sdr_blend:.2f}, decay={sdr_decay:.2f})")
 
         # ── Energy-Prioritized Sampling (EPS) Detection ──────────────────────
-        energy_mask = None
-        energy_priority = 1.0
-        if isinstance(positive, list):
-            for _, cond_dict in positive:
-                if isinstance(cond_dict, dict) and "radiance_energy_mask" in cond_dict:
-                    energy_mask = cond_dict["radiance_energy_mask"]
-                    energy_priority = cond_dict.get("radiance_energy_priority", 1.0)
-                    break
+        # The producer is RadianceEnergyMask (nodes/generate/energy.py). Before
+        # v3.2.1 there was no producer at all, so this branch was unreachable
+        # from any graph (#40).
+        energy_mask, energy_priority = _find_energy_mask(positive)
 
-        if energy_mask is not None:
-            _eps_mask = energy_mask.detach()
-            _eps_priority = float(energy_priority)
-            
+        if energy_mask is not None and energy_priority != 0.0:
             # See the note above: read model_options, not a nonexistent attribute.
             existing_cfg_fn = _existing_cfg_function(model)
 
-            def _energy_prioritized_cfg_patch(args):
-                import torch.nn.functional as F
-                cond = args["cond_denoised"]
-                uncond = args["uncond_denoised"]
-                cfg_val = args["cond_scale"]
-                
-                # Unify mask shape to (B, 1, H_l, W_l) to match the latent space
-                mask = _eps_mask.to(device=cond.device, dtype=cond.dtype)
-                if mask.ndim == 2:
-                    mask = mask.unsqueeze(0).unsqueeze(0)
-                elif mask.ndim == 3:
-                    mask = mask.unsqueeze(1)
-                
-                # Align batch size
-                B, C, H_l, W_l = cond.shape
-                if mask.shape[0] != B:
-                    mask = mask.expand(B, -1, -1, -1)
-                
-                # Align spatial resolution of the mask to match the latent space
-                if mask.shape[-2] != H_l or mask.shape[-1] != W_l:
-                    mask = F.interpolate(mask, size=(H_l, W_l), mode="bilinear", align_corners=False)
-                
-                # Apply energy-priority CFG scaling specifically in the mask regions
-                eps_modifier = 1.0 + _eps_priority * mask
-                
-                # Compute EPS-boosted positive conditioning projection
-                cond_eps = uncond + (cond - uncond) * eps_modifier
-                
-                # Update args dict so downstream CFG functions (e.g. rescale) inherit it
-                new_args = args.copy()
-                new_args["cond_denoised"] = cond_eps
-                new_args["denoised"] = uncond + cfg_val * (cond_eps - uncond)
-                
-                if existing_cfg_fn is not None:
-                    return existing_cfg_fn(new_args)
-                return new_args["denoised"]
-
-            model.set_model_sampler_cfg_function(_energy_prioritized_cfg_patch)
-            logger.info(f"[Energy Guidance] Registered Energy-Prioritized Sampling (EPS) patch (priority={_eps_priority:.2f})")
+            model.set_model_sampler_cfg_function(
+                _make_energy_cfg_patch(energy_mask, energy_priority, existing_cfg_fn)
+            )
+            logger.info(f"[Energy Guidance] Registered Energy-Prioritized Sampling (EPS) patch (priority={energy_priority:.2f})")
+        elif energy_mask is not None:
+            logger.info("[Energy Guidance] Energy mask attached with priority=0 — EPS is a no-op, not registering a patch.")
         if SamplerMode.is_phase_shift(sampler_mode) and detected_type in VIDEO_MODEL_TYPES:
             logger.warning(
                 f"[v3.0.0] Phase-Shift mode is not supported for video model '{detected_type}' — "
