@@ -389,7 +389,7 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
       audit and review write-ups are gone, `.comfyignore` no longer lists files
       that stopped existing, and the generated GPU report is ignored rather
       than committed.
-- [x] Suite: 2284 passed / 0 failed / 60 skipped, plus 27 JS tests.
+- [x] Suite: 2298 passed / 0 failed / 60 skipped, plus 27 JS tests.
 
 ## Documentation
 
