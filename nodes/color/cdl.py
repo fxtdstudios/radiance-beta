@@ -4,9 +4,8 @@ import json
 import os
 import xml.etree.ElementTree as std_ET
 import defusedxml.ElementTree as ET
-from typing import Dict, Any, Tuple
 
-from radiance.path_utils import strip_path_quotes
+from radiance.path_utils import resolve_input_path, resolve_output_path
 
 logger = logging.getLogger("radiance.cdl")
 
@@ -86,12 +85,19 @@ class RadianceCDLImport:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "file_path": ("STRING", {"default": "grading/shot_01.cdl", "tooltip": "Path to a .cdl, .cc, or .ccc file."}),
+                "file_path": ("STRING", {
+                    "default": "grading/shot_01.cdl",
+                    "tooltip": (
+                        "Path to a .cdl, .cc, or .ccc file. A relative path is looked "
+                        "for in ComfyUI's input/ then output/ folder; absolute paths "
+                        "are used as given."
+                    ),
+                }),
             }
         }
 
     def load(self, file_path):
-        file_path = strip_path_quotes(file_path)
+        file_path = resolve_input_path(file_path)
         if not os.path.isfile(file_path):
             logger.error(f"[CDL Import] File not found: {file_path}")
             return (json.dumps({}), 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0)
@@ -127,7 +133,13 @@ class RadianceCDLExport:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "file_path": ("STRING", {"default": "grading/shot_01_output.cdl"}),
+                "file_path": ("STRING", {
+                    "default": "grading/shot_01_output.cdl",
+                    "tooltip": (
+                        "Destination .cdl path. A relative path is written under "
+                        "ComfyUI's output/ folder; absolute paths are used as given."
+                    ),
+                }),
                 "slope_r": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.001}),
                 "slope_g": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.001}),
                 "slope_b": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.001}),
@@ -146,7 +158,7 @@ class RadianceCDLExport:
 
     def save(self, file_path, slope_r, slope_g, slope_b, offset_r, offset_g, offset_b,
              power_r, power_g, power_b, saturation, cdl_data=None):
-        file_path = strip_path_quotes(file_path)
+        file_path = resolve_output_path(file_path)
         if cdl_data:
             try:
                 d = json.loads(cdl_data)
@@ -157,7 +169,7 @@ class RadianceCDLExport:
             except Exception as exc:
                 logger.warning("[nodes_cdl] save: %s", exc)
 
-        os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
         root = std_ET.Element("ColorDecisionList", {"xmlns": "urn:ASC:CDL:v1.01"})
         cd = std_ET.SubElement(root, "ColorDecision")
         sop = std_ET.SubElement(cd, "SOPNode")

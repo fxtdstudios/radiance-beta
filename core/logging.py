@@ -451,12 +451,39 @@ class ThrottleDedupeFilter(logging.Filter):
         return True
 
 
-def setup_radiance_logging(level: int = logging.INFO) -> logging.Logger:
+def resolve_log_level(default: int = logging.INFO) -> int:
+    """The level named by RADIANCE_LOG_LEVEL, or *default*.
+
+    The startup shortfall error instructs users to "re-run with
+    RADIANCE_LOG_LEVEL=DEBUG for tracebacks". Nothing read that variable, so
+    the advice did nothing — the exact kind of control this package has a test
+    suite for. Accepts a level name or a numeric level; anything unrecognised
+    falls back rather than raising during import.
+    """
+    raw = os.environ.get("RADIANCE_LOG_LEVEL", "").strip()
+    if not raw:
+        return default
+
+    named = logging.getLevelName(raw.upper())
+    if isinstance(named, int):
+        return named
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def setup_radiance_logging(level: "int | None" = None) -> logging.Logger:
     """Configures the main 'radiance' logger tree with the custom premium console formatter.
 
     Clears any pre-existing handlers, activates Windows VT100 console colors if needed,
     and sets propagate=False to prevent duplicate logging inside ComfyUI.
+
+    *level* defaults to RADIANCE_LOG_LEVEL, then INFO.
     """
+    if level is None:
+        level = resolve_log_level()
+
     logger = logging.getLogger("radiance")
     logger.setLevel(level)
 

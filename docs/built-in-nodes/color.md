@@ -124,7 +124,7 @@ Export current CDL values to an ASC-compliant .cdl or .cc file.
 
 | Input | Required | Type | Default | Range | Description |
 | :--- | :---: | :--- | :--- | :--- | :--- |
-| `file_path` | Yes | `STRING` | `grading/shot_01_output.cdl` |  |  |
+| `file_path` | Yes | `STRING` | `grading/shot_01_output.cdl` |  | Destination .cdl path. A relative path is written under ComfyUI's output/ folder; absolute paths are used as given. |
 | `slope_r` | Yes | `FLOAT` | `1.0` | 0.0 – 4.0, step 0.001 |  |
 | `slope_g` | Yes | `FLOAT` | `1.0` | 0.0 – 4.0, step 0.001 |  |
 | `slope_b` | Yes | `FLOAT` | `1.0` | 0.0 – 4.0, step 0.001 |  |
@@ -157,7 +157,7 @@ Import an ASC CDL (.cdl / .cc / .ccc) file into pipeline metadata.
 
 | Input | Required | Type | Default | Range | Description |
 | :--- | :---: | :--- | :--- | :--- | :--- |
-| `file_path` | Yes | `STRING` | `grading/shot_01.cdl` |  | Path to a .cdl, .cc, or .ccc file. |
+| `file_path` | Yes | `STRING` | `grading/shot_01.cdl` |  | Path to a .cdl, .cc, or .ccc file. A relative path is looked for in ComfyUI's input/ then output/ folder; absolute paths are used as given. |
 
 ### Outputs
 

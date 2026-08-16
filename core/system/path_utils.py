@@ -69,6 +69,80 @@ def get_safe_input_path(base_dir: str, filename: str, allow_absolute: bool = Fal
     return safe_join(base_dir, filename)
 
 
+def _comfy_dir(kind: str) -> str:
+    """ComfyUI's output/input directory, or a temp dir when outside ComfyUI.
+
+    Imported lazily: `folder_paths` only exists when running inside ComfyUI,
+    and these helpers are reachable from tests and standalone tools.
+    """
+    try:
+        import folder_paths  # type: ignore
+    except ImportError:
+        import tempfile
+        return tempfile.gettempdir()
+
+    getter = getattr(folder_paths, f"get_{kind}_directory", None)
+    if getter is None:
+        import tempfile
+        return tempfile.gettempdir()
+    return getter()
+
+
+def resolve_output_path(path: str) -> str:
+    """Anchor a user-supplied output path to ComfyUI's output directory.
+
+    A node whose path widget defaults to something like "grading/shot.cdl" was
+    being resolved with `os.path.abspath()`, which anchors to the *process
+    working directory* — for ComfyUI that is the install root. Running such a
+    node on its default therefore scattered `grading/` and `preview/`
+    directories through the ComfyUI installation, and through this repository
+    whenever the test suite exercised those nodes.
+
+    Absolute paths are honoured untouched — someone who types a full path means
+    it. Relative paths land under `output/`, with `..` traversal rejected.
+    """
+    path = strip_path_quotes(path)
+    if not path:
+        return _comfy_dir("output")
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+    return safe_join(_comfy_dir("output"), path)
+
+
+def resolve_input_path(path: str) -> str:
+    """Resolve a user-supplied input path for reading.
+
+    Absolute paths pass through. A relative path is looked for under ComfyUI's
+    `input/` and then `output/` — the second because Radiance's own exporters
+    (CDL, flipbooks, sidecars) write to `output/`, so "read back what I just
+    wrote" is the common case. Falls back to the working directory so an
+    explicitly relative invocation from a shell still resolves.
+    """
+    path = strip_path_quotes(path)
+    if not path:
+        return path
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+
+    for base in (_comfy_dir("input"), _comfy_dir("output")):
+        try:
+            candidate = safe_join(base, path)
+        except ValueError:
+            continue
+        if os.path.isfile(candidate):
+            return candidate
+
+    if os.path.isfile(path):
+        return os.path.abspath(path)
+
+    # Nothing exists yet — hand back the input-dir candidate so the caller's
+    # "file not found" message names the directory users are meant to look in.
+    try:
+        return safe_join(_comfy_dir("input"), path)
+    except ValueError:
+        return os.path.abspath(path)
+
+
 def get_next_index(directory: str, prefix: str, extension: str) -> int:
     if not os.path.isdir(directory):
         return 0

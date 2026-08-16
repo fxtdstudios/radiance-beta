@@ -116,7 +116,7 @@ Export a sequence as an animated GIF flipbook for quick review.
 | Input | Required | Type | Default | Range | Description |
 | :--- | :---: | :--- | :--- | :--- | :--- |
 | `images` | Yes | `IMAGE` |  |  |  |
-| `save_path` | Yes | `STRING` | `preview/flipbook.gif` |  | Output .gif path. Directory is created automatically. |
+| `save_path` | Yes | `STRING` | `preview/flipbook.gif` |  | Output .gif path. A relative path is written under ComfyUI's output/ folder; absolute paths are used as given. The directory is created automatically. |
 | `fps` | Yes | `FLOAT` | `12.0` | 1.0 – 60.0, step 0.5 | Playback speed. GIF frame delay = 1000/fps ms. |
 | `max_width` | Yes | `INT` | `480` | 64 – 1920, step 8 | Resize frames to this width (preserves aspect ratio). Smaller = smaller file. |
 | `loop` | No | `BOOLEAN` | `True` |  | Loop the animation indefinitely. |
