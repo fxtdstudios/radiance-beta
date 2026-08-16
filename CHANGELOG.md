@@ -59,7 +59,55 @@ All notable changes to FXTD Radiance will be documented in this file.
   number, falling back rather than raising on garbage), so the advice printed
   by the error message is true.
 
+### Fixed
+
+- **Scene-cut thresholds were relative to the batch.** `detect_cuts` divided
+  every clip's scores by that clip's own maximum before comparing to
+  `threshold`, so the largest inter-frame delta in *any* footage was forced to
+  1.0. The threshold widget meant something different on every clip, and
+  cut-free footage always reported a cut. The comparison is now against the raw
+  distance. `_make_plot` was already comparing raw scores, so the rendered plot
+  and the returned cut list could contradict each other on the same input; they
+  now agree. Note the scales differ by method — histogram runs 0–2, edge runs
+  roughly 0–0.5 — which the normalisation had been hiding.
+- **Tier-3 upscale ignored `scale`.** The diffusion backends are fixed 4x, and
+  nothing conformed their output, so `tiled_upscale` cropped a 4x render down
+  to the requested 2x size — the user got the top-left quarter of the frame
+  (measured correlation with the input: 0.0024). The output is now resampled to
+  the requested ratio.
+- **Optical flow was single-scale Lucas–Kanade.** Brightness constancy was
+  linearised as `It = f2 - f1`, valid only within a pixel or two, so mask
+  propagation was effectively static on real motion: ~100% recovery at 1 px,
+  17% at 3 px, 1% at 5 px. It is now coarse-to-fine over an image pyramid,
+  warping by the accumulated flow and solving for the residual at each level.
+  1–5 px displacements now recover to within 10%, with 84–100% of the field
+  inside half a pixel. Above ~8 px is still unreliable.
+- **Model weights downloaded without asking.** Real-ESRGAN, HAT-L, SwinIR,
+  Depth Anything V2 and DSINE — 67 MB to 2.4 GB — began fetching the moment a
+  graph was queued. `nodes/upscale` had an opt-*out*
+  (`RADIANCE_UPSCALE_OFFLINE=1`); `nodes/vfx/multipass` had no gate at all. Both
+  now go through `radiance.core.consent`, which defaults to refusing with a
+  message naming the file, its size and where to put it. Set
+  `RADIANCE_ALLOW_DOWNLOADS=1` to permit them; the legacy opt-out is still
+  honoured.
+
 ### Removed
+
+- **Six internal write-ups.** `AUDIT.md`, `FULL_AUDIT_2026-08.md`,
+  `BATCH3_REPORT.md`, `RELEASE_REVIEW.md`, `VIEWER_REPORT.md` and
+  `PACKAGE_REVIEW.md` were point-in-time reports that had already drifted from
+  the code — several listed as open bugs that had been fixed months earlier,
+  which is how the tiled-VAE blend stayed on the backlog after it was
+  corrected. What matters lives in the README's Status & to-do list,
+  `KNOWN_ISSUES.md` and this changelog; `.gitignore` now keeps their filenames
+  out.
+- **`gpu_acceptance_report.md` is no longer tracked.** `tools/gpu_acceptance.py`
+  writes it on every run — a generated artifact that should never have been
+  committed. Now ignored.
+- **Dead `.comfyignore` entries.** Thirty-two of its paths no longer existed. A
+  packaging exclusion list naming files that are already gone reads as
+  protection it is not providing, so the file was rewritten around what is
+  actually there plus deliberate glob guards.
 
 - **The `docs/` folder and its tooling.** Documentation now lives at
   [www.fxtdstudios.com](https://www.fxtdstudios.com) rather than in the
@@ -102,6 +150,14 @@ All notable changes to FXTD Radiance will be documented in this file.
   a check that the string in the startup error still names a real flag.
 - The README gains a **Status & to-do** section: what is blocking a release,
   the correctness backlog, structural debt, and what is verified done.
+- `tests/test_backlog_fixes.py`, `tests/test_download_consent.py` and
+  `tests/test_optical_flow.py` cover the fixes above. The tiled-VAE blend is
+  pinned too — it had already been fixed months earlier but never tested, which
+  is why the audit notes still listed it as open.
+- **First JavaScript coverage in the project.** 27 tests over the shared
+  `escapeHtml` and widget-visibility helpers, on Node's built-in
+  `node --test` — no test framework added — wired into CI as a `js-test` job
+  and available as `npm test`.
 
 ## [3.2.1] - 2026-08-09 ("Full Audit")
 

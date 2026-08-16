@@ -78,7 +78,14 @@ def detect_cuts(
     Parameters
     ──────────
     frames          (B, H, W, 3) float32 [0, 1]
-    threshold       inter-frame distance above which a cut is declared
+    threshold       absolute inter-frame distance above which a cut is declared.
+                    The scale depends on `method`, and they are NOT the same:
+                      histogram : 0 (identical) .. 2 (no overlap), cut ~0.3+
+                      edge      : 0 .. ~0.5 in practice,           cut ~0.15+
+                      combined  : 0.6*histogram + 0.4*edge
+                    Batch-max normalisation used to hide this by rescaling
+                    every clip to a 0..1 range, at the cost of the threshold
+                    meaning anything at all.
     min_shot_frames minimum frames between two cut points
     method          "histogram" | "edge" | "combined"
 
@@ -101,15 +108,19 @@ def detect_cuts(
         else:  # combined
             scores[i] = 0.6 * _histogram_diff(a, b) + 0.4 * _edge_diff(a, b)
 
-    # Normalise scores to [0, 1]
-    max_s = scores.max()
-    if max_s > 1e-6:
-        scores_norm = scores / max_s
-    else:
-        scores_norm = scores.copy()
-
-    # Find cuts above threshold, enforcing min_shot_frames gap
-    raw_cuts = [i + 1 for i in range(B - 1) if scores_norm[i] >= threshold]
+    # Compare the RAW distance to the threshold.
+    #
+    # This used to divide by scores.max() first, which forced the largest
+    # inter-frame delta in every batch to exactly 1.0 before comparing. Two
+    # consequences: `threshold` had no fixed meaning — the same value meant
+    # something different for every clip — and cut-free footage always
+    # reported a cut, because after normalisation its biggest ripple sat at
+    # 1.0 no matter how small it really was.
+    #
+    # `_make_plot` was already comparing the raw scores to the threshold, so
+    # the rendered plot and the returned cut list could disagree with each
+    # other on the same input.
+    raw_cuts = [i + 1 for i in range(B - 1) if scores[i] >= threshold]
     cuts = [0]
     for c in raw_cuts:
         if c - cuts[-1] >= min_shot_frames:
@@ -144,10 +155,14 @@ class RadianceSceneCutDetect:
                     "tooltip": "Full video sequence as IMAGE batch.",
                 }),
                 "threshold": ("FLOAT", {
-                    "default": 0.35, "min": 0.05, "max": 1.0, "step": 0.01,
+                    "default": 0.35, "min": 0.01, "max": 2.0, "step": 0.01,
                     "tooltip": (
-                        "Cut sensitivity. Lower = detect more cuts. "
-                        "Typical range 0.25–0.45 for most footage."
+                        "Absolute inter-frame distance for a cut — the same "
+                        "value means the same thing on every clip, so a "
+                        "cut-free shot reports no cuts. Scale depends on the "
+                        "method: histogram runs 0 (identical) to 2 (nothing in "
+                        "common), a hard cut sitting above ~0.3; edge runs "
+                        "roughly 0 to 0.5, so use ~0.15 there."
                     ),
                 }),
                 "min_shot_frames": ("INT", {
