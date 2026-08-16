@@ -2,7 +2,31 @@
 
 All notable changes to FXTD Radiance will be documented in this file.
 
-## [Unreleased]
+## [3.3.0] - 2026-08-16
+
+**Upgrade note — read before updating mid-project.** Five changes alter what an
+unchanged graph does. None is a preference; each corrects something that was
+measurably wrong. But if you are partway through a job, finish it on 3.2.1.
+
+1. **ACES 2.0 output moves.** 18% grey now lands where the standard puts it —
+   10.000 nits at a 100-nit peak, 14.512 at 1000 — instead of ~18 nits
+   everywhere (legacy transform) or 10% of peak (Daniele Evo node, which put
+   grey at 400 nits on a 4000-nit master). In signal terms: sRGB 0.3492 rather
+   than 0.4610, PQ 0.3298 rather than 0.3478. **Re-check any master graded
+   against the old midtone.** HLG is unchanged — it is anchored to BT.2408.
+2. **Scene-cut `threshold` is now `distance_threshold`**, and means an absolute
+   inter-frame distance rather than a fraction of the clip's own maximum. The
+   widget was renamed on purpose: your saved value would otherwise have been
+   silently reinterpreted. Existing workflows reset to the new default and need
+   re-tuning — histogram runs 0–2 (a cut is above ~0.3), edge roughly 0–0.5.
+3. **Model downloads now refuse by default.** Set `RADIANCE_ALLOW_DOWNLOADS=1`
+   to restore automatic fetching. Previously a first queue could pull 67 MB to
+   2.4 GB with no prompt.
+4. **Tier-3 upscale at 2x returns a different image** — the whole frame rather
+   than the top-left quarter of a 4x render.
+5. **CDL Export and Flipbook GIF write to `output/`** instead of resolving
+   their relative defaults against the ComfyUI install directory.
+
 
 ### Added
 

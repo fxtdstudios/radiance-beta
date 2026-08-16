@@ -4,7 +4,7 @@
 
 **Professional VFX, HDR color science, review, and DCC handoff for ComfyUI.**
 
-[![Version](https://img.shields.io/badge/version-3.2.1-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
+[![Version](https://img.shields.io/badge/version-3.3.0-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
 [![Nodes](https://img.shields.io/badge/nodes-111-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
@@ -364,7 +364,9 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
       crashes on video latents.
 - [x] Nodes no longer write into the ComfyUI install directory.
 - [x] Scene-cut thresholds are absolute, so the same value means the same thing
-      on every clip and cut-free footage reports no cuts.
+      on every clip and cut-free footage reports no cuts. The widget was
+      renamed to `distance_threshold` so a saved value cannot be silently
+      reinterpreted under the new meaning.
 - [x] Tier-3 upscale honours `scale` — 2x no longer returns the top-left
       quarter of a 4x render.
 - [x] Optical flow is pyramidal: 1–5 px displacements recover to within 10%,
@@ -397,6 +399,8 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
       that stopped existing, and the generated GPU report is ignored rather
       than committed.
 - [x] Suite: 2326 passed / 0 failed / 60 skipped, plus 27 JS tests.
+- [x] Released as **3.3.0**, not a patch: five changes alter what an unchanged
+      graph does, and the changelog leads with them.
 
 ## Documentation
 
