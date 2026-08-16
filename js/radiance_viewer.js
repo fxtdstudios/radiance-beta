@@ -16630,7 +16630,7 @@ else:
                 <span id="rad-term-clean" style="cursor:pointer;color:#e87;opacity:0.6;transition:opacity 0.2s;">[CLEAR OUTPUT]</span>
             </div>
             <div style="display:flex;gap:12px;align-items:center;">
-                <a href="https://radiance.fxtd.org/" target="_blank" style="color:rgba(0,168,255,0.5);text-decoration:none;" onmouseover="this.style.color='#00a8ff'" onmouseout="this.style.color='rgba(0,168,255,0.5)'">📖 DOCS</a>
+                <a href="https://www.fxtdstudios.com" target="_blank" style="color:rgba(0,168,255,0.5);text-decoration:none;" onmouseover="this.style.color='#00a8ff'" onmouseout="this.style.color='rgba(0,168,255,0.5)'">📖 DOCS</a>
                 <span id="rad-term-status">READY</span>
             </div>
         `;

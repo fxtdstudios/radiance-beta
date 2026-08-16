@@ -98,7 +98,7 @@ full = [
 
 [project.urls]
 Repository    = "https://github.com/fxtdstudios/radiance"
-Documentation = "https://radiance.fxtd.org/index.html"
+Documentation = "https://www.fxtdstudios.com"
 "Bug Tracker" = "https://github.com/fxtdstudios/radiance/issues"
 
 [tool.comfy]

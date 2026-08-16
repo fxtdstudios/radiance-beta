@@ -525,8 +525,8 @@ app.registerExtension({
             });
             this.addWidget("button", "QUICK SAVE", "quick_save", () => this.saveToLibrary());
             this.addWidget("button", "INCREMENTAL SAVE", "inc_save", () => this.incrementalSave());
-            this.addWidget("button", "DOCUMENTATION", "docs_link", () => window.open("https://radiance.fxtd.org/", "_blank"));
-            this.addWidget("button", "FXTD STUDIOS", "site_link", () => window.open("https://www.fxtd.org", "_blank"));
+            this.addWidget("button", "DOCUMENTATION", "docs_link", () => window.open("https://www.fxtdstudios.com", "_blank"));
+            this.addWidget("button", "FXTD STUDIOS", "site_link", () => window.open("https://www.fxtdstudios.com", "_blank"));
 
             this.color = "#111111";
             this.bgcolor = "#111111";
