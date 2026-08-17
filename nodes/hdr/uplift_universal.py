@@ -30,6 +30,7 @@ missing or incompatible temporal weights fall back to deterministic expansion.
 from __future__ import annotations
 
 import logging
+from typing import List
 
 import torch
 
