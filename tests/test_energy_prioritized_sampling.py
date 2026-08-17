@@ -379,7 +379,7 @@ class TestEnergyCfgPatch:
         """LTX-AV's packed latent (comfy.utils.pack_latents) is (B, 1, N) --
         3D, below the 4-D floor this patch assumes. Must not corrupt the
         sample, and must warn once, not on every step."""
-        import radiance.nodes_sampler as ns
+        import radiance.nodes.generate.sampler as ns
 
         warnings = []
         monkeypatch.setattr(ns.logger, "warning", lambda *a, **k: warnings.append(a))
@@ -388,7 +388,7 @@ class TestEnergyCfgPatch:
         uncond = torch.ones(1, 1, 64)
         args = _args(cond, uncond, cfg=1.0)
 
-        patch = _make_energy_cfg_patch(torch.ones(1, 4, 4), 0.5)
+        patch = _make_energy_cfg_patch([(torch.ones(1, 4, 4), 0.5)])
         out1 = patch(args)
         out2 = patch(args)
 
