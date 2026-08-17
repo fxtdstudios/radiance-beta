@@ -3028,6 +3028,7 @@ class RadianceVAE4KDecode:
         pbar = comfy.utils.ProgressBar(100)
 
         decoded_video_frames = None  # Set when 3D VAE returns 5D output
+        _temporal_metadata = None  # Set when the decode_tiled() path resolves a temporal decision
         with torch.no_grad():
             if latent.ndim == 5 and turbo_decoder is None:
                 # ALBABIT-FIX: integrated spatial+temporal tiling via comfy's
@@ -3042,6 +3043,10 @@ class RadianceVAE4KDecode:
                 # _resolve_temporal_frames); must not be read as "chunk size
                 # zero", which would make lat_T > temporal_lat trivially true.
                 needs_temporal_chunking = temporal_lat > 0 and lat_T > temporal_lat
+                _temporal_metadata = {
+                    "temporal_size": temporal_lat,
+                    "temporal_chunking": needs_temporal_chunking,
+                }
 
                 if not needs_spatial_tiling and not needs_temporal_chunking:
                     img = vae.decode(latent).float()
@@ -3281,6 +3286,8 @@ class RadianceVAE4KDecode:
             # Batch of images (e.g. from frame-loop path arriving here as concatenated frames)
             metadata["video"] = True
             metadata["frames"] = img.shape[0]
+        if _temporal_metadata is not None:
+            metadata.update(_temporal_metadata)
         if rhdr_filenames:
             metadata["rhdr_export"] = rhdr_filenames[0] if len(rhdr_filenames) == 1 else rhdr_filenames
             metadata["rhdr_precision"] = rhdr_precision

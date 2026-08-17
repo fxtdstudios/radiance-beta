@@ -86,7 +86,9 @@ class _FakeVideoVAE:
 
     def decode(self, latent):
         self.decode_calls.append(tuple(latent.shape))
-        T = latent.shape[2] if latent.ndim == 5 else 1
+        if latent.ndim != 5:
+            return torch.zeros(1, 4, 4, 3)
+        T = latent.shape[2]
         return torch.zeros(1, T * self._frames_per_lat_frame, 4, 4, 3)
 
     def decode_tiled(self, samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
@@ -243,6 +245,80 @@ class TestTurboDecoderNeverUsesDecodeTiled(unittest.TestCase):
         # own metadata dict, so its absence confirms that block never fired:
         # Auto did not invent a chunk size for RUDRA's uncalibrated path.
         self.assertNotIn("temporal_chunks", json.loads(meta))
+
+
+@skip_no_torch
+class TestMetadataExposesTemporalDecision(unittest.TestCase):
+    """The metadata STRING output already reports the resolved tile_size/
+    overlap; temporal_size/temporal_chunking mirror that for the temporal
+    axis so the Auto decision is visible without reading console logs."""
+
+    def test_fast_path_reports_no_chunking(self):
+        decoder = _make_decoder()
+        vae = _FakeVideoVAE()
+        latent = torch.zeros(1, 4, 4, 32, 32)
+
+        _, meta, _ = decoder.decode(
+            {"samples": latent}, vae=vae,
+            tile_size="Auto", overlap=64,
+            hdr_mode="Clip (SDR)", source_space="sRGB",
+            display_tonemap="None", hdr_output=False,
+            temporal_size="Auto", temporal_overlap=2,
+        )
+
+        metadata = json.loads(meta)
+        self.assertFalse(metadata["temporal_chunking"])
+        self.assertIsInstance(metadata["temporal_size"], int)
+
+    def test_spatial_only_reports_no_chunking_despite_decode_tiled(self):
+        decoder = _make_decoder()
+        vae = _FakeVideoVAE()
+        latent = torch.zeros(1, 4, 1, 300, 300)
+
+        _, meta, _ = decoder.decode(
+            {"samples": latent}, vae=vae,
+            tile_size="Auto", overlap=64,
+            hdr_mode="Clip (SDR)", source_space="sRGB",
+            display_tonemap="None", hdr_output=False,
+            temporal_size="Auto", temporal_overlap=2,
+        )
+
+        self.assertFalse(json.loads(meta)["temporal_chunking"])
+
+    def test_temporal_chunking_reports_resolved_size(self):
+        decoder = _make_decoder()
+        vae = _FakeVideoVAE()
+        latent = torch.zeros(1, 4, 20, 4, 4)
+
+        _, meta, _ = decoder.decode(
+            {"samples": latent}, vae=vae,
+            tile_size="Auto", overlap=64,
+            hdr_mode="Clip (SDR)", source_space="sRGB",
+            display_tonemap="None", hdr_output=False,
+            temporal_size="8", temporal_overlap=2,
+        )
+
+        metadata = json.loads(meta)
+        self.assertTrue(metadata["temporal_chunking"])
+        self.assertEqual(metadata["temporal_size"], 8)
+
+    def test_4d_image_has_no_temporal_keys(self):
+        """Images never enter the 5D routing branch, so _temporal_metadata
+        stays None and the keys must be entirely absent, not False/0."""
+        decoder = _make_decoder()
+        vae = _FakeVideoVAE()
+        latent = torch.zeros(1, 4, 4, 4)
+
+        _, meta, _ = decoder.decode(
+            {"samples": latent}, vae=vae,
+            tile_size="Auto", overlap=64,
+            hdr_mode="Clip (SDR)", source_space="sRGB",
+            display_tonemap="None", hdr_output=False,
+        )
+
+        metadata = json.loads(meta)
+        self.assertNotIn("temporal_size", metadata)
+        self.assertNotIn("temporal_chunking", metadata)
 
 
 if __name__ == "__main__":
