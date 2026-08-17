@@ -284,8 +284,38 @@ jobs:
 
       # No test framework to install: node --test is built in, and the only
       # devDependency (esbuild) is not needed to run these.
+      #
+      # js/tests/ocio_gpu.test.mjs skips here because Playwright is absent; the
+      # gpu-test job below installs it and runs that file for real.
       - name: Run JS unit tests
         run: node --test js/tests/*.test.mjs
+
+  # ── GPU verification ────────────────────────────────────────────────────────
+  # The OpenColorIO display transform is spliced into a fragment shader, so the
+  # only way to know it is right is to compile it and render with it. This runs
+  # headless Chromium against SwiftShader — a software rasteriser, but a
+  # conformant one, and the behaviour under test is arithmetic.
+  #
+  # Separate job because it installs a browser and is an order of magnitude
+  # slower than the rest of the suite. Not optional: it is the only check that
+  # has caught the "compiles cleanly, renders black" class of bug here.
+  gpu-test:
+    name: "GPU: OCIO display transform"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Playwright and Chromium
+        run: npm install --no-save playwright && npx playwright install --with-deps chromium
+
+      - name: Render through OpenColorIO and compare against its CPU path
+        run: node --test js/tests/ocio_gpu.test.mjs
 
   # ── YAML / TOML lint ────────────────────────────────────────────────────────
   lint-config:
