@@ -8,6 +8,19 @@ import { RadianceNeuralMonitor } from "./radiance_neural.js";
 
 
 import { escapeHtml as _escapeHtml } from "./radiance_dom_utils.js";
+import {
+    sampleStats as _probeSampleStats,
+    rectFromCorners as _probeRectFromCorners,
+    pixelAt as _probePixelAt,
+    luminance as _probeLuminance,
+    nits as _probeNits,
+    exposureValue as _probeEV,
+    rgbToHsv as _probeRgbToHsv,
+    srgbToLinear as _probeSrgbToLinear,
+    hexSwatch as _probeHexSwatch,
+    formatValue as _probeFormat,
+    HDR_REFERENCE_WHITE_NITS as _PROBE_REF_WHITE,
+} from "./radiance_probe.js";
 
 class RadianceViewer {
     static singletonHUD = null;
@@ -869,6 +882,22 @@ class RadianceViewer {
         // Pixel data
         this.imageData = null;
         this.lastPixelColor = null;
+
+        // Pixel probe (see renderProbeTab). The viewer shipped four scopes and
+        // no probe, which is the wrong way round -- a scope characterises the
+        // frame, a probe answers "what is *that* pixel", and the second is the
+        // question a delivery note gets written from.
+        this.probeMode = 'cursor';        // cursor | region | frame
+        this.probeSource = 'source';      // source | rendered
+        this.probeRect = null;            // {x,y,w,h} in image pixels
+        this.probeHold = false;           // freeze the cursor readout (F key)
+        this._probeStats = null;          // last sampleStats() result
+        this._probeStatsMeta = null;      // what produced it, for the caption
+        this._probeCurrent = null;        // {x,y,r,g,b,a} under the cursor
+        this._probeDragging = false;
+        this._probeDragStart = null;
+        this._probePanelNodes = null;     // live DOM handles, so the readout
+                                          // updates without rebuilding the tab
 
         this.initialized = false; // Track if we've set initial size
 
@@ -5926,6 +5955,7 @@ else:
             const ctx = this._frameDataCanvas.getContext('2d');
             ctx.drawImage(this.image, 0, 0);
             this.imageData = ctx.getImageData(0, 0, this.image.width, this.image.height).data;
+            this._probeInvalidate();   // the probe measures this frame, not the last one
 
             // Update Z-Depth
             if (this.frameZdepthImages && this.frameZdepthImages[this.currentFrame]) {
@@ -7429,6 +7459,9 @@ else:
             this.drawMaskInteractiveOverlay(ctx);
         }
 
+        // Pixel probe region selection
+        if (this.probeRect && this._probeRegionActive()) this._probeDrawRegion(ctx);
+
         // Sprint 4: Render persistent probe dots
         if (this._probeMemory && this._probeMemory.length > 0) {
             this._probeMemory.forEach((p, idx) => {
@@ -7746,6 +7779,23 @@ else:
 
 
 
+            // Probe region drag. Deliberately below the wipe and mask handles
+            // -- those are direct manipulation of something already on screen
+            // and must keep priority -- and above panning, which stays reachable
+            // on shift or middle-drag while a region is being drawn.
+            if (this._probeRegionActive() && e.button === 0 && !e.shiftKey) {
+                const px = Math.floor(x), py = Math.floor(y);
+                if (px >= 0 && py >= 0 && px < this.imageWidth && py < this.imageHeight) {
+                    e.preventDefault();
+                    this._probeDragging = true;
+                    this._probeDragStart = { x: px, y: py };
+                    this.probeRect = _probeRectFromCorners(px, py, px, py);
+                    this.canvas.style.cursor = 'crosshair';
+                    this.renderOverlay();
+                    return;
+                }
+            }
+
             if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
                 e.preventDefault(); // Prevent middle-click auto-scroll which swallows mouseup
                 this.isPanning = true;
@@ -7821,6 +7871,19 @@ else:
                 return;
             }
 
+            if (this._probeDragging) {
+                const imgX = Math.floor((mx - this.panX) / this.zoom);
+                const imgY = Math.floor((my - this.panY) / this.zoom);
+                const cx = Math.max(0, Math.min(imgX, this.imageWidth - 1));
+                const cy = Math.max(0, Math.min(imgY, this.imageHeight - 1));
+                this.probeRect = _probeRectFromCorners(
+                    this._probeDragStart.x, this._probeDragStart.y, cx, cy,
+                );
+                this.renderOverlay();
+                this.updateCursor(e);
+                return;
+            }
+
             if (this.isPanning) {
                 if (e.buttons !== undefined && !(e.buttons & 1) && !(e.buttons & 4)) {
                     this.isPanning = false;
@@ -7843,6 +7906,16 @@ else:
         // Click-to-Focus for DoF
         this._winMouseUpHandler = (e) => {
             this.isPanning = false;
+
+            // Finishing a region drag measures it immediately. Requiring a
+            // second click on "Sample" after the drag would be one interaction
+            // too many for the panel's most-used path.
+            if (this._probeDragging) {
+                this._probeDragging = false;
+                this._probeDragStart = null;
+                this._probeComputeStats();
+                this.renderOverlay();
+            }
             if (this.isDraggingWipe) {
                 this.isDraggingWipe = false;
                 // Restore cursor based on current hover position
@@ -8105,6 +8178,21 @@ else:
             // Store probe for multi-probe display (Sprint 4)
             this._lastProbe = { imgX, imgY, dispStr, linStr, hex, isHDRPick };
 
+            // Feed the Probe panel. Sampled through _probeSampleOne rather than
+            // reused from the values above, because the panel's Source/Rendered
+            // switch has to actually change what is measured -- and coalesced to
+            // one repaint per frame, since a pointer can outrun the DOM.
+            if (!this.probeHold && this._probePanelNodes?.current?.isConnected) {
+                this._probeCurrent = this._probeSampleOne(imgX, imgY);
+                if (!this._probeRepaintQueued) {
+                    this._probeRepaintQueued = true;
+                    requestAnimationFrame(() => {
+                        this._probeRepaintQueued = false;
+                        this._probeRenderCurrent();
+                    });
+                }
+            }
+
             // Draw pixel loupe on overlay
             if (this.showLoupe) {
                 this.renderOverlay(); // Clear and redraw first
@@ -8114,6 +8202,10 @@ else:
             this.infoLeft.innerHTML = '';
             this.colorInfo.textContent = 'RGB: — — —';
             this.lastPixelColor = null;
+            if (!this.probeHold && this._probeCurrent) {
+                this._probeCurrent = null;
+                this._probeRenderCurrent();
+            }
         }
 
         // Update fixed right info stats continuously
@@ -8454,6 +8546,7 @@ else:
             const tempCtx = tempCanvas.getContext('2d');
             tempCtx.drawImage(src, 0, 0);
             this.imageData = tempCtx.getImageData(0, 0, src.width, src.height).data;
+            this._probeInvalidate();   // the probe measures this frame, not the last one
 
             // Load to WebGL renderer
             if (this.renderer) {
@@ -8516,6 +8609,7 @@ else:
                 const tempCtx = tempCanvas.getContext('2d');
                 tempCtx.drawImage(img, 0, 0);
                 this.imageData = tempCtx.getImageData(0, 0, img.width, img.height).data;
+                this._probeInvalidate();   // the probe measures this frame, not the last one
 
                 // Load to WebGL renderer
                 if (this.renderer) {
@@ -8668,6 +8762,7 @@ else:
         // v3.0 FIX: Store .data (Uint8ClampedArray), not ImageData object.
         // The rest of the code indexes this.imageData[i] for pixel values.
         this.imageData = ctx.getImageData(0, 0, width, height).data;
+        this._probeInvalidate();   // the probe measures this frame, not the last one
     }
 
     setCompareImage(img) {
@@ -12010,6 +12105,7 @@ else:
             { id: 'curves', label: '📈 CURVES' },
             { id: 'effects', label: '🎬 EFFECTS' },
             { id: 'masks', label: '🛡️ MASKS' },
+            { id: 'probe', label: '🔬 PROBE' },
             { id: 'view', label: '👁️ VIEW' }
         ];
         this._hudTabs = [];
@@ -12073,6 +12169,8 @@ else:
             } else if (active.activeTab === 'masks') {
                 active.renderQualifiersTab(tabContentContainer);
                 active.renderMasksTab(tabContentContainer);
+            } else if (active.activeTab === 'probe') {
+                active.renderProbeTab(tabContentContainer);
             } else if (active.activeTab === 'view') {
                 active.renderViewTab(tabContentContainer);
             } else if (active.activeTab === 'terminal') {
@@ -14743,6 +14841,552 @@ else:
         };
 
         this.container.addEventListener('click', clickHandler);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Pixel probe
+    //
+    //  The viewer shipped four scopes and no probe. That is the wrong way
+    //  round: a scope characterises a frame, a probe answers "what is *that*
+    //  pixel", and the second is the question a delivery note gets written
+    //  from. Nuke, RV, mrv2 and Resolve all ship one; this is that, using their
+    //  vocabulary so it is findable -- Current / Min / Max / Average / Median,
+    //  Pixel Selection vs Full Frame, source value vs final rendered value.
+    //
+    //  All the maths lives in radiance_probe.js and is unit-tested there. This
+    //  half is only sampling and presentation.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * The buffer the probe measures, and an honest description of what it is.
+     *
+     * Returns `{ error }` rather than throwing or silently substituting another
+     * source: a probe that quietly measures something other than what the
+     * dropdown says is worse than one that refuses.
+     */
+    _probeDescribe() {
+        if (this.probeSource === 'rendered') {
+            // Deliberately a *capture*, not a live read. `readPixelsFloat32`
+            // pulls the whole frame off the GPU; doing that once per pointer
+            // move would stall the render loop at 4K. So the rendered pixels
+            // are snapshotted on demand and the caption states when — a probe
+            // reading a stale frame it admits to is useful, a probe that drops
+            // the viewer to 4 fps is not.
+            const cap = this._probeRendered;
+            if (!cap) return { error: 'Rendered pixels are captured on demand — press ↻ CAPTURE.' };
+            if (cap.error) return { error: cap.error };
+            return {
+                kind: 'rendered', width: cap.width, height: cap.height, channels: 4,
+                linear: true,
+                label: (cap.graded
+                    ? 'Rendered — graded composite, scene-linear'
+                    : 'Rendered — UNGRADED: this backend returns the source, not the grade')
+                    + ` · captured ${cap.at}`,
+                warn: !cap.graded,
+                captured: true,
+            };
+        }
+
+        if (this.hdrData?.data) {
+            const isLinear = this.hdrData.isLinear !== false;
+            const C = this.hdrData.channels || this.hdrData.shape?.[2] || 3;
+            return {
+                kind: 'hdr',
+                width: this.hdrData.width || this.imageWidth,
+                height: this.hdrData.height || this.imageHeight,
+                channels: C,
+                linear: isLinear,
+                label: `Source — float ${C}-channel${isLinear ? ', scene-linear' : ', display-encoded'}`,
+            };
+        }
+
+        if (this.imageData) {
+            return {
+                kind: 'quantised',
+                width: this.imageWidth, height: this.imageHeight, channels: 4,
+                linear: true,
+                label: 'Source — 8-bit, sRGB-decoded to linear (no float sidecar)',
+                quantised: true,
+            };
+        }
+
+        return { error: 'No image loaded.' };
+    }
+
+    /**
+     * The same thing, with the pixels attached.
+     *
+     * Split from `_probeDescribe` on purpose. The caption repaints on every
+     * pointer move and needs only the label; materialising the buffer to
+     * produce a string would decode a 4K frame to a 132 MB float array on the
+     * first mouse move and hitch the viewer for no reason at all.
+     */
+    _probeBuffer() {
+        const info = this._probeDescribe();
+        if (info.error) return info;
+        if (info.kind === 'rendered') return { ...info, data: this._probeRendered.data };
+        if (info.kind === 'hdr') return { ...info, data: this.hdrData.data };
+        return { ...info, data: this._probeLinearFromImageData() };
+    }
+
+    /**
+     * The 8-bit frame, decoded to scene-linear float once and cached.
+     *
+     * Built lazily and only for whole-frame or region statistics -- the cursor
+     * readout converts the four values it needs directly. At 4K this array is
+     * 132 MB, which is why it is not built on load and is dropped when the
+     * frame changes.
+     */
+    _probeLinearFromImageData() {
+        if (this._probeLinearCacheFor === this.imageData && this._probeLinearCache) {
+            return this._probeLinearCache;
+        }
+        const src = this.imageData;
+        const out = new Float32Array(src.length);
+        const lut = new Float32Array(256);
+        for (let i = 0; i < 256; i++) lut[i] = _probeSrgbToLinear(i / 255);
+        for (let i = 0; i < src.length; i += 4) {
+            out[i] = lut[src[i]];
+            out[i + 1] = lut[src[i + 1]];
+            out[i + 2] = lut[src[i + 2]];
+            out[i + 3] = src[i + 3] / 255;      // alpha is not gamma-encoded
+        }
+        this._probeLinearCache = out;
+        this._probeLinearCacheFor = this.imageData;
+        return out;
+    }
+
+    /**
+     * Snapshot the rendered frame off the GPU.
+     *
+     * Both backends declare whether their pixels are graded. WebGPU's are not —
+     * it returns ungraded source — and the caption has to say so, or every
+     * number in the panel gets attributed to a grade that was never applied.
+     * Same contract the 32-bit EXR export relies on.
+     */
+    _probeCaptureRendered() {
+        const stamp = () => new Date().toTimeString().slice(0, 8);
+        if (!this.renderer?.readPixelsFloat32) {
+            this._probeRendered = { error: 'This renderer has no float readback. WebGL2 is required.' };
+            return;
+        }
+        let r = null;
+        try {
+            r = this.renderer.readPixelsFloat32(
+                this.imageWidth, this.imageHeight, this.lutIntensity || 1.0,
+            );
+        } catch (e) {
+            this._probeRendered = { error: `Readback failed: ${e?.message || e}` };
+            return;
+        }
+        if (!r?.data) {
+            this._probeRendered = { error: 'Float readback returned nothing.' };
+            return;
+        }
+        this._probeRendered = {
+            data: r.data, width: r.width, height: r.height,
+            graded: r.graded !== false, at: stamp(),
+        };
+        this._probeStats = null;
+        this._probeStatsMeta = null;
+    }
+
+    /** One pixel, cheaply, without materialising the whole float frame. */
+    _probeSampleOne(x, y) {
+        if (x < 0 || y < 0 || x >= this.imageWidth || y >= this.imageHeight) return null;
+
+        if (this.probeSource === 'rendered') {
+            const cap = this._probeRendered;
+            if (!cap?.data) return null;
+            const p = _probePixelAt(cap.data, { width: cap.width, height: cap.height, channels: 4 }, x, y);
+            return p ? { x, y, ...p } : null;
+        }
+        if (this.hdrData?.data) {
+            const C = this.hdrData.channels || this.hdrData.shape?.[2] || 3;
+            const p = _probePixelAt(this.hdrData.data,
+                { width: this.hdrData.width || this.imageWidth, height: this.hdrData.height || this.imageHeight, channels: C },
+                x, y);
+            return p ? { x, y, ...p } : null;
+        }
+        if (this.imageData) {
+            const i = (y * this.imageWidth + x) * 4;
+            return {
+                x, y,
+                r: _probeSrgbToLinear(this.imageData[i] / 255),
+                g: _probeSrgbToLinear(this.imageData[i + 1] / 255),
+                b: _probeSrgbToLinear(this.imageData[i + 2] / 255),
+                a: this.imageData[i + 3] / 255,
+            };
+        }
+        return null;
+    }
+
+    /** Compute statistics for the current mode. Region and Full Frame only. */
+    _probeComputeStats() {
+        const buf = this._probeBuffer();
+        if (buf.error) {
+            this._probeStats = null;
+            this._probeStatsMeta = { error: buf.error };
+            this._probeRenderStats();
+            return;
+        }
+        const rect = this.probeMode === 'region'
+            ? (this.probeRect || null)
+            : { x: 0, y: 0, w: buf.width, h: buf.height };
+        if (this.probeMode === 'region' && !rect) {
+            this._probeStats = null;
+            this._probeStatsMeta = { error: 'Drag a rectangle on the image to select a region.' };
+            this._probeRenderStats();
+            return;
+        }
+        const t0 = (typeof performance !== 'undefined' ? performance.now() : 0);
+        this._probeStats = _probeSampleStats(buf.data, {
+            width: buf.width, height: buf.height, channels: buf.channels, rect,
+        });
+        this._probeStatsMeta = {
+            label: buf.label, warn: buf.warn, quantised: buf.quantised,
+            ms: (typeof performance !== 'undefined' ? performance.now() : 0) - t0,
+            mode: this.probeMode,
+        };
+        this._probeRenderStats();
+    }
+
+    /** Discard cached probe state when the frame underneath changes. */
+    _probeInvalidate() {
+        this._probeLinearCache = null;
+        this._probeLinearCacheFor = null;
+        this._probeRendered = null;
+        this._probeStats = null;
+        this._probeStatsMeta = null;
+        this._probeCurrent = null;
+    }
+
+    renderProbeTab(container) {
+        container.style.cssText = 'display: flex; flex-direction: column; flex: 1; gap: 10px; padding: 12px; min-height: 0; overflow-y: auto;';
+        const t = this.theme;
+        const nodes = {};
+        this._probePanelNodes = nodes;
+
+        const heading = (text, hint) => {
+            const d = document.createElement('div');
+            d.style.cssText = 'color:#888; font-size:10px; margin-bottom:6px; text-transform:uppercase; font-weight:bold; letter-spacing:0.6px;';
+            d.textContent = text;
+            if (hint) d.title = hint;
+            return d;
+        };
+
+        // A segmented control. Used twice; the two rows are the whole state of
+        // the panel, so they are the first thing in it.
+        const segmented = (options, current, onPick) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex; gap:4px; background:rgba(255,255,255,0.03); padding:3px; border-radius:6px;';
+            options.forEach((opt) => {
+                const b = document.createElement('div');
+                b.textContent = opt.label;
+                b.title = opt.hint || '';
+                const on = current === opt.id;
+                b.style.cssText = `
+                    flex:1; text-align:center; padding:5px 4px; font-size:10px; font-weight:700;
+                    border-radius:4px; cursor:pointer; user-select:none; transition:all .15s;
+                    color:${on ? '#00f2ff' : t.textDim};
+                    background:${on ? 'rgba(0,242,255,0.10)' : 'transparent'};
+                    border:1px solid ${on ? 'rgba(0,242,255,0.28)' : 'transparent'};
+                `;
+                b.onclick = () => onPick(opt.id);
+                row.appendChild(b);
+            });
+            return row;
+        };
+
+        // ── Sampling mode ───────────────────────────────────────────────────
+        const sampleGroup = document.createElement('div');
+        sampleGroup.appendChild(heading('Sampling'));
+        sampleGroup.appendChild(segmented([
+            { id: 'cursor', label: 'Cursor', hint: 'Follow the pointer, one pixel at a time.' },
+            { id: 'region', label: 'Region', hint: 'Drag a rectangle on the image and measure inside it.' },
+            { id: 'frame', label: 'Full Frame', hint: 'Measure every pixel.' },
+        ], this.probeMode, (id) => {
+            this.probeMode = id;
+            if (id !== 'region') this.probeRect = null;
+            this._probeStats = null;
+            this._probeStatsMeta = null;
+            this._lastRenderContent?.();
+            this.renderOverlay();
+        }));
+        container.appendChild(sampleGroup);
+
+        // ── Value source ────────────────────────────────────────────────────
+        const srcGroup = document.createElement('div');
+        srcGroup.appendChild(heading('Values'));
+        srcGroup.appendChild(segmented([
+            { id: 'source', label: 'Source', hint: 'The pixels as loaded, before the viewer grade.' },
+            { id: 'rendered', label: 'Rendered', hint: 'The pixels as displayed, after the grade and view transform.' },
+        ], this.probeSource, (id) => {
+            this.probeSource = id;
+            this._probeStats = null;
+            this._probeStatsMeta = null;
+            // Switching to Rendered captures straight away, so the panel is
+            // never sitting on an instruction the user has to read first.
+            if (id === 'rendered') this._probeCaptureRendered();
+            this._lastRenderContent?.();
+        }));
+        if (this.probeSource === 'rendered') {
+            const recap = document.createElement('button');
+            recap.textContent = '↻ CAPTURE';
+            recap.title = 'Re-read the rendered frame from the GPU. Do this after changing the grade.';
+            recap.style.cssText = 'width:100%; margin-top:6px; background:#22222a; color:#ddd; border:1px solid #3a3a44; padding:6px; border-radius:4px; font-size:10px; cursor:pointer; font-weight:700;';
+            recap.onclick = () => {
+                this._probeCaptureRendered();
+                if (this._probeCurrent) {
+                    this._probeCurrent = this._probeSampleOne(this._probeCurrent.x, this._probeCurrent.y);
+                }
+                this._probeRenderCurrent();
+                this._probeRenderStats();
+            };
+            srcGroup.appendChild(recap);
+        }
+        container.appendChild(srcGroup);
+
+        // What exactly is being measured. Never left blank -- an unlabelled
+        // number is an untrustworthy number.
+        const caption = document.createElement('div');
+        caption.style.cssText = 'font-size:9px; line-height:1.5; color:rgba(255,255,255,0.4); font-family:monospace; padding:6px 8px; background:rgba(255,255,255,0.02); border-radius:5px; border-left:2px solid rgba(0,242,255,0.3);';
+        nodes.caption = caption;
+        container.appendChild(caption);
+
+        // ── Current pixel ───────────────────────────────────────────────────
+        const curGroup = document.createElement('div');
+        curGroup.appendChild(heading('Current'));
+        const curBox = document.createElement('div');
+        curBox.style.cssText = 'font-family:monospace; font-size:10px; line-height:1.7; background:rgba(0,0,0,0.28); border:1px solid rgba(255,255,255,0.06); border-radius:6px; padding:8px;';
+        nodes.current = curBox;
+        curGroup.appendChild(curBox);
+        container.appendChild(curGroup);
+
+        const curActions = document.createElement('div');
+        curActions.style.cssText = 'display:flex; gap:6px;';
+        const holdBtn = document.createElement('button');
+        holdBtn.style.cssText = 'flex:1; background:#22222a; color:#ddd; border:1px solid #3a3a44; padding:6px; border-radius:4px; font-size:10px; cursor:pointer; font-weight:700;';
+        const paintHold = () => {
+            holdBtn.textContent = this.probeHold ? '⏸ HELD' : '⏵ LIVE';
+            holdBtn.style.color = this.probeHold ? '#ffcc00' : '#ddd';
+            holdBtn.style.borderColor = this.probeHold ? 'rgba(255,204,0,0.4)' : '#3a3a44';
+        };
+        holdBtn.title = 'Freeze the cursor readout so it can be read and copied without the pointer moving off the pixel.';
+        holdBtn.onclick = () => { this.probeHold = !this.probeHold; paintHold(); };
+        paintHold();
+        curActions.appendChild(holdBtn);
+
+        const copyBtn = document.createElement('button');
+        copyBtn.textContent = '⧉ COPY';
+        copyBtn.style.cssText = 'flex:1; background:#22222a; color:#ddd; border:1px solid #3a3a44; padding:6px; border-radius:4px; font-size:10px; cursor:pointer; font-weight:700;';
+        copyBtn.title = 'Copy the current readout as text.';
+        copyBtn.onclick = () => this._probeCopy(copyBtn);
+        curActions.appendChild(copyBtn);
+        container.appendChild(curActions);
+
+        // ── Statistics ──────────────────────────────────────────────────────
+        const statGroup = document.createElement('div');
+        statGroup.appendChild(heading('Statistics'));
+        const statBox = document.createElement('div');
+        statBox.style.cssText = 'font-family:monospace; font-size:10px; background:rgba(0,0,0,0.28); border:1px solid rgba(255,255,255,0.06); border-radius:6px; padding:8px; overflow-x:auto;';
+        nodes.stats = statBox;
+        statGroup.appendChild(statBox);
+        container.appendChild(statGroup);
+
+        if (this.probeMode !== 'cursor') {
+            const sampleBtn = document.createElement('button');
+            sampleBtn.textContent = this.probeMode === 'frame' ? '⛶ SAMPLE FRAME' : '▣ SAMPLE REGION';
+            sampleBtn.style.cssText = 'background:rgba(0,242,255,0.08); color:#00f2ff; border:1px solid rgba(0,242,255,0.28); padding:8px; border-radius:5px; font-size:10px; cursor:pointer; font-weight:800; letter-spacing:0.5px;';
+            sampleBtn.onclick = () => this._probeComputeStats();
+            container.appendChild(sampleBtn);
+        }
+
+        this._probeRenderCurrent();
+        this._probeRenderStats();
+    }
+
+    /** Repaint the Current block. Cheap enough to run per pointer move. */
+    _probeRenderCurrent() {
+        const nodes = this._probePanelNodes;
+        if (!nodes?.current || !nodes.current.isConnected) return;
+
+        const buf = this._probeDescribe();
+        nodes.caption.innerHTML = buf.error
+            ? `<span style="color:#ff8080">${_escapeHtml(buf.error)}</span>`
+            : `<span style="color:${buf.warn ? '#ffb020' : 'rgba(255,255,255,0.45)'}">${_escapeHtml(buf.label)}</span>`
+              + (buf.quantised ? '<br><span style="color:rgba(255,255,255,0.3)">Values are 8-bit quantised — 256 steps per channel.</span>' : '');
+
+        const p = this._probeCurrent;
+        if (!p) {
+            nodes.current.innerHTML = '<span style="color:rgba(255,255,255,0.3)">Move the pointer over the image.</span>';
+            return;
+        }
+
+        const Y = _probeLuminance(p.r, p.g, p.b);
+        const hsv = _probeRgbToHsv(p.r, p.g, p.b);
+        const ev = _probeEV(Y);
+        const nit = _probeNits(Y);
+        const hex = _probeHexSwatch(p.r, p.g, p.b);
+        const bad = [p.r, p.g, p.b, p.a].some((v) => !Number.isFinite(v));
+
+        const chan = (label, colour, v) => `
+            <div><span style="color:${colour}; font-weight:700">${label}</span>
+            <span style="color:${Number.isFinite(v) ? '#ddd' : '#ff5050'}"> ${_probeFormat(v).padStart(10)}</span></div>`;
+
+        nodes.current.innerHTML = `
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+                <div style="width:22px; height:22px; border-radius:4px; border:1px solid rgba(255,255,255,0.25); background:${hex}; flex-shrink:0;"
+                     title="Display swatch — clamped to the monitor. The numbers below are not."></div>
+                <span style="color:#888">X</span> <span style="color:#ddd">${p.x}</span>
+                <span style="color:#888">Y</span> <span style="color:#ddd">${p.y}</span>
+                <span style="color:rgba(255,255,255,0.35); margin-left:auto">${hex}</span>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:0 10px;">
+                ${chan('R', '#ff6060', p.r)}
+                ${chan('G', '#60ff90', p.g)}
+                ${chan('B', '#6090ff', p.b)}
+                ${chan('A', '#aaaaaa', p.a)}
+            </div>
+            <div style="margin-top:6px; padding-top:6px; border-top:1px solid rgba(255,255,255,0.06); display:grid; grid-template-columns:1fr 1fr; gap:0 10px;">
+                <div><span style="color:#cccccc; font-weight:700">Y</span> <span style="color:#ddd">${_probeFormat(Y)}</span></div>
+                <div title="Stops relative to 18% mid-grey."><span style="color:#d49dff; font-weight:700">EV</span>
+                    <span style="color:#ddd">${Number.isFinite(ev) ? (ev >= 0 ? '+' : '') + ev.toFixed(2) : '−∞'}</span></div>
+                <div title="Scene-linear luminance as cd/m², on ITU-R BT.2408's 203 cd/m² HDR Reference White.">
+                    <span style="color:#f97316; font-weight:700">nits</span> <span style="color:#ddd">${Number.isFinite(nit) ? nit.toFixed(1) : '—'}</span></div>
+                <div><span style="color:#888; font-weight:700">HSV</span>
+                    <span style="color:#ddd">${Number.isFinite(hsv.h) ? `${hsv.h.toFixed(0)}° ${hsv.s.toFixed(3)} ${_probeFormat(hsv.v, 3)}` : '—'}</span></div>
+            </div>
+            ${bad ? '<div style="margin-top:6px; color:#ff5050; font-weight:700">⚠ This pixel is not finite.</div>' : ''}
+        `;
+    }
+
+    /** Repaint the Statistics block. */
+    _probeRenderStats() {
+        const nodes = this._probePanelNodes;
+        if (!nodes?.stats || !nodes.stats.isConnected) return;
+        const box = nodes.stats;
+
+        if (this.probeMode === 'cursor') {
+            box.innerHTML = '<span style="color:rgba(255,255,255,0.3)">'
+                + 'One pixel has no distribution. Switch to Region or Full Frame for '
+                + 'min, max, mean and median.</span>';
+            return;
+        }
+        if (this._probeStatsMeta?.error) {
+            box.innerHTML = `<span style="color:#ffb020">${_escapeHtml(this._probeStatsMeta.error)}</span>`;
+            return;
+        }
+        const s = this._probeStats;
+        if (!s) {
+            box.innerHTML = '<span style="color:rgba(255,255,255,0.3)">Not sampled yet.</span>';
+            return;
+        }
+        if (s.count === 0) {
+            box.innerHTML = '<span style="color:rgba(255,255,255,0.3)">The selection is empty.</span>';
+            return;
+        }
+
+        const names = ['R', 'G', 'B', 'A'];
+        const colours = ['#ff6060', '#60ff90', '#6090ff', '#aaaaaa'];
+        const rows = [
+            ['Min', (c) => c.min], ['Max', (c) => c.max],
+            ['Mean', (c) => c.mean], ['Median', (c) => c.median],
+        ];
+        const present = s.channels.map((c, i) => (c ? i : -1)).filter((i) => i >= 0);
+
+        const head = `<tr><th style="text-align:left; color:#666; font-weight:600; padding-right:8px;"></th>`
+            + present.map((i) => `<th style="text-align:right; color:${colours[i] || '#aaa'}; font-weight:700; padding-left:10px;">${names[i] || `C${i}`}</th>`).join('')
+            + `</tr>`;
+        const body = rows.map(([label, get]) => `<tr>`
+            + `<td style="color:#888; font-weight:600; padding-right:8px;">${label}</td>`
+            + present.map((i) => `<td style="text-align:right; color:#ddd; padding-left:10px;">${_probeFormat(get(s.channels[i]))}</td>`).join('')
+            + `</tr>`).join('');
+
+        const approx = s.channels[present[0]]?.medianExact === false;
+        const px = s.count.toLocaleString();
+        const scope = this.probeMode === 'frame'
+            ? `full frame · ${px} px`
+            : `region ${s.rect.w}×${s.rect.h} at (${s.rect.x}, ${s.rect.y}) · ${px} px`;
+
+        // Non-finite and negative counts get their own line and their own
+        // colour. This is the number a probe exists to surface: a single NaN in
+        // a plate is invisible on screen and fatal downstream.
+        const flags = [];
+        if (s.nan) flags.push(`<span style="color:#ff5050; font-weight:700">${s.nan.toLocaleString()} NaN</span>`);
+        if (s.inf) flags.push(`<span style="color:#ff9040; font-weight:700">${s.inf.toLocaleString()} Inf</span>`);
+        if (s.negative) flags.push(`<span style="color:#ffcc00">${s.negative.toLocaleString()} negative</span>`);
+
+        box.innerHTML = `
+            <div style="color:rgba(255,255,255,0.35); font-size:9px; margin-bottom:6px;">${_escapeHtml(scope)}</div>
+            <table style="width:100%; border-collapse:collapse;">${head}${body}</table>
+            ${approx ? '<div style="color:rgba(255,255,255,0.3); font-size:9px; margin-top:6px;" title="Sorting every sample is not viable at this size; the median is read off a 16384-bin histogram.">Median estimated — sample exceeds the exact-sort limit.</div>' : ''}
+            ${flags.length
+                ? `<div style="margin-top:6px; padding-top:6px; border-top:1px solid rgba(255,255,255,0.06);">⚠ ${flags.join(' · ')}
+                   <div style="color:rgba(255,255,255,0.3); font-size:9px;">Excluded from every statistic above.</div></div>`
+                : '<div style="margin-top:6px; color:rgba(120,220,150,0.5); font-size:9px;">All samples finite.</div>'}
+        `;
+    }
+
+    /** The readout as plain text, for pasting into a note or a ticket. */
+    _probeCopy(btn) {
+        const p = this._probeCurrent;
+        const lines = [];
+        const buf = this._probeDescribe();
+        lines.push(`# Radiance pixel probe — ${buf.error || buf.label}`);
+        if (p) {
+            const Y = _probeLuminance(p.r, p.g, p.b);
+            const hsv = _probeRgbToHsv(p.r, p.g, p.b);
+            lines.push(`X ${p.x}  Y ${p.y}`);
+            lines.push(`R ${_probeFormat(p.r)}  G ${_probeFormat(p.g)}  B ${_probeFormat(p.b)}  A ${_probeFormat(p.a)}`);
+            lines.push(`Luma ${_probeFormat(Y)}  EV ${_probeFormat(_probeEV(Y), 2)}  ${_probeFormat(_probeNits(Y), 1)} cd/m² (BT.2408 ref white ${_PROBE_REF_WHITE})`);
+            lines.push(`HSV ${_probeFormat(hsv.h, 1)}° ${_probeFormat(hsv.s, 3)} ${_probeFormat(hsv.v, 3)}  Hex ${_probeHexSwatch(p.r, p.g, p.b)}`);
+        }
+        const s = this._probeStats;
+        if (s && s.count) {
+            const names = ['R', 'G', 'B', 'A'];
+            lines.push(`Samples ${s.count}  rect ${s.rect.x},${s.rect.y} ${s.rect.w}×${s.rect.h}`);
+            s.channels.forEach((c, i) => {
+                if (!c) return;
+                lines.push(`${names[i] || `C${i}`}  min ${_probeFormat(c.min)}  max ${_probeFormat(c.max)}`
+                    + `  mean ${_probeFormat(c.mean)}  median ${_probeFormat(c.median)}${c.medianExact ? '' : ' (estimated)'}`);
+            });
+            lines.push(`NaN ${s.nan}  Inf ${s.inf}  negative ${s.negative}`);
+        }
+        const text = lines.join('\n');
+        navigator.clipboard?.writeText(text).then(() => {
+            if (!btn) return;
+            const was = btn.textContent;
+            btn.textContent = '✓ COPIED';
+            setTimeout(() => { btn.textContent = was; }, 1200);
+        }).catch(() => this._termLog?.('warn', '[Probe] Clipboard write refused by the browser.'));
+    }
+
+    /** Draw the region rectangle on the overlay, in canvas space. */
+    _probeDrawRegion(ctx) {
+        const r = this.probeRect;
+        if (!r || r.w <= 0 || r.h <= 0) return;
+        const x = r.x * this.zoom + this.panX;
+        const y = r.y * this.zoom + this.panY;
+        const w = r.w * this.zoom;
+        const h = r.h * this.zoom;
+        ctx.save();
+        ctx.strokeStyle = '#00f2ff';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 3]);
+        ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+        ctx.setLineDash([]);
+        ctx.fillStyle = 'rgba(0,242,255,0.07)';
+        ctx.fillRect(x, y, w, h);
+        ctx.fillStyle = '#00f2ff';
+        ctx.font = 'bold 9px monospace';
+        ctx.fillText(`${r.w}×${r.h}`, x + 3, Math.max(10, y - 4));
+        ctx.restore();
+    }
+
+    /** True when a canvas drag should draw a probe region rather than pan. */
+    _probeRegionActive() {
+        return this.activeTab === 'probe' && this.probeMode === 'region';
     }
 
     renderViewTab(container) {
@@ -18595,6 +19239,7 @@ else:
         this.frameHDRData = null;
         this.frameImages = null;
         this.imageData = null;
+        this._probeInvalidate();   // the probe measures this frame, not the last one
         // Clear container
         if (this.container) this.container.innerHTML = '';
 
