@@ -12,6 +12,13 @@ try:
     import cv2
     HAS_CV2 = True
 except ImportError:
+    # Bind the name, not just the flag. `viewer_utils.py` does
+    # `from radiance.io.formats import HAS_CV2, cv2` — with `cv2` left
+    # undefined on this branch that import raised "cannot import name 'cv2'
+    # from 'radiance.io.formats'", so the guard protected nothing: every
+    # consumer of this module died anyway, just with a more confusing error
+    # than the ImportError it was written to absorb.
+    cv2 = None
     HAS_CV2 = False
     logger.warning(
         "cv2 not available — 16-bit PNG disabled, falling back to 8-bit. "
