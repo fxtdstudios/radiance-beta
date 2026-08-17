@@ -9,8 +9,10 @@
  *   HDR scale, and opt-in RHDR precision while the backend fixes output to
  *   scene-linear Linear with no display tonemap.
  *
- *   temporal_overlap is hidden unless temporal_size > 0 (its own tooltip:
- *   "Only active when temporal_size > 0").
+ *   temporal_overlap is always visible: temporal_size is now an Auto/preset
+ *   combo (hdr/vae.py's decode_tiled() integration) where no value statically
+ *   guarantees chunking is off, so visibility can no longer be decided from
+ *   the widget alone.
  *
  *   Post-execution (read from engine.py's "ui" channel via onExecuted, since
  *   only knowable once decode actually runs):
@@ -71,7 +73,6 @@ const W_TARGET_SPACE     = "target_space";
 const W_SOURCE_SPACE     = "source_space";
 const W_DECODE_NOISE_SCALE = "decode_noise_scale";
 const W_HDR_SCALE_FACTOR   = "hdr_scale_factor";
-const W_TEMPORAL_SIZE      = "temporal_size";
 const W_TEMPORAL_OVERLAP   = "temporal_overlap";
 
 // ALBABIT-FIX: mirrors nodes/generate/engine.py's _SCENE_REFERRED complement --
@@ -132,7 +133,6 @@ function syncWidgets(node) {
     const sourceSpaceW    = getWidget(node, W_SOURCE_SPACE);
     const decodeNoiseW    = getWidget(node, W_DECODE_NOISE_SCALE);
     const hdrScaleW       = getWidget(node, W_HDR_SCALE_FACTOR);
-    const temporalSizeW   = getWidget(node, W_TEMPORAL_SIZE);
     const temporalOverlapW = getWidget(node, W_TEMPORAL_OVERLAP);
 
     if (!decodeModeW) return;
@@ -169,10 +169,11 @@ function syncWidgets(node) {
     if (setWidgetVisible(inverseTmW, !directHDR, node)) changed = true;
     if (setWidgetVisible(hdrScaleW, directHDR, node)) changed = true;
 
-    // ALBABIT-FIX: temporal_overlap is only read inside `if latent.ndim == 5
-    // and temporal_size > 0:` (hdr/vae.py:2763) -- matches its own tooltip
-    // ("Only active when temporal_size > 0").
-    if (setWidgetVisible(temporalOverlapW, (parseInt(temporalSizeW?.value, 10) || 0) > 0, node)) changed = true;
+    // ALBABIT-FIX (VAE tiling integration): temporal_size is now an
+    // Auto/preset combo. Auto's chunk size is VRAM-dependent and every
+    // manual preset still depends on the clip's actual length at runtime,
+    // so no widget value statically guarantees chunking is off. Always show.
+    if (setWidgetVisible(temporalOverlapW, true, node)) changed = true;
 
     if (changed) refreshNodeSize(node);
 }
@@ -203,7 +204,6 @@ app.registerExtension({
                 getWidget(this, W_RUDRA_DECODER),
                 getWidget(this, W_DECODER_SIZE),
                 getWidget(this, W_TARGET_SPACE),
-                getWidget(this, W_TEMPORAL_SIZE),
             ]
                 .forEach(w => {
                     if (!w) return;

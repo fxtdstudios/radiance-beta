@@ -620,6 +620,27 @@ def detect_latent_format(vae: Any) -> str:
     return "sd_4ch"  # Safe default
 
 
+def _resolve_temporal_frames(temporal_size: Any, ts_px: Optional[int], temporal_compression: int) -> int:
+    """
+    Resolve the temporal_size widget value to a count of LATENT frames.
+
+    Accepts "Auto", a numeric preset string (from the widget), or a raw int.
+    The turbo_decoder/RUDRA recursive chunking path passes 0 internally to
+    stop further recursion; that is not a value the widget itself offers.
+
+    ts_px=None disables Auto-sizing (resolves to 0 / "no chunking" instead):
+    used for the turbo_decoder path, which has no VRAM calibration data of
+    its own. See RadianceVAE4KDecode.decode().
+    """
+    if temporal_size in (0, "0", None):
+        return 0
+    if temporal_size == "Auto":
+        if ts_px is None:
+            return 0
+        return TileEngine.get_optimal_temporal_size(ts_px, temporal_compression)
+    return int(temporal_size)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Feature 5: Encode quality metrics
 # ─────────────────────────────────────────────────────────────────────────────
@@ -848,6 +869,50 @@ class TileEngine:
             f"tile size: {tile}px (image: {image_w}x{image_h})"
         )
         return tile
+
+    @staticmethod
+    def get_optimal_temporal_size(
+        tile_size_px: int,
+        temporal_compression: int = 8,
+        min_frames: int = 2,
+        max_frames: int = 64,
+        vram_budget_gb: float = None,
+    ) -> int:
+        """
+        Determine optimal temporal chunk size (in LATENT frames) for 5D video
+        VAE decode, given the spatial tile size already chosen. Spatial and
+        temporal chunking share one VRAM budget instead of being sized
+        independently; a bigger spatial tile leaves less room per frame.
+
+        ALBABIT-FIX (VAE tiling integration): bytes_per_pixel_frame is
+        back-solved from the LTX-2.5 crash data (1536px/~16.8GB: 8 frames
+        clean, 16 hard-crashed) to land exactly on 8, not just "under 16".
+        Rough proxy, not a precise memory model; see
+        project_radiance_vae_tiling_seams memory for the investigation.
+        """
+        if vram_budget_gb is None:
+            try:
+                device = comfy.model_management.get_torch_device()
+                if device.type == "cuda":
+                    free_mem, total_mem = torch.cuda.mem_get_info(device)
+                    vram_budget_gb = (free_mem * 0.6) / (1024**3)
+                else:
+                    vram_budget_gb = 4.0
+            except Exception:
+                vram_budget_gb = 4.0
+
+        bytes_per_pixel_frame = 110
+        max_pixel_frames = int(
+            vram_budget_gb * (1024**3) / (bytes_per_pixel_frame * tile_size_px * tile_size_px)
+        )
+        compression = max(1, temporal_compression or 8)
+        frames = max(min_frames, min(max_pixel_frames // compression, max_frames))
+
+        logger.info(
+            f"[Radiance Temporal] VRAM budget: {vram_budget_gb:.1f}GB, tile={tile_size_px}px -> "
+            f"temporal size: {frames} latent frames"
+        )
+        return frames
 
     @staticmethod
     def compute_tiles(total: int, tile_size: int, overlap: int) -> list:
@@ -1646,41 +1711,38 @@ class RadianceVAE4KDecode:
                         "tooltip": "Overlap between tiles. 128px optimal for cosine blending.",
                     },
                 ),
-                # ALBABIT-FIX: Temporal chunking for video VAE decode.
-                # Splits the video latent along the T axis into smaller chunks
-                # before VAE decode to reduce peak VRAM. Each chunk is decoded
-                # independently with the full spatial tiling logic applied within
-                # it. Results are concatenated along the frame axis.
+                # ALBABIT-FIX: Temporal chunking for video VAE decode, integrated
+                # with spatial tiling via comfy's own vae.decode_tiled() instead
+                # of Radiance's own stacked chunk-then-tile loop. See
+                # project_radiance_vae_tiling_seams memory.
                 "temporal_size": (
-                    "INT",
+                    ["Auto", "2", "4", "8", "16", "32", "64"],
                     {
-                        "default": 0,
-                        "min": 0,
-                        "max": 256,
-                        "step": 1,
+                        "default": "Auto",
                         "tooltip": (
                             "Temporal chunk size in LATENT frames (not pixel frames — unlike "
                             "ComfyUI's native 'VAE Decode (Tiled)', which counts pixel frames and "
                             "divides internally by the VAE's temporal compression). "
-                            "0 = disabled (full video decoded at once). "
-                            "Splits video latents along the time axis to reduce peak VRAM during VAE decode. "
-                            "Useful when hitting OOM on long videos. "
-                            "For Mochi: try 4–6. For LTX-Video: try 8–16. "
-                            "Images (4D latents) are not affected."
+                            "Auto sizes it from the same VRAM budget as tile_size, computed "
+                            "jointly since a larger spatial tile leaves less room per frame. "
+                            "A manual value forces chunking at that many latent frames "
+                            "regardless of tile_size. Images (4D latents) are not affected."
                         ),
                     },
                 ),
                 "temporal_overlap": (
                     "INT",
                     {
-                        "default": 0,
+                        "default": 2,
                         "min": 0,
                         "max": 32,
                         "step": 1,
                         "tooltip": (
-                            "Overlap in latent frames between temporal chunks. 0 = no overlap. "
-                            "A small value (1–2) reduces temporal seams at chunk boundaries. "
-                            "Only active when temporal_size > 0."
+                            "Overlap in latent frames between temporal chunks. 0 = hard cuts "
+                            "at chunk boundaries. A small value (1–2) blends them instead. "
+                            "Only active when the video actually needs temporal chunking "
+                            "(temporal_size='Auto' decides on its own, or set a manual value "
+                            "smaller than the clip's latent frame count)."
                         ),
                     },
                 ),
@@ -2547,8 +2609,8 @@ class RadianceVAE4KDecode:
         hdr_output: bool = False,
         turbo_decoder: torch.nn.Module = None,
         decode_noise_scale: float = 0.0,
-        temporal_size: int = 0,
-        temporal_overlap: int = 0,
+        temporal_size: str = "Auto",
+        temporal_overlap: int = 2,
     ) -> Tuple:
         """v2.3.5 TRUE-HDR: Universal decode with 32-bit HDR output support.
 
@@ -2793,15 +2855,41 @@ class RadianceVAE4KDecode:
         lat_h, lat_w = latent.shape[-2], latent.shape[-1]
         pix_h, pix_w = lat_h * vae_factor, lat_w * vae_factor
 
-        # ALBABIT-FIX: Temporal chunking — orthogonal to spatial tiling.
-        # Placed here so it fires for ALL model types (3D-native VAEs such as
-        # Mochi and LTX-Video whose 5D latent reaches this branch after the
-        # non-3D frame-loop is skipped, as well as any future path bringing a
-        # 5D latent directly here). Each chunk is decoded independently via a
-        # recursive decode() call (temporal_size=0 prevents further recursion);
-        # the individual chunk calls choose tiled or direct decode on their own
-        # based on spatial size, so temporal and spatial chunking stay orthogonal.
-        if latent.ndim == 5 and temporal_size > 0:
+        # Spatial tile size in pixel space (must be aligned to vae_factor).
+        # ALBABIT-FIX: resolved up front so the temporal Auto-size below can
+        # be computed jointly with it. Spatial and temporal chunking share
+        # one VRAM budget rather than being sized independently.
+        pad_multiple = max(vae_factor, 8)
+        if tile_size == "Auto":
+            ts_px = TileEngine.get_optimal_tile_size(pix_h, pix_w)
+        else:
+            ts_px = int(tile_size)
+        ts_px = (ts_px // pad_multiple) * pad_multiple
+
+        overlap = min(overlap, ts_px // 2)
+        overlap = (overlap // 8) * 8
+        overlap = max(16, overlap)
+
+        # Same defensive getattr/callable/try pattern as detect_vae_factor()
+        # above: third-party VAE-like objects aren't guaranteed to implement
+        # this comfy.sd.VAE convenience method, or to implement it safely.
+        _temporal_compression_fn = getattr(vae, "temporal_compression_decode", None)
+        _temporal_compression = None
+        if callable(_temporal_compression_fn):
+            try:
+                _temporal_compression = _temporal_compression_fn()
+            except Exception:
+                _temporal_compression = None
+        _temporal_compression = _temporal_compression or 8
+
+        # ALBABIT-FIX: RUDRA (turbo_decoder) is a raw nn.Module, not a
+        # comfy.sd.VAE, so vae.decode_tiled() below can't handle it; this
+        # keeps its original recursive-chunking path unchanged. ts_px=None
+        # makes "Auto" resolve to 0 (disabled) here: no VRAM calibration
+        # data exists for RUDRA. A manual preset still applies normally.
+        _rudra_temporal_lat = _resolve_temporal_frames(temporal_size, None, _temporal_compression)
+        if latent.ndim == 5 and turbo_decoder is not None and _rudra_temporal_lat > 0:
+            temporal_size = _rudra_temporal_lat
             _T = latent.shape[2]
             if _T > temporal_size:
                 t_ov = max(0, temporal_overlap)
@@ -2937,24 +3025,50 @@ class RadianceVAE4KDecode:
                 f"applied to latent (profile='{source_space}')."
             )
 
-        pad_multiple = max(vae_factor, 8)
-
-        # Tile size in pixel space (must be aligned to vae_factor)
-        if tile_size == "Auto":
-            ts_px = TileEngine.get_optimal_tile_size(pix_h, pix_w)
-        else:
-            ts_px = int(tile_size)
-        ts_px = (ts_px // pad_multiple) * pad_multiple
-
-        overlap = min(overlap, ts_px // 2)
-        overlap = (overlap // 8) * 8
-        overlap = max(16, overlap)
-
         pbar = comfy.utils.ProgressBar(100)
 
         decoded_video_frames = None  # Set when 3D VAE returns 5D output
         with torch.no_grad():
-            if pix_h <= ts_px and pix_w <= ts_px:
+            if latent.ndim == 5 and turbo_decoder is None:
+                # ALBABIT-FIX: integrated spatial+temporal tiling via comfy's
+                # vae.decode_tiled(), replacing the old stacked tiler that
+                # re-decoded a full spatial tile per temporal chunk. This is
+                # what let LTX-2.5 crash at settings the native "VAE Decode
+                # (Tiled)" node handles fine. See project_radiance_vae_tiling_seams.
+                lat_T = latent.shape[2]
+                temporal_lat = _resolve_temporal_frames(temporal_size, ts_px, _temporal_compression)
+                needs_spatial_tiling = not (pix_h <= ts_px and pix_w <= ts_px)
+                # temporal_lat==0 means explicitly disabled (see
+                # _resolve_temporal_frames); must not be read as "chunk size
+                # zero", which would make lat_T > temporal_lat trivially true.
+                needs_temporal_chunking = temporal_lat > 0 and lat_T > temporal_lat
+
+                if not needs_spatial_tiling and not needs_temporal_chunking:
+                    img = vae.decode(latent).float()
+                else:
+                    lat_tile = ts_px // vae_factor
+                    lat_overlap = overlap // vae_factor
+                    # tile_t/overlap_t=None (omitted by comfy's decode_tiled
+                    # dispatcher) means "no temporal limit"; correct when
+                    # only spatial tiling is actually needed.
+                    tile_t = temporal_lat if needs_temporal_chunking else None
+                    t_overlap_lat = min(temporal_overlap, temporal_lat // 2) if needs_temporal_chunking else None
+                    logger.info(
+                        f"[Radiance 4K Decode] {pix_w}x{pix_h} x {lat_T}f -> "
+                        f"spatial tile={lat_tile}lat (needed={needs_spatial_tiling}), "
+                        f"temporal chunk={temporal_lat}lat (needed={needs_temporal_chunking})"
+                    )
+                    img = vae.decode_tiled(
+                        latent, tile_x=lat_tile, tile_y=lat_tile, overlap=lat_overlap,
+                        tile_t=tile_t, overlap_t=t_overlap_lat,
+                    ).float()
+
+                if img.ndim == 5:
+                    _B5, _F5, _H5, _W5, _C5 = img.shape
+                    decoded_video_frames = _F5
+                    img = img.reshape(_B5 * _F5, _H5, _W5, _C5)
+                pbar.update_absolute(100, 100)
+            elif pix_h <= ts_px and pix_w <= ts_px:
                 if turbo_decoder is not None:
                     if next(turbo_decoder.parameters()).device != latent.device:
                         turbo_decoder.to(latent.device)
