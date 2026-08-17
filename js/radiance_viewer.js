@@ -985,9 +985,26 @@ class RadianceViewer {
         this.controlsPanel = null;
 
         // HUD Panel Sizing and Position (persisted)
-        const savedHudWidth = localStorage.getItem('radiance_hud_width');
-        this.hudPanelWidth = savedHudWidth ? parseInt(savedHudWidth) : 580;
-        this.hudPanelMinWidth = 360;
+        //
+        // 580 was the width a two-column body needed; one column needs about
+        // 340. Measured on a 2000px-wide window, the panel was taking 38% of
+        // the width and the image canvas was left with 27% of the screen -- on
+        // a 2.39:1 plate that is a 882x369 picture, 43% of a 2048 frame's
+        // native size, which is under the 1:2 where grain and edge quality stop
+        // being judgeable. At 340 the same plate lands near 74% of native.
+        //
+        // The stored value is migrated once rather than left alone: anyone who
+        // has opened the viewer before has 580 (or whatever they dragged it to)
+        // in localStorage, and would see none of this. A width they set
+        // deliberately BELOW the old default is kept -- that was a choice.
+        const HUD_WIDTH_DEFAULT = 340;
+        let savedHudWidth = localStorage.getItem('radiance_hud_width');
+        if (savedHudWidth && !localStorage.getItem('radiance_hud_width_v2')) {
+            if (parseInt(savedHudWidth) >= 500) savedHudWidth = null;
+            localStorage.setItem('radiance_hud_width_v2', '1');
+        }
+        this.hudPanelWidth = savedHudWidth ? parseInt(savedHudWidth) : HUD_WIDTH_DEFAULT;
+        this.hudPanelMinWidth = 300;
         this.hudPanelMaxWidth = 1200;
         const savedHudHeight = localStorage.getItem('radiance_hud_height2');
         this.hudPanelHeight = savedHudHeight ? parseInt(savedHudHeight) : null; // null = auto
@@ -10430,7 +10447,7 @@ else:
                 .radiance-ref-tab:hover { color: var(--radiance-text); }
                 .radiance-ref-tab.is-active { color: var(--radiance-accent) !important; font-weight: 800; }
                 .radiance-ref-tab.is-active::after { content:""; position:absolute; left:20px; right:20px; bottom:0; height:2px; background:var(--radiance-accent); box-shadow:0 0 10px var(--radiance-accent-glow); }
-                .radiance-ref-body { display:grid; grid-template-columns:minmax(236px, 1fr) minmax(248px, 1fr); flex:1; min-height:0; overflow:hidden; background: #0c0c12; }
+                .radiance-ref-body { display:grid; grid-template-columns:1fr; flex:1; min-height:0; overflow:hidden; background: #0c0c12; }
                 .radiance-ref-col { min-width:0; min-height:0; overflow:auto; padding:16px 16px 14px; border-right:1px solid var(--radiance-panel-border); scrollbar-width:thin; scrollbar-color:rgba(255,255,255,.18) transparent; }
                 .radiance-ref-col:last-child { border-right:0; }
                 .radiance-ref-section { padding:0 0 15px; margin:0 0 15px; border-bottom:1px solid var(--radiance-panel-border); }
@@ -10541,7 +10558,7 @@ else:
                     .radiance-ref-wheels { grid-template-columns:repeat(3, minmax(0,1fr)); }
                     .radiance-ref-status-grid { grid-template-columns:1fr; }
                 }
-                @media (max-width: 1180px) { .radiance-ref-body { grid-template-columns:1fr; } .radiance-ref-col:first-child { border-right:0; border-bottom:1px solid var(--radiance-panel-border); } }
+                /* The two-column body collapsed here at 1180px; it is single-column at every width now, so this rule has nothing left to do. */
             `;
             document.head.appendChild(style);
         }
@@ -10559,24 +10576,39 @@ else:
         body.className = 'radiance-ref-body';
         shell.appendChild(body);
 
-        const left = document.createElement('div');
-        left.className = 'radiance-ref-col';
-        const right = document.createElement('div');
-        right.className = 'radiance-ref-col';
-        body.appendChild(left);
-        body.appendChild(right);
+        // One column. The body used to be two, and the tab bar above only ever
+        // switched the LEFT one -- `_renderReferenceGrade(right)` ran on every
+        // render regardless of the active tab. So picking INSPECTOR still showed
+        // the whole grade panel next to it, and picking GRADE showed the grade
+        // twice: a status summary on the left, the real controls on the right.
+        // The tabs were decoration on a panel that always displayed everything.
+        //
+        // That cost 484px of hard minimum (236 + 248) before padding, on a panel
+        // whose default width was 580 -- roughly a third of the window, to show
+        // the user two things when they asked for one. The picture got 27%.
+        const col = document.createElement('div');
+        col.className = 'radiance-ref-col';
+        body.appendChild(col);
 
         let activeTab = this._referenceRightTab || 'inspector';
         const render = () => {
-            left.innerHTML = '';
-            right.innerHTML = '';
+            col.innerHTML = '';
             [...tabs.children].forEach(btn => btn.classList.toggle('is-active', btn.dataset.tabId === activeTab));
-            if (activeTab === 'grade') this._renderReferenceGradeSummary(left);
-            else if (activeTab === 'effects') this._renderReferenceEffects(left);
-            else if (activeTab === 'scopes') this._renderReferenceScopes(left);
-            else if (activeTab === 'analysis') this._renderReferenceAnalysis(left);
-            else this._renderReferenceInspector(left);
-            this._renderReferenceGrade(right);
+            if (activeTab === 'grade') {
+                // The full control set, not the read-only summary.
+                this._renderReferenceGrade(col);
+            } else if (activeTab === 'effects') {
+                this._renderReferenceEffects(col);
+            } else if (activeTab === 'scopes') {
+                this._renderReferenceScopes(col);
+            } else if (activeTab === 'analysis') {
+                this._renderReferenceAnalysis(col);
+            } else {
+                // Inspector is "what is this frame", so the grade *status*
+                // belongs here. The controls that change it live on GRADE.
+                this._renderReferenceInspector(col);
+                this._renderReferenceGradeSummary(col);
+            }
             this._lastRenderContent = render;
         };
 
