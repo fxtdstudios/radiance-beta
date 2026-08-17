@@ -2143,9 +2143,15 @@ const float GOLDEN_ANGLE = 2.39996323;
             // names and neither reported nits.
             //
             // This maps scene luminance to absolute cd/m2, with the boundaries
-            // an HDR colourist actually works to. `v` arrives in the internal
-            // scale where 1.0 == 100 nits, the same convention the SDR->HDR
-            // nodes use, so nits = v * 100.
+            // an HDR colourist actually works to. The argument arrives in the
+            // internal scale where 1.0 == 100 nits, the same convention the
+            // SDR->HDR nodes use, so nits = v * 100.
+            //
+            // No backticks in here. This comment sits inside a JS template
+            // literal, so a backtick terminates the shader string and every
+            // line after it is parsed as JavaScript. That is exactly what
+            // happened: a backtick-quoted 'v' in this comment broke the whole
+            // module, and the viewer node rendered with no UI at all.
             //
             // The anchor is ITU-R BT.2408: HDR Reference White = 203 cd/m2,
             // "the nominal signal level obtained from an HDR camera and a 100%
@@ -3116,7 +3122,7 @@ vec3 getDenoiseColor(vec2 uv) {
 
         // Scene-linear, captured before the display transform flattens it.
         // The HDR heatmap reports absolute cd/m2, and after tone mapping that
-        // information is gone -- `color` from here on is display-referred.
+        // information is gone -- color from here on is display-referred.
         vec3 sceneLinearForHeatmap = color;
 
         // 6 & 7. Display transform.
@@ -3798,7 +3804,7 @@ vec3 getDenoiseColor(vec2 uv) {
         }
 
         console.log(`[Radiance] Float32 readback: ${w}×${h} (${(flipped.byteLength / 1048576).toFixed(1)} MB)`);
-        // `graded: true` -- this path renders the full composite pipeline into
+        // graded: true -- this path renders the full composite pipeline into
         // an RGBA32F FBO first. The WebGPU backend returns the ungraded source
         // and says so, so callers can tell the two apart instead of assuming.
         return { data: flipped, width: w, height: h, graded: true };
@@ -4335,7 +4341,7 @@ vec3 getDenoiseColor(vec2 uv) {
     // ═══════════════════════════════════════════════════════════════════════
     //  OpenColorIO
     //
-    //  `info` is what radiance_ocio.js returns from buildDisplayView(): the
+    //  info is what radiance_ocio.js returns from buildDisplayView(): the
     //  GLSL OpenColorIO generated for this (source → display / view), plus the
     //  LUT textures and uniforms that code expects to find bound. Pass null to
     //  go back to Radiance's own display pipeline.
@@ -4552,7 +4558,7 @@ vec3 getDenoiseColor(vec2 uv) {
 
         // Null the maps. They previously kept the now-invalid handles, so a
         // scope debounce that fired after teardown passed the
-        // `if (!this.gl || !this.programs[mode]) return;` guard and issued
+        // if (!this.gl || !this.programs[mode]) return; guard and issued
         // useProgram/bindTexture on deleted objects -- INVALID_OPERATION spam
         // and a corrupted GL state shared with everything else on the page.
         this.textures = {};

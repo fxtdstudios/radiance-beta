@@ -157,8 +157,8 @@ function describeConfig(config, name) {
         colorSpaces,
         roles: roleMap,
         // The colour space an image should be read as when the config does not
-        // say. `scene_linear` first because that is what a renderer emits;
-        // falling back to `default` and then to whatever exists.
+        // say. 'scene_linear' first because that is what a renderer emits;
+        // falling back to 'default' and then to whatever exists.
         suggestedSource: roleMap.scene_linear || roleMap.default
             || colorSpaces.find((c) => /ACEScg/i.test(c.name))?.name
             || colorSpaces[0]?.name || '',
@@ -231,7 +231,7 @@ export function prepareShaderSource(shaderText) {
         .split('\n')
         .filter((line) => {
             // Our fragment shader already declares these, and a duplicate
-            // `#version` or `precision` is a compile error rather than a
+            // '#version' or 'precision' is a compile error rather than a
             // warning.
             if (/^\s*#version/.test(line) || /^\s*precision\s+\w+\s+\w+\s*;/.test(line)) {
                 stripped.push(line.trim());
