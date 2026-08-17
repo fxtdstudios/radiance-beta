@@ -11,8 +11,16 @@ import torch
 import numpy as np
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
-from aiohttp import web
-from server import PromptServer
+try:
+    from aiohttp import web
+    from server import PromptServer
+except ImportError:  # pragma: no cover - exercised by the CI import smoke-test
+    # Same guard, same reason as nodes/monitor/viewer.py: viewer.py imports
+    # this module at import time, so an unguarded aiohttp here made the whole
+    # Review node group unimportable without a running ComfyUI. aiohttp is a
+    # required ComfyUI dependency, so a real install never takes this branch.
+    web = None
+    PromptServer = None
 import folder_paths
 
 # Re-import modular components
@@ -244,12 +252,15 @@ def _export_aces_clip_xml(media_path: str, grading: dict, color_space: str, vers
 # "method POST is already registered" at startup and the whole pack fails to load
 # -- exactly the crash those two guards were written for.
 _RADIANCE_DELIVER_ROUTE_REGISTERED = getattr(
-    PromptServer.instance, "_radiance_deliver_route_registered", False)
+    getattr(PromptServer, "instance", None), "_radiance_deliver_route_registered", False)
 
 
 def _register_deliver_route(handler):
-    if _RADIANCE_DELIVER_ROUTE_REGISTERED:
-        logger.debug("[Deliver] Route already registered; skipping duplicate registration.")
+    # `PromptServer` is None when aiohttp/ComfyUI are absent (see the guarded
+    # import at the top). Reading `.instance` off None at module scope raised
+    # AttributeError and took the whole Review group down with it.
+    if _RADIANCE_DELIVER_ROUTE_REGISTERED or PromptServer is None:
+        logger.debug("[Deliver] Route already registered or no server; skipping.")
         return handler
     try:
         PromptServer.instance.routes.post('/radiance/deliver')(handler)

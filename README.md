@@ -407,6 +407,15 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
       branding override but no registration. Now `Bake Viewer Grade`, which
       also settles the Grade naming overlap. `SECTION_OVERRIDES` is empty for
       the first time; both entries it ever held were unpublished nodes.
+- [x] **Every node group imports without aiohttp or a running ComfyUI.**
+      `nodes/monitor/viewer.py` and `delivery/handler.py` imported
+      `aiohttp`/`server` at module scope and read `PromptServer.instance`
+      there, which the flat `nodes_realtime_preview.py` had hidden — moving it
+      into a package made importing any Review module run the viewer, and CI's
+      minimal-dependency job failed. `gizmo.py` and `workspace.py` had guarded
+      the same import for years. `tests/test_import_isolation.py` now proves
+      the property for all eleven groups in a subprocess with aiohttp and
+      `server` blocked, rather than for one hand-listed module in CI.
 - [x] Three compatibility alias keys (`RadianceImageLoader`,
       `RadianceControlApply`, `RadianceWorkspace`) ship as `DEPRECATED`
       subclasses: workflows saved against the old key still open, and the menu
@@ -415,7 +424,7 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
       audit and review write-ups are gone, `.comfyignore` no longer lists files
       that stopped existing, and the generated GPU report is ignored rather
       than committed.
-- [x] Suite: 2407 passed / 0 failed / 69 skipped, plus 27 JS tests.
+- [x] Suite: 2420 passed / 0 failed / 69 skipped, plus 27 JS tests.
 - [x] Released as **3.3.0**, not a patch: five changes alter what an unchanged
       graph does, and the changelog leads with them.
 

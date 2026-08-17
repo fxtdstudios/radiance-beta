@@ -244,10 +244,14 @@ jobs:
               sys.meta_path.insert(0, _RadianceNameFinder())
 
           # ── Modules to smoke-test ──────────────────────────────────────────
+          # A spread of node modules that must import with nothing but the
+          # stubs above — no cv2, no OpenEXR, no real torch. The list is short
+          # and explicit on purpose; importing everything under nodes/ would
+          # fail on optional dependencies that are genuinely absent here.
           _modules = [
-              ("radiance.nodes.ai.scene_cut",        "scene_cut"),
+              ("radiance.nodes.ai.scene_cut",         "scene_cut"),
               ("radiance.nodes.hdr.aces2",            "aces2"),
-              ("radiance.nodes_realtime_preview",    "nodes_realtime_preview"),
+              ("radiance.nodes.monitor.realtime",     "realtime"),
               ("radiance.nodes.upscale.upscale",      "upscale"),
               ("radiance.nodes.video.dit",            "dit"),
               ("radiance.nodes.video.character",      "character"),
@@ -264,6 +268,24 @@ jobs:
 
           sys.exit(0 if ok else 1)
           EOF
+
+  # ── JavaScript unit tests ───────────────────────────────────────────────────
+  js-test:
+    name: "JS unit tests"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # No test framework to install: node --test is built in, and the only
+      # devDependency (esbuild) is not needed to run these.
+      - name: Run JS unit tests
+        run: node --test js/tests/*.test.mjs
 
   # ── YAML / TOML lint ────────────────────────────────────────────────────────
   lint-config:
