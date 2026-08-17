@@ -215,12 +215,6 @@ def _make_energy_cfg_patch(layers):
     user asked for — so the sum is floored at −1 before the +1, i.e. the
     modifier is clamped to ``[0, ∞)``.
 
-    # ALBABIT-FIX: registered via set_model_sampler_post_cfg_function (a list
-    # ComfyUI chains automatically), not the single-slot sampler_cfg_function
-    # -- no more manual existing_cfg_fn chaining needed to compose with
-    # guidance rescale / SDR, and the args["denoised"] this receives already
-    # reflects any earlier post-cfg patch's effect.
-
     Shape handling is deliberately rank-agnostic. The previous version
     unpacked `B, C, H_l, W_l = cond.shape`, which raises ValueError on the
     5-D (B, C, T, H, W) latents every video model here produces — WAN,

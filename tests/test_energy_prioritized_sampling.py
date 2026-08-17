@@ -375,23 +375,22 @@ class TestEnergyCfgPatch:
 
         assert out.shape == cond.shape
 
-    def test_an_existing_cfg_function_is_wrapped_not_replaced(self):
-        """EPS must compose with guidance rescale and the SDR anchor."""
-        seen = {}
-
-        def existing(args):
-            seen["cond_denoised"] = args["cond_denoised"]
-            return args["denoised"] * 0.0
-
+    def test_composes_through_the_post_cfg_chain_not_manual_wrapping(self):
+        """EPS is registered on set_model_sampler_post_cfg_function, a list
+        ComfyUI chains automatically (comfy/samplers.py:600-603) -- it takes
+        no existing_cfg_fn and must not depend on the incoming
+        args["denoised"] (an earlier chain link's output) to produce its own
+        result, so it composes correctly regardless of chain position."""
         cond = torch.full((1, 4, 4, 4), 5.0)
         uncond = torch.ones(1, 4, 4, 4)
 
-        patch = _make_energy_cfg_patch([(torch.ones(1, 4, 4), 0.5)], existing_cfg_fn=existing)
-        out = patch(_args(cond, uncond, cfg=1.0))
+        patch = _make_energy_cfg_patch([(torch.ones(1, 4, 4), 0.5)])
+        args = _args(cond, uncond, cfg=1.0)
+        args["denoised"] = torch.zeros_like(cond)  # as if an earlier link already ran
+        out = patch(args)
 
-        assert torch.allclose(out, torch.zeros_like(out)), "the existing cfg fn did not run"
-        assert seen["cond_denoised"][0, 0, 0, 0].item() == pytest.approx(7.0), \
-            "the downstream cfg fn did not receive the EPS-boosted prediction"
+        assert out[0, 0, 0, 0].item() == pytest.approx(7.0), \
+            "EPS's own result must not be discarded in favor of the incoming denoised value"
 
     def test_mismatched_cond_uncond_shapes_pass_through(self):
         args = {
