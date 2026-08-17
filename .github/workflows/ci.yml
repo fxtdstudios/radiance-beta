@@ -287,6 +287,10 @@ jobs:
       #
       # js/tests/ocio_gpu.test.mjs skips here because Playwright is absent; the
       # gpu-test job below installs it and runs that file for real.
+      # js/tests/module_parse.test.mjs is the first thing that matters here.
+      # `node --check foo.js` does not apply ES-module parsing to a .js file in
+      # a package without "type": "module", so it passed on a viewer that could
+      # not load in a browser at all. That test copies each module to .mjs first.
       - name: Run JS unit tests
         run: node --test js/tests/*.test.mjs
 

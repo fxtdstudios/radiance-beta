@@ -920,7 +920,7 @@ class RadianceViewer {
         this.matteMode = localStorage.getItem('radiance_matte') || 'off';
         this.matteOpacity = 0.7;
 
-        // Nearest-neighbour vs linear magnification. RV binds this to `n`, and
+        // Nearest-neighbour vs linear magnification. RV binds this to 'n', and
         // pixel-level inspection is meaningless through a bilinear filter.
         this.pixelFilter = localStorage.getItem('radiance_pixel_filter') || 'linear';
 
@@ -1524,7 +1524,7 @@ class RadianceViewer {
             const NLOG_BREAK = 0.328;
             const nlogCurve = (x) => Math.pow((x - 0.363) / 0.241, 4) / Math.pow(10, 2.57);
             if (v >= NLOG_BREAK) return nlogCurve(v);
-            // Was `return (v - 0.0) / 0.0;` — a literal divide by zero, labelled
+            // Was 'return (v - 0.0) / 0.0;' — a literal divide by zero, labelled
             // "linear region approximation". It returns ±Infinity for any v != 0
             // and NaN at v === 0, and this feeds _computeHDRZoneStats, so the
             // whole stats object and the HDR peak badge read "Infinityk nit" or
@@ -1725,7 +1725,7 @@ class RadianceViewer {
 
     // ── v4.3: Auto-IDT Inference ──────────────────────────────────────────────
     // Infers the input colorspace from three fingerprint tiers:
-    //   1. EXR metadata `colorSpace` / `chromaticities` attribute (most authoritative)
+    //   1. EXR metadata 'colorSpace' / 'chromaticities' attribute (most authoritative)
     //   2. Filename keyword scan (e.g. 'logc3', 'slog3', 'vlog')
     //   3. Data midgrey fingerprint — compares p50 luma to known camera profiles
     // Sets this.inputSpace and updates the IDT dropdown + shows a dismissible toast.
@@ -2208,9 +2208,9 @@ class RadianceViewer {
             Edit: [
                 // These two work. Their keyboard shortcuts did not: the only
                 // Ctrl+Z / Ctrl+Y handler in the file sits inside the region of
-                // createHUD() after the unconditional `return` at ~11753, so it
+                // createHUD() after the unconditional 'return' at ~11753, so it
                 // is never installed. The menu advertised a binding that did not
-                // exist. `_installUndoShortcuts` (called from createUI) restores
+                // exist. '_installUndoShortcuts' (called from createUI) restores
                 // it in live code.
                 { label: 'Undo', shortcut: 'Ctrl+Z', action: () => this.undo?.() },
                 { label: 'Redo', shortcut: 'Ctrl+Y', action: () => this.redo?.() },
@@ -2359,7 +2359,7 @@ class RadianceViewer {
             { label: 'Exposure', action: () => this.toggleControls() },
             { label: 'False Color', action: () => { this.falseColor = !this.falseColor; this.render(); } },
             { label: 'Zebra', action: () => { this.zebra = !this.zebra; this.render(); } },
-            // Was a second switch on `falseColor` -- the same feature under two
+            // Was a second switch on 'falseColor' -- the same feature under two
             // names, and neither reported nits. False Color is an *exposure*
             // tool on display luma; this one reads scene luminance and maps
             // absolute cd/m2 against BT.2408's 203-nit HDR Reference White.
@@ -2593,9 +2593,9 @@ class RadianceViewer {
         Object.values(trackButtons).forEach(b => b.updateVisual());
 
         // Named and stored so destroy() can remove it. It used to be an
-        // anonymous listener on `window` with no reference kept, so it could
-        // never be removed: the closure captured `this`, `toolButtons` and
-        // `trackButtons`, and kept firing after the node was deleted. Pressing
+        // anonymous listener on 'window' with no reference kept, so it could
+        // never be removed: the closure captured 'this', 'toolButtons' and
+        // 'trackButtons', and kept firing after the node was deleted. Pressing
         // A/B/S/D/F/V anywhere in ComfyUI ran the handler once per destroyed
         // viewer, each mutating a dead instance and calling updateVisual() on
         // detached DOM. One more every time the node executed.
@@ -3254,7 +3254,7 @@ class RadianceViewer {
 
         // WebGPU is opt-in, and off by default.
         //
-        // It used to upgrade automatically wherever `navigator.gpu` existed,
+        // It used to upgrade automatically wherever 'navigator.gpu' existed,
         // which meant nobody chose it — and the backend it silently switched
         // people to is the one missing four features the WebGL path has:
         //
@@ -4055,7 +4055,7 @@ class RadianceViewer {
             item.style.cssText = `background: #111; border: 1px solid #222; padding: 6px 10px; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; font-size: 10px;`;
 
             const info = document.createElement('div');
-            // Escaped: `name` is the raw Filename textbox value and `path`/`qc`
+            // Escaped: 'name' is the raw Filename textbox value and 'path'/'qc'
             // come from the /radiance/deliver JSON. This was the one tainted
             // innerHTML in the file -- the same class already has escapeHtml()
             // and uses it correctly a few hundred lines up.
@@ -5220,7 +5220,7 @@ else:
             case 'export': {
                 if (!this.image) { this._termLog('warn', '[Export] No image loaded.'); break; }
 
-                // v4.0: `export exr32 [name]` — 32-bit graded EXR
+                // v4.0: 'export exr32 [name]' — 32-bit graded EXR
                 if (args[0] === 'exr32') {
                     this.exportSnapshot('exr32');
                     break;
@@ -6356,7 +6356,7 @@ else:
             case 'b': this.channel = 'b'; this.showZdepth = false; this.render(); break;
             case 'l': this.channel = 'luma'; this.showZdepth = false; this.render(); break;
             case 'c': this.channel = 'rgb'; this.showZdepth = false; this.render(); break;
-            // RV binds nearest-neighbour to `n`. Pixel-peeping through a
+            // RV binds nearest-neighbour to 'n'. Pixel-peeping through a
             // bilinear filter shows a blend of neighbours rather than pixels.
             case 'n': this.togglePixelFilter(); break;
             case 'h': this.toggleHelp(); break;
@@ -6760,10 +6760,10 @@ else:
         // the float data, and encodes it as an OpenEXR file with FLOAT pixel
         // type (pixelType=2) and uncompressed scanlines.
         if (format === 'exr32') {
-            // The old guard was `if (!this.useWebGL || !this.renderer)`, which
-            // never fired on WebGPU: `_tryWebGPUUpgrade` sets `useWebGL = true`.
-            // So a WebGPU user fell straight through to `result.data` on what
-            // was then a Promise, got `undefined`, and was told "EXR encoding
+            // The old guard was 'if (!this.useWebGL || !this.renderer)', which
+            // never fired on WebGPU: '_tryWebGPUUpgrade' sets 'useWebGL = true'.
+            // So a WebGPU user fell straight through to 'result.data' on what
+            // was then a Promise, got 'undefined', and was told "EXR encoding
             // failed" -- the encoder blamed for a backend contract mismatch.
             if (!this.renderer?.readPixelsFloat32) {
                 this._termLog?.('warn', '[Export] 32-bit EXR export needs a renderer with float readback.');
@@ -6777,7 +6777,7 @@ else:
                 return;
             }
 
-            // Both backends return `{data, width, height, graded}` now. Only
+            // Both backends return '{data, width, height, graded}' now. Only
             // WebGL renders the graded composite; WebGPU returns the ungraded
             // scene-linear source. Writing that into a file called
             // "radiance_graded_*.exr" without saying so is the kind of quiet
@@ -10906,7 +10906,7 @@ else:
         shell.appendChild(body);
 
         // One column. The body used to be two, and the tab bar above only ever
-        // switched the LEFT one -- `_renderReferenceGrade(right)` ran on every
+        // switched the LEFT one -- '_renderReferenceGrade(right)' ran on every
         // render regardless of the active tab. So picking INSPECTOR still showed
         // the whole grade panel next to it, and picking GRADE showed the grade
         // twice: a status summary on the left, the real controls on the right.
@@ -10987,7 +10987,7 @@ else:
     _installUndoShortcuts() {
         // The Edit menu offers Undo and Redo and labels them Ctrl+Z / Ctrl+Y.
         // The handler that implemented those labels lives after the
-        // unconditional `return` in createHUD(), so it was never installed and
+        // unconditional 'return' in createHUD(), so it was never installed and
         // the labels were a promise the app did not keep -- while _pushUndo()
         // kept filling a 50-deep stack from live code the whole time.
         if (this._undoKeyHandler) return;
@@ -15070,7 +15070,7 @@ else:
      */
     _probeDescribe() {
         if (this.probeSource === 'rendered') {
-            // Deliberately a *capture*, not a live read. `readPixelsFloat32`
+            // Deliberately a *capture*, not a live read. 'readPixelsFloat32'
             // pulls the whole frame off the GPU; doing that once per pointer
             // move would stall the render loop at 4K. So the rendered pixels
             // are snapshotted on demand and the caption states when — a probe
@@ -18406,7 +18406,7 @@ else:
             b = (b - piv) * con + piv;
 
             // 8. Log Wheels (Shadow/Midtone/Highlight)
-            // Precise reimplementation of `applyLogWheels` from glsl
+            // Precise reimplementation of 'applyLogWheels' from glsl
             const logLuma = r * 0.2126 + g * 0.7152 + b * 0.0722;
 
             // Shadow curve log_s(x)
@@ -19937,7 +19937,7 @@ else:
     }
 
     destroy() {
-        // Both of these were added to `window` and never removed.
+        // Both of these were added to 'window' and never removed.
         if (this._seqDockKeyHandler) {
             window.removeEventListener('keydown', this._seqDockKeyHandler);
             this._seqDockKeyHandler = null;

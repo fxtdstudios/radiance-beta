@@ -114,7 +114,7 @@ export function sampleStats(data, { width, height, channels, rect } = {}) {
     };
 
     // Pass 2 — median. Exact by sort when the sample is small, histogram
-    // otherwise. `medianExact` travels with the number so the panel can say
+    // otherwise. 'medianExact' travels with the number so the panel can say
     // which one it is showing rather than implying a precision it does not have.
     const exact = total <= MEDIAN_EXACT_LIMIT;
     const buckets = exact ? null : new Float64Array(ch * MEDIAN_BINS);
