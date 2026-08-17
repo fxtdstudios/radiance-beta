@@ -3515,9 +3515,15 @@ vec3 getDenoiseColor(vec2 uv) {
         // 'linear' falls back to nearest there rather than sampling as black.
         const canLinear = !this._imageIsFloat || this.extColorFloatLinear;
         const mag = (this.pixelFilter === 'nearest' || !canLinear) ? gl.NEAREST : gl.LINEAR;
+        // Unit 0 explicitly. Without it this binds the image texture to
+        // whichever unit happened to be active -- unit 3 is the depth map,
+        // unit 4 the reference -- and then leaves it there. Unit 0 is where the
+        // image belongs and where the composite shader expects it, so binding
+        // it here is also the correct resting state; unbinding to null would
+        // just make the next draw rebind it.
+        gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, tex);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, mag);
-        gl.bindTexture(gl.TEXTURE_2D, null);
     }
 
     loadImageTexture(image) {
@@ -4505,6 +4511,13 @@ vec3 getDenoiseColor(vec2 uv) {
 
         // v4.3: Bloom FBO chain (6-level Kawase) — was never freed
         this._destroyBloomFBOs();
+
+        // OpenColorIO LUT textures. A show config can carry several 3D LUTs,
+        // and the pattern in this method is that everything with a lifetime
+        // longer than a frame gets freed here explicitly rather than left to
+        // context loss.
+        this._releaseOCIOTextures();
+        this._ocio = null;
 
         // v4.3: Scope offscreen FBO + texture — was never freed
         if (this.scopeFBO)  { gl.deleteFramebuffer(this.scopeFBO);  this.scopeFBO  = null; }

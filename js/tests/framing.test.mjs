@@ -220,3 +220,28 @@ test('the frame rate is only used for conversion, and says so', () => {
     assert.match(section, /23\.976/, 'the broadcast rates must be offered, not just integers');
     assert.match(section, /29\.97/);
 });
+
+// ── review findings, pinned ─────────────────────────────────────────────────
+// Three defects a self-review of this session's own work turned up. None of
+// them failed a test, which is why they are here now.
+
+test('the filter is applied to a named texture unit', () => {
+    // _applyPixelFilter bound TEXTURE_2D without selecting a unit first, so it
+    // operated on whichever unit happened to be active — unit 3 is the depth
+    // map, unit 4 the reference — and then left the image texture bound there.
+    const gl = readFileSync(join(JS, 'radiance_webgl.js'), 'utf8');
+    const body = code(methodBody(gl, '_applyPixelFilter'));
+    assert.match(body, /gl\.activeTexture\(gl\.TEXTURE0\)/,
+        'bind to unit 0 explicitly, not to whatever was current');
+    assert.doesNotMatch(body, /bindTexture\(gl\.TEXTURE_2D, null\)/,
+        'unit 0 holds the image; unbinding it just forces the next draw to rebind');
+});
+
+test('OCIO LUT textures are freed on teardown', () => {
+    // Everything else in destroy() with a lifetime longer than a frame is freed
+    // explicitly rather than left to context loss; these were not.
+    const gl = readFileSync(join(JS, 'radiance_webgl.js'), 'utf8');
+    const start = gl.indexOf('    destroy() {');
+    const body = gl.slice(start, gl.indexOf('\n    }\n', start));
+    assert.match(body, /_releaseOCIOTextures\(\)/, 'OCIO textures leak on destroy');
+});
