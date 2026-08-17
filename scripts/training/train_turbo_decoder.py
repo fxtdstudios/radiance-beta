@@ -48,7 +48,15 @@ import logging
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only
+    # The return annotation below is a string, so this costs nothing at
+    # runtime; without it the name is undefined for any tool that resolves
+    # annotations, which is what ruff was reporting. Only the package-relative
+    # path is declared here -- a type checker does not need the three-way
+    # fallback that _import_decoders() carries for the standalone case.
+    from ..hdr.fast_vae import RadianceTurboDecoder
 from copy import deepcopy
 
 import torch
@@ -186,6 +194,31 @@ class EMA:
 #  METRICS
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _import_decoders():
+    """
+    The decoder classes, wherever this script happens to be run from.
+
+    The three-way fallback exists because this file runs both as a module
+    inside the package and as a standalone script from the training directory,
+    and the working directory decides which import resolves.
+
+    It lives here rather than inline because it *was* inline in train() and
+    simply absent from load_trained_turbo_decoder(), which therefore raised
+    NameError on RadianceFullDecoder the moment anyone loaded a checkpoint --
+    the one function in this file a user reaches without training anything
+    first. Ruff saw it as two F821s; the script is outside CI's ruff exclude,
+    so they were reported and never acted on.
+    """
+    try:
+        from .fast_vae import RadianceTurboDecoder, RadianceFullDecoder
+    except (ImportError, ValueError):
+        try:
+            from fast_vae import RadianceTurboDecoder, RadianceFullDecoder
+        except ImportError:
+            from hdr.fast_vae import RadianceTurboDecoder, RadianceFullDecoder
+    return RadianceTurboDecoder, RadianceFullDecoder
+
+
 def psnr_log_space(pred: torch.Tensor, target: torch.Tensor) -> float:
     """
     PSNR computed in log space.
@@ -266,13 +299,7 @@ def train(
         except ImportError:
             resolve_model_vae_config = None
 
-    try:
-        from .fast_vae import RadianceTurboDecoder, RadianceFullDecoder
-    except (ImportError, ValueError):
-        try:
-            from fast_vae import RadianceTurboDecoder, RadianceFullDecoder
-        except ImportError:
-            from hdr.fast_vae import RadianceTurboDecoder, RadianceFullDecoder
+    RadianceTurboDecoder, RadianceFullDecoder = _import_decoders()
 
     if resolve_model_vae_config:
         cfg = resolve_model_vae_config(model_type)
@@ -606,6 +633,7 @@ def load_trained_turbo_decoder(
         latent_channels = cfg.get("latent_channels", 16) if cfg else 16
     else:
         latent_channels = 16 if model_type in ("flux", "wan", "sd3", "sd3.5", "hunyuanvideo", "ltx-video", "lumina2", "cogvideox") else 4
+    RadianceTurboDecoder, RadianceFullDecoder = _import_decoders()
     if "full" in checkpoint_path.lower():
         model = RadianceFullDecoder(latent_channels=latent_channels)
     else:
