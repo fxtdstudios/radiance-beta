@@ -245,3 +245,28 @@ test('OCIO LUT textures are freed on teardown', () => {
     const body = gl.slice(start, gl.indexOf('\n    }\n', start));
     assert.match(body, /_releaseOCIOTextures\(\)/, 'OCIO textures leak on destroy');
 });
+
+// ── backend default ─────────────────────────────────────────────────────────
+
+test('WebGPU is opt-in, not automatic', () => {
+    // It used to upgrade wherever navigator.gpu existed, so nobody chose it —
+    // and the backend it switched people to is the one missing masks,
+    // qualifiers, the HDR heatmap and OpenColorIO. Defaulting to the backend
+    // with the missing features, then explaining the gaps with four in-panel
+    // banners, is a worse product than defaulting to the one that works.
+    assert.match(viewer, /localStorage\.getItem\('radiance_prefer_webgpu'\) === '1'\s*\n\s*&& navigator\.gpu/,
+        'the WebGPU upgrade must be gated on an explicit preference');
+    const auto = /if \(navigator\.gpu && typeof RadianceWebGPURenderer !== 'undefined'/;
+    assert.doesNotMatch(code(viewer), auto, 'the automatic WebGPU upgrade is back');
+});
+
+test('turning WebGPU on says what stops working', () => {
+    // A user who opts in should know exactly what breaks, rather than
+    // discovering it one inert panel at a time.
+    const section = code(methodBody(viewer, 'renderFramingSection'));
+    assert.match(section, /radiance_prefer_webgpu/, 'no control to change the backend');
+    for (const feature of ['[Mm]asks', '[Qq]ualifiers', 'HDR heatmap', 'OpenColorIO']) {
+        assert.match(section, new RegExp(feature),
+            `the backend control does not mention ${feature} as unavailable on WebGPU`);
+    }
+});
