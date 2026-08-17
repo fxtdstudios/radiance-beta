@@ -33,9 +33,9 @@ for _mod in ["folder_paths", "comfy", "comfy.utils"]:
 
 def _import_cs():
     if "nodes_hdr_colorspace" in sys.modules:
-        return sys.modules["nodes_hdr_colorspace"]
+        return sys.modules["radiance.nodes.hdr.colorspace"]
     sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
-    return importlib.import_module("nodes_hdr_colorspace")
+    return importlib.import_module("radiance.nodes.hdr.colorspace")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

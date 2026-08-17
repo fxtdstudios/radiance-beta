@@ -81,7 +81,7 @@ def test_restart_runs_the_segment_back_down_to_zero():
     the latent partially noised: measured on a 20-step Karras schedule,
     restart_sigma 2.0 returned a latent still at sigma 0.7913.
     """
-    src = _src("nodes_sampler.py")
+    src = _src("nodes/generate/sampler.py")
     body = src[src.index("def _apply_restarts"):]
     body = body[:body.index("\n        return result")]
     assert "sub_sigmas = s_vals[idx:]" in body
@@ -91,7 +91,7 @@ def test_restart_runs_the_segment_back_down_to_zero():
 def test_restart_noise_variance_matches_the_paper():
     """Alg. 2 adds noise of variance sigma_max^2 - sigma_min^2. The old code
     used `randn_like(result) * r_val` — a std of r_val, no subtraction."""
-    src = _src("nodes_sampler.py")
+    src = _src("nodes/generate/sampler.py")
     body = src[src.index("def _apply_restarts"):]
     body = body[:body.index("\n        return result")]
     assert "sigma_max ** 2 - sigma_min ** 2" in body
@@ -104,7 +104,7 @@ def test_restart_does_not_pass_a_noised_latent_as_the_noise_argument():
     passing the noised latent as `noise=` amplified the signal by (1 + sigma0)
     and scaled the noise by sigma0 on top.
     """
-    src = _src("nodes_sampler.py")
+    src = _src("nodes/generate/sampler.py")
     body = src[src.index("def _apply_restarts"):]
     body = body[:body.index("\n        return result")]
     assert "noise=torch.zeros_like(noisy)" in body
@@ -202,7 +202,7 @@ def test_reload_is_a_real_widget_not_a_hidden_input():
     frontend builds widgets from required/optional only, so radiance_io.js
     could not find it and bailed before adding the button.
     """
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     spec = RadianceRead.INPUT_TYPES()
     assert "reload" in (spec.get("optional") or {}), \
@@ -213,7 +213,7 @@ def test_reload_is_a_real_widget_not_a_hidden_input():
 def test_reload_still_reaches_is_changed_and_read():
     import inspect
 
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     assert "reload" in inspect.signature(RadianceRead.IS_CHANGED).parameters
     assert "reload" in inspect.signature(RadianceRead.read).parameters

@@ -19,6 +19,7 @@ from radiance.nodes.video.hdr import (
     RadianceVideoFrameRouter,
     RadianceVideoAssembler,
 )
+from radiance.nodes.aggregate import fold_in_module_nodes
 
 logger = logging.getLogger("radiance.nodes.video")
 
@@ -51,5 +52,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceVideoFrameRouter": "◎ Video Frame Router",
     "RadianceVideoAssembler": "◎ Video Assembler",
 }
+
+# Publishing is the default: sweep this package for nodes its leaf modules
+# declare but the mapping above does not list. See nodes/aggregate.py — this is
+# what stopped seventeen finished nodes from ever reaching the menu.
+fold_in_module_nodes(__name__, NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS, logger)
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

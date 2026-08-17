@@ -110,7 +110,7 @@ def test_formats_pillow_can_open_are_not_refused(ext, tmp_path, rgba8):
     everything else and the node refused the file -- while the reader underneath
     opened it without complaint.
     """
-    from radiance.nodes_io import _path_kind
+    from radiance.nodes.io.write import _path_kind
 
     if ext not in F.image_extensions():
         pytest.skip(f"this Pillow build has no {ext} reader")
@@ -214,7 +214,7 @@ def test_an_explicit_pattern_reports_the_range_on_disk(png_sequence):
 
 
 def test_reading_one_frame_reads_the_sequence(png_sequence):
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     image, mask, info = RadianceRead().read(browse="", path=str(png_sequence))
     assert image.shape[0] == 8, "picking one frame should offer the whole range"
@@ -223,7 +223,7 @@ def test_reading_one_frame_reads_the_sequence(png_sequence):
 
 def test_media_type_image_still_reads_exactly_one_frame(png_sequence):
     """The escape hatch, for when you really do want the single frame."""
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     image, _mask, info = RadianceRead().read(
         browse="", path=str(png_sequence), media_type="Image")
@@ -233,7 +233,7 @@ def test_media_type_image_still_reads_exactly_one_frame(png_sequence):
 
 def test_a_sequence_keeps_its_alpha(png_sequence):
     """`img_t, _ = _read_image(p)` threw the matte away for every frame."""
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     _image, mask, info = RadianceRead().read(browse="", path=str(png_sequence))
     assert json.loads(info)["alpha"] is True
@@ -248,7 +248,7 @@ def test_the_sequence_start_frame_default_does_not_swallow_a_sequence(tmp_path, 
     for frame in range(1, 6):
         PIL.fromarray(rgba8).save(d / f"take.{frame:04d}.png")
 
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     image, _mask, _info = RadianceRead().read(browse="", path=str(d / "take.0003.png"))
     assert image.shape[0] == 5
@@ -295,7 +295,7 @@ def test_a_depth_only_exr_reads_instead_of_raising(exr_depth_only):
 
     A Z pass is a normal render output, not a malformed file.
     """
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     image, _mask, info = RadianceRead().read(browse="", path=str(exr_depth_only))
     assert image.shape == (1, 16, 24, 3)
@@ -328,7 +328,7 @@ def test_layer_choices_puts_the_beauty_first(exr_layers):
 
 
 def test_reading_a_named_layer_through_the_node(exr_layers):
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     image, _mask, info = RadianceRead().read(
         browse="", path=str(exr_layers), layer="specular")
@@ -341,7 +341,7 @@ def test_reading_a_named_layer_through_the_node(exr_layers):
 def test_an_overscan_exr_is_conformed_to_its_display_window(exr_overscan):
     """Documented as a known limitation through 3.1.x: the reader used the data
     window and returned an offset frame at the wrong resolution, silently."""
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     image, _mask, info = RadianceRead().read(browse="", path=str(exr_overscan))
     assert image.shape == (1, 18, 24, 3), "not conformed to the display window"
@@ -351,7 +351,7 @@ def test_an_overscan_exr_is_conformed_to_its_display_window(exr_overscan):
 
 
 def test_raw_keeps_the_overscan(exr_overscan):
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     image, _mask, _info = RadianceRead().read(
         browse="", path=str(exr_overscan), raw=True)
@@ -359,7 +359,7 @@ def test_raw_keeps_the_overscan(exr_overscan):
 
 
 def test_the_info_output_reports_both_windows(exr_overscan):
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     _image, _mask, info = RadianceRead().read(browse="", path=str(exr_overscan))
     data = json.loads(info)
@@ -370,7 +370,7 @@ def test_the_info_output_reports_both_windows(exr_overscan):
 # ── error policy ───────────────────────────────────────────────────────────
 
 def test_a_missing_file_raises_by_default(tmp_path):
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     with pytest.raises(Exception) as excinfo:
         RadianceRead().read(browse="", path=str(tmp_path / "absent.exr"))
@@ -381,7 +381,7 @@ def test_black_frame_is_available_but_says_so(tmp_path, caplog):
     """The 3.1.x behaviour, kept as an explicit choice rather than a silent one."""
     import logging
 
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     with caplog.at_level(logging.WARNING):
         image, _mask, info = RadianceRead().read(
@@ -394,7 +394,7 @@ def test_black_frame_is_available_but_says_so(tmp_path, caplog):
 
 
 def test_an_unreadable_format_names_the_fix(tmp_path):
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     junk = tmp_path / "plate.wat"
     junk.write_bytes(b"nope")
@@ -406,7 +406,7 @@ def test_an_unreadable_format_names_the_fix(tmp_path):
 # ── premultiplied alpha ────────────────────────────────────────────────────
 
 def test_premultiplied_divides_rgb_back_out(tmp_path):
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     OpenEXR = pytest.importorskip("OpenEXR")
     if not hasattr(OpenEXR, "File"):
@@ -429,7 +429,7 @@ def test_premultiplied_divides_rgb_back_out(tmp_path):
 
 def test_unpremultiply_never_produces_nan(tmp_path):
     """Dividing by a zero alpha would poison every downstream operation."""
-    from radiance.nodes_io import _unpremultiply
+    from radiance.nodes.io.write import _unpremultiply
 
     image = torch.full((1, 4, 4, 3), 0.5)
     mask = torch.zeros(1, 4, 4)
@@ -441,7 +441,7 @@ def test_unpremultiply_never_produces_nan(tmp_path):
 # ── raw ────────────────────────────────────────────────────────────────────
 
 def test_raw_skips_the_colour_transform(tmp_path, rgba8):
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     PIL.fromarray(rgba8[..., :3]).save(tmp_path / "srgb.png")
     managed, _m, _i = RadianceRead().read(
@@ -455,7 +455,7 @@ def test_raw_skips_the_colour_transform(tmp_path, rgba8):
 # ── the info output ────────────────────────────────────────────────────────
 
 def test_every_read_returns_three_outputs(png_sequence):
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     assert len(RadianceRead().read(browse="", path=str(png_sequence))) == 3
 
@@ -463,7 +463,7 @@ def test_every_read_returns_three_outputs(png_sequence):
 def test_the_node_declares_the_info_output_last():
     """Appended, not inserted: ComfyUI links outputs by index, so a workflow
     saved against the two-output version must keep working."""
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     assert RadianceRead.RETURN_TYPES[:2] == ("IMAGE", "MASK")
     assert RadianceRead.RETURN_NAMES == ("image", "mask", "info")
@@ -472,7 +472,7 @@ def test_the_node_declares_the_info_output_last():
 
 def test_the_info_output_is_valid_json_for_every_media_type(
         png_sequence, exr_layers, tmp_path, rgba8):
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     PIL.fromarray(rgba8).save(tmp_path / "still.png")
     cases = [str(png_sequence), str(exr_layers), str(tmp_path / "still.png"), ""]
@@ -484,7 +484,7 @@ def test_the_info_output_is_valid_json_for_every_media_type(
 
 def test_an_empty_read_is_not_an_error():
     """A node just dropped on the canvas has no file yet."""
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     image, mask, info = RadianceRead().read(browse="", path="")
     assert image.shape[0] == 1 and mask is not None
@@ -498,7 +498,7 @@ def test_every_widget_the_signature_accepts_is_declared():
     which is exactly how the RELOAD button went missing for two releases."""
     import inspect
 
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     spec = RadianceRead.INPUT_TYPES()
     declared = set(spec.get("required", {})) | set(spec.get("optional", {}))
@@ -509,7 +509,7 @@ def test_every_widget_the_signature_accepts_is_declared():
 
 def test_every_widget_has_a_tooltip():
     """Fifteen widgets is a lot to guess at."""
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     spec = RadianceRead.INPUT_TYPES()
     missing = [
@@ -525,7 +525,7 @@ def test_the_layer_widget_is_a_string_not_a_combo():
     """Deliberate. ComfyUI validates a combo against the list INPUT_TYPES built,
     so a workflow saved with layer="diffuse" would fail to load on a machine
     that had never seen that file. The frontend adds the dropdown."""
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     entry = RadianceRead.INPUT_TYPES()["optional"]["layer"]
     assert entry[0] == "STRING"
@@ -533,7 +533,7 @@ def test_the_layer_widget_is_a_string_not_a_combo():
 
 
 def test_on_error_defaults_to_raising():
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     entry = RadianceRead.INPUT_TYPES()["optional"]["on_error"]
     assert entry[1]["default"] == "Error", (
@@ -547,7 +547,7 @@ def test_the_layer_route_is_sandboxed(monkeypatch, tmp_path):
     """An unauthenticated GET taking a path is a file-existence oracle for the
     whole filesystem unless it is bounded. The Read *node* still opens any path
     the user types -- that is the job; this bounds only the HTTP route."""
-    from radiance import nodes_io
+    from radiance.nodes.io import write as nodes_io
 
     allowed = tmp_path / "plates"
     allowed.mkdir()
@@ -560,7 +560,7 @@ def test_the_layer_route_is_sandboxed(monkeypatch, tmp_path):
 
 
 def test_the_sandbox_is_not_defeated_by_dot_dot(monkeypatch, tmp_path):
-    from radiance import nodes_io
+    from radiance.nodes.io import write as nodes_io
 
     allowed = tmp_path / "allowed"
     allowed.mkdir()
@@ -577,7 +577,7 @@ def test_the_sandbox_is_not_defeated_by_dot_dot(monkeypatch, tmp_path):
 
 def test_the_sandbox_is_not_defeated_by_a_symlink(monkeypatch, tmp_path):
     """`realpath`, not `abspath` — a link inside the root must not lead out."""
-    from radiance import nodes_io
+    from radiance.nodes.io import write as nodes_io
 
     allowed = tmp_path / "allowed"
     allowed.mkdir()
@@ -594,7 +594,7 @@ def test_the_sandbox_is_not_defeated_by_a_symlink(monkeypatch, tmp_path):
 
 def test_a_prefix_collision_is_not_inside_the_root(monkeypatch, tmp_path):
     """/plates_private must not match a /plates root by string prefix."""
-    from radiance import nodes_io
+    from radiance.nodes.io import write as nodes_io
 
     (tmp_path / "plates").mkdir()
     (tmp_path / "plates_private").mkdir()
@@ -605,7 +605,7 @@ def test_a_prefix_collision_is_not_inside_the_root(monkeypatch, tmp_path):
 
 
 def test_the_ui_probe_describes_each_media_type(exr_layers, png_sequence):
-    from radiance.nodes_io import _probe_for_ui
+    from radiance.nodes.io.write import _probe_for_ui
 
     exr = _probe_for_ui(str(exr_layers))
     assert exr["kind"] == "exr" and "layer" in exr["summary"]
@@ -617,7 +617,7 @@ def test_the_ui_probe_describes_each_media_type(exr_layers, png_sequence):
 def test_route_registration_is_idempotent():
     """Registering twice used to crash ComfyUI at startup with
     'method HEAD is already registered'."""
-    from radiance.nodes_io import register_read_routes
+    from radiance.nodes.io.write import register_read_routes
 
     register_read_routes()
     register_read_routes()

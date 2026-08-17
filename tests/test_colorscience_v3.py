@@ -47,14 +47,20 @@ for _p in (_MNT_DIR, _RADIANCE_DIR):
         sys.path.insert(0, _p)
 
 import importlib as _il
-_il.import_module("radiance.nodes_colorscience")
+_il.import_module("radiance.nodes.color.colorspace")
 
-from radiance.nodes_colorscience import (
-    _COLOR_SPACES,
-    RadianceBitDepthDegrade,
+from radiance.nodes.color import (
     NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS,
 )
+from radiance.nodes.color.colorspace import (
+    RadianceBitDepthDegrade,
+    RadianceColorSpaceConvert,
+)
+
+# Was a module-level name in the deleted nodes_colorscience shim;
+# it has always been an attribute of the node class.
+_COLOR_SPACES = RadianceColorSpaceConvert._COLOR_SPACES
 
 # This module already gates its torch-dependent tests correctly (they skip
 # cleanly against conftest's stub), so opt out of the automatic module-level

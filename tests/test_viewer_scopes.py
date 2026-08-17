@@ -94,9 +94,12 @@ _install_stubs()
 # cache left behind by tests that ran before us with stub torch environments.
 import importlib.util as _ilu
 
+# The viewer module itself, not the deleted root shim that re-exported it.
+# The shim was a second name for this file, which is exactly the double import
+# `_radiance_route_once` exists to survive.
 _VIEWER_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "nodes_radiance_viewer.py",
+    "nodes", "monitor", "viewer.py",
 )
 _IMPORT_ERROR = None
 try:

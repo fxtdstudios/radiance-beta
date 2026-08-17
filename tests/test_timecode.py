@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import torch  # noqa: F401  (nodes_realtime_preview imports torch at top-level)
 
-from nodes_realtime_preview import (
+from radiance.nodes.monitor.realtime import (
     RadianceFrameStamp,
     NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS,

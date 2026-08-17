@@ -20,7 +20,7 @@ import comfy.model_management
 from comfy.cldm.control_types import UNION_CONTROLNET_TYPES
 
 # ── Single Source of Truth: all model-detection / latent / cache utilities ──
-from .loader_utils import (
+from ...loader_utils import (
     RADIANCE_MODEL_MAP,
     CHECKPOINT_PRESETS,
     VIDEO_PRESET_NAMES,
@@ -936,13 +936,34 @@ class RadianceControlNetApply:
 # FIX 1: NODE_CLASS_MAPPINGS keys must be plain ASCII identifiers.
 # The ◎ prefix belongs only in NODE_DISPLAY_NAME_MAPPINGS (the user-visible label).
 # Having it in the type key breaks ComfyUI workflow JSON serialization and node lookup.
+# Compatibility aliases.
+#
+# These two keys are older names for the node beside them. They have to stay
+# registered or a workflow saved against the old key fails to load with a red
+# "missing node" box, but they must not appear in the menu twice — two search
+# results for one node is exactly the confusion the naming cleanup removed.
+#
+# A subclass rather than a second reference to the same class: `DEPRECATED` is
+# a class attribute, and ComfyUI reads it off the class it was handed, so
+# setting it on `RadianceUnifiedLoader` itself would hide the canonical node
+# too. The subclass carries the flag and inherits every behaviour.
+class RadianceImageLoader(RadianceUnifiedLoader):
+    """Deprecated alias of RadianceUnifiedLoader. Loads, does not list."""
+    DEPRECATED = True
+
+
+class RadianceControlApply(RadianceControlNetApply):
+    """Deprecated alias of RadianceControlNetApply. Loads, does not list."""
+    DEPRECATED = True
+
+
 NODE_CLASS_MAPPINGS = {
     "RadianceUnifiedLoader": RadianceUnifiedLoader,
-    "RadianceImageLoader":   RadianceUnifiedLoader, # Alias
+    "RadianceImageLoader":   RadianceImageLoader,   # deprecated alias
     "RadianceVideoLoader":   RadianceVideoLoader,
     "RadianceLoraStack":     RadianceLoraStack,
     "RadianceControlNetApply": RadianceControlNetApply,
-    "RadianceControlApply":    RadianceControlNetApply, # Alias
+    "RadianceControlApply":    RadianceControlApply,  # deprecated alias
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {

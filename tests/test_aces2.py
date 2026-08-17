@@ -39,7 +39,7 @@ skip_no_torch = pytest.mark.skipif(not HAS_TORCH, reason="torch not available")
 # Import the module under test
 # ─────────────────────────────────────────────────────────────────────────────
 sys.path.insert(0, ".")
-from nodes_aces2 import (
+from radiance.nodes.hdr.aces2 import (
     _DanieleEvoParams,
     _daniele_evo_fwd,
     _daniele_evo_luma_preserving,
