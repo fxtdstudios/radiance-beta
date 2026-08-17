@@ -1753,6 +1753,19 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             uniform sampler2D u_bloomTex;
             uniform int u_bloomTexEnabled;
 
+            // ── OpenColorIO ─────────────────────────────────────────────────
+            // When a config is loaded, OpenColorIO 2.5 generates the GLSL below
+            // from the show's config and it replaces this shader's display
+            // transform entirely. The block declares its own helpers, its own
+            // LUT samplers and OCIODisplay(). Nothing in Radiance
+            // re-implements it -- that is the point: the config decides.
+            // With no config loaded the entry point still has to exist or the
+            // shader will not compile; u_ocioEnabled is false, so the stub is
+            // never reached.
+            uniform bool u_ocioEnabled;
+${this._ocioShaderSource || '            vec4 OCIODisplay(vec4 inPixel) { return inPixel; }'}
+            // ── end OpenColorIO ─────────────────────────────────────────────
+
             // ── v3.2 Phase 11: Anamorphic Streaks + k2 Distortion ────────────
             uniform float u_lensDistortionK2;   // Brown-Conrady quartic term
             uniform float u_anamorphicStreaks;   // 0=off, strength 0..1
@@ -3124,6 +3137,34 @@ vec3 getDenoiseColor(vec2 uv) {
         // information is gone -- `color` from here on is display-referred.
         vec3 sceneLinearForHeatmap = color;
 
+        // 6 & 7. Display transform.
+        //
+        // With an OCIO config loaded, OCIODisplay() *is* steps 6 and 7: it
+        // carries the view transform, the display encoding and the output OETF,
+        // exactly as the show's config specifies them. Running our tonemap or
+        // our sRGB OETF alongside it would double-apply a transfer function --
+        // the same class of bug the u_lutIsDisplayTransform flag below exists to
+        // prevent -- so this branch replaces both, and there is no partial mode
+        // where some of ours and some of the config's both apply.
+        if (u_ocioEnabled) {
+            // Exactly 0.0 has to be nudged off zero first.
+            //
+            // OCIO's generated inverse-EOTF chains reach pow(x, y) with y <= 0,
+            // which GLSL leaves *undefined* at x == 0. Measured on the ACES
+            // configs through a WebGL2 context: scene-linear black came back as
+            // 1.3e16 on the Rec.1886 view, 7.7e14 on P3-D65 and NaN on sRGB and
+            // Display P3. Black is the most common pixel in a frame -- night
+            // shots, letterbox bars, mattes -- so this is not an edge case.
+            //
+            // The nudge is confined to exact zeros. Anything down to 1e-30 goes
+            // through the chain correctly, and negatives do too (OCIO clamps
+            // them itself), so a blanket max() would change legitimately
+            // negative scene-linear pixels for no reason. 1e-10 lands within a
+            // hundredth of an 8-bit code value of where the CPU path puts zero.
+            vec3 ocioIn = mix(color, vec3(1e-10), vec3(equal(color, vec3(0.0))));
+            color = OCIODisplay(vec4(ocioIn, 1.0)).rgb;
+        } else {
+
         // 6. Display LUT / Tonemap  (runs after 5. LUT)
         if (u_displayLutMode > 0) {
             vec3 transformed = applyDisplayLUT(color, u_displayLutMode);
@@ -3145,6 +3186,8 @@ vec3 getDenoiseColor(vec2 uv) {
             color = applySoftClip(color, u_softClip);
             color = linearToSRGB(max(color, vec3(0.0)));
         }
+
+        }   // end !u_ocioEnabled
 
         // 7a. Film Grain — Photochemical-quality, static by default
         // ─────────────────────────────────────────────────────────
@@ -4075,6 +4118,10 @@ vec3 getDenoiseColor(vec2 uv) {
             gl.bindTexture(gl.TEXTURE_2D, null);
         }
 
+        // OpenColorIO — binds the config's LUTs and switches the shader's
+        // display transform over to OCIODisplay(). No-op when nothing is loaded.
+        this._applyOCIOUniforms(program);
+
         // Analytics Uniforms
         this._ui1(program, 'u_falseColor', this.falseColor ? 1 : 0);
         this._ui1(program, 'u_hdrHeatmap', this.hdrHeatmap ? 1 : 0);
@@ -4262,6 +4309,169 @@ vec3 getDenoiseColor(vec2 uv) {
     // already inside), skip the final linearToSRGB to prevent double-gamma.
     setLutIsDisplayTransform(v) {
         this.lutIsDisplayTransform = !!v;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  OpenColorIO
+    //
+    //  `info` is what radiance_ocio.js returns from buildDisplayView(): the
+    //  GLSL OpenColorIO generated for this (source → display / view), plus the
+    //  LUT textures and uniforms that code expects to find bound. Pass null to
+    //  go back to Radiance's own display pipeline.
+    //
+    //  This recompiles the composite program, so it is called when the view
+    //  changes and never per frame.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    setOCIODisplay(info) {
+        const gl = this.gl;
+        this._releaseOCIOTextures();
+
+        if (!info || !info.shaderText) {
+            this._ocioShaderSource = null;
+            this._ocio = null;
+            this.ocioEnabled = false;
+            this._rebuildCompositeProgram();
+            return { ok: true, enabled: false };
+        }
+
+        // Indent the generated block so a compile error's line number still
+        // lines up with something readable when the source is dumped.
+        this._ocioShaderSource = info.shaderText
+            .split('\n').map((l) => '            ' + l).join('\n');
+
+        const rebuilt = this._rebuildCompositeProgram();
+        if (!rebuilt) {
+            // A shader that will not compile must not leave the viewer with a
+            // dead program. Fall back to Radiance's own pipeline and report --
+            // a black viewport with no explanation is the worst outcome here.
+            this._ocioShaderSource = null;
+            this._ocio = null;
+            this.ocioEnabled = false;
+            this._rebuildCompositeProgram();
+            return { ok: false, enabled: false, error: 'The generated OCIO shader did not compile. See the console for the source.' };
+        }
+
+        this._ocio = {
+            functionName: info.functionName,
+            uniforms: info.uniforms || [],
+            textures: (info.textures || []).map((t, i) => ({
+                ...t,
+                unit: 7 + i,        // 0–6 belong to the composite shader
+                glTexture: this._createOCIOTexture(t),
+            })),
+            label: info.label || '',
+        };
+
+        // WebGL2 guarantees 16 fragment texture units. A config needing more
+        // than nine LUTs is not something to fail silently on.
+        const max = gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS);
+        if (7 + this._ocio.textures.length > max) {
+            const need = 7 + this._ocio.textures.length;
+            this._releaseOCIOTextures();
+            this._ocioShaderSource = null;
+            this._ocio = null;
+            this.ocioEnabled = false;
+            this._rebuildCompositeProgram();
+            return { ok: false, enabled: false, error: `This view needs ${need} texture units and the GPU has ${max}.` };
+        }
+
+        this.ocioEnabled = true;
+        return { ok: true, enabled: true };
+    }
+
+    _rebuildCompositeProgram() {
+        const gl = this.gl;
+        const next = this.createProgram(this.getBasicVertexShader(), this.getCompositeFragmentShader());
+        if (!next) return false;
+        const prev = this.programs.composite;
+        this.programs.composite = next;
+        // The uniform-location and value caches are keyed on the program, and
+        // the old program's entries would otherwise shadow the new one's.
+        this._uniformValueCache?.clear?.();
+        this._uniformCache?.clear?.();
+        if (prev && prev !== next) gl.deleteProgram(prev);
+        return true;
+    }
+
+    _createOCIOTexture(t) {
+        const gl = this.gl;
+        const tex = gl.createTexture();
+        const target = t.dimensions === 3 ? gl.TEXTURE_3D : gl.TEXTURE_2D;
+        // OCIO hands back 1 channel for a 1D LUT and 3 for a 3D LUT. Uploading
+        // a 1-channel LUT as RGB would read the wrong samples per texel.
+        const internal = t.channels === 1 ? gl.R32F : gl.RGB32F;
+        const format = t.channels === 1 ? gl.RED : gl.RGB;
+
+        // 32-bit float textures are NOT filterable in WebGL2 unless
+        // OES_texture_float_linear is enabled, and enabling means calling
+        // getExtension -- merely having it in getSupportedExtensions() does
+        // nothing. Without the call, LINEAR sampling of an R32F LUT returns
+        // zero, and measured through a real context that made every HDR view
+        // in the ACES configs render solid black while compiling cleanly and
+        // reporting no error anywhere.
+        if (this._ocioFloatLinear === undefined) {
+            this._ocioFloatLinear = !!gl.getExtension('OES_texture_float_linear');
+            if (!this._ocioFloatLinear) {
+                console.warn('[Radiance] OES_texture_float_linear is unavailable; '
+                    + 'OCIO LUTs will be sampled without interpolation, which will band.');
+            }
+        }
+        const wantsNearest = /nearest/i.test(t.interpolation || '');
+        const filter = (wantsNearest || !this._ocioFloatLinear) ? gl.NEAREST : gl.LINEAR;
+
+        gl.bindTexture(target, tex);
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+        if (t.dimensions === 3) {
+            gl.texImage3D(target, 0, internal, t.width, t.height, t.depth, 0, format, gl.FLOAT, t.values);
+            gl.texParameteri(target, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+        } else {
+            gl.texImage2D(target, 0, internal, t.width, t.height, 0, format, gl.FLOAT, t.values);
+        }
+        gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, filter);
+        gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, filter);
+        gl.texParameteri(target, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(target, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.bindTexture(target, null);
+        return tex;
+    }
+
+    _releaseOCIOTextures() {
+        if (!this._ocio?.textures) return;
+        for (const t of this._ocio.textures) {
+            if (t.glTexture) this.gl.deleteTexture(t.glTexture);
+        }
+    }
+
+    /** Bind OCIO's textures and uniforms. Called once per draw of the composite. */
+    _applyOCIOUniforms(program) {
+        const gl = this.gl;
+        this._ui1(program, 'u_ocioEnabled', this.ocioEnabled ? 1 : 0);
+        if (!this.ocioEnabled || !this._ocio) return;
+
+        for (const t of this._ocio.textures) {
+            gl.activeTexture(gl.TEXTURE0 + t.unit);
+            gl.bindTexture(t.dimensions === 3 ? gl.TEXTURE_3D : gl.TEXTURE_2D, t.glTexture);
+            this._ui1(program, t.samplerName, t.unit);
+        }
+
+        // Dynamic properties. Radiance does not enable any yet, so OCIO
+        // normally emits none -- but a uniform left unset would silently read
+        // zero and change the picture, so anything that does appear is set, and
+        // anything unrecognised is reported rather than skipped quietly.
+        for (const u of this._ocio.uniforms) {
+            const loc = this.getUniform(program, u.name);
+            if (!loc) continue;
+            switch (u.type) {
+                case 'double': gl.uniform1f(loc, Number(u.value)); break;
+                case 'bool': gl.uniform1i(loc, u.value ? 1 : 0); break;
+                case 'float3': gl.uniform3fv(loc, Float32Array.from(u.value)); break;
+                case 'vector_float': gl.uniform1fv(loc, Float32Array.from(u.value)); break;
+                case 'vector_int': gl.uniform1iv(loc, Int32Array.from(u.value)); break;
+                default:
+                    console.warn('[Radiance] OCIO uniform type not handled:', u.type, u.name);
+            }
+        }
     }
 
 

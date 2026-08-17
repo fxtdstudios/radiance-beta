@@ -41,3 +41,9 @@
 *.zip   binary
 *.mp4   binary
 *.mov   binary
+*.wasm  binary
+
+# Vendored third-party builds. Marked so they stay out of language stats and
+# review diffs; js/vendor/ocio/README.md records the provenance and the single
+# patch applied to it.
+js/vendor/** linguist-vendored

@@ -30,6 +30,15 @@ import {
     logAssistPos as _logAssistPos,
     logAssistInv as _logAssistInv,
 } from "./radiance_scope_units.js";
+// The façade only. It dynamic-imports the 4.7 MB WASM on first use, so nothing
+// is paid by a user who never opens a config.
+import {
+    initOCIO as _ocioInit,
+    isReady as _ocioReady,
+    builtinConfigs as _ocioBuiltins,
+    loadConfig as _ocioLoadConfig,
+    buildDisplayView as _ocioBuildDisplayView,
+} from "./radiance_ocio.js";
 
 class RadianceViewer {
     static singletonHUD = null;
@@ -885,6 +894,17 @@ class RadianceViewer {
         this.scopeLevels = localStorage.getItem('radiance_scope_levels') || 'data';
         this.scopeTransformed = localStorage.getItem('radiance_scope_xform') !== '0';
         this.scopeHlgPeak = parseInt(localStorage.getItem('radiance_scope_hlg_peak') || '1000', 10) || 1000;
+
+        // OpenColorIO. Null until a config is loaded, and Radiance's own ACES
+        // 1.3 pipeline runs until then -- OCIO is a capability, not a
+        // dependency.
+        this.ocio = null;          // { summary, config } from radiance_ocio.js
+        this.ocioDisplay = '';
+        this.ocioView = '';
+        this.ocioSource = '';
+        this.ocioActive = false;
+        this.ocioStatus = null;    // { level: 'ok'|'warn'|'error', text }
+        this.ocioBusy = false;
         this.generationID = 0; // v3.1: Unique ID per execution to cancel stale async loads
 
         // Grid & Safe Areas
@@ -15410,8 +15430,259 @@ else:
         return this.activeTab === 'probe' && this.probeMode === 'region';
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    //  OpenColorIO
+    //
+    //  The capability that decides whether the Viewer can be used on a show.
+    //  Nuke, RV, DJV, mrv2 and cineSync all load a show's config; without it
+    //  the Viewer's colour is its own opinion, which is fine for looking at
+    //  generations and useless for looking at work.
+    //
+    //  Two rules govern everything below. First, a Display/View menu that does
+    //  not change the picture is worse than no menu, so nothing is listed here
+    //  that is not actually applied. Second, OCIO is never a dependency: with
+    //  no config loaded the viewer's own ACES 1.3 path runs exactly as before.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    _ocioSetStatus(level, text) {
+        this.ocioStatus = text ? { level, text } : null;
+        if (level === 'error') this._termLog?.('warn', `[OCIO] ${text}`);
+        else if (text) this._termLog?.('info', `[OCIO] ${text}`);
+    }
+
+    /** Load a config, pick sensible defaults from it, and apply them. */
+    async _ocioLoad(source, name) {
+        this.ocioBusy = true;
+        this._ocioSetStatus('ok', 'Starting OpenColorIO…');
+        this._lastRenderContent?.();
+
+        const boot = await _ocioInit();
+        if (!boot.ok) {
+            this.ocioBusy = false;
+            this._ocioSetStatus('error', boot.error);
+            this._lastRenderContent?.();
+            return;
+        }
+
+        const loaded = await _ocioLoadConfig(source, { name });
+        this.ocioBusy = false;
+        if (loaded.error) {
+            this._ocioSetStatus('error', loaded.error);
+            this._lastRenderContent?.();
+            return;
+        }
+
+        this.ocio = loaded;
+        this.ocioDisplay = loaded.defaultDisplay;
+        this.ocioView = loaded.defaultView;
+        this.ocioSource = loaded.suggestedSource;
+        this._ocioSetStatus(
+            loaded.warning ? 'warn' : 'ok',
+            loaded.warning
+                ? `Loaded ${loaded.name} with warnings: ${loaded.warning}`
+                : `Loaded ${loaded.name} — OCIO ${loaded.version.major}.${loaded.version.minor}, `
+                  + `${loaded.displays.length} displays, ${loaded.colorSpaces.length} colour spaces.`,
+        );
+        this._ocioApply();
+    }
+
+    /**
+     * Build the current (source → display / view) and hand it to the renderer.
+     *
+     * Every failure turns OCIO back off rather than leaving it half-applied.
+     * Half-applied is the state where the menu says one thing and the picture
+     * shows another, which is the outcome this whole feature exists to avoid.
+     */
+    _ocioApply() {
+        if (!this.ocio?.config) return;
+        const built = _ocioBuildDisplayView(this.ocio.config, {
+            source: this.ocioSource, display: this.ocioDisplay, view: this.ocioView,
+        });
+        if (built.error) {
+            this._ocioDisable(built.error);
+            return;
+        }
+        const res = this.renderer?.setOCIODisplay?.(built);
+        if (!res || !res.ok) {
+            this._ocioDisable(res?.error || 'This renderer cannot apply an OCIO transform.');
+            return;
+        }
+        this.ocioActive = true;
+        this._ocioSetStatus(
+            built.isNoOp ? 'warn' : 'ok',
+            built.isNoOp
+                ? `${built.label} — this view is a pass-through, so the picture will not change.`
+                : `Applied ${built.label}.`,
+        );
+        this._lastRenderContent?.();
+        this.render();
+    }
+
+    /** Return to Radiance's own display pipeline, and say why if there was a reason. */
+    _ocioDisable(reason = null) {
+        this.ocioActive = false;
+        this.renderer?.setOCIODisplay?.(null);
+        if (reason) this._ocioSetStatus('error', `${reason} Radiance's own display pipeline is in use.`);
+        this._lastRenderContent?.();
+        this.render();
+    }
+
+    renderOcioSection(container) {
+        const t = this.theme;
+        const group = document.createElement('div');
+        group.style.marginBottom = '4px';
+
+        const head = document.createElement('div');
+        head.style.cssText = 'display:flex; align-items:center; gap:6px; margin-bottom:8px;';
+        head.innerHTML = `
+            <div style="color:#888; font-size:10px; text-transform:uppercase; font-weight:bold; letter-spacing:0.6px;">Colour Management</div>
+            <div style="font-size:9px; color:${this.ocioActive ? '#00ffcc' : 'rgba(255,255,255,0.25)'}; font-weight:700; letter-spacing:0.5px;">
+                ${this.ocioActive ? 'OCIO ACTIVE' : 'ACES 1.3 (built in)'}
+            </div>`;
+        group.appendChild(head);
+
+        const box = document.createElement('div');
+        box.style.cssText = 'background: rgba(255,255,255,0.03); padding: 8px; border-radius: 6px; display:flex; flex-direction:column; gap:6px;';
+
+        const row = (labelText, node) => {
+            const r = document.createElement('div');
+            r.style.cssText = 'display:flex; align-items:center; gap:6px;';
+            const l = document.createElement('div');
+            l.textContent = labelText;
+            l.style.cssText = 'font-size:10px; color:#888; width:64px; flex-shrink:0; font-weight:600;';
+            r.appendChild(l); r.appendChild(node);
+            return r;
+        };
+        const select = (values, current, onPick) => {
+            const s = document.createElement('select');
+            s.style.cssText = 'flex:1; min-width:0; background:rgba(255,255,255,0.06); color:#ddd; border:1px solid rgba(255,255,255,0.14); border-radius:4px; padding:4px 6px; font-size:11px;';
+            values.forEach((v) => {
+                const o = document.createElement('option');
+                o.value = v; o.textContent = v;
+                if (v === current) o.selected = true;
+                s.appendChild(o);
+            });
+            s.onchange = () => onPick(s.value);
+            return s;
+        };
+        const button = (label, onClick, accent = false) => {
+            const b = document.createElement('button');
+            b.textContent = label;
+            b.disabled = !!this.ocioBusy;
+            b.style.cssText = `flex:1; background:${accent ? 'rgba(0,242,255,0.08)' : '#22222a'}; color:${accent ? '#00f2ff' : '#ddd'};
+                border:1px solid ${accent ? 'rgba(0,242,255,0.28)' : '#3a3a44'}; padding:6px; border-radius:4px;
+                font-size:10px; cursor:${this.ocioBusy ? 'wait' : 'pointer'}; font-weight:700; opacity:${this.ocioBusy ? 0.5 : 1};`;
+            b.onclick = onClick;
+            return b;
+        };
+
+        // ── Load ────────────────────────────────────────────────────────────
+        const loadRow = document.createElement('div');
+        loadRow.style.cssText = 'display:flex; gap:6px;';
+
+        const fileBtn = button('📁 LOAD CONFIG…', () => {
+            const input = document.createElement('input');
+            input.type = 'file';
+            // .ocio is the config; a config directory also carries LUTs, which
+            // a file picker cannot reach -- see the note under the controls.
+            input.accept = '.ocio,.yaml,.yml';
+            input.onchange = async () => {
+                const f = input.files?.[0];
+                if (!f) return;
+                const text = await f.text();
+                await this._ocioLoad({ text }, f.name);
+            };
+            input.click();
+        }, true);
+        loadRow.appendChild(fileBtn);
+
+        if (this.ocio) {
+            loadRow.appendChild(button('✕ USE BUILT-IN', () => {
+                this.ocio = null;
+                this._ocioDisable();
+                this._ocioSetStatus('ok', 'Using Radiance\'s own ACES 1.3 pipeline.');
+                this._lastRenderContent?.();
+            }));
+        }
+        box.appendChild(loadRow);
+
+        // The bundled ACES configs. Someone with no config of their own still
+        // gets a correct, standard picture rather than our approximation of one.
+        const builtins = _ocioReady() ? _ocioBuiltins() : [];
+        if (builtins.length) {
+            const bSel = document.createElement('select');
+            bSel.style.cssText = 'flex:1; min-width:0; background:rgba(255,255,255,0.06); color:#ddd; border:1px solid rgba(255,255,255,0.14); border-radius:4px; padding:4px 6px; font-size:11px;';
+            const none = document.createElement('option');
+            none.value = ''; none.textContent = 'Bundled ACES config…';
+            bSel.appendChild(none);
+            builtins.forEach((c) => {
+                const o = document.createElement('option');
+                o.value = c.id; o.textContent = c.label;
+                bSel.appendChild(o);
+            });
+            bSel.onchange = () => {
+                if (bSel.value) this._ocioLoad({ builtin: bSel.value }, bSel.selectedOptions[0].textContent);
+            };
+            box.appendChild(row('Bundled', bSel));
+        } else if (!_ocioReady()) {
+            box.appendChild(button('⚙ START OPENCOLORIO', () => this._ocioLoad(
+                { builtin: 'ocio://cg-config-v2.2.0_aces-v1.3_ocio-v2.4' }, 'ACES CG (bundled)')));
+        }
+
+        // ── Input / Display / View ──────────────────────────────────────────
+        if (this.ocio) {
+            const spaces = this.ocio.colorSpaces.map((c) => c.name);
+            box.appendChild(row('Input', select(spaces, this.ocioSource, (v) => {
+                this.ocioSource = v; this._ocioApply();
+            })));
+            box.appendChild(row('Display', select(this.ocio.displays, this.ocioDisplay, (v) => {
+                this.ocioDisplay = v;
+                const views = this.ocio.viewsByDisplay[v] || [];
+                // The previous view may not exist on the new display. Keeping
+                // the stale name would fail the next build with a confusing
+                // error about a view the user did not choose.
+                if (!views.includes(this.ocioView)) this.ocioView = views[0] || '';
+                this._ocioApply();
+            })));
+            box.appendChild(row('View', select(
+                this.ocio.viewsByDisplay[this.ocioDisplay] || [], this.ocioView, (v) => {
+                    this.ocioView = v; this._ocioApply();
+                })));
+
+            if (this.ocio.looks?.length) {
+                const note = document.createElement('div');
+                note.style.cssText = 'font-size:9px; color:rgba(255,255,255,0.3); line-height:1.4;';
+                note.textContent = `This config defines ${this.ocio.looks.length} look${this.ocio.looks.length > 1 ? 's' : ''}. `
+                    + 'Looks are not applied yet — only the view\'s own look, where the view carries one.';
+                box.appendChild(note);
+            }
+        }
+
+        // ── Status ──────────────────────────────────────────────────────────
+        if (this.ocioStatus) {
+            const colour = { ok: 'rgba(255,255,255,0.45)', warn: '#ffb020', error: '#ff8080' }[this.ocioStatus.level];
+            const s = document.createElement('div');
+            s.style.cssText = `font-size:9px; line-height:1.5; font-family:monospace; color:${colour};
+                padding:6px 8px; background:rgba(0,0,0,0.25); border-radius:4px; border-left:2px solid ${colour};`;
+            s.textContent = this.ocioStatus.text;
+            box.appendChild(s);
+        }
+
+        const caveat = document.createElement('div');
+        caveat.style.cssText = 'font-size:9px; color:rgba(255,255,255,0.28); line-height:1.4;';
+        caveat.textContent = 'A config that references LUT files on disk cannot resolve them from a '
+            + 'file picker — the browser only receives the one file you choose. Configs built from '
+            + 'built-in transforms, which includes every ACES config, load completely.';
+        box.appendChild(caveat);
+
+        group.appendChild(box);
+        container.appendChild(group);
+    }
+
     renderViewTab(container) {
         container.style.cssText = 'display: flex; flex-direction: column; flex: 1; gap: 12px; padding: 12px; min-height: 0; overflow-y: auto;';
+
+        this.renderOcioSection(container);
 
         // 0. Neural Network Monitor (Real-time 3D)
         const neuralGroup = document.createElement('div');
