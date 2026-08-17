@@ -15,8 +15,21 @@ import math
 import sys
 import io
 import traceback
-from aiohttp import web
-from server import PromptServer
+try:
+    from aiohttp import web
+    from server import PromptServer
+except ImportError:  # pragma: no cover - exercised by the CI import smoke-test
+    # Guarded because importing any module in this package runs this file, and
+    # a bare `from aiohttp import web` therefore made the whole Review group
+    # unimportable without a running ComfyUI. `nodes/gizmo.py` and
+    # `nodes/pipeline/workspace.py` have always guarded it for the same reason;
+    # this one did not, and the root `nodes_realtime_preview.py` shim hid that
+    # by being importable on its own — until it was retired into this package.
+    #
+    # aiohttp is a required dependency of ComfyUI, so this never degrades a
+    # real install; it keeps the module readable by tooling that has neither.
+    web = None
+    PromptServer = None
 import re
 
 # v3.1: Enable OpenEXR support in OpenCV
