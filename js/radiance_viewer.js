@@ -6652,16 +6652,33 @@ else:
         // the float data, and encodes it as an OpenEXR file with FLOAT pixel
         // type (pixelType=2) and uncompressed scanlines.
         if (format === 'exr32') {
-            if (!this.useWebGL || !this.renderer) {
-                this._termLog?.('warn', '[Export] EXR 32-bit export requires WebGL renderer.');
+            // The old guard was `if (!this.useWebGL || !this.renderer)`, which
+            // never fired on WebGPU: `_tryWebGPUUpgrade` sets `useWebGL = true`.
+            // So a WebGPU user fell straight through to `result.data` on what
+            // was then a Promise, got `undefined`, and was told "EXR encoding
+            // failed" -- the encoder blamed for a backend contract mismatch.
+            if (!this.renderer?.readPixelsFloat32) {
+                this._termLog?.('warn', '[Export] 32-bit EXR export needs a renderer with float readback.');
                 return;
             }
             const result = this.renderer.readPixelsFloat32(
                 this.imageWidth, this.imageHeight, this.lutIntensity || 1.0
             );
-            if (!result) {
+            if (!result || !result.data) {
                 this._termLog?.('warn', '[Export] Float32 readback failed (WebGL2 required).');
                 return;
+            }
+
+            // Both backends return `{data, width, height, graded}` now. Only
+            // WebGL renders the graded composite; WebGPU returns the ungraded
+            // scene-linear source. Writing that into a file called
+            // "radiance_graded_*.exr" without saying so is the kind of quiet
+            // wrongness that surfaces three weeks later in a review.
+            const isGraded = result.graded !== false;
+            if (!isGraded) {
+                this._termLog?.('warn',
+                    '[Export] This backend returns ungraded scene-linear pixels; '
+                    + 'the file will contain the source, not the grade.');
             }
 
             const blob = this._encodeEXR32(result.data, result.width, result.height);
@@ -6672,11 +6689,13 @@ else:
 
             const url = URL.createObjectURL(blob);
             const link = document.createElement('a');
-            link.download = `radiance_graded_${Date.now()}.exr`;
+            link.download = `radiance_${isGraded ? 'graded' : 'source'}_${Date.now()}.exr`;
             link.href = url;
             link.click();
             URL.revokeObjectURL(url);
-            this._termLog?.('success', `[Export] Saved 32-bit graded EXR: ${result.width}×${result.height}`);
+            this._termLog?.('success',
+                `[Export] Saved 32-bit ${isGraded ? 'graded' : 'source'} EXR: `
+                + `${result.width}×${result.height}`);
             return;
         }
 

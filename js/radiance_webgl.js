@@ -3677,7 +3677,10 @@ vec3 getDenoiseColor(vec2 uv) {
         }
 
         console.log(`[Radiance] Float32 readback: ${w}×${h} (${(flipped.byteLength / 1048576).toFixed(1)} MB)`);
-        return { data: flipped, width: w, height: h };
+        // `graded: true` -- this path renders the full composite pipeline into
+        // an RGBA32F FBO first. The WebGPU backend returns the ungraded source
+        // and says so, so callers can tell the two apart instead of assuming.
+        return { data: flipped, width: w, height: h, graded: true };
     }
 
     // Load 3D LUT from .cube file data (WebGL2: float32, WebGL1: fallback)

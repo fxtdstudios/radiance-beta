@@ -1260,10 +1260,11 @@ class RadianceWebGPURenderer extends RadianceRenderer {
             pixelsPromise = Promise.resolve(data);
         } else {
             // Fall back to CPU grading emulation on raw float pixels
-            pixelsPromise = this.readPixelsFloat32(scopeW, scopeH, 1.0).then(pixels => {
-                if (!pixels) return null;
-                return this._emulateGradingOnCPU(pixels);
-            });
+            // readPixelsFloat32 is synchronous now and returns a wrapper.
+            const readback = this.readPixelsFloat32(scopeW, scopeH, 1.0);
+            pixelsPromise = Promise.resolve(
+                readback ? this._emulateGradingOnCPU(readback.data) : null
+            );
         }
 
         pixelsPromise.then(pixels => {
@@ -1626,8 +1627,29 @@ class RadianceWebGPURenderer extends RadianceRenderer {
 
     // ── Pixel readback for export ──────────────────────────────────────────
 
+    /**
+     * Read back float pixels.
+     *
+     * Contract matches the WebGL renderer's deliberately: a **synchronous**
+     * `{ data, width, height, graded }` or `null`. It used to return a
+     * `Promise<Float32Array>` -- a different type, a different shape, and no
+     * indication that the pixels were ungraded -- while WebGL returned a
+     * synchronous wrapper around a fully graded composite.
+     *
+     * The two consumers held contradictory expectations of the same method.
+     * `_renderScopeFromPixels` used `.then()`, so it worked; the 32-bit EXR
+     * export at `radiance_viewer.js` read `result.data` straight off the
+     * Promise, got `undefined`, and reported "[Export] EXR encoding failed" --
+     * an error blaming the encoder for a backend contract mismatch. The
+     * `!this.useWebGL` guard did not catch it because `_tryWebGPUUpgrade` sets
+     * `useWebGL = true`.
+     *
+     * `graded` is part of the contract, not decoration: this backend returns
+     * the ungraded scene-linear source, so anything writing a "graded" file
+     * has to know that and say so rather than silently export the wrong image.
+     */
     readPixelsFloat32(w, h, lutStrength) {
-        if (!this._lastSourcePixels || !this.imageWidth || !this.imageHeight) return Promise.resolve(null);
+        if (!this._lastSourcePixels || !this.imageWidth || !this.imageHeight) return null;
 
         // CPU-side nearest resample of the uploaded scene-linear source. This is
         // intentionally conservative: it keeps WebGPU scopes/export from relying
@@ -1649,7 +1671,7 @@ class RadianceWebGPURenderer extends RadianceRenderer {
                 out[di + 3] = src[si + 3];
             }
         }
-        return Promise.resolve(out);
+        return { data: out, width: w, height: h, graded: false };
     }
 
     // ── Reference shelf ────────────────────────────────────────────────────
