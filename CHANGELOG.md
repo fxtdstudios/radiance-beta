@@ -2,6 +2,73 @@
 
 All notable changes to FXTD Radiance will be documented in this file.
 
+## [3.4.0] - 2026-08-17
+
+A Viewer release. Everything below is in the Viewer unless it says otherwise.
+
+**Upgrade note.** Two defaults change.
+
+**WebGPU is now opt-in.** It used to upgrade automatically wherever the browser
+exposed `navigator.gpu`, so nobody chose it — and the backend it switched people
+to is the one that does not implement masks, qualifiers, the HDR heatmap or
+OpenColorIO, and whose grade maths differed from WebGL on lift, gamma and
+contrast. Defaulting to the backend with the missing features, then explaining
+the gaps with in-panel banners, is a worse product than defaulting to the one
+that works. View → Framing & Guides → Backend turns it back on, and states what
+stops working when you do.
+
+**Safe-area boxes move.** The Viewer drew the modern 93% action box against the
+legacy 80% title box — a pairing no published standard specifies. The title box
+is now 90%. If you have been placing graphics against the old inner box they
+were inset by 10% for a delivery that asks for 5%.
+
+### Added
+
+- **OpenColorIO 2.5 config support.** Load a show's config and the Display and
+  View menus come from it; picking a view changes the picture, through OCIO's
+  own generated GLSL. Bundled ACES 1.3 and 2.0 configs for anyone without a
+  config of their own. With nothing loaded the built-in ACES 1.3 pipeline runs
+  exactly as before — OCIO is a capability, not a dependency. Real OpenColorIO
+  compiled to WebAssembly, vendored under `js/vendor/ocio/` (BSD-3-Clause).
+- **Pixel probe** (PROBE tab). Cursor, region and full-frame sampling; source or
+  rendered values; RGBA, luminance, EV, cd/m², HSV and hex; min, max, mean and
+  median per channel. NaN, Inf and negative counts are excluded from every
+  statistic and reported separately.
+- **Scope scales.** 10-bit and 12-bit code value, percent, millivolts, and nits
+  for ST.2084 and HLG, with Data/Video levels and a switch for whether the
+  scopes measure before or after the viewer colour transforms. Every graticule
+  line carries its number; the panel states what is being measured. IRE is
+  deliberately not offered.
+- **HDR heatmap**, banded to ITU-R BT.2408 with a white line at 200–206 nits.
+- **Safe areas labelled with their standard**, an **aspect-ratio matte**,
+  **nearest-neighbour magnification on `N`**, and **frames / seconds / timecode**.
+
+### Fixed
+
+- The **HDR heatmap did not exist**: "HDR Heatmap" and "False Color" were one
+  toggle under two menu labels, and the map read display luma on ARRI stops.
+- **The grade was implemented four times** — WebGL GLSL, WebGPU WGSL, the WebGPU
+  CPU readback and the `.cube` export — and no two agreed on lift, gamma or
+  contrast. The CPU readback used a different contrast curve entirely and
+  produced NaN at pivot 0. All four are now emitted from `js/radiance_grade.js`.
+- The scopes' **"HDR ruler" placed its nit lines with a Reinhard curve** as a
+  stand-in for the display transform, while the pixels had come through the
+  actual ACES transform: "203 nit" drew at half height regardless.
+- **Safe areas were drawn on the canvas, not the picture** — at any zoom or pan
+  other than an exact fit they measured the viewport.
+- Scene-linear black rendered as **NaN or ~1e16** through OCIO views
+  (`pow(0, y≤0)` is undefined in GLSL), and every HDR view rendered **solid
+  black** (`OES_texture_float_linear` must be enabled, not merely supported).
+- `load_trained_turbo_decoder()` raised **NameError on every call** — the
+  decoder classes were imported in `train()` and nowhere else.
+
+### Testing
+
+240 JavaScript tests, including two headless-WebGL2 harnesses that compile the
+real shaders and compare them against the CPU implementations they were
+generated from. Both defects in the OCIO list above were found by rendering, not
+by reading — each compiled cleanly and reported nothing.
+
 ## [3.3.0] - 2026-08-16
 
 **Upgrade note — read before updating mid-project.** Five changes alter what an

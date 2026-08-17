@@ -3252,9 +3252,33 @@ class RadianceViewer {
             this.useWebGL = false;
         }
 
-        // WebGPU is the preferred backend. If it fails, the initialized WebGL
-        // renderer remains active.
-        if (navigator.gpu && typeof RadianceWebGPURenderer !== 'undefined' && this._gpuBackend !== 'webgpu') {
+        // WebGPU is opt-in, and off by default.
+        //
+        // It used to upgrade automatically wherever `navigator.gpu` existed,
+        // which meant nobody chose it — and the backend it silently switched
+        // people to is the one missing four features the WebGL path has:
+        //
+        //   Masks and Qualifiers   no WGSL implementation; the base class
+        //                          stores the state and the shader never reads
+        //                          it, so every slider moves and nothing changes
+        //   HDR heatmap            not implemented in WGSL
+        //   OpenColorIO            no WGSL path; a loaded config cannot apply
+        //   Grade maths            lift, gamma and contrast each differed from
+        //                          WebGL until they were collapsed into
+        //                          js/radiance_grade.js — and the WGSL half of
+        //                          that collapse is still unverified, because
+        //                          no CI environment available here exposes
+        //                          navigator.gpu to compile it
+        //
+        // Defaulting to the backend with the missing features, and explaining
+        // the gaps with four separate in-panel banners, is a worse product than
+        // defaulting to the one that works. Anyone who wants WebGPU can still
+        // have it; they now have to ask.
+        if (localStorage.getItem('radiance_prefer_webgpu') === '1'
+            && navigator.gpu && typeof RadianceWebGPURenderer !== 'undefined'
+            && this._gpuBackend !== 'webgpu') {
+            console.warn('[Radiance] WebGPU is enabled by preference. Masks, qualifiers, '
+                + 'the HDR heatmap and OpenColorIO are not implemented on this backend.');
             this._tryWebGPUUpgrade();
         }
 
@@ -15970,6 +15994,41 @@ else:
             (v) => { this.frameRate = parseFloat(v); paintTime(); this.renderOverlay(); },
         );
         row('Frame rate', fpsSel, 'Used only to convert frames to seconds and timecode. Taken from the file when the metadata carries it.');
+
+        // ── Renderer backend ────────────────────────────────────────────────
+        // Opt-in, and stated plainly. A user who turns this on should know
+        // exactly what stops working rather than discovering it one inert
+        // panel at a time.
+        if (typeof navigator !== 'undefined' && navigator.gpu) {
+            const on = localStorage.getItem('radiance_prefer_webgpu') === '1';
+            const gpuBtn = document.createElement('div');
+            gpuBtn.textContent = on ? 'WEBGPU (experimental)' : 'WEBGL (recommended)';
+            gpuBtn.style.cssText = `flex:1; text-align:center; padding:5px; border-radius:4px; font-size:10px;
+                font-weight:700; cursor:pointer; user-select:none;
+                background:${on ? 'rgba(255,176,32,0.10)' : 'rgba(255,255,255,0.06)'};
+                color:${on ? '#ffb020' : '#aaa'};
+                border:1px solid ${on ? 'rgba(255,176,32,0.35)' : 'rgba(255,255,255,0.12)'};`;
+            gpuBtn.title = 'WebGPU does not implement masks, qualifiers, the HDR heatmap or '
+                + 'OpenColorIO. Takes effect on reload.';
+            gpuBtn.onclick = () => {
+                const next = localStorage.getItem('radiance_prefer_webgpu') === '1' ? '0' : '1';
+                localStorage.setItem('radiance_prefer_webgpu', next);
+                this._termLog?.('warn', next === '1'
+                    ? '[Renderer] WebGPU enabled — masks, qualifiers, HDR heatmap and OCIO are '
+                      + 'not implemented there. Reload to apply.'
+                    : '[Renderer] WebGL restored. Reload to apply.');
+                this._lastRenderContent?.();
+            };
+            row('Backend', gpuBtn, 'Which GPU backend renders the picture. Changing it takes effect on reload.');
+
+            if (on) {
+                const warn = document.createElement('div');
+                warn.style.cssText = 'font-size:9px; line-height:1.45; color:#ffb020;';
+                warn.textContent = 'Masks, qualifiers, the HDR heatmap and OpenColorIO are not '
+                    + 'implemented on WebGPU. Their controls will move and the picture will not change.';
+                box.appendChild(warn);
+            }
+        }
 
         group.appendChild(box);
         container.appendChild(group);
