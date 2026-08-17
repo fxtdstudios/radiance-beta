@@ -35,7 +35,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radiance.nodes.catalog import NODE_GROUPS  # noqa: E402
 
-REPO_PARENT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_PARENT = os.path.dirname(REPO_ROOT)
+#: Directory name of the checkout — "radiance" locally, "radiance-beta" on the
+#: mirror CI clones. The harness needs it to map the import name.
+REPO_DIRNAME = os.path.basename(REPO_ROOT)
 
 #: Everything the import smoke-test stubs, and nothing else. In particular NOT
 #: aiohttp and NOT `server` — those are the two this file exists to keep out.
@@ -105,6 +109,30 @@ for _m in [m for m in sys.modules if m.split(".")[0] in {"aiohttp", "server"}]:
     del sys.modules[_m]
 
 sys.path.insert(0, %(parent)r)
+
+# Map the import name `radiance` to this checkout regardless of the directory
+# name. CI clones the mirror as "radiance-beta", where `import radiance` fails
+# outright — so every group "failed" this test for a reason that had nothing to
+# do with aiohttp, and the failure message blamed the code. conftest.py and
+# ci.yml both carry this finder; a subprocess gets neither.
+import importlib.abc, importlib.util, os
+_ROOT = os.path.join(%(parent)r, %(pkgdir)r)
+if os.path.basename(_ROOT) != "radiance" and os.path.exists(os.path.join(_ROOT, "__init__.py")):
+    class _RadianceNameFinder(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name != "radiance":
+                return None
+            return importlib.util.spec_from_file_location(
+                "radiance", os.path.join(_ROOT, "__init__.py"),
+                submodule_search_locations=[_ROOT])
+    sys.meta_path.insert(0, _RadianceNameFinder())
+
+try:
+    import radiance  # noqa: F401
+except Exception as exc:
+    print(f"HARNESS-BROKEN: the package itself will not import: {exc!r}")
+    raise SystemExit(2)
+
 __import__(%(module)r)
 print("IMPORT-OK")
 """
@@ -112,7 +140,11 @@ print("IMPORT-OK")
 
 def _import_in_clean_process(module: str):
     """Import *module* in a subprocess with no aiohttp and no server."""
-    script = _HARNESS % {"parent": REPO_PARENT, "module": module}
+    script = _HARNESS % {
+        "parent": REPO_PARENT,
+        "pkgdir": REPO_DIRNAME,
+        "module": module,
+    }
     return subprocess.run(
         [sys.executable, "-c", textwrap.dedent(script)],
         capture_output=True, text=True, timeout=180,
@@ -120,6 +152,25 @@ def _import_in_clean_process(module: str):
 
 
 GROUP_PATHS = [g.module_path for g in NODE_GROUPS]
+
+
+def test_the_harness_can_import_the_package_at_all():
+    """Fail here, loudly and once, when the harness is what is broken.
+
+    Without this the first version of this file reported eleven identical
+    "cannot be imported without aiohttp" failures on CI, when the real cause
+    was that the mirror is checked out as `radiance-beta` and the subprocess
+    had no name mapping, so `import radiance` failed before aiohttp entered
+    into it. A test that misattributes its own breakage to the code under test
+    is worse than no test.
+    """
+    result = _import_in_clean_process("radiance")
+
+    assert "HARNESS-BROKEN" not in result.stdout, result.stdout.strip()
+    assert "IMPORT-OK" in result.stdout, (
+        "the isolation harness cannot import the package:\n"
+        + (result.stderr or result.stdout).strip()[-1500:]
+    )
 
 
 @pytest.mark.parametrize("group", GROUP_PATHS)
@@ -130,6 +181,13 @@ def test_a_node_group_imports_without_aiohttp_or_a_server(group):
         return
 
     tail = "\n".join((result.stderr or result.stdout).strip().splitlines()[-12:])
+
+    if "HARNESS-BROKEN" in result.stdout:
+        pytest.fail(
+            "the isolation harness is broken, so this says nothing about "
+            f"{group}:\n\n{result.stdout.strip()}\n\n{tail}"
+        )
+
     pytest.fail(
         f"{group} cannot be imported without aiohttp / ComfyUI's server.\n"
         "Guard the import (see nodes/gizmo.py) and do not touch PromptServer "
