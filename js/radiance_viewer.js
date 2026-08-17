@@ -799,6 +799,7 @@ class RadianceViewer {
         this.lutIntensity = 1.0;
 
         this.falseColor = false;
+        this.hdrHeatmap = false;   // absolute cd/m2, anchored to BT.2408 (203 nits)
         this.zebra = false;
         this.gamutWarning = false;
         this.clippingMonitor = false;
@@ -2211,7 +2212,7 @@ class RadianceViewer {
         [
             ['Snapshot', () => this.showExportMenu?.({ target: actions })],
             ['Compare', () => this.cycleCompareMode()],
-            ['HDR', () => { this.falseColor = !this.falseColor; this.render(); }],
+            ['HDR', () => { this.toggleHDRHeatmap(); }],
             ['⚙', () => this.toggleControls()],
         ].forEach(([label, handler]) => {
             const btn = document.createElement('button');
@@ -2274,7 +2275,11 @@ class RadianceViewer {
             { label: 'Exposure', action: () => this.toggleControls() },
             { label: 'False Color', action: () => { this.falseColor = !this.falseColor; this.render(); } },
             { label: 'Zebra', action: () => { this.zebra = !this.zebra; this.render(); } },
-            { label: 'HDR Heatmap', action: () => { this.falseColor = !this.falseColor; this.render(); } },
+            // Was a second switch on `falseColor` -- the same feature under two
+            // names, and neither reported nits. False Color is an *exposure*
+            // tool on display luma; this one reads scene luminance and maps
+            // absolute cd/m2 against BT.2408's 203-nit HDR Reference White.
+            { label: 'HDR Heatmap', action: () => { this.toggleHDRHeatmap(); } },
         ]);
         addSection('Analysis', [
             { label: 'Histogram', action: () => { this.scopeMode = 'histogram'; this._setReferenceTab('scopes'); this.updateScopes(); } },
@@ -9463,6 +9468,7 @@ else:
 
             // Analytics State
             this.renderer.setFalseColor(this.falseColor || false);
+        this.renderer.setHDRHeatmap?.(this.hdrHeatmap);
             this.renderer.setZebra(this.zebra || false);
             this.renderer.setZebraThreshold(this.zebraThreshold || 0.95);
             this.renderer.setGamutWarning(this.gamutWarning || false);
@@ -10682,6 +10688,25 @@ else:
         });
 
         render();
+    }
+
+    toggleHDRHeatmap() {
+        this.hdrHeatmap = !this.hdrHeatmap;
+        // Mutually exclusive with the other full-frame analysis overlays, the
+        // same way falseColor already is at ~5746 -- two of them at once shows
+        // neither.
+        if (this.hdrHeatmap) {
+            this.falseColor = false;
+            this.zebra = false;
+            this.focusPeaking = false;
+        }
+        this.renderer?.setHDRHeatmap?.(this.hdrHeatmap);
+        if (this.hdrHeatmap && this._gpuBackend === 'webgpu') {
+            this._termLog?.('warn',
+                '[HDR Heatmap] Not implemented in the WebGPU shader path yet — '
+                + 'no nits overlay will appear on this backend.');
+        }
+        this.render();
     }
 
     _installUndoShortcuts() {
