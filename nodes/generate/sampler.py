@@ -228,6 +228,7 @@ def _make_energy_cfg_patch(layers):
     # Resizing the masks is per-step work that only depends on the latent
     # geometry, which never changes mid-sample. Cache the summed field.
     _cache: Dict[Any, Any] = {}
+    _warned_bad_shape = [False]
 
     def _energy_field(cond):
         """Σ priority_i · mask_i, resampled to the latent grid."""
@@ -279,8 +280,16 @@ def _make_energy_cfg_patch(layers):
         cfg_val = args["cond_scale"]
 
         if cond.ndim < 4 or cond.shape != uncond.shape:
-            # Unknown latent layout — pass through untouched rather than
-            # corrupting the sample.
+            # ALBABIT-FIX: LTX-AV's packed latent (comfy.utils.pack_latents)
+            # is (B, 1, N) -- 3D, always trips this guard, so EPS silently
+            # no-ops for every LTX-AV render regardless of mask/priority.
+            # Was silent; warn once per render instead of every step.
+            if not _warned_bad_shape[0]:
+                logger.warning(
+                    "[Energy Guidance] Latent shape %s isn't supported (need "
+                    "4+ dims) -- EPS has no effect this run.", tuple(cond.shape),
+                )
+                _warned_bad_shape[0] = True
             return args["denoised"]
 
         eps_modifier = (1.0 + _energy_field(cond)).clamp_min(0.0)
