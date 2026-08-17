@@ -297,12 +297,9 @@ const LTX_INCOMPATIBLE_WIDGETS = [
     "tile_stride",
     "tile_blend",
     // ALBABIT-FIX: hide widgets that have no effect under LTX — single unified encoder,
-    // no AYS table, no PAG self-attention. guidance_rescale_phi was here too
-    // ("no CFG rescale"), but that predates the CFG-function contract fix
-    // (2026-08-15) -- live-tested afterward with a real LTX 2.5 render
-    // (phi=0 vs 0.7): consistent ~18% saturation drop across 3 timestamps,
-    // correct anti-oversaturation direction, no artifacts. It works like any
-    // other CFG-guided model now; removed from this list.
+    // no AYS table, no PAG self-attention. guidance_rescale_phi was here too but that
+    // predated the CFG-function contract fix; live-tested afterward and confirmed
+    // working (consistent saturation drop, no artifacts) -- removed from this list.
     "conditioning_clip_target",
     "ays_schedule",
     "pag_scale"
@@ -1023,12 +1020,10 @@ function _markLinkedWidget(widget, linked, inSync) {
 }
 
 // ALBABIT-FIX: extends the guidance/steps sync (above) to model_type/cfg/
-// sampler/scheduler/flux_shift/denoise, resolved from the linked Loader's
-// preset/model_type (plus, for LTX-AV, which Sampler stage this node is --
-// see _isLtxAvHighResStage). Gated on preset (Auto/Custom) only -- not
-// model_type=="auto" too, since the per-field checks in _syncAutoValue()
-// already protect any field the user deliberately set (mirrors
-// nodes_sampler.py).
+// sampler/scheduler/flux_shift/denoise (plus, for LTX-AV, which Sampler
+// stage this node is -- see _isLtxAvHighResStage). Gated on preset
+// (Auto/Custom) only -- the per-field checks in _syncAutoValue() already
+// protect any field the user deliberately set.
 function updateModelMetaDefaults(node) {
     if (!node.widgets) return;
     const presetW = node.widgets.find(w => w.name === "preset");
