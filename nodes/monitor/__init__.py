@@ -5,13 +5,14 @@ import logging
 
 from radiance.nodes.monitor.lite_viewer import RadianceLiteViewer
 from radiance.nodes.monitor.viewer import RadianceGradeApply, RadianceViewer
-from radiance.nodes_realtime_preview import (
+from radiance.nodes.monitor.realtime import (
     RadianceFocusPeaking,
     RadianceContactSheet,
     RadianceFrameStamp,
     RadianceFlipbookGIF,
     RadiancePreviewServer,
 )
+from radiance.nodes.aggregate import fold_in_module_nodes
 
 logger = logging.getLogger("radiance.nodes.monitor")
 
@@ -43,5 +44,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceFlipbookGIF": "◎ Radiance Flipbook GIF",
     "RadiancePreviewServer": "◎ Radiance Preview Server",
 }
+
+# Publishing is the default: sweep this package for nodes its leaf modules
+# declare but the mapping above does not list. See nodes/aggregate.py — this is
+# what stopped seventeen finished nodes from ever reaching the menu.
+fold_in_module_nodes(__name__, NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS, logger)
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

@@ -742,11 +742,21 @@ def _ensure_stubs() -> None:
 
 def _discover_node_keys_from_source() -> Dict[str, str]:
     """
-    Parse all nodes_*.py and color/*.py with AST to extract NODE_CLASS_MAPPINGS
-    keys without importing the files.  Returns {node_key: source_file}.
+    Parse the node modules with AST to extract NODE_CLASS_MAPPINGS keys without
+    importing the files.  Returns {node_key: source_file}.
+
+    This used to glob only the root `nodes_*.py` layer, which is why retiring
+    that layer made three keys silently vanish from the scan instead of
+    resolving: the aliases were declared in files that had moved into the
+    package. It now walks `nodes/` too, so a key is discovered wherever it
+    actually lives.
     """
     results: Dict[str, str] = {}
-    patterns = list(RADIANCE_ROOT.glob("nodes_*.py")) + list(RADIANCE_ROOT.glob("color/*.py"))
+    patterns = (
+        list(RADIANCE_ROOT.glob("nodes_*.py"))
+        + list(RADIANCE_ROOT.glob("nodes/**/*.py"))
+        + list(RADIANCE_ROOT.glob("color/*.py"))
+    )
     for fpath in sorted(patterns):
         try:
             src = fpath.read_text(encoding="utf-8")
@@ -767,8 +777,11 @@ def _discover_node_keys_from_source() -> Dict[str, str]:
 def _import_file(fpath: str) -> types.ModuleType | None:
     """Import a source file by path, returning the module or None on failure.
 
-    Sets __package__ = "radiance" so that relative imports (from . import x)
-    resolve against the pre-stubbed radiance.* entries in sys.modules.
+    Sets __package__ to the module's real parent package so that relative
+    imports resolve against the pre-stubbed radiance.* entries in sys.modules.
+    A file under `nodes/generate/` needs `radiance.nodes.generate`, not
+    `radiance` — with the wrong parent, `from ...core import x` walks off the
+    top of the package and the import fails.
     """
     path = RADIANCE_ROOT / fpath
     spec = importlib.util.spec_from_file_location(
@@ -778,10 +791,11 @@ def _import_file(fpath: str) -> types.ModuleType | None:
         return None
     mod = importlib.util.module_from_spec(spec)
     # Give the module a package context so relative imports work.
-    mod.__package__ = "radiance"
+    parent_parts = path.relative_to(RADIANCE_ROOT).parts[:-1]
+    mod.__package__ = ".".join(("radiance",) + parent_parts)
     # Register under the radiance namespace so cross-file relative imports
     # (e.g. from .color_utils import …) can find sibling stubs.
-    _mod_key = f"radiance.{path.stem}"
+    _mod_key = f"{mod.__package__}.{path.stem}"
     if _mod_key not in sys.modules:
         sys.modules[_mod_key] = mod
     try:
@@ -999,11 +1013,18 @@ class TestCoverageSummary(unittest.TestCase):
     #:
     #: The list is a ratchet: it may shrink, and a shrink fails this test so the
     #: entry gets removed, but it may never grow without someone editing here.
-    _KNOWN_UNREGISTERED = frozenset({
-        "RadianceImageLoader",   # nodes_loader.py — alias of RadianceUnifiedLoader
-        "RadianceControlApply",  # nodes_loader.py — alias of RadianceControlNetApply
-        "RadianceWorkspace",     # nodes_workspace.py — alias of RadianceProjectManager
-    })
+    # Empty, and it should stay that way.
+    #
+    # It held three alias keys that "could not" be registered. They are all
+    # published now — as DEPRECATED subclasses, so saved workflows referencing
+    # the old key still load while the menu shows one entry per node. Widening
+    # this file's AST scan from the retired root `nodes_*.py` layer to the whole
+    # `nodes/` package turned up seventeen more nodes in the same state, none of
+    # which anyone had noticed; `nodes/aggregate.py` publishes by default now.
+    #
+    # An entry here means a node exists in source and deliberately does not
+    # ship. Write down why.
+    _KNOWN_UNREGISTERED = frozenset()
 
     @staticmethod
     def _environment_load_failures():

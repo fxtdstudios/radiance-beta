@@ -34,6 +34,7 @@ from radiance.nodes.color.qc import (
     RadianceQC,
     RadiancePolicyGuard,
 )
+from radiance.nodes.aggregate import fold_in_module_nodes
 
 logger = logging.getLogger("radiance.nodes.color")
 
@@ -74,6 +75,18 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceGradeMatch": "◎ Radiance Grade Match",
     "RadianceOCIOContext": "◎ Radiance OCIO Context",
     "RadianceQC": "◎ Radiance QC",
+    # These four were registered with no display name, so the branding
+    # layer had to derive a label from the class key. Harmless in the menu,
+    # but it made "every registered node has a display name" untestable.
+    "RadiancePolicyGuard": "◎ Radiance Policy Guard",
+    "RadianceLUTApply": "◎ Radiance LUT Apply",
+    "RadianceLUTBlend": "◎ Radiance LUT Blend",
+    "RadianceBitDepthDegrade": "◎ Radiance Bit-Depth Degrade",
 }
+
+# Publishing is the default: sweep this package for nodes its leaf modules
+# declare but the mapping above does not list. See nodes/aggregate.py — this is
+# what stopped seventeen finished nodes from ever reaching the menu.
+fold_in_module_nodes(__name__, NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS, logger)
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

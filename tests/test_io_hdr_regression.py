@@ -24,7 +24,7 @@ torch = pytest.importorskip("torch")
 # skip so they keep running on the no-torch CI matrix.
 RADIANCE_TORCH_GATED = True
 
-nodes_io = importlib.import_module("radiance.nodes_io")
+nodes_io = importlib.import_module("radiance.nodes.io.write")
 
 
 # ── C-1: scene-linear values must survive the tensor conversion ─────────────

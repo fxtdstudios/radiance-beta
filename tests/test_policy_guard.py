@@ -27,14 +27,18 @@ import numpy as np
 # ── Module under test ────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from nodes_qc import (
+# NODE_CLASS_MAPPINGS moved to the group package: the root
+# aggregator that used to build it was a shim over these classes.
+from radiance.nodes.color import (
+    NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS,
+)
+from radiance.nodes.color.qc import (
     _luma,
     _mean_saturation,
     _gamut_out_of_p3,
     _policy_analyse as _analyse,
     _evaluate_policy as _evaluate,
-    NODE_CLASS_MAPPINGS,
-    NODE_DISPLAY_NAME_MAPPINGS,
     RadiancePolicyGuard,
 )
 

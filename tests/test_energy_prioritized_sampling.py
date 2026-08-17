@@ -33,11 +33,12 @@ import torch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radiance.nodes.generate.energy import (
+    ENERGY_LAYERS_KEY,
     ENERGY_MASK_KEY,
     ENERGY_PRIORITY_KEY,
     RadianceEnergyMask,
 )
-from radiance.nodes_sampler import _find_energy_mask, _make_energy_cfg_patch
+from radiance.nodes.generate.sampler import _collect_energy_layers, _make_energy_cfg_patch
 
 
 def _conditioning(batch=1):
@@ -70,10 +71,10 @@ class TestEnergyMaskNode:
         """The whole point of #40: producer output must satisfy the reader."""
         out, _ = RadianceEnergyMask().apply(_conditioning(), _half_mask(), priority=0.75)
 
-        mask, priority = _find_energy_mask(out)
+        layers = _collect_energy_layers(out)
 
-        assert mask is not None, "the sampler did not find the mask the node attached"
-        assert priority == pytest.approx(0.75)
+        assert len(layers) == 1, "the sampler did not find the mask the node attached"
+        assert layers[0][1] == pytest.approx(0.75)
 
     def test_every_entry_carries_the_keys(self):
         cond = _conditioning() + _conditioning()
@@ -155,30 +156,139 @@ class TestEnergyMaskNode:
 
 class TestEnergyMaskParser:
 
-    def test_no_mask_returns_none(self):
-        assert _find_energy_mask(_conditioning()) == (None, 0.0)
+    def test_no_mask_returns_no_layers(self):
+        assert _collect_energy_layers(_conditioning()) == []
 
     def test_non_list_conditioning_is_tolerated(self):
-        assert _find_energy_mask(None) == (None, 0.0)
+        assert _collect_energy_layers(None) == []
 
     def test_a_junk_mask_value_is_skipped_not_crashed(self):
         positive = [(torch.zeros(1, 77, 2048), {ENERGY_MASK_KEY: "nonsense"})]
-        assert _find_energy_mask(positive) == (None, 0.0)
+        assert _collect_energy_layers(positive) == []
+
+    def test_a_malformed_layer_entry_is_skipped_not_crashed(self):
+        positive = [(torch.zeros(1, 77, 2048), {ENERGY_LAYERS_KEY: ["not a pair"]})]
+        assert _collect_energy_layers(positive) == []
 
     def test_a_non_numeric_priority_falls_back(self):
         positive = [(torch.zeros(1, 77, 2048), {
             ENERGY_MASK_KEY: _half_mask(),
             ENERGY_PRIORITY_KEY: "loud",
         })]
-        _, priority = _find_energy_mask(positive)
-        assert priority == pytest.approx(1.0)
+        layers = _collect_energy_layers(positive)
+        assert layers[0][1] == pytest.approx(1.0)
 
-    def test_the_first_carrier_wins(self):
+    def test_a_beta_conditioning_without_the_layers_key_still_reads(self):
+        """3.3.0-beta wrote only the singular keys; those graphs keep working."""
+        positive = [(torch.zeros(1, 77, 2048), {
+            ENERGY_MASK_KEY: _half_mask(),
+            ENERGY_PRIORITY_KEY: 0.4,
+        })]
+        layers = _collect_energy_layers(positive)
+        assert len(layers) == 1
+        assert layers[0][1] == pytest.approx(0.4)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Stacking
+#
+#  Two Energy Mask nodes used to be a silent data loss, in two different ways
+#  depending on how they were wired, and the node docstring described only one
+#  of them — incorrectly. In series, the second `attach_energy_mask` overwrote
+#  the singular key on every entry, so the DOWNSTREAM node won. Joined by
+#  Conditioning Combine, the reader stopped at the first entry carrying the
+#  key, so the UPSTREAM node won. Either way one mask vanished with no log
+#  line. Both shapes now stack.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestChainedEnergyMasksStack:
+
+    def test_two_nodes_in_series_produce_two_layers(self):
         first, _ = RadianceEnergyMask().apply(_conditioning(), _half_mask(), priority=0.25)
-        second, _ = RadianceEnergyMask().apply(_conditioning(), _half_mask(), priority=2.0)
+        second, _ = RadianceEnergyMask().apply(first, _half_mask(), priority=0.5)
 
-        _, priority = _find_energy_mask(first + second)
-        assert priority == pytest.approx(0.25)
+        layers = _collect_energy_layers(second)
+        assert [p for _, p in layers] == [pytest.approx(0.25), pytest.approx(0.5)]
+
+    def test_two_branches_combined_produce_two_layers(self):
+        """The Conditioning Combine shape: one list, entries from both branches."""
+        a, _ = RadianceEnergyMask().apply(_conditioning(), _half_mask(), priority=0.25)
+        b, _ = RadianceEnergyMask().apply(_conditioning(), _half_mask(), priority=2.0)
+
+        layers = _collect_energy_layers(a + b)
+        assert [p for _, p in layers] == [pytest.approx(0.25), pytest.approx(2.0)]
+
+    def test_one_node_fanned_across_many_entries_is_still_one_layer(self):
+        """The counting trap: attach writes the layer onto every entry."""
+        cond = _conditioning() + _conditioning() + _conditioning()
+        out, _ = RadianceEnergyMask().apply(cond, _half_mask(), priority=0.5)
+
+        assert len(_collect_energy_layers(out)) == 1
+
+    def test_a_shallow_copy_of_the_meta_dict_does_not_double_count(self):
+        """`conditioning_set_values` and friends copy the dict, not the layer."""
+        out, _ = RadianceEnergyMask().apply(_conditioning(), _half_mask(), priority=0.5)
+        copied = [(t, dict(meta)) for t, meta in out]
+
+        assert len(_collect_energy_layers(out + copied)) == 1
+
+    def test_the_priorities_add_where_the_masks_overlap(self):
+        cond = torch.full((1, 4, 4, 4), 5.0)
+        uncond = torch.ones(1, 4, 4, 4)
+        full = torch.ones(1, 4, 4)
+
+        patch = _make_energy_cfg_patch([(full, 0.25), (full, 0.5)])
+        out = patch(_args(cond, uncond, cfg=1.0))
+
+        # 1 + 0.25 + 0.5 = 1.75  →  1 + 4 * 1.75 = 8.0
+        assert out[0, 0, 0, 0].item() == pytest.approx(8.0)
+
+    def test_disjoint_masks_each_apply_only_to_their_own_region(self):
+        cond = torch.full((1, 4, 8, 8), 5.0)
+        uncond = torch.ones(1, 4, 8, 8)
+
+        left = torch.zeros(1, 8, 8)
+        left[:, :, :4] = 1.0
+        right = torch.zeros(1, 8, 8)
+        right[:, :, 4:] = 1.0
+
+        patch = _make_energy_cfg_patch([(left, 0.5), (right, 1.0)])
+        out = patch(_args(cond, uncond, cfg=1.0))
+
+        assert out[0, 0, 0, 0].item() == pytest.approx(7.0)   # 1 + 4*1.5
+        assert out[0, 0, 0, 7].item() == pytest.approx(9.0)   # 1 + 4*2.0
+
+    def test_a_stack_of_negatives_suppresses_but_never_inverts(self):
+        """Two -1.0 layers would give a modifier of -1: guidance backwards."""
+        cond = torch.full((1, 4, 4, 4), 5.0)
+        uncond = torch.ones(1, 4, 4, 4)
+        full = torch.ones(1, 4, 4)
+
+        patch = _make_energy_cfg_patch([(full, -1.0), (full, -1.0)])
+        out = patch(_args(cond, uncond, cfg=1.0))
+
+        # Clamped to 0 → cond_eps == uncond, not uncond - (cond-uncond).
+        assert out[0, 0, 0, 0].item() == pytest.approx(1.0)
+
+    def test_layers_of_different_resolutions_are_each_resampled(self):
+        cond = torch.full((1, 4, 16, 16), 5.0)
+        uncond = torch.ones(1, 4, 16, 16)
+
+        patch = _make_energy_cfg_patch([
+            (torch.ones(1, 512, 512), 0.25),
+            (torch.ones(1, 8, 8), 0.25),
+        ])
+        out = patch(_args(cond, uncond, cfg=1.0))
+
+        assert out[0, 0, 8, 8].item() == pytest.approx(1.0 + 4.0 * 1.5, abs=1e-3)
+
+    def test_an_inert_layer_does_not_cancel_an_active_one(self):
+        """priority=0 layers are dropped at the call site, not summed in."""
+        first, _ = RadianceEnergyMask().apply(_conditioning(), _half_mask(), priority=0.0)
+        second, _ = RadianceEnergyMask().apply(first, _half_mask(), priority=0.6)
+
+        active = [(m, p) for m, p in _collect_energy_layers(second) if p != 0.0]
+        assert [p for _, p in active] == [pytest.approx(0.6)]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -193,7 +303,7 @@ class TestEnergyCfgPatch:
         mask = torch.zeros(1, 8, 8)
         mask[:, :, 4:] = 1.0
 
-        patch = _make_energy_cfg_patch(mask, 0.5)
+        patch = _make_energy_cfg_patch([(mask, 0.5)])
         out = patch(_args(cond, uncond, cfg=1.0))
 
         # cfg=1 → denoised == cond_eps. Unmasked keeps cond (5.0); masked gets
@@ -206,14 +316,14 @@ class TestEnergyCfgPatch:
         uncond = torch.randn(1, 4, 8, 8)
         args = _args(cond, uncond)
 
-        patch = _make_energy_cfg_patch(torch.zeros(1, 8, 8), 0.9)
+        patch = _make_energy_cfg_patch([(torch.zeros(1, 8, 8), 0.9)])
         assert torch.allclose(patch(args), args["denoised"], atol=1e-5)
 
     def test_negative_priority_suppresses_the_region(self):
         cond = torch.full((1, 4, 4, 4), 5.0)
         uncond = torch.ones(1, 4, 4, 4)
 
-        patch = _make_energy_cfg_patch(torch.ones(1, 4, 4), -0.5)
+        patch = _make_energy_cfg_patch([(torch.ones(1, 4, 4), -0.5)])
         out = patch(_args(cond, uncond, cfg=1.0))
 
         # 1 + 4*0.5 = 3.0, i.e. half the guidance
@@ -226,7 +336,7 @@ class TestEnergyCfgPatch:
         mask = torch.zeros(1, 8, 8)
         mask[:, :, 4:] = 1.0
 
-        patch = _make_energy_cfg_patch(mask, 0.5)
+        patch = _make_energy_cfg_patch([(mask, 0.5)])
         out = patch(_args(cond, uncond, cfg=1.0))
 
         assert out.shape == cond.shape
@@ -239,7 +349,7 @@ class TestEnergyCfgPatch:
         cond = torch.full((1, 4, 64, 64), 5.0)
         uncond = torch.ones(1, 4, 64, 64)
 
-        patch = _make_energy_cfg_patch(_half_mask(512, 512), 0.5)
+        patch = _make_energy_cfg_patch([(_half_mask(512, 512), 0.5)])
         out = patch(_args(cond, uncond, cfg=1.0))
 
         assert out[0, 0, 0, 0].item() == pytest.approx(5.0, abs=1e-3)
@@ -249,7 +359,7 @@ class TestEnergyCfgPatch:
         cond = torch.full((4, 4, 8, 8), 5.0)
         uncond = torch.ones(4, 4, 8, 8)
 
-        patch = _make_energy_cfg_patch(torch.ones(1, 8, 8), 0.5)
+        patch = _make_energy_cfg_patch([(torch.ones(1, 8, 8), 0.5)])
         out = patch(_args(cond, uncond, cfg=1.0))
 
         assert out.shape == cond.shape
@@ -260,7 +370,7 @@ class TestEnergyCfgPatch:
         cond = torch.full((4, 4, 8, 8), 5.0)
         uncond = torch.ones(4, 4, 8, 8)
 
-        patch = _make_energy_cfg_patch(torch.ones(3, 8, 8), 0.5)
+        patch = _make_energy_cfg_patch([(torch.ones(3, 8, 8), 0.5)])
         out = patch(_args(cond, uncond, cfg=1.0))
 
         assert out.shape == cond.shape
@@ -276,7 +386,7 @@ class TestEnergyCfgPatch:
         cond = torch.full((1, 4, 4, 4), 5.0)
         uncond = torch.ones(1, 4, 4, 4)
 
-        patch = _make_energy_cfg_patch(torch.ones(1, 4, 4), 0.5, existing_cfg_fn=existing)
+        patch = _make_energy_cfg_patch([(torch.ones(1, 4, 4), 0.5)], existing_cfg_fn=existing)
         out = patch(_args(cond, uncond, cfg=1.0))
 
         assert torch.allclose(out, torch.zeros_like(out)), "the existing cfg fn did not run"
@@ -291,7 +401,7 @@ class TestEnergyCfgPatch:
             "denoised": torch.zeros(1, 4, 8, 8),
         }
 
-        patch = _make_energy_cfg_patch(torch.ones(1, 8, 8), 0.5)
+        patch = _make_energy_cfg_patch([(torch.ones(1, 8, 8), 0.5)])
         assert torch.equal(patch(args), args["denoised"])
 
     def test_the_resized_mask_is_reused_across_steps(self):
@@ -299,7 +409,7 @@ class TestEnergyCfgPatch:
         cond = torch.full((1, 4, 8, 8), 5.0)
         uncond = torch.ones(1, 4, 8, 8)
 
-        patch = _make_energy_cfg_patch(_half_mask(256, 256), 0.5)
+        patch = _make_energy_cfg_patch([(_half_mask(256, 256), 0.5)])
         first = patch(_args(cond, uncond, cfg=1.0))
 
         with_interpolate_banned = torch.nn.functional.interpolate

@@ -347,6 +347,12 @@ _defects_stub.analyze_noise          = MagicMock(return_value={"level": 0.0})
 _defects_stub.detect_compression_artifacts = MagicMock(return_value={"detected": False})
 _defects_stub.analyze_focus          = MagicMock(return_value={"sharpness": 1.0})
 _image_pkg.defects = _defects_stub
+# Keep the package importable as a real package. Without a __path__ this stub
+# shadowed the whole subpackage, so `import radiance.image.upscale` failed even
+# though the file exists — which is the reason delivery/handler.py reached for
+# a node class instead of the library function it actually wanted. Only
+# `defects` is stubbed; every other submodule loads from disk.
+_image_pkg.__path__ = [str(Path(__file__).resolve().parent.parent / "image")]
 sys.modules.setdefault("radiance.image",         _image_pkg)
 sys.modules.setdefault("radiance.image.defects", _defects_stub)
 # Also expose as bare `image` and `image.defects` for flat imports
@@ -380,6 +386,26 @@ def _make_comfy_stubs():
         "normal", "karras", "exponential", "sgm_uniform",
         "simple", "ddim_uniform", "beta",
     ]
+
+    def _calculate_sigmas(model_sampling, scheduler, steps):
+        """Monotonically decreasing sigmas, the only property callers rely on.
+
+        test_sampler_regression.py used to install its own `comfy` stub with
+        this function and then import the sampler by bare name, which gave it a
+        private module that captured that stub. Now that the sampler is a
+        package module, whichever stub was installed first wins and the test's
+        own is overwritten — so the shared stub has to carry it.
+        """
+        try:
+            import torch as _torch
+            if isinstance(getattr(_torch, "__version__", None), str):
+                return _torch.linspace(1.0, 0.0, int(steps) + 1)
+        except ImportError:
+            pass
+        import numpy as _np
+        return _np.linspace(1.0, 0.0, int(steps) + 1)
+
+    samplers.calculate_sigmas = _calculate_sigmas
     comfy.samplers = samplers
 
     # comfy.sample

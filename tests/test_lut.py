@@ -2,7 +2,7 @@
 test_lut.py — LUT parsing and interpolation tests.
 
 The static methods under test (_parse_cube, _apply_3d_lut, _apply_1d_lut)
-are pure-NumPy functions extracted from nodes_engine.RadianceLUTApply.
+are pure-NumPy functions extracted from radiance.color.lut.RadianceLUTApply.
 They are inlined here so the test file can be collected without a live
 ComfyUI or torch installation.
 
@@ -35,7 +35,7 @@ except ImportError:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Pure-numpy implementations (copied from nodes_engine.RadianceLUTApply)
+#  Pure-numpy implementations (copied from radiance.color.lut.RadianceLUTApply)
 #  — inlined so this test file has no torch / relative-import dependency.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -408,7 +408,7 @@ class TestApply1DLUT:
 class TestApplyLUTIntegration:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Pipeline"
     """
-    End-to-end tests that exercise nodes_engine.RadianceLUTApply.apply_lut,
+    End-to-end tests that exercise radiance.color.lut.RadianceLUTApply.apply_lut,
     which wraps the numpy static methods with batch processing, strength
     blending, and alpha pass-through.
     """
@@ -419,9 +419,9 @@ class TestApplyLUTIntegration:
         # full radiance package to be importable.  Under pytest the cwd is
         # the radiance root so this normally works when torch is available.
         try:
-            from radiance.nodes_engine import RadianceLUTApply
+            from radiance.color.lut import RadianceLUTApply
         except ImportError:
-            from nodes_engine import RadianceLUTApply
+            from radiance.color.lut import RadianceLUTApply
         return RadianceLUTApply()
 
     def test_strength_zero_returns_original(self, node, tmp_path):

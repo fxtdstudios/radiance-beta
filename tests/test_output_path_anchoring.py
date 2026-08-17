@@ -149,7 +149,7 @@ class TestNodesWriteWhereTheyShould:
 
     def test_flipbook_gif_on_its_default_writes_to_output(self, comfy_dirs):
         pytest.importorskip("PIL")
-        from radiance.nodes_realtime_preview import RadianceFlipbookGIF
+        from radiance.nodes.monitor.realtime import RadianceFlipbookGIF
 
         default = RadianceFlipbookGIF.INPUT_TYPES()["required"]["save_path"][1]["default"]
         images = _t.zeros(2, 8, 8, 3)

@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
-nodes_io = importlib.import_module("radiance.nodes_io")
+nodes_io = importlib.import_module("radiance.nodes.io.write")
 
 HAS_FFMPEG = shutil.which("ffmpeg") is not None
 skip_no_ffmpeg = pytest.mark.skipif(not HAS_FFMPEG, reason="ffmpeg not installed")

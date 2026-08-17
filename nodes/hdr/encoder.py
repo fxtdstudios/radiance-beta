@@ -309,10 +309,24 @@ class RadianceHDRPerChannelDenorm:
 
     def denormalize(self, image: torch.Tensor, stats_json: str):
         import json
-        stats       = json.loads(stats_json)
-        mean        = torch.tensor(stats["mean"],  dtype=image.dtype, device=image.device)
-        std         = torch.tensor(stats["std"],   dtype=image.dtype, device=image.device)
-        norm_center = float(stats["norm_center"])
+
+        # `stats_json` is forceInput, so an empty or malformed value means the
+        # Norm node is not wired up. Say that, rather than surfacing a bare
+        # JSONDecodeError with a character offset into a string the user never
+        # typed.
+        try:
+            stats = json.loads(stats_json)
+            mean_v, std_v = stats["mean"], stats["std"]
+            norm_center = float(stats["norm_center"])
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ValueError(
+                "RadianceHDRPerChannelDenorm: `stats_json` must be the stats "
+                "output of RadianceHDRPerChannelNorm — connect that node's "
+                f"stats_json socket to this input. ({type(exc).__name__}: {exc})"
+            ) from exc
+
+        mean = torch.tensor(mean_v, dtype=image.dtype, device=image.device)
+        std = torch.tensor(std_v, dtype=image.dtype, device=image.device)
 
         mu  = mean.reshape(1, 1, 1, -1)
         sig = std.reshape(1, 1, 1, -1)

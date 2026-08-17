@@ -13,7 +13,7 @@ from typing import Tuple
 import numpy as np
 import torch
 
-from radiance.nodes_io import _save_exr, _save_pil_image
+from radiance.nodes.io.write import _save_exr, _save_pil_image
 
 logger = logging.getLogger("radiance.nodes.studio")
 

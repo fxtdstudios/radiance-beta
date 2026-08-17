@@ -101,6 +101,14 @@ def _synthesise(spec):
     if kind == "BOOLEAN":
         return bool(config.get("default", False)), None
     if kind == "STRING":
+        # `forceInput` means ComfyUI draws no widget at all: the value can only
+        # arrive over a link, so there is no default to stand in for and "" is
+        # not a value any real graph would produce. Treat it like an opaque
+        # type rather than feeding empty text into a parser — that was reported
+        # as a node failure (RadianceHDRPerChannelDenorm on an empty
+        # stats_json) when it is really an un-runnable input.
+        if config.get("forceInput"):
+            return None, "needs a STRING from an upstream node"
         return str(config.get("default", "")), None
     if kind in _OPAQUE:
         return None, f"needs a {kind}"

@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import logging
 
-from radiance.nodes_sampler import RadianceSamplerPro
+from radiance.nodes.generate.sampler import RadianceSamplerPro
 from radiance.nodes.generate.engine import (
     RadianceHDRVAEDecode,
 )
-from radiance.nodes_loader import (
+from radiance.nodes.generate.loader import (
     RadianceControlNetApply,
     RadianceLoraStack,
     RadianceUnifiedLoader,
@@ -21,6 +21,7 @@ from radiance.nodes.generate.regional import RadianceRegionalPrompt, RadianceReg
 from radiance.nodes.generate.resolution import RadianceResolution
 from radiance.nodes.generate.denoise import RadianceDenoise
 from radiance.nodes.generate.energy import RadianceEnergyMask
+from radiance.nodes.aggregate import fold_in_module_nodes
 
 logger = logging.getLogger("radiance.nodes.generate")
 
@@ -59,5 +60,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceDenoise": "◎ Denoise",
     "RadianceEnergyMask": "◎ Energy Mask",
 }
+
+# Publishing is the default: sweep this package for nodes its leaf modules
+# declare but the mapping above does not list. See nodes/aggregate.py — this is
+# what stopped seventeen finished nodes from ever reaching the menu.
+fold_in_module_nodes(__name__, NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS, logger)
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

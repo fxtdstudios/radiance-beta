@@ -192,6 +192,38 @@ NODE_SECTIONS = {
     "RadianceVideoMaskPropagator": "Video",
     "RadianceVideoModelInfo": "Video",
     "RadianceVideoSampler": "Video",
+    # ── Published by the aggregate sweep, 2026-08 ─────────────────────────
+    # Twenty finished nodes that no group's __init__.py ever listed, so
+    # ComfyUI never saw them. See nodes/aggregate.py for how that happened and
+    # why it cannot happen again silently.
+    "RadianceACES2Compliance": "HDR",
+    "RadianceACESMetadataFile": "HDR",
+    "RadianceColorSpaceInfo": "HDR",
+    "RadianceHDRAnalysis": "HDR",
+    "RadianceHDRBlendValidator": "HDR",
+    "RadianceHDRPerChannelDenorm": "HDR",
+    "RadianceHDRPerChannelNorm": "HDR",
+    "RadianceHDRTurboEncoder": "HDR",
+    "RadianceLuminanceGuidance": "HDR",
+    "RadianceAudioCut": "Pipeline",
+    "RadianceAudioTranscribe": "Pipeline",
+    # Named "◎ Radiance Manager" in its own module, which strips to a bare
+    # "Manager" — indistinguishable from Project Manager in the menu. It is
+    # neither: it builds prompt text from real camera and lens profiles, so it
+    # belongs beside the other prompt nodes with a name that says so.
+    "RadianceCinemaStudio": "Generate",
+    "RadianceLinearCheck": "Pipeline",
+    "RadianceNDISender": "Pipeline",
+    "RadianceCameraSync": "VFX",
+    "RadianceShotGradeRouter": "VFX",
+    "RadianceVideoPromptBuilder": "Video",
+    # Alias keys: the same class as a node already in this table, kept so that
+    # workflows saved against the older key still load. They are marked
+    # DEPRECATED at the class level so ComfyUI keeps loading them but leaves
+    # them out of the node search, which is why they do not double up the menu.
+    "RadianceControlApply": "Generate",
+    "RadianceImageLoader": "Generate",
+    "RadianceWorkspace": "Core",
 }
 
 
@@ -201,16 +233,23 @@ SECTION_OVERRIDES = {
     # their placement is already decided if they are ever published. Everything
     # registered is declared in NODE_SECTIONS above instead.
     #
-    # RadianceGradeApply used to live here while unregistered — the override
-    # was the only sign anyone knew the node existed. It is published now.
-    "RadianceNDISender": "Pipeline",        # written, not registered; network
-                                            # output, not generation
+    # Empty, and that is the point. Both entries this map ever held —
+    # RadianceGradeApply and RadianceNDISender — were nodes somebody had
+    # written, given a menu home, and then never published; the override was
+    # the only trace that they existed at all. Both ship now, and
+    # `nodes/aggregate.py` makes publishing the default, so a third one cannot
+    # quietly accumulate here.
 }
 
 # Exact label overrides keyed by node class id. The value is the BASE label
 # (the section rule then adds the "Radiance" prefix for generation sections).
 # Comp nodes are mapped to the vocabulary a Nuke/Flame compositor expects.
 TERM_OVERRIDES = {
+    # ── Generate ──────────────────────────────────────────────────────────
+    # Its module calls it "◎ Radiance Manager", which strips to "Manager" and
+    # collides with Project Manager. It builds prompts from camera and lens
+    # profiles.
+    "RadianceCinemaStudio": "Camera & Lens Prompt",
     # ── Color ─────────────────────────────────────────────────────────────
     "RadianceCurves": "ColorLookup",
     "RadianceHueCurves": "HueCorrect",

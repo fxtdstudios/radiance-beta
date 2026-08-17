@@ -392,7 +392,7 @@ class TestRadianceHDRColorPipelineNode:
     """Integration test for the RadianceHDRColorPipeline ComfyUI node."""
 
     def setup_method(self):
-        mod = importlib.import_module("nodes_hdr_colorspace")
+        mod = importlib.import_module("radiance.nodes.hdr.colorspace")
         self.cls = mod.RadianceHDRColorPipeline
 
     def _make_logc4_tensor(self, H=32, W=32) -> "torch.Tensor":
@@ -443,7 +443,7 @@ class TestRadianceACES2TonescaleNode:
     """Integration test for the RadianceACES2Tonescale ComfyUI node."""
 
     def setup_method(self):
-        mod = importlib.import_module("nodes_aces2")
+        mod = importlib.import_module("radiance.nodes.hdr.aces2")
         self.cls = mod.RadianceACES2Tonescale
 
     def test_mid_grey_maps_to_10pct_peak(self):

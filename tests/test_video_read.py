@@ -336,7 +336,7 @@ def test_an_untagged_file_suggests_nothing():
 
 def test_every_suggestion_is_a_colour_space_the_read_node_offers():
     """A suggestion the widget cannot hold would be worse than none."""
-    from radiance.nodes_io import INPUT_COLOR_SPACES
+    from radiance.nodes.io.write import INPUT_COLOR_SPACES
 
     for name in V.TRANSFER_TO_RADIANCE.values():
         assert name in INPUT_COLOR_SPACES, (
@@ -347,7 +347,7 @@ def test_every_suggestion_is_a_colour_space_the_read_node_offers():
 
 def test_every_offered_colour_space_can_actually_be_decoded():
     """The menu listed nine entries; three of them had no inverse wired up."""
-    from radiance.nodes_io import INPUT_COLOR_SPACES, _INPUT_DECODERS
+    from radiance.nodes.io.write import INPUT_COLOR_SPACES, _INPUT_DECODERS
 
     passthrough = {"Auto / Linear (pass-through)", "ACEScg"}
     for name in INPUT_COLOR_SPACES:
@@ -366,7 +366,7 @@ def test_every_offered_colour_space_can_actually_be_decoded():
 # ── the Read node itself ───────────────────────────────────────────────────
 
 def test_read_node_puts_prores_4444_alpha_on_the_mask_output(prores4444, source):
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     image, mask, _info = RadianceRead().read(browse="", path=str(prores4444))
     assert image.shape == (FRAMES, HEIGHT, WIDTH, 3)
@@ -378,14 +378,14 @@ def test_read_node_puts_prores_4444_alpha_on_the_mask_output(prores4444, source)
 
 
 def test_read_node_leaves_the_mask_empty_when_there_is_no_alpha(prores422):
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     _image, mask, _info = RadianceRead().read(browse="", path=str(prores422))
     assert float(mask.abs().max()) == 0.0
 
 
 def test_read_node_honours_a_frame_range(prores4444):
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     image, mask, _info = RadianceRead().read(
         browse="", path=str(prores4444), start_frame=2, end_frame=5)
@@ -396,7 +396,7 @@ def test_read_node_honours_a_frame_range(prores4444):
 def test_the_sequence_default_start_frame_does_not_swallow_a_clip(prores4444):
     """`start_frame` defaults to 1001 for VFX sequences. Taken literally on a
     clip that is 8 frames long, that means decoding nothing at all."""
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     image, _mask, _info = RadianceRead().read(
         browse="", path=str(prores4444), start_frame=1001)
@@ -406,7 +406,7 @@ def test_the_sequence_default_start_frame_does_not_swallow_a_clip(prores4444):
 def test_read_node_raises_on_a_missing_file(tmp_path):
     """It used to log the error and return an 8x8 black frame, so the graph
     carried on and wrote a master out of black."""
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     with pytest.raises(Exception) as excinfo:
         RadianceRead().read(browse="", path=str(tmp_path / "absent.mov"))
@@ -414,7 +414,7 @@ def test_read_node_raises_on_a_missing_file(tmp_path):
 
 
 def test_read_node_raises_on_a_corrupt_file(tmp_path):
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     junk = tmp_path / "corrupt.mov"
     junk.write_bytes(os.urandom(80_000))
@@ -424,7 +424,7 @@ def test_read_node_raises_on_a_corrupt_file(tmp_path):
 
 def test_a_blank_path_still_returns_a_frame_rather_than_erroring():
     """A node just dropped on the canvas is not a failure."""
-    from radiance.nodes_io import RadianceRead
+    from radiance.nodes.io.write import RadianceRead
 
     image, mask, _info = RadianceRead().read(browse="", path="")
     assert image.shape[0] == 1 and mask is not None
@@ -434,7 +434,7 @@ def test_read_node_reports_what_the_file_is(prores4444, caplog):
     """The console should say what arrived, the way a Nuke Read does."""
     import logging
 
-    from radiance.nodes_io import _read_video
+    from radiance.nodes.io.write import _read_video
 
     with caplog.at_level(logging.INFO):
         _read_video(str(prores4444), 0, "Auto / Linear (pass-through)")
@@ -443,7 +443,7 @@ def test_read_node_reports_what_the_file_is(prores4444, caplog):
 
 
 def test_the_metadata_carries_the_colour_tags(prores4444):
-    from radiance.nodes_io import _read_video
+    from radiance.nodes.io.write import _read_video
 
     *_rest, meta = _read_video(str(prores4444), 0, "Auto / Linear (pass-through)")
     data = json.loads(meta)
@@ -459,7 +459,7 @@ def test_the_metadata_carries_the_colour_tags(prores4444):
 def test_the_handoff_decoder_no_longer_quantises_to_eight_bits(prores4444):
     """`_load_video_to_numpy` used to try OpenCV first, which returns 8-bit BGR
     for every source. A 12-bit ProRes lost four bits per component."""
-    from radiance.nodes_io import _load_video_to_numpy
+    from radiance.nodes.io.write import _load_video_to_numpy
 
     arr = _load_video_to_numpy(str(prores4444))
     red = arr[..., 0].ravel()
@@ -468,13 +468,13 @@ def test_the_handoff_decoder_no_longer_quantises_to_eight_bits(prores4444):
 
 
 def test_the_handoff_decoder_respects_a_frame_cap(prores4444):
-    from radiance.nodes_io import _load_video_to_numpy
+    from radiance.nodes.io.write import _load_video_to_numpy
 
     assert _load_video_to_numpy(str(prores4444), max_frames=3).shape[0] == 3
 
 
 def test_the_handoff_decoder_raises_rather_than_returning_a_short_clip(tmp_path):
-    from radiance.nodes_io import _load_video_to_numpy
+    from radiance.nodes.io.write import _load_video_to_numpy
 
     junk = tmp_path / "corrupt.mov"
     junk.write_bytes(os.urandom(40_000))
@@ -489,14 +489,14 @@ def test_the_handoff_decoder_raises_rather_than_returning_a_short_clip(tmp_path)
 def test_the_formats_a_camera_hands_you_are_recognised_as_video(ext):
     """The old seven-entry set classified a .m2ts off a card as 'unknown',
     which then tried to open it as a still image."""
-    from radiance.nodes_io import _path_kind
+    from radiance.nodes.io.write import _path_kind
 
     assert _path_kind(f"/plates/sh010{ext}") == "video"
 
 
 def test_the_extension_set_has_one_owner():
     """Three copies of this list is three chances to disagree."""
-    from radiance.nodes_io import _VID_EXT
+    from radiance.nodes.io.write import _VID_EXT
 
     assert _VID_EXT == set(V.VIDEO_EXTENSIONS)
 
