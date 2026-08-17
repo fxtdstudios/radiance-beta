@@ -201,19 +201,43 @@ def test_recover_empty_batch_returns_empty():
 
 # ── 5. Invariants that must not regress ─────────────────────────────────────
 
-def test_expand_is_monotonic_and_hits_the_peak(node):
+def test_expand_is_monotonic_and_hits_reference_white(node):
+    """SDR code 1.0 lands on reference white, not on the display peak.
+
+    This asserted 10.0 — peak_nits/100, i.e. a white shirt at 1000 nits. From
+    3.4 the expansion targets `reference_white_nits` (ITU-R BT.2408: 203), and
+    the range above it is headroom for recovered speculars rather than
+    somewhere to put diffuse white.
+    """
     ramp = torch.linspace(0, 1, 256).view(1, 1, 256, 1).repeat(1, 1, 1, 3)
     out, _, _, _, _ = node.convert(image=ramp, processing_mode="Expand", **BASE_KW)
     y = mod._luma(out)[0, 0]
     assert bool((torch.diff(y) >= -1e-6).all()), "expansion is not monotonic"
-    assert abs(float(y.max()) - 10.0) < 1e-4, "peak_scale not reached"
+    assert abs(float(y.max()) - 2.03) < 1e-4, "reference white not reached"
     assert float(y[0]) == pytest.approx(0.0, abs=1e-7)
 
 
 @pytest.mark.parametrize("peak", [200.0, 1000.0, 4000.0, 10000.0])
-def test_peak_nits_is_honoured(node, peak):
+def test_peak_nits_is_the_ceiling_not_the_target(node, peak):
+    """Raising the mastering peak must not move diffuse white.
+
+    It used to: this asserted that SDR white came out at exactly peak_nits, so
+    switching a 1000-nit master to 4000 made every white surface four times
+    brighter. peak_nits is the ceiling and the encode target; where SDR white
+    sits is `reference_white_nits`.
+    """
     out, _, _, _, _ = node.convert(image=torch.ones(1, 4, 4, 3),
                                    **dict(BASE_KW, peak_nits=peak))
+    y = float(mod._luma(out).max())
+    assert y == pytest.approx(min(2.03, peak / 100.0), rel=1e-4)
+    assert y <= peak / 100.0 + 1e-6, "output exceeded the mastering peak"
+
+
+@pytest.mark.parametrize("peak", [1000.0, 4000.0, 10000.0])
+def test_the_old_behaviour_is_still_reachable(node, peak):
+    out, _, _, _, _ = node.convert(image=torch.ones(1, 4, 4, 3),
+                                   **dict(BASE_KW, peak_nits=peak,
+                                          reference_white_nits=peak))
     assert float(mod._luma(out).max()) == pytest.approx(peak / 100.0, rel=1e-4)
 
 
