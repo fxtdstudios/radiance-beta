@@ -375,6 +375,27 @@ class TestEnergyCfgPatch:
 
         assert out.shape == cond.shape
 
+    def test_ltxav_packed_latent_no_ops_with_one_warning(self, monkeypatch):
+        """LTX-AV's packed latent (comfy.utils.pack_latents) is (B, 1, N) --
+        3D, below the 4-D floor this patch assumes. Must not corrupt the
+        sample, and must warn once, not on every step."""
+        import radiance.nodes_sampler as ns
+
+        warnings = []
+        monkeypatch.setattr(ns.logger, "warning", lambda *a, **k: warnings.append(a))
+
+        cond = torch.full((1, 1, 64), 5.0)
+        uncond = torch.ones(1, 1, 64)
+        args = _args(cond, uncond, cfg=1.0)
+
+        patch = _make_energy_cfg_patch(torch.ones(1, 4, 4), 0.5)
+        out1 = patch(args)
+        out2 = patch(args)
+
+        assert torch.equal(out1, args["denoised"])
+        assert torch.equal(out2, args["denoised"])
+        assert len(warnings) == 1
+
     def test_composes_through_the_post_cfg_chain_not_manual_wrapping(self):
         """EPS is registered on set_model_sampler_post_cfg_function, a list
         ComfyUI chains automatically (comfy/samplers.py:600-603) -- it takes
