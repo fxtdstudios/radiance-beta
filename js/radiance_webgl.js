@@ -1654,6 +1654,7 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             uniform vec2 u_texSize;
 
             uniform bool u_falseColor;
+            uniform bool u_hdrHeatmap;
             uniform bool u_zebra;
             uniform float u_zebraThreshold;
 
@@ -2113,6 +2114,51 @@ const float GOLDEN_ANGLE = 2.39996323;
                 if (v >= 0.38) return vec3(0.0, 1.0, 1.0);       // Cyan (Dark Skin / Shadows)
                 if (v >= 0.02) return vec3(v);                   // Deep Grey
                 return vec3(0.6, 0.0, 0.8);                      // Purple (Clipped Black)
+            }
+
+            // ── HDR nits heatmap ────────────────────────────────────────
+            // getFalseColorMap above is an *exposure* tool: ARRI-style stops on
+            // display luma, 0-1, which says nothing about absolute luminance.
+            // The menu offered "HDR Heatmap" as a separate entry and wired it to
+            // the same falseColor flag, so the two were one feature under two
+            // names and neither reported nits.
+            //
+            // This maps scene luminance to absolute cd/m2, with the boundaries
+            // an HDR colourist actually works to. `v` arrives in the internal
+            // scale where 1.0 == 100 nits, the same convention the SDR->HDR
+            // nodes use, so nits = v * 100.
+            //
+            // The anchor is ITU-R BT.2408: HDR Reference White = 203 cd/m2,
+            // "the nominal signal level obtained from an HDR camera and a 100%
+            // reflectance white card" -- 58% PQ, 75% HLG. That is the boundary
+            // that matters: below it is diffuse, above it is specular. A
+            // heatmap without it is a colour ramp; with it, it is instrumentation.
+            //
+            //     nits        band                       colour
+            //     < 0.01      below the noise floor      near-black
+            //     0.01 - 5    deep shadow                indigo
+            //     5 - 50      shadow to low midtone      blue -> teal
+            //     50 - 203    midtone up to diffuse      teal -> green
+            //     = 203       BT.2408 Reference White    white line
+            //     203 - 400   specular, comfortable      yellow
+            //     400 - 1000  specular, bright           orange
+            //     1000 - 4000 mastering headroom         red
+            //     > 4000      beyond common masters      magenta
+            vec3 getHDRHeatmap(float v) {
+                float nits = max(v, 0.0) * 100.0;
+
+                // A visible band either side of reference white, so the eye can
+                // land on 203 without reading a legend.
+                if (nits >= 200.0 && nits <= 206.0) return vec3(1.0, 1.0, 1.0);
+
+                if (nits < 0.01)   return vec3(0.04, 0.02, 0.08);
+                if (nits < 5.0)    return mix(vec3(0.15, 0.05, 0.45), vec3(0.10, 0.25, 0.75), nits / 5.0);
+                if (nits < 50.0)   return mix(vec3(0.10, 0.25, 0.75), vec3(0.05, 0.70, 0.70), (nits - 5.0) / 45.0);
+                if (nits < 203.0)  return mix(vec3(0.05, 0.70, 0.70), vec3(0.20, 0.85, 0.25), (nits - 50.0) / 153.0);
+                if (nits < 400.0)  return mix(vec3(0.95, 0.95, 0.20), vec3(1.00, 0.75, 0.10), (nits - 203.0) / 197.0);
+                if (nits < 1000.0) return mix(vec3(1.00, 0.75, 0.10), vec3(1.00, 0.40, 0.05), (nits - 400.0) / 600.0);
+                if (nits < 4000.0) return mix(vec3(1.00, 0.40, 0.05), vec3(0.90, 0.05, 0.05), (nits - 1000.0) / 3000.0);
+                return vec3(1.0, 0.0, 1.0);
             }
 
             // ACES Tone Mapping (Approx)
@@ -3073,6 +3119,11 @@ vec3 getDenoiseColor(vec2 uv) {
             color = mix(color, lutted, u_lutStrength);
         }
 
+        // Scene-linear, captured before the display transform flattens it.
+        // The HDR heatmap reports absolute cd/m2, and after tone mapping that
+        // information is gone -- `color` from here on is display-referred.
+        vec3 sceneLinearForHeatmap = color;
+
         // 6. Display LUT / Tonemap  (runs after 5. LUT)
         if (u_displayLutMode > 0) {
             vec3 transformed = applyDisplayLUT(color, u_displayLutMode);
@@ -3187,6 +3238,12 @@ vec3 getDenoiseColor(vec2 uv) {
 
         if (u_falseColor) {
             color = getFalseColorMap(lumaDisplay);
+        }
+
+        // Reads scene luminance, not display luma: the whole point is absolute
+        // cd/m2, which the display transform has already thrown away.
+        if (u_hdrHeatmap) {
+            color = getHDRHeatmap(dot(sceneLinearForHeatmap, vec3(0.2126, 0.7152, 0.0722)));
         }
 
         if (u_zebra) {
@@ -4020,6 +4077,7 @@ vec3 getDenoiseColor(vec2 uv) {
 
         // Analytics Uniforms
         this._ui1(program, 'u_falseColor', this.falseColor ? 1 : 0);
+        this._ui1(program, 'u_hdrHeatmap', this.hdrHeatmap ? 1 : 0);
         this._ui1(program, 'u_zebra', this.zebra ? 1 : 0);
         this._uf1(program, 'u_zebraThreshold', this.zebraThreshold);
         this._ui1(program, 'u_gamutWarning', this.gamutWarning ? 1 : 0);
@@ -4156,6 +4214,10 @@ vec3 getDenoiseColor(vec2 uv) {
 
 
 
+
+    setHDRHeatmap(enabled) {
+        this.hdrHeatmap = !!enabled;
+    }
 
     setFalseColor(enabled) {
         this.falseColor = enabled;

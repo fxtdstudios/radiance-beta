@@ -178,6 +178,10 @@ export class RadianceRenderer {
     setGamma(r, g, b) { this.gradingGamma = g === undefined ? [r, r, r] : [r, g, b]; }
     setSaturation(v) { this.saturation = v; }
     setFalseColor(v) { this.falseColor = v; }
+    // WebGPU has no WGSL implementation yet; it stores the flag and the
+    // viewer reports the backend, rather than the toggle looking active
+    // and doing nothing.
+    setHDRHeatmap(v) { this.hdrHeatmap = v; }
     setZebra(v) { this.zebra = v; }
     setZebraThreshold(v) { this.zebraThreshold = v; }
     setGamutWarning(v) { this.gamutWarning = v; }
