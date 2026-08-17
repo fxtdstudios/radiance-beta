@@ -200,11 +200,18 @@ def _collect_energy_layers(positive) -> List[Tuple["torch.Tensor", float]]:
     return layers
 
 
-def _make_energy_cfg_patch(layers):
+def _make_energy_cfg_patch(layers, latent_shapes=None):
     """Build the EPS sampler_post_cfg_function from one or more energy layers.
 
     *layers* is a sequence of ``(mask, priority)`` pairs, as returned by
     `_collect_energy_layers`.
+
+    *latent_shapes* is the per-modality shape list captured from the work
+    latent at registration time (mirrors how the LTX-AV dual-CFG patch above
+    gets its own video/audio split from `work_latent.unbind()`): None for a
+    plain latent, or ``[tuple(p.shape) for p in work_latent.unbind()]`` when
+    nested. Lets EPS mask the video stream of a packed multi-modality latent
+    (e.g. LTX-AV) instead of no-op'ing on it; see `_energy_prioritized_cfg_patch`.
 
     Scales the guidance vector (cond − uncond) by ``1 + Σ priority_i · mask_i``,
     leaving unmasked regions at the sampler's own cfg.
@@ -274,27 +281,48 @@ def _make_energy_cfg_patch(layers):
         _cache[key] = total
         return total
 
+    def _boosted_cond(cond, uncond):
+        """cond, pushed further from uncond in high-energy mask regions."""
+        eps_modifier = (1.0 + _energy_field(cond)).clamp_min(0.0)
+        return uncond + (cond - uncond) * eps_modifier
+
     def _energy_prioritized_cfg_patch(args):
         cond = args["cond_denoised"]
         uncond = args["uncond_denoised"]
         cfg_val = args["cond_scale"]
 
+        # ALBABIT-FIX: a packed multi-modality latent (e.g. LTX-AV) arrives
+        # as a flat (B, 1, N) tensor with no spatial grid to overlay the mask
+        # against. Unpack (using shapes captured at registration time) to
+        # recover the video stream's real grid, mask that alone, leave any
+        # other stream (audio) untouched, then re-pack.
+        if latent_shapes and len(latent_shapes) > 1 and cond.ndim < 4 and cond.shape == uncond.shape:
+            try:
+                cond_parts = comfy.utils.unpack_latents(cond, latent_shapes)
+                uncond_parts = comfy.utils.unpack_latents(uncond, latent_shapes)
+                video_cond, video_uncond = cond_parts[0], uncond_parts[0]
+                if video_cond.ndim >= 4 and video_cond.shape == video_uncond.shape:
+                    cond_parts[0] = _boosted_cond(video_cond, video_uncond)
+                    packed_cond, _ = comfy.utils.pack_latents(cond_parts)
+                    return uncond + cfg_val * (packed_cond - uncond)
+            except Exception as _exc:
+                logger.debug(
+                    "[Energy Guidance] packed-latent unpack failed (%s: %s); "
+                    "falling back to the unsupported-shape warning.",
+                    type(_exc).__name__, _exc,
+                )
+
         if cond.ndim < 4 or cond.shape != uncond.shape:
-            # ALBABIT-FIX: LTX-AV's packed latent (comfy.utils.pack_latents)
-            # is (B, 1, N) -- 3D, always trips this guard, so EPS silently
-            # no-ops for every LTX-AV render regardless of mask/priority.
-            # Was silent; warn once per render instead of every step.
             if not _warned_bad_shape[0]:
                 logger.warning(
                     "[Energy Guidance] Latent shape %s isn't supported (need "
-                    "4+ dims) -- EPS has no effect this run.", tuple(cond.shape),
+                    "4+ dims, or a multi-modality latent with video as the "
+                    "first stream). EPS has no effect this run.", tuple(cond.shape),
                 )
                 _warned_bad_shape[0] = True
             return args["denoised"]
 
-        eps_modifier = (1.0 + _energy_field(cond)).clamp_min(0.0)
-        cond_eps = uncond + (cond - uncond) * eps_modifier
-        return uncond + cfg_val * (cond_eps - uncond)
+        return uncond + cfg_val * (_boosted_cond(cond, uncond) - uncond)
 
     return _energy_prioritized_cfg_patch
 
@@ -1343,8 +1371,15 @@ class RadianceSamplerPro:
             # single slot) despite computing a denoised-space result. Moved to
             # set_model_sampler_post_cfg_function, which also removes the need
             # for _make_energy_cfg_patch's own existing_cfg_fn chaining.
+            #
+            # ALBABIT-FIX: same video/audio split source as the LTX-AV dual-CFG
+            # patch below (work_latent.unbind()), so EPS can mask the video
+            # stream of a packed multi-modality latent instead of no-op'ing.
+            _energy_latent_shapes = None
+            if getattr(work_latent, "is_nested", False):
+                _energy_latent_shapes = [tuple(p.shape) for p in work_latent.unbind()]
             model.set_model_sampler_post_cfg_function(
-                _make_energy_cfg_patch(active_layers)
+                _make_energy_cfg_patch(active_layers, latent_shapes=_energy_latent_shapes)
             )
             logger.info(
                 "[Energy Guidance] Registered Energy-Prioritized Sampling (EPS) patch "
