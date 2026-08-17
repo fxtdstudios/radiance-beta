@@ -539,13 +539,14 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
     CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = (
         "SDR→HDR orchestrator: deterministic Expand, learned Recover, or "
-        "Hybrid. Includes safe fallback, professional output transforms, and "
-        "separate highlight/shadow masks."
+        "Hybrid. Recover and Hybrid need a learned checkpoint or a RUDRA VAE — "
+        "without one they fall back to Expand, and the report output says so. "
+        "Professional output transforms and separate highlight/shadow masks."
     )
     FUNCTION = "convert"
-    RETURN_TYPES = ("IMAGE", "MASK", "MASK", "MASK", "MASK")
+    RETURN_TYPES = ("IMAGE", "MASK", "MASK", "MASK", "MASK", "STRING")
     RETURN_NAMES = ("image", "highlight_mask", "shadow_mask",
-                    "highlight_confidence", "shadow_confidence")
+                    "highlight_confidence", "shadow_confidence", "report")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -643,7 +644,7 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
             img = img.unsqueeze(0)
         if img.shape[0] == 0:                   # empty batch → empty result
             zeros = img[..., 0]
-            return (img, zeros, zeros, zeros, zeros)
+            return (img, zeros, zeros, zeros, zeros, "mode: empty batch\nframes: 0")
 
         rgb, extra = img[..., :3], img[..., 3:]
         peak_scale = max(peak_nits, 100.0) / 100.0
@@ -696,6 +697,22 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
         h_conf = torch.zeros_like(clipped)
         s_conf = torch.zeros_like(shadows)
 
+        # What actually ran, reported rather than left to the console.
+        #
+        # Every learned backend below is wrapped in try/except and logs a
+        # warning on the way past, so a user with no checkpoint installed gets
+        # deterministic Expand output from Hybrid or Recover — bit-identical,
+        # with five normal-looking outputs and nothing on the graph to say the
+        # node's headline feature never engaged. Measured on a clean install:
+        # Hybrid and Recover both return exactly the Expand result.
+        #
+        # `report` names the path that executed and, when the learned path did
+        # not, why. It is a STRING output so it can be wired to a preview or
+        # read at a glance, and it is appended last so existing links, which
+        # ComfyUI stores by index, are unaffected.
+        attempts: List[str] = []
+        path = "deterministic expansion"
+
         # 3b ── direct-pixel, legacy VAE RUDRA, or temporal reconstruction.
         wants_recovery = mode in {"Recover", "Hybrid"}
         if wants_recovery and rudra_blend > 0.0:
@@ -714,8 +731,10 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
                         mode == "Recover",
                     )
                     recovery_applied = True
+                    path = "temporal RUDRA"
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Temporal RUDRA unavailable (%s).", exc)
+                    attempts.append(f"temporal RUDRA unavailable ({exc})")
 
             # The direct-pixel checkpoint supports stills and frame batches.
             # Until the temporal direct model is trained, video frames are
@@ -744,8 +763,10 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
                     h_conf = clipped * float(rudra_blend) if pixel_recovery_mode in {"highlights", "all"} else torch.zeros_like(clipped)
                     s_conf = shadows * float(rudra_blend) if pixel_recovery_mode in {"shadows", "all"} else torch.zeros_like(shadows)
                     recovery_applied = True
+                    path = f"direct-pixel ({pixel_recovery_mode})"
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Direct-pixel recovery unavailable (%s).", exc)
+                    attempts.append(f"direct-pixel unavailable ({exc})")
 
             if (not recovery_applied and backend in {"Auto", "Legacy RUDRA"}
                     and img.shape[0] == 1 and vae is not None):
@@ -758,8 +779,10 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
                     h_conf = clipped * float(rudra_blend)
                     s_conf = shadows * float(rudra_blend)
                     recovery_applied = True
+                    path = f"legacy RUDRA ({rudra_size})"
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Legacy RUDRA recovery unavailable (%s).", exc)
+                    attempts.append(f"legacy RUDRA unavailable ({exc})")
 
         # Universal always produces usable HDR. Recover mode therefore falls
         # back to deterministic expansion if the learned path cannot run.
@@ -771,7 +794,67 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
 
         if extra.shape[-1] > 0:                 # pass alpha / extra channels through
             out = torch.cat([out, extra], dim=-1)
-        return (out, mask, shadows, h_conf, s_conf)
+
+        report = self._build_report(
+            mode=mode, path=path, recovery_applied=recovery_applied,
+            attempts=attempts, frames=int(img.shape[0]),
+            reference_white_nits=float(reference_white_nits),
+            peak_nits=float(peak_nits), output_encoding=str(output_encoding),
+            rudra_blend=float(rudra_blend), vae_connected=vae is not None,
+        )
+        return (out, mask, shadows, h_conf, s_conf, report)
+
+    @staticmethod
+    def _build_report(*, mode, path, recovery_applied, attempts, frames,
+                      reference_white_nits, peak_nits, output_encoding,
+                      rudra_blend, vae_connected) -> str:
+        """One human-readable line per fact about what this run actually did.
+
+        Recover and Hybrid are the reason this node is called Universal, and on
+        a machine with no checkpoint installed they are bit-identical to Expand
+        — silently, because every backend is wrapped in try/except and only
+        logs. This is the output that makes the difference visible on the graph
+        instead of in a console the user is not reading.
+        """
+        lines = [
+            f"mode: {mode}",
+            f"path: {path}",
+            f"frames: {frames}",
+            f"reference white: {reference_white_nits:.0f} nits "
+            f"(BT.2408 reference is 203)",
+            f"mastering peak: {peak_nits:.0f} nits",
+            f"output: {output_encoding}",
+        ]
+
+        if mode == "Expand":
+            lines.append("learned recovery: not requested")
+            return "\n".join(lines)
+
+        if recovery_applied:
+            lines.append("learned recovery: applied")
+            return "\n".join(lines)
+
+        # Requested but did not run. Say why, and say what it cost.
+        if rudra_blend <= 0.0:
+            why = "rudra_blend is 0"
+        elif attempts:
+            why = "; ".join(attempts)
+        elif not vae_connected:
+            why = ("no learned checkpoint found and no VAE connected — install a "
+                   "RUDRA checkpoint in models/radiance, set "
+                   "RADIANCE_SDR2HDR_PIXEL, or connect a VAE")
+        else:
+            why = "no backend was eligible for this input"
+
+        lines.append(f"learned recovery: NOT APPLIED — {why}")
+        lines.append(
+            f"result: identical to Expand. {mode} did nothing this run."
+        )
+        logger.warning(
+            "[SDR→HDR Universal] %s mode produced deterministic Expand output: %s",
+            mode, why,
+        )
+        return "\n".join(lines)
 
 
 NODE_CLASS_MAPPINGS = {
