@@ -61,9 +61,15 @@ class TestContract(unittest.TestCase):
 
     def test_node_metadata(self):
         cls = self.mod.RadianceSDRToHDRUniversal
-        self.assertEqual(cls.RETURN_TYPES, ("IMAGE", "MASK", "MASK", "MASK", "MASK"))
+        # `report` is appended last so links, which ComfyUI stores by index,
+        # survive. It names the path that actually ran — Recover and Hybrid are
+        # bit-identical to Expand without a checkpoint, and used to say so only
+        # in the console.
+        self.assertEqual(cls.RETURN_TYPES,
+                         ("IMAGE", "MASK", "MASK", "MASK", "MASK", "STRING"))
         self.assertEqual(cls.RETURN_NAMES, ("image", "highlight_mask", "shadow_mask",
-                                            "highlight_confidence", "shadow_confidence"))
+                                            "highlight_confidence", "shadow_confidence",
+                                            "report"))
         self.assertEqual(cls.FUNCTION, "convert")
         self.assertTrue(cls.CATEGORY.endswith("HDR"))
 
@@ -101,7 +107,7 @@ class TestMath(unittest.TestCase):
 
     def test_below_knee_preserved_linear(self):
         img = self._gradient()
-        out, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.75, 1.6,
+        out, _, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.75, 1.6,
                                       0.0, "Linear")
         luma_in = img[..., 0]
         below = luma_in <= 0.74
@@ -119,25 +125,25 @@ class TestMath(unittest.TestCase):
         """
         img = self.torch.ones(1, 4, 4, 3)
 
-        out, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.75, 1.6,
+        out, _, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.75, 1.6,
                                             0.0, "Linear")
         self.assertAlmostEqual(float(out.max()), 2.03, places=3)   # 203 nits
 
-        out, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.75, 1.6,
+        out, _, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.75, 1.6,
                                             0.0, "Linear",
                                             reference_white_nits=1000.0)
         self.assertAlmostEqual(float(out.max()), 10.0, places=3)   # 1000 nits
 
     def test_monotonic(self):
         img = self._gradient()
-        out, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.5, 2.0,
+        out, _, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.5, 2.0,
                                       0.0, "Linear")
         flat = out[..., 0].flatten()
         self.assertTrue(bool((flat[1:] >= flat[:-1] - 1e-5).all()))
 
     def test_hue_preserved(self):
         img = self.torch.tensor([[[[0.9, 0.6, 0.3]]]])
-        out, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.3, 1.0,
+        out, _, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.3, 1.0,
                                       0.0, "Linear")
         r, g, b = (float(out[0, 0, 0, i]) for i in range(3))
         self.assertAlmostEqual(r / g, 0.9 / 0.6, places=3)
@@ -146,7 +152,7 @@ class TestMath(unittest.TestCase):
     def test_pq_encoding_known_value(self):
         # linear 1.0 == 100 nits → PQ ≈ 0.5081 (ST.2084)
         img = self.torch.full((1, 2, 2, 3), 0.75)  # below knee → unchanged luma
-        out, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.9, 1.6,
+        out, _, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.9, 1.6,
                                       0.0, "PQ (HDR10)")
         lin = 0.75
         L = lin * 100.0 / 10000.0
@@ -157,14 +163,14 @@ class TestMath(unittest.TestCase):
 
     def test_hlg_bounded(self):
         img = self._gradient()
-        out, _, _, _, _ = self.node.convert(img, "sRGB", 1000.0, "adaptive", 0.95, 1.6,
+        out, _, _, _, _, _ = self.node.convert(img, "sRGB", 1000.0, "adaptive", 0.95, 1.6,
                                       0.0, "HLG")
         self.assertGreaterEqual(float(out.min()), 0.0)
         self.assertLessEqual(float(out.max()), 1.0)
 
     def test_mask_range_and_zero_below_knee(self):
         img = self._gradient()
-        _, mask, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.75, 1.6,
+        _, mask, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.75, 1.6,
                                        0.0, "Linear")
         self.assertGreaterEqual(float(mask.min()), 0.0)
         self.assertLessEqual(float(mask.max()), 1.0)
@@ -183,7 +189,7 @@ class TestMath(unittest.TestCase):
 
     def test_single_frame_hwc_accepted(self):
         img = self.torch.rand(4, 4, 3)
-        out, mask, shadows, h_conf, s_conf = self.node.convert(img, "sRGB", 1000.0, "adaptive", 0.9,
+        out, mask, shadows, h_conf, s_conf, _ = self.node.convert(img, "sRGB", 1000.0, "adaptive", 0.9,
                                                1.6, 0.85, "Linear")
         self.assertEqual(tuple(out.shape), (1, 4, 4, 3))
         self.assertEqual(tuple(mask.shape), (1, 4, 4))
@@ -194,14 +200,14 @@ class TestMath(unittest.TestCase):
     def test_alpha_passthrough(self):
         img = self.torch.rand(1, 4, 4, 4)
         alpha = img[..., 3].clone()
-        out, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.75, 1.6,
+        out, _, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.75, 1.6,
                                       0.0, "Linear")
         self.assertTrue(self.torch.allclose(out[..., 3], alpha))
 
     def test_pq_converts_rec709_primaries_to_rec2020(self):
         from radiance.color.ops import M_REC709_TO_BT2020, apply_matrix_3x3
         img = self.torch.tensor([[[[1.0, 0.0, 0.0]]]])
-        out, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.99, 1.6,
+        out, _, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.99, 1.6,
                                       0.0, "PQ (HDR10)")
         rec2020 = apply_matrix_3x3(img, M_REC709_TO_BT2020).clamp(min=0.0)
         expected = self.mod._torch_pq_encode(rec2020)
@@ -212,7 +218,7 @@ class TestMath(unittest.TestCase):
     def test_aces2065_output_uses_ap0_primaries(self):
         from radiance.color.ops import M_REC709_TO_ACES2065_1, apply_matrix_3x3
         img = self.torch.tensor([[[[1.0, 0.25, 0.0]]]])
-        out, _, _, _, _ = self.node.convert(
+        out, _, _, _, _, _ = self.node.convert(
             img, "None", 1000.0, "manual", 0.99, 1.6, 0.0,
             "Linear ACES2065-1 (AP0)",
         )
@@ -222,11 +228,11 @@ class TestMath(unittest.TestCase):
     def test_independent_batch_is_order_independent(self):
         bright = self._gradient()
         dark = bright * 0.2
-        alone, _, _, _, _ = self.node.convert(
+        alone, _, _, _, _, _ = self.node.convert(
             bright, "None", 1000.0, "adaptive", 0.75, 1.6, 0.95, "Linear",
             batch_mode="Independent Images",
         )
-        batch, _, _, _, _ = self.node.convert(
+        batch, _, _, _, _, _ = self.node.convert(
             self.torch.cat([dark, bright], dim=0), "None", 1000.0,
             "adaptive", 0.75, 1.6, 0.95, "Linear",
             batch_mode="Independent Images",
@@ -236,12 +242,12 @@ class TestMath(unittest.TestCase):
     def test_video_batch_uses_temporal_smoothing(self):
         bright = self._gradient()
         dark = bright * 0.2
-        independent, _, _, _, _ = self.node.convert(
+        independent, _, _, _, _, _ = self.node.convert(
             self.torch.cat([dark, bright], dim=0), "None", 1000.0,
             "adaptive", 0.75, 1.6, 0.95, "Linear",
             batch_mode="Independent Images",
         )
-        video, _, _, _, _ = self.node.convert(
+        video, _, _, _, _, _ = self.node.convert(
             self.torch.cat([dark, bright], dim=0), "None", 1000.0,
             "adaptive", 0.75, 1.6, 0.95, "Linear",
             batch_mode="Video Frames",
@@ -250,7 +256,7 @@ class TestMath(unittest.TestCase):
 
     def test_nan_and_infinity_are_sanitized(self):
         img = self.torch.tensor([[[[float("nan"), float("inf"), float("-inf")]]]])
-        out, highlights, shadows, h_conf, s_conf = self.node.convert(
+        out, highlights, shadows, h_conf, s_conf, _ = self.node.convert(
             img, "None", 1000.0, "manual", 0.75, 1.6, 0.0, "Linear",
         )
         self.assertTrue(bool(self.torch.isfinite(out).all()))
@@ -263,7 +269,7 @@ class TestMath(unittest.TestCase):
         img = self.torch.tensor([[[[1.0, 0.0, 0.0],
                                     [0.0, 1.0, 0.0],
                                     [0.0, 0.0, 1.0]]]])
-        out, _, _, _, _ = self.node.convert(
+        out, _, _, _, _, _ = self.node.convert(
             img, "None", 1000.0, "manual", 0.05, 1.0, 0.0, "Linear",
         )
         self.assertTrue(bool(self.torch.isfinite(out).all()))
@@ -273,7 +279,7 @@ class TestMath(unittest.TestCase):
         img = self.torch.tensor([[[[0.0, 0.0, 0.0],
                                     [0.05, 0.05, 0.05],
                                     [0.2, 0.2, 0.2]]]])
-        _, _, shadows, _, _ = self.node.convert(
+        _, _, shadows, _, _, _ = self.node.convert(
             img, "None", 1000.0, "manual", 0.75, 1.6, 0.0, "Linear",
             shadow_threshold=0.1,
         )
@@ -318,9 +324,9 @@ class TestRudraPath(unittest.TestCase):
         self.fv.load_radiance_decoder_weights = lambda **kw: None
         self.fv.detect_rudra_model_type = lambda *a, **kw: "flux"
         img = self._img()
-        base, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
+        base, _, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
                                        0.0, "Linear")
-        out, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
+        out, _, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
                                       0.0, "Linear", vae=self._FakeVAE())
         self.assertTrue(self.torch.allclose(out, base))
 
@@ -338,9 +344,9 @@ class TestRudraPath(unittest.TestCase):
         self.fv.decode_to_linear_realtime = fake_decode
 
         img = self._img()
-        base, mask, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
+        base, mask, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
                                           0.0, "Linear")
-        out, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
+        out, _, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
                                       0.0, "Linear", vae=self._FakeVAE(),
                                       rudra_blend=1.0)
         clean_midtones = (img[..., 0] > 0.2) & (img[..., 0] < 0.8)
@@ -374,13 +380,13 @@ class TestRudraPath(unittest.TestCase):
 
         self.fv.decode_to_linear_realtime = fake_decode
         args = (self._img(), "None", 1000.0, "manual", 0.5, 1.6, 0.0, "Linear")
-        expand, _, _, _, _ = self.node.convert(
+        expand, _, _, _, _, _ = self.node.convert(
             *args, vae=self._FakeVAE(), processing_mode="Expand",
         )
-        recover, _, _, _, _ = self.node.convert(
+        recover, _, _, _, _, _ = self.node.convert(
             *args, vae=self._FakeVAE(), processing_mode="Recover",
         )
-        hybrid, _, _, _, _ = self.node.convert(
+        hybrid, _, _, _, _, _ = self.node.convert(
             *args, vae=self._FakeVAE(), processing_mode="Hybrid",
         )
         self.assertFalse(torch.allclose(expand, recover))
@@ -439,7 +445,7 @@ class TestRudraPath(unittest.TestCase):
             return torch.full((b, h, w, 3), 1000.0)
 
         self.fv.decode_to_linear_realtime = fake_decode
-        out, _, _, _, _ = self.node.convert(
+        out, _, _, _, _, _ = self.node.convert(
             self._img(), "None", 200.0, "manual", 0.5, 1.0, 0.0,
             "Linear", vae=self._FakeVAE(), rudra_blend=1.0,
         )
@@ -466,9 +472,9 @@ class TestRudraPath(unittest.TestCase):
         self.fv.load_radiance_decoder_weights = loader
 
         video = self._img().expand(5, 8, 8, 3).contiguous()   # 5 frames
-        base, _, _, _, _ = self.node.convert(video, "None", 1000.0, "manual", 0.5, 1.6,
+        base, _, _, _, _, _ = self.node.convert(video, "None", 1000.0, "manual", 0.5, 1.6,
                                        0.0, "Linear")
-        out, _, _, _, _ = self.node.convert(video, "None", 1000.0, "manual", 0.5, 1.6,
+        out, _, _, _, _, _ = self.node.convert(video, "None", 1000.0, "manual", 0.5, 1.6,
                                       0.0, "Linear", vae=_CountingVAE())
         self.assertEqual(encode_calls["n"], 0)
         self.assertEqual(loader_calls["n"], 0)
@@ -486,7 +492,7 @@ class TestRudraPath(unittest.TestCase):
 
         self.node._temporal_reconstruct = temporal
         video = self._img().expand(5, 8, 8, 3).contiguous()
-        out, _, _, h_conf, s_conf = self.node.convert(
+        out, _, _, h_conf, s_conf, _ = self.node.convert(
             video, "None", 1000.0, "manual", 0.5, 1.6, 0.0,
             "Linear", batch_mode="Video Frames", processing_mode="Hybrid",
             temporal_window=7,
@@ -518,7 +524,7 @@ class TestRudraPath(unittest.TestCase):
             return base + mask.unsqueeze(-1) * 0.05
 
         self.node._pixel_reconstruct = pixel
-        out, _, _, h_conf, s_conf = self.node.convert(
+        out, _, _, h_conf, s_conf, _ = self.node.convert(
             self._img(), "None", 1000.0, "manual", 0.5, 1.6, 0.0,
             "Linear", learned_backend="Direct Pixel",
             pixel_checkpoint="pixel.pt", pixel_recovery_mode="highlights",
@@ -550,11 +556,11 @@ class TestRudraPath(unittest.TestCase):
 
         self.node._pixel_reconstruct = unavailable
         img = self._img()
-        expected, _, _, _, _ = self.node.convert(
+        expected, _, _, _, _, _ = self.node.convert(
             img, "None", 1000.0, "manual", 0.5, 1.6, 0.0,
             "Linear", processing_mode="Expand",
         )
-        out, _, _, h_conf, s_conf = self.node.convert(
+        out, _, _, h_conf, s_conf, _ = self.node.convert(
             img, "None", 1000.0, "manual", 0.5, 1.6, 0.0,
             "Linear", learned_backend="Direct Pixel",
         )

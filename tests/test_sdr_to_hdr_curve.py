@@ -213,14 +213,15 @@ class TestThePeakLimiter:
 
 class TestTheNodeStillHonoursItsContract:
 
-    def test_five_outputs_and_the_alpha_passes_through(self):
+    def test_the_outputs_and_the_alpha_passthrough(self):
         rgba = torch.cat([_patch_strip([0.5, 1.0]),
                           torch.full((1, 1, 2, 1), 0.25)], dim=-1)
-        out, hi, sh, hc, sc = _convert(rgba)
+        out, hi, sh, hc, sc, report = _convert(rgba)
         assert out.shape[-1] == 4
         assert float(out[0, 0, 0, 3]) == pytest.approx(0.25)
         for m in (hi, sh, hc, sc):
             assert m.shape == (1, 1, 2)
+        assert isinstance(report, str) and report
 
     def test_an_empty_batch_does_not_crash(self):
         empty = torch.zeros((0, 4, 4, 3))
@@ -230,3 +231,77 @@ class TestTheNodeStillHonoursItsContract:
     def test_expand_mode_needs_no_model(self):
         out, *_ = _convert(_patch_strip([1.0]), processing_mode="Expand", vae=None)
         assert torch.isfinite(out).all()
+
+
+# ── the report ───────────────────────────────────────────────────────────────
+
+class TestTheReportSaysWhatActuallyRan:
+    """Recover and Hybrid are the reason this node is called Universal.
+
+    On a machine with no checkpoint installed they are bit-identical to Expand,
+    because every learned backend is wrapped in try/except and only logs on the
+    way past. Measured on a clean install before this output existed:
+
+        pixel checkpoint discoverable:      False
+        Hybrid output identical to Expand:  True
+        Recover output identical to Expand: True
+
+    Five normal-looking outputs and nothing on the graph to say the node's
+    headline feature never engaged. The `report` output is that signal.
+    """
+
+    @staticmethod
+    def _report(**kw):
+        img = torch.rand(1, 16, 16, 3)
+        img[:, :4, :4, :] = 1.0                  # a clipped highlight to recover
+        return _convert(img, **kw)[5]
+
+    def test_expand_says_it_did_not_ask_for_recovery(self):
+        r = self._report(processing_mode="Expand")
+        assert "mode: Expand" in r
+        assert "not requested" in r
+        assert "NOT APPLIED" not in r
+
+    @pytest.mark.parametrize("mode", ["Hybrid", "Recover"])
+    def test_a_learned_mode_with_no_backend_says_so_in_capitals(self, mode):
+        r = self._report(processing_mode=mode)
+        assert "NOT APPLIED" in r, r
+        assert "identical to Expand" in r, r
+        assert mode in r
+
+    @pytest.mark.parametrize("mode", ["Hybrid", "Recover"])
+    def test_it_names_the_thing_the_user_has_to_install(self, mode):
+        r = self._report(processing_mode=mode)
+        assert "models/radiance" in r or "RADIANCE_SDR2HDR_PIXEL" in r, r
+
+    def test_a_zero_blend_is_reported_as_the_reason_when_it_is(self):
+        r = self._report(processing_mode="Hybrid", rudra_blend=0.0)
+        assert "rudra_blend is 0" in r, r
+
+    def test_the_report_carries_the_numbers_that_decide_the_look(self):
+        r = self._report(processing_mode="Expand", reference_white_nits=203.0,
+                         peak_nits=4000.0)
+        assert "203 nits" in r
+        assert "4000 nits" in r
+        assert "BT.2408" in r
+
+    def test_a_learned_mode_that_did_nothing_logs_a_warning(self, caplog):
+        with caplog.at_level("WARNING"):
+            self._report(processing_mode="Hybrid")
+        assert "deterministic Expand output" in caplog.text
+
+    def test_expand_does_not_warn(self, caplog):
+        with caplog.at_level("WARNING"):
+            self._report(processing_mode="Expand")
+        assert "deterministic Expand output" not in caplog.text
+
+    def test_the_report_survives_an_empty_batch(self):
+        out, _, _, _, _, report = _convert(torch.zeros((0, 4, 4, 3)))
+        assert out.shape[0] == 0
+        assert isinstance(report, str) and report
+
+    def test_the_description_warns_before_the_user_runs_it(self):
+        """The report is after the fact; the node description is before."""
+        text = RadianceSDRToHDRUniversal.DESCRIPTION
+        assert "checkpoint" in text.lower()
+        assert "fall back" in text.lower() or "falls back" in text.lower()
