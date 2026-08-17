@@ -317,6 +317,13 @@ jobs:
       - name: Render through OpenColorIO and compare against its CPU path
         run: node --test js/tests/ocio_gpu.test.mjs
 
+      # The grade maths is emitted as GLSL and WGSL from one JS file. This
+      # compiles the emitted GLSL and checks it against the JS it was generated
+      # from -- it caught an integer literal in a clamp() that failed to link
+      # the whole composite shader.
+      - name: Compile the emitted grade shader and compare against the JS
+        run: node --test js/tests/grade_gpu.test.mjs
+
   # ── YAML / TOML lint ────────────────────────────────────────────────────────
   lint-config:
     name: "Config lint"

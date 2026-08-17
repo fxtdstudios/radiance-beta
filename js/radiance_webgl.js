@@ -1,5 +1,8 @@
 // WebGL Context Manager — extends abstract RadianceRenderer base class
 import { RadianceRenderer } from "./radiance_renderer.js";
+// The grade maths, emitted from one file for both backends and both CPU
+// paths. See js/radiance_grade.js for what used to be four implementations.
+import { GLSL as GRADE_GLSL } from "./radiance_grade.js";
 
 class RadianceWebGLRenderer extends RadianceRenderer {
     constructor(canvas) {
@@ -1542,7 +1545,7 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             uniform float u_gamma;
             uniform float u_saturation;
             uniform bool u_isLinear;
-
+${GRADE_GLSL}
             // sRGB OETF (linear → display)
             vec3 linearToSRGB(vec3 linear) {
                 bvec3 cutoff = lessThan(linear, vec3(0.0031308));
@@ -1576,7 +1579,10 @@ class RadianceWebGLRenderer extends RadianceRenderer {
 
                 // Gamma (artistic control)
                 if (u_gamma != 1.0) {
-                    color = pow(max(color, vec3(0.0)), vec3(1.0 / u_gamma));
+                    // Was pow(max(color,0), 1.0 / u_gamma) with no floor: at
+                    // gamma 0 that is 1/0 = Infinity and the image splits into
+                    // hard black and blown. radGamma carries the floor.
+                    color = radGamma(color, vec3(u_gamma));
                 }
 
                 // Display transform (sRGB OETF)
@@ -2643,40 +2649,16 @@ const float GOLDEN_ANGLE = 2.39996323;
                 return vec3(ACEScct_to_lin(v.r), ACEScct_to_lin(v.g), ACEScct_to_lin(v.b));
             }
 
+${GRADE_GLSL}
             vec3 applyGrading(vec3 color, vec3 lift, vec3 gamma, vec3 gain, vec3 offset) {
-                // Resolve-Style Grading
-
-                // 1. Offset (Global Add)
-                color += offset;
-
-                // 2. Lift (Shadows - Pivoted at White)
-                // Lift adds to blacks, but has 0 effect at 1.0
-                // Simple formula: color + lift * (1.0 - luma)
-                // Using luminance for pivot to avoid color shifts
-                float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-                // Clamp luma to 0..1 for pivot
-                float pivot = clamp(1.0 - luma, 0.0, 1.0);
-                color += lift * pivot;
-
-                // 3. Gain (Slope - Pivoted at Black)
-                color *= gain;
-
-                // 4. Gamma (Power - Mids)
-                // Safe pow
-                color = max(color, 0.0);
-                if (any(notEqual(gamma, vec3(1.0)))) {
-                     color.r = pow(color.r, 1.0 / max(0.01, gamma.r));
-                     color.g = pow(color.g, 1.0 / max(0.01, gamma.g));
-                     color.b = pow(color.b, 1.0 / max(0.01, gamma.b));
-                }
-
-                return color;
+                // Resolve-style order: Offset, Lift (pivoted at white), Gain
+                // (pivoted at black), Gamma. Every step is the shared
+                // definition; see js/radiance_grade.js.
+                return radGradeOrder(color, offset, lift, gain, gamma);
             }
 
             vec3 applyContrast(vec3 color, float contrast, float pivot) {
-                // v3.2: Clamping to prevent extreme separation
-                float c = clamp(contrast, 0.0, 5.0);
-                return (color - pivot) * c + pivot;
+                return radContrast(color, contrast, pivot);
             }
 
             // v2.5 Pro Pro: Cinematic S-Curve Shadows/Highlights
