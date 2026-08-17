@@ -297,10 +297,14 @@ const LTX_INCOMPATIBLE_WIDGETS = [
     "tile_stride",
     "tile_blend",
     // ALBABIT-FIX: hide widgets that have no effect under LTX — single unified encoder,
-    // no AYS table, no CFG rescale, no PAG self-attention.
+    // no AYS table, no PAG self-attention. guidance_rescale_phi was here too
+    // ("no CFG rescale"), but that predates the CFG-function contract fix
+    // (2026-08-15) -- live-tested afterward with a real LTX 2.5 render
+    // (phi=0 vs 0.7): consistent ~18% saturation drop across 3 timestamps,
+    // correct anti-oversaturation direction, no artifacts. It works like any
+    // other CFG-guided model now; removed from this list.
     "conditioning_clip_target",
     "ays_schedule",
-    "guidance_rescale_phi",
     "pag_scale"
 ];
 
