@@ -21,6 +21,7 @@ import {
     formatValue as _probeFormat,
     HDR_REFERENCE_WHITE_NITS as _PROBE_REF_WHITE,
 } from "./radiance_probe.js";
+import { gradePixel as _gradePixel } from "./radiance_grade.js";
 import {
     SCOPE_SCALES as _SCOPE_SCALES,
     LEVELS as _SCOPE_LEVELS,
@@ -6602,31 +6603,17 @@ else:
         const con = this.contrast || 1.0;
         const piv = this.pivot || 0.18;
 
-        // Apply grade inline (mirrors apply_grading Python logic)
+        // The shared grade definition -- the same one the shaders are emitted
+        // from. This was a fourth hand-written copy, and it differed from the
+        // WebGL one it was meant to mirror by leaving contrast unclamped, so a
+        // .cube taken into Resolve did not match the viewer it came from.
         const applyGrade = (r, g, b) => {
-            // Lift (luma-pivoted additive shadow shift)
-            const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-            const lumaPivot = Math.max(0, 1 - luma);
-            r += lift[0] * lumaPivot;
-            g += lift[1] * lumaPivot;
-            b += lift[2] * lumaPivot;
-            // Gain (multiplicative slope)
-            r *= gain[0]; g *= gain[1]; b *= gain[2];
-            // Gamma (power curve on positives)
-            if (r > 0) r = Math.pow(r, 1.0 / Math.max(gamma[0], 0.01));
-            if (g > 0) g = Math.pow(g, 1.0 / Math.max(gamma[1], 0.01));
-            if (b > 0) b = Math.pow(b, 1.0 / Math.max(gamma[2], 0.01));
-            // Contrast (around pivot)
-            r = (r - piv) * con + piv;
-            g = (g - piv) * con + piv;
-            b = (b - piv) * con + piv;
-            // Saturation
-            const luma2 = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-            r = luma2 + sat * (r - luma2);
-            g = luma2 + sat * (g - luma2);
-            b = luma2 + sat * (b - luma2);
-            // Clamp to [0, 1] for LUT domain
-            return [Math.max(0, Math.min(1, r)), Math.max(0, Math.min(1, g)), Math.max(0, Math.min(1, b))];
+            const out = _gradePixel([r, g, b], {
+                lift, gain, gamma, contrast: con, pivot: piv, saturation: sat,
+            });
+            // Clamp to [0, 1] for the LUT domain -- a .cube cannot carry values
+            // outside it.
+            return out.map((v) => Math.max(0, Math.min(1, v)));
         };
 
         // .CUBE Ordering: R varies fastest, then G, then B
@@ -14487,7 +14474,30 @@ else:
     }
 
 
+    /**
+     * A banner for a control that the current backend cannot honour.
+     *
+     * The Masks and Qualifiers tabs are fully interactive on WebGPU and
+     * completely inert: the base renderer stores the state and the WGSL never
+     * reads it, so every slider moves and nothing changes. A control that
+     * silently does nothing is worse than a disabled one, because the user
+     * concludes the feature is broken rather than unavailable.
+     */
+    _backendUnsupportedNotice(container, what) {
+        if (this._gpuBackend !== 'webgpu') return false;
+        const n = document.createElement('div');
+        n.style.cssText = 'font-size:10px; line-height:1.5; color:#ffb020; font-family:monospace;'
+            + 'padding:8px; margin-bottom:8px; background:rgba(255,176,32,0.06);'
+            + 'border-radius:5px; border-left:2px solid rgba(255,176,32,0.5);';
+        n.textContent = `${what} are not implemented on the WebGPU backend. `
+            + 'The controls below will move and the picture will not change. '
+            + 'Radiance prefers WebGPU whenever the browser offers it.';
+        container.appendChild(n);
+        return true;
+    }
+
     renderQualifiersTab(container) {
+        this._backendUnsupportedNotice(container, 'Qualifiers');
         container.style.cssText = 'display: flex; flex-direction: column; flex: 1; gap: 10px; padding: 10px; min-height: 0; overflow-y: auto;';
 
         // Initialize state if missing
@@ -14619,6 +14629,7 @@ else:
     }
 
     renderMasksTab(container) {
+        this._backendUnsupportedNotice(container, 'Masks');
         container.style.cssText = 'display: flex; flex-direction: column; flex: 1; gap: 10px; padding: 10px; min-height: 0; overflow-y: auto;';
 
         const update = () => {

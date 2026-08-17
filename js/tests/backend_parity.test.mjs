@@ -17,9 +17,16 @@
  * trips — and that samples ~40 pixels, so a dark or letterboxed frame trips it
  * spuriously.
  *
- * These tests do not need a GPU. They pin the *contract* both backends must
- * satisfy and the reference maths both must implement, so a divergence fails
- * here rather than as "the viewer looks different on my machine".
+ * **Resolved.** All four now come from `js/radiance_grade.js`: the two shaders
+ * are emitted from it and the two CPU paths call it. The divergence table above
+ * is history rather than a warning, and the maths tests that used to live here
+ * moved to `grade.test.mjs` alongside the definition they check.
+ *
+ * What stays here is the part that is genuinely about the two *backends* and
+ * not about arithmetic: the readback contract, which is still hand-written on
+ * both sides, and the WGSL feature gaps.
+ *
+ * These tests do not need a GPU.
  *
  * Run: node --test js/tests/backend_parity.test.mjs
  */
@@ -28,25 +35,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { applyContrastChannel as applyContrast, applyGammaChannel as applyGamma } from '../radiance_grade.js';
 
 const JS = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (f) => readFileSync(join(JS, f), 'utf8');
 
-// ── the reference grade maths ────────────────────────────────────────────────
-// One implementation, the one every backend is supposed to match. Linear
-// interpolation about the pivot, matching BT.2446's use of pivoted contrast and
-// the three of four shipped paths that already agree.
-
-export function applyContrast(c, contrast, pivot) {
-    const k = Math.min(Math.max(contrast, 0), 5);        // GL's clamp, everywhere
-    const p = Math.max(pivot, 1e-6);                     // pivot 0 is a legal slider value
-    return (c - p) * k + p;
-}
-
-export function applyGamma(c, gamma) {
-    const g = Math.max(gamma, 0.01);                     // GL's guard, everywhere
-    return Math.pow(Math.max(c, 0), 1 / g);
-}
+// The reference maths is no longer defined here. It used to be a local copy,
+// which made this file a *fifth* implementation of the thing it was written to
+// police. It now comes from the one definition both backends are emitted from.
 
 // ── the contract both backends must satisfy ─────────────────────────────────
 
@@ -82,66 +78,23 @@ test('each backend declares whether its pixels are graded', () => {
 
 // ── the maths ───────────────────────────────────────────────────────────────
 
-test('contrast is linear about the pivot, not a power curve', () => {
-    // The exact case that separates the two shipped formulas.
-    assert.equal(applyContrast(0.25, 2, 0.5), 0.0);
-    const power = 0.5 * Math.pow(0.25 / 0.5, 2);
-    assert.equal(power, 0.125);
-    assert.notEqual(applyContrast(0.25, 2, 0.5), power);
-});
+// The maths tests that used to sit here now live in grade.test.mjs, next to the
+// definition. Two of them are kept below in backend form: they assert the
+// *shipped source* no longer contains the divergent formulas, which is a
+// different claim from "the shared function is correct".
 
-test('contrast leaves the pivot fixed', () => {
-    for (const k of [0, 0.5, 1, 2, 5]) {
-        assert.ok(Math.abs(applyContrast(0.5, k, 0.5) - 0.5) < 1e-12,
-            `pivot moved at contrast ${k}`);
+test('neither backend re-implements contrast or gamma', () => {
+    const strip = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\s)\/\/.*$/gm, '$1');
+    for (const [name, file] of [['webgl', 'radiance_webgl.js'], ['webgpu', 'radiance_webgpu.js']]) {
+        const src = strip(read(file));
+        assert.doesNotMatch(src, /clamp\(contrast, 0\.0, 5\.0\)/,
+            `${name} has its own contrast clamp again — it should come from radiance_grade.js`);
     }
+    // And the shared functions still behave, so a green suite here means
+    // something.
+    assert.equal(applyContrast(0.25, 2, 0.5), 0);
+    assert.ok(Number.isFinite(applyGamma(0.5, 0)));
 });
-
-test('contrast at 1.0 is the identity', () => {
-    for (const c of [0, 0.18, 0.5, 1, 4]) {
-        assert.ok(Math.abs(applyContrast(c, 1, 0.5) - c) < 1e-12);
-    }
-});
-
-test('pivot 0 does not produce NaN', () => {
-    // The Pivot slider's minimum is 0. The WebGPU CPU path computes
-    // pow(c/0, k) there: Infinity ** k, then 0 * Infinity = NaN across the
-    // whole scope buffer.
-    for (const c of [0, 0.25, 1, 10]) {
-        const out = applyContrast(c, 2, 0);
-        assert.ok(Number.isFinite(out), `pivot=0 gave ${out} for c=${c}`);
-    }
-});
-
-test('gamma 0 does not divide by zero', () => {
-    // Guarded in radiance_webgl.js:2609 and the LUT export, unguarded in
-    // radiance_webgpu.js:418 and :1382, where 1/0 = Infinity turns the image
-    // into a hard black/blown split.
-    for (const c of [0, 0.5, 1, 2]) {
-        assert.ok(Number.isFinite(applyGamma(c, 0)), `gamma=0 gave a non-finite value at c=${c}`);
-    }
-});
-
-test('gamma is monotonic and fixes 0 and 1', () => {
-    for (const g of [0.5, 1, 2.2, 2.4]) {
-        assert.equal(applyGamma(0, g), 0);
-        assert.ok(Math.abs(applyGamma(1, g) - 1) < 1e-12);
-        let prev = -Infinity;
-        for (let c = 0; c <= 1.0001; c += 0.05) {
-            const v = applyGamma(c, g);
-            assert.ok(v >= prev - 1e-12, `gamma ${g} is not monotonic at ${c}`);
-            prev = v;
-        }
-    }
-});
-
-test('negative input never reaches pow', () => {
-    // pow(negative, fractional) is NaN. Scene-linear EXR legitimately carries
-    // negative values after a matrix conversion.
-    assert.ok(Number.isFinite(applyGamma(-0.2, 2.2)));
-});
-
-// ── divergences that must not silently reappear ─────────────────────────────
 
 test('the WebGPU shader path guards gamma', () => {
     const gpu = read('radiance_webgpu.js');
