@@ -87,7 +87,10 @@ LATENT_FORMAT_MAP = {
     "CogVideoX (16ch)": "cogvideox",
     "Mochi (12ch)": "mochi",
     # ALBABIT-FIX: LTX-Video latent format. "ltxav" (not "ltx") to match the
-    # LTX 2.3 model_type key used by RadianceSamplerPro (sampler_utils.py).
+    # model_type key used by RadianceSamplerPro (sampler_utils.py). Covers
+    # both LTX 2.3 and 2.5 -- same 128ch transformer, capability-based
+    # detection, and (confirmed against the real checkpoints) identical VAE
+    # spatial/temporal compression too, so one entry serves both.
     "LTXV (128ch)": "ltxav",
     # ALBABIT-FIX: Added model types matching the Radiance Video Loader / RUDRA decoder set
     "WAN (16ch)": "wan",
@@ -119,7 +122,9 @@ MODEL_TYPES = [
     # ALBABIT-FIX: Mochi has its own temporal compression (×6, see TEMPORAL_SCALE)
     # and is a 5D video latent like WAN/LTXV/HunyuanVideo.
     "Mochi (12ch)",
-    # ALBABIT-FIX: LTX-Video uses a 128-channel latent (vs 16ch for Flux/SD3)
+    # ALBABIT-FIX: LTX-Video uses a 128-channel latent (vs 16ch for Flux/SD3).
+    # Covers both LTX 2.3 and 2.5 -- confirmed identical VAE compression, see
+    # LATENT_FORMAT_MAP above.
     "LTXV (128ch)",
     # ALBABIT-FIX: Added model types matching the Radiance Video Loader / RUDRA decoder set
     "WAN (16ch)",
@@ -143,7 +148,7 @@ LATENT_CHANNELS = {
     "Cosmos World (16ch)": 16,
     "CogVideoX (16ch)": 16,
     "Mochi (12ch)": 12,
-    # ALBABIT-FIX: LTX-Video latent is 128 channels
+    # ALBABIT-FIX: LTX-Video latent is 128 channels (2.3 and 2.5 alike)
     "LTXV (128ch)": 128,
     # ALBABIT-FIX: Added model types matching the Radiance Video Loader / RUDRA decoder set
     "WAN (16ch)": 16,
@@ -161,6 +166,9 @@ LATENT_CHANNELS = {
 # but produced grossly oversized latents for LTXV (×32) and Flux.2 (×16).
 # 8 remains the default for any model_type not listed here.
 SPATIAL_SCALE = {
+    # ALBABIT-FIX: 32x spatial, confirmed identical for LTX 2.3 and 2.5 against
+    # comfy/sd.py's hardcoded ratio for the real diffusion-decoder VAE class
+    # (a wrong 16x entry here once produced 2x-oversized output).
     "LTXV (128ch)": 32,
     "Flux.2 / Flux.2 Klein (128ch)": 16,
     # ALBABIT-FIX: WAN 2.2 TI2V-5B's VAE trades channel depth for spatial
@@ -181,6 +189,9 @@ SPATIAL_SCALE = {
 # the sampler to process ~8x more "frames" than necessary. 4 is the default for
 # any video model_type not listed here.
 TEMPORAL_SCALE = {
+    # ALBABIT-FIX: 8x temporal, confirmed identical for LTX 2.3 and 2.5 --
+    # comfy/sd.py's downscale_ratio formula for the real diffusion-decoder VAE
+    # is `(a+7)//8`, same as SPATIAL_SCALE's note above.
     "LTXV (128ch)": 8,
     "WAN (16ch)": 4,
     # ALBABIT-FIX: WAN 2.2 TI2V-5B keeps the same 4x temporal compression as

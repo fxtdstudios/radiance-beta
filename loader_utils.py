@@ -303,6 +303,18 @@ def estimate_vram_for_load(
     return est, avail, total
 
 
+# ALBABIT-FIX: comfy's loaders silently return vae=None for a checkpoint with
+# no baked VAE instead of raising, so callers used to log a fake success and
+# only fail much later at VAE Decode with a confusing NoneType error.
+def _require_baked_vae(vae, unet_name: str):
+    if vae is None:
+        raise RuntimeError(
+            f"'{unet_name}' has no VAE weights baked in — "
+            f"select a standalone vae_name file instead of "
+            f"'Baked VAE (from UNET)'."
+        )
+
+
 def load_unet_and_baked_vae(
     unet_path: str,
     unet_name: str,
@@ -415,6 +427,7 @@ def load_unet_and_baked_vae(
                     )
                     t_vae0 = time.time()
                     vae = out[2]
+                    _require_baked_vae(vae, unet_name)
                     if getattr(vae, "patcher", None) is not None:
                         vae.patcher.cached_patcher_init = (
                             comfy.sd.load_checkpoint_vae_patcher,
@@ -438,6 +451,7 @@ def load_unet_and_baked_vae(
                 model = out[0]
                 t_vae0 = time.time()
                 vae = out[2]
+                _require_baked_vae(vae, unet_name)
                 vae_time = time.time() - t_vae0
                 logger.info("VAE extracted natively from UNET")
                 info_lines.append(f"VAE: Baked from UNET ({vae_time:.1f}s)")
@@ -566,6 +580,21 @@ def load_standalone_vae(
 
     Returns ``(vae, vae_time, vae_cache_hit)``.
     """
+    # ALBABIT-FIX: "conv" VAE uses a different compression (16x/4x) than the
+    # default LTX 2.5 VAE (32x/8x) Resolution's factors assume, silently
+    # halving output resolution. Delisted from presets/model_map; this warns
+    # if picked manually anyway. See project_radiance_ltx25 memory.
+    if "ltx-2.5-video-vae-conv" in vae_name.lower():
+        warn = (
+            f"⚠ '{vae_name}' uses a different VAE compression (16x spatial / "
+            f"4x temporal) than LTX 2.5's default VAE (32x/8x, what "
+            f"Resolution's 'LTXV (128ch)' assumes). The decoded video will "
+            f"come out at half the intended resolution. Use "
+            f"'ltx-2.5-video-vae-bf16.safetensors' instead."
+        )
+        logger.warning(warn)
+        info_lines.append(warn)
+
     t0 = time.time()
     vae_path = ensure_model_exists(vae_name, "vae", auto_download)
     if not vae_path:

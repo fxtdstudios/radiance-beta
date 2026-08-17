@@ -211,7 +211,11 @@ _CLIP_DTYPE_MULT = {
 _BASE_VRAM = {
     "flux": 12.0, "sd3": 10.0, "sd3.5": 12.0,
     "sdxl": 6.5, "sd1.5": 3.5,
-    "hunyuan_video": 20.0, "wan": 14.0, "ltxv": 11.0, "ltxav": 15.0,  # ALBABIT-FIX: "ltx" → "ltxv"
+    "hunyuan_video": 20.0, "wan": 14.0, "ltxv": 11.0,
+    # ALBABIT-FIX: "ltx" -> "ltxv". "ltxav" corrected 15.0->39.0 -- ComfyUI's
+    # own staging log reported 40048MB live (LTX 2.5 Dev bf16, 22B), not the
+    # ~15-23GB this table implied.
+    "ltxav": 39.0,
     "pixart": 6.0, "aura_flow": 8.0,
     "lumina2": 12.0, "z_image": 14.0,
     # ALBABIT-FIX: Cosmos / CogVideoX / Mochi base VRAM estimates

@@ -928,7 +928,10 @@ def _detect_arch_from_clip(clip, target_arch: str,
     # ALBABIT-FIX: LTXAVGemmaTokenizer registers as "gemma3_12b" — exact key match.
     # The old check used substring "gemma" which never matched "gemma3_12b" in a frozenset.
     # Without this, LTX-AV fell through to "sdxl" fallback (wrong arch, wrong prompt path).
-    if "gemma3_12b" in keys:
+    # LTX 2.5's Gemma4-based tokenizer registers under a different key, "gemma4"
+    # (comfy/text_encoders/gemma4.py Gemma4Tokenizer), so it needs its own check
+    # -- same fallback-to-sdxl gap, just for the newer encoder.
+    if "gemma3_12b" in keys or "gemma4" in keys:
         return "ltxav"
     # LTX-V (pre-2.3, T5-based) — still matched by key fragments
     if any(k in keys for k in ("ltxv", "ltx")):

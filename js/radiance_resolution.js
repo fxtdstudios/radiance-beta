@@ -50,6 +50,8 @@ const VIDEO_MODEL_TYPES_JS = new Set(["WAN (16ch)", "WAN TI2V (48ch)", "LTXV (12
 // recompute width/height instantly when model_type changes, instead of waiting
 // for the next execution's onExecuted sync.
 const SPATIAL_SCALE_JS = {
+    // ALBABIT-FIX: 32x spatial, confirmed identical for LTX 2.3 and 2.5 --
+    // see resolution.py's SPATIAL_SCALE for the full explanation.
     "LTXV (128ch)": 32,
     "Flux.2 / Flux.2 Klein (128ch)": 16,
     // ALBABIT-FIX: WAN 2.2 TI2V-5B's VAE compresses 16x spatially (double
