@@ -21,6 +21,15 @@ import {
     formatValue as _probeFormat,
     HDR_REFERENCE_WHITE_NITS as _PROBE_REF_WHITE,
 } from "./radiance_probe.js";
+import {
+    SCOPE_SCALES as _SCOPE_SCALES,
+    LEVELS as _SCOPE_LEVELS,
+    scaleTicks as _scopeTicks,
+    scaleValue as _scopeValue,
+    describeMeasurement as _scopeDescribe,
+    logAssistPos as _logAssistPos,
+    logAssistInv as _logAssistInv,
+} from "./radiance_scope_units.js";
 
 class RadianceViewer {
     static singletonHUD = null;
@@ -866,6 +875,16 @@ class RadianceViewer {
         this.scopeOverlay = false;
         this.waveformParadeMode = true; // true = RGB parade
         this.scopeMode = localStorage.getItem('radiance_scope_mode') || 'parade'; // parade|waveform|histogram|vectorscope|falsecolor
+
+        // Scope scale and measurement point. The scopes used to draw a graticule
+        // labelled 0/25/50/75/100 under a caption that read "Linear · 0–255" --
+        // two units in one panel, neither of them stated. These say which.
+        // 10-bit code value is the default because that is what a delivery spec
+        // is written in.
+        this.scopeScale = localStorage.getItem('radiance_scope_scale') || 'cv10';
+        this.scopeLevels = localStorage.getItem('radiance_scope_levels') || 'data';
+        this.scopeTransformed = localStorage.getItem('radiance_scope_xform') !== '0';
+        this.scopeHlgPeak = parseInt(localStorage.getItem('radiance_scope_hlg_peak') || '1000', 10) || 1000;
         this.generationID = 0; // v3.1: Unique ID per execution to cancel stale async loads
 
         // Grid & Safe Areas
@@ -3356,7 +3375,9 @@ class RadianceViewer {
         this.bottomInfoBar.appendChild(this.infoRight);
 
         // False Color Legend (Overlay within Bottom Bar)
-        // v4.5: Extended with exact IRE thresholds so colorists can read zone boundaries
+        // The bands are labelled in percent, which is what they are. They were
+        // described as IRE thresholds; IRE is a legacy analogue-composite unit and
+        // these were never IRE values.
         this.fcLegend = document.createElement('div');
         this.fcLegend.style.cssText = `
             position: absolute; left: 50%; transform: translateX(-50%);
@@ -16521,22 +16542,103 @@ else:
             this._lastRenderContent();
         }));
 
-        // v4.2: HDR ruler — nit-referenced guide lines (waveform + parade only)
-        if (!this.scopeHdrRuler) this.scopeHdrRuler = localStorage.getItem('radiance_scope_hdr_ruler') === '1';
-        const isWaveformLike = this.scopeMode === 'waveform' || this.scopeMode === 'parade';
-        if (isWaveformLike) {
-            optRow.appendChild(makeOptBtn('HDR RULER', this.scopeHdrRuler, () => {
-                this.scopeHdrRuler = !this.scopeHdrRuler;
-                localStorage.setItem('radiance_scope_hdr_ruler', this.scopeHdrRuler ? '1' : '0');
+        // Data vs Video levels. The distinction decides where 0% and 100% sit,
+        // and reading a legal-range error as a grading choice is exactly what
+        // happens when a scope does not say which it is showing.
+        optRow.appendChild(makeOptBtn(
+            this.scopeLevels === 'video' ? 'VIDEO LEVELS' : 'DATA LEVELS',
+            this.scopeLevels === 'video',
+            () => {
+                this.scopeLevels = this.scopeLevels === 'video' ? 'data' : 'video';
+                localStorage.setItem('radiance_scope_levels', this.scopeLevels);
                 this._lastRenderContent();
-            }));
-        }
+            },
+        )).title = (_SCOPE_LEVELS.find((l) => l.id === this.scopeLevels) || _SCOPE_LEVELS[0]).hint;
+
+        // Nuke's "include viewer colour transforms". Without it the user cannot
+        // tell whether the scope is measuring the source or the display, and
+        // those are different pictures.
+        optRow.appendChild(makeOptBtn(
+            this.scopeTransformed ? 'VIEWER XFORM' : 'SOURCE',
+            !!this.scopeTransformed,
+            () => {
+                this.scopeTransformed = !this.scopeTransformed;
+                localStorage.setItem('radiance_scope_xform', this.scopeTransformed ? '1' : '0');
+                this._lastRenderContent();
+            },
+        )).title = 'Measure after the viewer colour transforms (what the display receives), or before them (the source as loaded).';
 
         const logNote = document.createElement('div');
-        logNote.textContent = this.scopeLogView ? 'LogC · shadows expanded' : 'Linear · 0–255';
+        logNote.textContent = this.scopeLogView ? 'LogC assist' : '';
         logNote.style.cssText = 'font-size: 10px; color: #666; margin-left: auto; font-weight: 600;';
         optRow.appendChild(logNote);
         container.appendChild(optRow);
+
+        // ─── Scale selector ────────────────────────────────
+        // The scales are Resolve's set. IRE is deliberately absent: Resolve does
+        // not list it, it is a legacy analogue-composite unit, and offering it
+        // signals the opposite of expertise.
+        const scaleRow = document.createElement('div');
+        scaleRow.style.cssText = 'display: flex; gap: 6px; width: 100%; align-items: center; margin-bottom: 4px;';
+
+        const scaleLbl = document.createElement('div');
+        scaleLbl.textContent = 'SCALE';
+        scaleLbl.style.cssText = 'font-size: 10px; color: #666; font-weight: 700; letter-spacing: 0.5px;';
+        scaleRow.appendChild(scaleLbl);
+
+        const scaleSel = document.createElement('select');
+        scaleSel.style.cssText = 'flex: 1; background: rgba(255,255,255,0.06); color: #ddd; border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 4px 6px; font-size: 11px; font-weight: 600;';
+        _SCOPE_SCALES.forEach((s) => {
+            const o = document.createElement('option');
+            o.value = s.id;
+            o.textContent = `${s.label}  (${s.unit})`;
+            if (s.id === this.scopeScale) o.selected = true;
+            scaleSel.appendChild(o);
+        });
+        scaleSel.onchange = () => {
+            this.scopeScale = scaleSel.value;
+            localStorage.setItem('radiance_scope_scale', this.scopeScale);
+            this._lastRenderContent();
+        };
+        scaleRow.appendChild(scaleSel);
+
+        if (this.scopeScale === 'nits-hlg') {
+            const peakSel = document.createElement('select');
+            peakSel.title = 'HLG nominal peak luminance. The system gamma follows it (BT.2100).';
+            peakSel.style.cssText = 'background: rgba(255,255,255,0.06); color: #ddd; border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 4px 6px; font-size: 11px; font-weight: 600;';
+            [400, 600, 1000, 2000, 4000].forEach((p) => {
+                const o = document.createElement('option');
+                o.value = String(p);
+                o.textContent = `${p} nit peak`;
+                if (p === this.scopeHlgPeak) o.selected = true;
+                peakSel.appendChild(o);
+            });
+            peakSel.onchange = () => {
+                this.scopeHlgPeak = parseInt(peakSel.value, 10);
+                localStorage.setItem('radiance_scope_hlg_peak', String(this.scopeHlgPeak));
+                this._lastRenderContent();
+            };
+            scaleRow.appendChild(peakSel);
+        }
+        container.appendChild(scaleRow);
+
+        // ─── What is being measured ────────────────────────
+        // Never blank. An unlabelled scope is an ambiguous instrument, and an
+        // ambiguous instrument is an untrusted one.
+        const desc = _scopeDescribe(this.scopeScale, this._scopeCtx());
+        const measureNote = document.createElement('div');
+        measureNote.style.cssText = 'font-size: 9px; line-height: 1.5; color: rgba(255,255,255,0.4); font-family: monospace; padding: 6px 8px; background: rgba(255,255,255,0.02); border-radius: 5px; border-left: 2px solid rgba(106,138,255,0.35); margin-bottom: 4px;';
+        measureNote.innerHTML =
+            `<b style="color:rgba(255,255,255,0.6)">${_escapeHtml(desc.label)}</b> · ${_escapeHtml(desc.levels)}`
+            + `<br>${_escapeHtml(desc.detail)}`
+            + `<br>Measured ${_escapeHtml(desc.measuredAt)}.`
+            // The scopes read an 8-bit canvas. A 10-bit scale over that shows
+            // the right number on a 256-step signal, not 1024 steps of
+            // precision. Saying so is the difference between a scale and a claim.
+            + '<br><span style="color:rgba(255,255,255,0.3)">Sampled at 8 bits — the scale converts the value, it does not add precision.</span>'
+            + (this.scopeLogView ? '<br><span style="color:#ffc844">LogC assist is on — the plot is reshaped and the graticule is reshaped with it, so the labels still read true.</span>' : '')
+            + (desc.warn ? `<br><span style="color:#ff9040">⚠ ${_escapeHtml(desc.warn)}</span>` : '');
+        container.appendChild(measureNote);
 
         // ─── Scope Canvas ──────────────────────────────────
         const isSquare = this.scopeMode === 'vectorscope';
@@ -16548,6 +16650,35 @@ else:
         canvas.height = cH;
         canvas.style.cssText = `background: #010102; border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 8px; width: 100%; height: auto; aspect-ratio: ${cW}/${cH}; box-shadow: inset 0 0 30px rgba(0,0,0,0.9);`;
         container.appendChild(canvas);
+
+        // Point at a trace and read its value. The graticule gives you the
+        // marked positions; this gives you every position in between, which is
+        // where the answer usually is.
+        const axis = (this.scopeMode === 'histogram') ? 'x'
+            : (this.scopeMode === 'waveform' || this.scopeMode === 'parade') ? 'y'
+            : null;
+        if (axis) {
+            const readout = document.createElement('div');
+            readout.style.cssText = 'font-family: monospace; font-size: 10px; color: rgba(255,255,255,0.45); min-height: 14px; margin-top: -2px;';
+            readout.textContent = 'Point at the scope to read a value.';
+            container.appendChild(readout);
+            const desc = _scopeDescribe(this.scopeScale, this._scopeCtx());
+            const digits = (_SCOPE_SCALES.find((s) => s.id === this.scopeScale) || _SCOPE_SCALES[0]).digits;
+            canvas.addEventListener('mousemove', (e) => {
+                const r = canvas.getBoundingClientRect();
+                const p = axis === 'y'
+                    ? 1 - (e.clientY - r.top) / r.height
+                    : (e.clientX - r.left) / r.width;
+                const norm = this._scopePlotInv(p, this.scopeLogView);
+                const v = _scopeValue(norm, this.scopeScale, this._scopeCtx());
+                readout.textContent = Number.isFinite(v)
+                    ? `${v.toFixed(digits)} ${desc.unit}`
+                    : '—';
+            });
+            canvas.addEventListener('mouseleave', () => {
+                readout.textContent = 'Point at the scope to read a value.';
+            });
+        }
 
         // ─── Extract Pixel Data ─────────────────────────────
         if (!this.image) {
@@ -16563,8 +16694,13 @@ else:
         tmp.width = sampleW; tmp.height = sampleH;
         const tctx = tmp.getContext('2d');
 
-        // Sample from graded GL canvas if possible, else fall back to raw image
-        const srcCanvas = (this.glCanvas && this.glCanvas.width > 0) ? this.glCanvas : this.image;
+        // Where the measurement is taken. Nuke calls this "include viewer colour
+        // transforms"; with it off the scope reads the source as loaded, with it
+        // on it reads what the display receives. The scopes used to always take
+        // the second and never say so.
+        const canUseGL = !!(this.glCanvas && this.glCanvas.width > 0);
+        const srcCanvas = (this.scopeTransformed && canUseGL) ? this.glCanvas : this.image;
+        this._scopeMeasuredTransformed = this.scopeTransformed && canUseGL;
         tctx.drawImage(srcCanvas, 0, 0, sampleW, sampleH);
         const imgData = tctx.getImageData(0, 0, sampleW, sampleH);
 
@@ -16583,10 +16719,9 @@ else:
 
         // ─── Render Based on Mode ───────────────────────────
         const logFlag = this.scopeLogView;
-        const hdrRuler = !!(this.scopeHdrRuler && this.hdrData);
         switch (this.scopeMode) {
-            case 'parade': this._drawScopeParade(ctx, pixels, sampleW, sampleH, cW, cH, logFlag, hdrRuler); break;
-            case 'waveform': this._drawScopeWaveform(ctx, pixels, sampleW, sampleH, cW, cH, logFlag, hdrRuler); break;
+            case 'parade': this._drawScopeParade(ctx, pixels, sampleW, sampleH, cW, cH, logFlag); break;
+            case 'waveform': this._drawScopeWaveform(ctx, pixels, sampleW, sampleH, cW, cH, logFlag); break;
             case 'histogram': this._drawScopeHistogram(ctx, pixels, cW, cH, logFlag); break;
             case 'vectorscope': this._drawScopeVectorscope(ctx, pixels, cW, cH); break;
             case 'chromaticity': this._drawScopeChromaticity(ctx, pixels, cW, cH); break;
@@ -16622,7 +16757,65 @@ else:
     }
 
     // ─── RGB Parade ──────────────────────────────────────────
-    _drawScopeParade(ctx, data, imgW, imgH, w, h, logView, hdrRuler = false) {
+    /** The scale context the units module needs, gathered in one place. */
+    _scopeCtx() {
+        return {
+            levels: this.scopeLevels || 'data',
+            peakNits: this.scopeHlgPeak || 1000,
+            transformed: this._scopeMeasuredTransformed !== false,
+        };
+    }
+
+    /**
+     * Where a normalised value lands on the plot.
+     *
+     * LogC assist reshapes the pixels before they are plotted, so the graticule
+     * has to be reshaped by the same curve or every label moves off its line.
+     * Reshaping it is what keeps the numbers true under log assist rather than
+     * merely warning that they are not.
+     */
+    _scopePlotPos(v, logView) {
+        return logView ? _logAssistPos(v) : v;
+    }
+
+    /** Its inverse — a position on the plot back to a normalised value. */
+    _scopePlotInv(p, logView) {
+        return logView ? _logAssistInv(p) : Math.min(Math.max(p, 0), 1);
+    }
+
+    /**
+     * The horizontal graticule, in the selected scale's units.
+     *
+     * One implementation for waveform and parade. Every line carries its number
+     * and the panel carries the unit, so there is no position on either scope
+     * whose value has to be guessed.
+     */
+    _drawScopeGraticule(ctx, w, h, logView, opts = {}) {
+        const ctxScale = this._scopeCtx();
+        const ticks = _scopeTicks(this.scopeScale, ctxScale);
+        const unit = _scopeDescribe(this.scopeScale, ctxScale).unit;
+
+        ctx.save();
+        ctx.lineWidth = opts.lineWidth || 2;
+        ctx.font = '15px monospace';
+        ctx.setLineDash(opts.dash || []);
+        ticks.forEach((t) => {
+            const y = h - this._scopePlotPos(t.at, logView) * h;
+            ctx.strokeStyle = t.emphasis ? 'rgba(255,200,80,0.45)' : 'rgba(255,255,255,0.09)';
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+            ctx.fillStyle = t.emphasis ? '#ffc844' : 'rgba(255,255,255,0.34)';
+            ctx.fillText(t.label, 4, Math.max(14, y - 4));
+        });
+        ctx.setLineDash([]);
+
+        // The unit, once, where it cannot be mistaken for a value.
+        ctx.fillStyle = 'rgba(255,255,255,0.45)';
+        ctx.font = 'bold 15px monospace';
+        ctx.fillText(unit, w - 8 - ctx.measureText(unit).width, h - 8);
+        ctx.restore();
+    }
+
+    _drawScopeParade(ctx, data, imgW, imgH, w, h, logView) {
         ctx.fillStyle = '#050508';
         ctx.fillRect(0, 0, w, h);
 
@@ -16668,89 +16861,32 @@ else:
         ctx.moveTo(secW * 2, 0); ctx.lineTo(secW * 2, h);
         ctx.stroke();
 
-        // Guide lines — three modes: HDR nit / log IRE / linear IRE
-        const R = v => v / (v + 1); // Reinhard display proxy for HDR ruler
-        const guides = hdrRuler
-            ? [
-                { v: R(0),       lbl: '0',        color: '#2a2a2a' },
-                { v: R(0.0049),  lbl: '1 nit',    color: '#2a3020' },
-                { v: R(0.018),   lbl: 'SDR mid',  color: '#2a4020' },
-                { v: R(1.0),     lbl: '203 nit',  color: '#3a4010' },
-                { v: R(4.926),   lbl: '1k nit',   color: '#4a3a08' },
-                { v: R(49.26),   lbl: '10k nit',  color: '#5a2a05' },
-              ]
-            : logView
-            ? [{ v: 0, lbl: '0' }, { v: 0.5, lbl: '~18%' }, { v: 0.74, lbl: '~90%' }, { v: 1, lbl: '100' }]
-            : [{ v: 0, lbl: '0' }, { v: 0.5, lbl: '50%' }, { v: 1, lbl: '100' }];
+        // The graticule, in the selected scale's units.
+        //
+        // What was here before was an "HDR ruler" that placed nit labels using
+        // a Reinhard curve, v/(v+1), as a display proxy. The pixels being
+        // plotted had come through the actual ACES display transform, not
+        // Reinhard, so the lines sat wherever that unrelated curve put them:
+        // "203 nit" was drawn at exactly half height regardless of what the
+        // viewer was doing. Nit readings now come from ST.2084 or HLG, which
+        // are defined on the signal actually being measured.
+        this._drawScopeGraticule(ctx, w, h, logView, { dash: [6, 6], lineWidth: 1 });
 
-        ctx.setLineDash([6, 6]);
-        ctx.font = '14px monospace';
-        guides.forEach(g => {
-            const y = h - g.v * h;
-            ctx.strokeStyle = g.color || '#333';
-            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
-            ctx.fillStyle = hdrRuler ? '#886633' : '#444';
-            if (g.lbl) ctx.fillText(g.lbl, 4, y - 4);
-        });
-        ctx.setLineDash([]);
-
-        // Mode label (bottom-right)
-        const modeLabel = hdrRuler ? 'PARADE·HDR·NIT' : logView ? 'LOG' : '';
-        if (modeLabel) {
-            ctx.fillStyle = hdrRuler ? '#cc8833' : '#554400';
+        if (logView) {
+            ctx.fillStyle = '#554400';
             ctx.font = '16px monospace';
-            ctx.fillText(modeLabel, w - (hdrRuler ? 155 : 40), h - 6);
+            ctx.fillText('LOG', 8, h - 8);
         }
     }
 
     // ─── Luma Waveform ───────────────────────────────────────
-    _drawScopeWaveform(ctx, data, imgW, imgH, w, h, logView, hdrRuler = false) {
+    _drawScopeWaveform(ctx, data, imgW, imgH, w, h, logView) {
         ctx.fillStyle = '#050508';
         ctx.fillRect(0, 0, w, h);
 
-        // ── Guide lines ────────────────────────────────────────────────────────
-        // HDR ruler: nit-referenced stops using Reinhard curve (v / (v+1)) as
-        // display proxy. Scene-linear nit values: 0.18 SDR mid / 1.0 = 203 nit
-        // / 4.9 ≈ 1k nit / 49 ≈ 10k nit (displayed via Reinhard tonemap).
-        const guides = hdrRuler
-            ? (() => {
-                // Convert scene-linear peak value → display [0–1] via Reinhard
-                const R = v => v / (v + 1);
-                return [
-                    { v: R(0),        lbl: '0 nit',     color: '#333' },
-                    { v: R(0.0049),   lbl: '1 nit',     color: '#2a3a2a' },
-                    { v: R(0.018),    lbl: 'SDR mid',   color: '#2a4a2a' },
-                    { v: R(0.18),     lbl: '~36 nit',   color: '#2a5a2a' },
-                    { v: R(1.0),      lbl: '203 nit',   color: '#3a4a2a' },
-                    { v: R(4.926),    lbl: '1k nit',    color: '#4a4a20' },
-                    { v: R(49.26),    lbl: '10k nit',   color: '#5a3a10' },
-                ];
-              })()
-            : logView
-            ? [
-                { v: 0,    lbl: '0',      color: '#333' },
-                { v: 0.18, lbl: '~black', color: '#2a3a2a' },
-                { v: 0.50, lbl: '~18%',   color: '#2a4a2a' },
-                { v: 0.74, lbl: '~90%',   color: '#2a5a2a' },
-                { v: 1.0,  lbl: '100',    color: '#333' },
-              ]
-            : [
-                { v: 0,    lbl: '0',  color: '#333' },
-                { v: 0.25, lbl: '25', color: '#2a3a2a' },
-                { v: 0.50, lbl: '50', color: '#2a4a2a' },
-                { v: 0.75, lbl: '75', color: '#2a5a2a' },
-                { v: 1.0,  lbl: '100',color: '#333' },
-              ];
-
-        ctx.lineWidth = 2;
-        ctx.font = '16px monospace';
-        guides.forEach(g => {
-            const y = h - g.v * h;
-            ctx.strokeStyle = g.color || '#2a2a2a';
-            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
-            ctx.fillStyle = hdrRuler ? '#886633' : '#444';
-            ctx.fillText(g.lbl, 4, y - 4);
-        });
+        // The graticule, in the selected scale's units. See _drawScopeParade for
+        // why the old nit ruler was removed rather than kept alongside.
+        this._drawScopeGraticule(ctx, w, h, logView);
 
         // ── Plot luma dots ─────────────────────────────────────────────────────
         const step = Math.max(1, Math.floor(imgW / w));
@@ -16769,9 +16905,9 @@ else:
         ctx.globalAlpha = 1.0;
 
         // ── Label ──────────────────────────────────────────────────────────────
-        ctx.fillStyle = hdrRuler ? '#cc8833' : '#5a5';
+        ctx.fillStyle = '#5a5';
         ctx.font = '18px monospace';
-        ctx.fillText(hdrRuler ? 'LUMA·HDR·NIT' : logView ? 'LUMA·LOG' : 'LUMA', 8, 22);
+        ctx.fillText(logView ? 'LUMA·LOG' : 'LUMA', 8, 22);
     }
 
     // ─── Histogram ───────────────────────────────────────────
@@ -16789,11 +16925,22 @@ else:
         let max = 1;
         for (let i = 0; i < 256; i++) max = Math.max(max, hR[i], hG[i], hB[i]);
 
-        // Grid
-        ctx.strokeStyle = '#222'; ctx.lineWidth = 2;
-        for (let i = 1; i < 4; i++) {
-            const x = (i / 4) * w;
-            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+        // Grid — the histogram's axis is horizontal, so the same ticks the
+        // waveform draws as lines are drawn here as columns. It used to be four
+        // evenly spaced unlabelled lines with "0" and "255" in the corners,
+        // which named a unit the panel did not otherwise use.
+        {
+            const ticks = _scopeTicks(this.scopeScale, this._scopeCtx());
+            ctx.lineWidth = 1;
+            ctx.font = '15px monospace';
+            ticks.forEach((t) => {
+                const x = this._scopePlotPos(t.at, logView) * w;
+                ctx.strokeStyle = t.emphasis ? 'rgba(255,200,80,0.45)' : 'rgba(255,255,255,0.08)';
+                ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+                ctx.fillStyle = t.emphasis ? '#ffc844' : 'rgba(255,255,255,0.32)';
+                const tw = ctx.measureText(t.label).width;
+                ctx.fillText(t.label, Math.min(Math.max(x - tw / 2, 2), w - tw - 2), h - 8);
+            });
         }
 
         const drawCurve = (hist, color) => {
@@ -16832,13 +16979,17 @@ else:
         drawCurve(hB, '#4488ff');
         ctx.globalAlpha = 1.0;
 
-        // Labels
-        ctx.fillStyle = '#666'; ctx.font = '16px monospace';
-        ctx.fillText(logView ? 'LOG·0' : '0', 4, h - 6);
-        ctx.fillText(logView ? 'LOG·255' : '255', w - 75, h - 6);
+        // The unit, once, where it cannot be mistaken for a tick value.
+        {
+            const unit = _scopeDescribe(this.scopeScale, this._scopeCtx()).unit;
+            ctx.fillStyle = 'rgba(255,255,255,0.45)';
+            ctx.font = 'bold 15px monospace';
+            ctx.fillText(unit, w - 8 - ctx.measureText(unit).width, 20);
+        }
         if (logView) {
             ctx.fillStyle = '#554400';
-            ctx.fillText('LOG', w - 40, 20);
+            ctx.font = '16px monospace';
+            ctx.fillText('LOG', 8, 20);
         }
     }
 
@@ -16988,34 +17139,34 @@ else:
                 const srcX = Math.floor(x * sx), srcY = Math.floor(y * sy);
                 const idx = (srcY * imgW + srcX) * 4;
                 const luma = data[idx] * 0.2126 + data[idx + 1] * 0.7152 + data[idx + 2] * 0.0722;
-                const ire = luma / 255; // 0..1
+                const level = luma / 255; // 0..1 -- normalised display level, not IRE
 
                 let r, g, b;
-                if (ire < 0.02) {
+                if (level < 0.02) {
                     // Under black — purple
                     r = 80; g = 0; b = 120;
-                } else if (ire < 0.10) {
+                } else if (level < 0.10) {
                     // Deep shadows — blue
                     r = 20; g = 40; b = 180;
-                } else if (ire < 0.25) {
+                } else if (level < 0.25) {
                     // Shadows — cyan
                     r = 0; g = 140; b = 180;
-                } else if (ire < 0.40) {
+                } else if (level < 0.40) {
                     // Low mid — teal
                     r = 0; g = 160; b = 100;
-                } else if (ire < 0.55) {
+                } else if (level < 0.55) {
                     // Mid — green (proper exposure)
                     r = 40; g = 180; b = 40;
-                } else if (ire < 0.68) {
+                } else if (level < 0.68) {
                     // Upper mid — yellow-green
                     r = 160; g = 180; b = 0;
-                } else if (ire < 0.80) {
+                } else if (level < 0.80) {
                     // Highlights — yellow
                     r = 220; g = 200; b = 0;
-                } else if (ire < 0.90) {
+                } else if (level < 0.90) {
                     // Hot highlights — orange
                     r = 240; g = 120; b = 0;
-                } else if (ire < 0.97) {
+                } else if (level < 0.97) {
                     // Near clipping — red
                     r = 230; g = 30; b = 30;
                 } else {
@@ -17036,17 +17187,18 @@ else:
         ctx.fillStyle = '#aaa'; ctx.font = '18px monospace';
         ctx.fillText('FALSE COLOR', w - 138, 22);
 
-        // IRE scale bar
+        // False-colour ramp bar. Named an "IRE scale" for no reason -- it carries
+        // no values at all, it is the legend for the colours above it.
         const barX = w - 14, barH = h - 20, barY = 18;
-        const ireColors = [
+        const falseColorRamp = [
             [80, 0, 120], [20, 40, 180], [0, 140, 180], [0, 160, 100],
             [40, 180, 40], [160, 180, 0], [220, 200, 0], [240, 120, 0],
             [230, 30, 30], [255, 50, 150]
         ];
-        const segH = barH / ireColors.length;
-        ireColors.forEach((c, i) => {
+        const segH = barH / falseColorRamp.length;
+        falseColorRamp.forEach((c, i) => {
             ctx.fillStyle = `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
-            ctx.fillRect(barX, barY + (ireColors.length - 1 - i) * segH, 10, segH);
+            ctx.fillRect(barX, barY + (falseColorRamp.length - 1 - i) * segH, 10, segH);
         });
     }
 
