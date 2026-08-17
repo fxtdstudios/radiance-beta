@@ -12,7 +12,7 @@ import comfy.sample
 import comfy.model_management
 import comfy.utils
 try:
-    from .tensor_contract import ensure_4d, ensure_5d
+    from ...tensor_contract import ensure_4d, ensure_5d
 except (ImportError, ValueError):
     from tensor_contract import ensure_4d, ensure_5d
 
@@ -25,7 +25,7 @@ except ImportError:
     _HAS_NESTED_TENSOR = False
 
 try:
-    from .sampler_utils import (
+    from ...sampler_utils import (
         DYNAMIC_GUIDANCE_EARLY_MULTIPLIER, DYNAMIC_GUIDANCE_LATE_MULTIPLIER, 
         DYNAMIC_GUIDANCE_EARLY_THRESHOLD, DYNAMIC_GUIDANCE_LATE_THRESHOLD, 
         DYNAMIC_GUIDANCE_RAMP_WIDTH, GUIDANCE_RESCALE_PHI, 
@@ -134,13 +134,29 @@ def _existing_cfg_function(model):
 
 ENERGY_MASK_KEY = "radiance_energy_mask"
 ENERGY_PRIORITY_KEY = "radiance_energy_priority"
+ENERGY_LAYERS_KEY = "radiance_energy_layers"
 
 
-def _find_energy_mask(positive) -> Tuple[Optional["torch.Tensor"], float]:
-    """The energy mask carried by a CONDITIONING list, or (None, 0.0).
+def _collect_energy_layers(positive) -> List[Tuple["torch.Tensor", float]]:
+    """Every energy layer carried by a CONDITIONING list, oldest first.
 
-    Written by RadianceEnergyMask. The first entry carrying the key wins, so
-    chaining two producers does not stack — documented on that node.
+    Written by RadianceEnergyMask. Layers stack: two of those nodes in series,
+    or two branches joined by Conditioning Combine, both yield two layers and
+    the sampler sums their contributions.
+
+    Two shapes have to be told apart, and the layer tuple's identity is what
+    does it. `attach_energy_mask` builds one `(mask, priority)` tuple per call
+    and stores that same object on every entry, so:
+
+      * one node fanned across four conditioning entries → the same layer seen
+        four times → one layer;
+      * two nodes combined → two distinct layers → both applied.
+
+    Identity survives the shallow `dict(meta)` copies ComfyUI's conditioning
+    helpers make. A node that deep-copied conditioning would defeat it, but
+    that would give the masks new tensors too, so the dedupe token —
+    `(id(mask), priority)` — degrades to "applied once", never to double
+    counting.
 
     Kept at module scope so the tests can exercise the real parser instead of
     re-implementing it: the original tests copied this loop into the test body
@@ -148,42 +164,73 @@ def _find_energy_mask(positive) -> Tuple[Optional["torch.Tensor"], float]:
     this file did.
     """
     if not isinstance(positive, list):
-        return None, 0.0
+        return []
+
+    layers: List[Tuple["torch.Tensor", float]] = []
+    seen = set()
+
+    def _add(mask, raw_priority):
+        if not isinstance(mask, torch.Tensor) or mask.numel() == 0:
+            logger.warning(
+                "[Energy Guidance] Ignoring energy layer: expected a non-empty tensor, got %r.",
+                type(mask).__name__,
+            )
+            return
+        try:
+            priority = float(raw_priority)
+        except (TypeError, ValueError):
+            logger.warning("[Energy Guidance] Non-numeric energy priority; defaulting to 1.0.")
+            priority = 1.0
+
+        token = (id(mask), priority)
+        if token in seen:
+            return
+        seen.add(token)
+        layers.append((mask.detach(), priority))
 
     for entry in positive:
         if not isinstance(entry, (tuple, list)) or len(entry) < 2:
             continue
         cond_dict = entry[1]
-        if not isinstance(cond_dict, dict) or ENERGY_MASK_KEY not in cond_dict:
+        if not isinstance(cond_dict, dict):
             continue
 
-        mask = cond_dict[ENERGY_MASK_KEY]
-        if not isinstance(mask, torch.Tensor) or mask.numel() == 0:
-            logger.warning(
-                "[Energy Guidance] Ignoring '%s': expected a non-empty tensor, got %r.",
-                ENERGY_MASK_KEY, type(mask).__name__,
-            )
+        stack = cond_dict.get(ENERGY_LAYERS_KEY)
+        if isinstance(stack, (list, tuple)) and stack:
+            for layer in stack:
+                if isinstance(layer, (tuple, list)) and len(layer) >= 2:
+                    _add(layer[0], layer[1])
+                else:
+                    logger.warning(
+                        "[Energy Guidance] Ignoring malformed energy layer %r.",
+                        type(layer).__name__,
+                    )
             continue
 
-        try:
-            priority = float(cond_dict.get(ENERGY_PRIORITY_KEY, 1.0))
-        except (TypeError, ValueError):
-            logger.warning("[Energy Guidance] Non-numeric energy priority; defaulting to 1.0.")
-            priority = 1.0
+        # Conditioning written by 3.3.0-beta, or by hand, carries only the
+        # singular keys.
+        if ENERGY_MASK_KEY in cond_dict:
+            _add(cond_dict[ENERGY_MASK_KEY], cond_dict.get(ENERGY_PRIORITY_KEY, 1.0))
 
-        return mask.detach(), priority
-
-    return None, 0.0
+    return layers
 
 
-def _make_energy_cfg_patch(mask, priority: float, existing_cfg_fn=None):
-    """Build the EPS sampler_cfg_function.
+def _make_energy_cfg_patch(layers, existing_cfg_fn=None):
+    """Build the EPS sampler_cfg_function from one or more energy layers.
 
-    Scales the guidance vector (cond − uncond) by (1 + priority·mask) inside
-    the mask, leaving unmasked regions at the sampler's own cfg, then hands
-    the modified args to whatever cfg function was already registered
-    (guidance rescale, SDR anchor) so the patches compose instead of
-    clobbering each other.
+    *layers* is a sequence of ``(mask, priority)`` pairs, as returned by
+    `_collect_energy_layers`.
+
+    Scales the guidance vector (cond − uncond) by ``1 + Σ priority_i · mask_i``,
+    leaving unmasked regions at the sampler's own cfg, then hands the modified
+    args to whatever cfg function was already registered (guidance rescale, SDR
+    anchor) so the patches compose instead of clobbering each other.
+
+    Summing is what makes chained Energy Mask nodes stack. It also means a
+    stack of negative priorities can drive the modifier below zero, which would
+    *invert* guidance rather than suppress it — a much louder artefact than the
+    user asked for — so the sum is floored at −1 before the +1, i.e. the
+    modifier is clamped to ``[0, ∞)``.
 
     Shape handling is deliberately rank-agnostic. The previous version
     unpacked `B, C, H_l, W_l = cond.shape`, which raises ValueError on the
@@ -192,13 +239,15 @@ def _make_energy_cfg_patch(mask, priority: float, existing_cfg_fn=None):
     a producer existed. It also called `mask.expand(B, ...)` on a mask whose
     batch was neither 1 nor B, which expand() cannot do.
     """
-    _eps_mask = mask.detach() if hasattr(mask, "detach") else mask
-    _eps_priority = float(priority)
-    # Resizing the mask is per-step work that only depends on the latent
-    # geometry, which never changes mid-sample. Cache it.
+    _eps_layers = [
+        (m.detach() if hasattr(m, "detach") else m, float(p)) for m, p in layers
+    ]
+    # Resizing the masks is per-step work that only depends on the latent
+    # geometry, which never changes mid-sample. Cache the summed field.
     _cache: Dict[Any, Any] = {}
 
-    def _aligned_mask(cond):
+    def _energy_field(cond):
+        """Σ priority_i · mask_i, resampled to the latent grid."""
         key = (tuple(cond.shape), str(cond.device), str(cond.dtype))
         cached = _cache.get(key)
         if cached is not None:
@@ -209,29 +258,37 @@ def _make_energy_cfg_patch(mask, priority: float, existing_cfg_fn=None):
         B = cond.shape[0]
         H_l, W_l = cond.shape[-2], cond.shape[-1]
 
-        m = _eps_mask.to(device=cond.device, dtype=cond.dtype)
-        # MASK is (H,W) or (B,H,W); a latent-shaped mask may arrive as
-        # (B,1,H,W) and a video mask as (B,1,T,H,W). Only the trailing two
-        # dims are spatial, so fold everything else into the batch axis.
-        m = m.reshape(-1, 1, m.shape[-2], m.shape[-1])
+        total = None
+        for mask, priority in _eps_layers:
+            m = mask.to(device=cond.device, dtype=cond.dtype)
+            # MASK is (H,W) or (B,H,W); a latent-shaped mask may arrive as
+            # (B,1,H,W) and a video mask as (B,1,T,H,W). Only the trailing two
+            # dims are spatial, so fold everything else into the batch axis.
+            m = m.reshape(-1, 1, m.shape[-2], m.shape[-1])
 
-        if m.shape[-2] != H_l or m.shape[-1] != W_l:
-            m = F.interpolate(m, size=(H_l, W_l), mode="bilinear", align_corners=False)
+            if m.shape[-2] != H_l or m.shape[-1] != W_l:
+                m = F.interpolate(m, size=(H_l, W_l), mode="bilinear", align_corners=False)
 
-        if m.shape[0] != B:
-            # expand() only broadcasts from 1. For any other mismatch (a
-            # 3-frame mask against a 4-latent batch) fall back to the first
-            # mask rather than raising in the middle of sampling.
-            m = m[:1].expand(B, -1, -1, -1)
+            if m.shape[0] != B:
+                # expand() only broadcasts from 1. For any other mismatch (a
+                # 3-frame mask against a 4-latent batch) fall back to the first
+                # mask rather than raising in the middle of sampling.
+                m = m[:1].expand(B, -1, -1, -1)
 
-        if cond.ndim > 4:
-            # (B,1,H,W) → (B,1,1,…,H,W) so the modifier broadcasts across the
-            # temporal axis as well as channels.
-            m = m.reshape(B, 1, *([1] * (cond.ndim - 4)), H_l, W_l)
+            if cond.ndim > 4:
+                # (B,1,H,W) → (B,1,1,…,H,W) so the modifier broadcasts across
+                # the temporal axis as well as channels.
+                m = m.reshape(B, 1, *([1] * (cond.ndim - 4)), H_l, W_l)
+
+            contribution = m * priority
+            total = contribution if total is None else total + contribution
+
+        if total is None:
+            total = torch.zeros((), device=cond.device, dtype=cond.dtype)
 
         _cache.clear()
-        _cache[key] = m
-        return m
+        _cache[key] = total
+        return total
 
     def _energy_prioritized_cfg_patch(args):
         cond = args["cond_denoised"]
@@ -245,7 +302,7 @@ def _make_energy_cfg_patch(mask, priority: float, existing_cfg_fn=None):
                 return existing_cfg_fn(args)
             return args["denoised"]
 
-        eps_modifier = 1.0 + _eps_priority * _aligned_mask(cond)
+        eps_modifier = (1.0 + _energy_field(cond)).clamp_min(0.0)
         cond_eps = uncond + (cond - uncond) * eps_modifier
 
         # Update args so downstream cfg functions (e.g. rescale) inherit the
@@ -1289,18 +1346,26 @@ class RadianceSamplerPro:
         # The producer is RadianceEnergyMask (nodes/generate/energy.py). Before
         # v3.2.1 there was no producer at all, so this branch was unreachable
         # from any graph (#40).
-        energy_mask, energy_priority = _find_energy_mask(positive)
+        energy_layers = _collect_energy_layers(positive)
+        active_layers = [(m, p) for m, p in energy_layers if p != 0.0]
 
-        if energy_mask is not None and energy_priority != 0.0:
+        if active_layers:
             # See the note above: read model_options, not a nonexistent attribute.
             existing_cfg_fn = _existing_cfg_function(model)
 
             model.set_model_sampler_cfg_function(
-                _make_energy_cfg_patch(energy_mask, energy_priority, existing_cfg_fn)
+                _make_energy_cfg_patch(active_layers, existing_cfg_fn)
             )
-            logger.info(f"[Energy Guidance] Registered Energy-Prioritized Sampling (EPS) patch (priority={energy_priority:.2f})")
-        elif energy_mask is not None:
-            logger.info("[Energy Guidance] Energy mask attached with priority=0 — EPS is a no-op, not registering a patch.")
+            logger.info(
+                "[Energy Guidance] Registered Energy-Prioritized Sampling (EPS) patch "
+                "(%d layer(s), priorities=%s)",
+                len(active_layers), ", ".join(f"{p:.2f}" for _, p in active_layers),
+            )
+        elif energy_layers:
+            logger.info(
+                "[Energy Guidance] %d energy mask(s) attached, all at priority=0 — "
+                "EPS is a no-op, not registering a patch.", len(energy_layers),
+            )
         if SamplerMode.is_phase_shift(sampler_mode) and detected_type in VIDEO_MODEL_TYPES:
             logger.warning(
                 f"[v3.0.0] Phase-Shift mode is not supported for video model '{detected_type}' — "

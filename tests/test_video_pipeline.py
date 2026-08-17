@@ -1,7 +1,7 @@
 """
 tests/test_video_pipeline.py
 Unit tests for the Radiance v3 Video-First Pipeline modules:
-  • nodes_scene_cut.py  — detect_cuts(), SceneCutDetect, Split, Router
+  • radiance/nodes/ai/scene_cut.py  — detect_cuts(), SceneCutDetect, Split, Router
 """
 
 import sys
@@ -42,7 +42,7 @@ def _import(mod_name):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# nodes_scene_cut.py  — detect_cuts (pure numpy, no torch required)
+# radiance/nodes/ai/scene_cut.py  — detect_cuts (pure numpy, no torch required)
 # ═════════════════════════════════════════════════════════════════════════════
 
 class TestDetectCuts:
@@ -50,7 +50,7 @@ class TestDetectCuts:
     """Test the core detect_cuts() algorithm directly."""
 
     def setup_method(self):
-        self.fn = _import("nodes_scene_cut").detect_cuts
+        self.fn = _import("radiance.nodes.ai.scene_cut").detect_cuts
 
     def _make_shots(self, shot_lengths, h=32, w=32):
         """Build a synthetic batch with hard cuts between shots."""
@@ -113,7 +113,7 @@ class TestDetectCuts:
 class TestSceneCutDetectNode:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Pipeline"
     def setup_method(self):
-        self.mod = _import("nodes_scene_cut")
+        self.mod = _import("radiance.nodes.ai.scene_cut")
         self.cls = self.mod.RadianceSceneCutDetect
 
     def test_registered(self):
@@ -124,7 +124,7 @@ class TestSceneCutDetectNode:
         import torch
         t = torch.from_numpy(frames)
         cut_data, shot_count, plot = self.cls().detect(
-            t, distance_threshold=0.3, min_shot_frames=8, method="combined"
+            t, cut_confidence=0.5, min_shot_frames=8, method="combined"
         )
         assert isinstance(cut_data, str)
         assert isinstance(shot_count, int)
@@ -148,7 +148,7 @@ class TestSceneCutDetectNode:
 class TestSceneCutSplitNode:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Pipeline"
     def setup_method(self):
-        self.mod = _import("nodes_scene_cut")
+        self.mod = _import("radiance.nodes.ai.scene_cut")
         self.split = self.mod.RadianceSceneCutSplit
         self.detect = self.mod.RadianceSceneCutDetect
 
@@ -183,7 +183,7 @@ class TestSceneCutSplitNode:
 class TestShotGradeRouter:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Pipeline"
     def setup_method(self):
-        self.cls = _import("nodes_scene_cut").RadianceShotGradeRouter
+        self.cls = _import("radiance.nodes.ai.scene_cut").RadianceShotGradeRouter
 
     def test_returns_defaults_for_empty_table(self):
         ev, temp, sat, con, idx = self.cls().route(0, "[]")
@@ -224,13 +224,13 @@ class TestAllModulesRegistered:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Pipeline"
 
     def test_scene_cut_nodes_registered(self):
-        mod = _import("nodes_scene_cut")
+        mod = _import("radiance.nodes.ai.scene_cut")
         for key in ("RadianceSceneCutDetect", "RadianceSceneCutSplit",
                     "RadianceShotGradeRouter"):
             assert key in mod.NODE_CLASS_MAPPINGS, f"{key} missing"
 
     def test_all_display_names_use_radiance_prefix(self):
-        for mod_name in ("nodes_scene_cut",):
+        for mod_name in ("radiance.nodes.ai.scene_cut",):
             mod = _import(mod_name)
             for key, name in mod.NODE_DISPLAY_NAME_MAPPINGS.items():
                 assert name.startswith("◎"), \

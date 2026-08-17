@@ -323,25 +323,22 @@ _comfy_utils.ProgressBar = lambda n: types.SimpleNamespace(
 if "folder_paths" not in sys.modules:
     sys.modules["folder_paths"] = types.ModuleType("folder_paths")
 
-# ── Load nodes_sampler.py ─────────────────────────────────────────────────────
-import importlib.util as _ilu
+# ── Load the sampler ─────────────────────────────────────────────────────────
+#
+# This used to load the module from its file path under the bare name
+# "nodes_sampler", giving the process a second, independent copy of a module the
+# package also imports — the same double-import the aiohttp route guards exist
+# to survive. It also swallowed every exception from `exec_module`, so an import
+# error surfaced later as `AttributeError: module 'nodes_sampler' has no
+# attribute 'RadianceSamplerPro'` with the real cause discarded.
 
 # This module already gates its torch-dependent tests correctly (they skip
 # cleanly against conftest's stub), so opt out of the automatic module-level
 # skip and keep the rest of the file running on the no-torch CI matrix.
 RADIANCE_TORCH_GATED = True
 
-_nspec = _ilu.spec_from_file_location("nodes_sampler", os.path.join(_ROOT, "nodes_sampler.py"))
-_ns_mod = _ilu.module_from_spec(_nspec)
-sys.modules["nodes_sampler"] = _ns_mod
-try:
-    _nspec.loader.exec_module(_ns_mod)
-except Exception:
-    pass   # some comfy internals may fail — we only need the classes we test
-
-RadianceSamplerPro = _ns_mod.RadianceSamplerPro
-# ALBABIT-FIX: _build_latent_meta is no longer re-exported via nodes_sampler — import from sampler_utils
-_build_latent_meta = sys.modules["sampler_utils"]._build_latent_meta
+from radiance.nodes.generate.sampler import RadianceSamplerPro  # noqa: E402
+from radiance.sampler_utils import _build_latent_meta  # noqa: E402
 
 
 # ── Numpy-based sigmas helper ─────────────────────────────────────────────────

@@ -43,24 +43,48 @@ logger = logging.getLogger("radiance.energy")
 ENERGY_MASK_KEY = "radiance_energy_mask"
 ENERGY_PRIORITY_KEY = "radiance_energy_priority"
 
+#: Every energy layer applied so far, oldest first, as ``(mask, priority)``.
+#: The two singular keys above are still written — they carry the *last*
+#: layer — so anything that learned to read them during 3.3.0 beta keeps
+#: working. The sampler reads this key.
+ENERGY_LAYERS_KEY = "radiance_energy_layers"
+
 
 def attach_energy_mask(
     conditioning: list,
     mask: torch.Tensor,
     priority: float,
 ) -> list:
-    """Return a copy of *conditioning* with the EPS keys attached.
+    """Return a copy of *conditioning* with one more energy layer attached.
 
-    Every entry gets the keys, not just the first: ComfyUI nodes downstream
-    are free to reorder or drop entries, and the sampler stops at the first
-    entry that carries the key. Input dicts are copied, never mutated — a
-    conditioning list is frequently fanned out to several branches of a graph
-    and mutating it in place would leak EPS into all of them.
+    Layers accumulate. Chaining two of these nodes used to be a silent data
+    loss: the second call overwrote ``ENERGY_MASK_KEY`` on every entry, so the
+    downstream node won and the upstream mask vanished without a log line.
+    (The node's own docstring claimed the *upstream* one won, which was true
+    only for the other chaining shape — two branches joined by Conditioning
+    Combine, where the sampler stopped at the first entry carrying the key.
+    Both shapes now stack.)
+
+    Every entry gets the layer, not just the first: ComfyUI nodes downstream
+    are free to reorder or drop entries. The same layer tuple object is shared
+    by every entry, which is how the sampler tells "one node fanned across
+    four entries" (one layer) from "two nodes combined" (two layers).
+
+    Input dicts are copied, never mutated — a conditioning list is frequently
+    fanned out to several branches of a graph and mutating it in place would
+    leak EPS into all of them.
     """
+    layer = (mask, float(priority))
+
     out = []
     for entry in conditioning:
         tensor, meta = entry[0], entry[1]
         new_meta = dict(meta)
+
+        existing = new_meta.get(ENERGY_LAYERS_KEY)
+        prior = tuple(existing) if isinstance(existing, (list, tuple)) else ()
+        new_meta[ENERGY_LAYERS_KEY] = prior + (layer,)
+
         new_meta[ENERGY_MASK_KEY] = mask
         new_meta[ENERGY_PRIORITY_KEY] = float(priority)
         out.append((tensor, new_meta))
@@ -124,9 +148,12 @@ class RadianceEnergyMask:
     Negative priority is allowed and *suppresses* guidance in the mask, which
     is the cheapest way to keep a background soft while a subject stays sharp.
 
-    Only the first EPS-carrying entry in the conditioning list is honoured by
-    the sampler, so chaining two of these nodes does not stack — the upstream
-    one wins. Use one node and one combined mask.
+    Chaining stacks. Two of these in series — or two branches joined by
+    Conditioning Combine — add their contributions, so the effective guidance
+    is ``cfg × (1 + Σ priority_i · mask_i)``. Layering a broad +0.2 over the
+    whole subject and a tight +0.6 on the practicals does what it looks like
+    it does. The combined modifier is floored at 0 so a stack of negative
+    priorities suppresses guidance completely rather than inverting it.
     """
 
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Generate"
@@ -152,7 +179,8 @@ class RadianceEnergyMask:
                     "default": 0.5, "min": -1.0, "max": 4.0, "step": 0.05,
                     "tooltip": (
                         "Local guidance bonus inside the mask. Effective CFG there is "
-                        "cfg × (1 + priority). 0 disables EPS; negative softens the region."
+                        "cfg × (1 + priority). 0 disables EPS; negative softens the region. "
+                        "Chained Energy Mask nodes stack, so priorities add where masks overlap."
                     ),
                 }),
                 "invert": ("BOOLEAN", {
@@ -217,7 +245,16 @@ class RadianceEnergyMask:
                 float(priority), coverage * 100.0, tuple(m.shape),
             )
 
-        return (attach_energy_mask(conditioning, m, priority), m)
+        out = attach_energy_mask(conditioning, m, priority)
+
+        depth = len(out[0][1].get(ENERGY_LAYERS_KEY, ()))
+        if depth > 1:
+            logger.info(
+                "[Energy Mask] stacking onto %d existing layer(s); the sampler will "
+                "sum priority × mask across all %d.", depth - 1, depth,
+            )
+
+        return (out, m)
 
 
 # ==============================================================================

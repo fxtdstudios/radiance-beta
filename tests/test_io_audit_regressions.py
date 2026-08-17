@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
-nodes_io = importlib.import_module("radiance.nodes_io")
+nodes_io = importlib.import_module("radiance.nodes.io.write")
 
 
 class TestTiffDepthHonesty:

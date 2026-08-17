@@ -7,7 +7,7 @@ from radiance.nodes.generate.prompt import (
     _detect_arch_from_clip,
     build_cinematic_prompt_v3,
 )
-from radiance.nodes_loader import RadianceUnifiedLoader
+from radiance.nodes.generate.loader import RadianceUnifiedLoader
 
 
 class FakeClip:

@@ -35,11 +35,15 @@ logger = setup_radiance_logging()
 
 
 def _load_comfyui_nodes() -> NodeLoadResult:
-    """Load the organized node catalog and optional viewer extension."""
+    """Load the organized node catalog."""
 
+    # One entry point, not two. `.nodes_radiance_viewer` was a second spec
+    # publishing RadianceViewer alongside `radiance.nodes.monitor` — the one
+    # genuine dual-publish the legacy layer had, and a live instance of the
+    # double import that `_radiance_route_once` exists to survive. The monitor
+    # group publishes the viewer; nothing else needs to.
     entrypoint_modules = (
         NodeModuleSpec(".nodes", package=__name__, required=True),
-        NodeModuleSpec(".nodes_radiance_viewer", package=__name__),
     )
     result = load_node_mappings(
         entrypoint_modules,

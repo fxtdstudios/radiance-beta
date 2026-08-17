@@ -45,7 +45,7 @@ import numpy as np
 import torch
 
 try:
-    from .config.constants import VERSION as _RADIANCE_VERSION
+    from ...config.constants import VERSION as _RADIANCE_VERSION
 except Exception:  # keep the writer importable even if constants move
     _RADIANCE_VERSION = "3.1.1"
 
@@ -70,12 +70,12 @@ try:
 except ImportError:
     _HAS_OIIO = False
 
-from . import color_utils
-from .core import formats as _formats
-from .core.video import VIDEO_EXTENSIONS as _VIDEO_EXTENSIONS
+from ... import color_utils
+from ...core import formats as _formats
+from ...core.video import VIDEO_EXTENSIONS as _VIDEO_EXTENSIONS
 
 try:
-    from .hdr.io import write_exr_robust, write_exr_multipart
+    from ...hdr.io import write_exr_robust, write_exr_multipart
 except ImportError:
     try:
         from hdr.io import write_exr_robust, write_exr_multipart  # type: ignore[import]
@@ -84,7 +84,7 @@ except ImportError:
         write_exr_multipart = None   # type: ignore[assignment]
 
 try:
-    from .path_utils import get_safe_output_dir, strip_path_quotes
+    from ...path_utils import get_safe_output_dir, strip_path_quotes
 except ImportError:
     try:
         from path_utils import get_safe_output_dir, strip_path_quotes  # type: ignore[import]
@@ -265,21 +265,21 @@ def _tensor_to_np(t: torch.Tensor) -> np.ndarray:
 
 def _ffmpeg_bin() -> str:
     """ffmpeg path, PATH first then the imageio-ffmpeg bundle."""
-    from .core.ffmpeg import require_ffmpeg
+    from ...core.ffmpeg import require_ffmpeg
     return require_ffmpeg()
 
 
 def _ffprobe_bin() -> str:
     """ffprobe path. imageio-ffmpeg does not ship ffprobe, so this can be
     absent even when ffmpeg is present; callers fall back to defaults."""
-    from .core.ffmpeg import ffprobe_exe
+    from ...core.ffmpeg import ffprobe_exe
     return ffprobe_exe() or "ffprobe"
 
 
 def _ffmpeg_ok() -> bool:
     # shutil.which alone missed the ffmpeg that imageio-ffmpeg ships, which
     # is the only one most Windows installs have.
-    from .core.ffmpeg import ffmpeg_available
+    from ...core.ffmpeg import ffmpeg_available
     return ffmpeg_available()
 
 
@@ -532,7 +532,7 @@ def _read_exr_single(
     so an overscan render came back offset and at the wrong resolution with no
     warning.
     """
-    from .core import exr as _exr
+    from ...core import exr as _exr
 
     rgb, alpha, _info, _name = _exr.read_layer(path, layer, raw=raw)
     mask = _np_to_tensor(alpha) if alpha is not None else None
@@ -541,7 +541,7 @@ def _read_exr_single(
 
 def _read_exr_with_info(path: str, layer: Optional[str] = None, raw: bool = False):
     """As above, but also hands back the probe so the node can report it."""
-    from .core import exr as _exr
+    from ...core import exr as _exr
 
     rgb, alpha, info, name = _exr.read_layer(path, layer, raw=raw)
     mask = _np_to_tensor(alpha) if alpha is not None else None
@@ -789,7 +789,7 @@ def _read_video(
     (images, alpha, fps, width, height, frame_count, metadata_json)
         ``alpha`` is None unless the file actually carries an alpha channel.
     """
-    from .core import video as _video
+    from ...core import video as _video
 
     info = _video.probe(path)
 
@@ -861,7 +861,7 @@ def _video_frame_range(path: str, start_frame: int, end_frame: int) -> Tuple[int
     touched this widget", and said out loud. A start inside the clip is
     honoured, because then it is a deliberate trim.
     """
-    from .core import video as _video
+    from ...core import video as _video
 
     start = max(int(start_frame), 0)
     end = max(int(end_frame), 0)
@@ -905,7 +905,7 @@ def _resolve_video_colorspace(requested: str, info, path: str) -> str:
     through unchanged, but now says that too, because a silent pass-through is
     exactly how the mistake goes unnoticed.
     """
-    from .core import video as _video
+    from ...core import video as _video
 
     if requested != "Auto / Linear (pass-through)":
         tagged = _video.suggest_transfer(info)
@@ -992,7 +992,7 @@ def _load_video_to_numpy(
     DCC handoff paths that expect three channels; pass ``alpha=True`` to keep
     the fourth when the file has one.
     """
-    from .core import video as _video
+    from ...core import video as _video
 
     arr, _info = _video.decode(path, count=max(int(max_frames), 0), alpha=alpha)
     return arr
@@ -2750,7 +2750,7 @@ def register_read_routes():
         if os.path.splitext(path)[1].lower() not in _EXR_EXT:
             return web.json_response({"layers": [], "reason": "not an EXR"})
         try:
-            from .core import exr as _exr
+            from ...core import exr as _exr
 
             return web.json_response({"layers": ["auto"] + _exr.layer_choices(path)})
         except Exception as exc:
@@ -2926,7 +2926,7 @@ def _probe_for_ui(path: str) -> Dict[str, Any]:
     out: Dict[str, Any] = {"kind": kind, "name": os.path.basename(path)}
 
     if kind == "video":
-        from .core import video as _video
+        from ...core import video as _video
 
         info = _video.probe(path)
         out.update(info.as_dict())
@@ -2934,7 +2934,7 @@ def _probe_for_ui(path: str) -> Dict[str, Any]:
         return out
 
     if kind == "exr":
-        from .core import exr as _exr
+        from ...core import exr as _exr
 
         info = _exr.probe(path)
         out.update({
