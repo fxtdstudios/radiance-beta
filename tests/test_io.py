@@ -48,19 +48,19 @@ def _import_path_utils():
 
 
 def _import_io():
-    if "radiance.nodes_io" in sys.modules:
-        return sys.modules["radiance.nodes_io"]
+    if "radiance.nodes.io.write" in sys.modules:
+        return sys.modules["radiance.nodes.io.write"]
     if "nodes_io" in sys.modules:
-        return sys.modules["nodes_io"]
+        return sys.modules["radiance.nodes.io.write"]
     root = __import__("pathlib").Path(__file__).parent.parent
     parent = str(root.parent)
     if parent not in sys.path:
         sys.path.insert(0, parent)
     try:
-        return importlib.import_module("radiance.nodes_io")
+        return importlib.import_module("radiance.nodes.io.write")
     except ImportError:
         sys.path.insert(0, str(root))
-        return importlib.import_module("nodes_io")
+        return importlib.import_module("radiance.nodes.io.write")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

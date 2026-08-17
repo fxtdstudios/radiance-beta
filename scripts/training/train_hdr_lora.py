@@ -715,10 +715,7 @@ def train(
     _radiance_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     if _radiance_dir not in sys.path:
         sys.path.insert(0, _radiance_dir)
-    try:
-        from .nodes_hdr_smart import RADIANCE_MODEL_PRESETS, _resolve_model
-    except ImportError:
-        from nodes_hdr_smart import RADIANCE_MODEL_PRESETS, _resolve_model
+    from radiance.nodes.hdr.smart import RADIANCE_MODEL_PRESETS, _resolve_model
 
     preset = _resolve_model(model_name) or RADIANCE_MODEL_PRESETS["ltx-video"]
     compression_ratio = preset["compression_ratio"]
@@ -1071,10 +1068,10 @@ if __name__ == "__main__":
     logger.info("[Main] Radiance dir  : %s", _radiance_dir)
 
     try:
-        from nodes_hdr_smart import RADIANCE_MODEL_PRESETS
+        from radiance.nodes.hdr.smart import RADIANCE_MODEL_PRESETS
     except ImportError as _e:
         raise ImportError(
-            f"Cannot import nodes_hdr_smart from {_radiance_dir}. "
+            f"Cannot import radiance.nodes.hdr.smart from {_radiance_dir}. "
             f"Ensure the radiance custom_node directory is correct."
         ) from _e
 

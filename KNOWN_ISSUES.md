@@ -6,27 +6,23 @@ clear backlog.
 
 ## Architecture / tech debt
 
-- **Dual-module structure (~39 duplicate node keys).** Many nodes are defined in
-  both a legacy top-level `nodes_*.py` and the organized `nodes/<group>/` package.
-  Only one wins at registration (no duplicate menu entries), but maintaining two
-  source files per node is the root cause of the route-registration issue below.
-  *Planned fix:* retire the legacy shims, keep the organized packages. Tracked
-  in the README's Status & to-do list.
+- **Route registration keeps an idempotency guard.** aiohttp routes register
+  through `_radiance_route_once`, which records what it has already registered
+  on the PromptServer singleton, so a module imported twice cannot crash
+  startup with "method HEAD is already registered". The dual-module structure
+  that made this necessary is gone — the legacy `nodes_*.py` layer was removed
+  in 3.3.0 and there is one entry point now — but ComfyUI puts `custom_nodes/`
+  on `sys.path`, so a user script doing `import viewer` can still produce a
+  second copy of a module. One file (`nodes/monitor/viewer.py`) carries the
+  guard; two more read the same registry. Kept as cheap insurance, no longer a
+  symptom of anything.
 
-- **Route registration depends on idempotency guards.** Because the package can be
-  imported under two names, aiohttp routes are guarded against double-registration
-  (`_radiance_registered_routes` on the PromptServer singleton). This prevents the
-  "method HEAD is already registered" startup crash, but it is a guard around the
-  dual-module symptom, not a structural fix. Removed once Phase 4 lands.
-
-- **Monolithic files.** `nodes/monitor/viewer.py` (~1k lines, dynamic
-  `globals().update()` injection), `nodes_io.py`, and `hdr/vae.py` carry several
-  responsibilities and are the hardest files to change safely. *Planned fix:*
-  Phase 1 of the refactor plan.
-
-- **Heuristic menu classification.** `nodes/branding.py` keyword-classifies nodes
-  into menu sections; edge cases can misfile. Mitigated by `SECTION_OVERRIDES`.
-  *Planned fix:* Phase 3 — explicit per-node section declaration.
+- **Monolithic files.** `hdr/vae.py` (3324 lines), `nodes/io/write.py` (2972)
+  and `nodes/monitor/viewer.py` (1220, with dynamic `globals().update()`
+  injection) carry several responsibilities each and are the hardest files to
+  change safely. The `nodes/io/write.py` split is also what unblocks
+  `delivery/handler.py`, which still reaches up into the node layer for
+  `RadianceWrite`. Tracked in the README's Status & to-do list.
 
 - **RUDRA video checkpoints trained on stills (wan / ltx-video / hunyuanvideo).**
   `scripts/training/dataset_hdr.py` pads every video model to T=1 before VAE
@@ -49,6 +45,19 @@ clear backlog.
 
 - **Naming overlap:** `Grade` / `Grade Apply` / `Apply Grade Info` read similarly;
   to be clarified during the Color cleanup.
+
+- **Scene-cut `edge` method is weak on soft and grainy footage.** It compares
+  gradient magnitudes, so it cannot see a cut between two frames that both lack
+  edges — a soft gradient cutting to a different soft gradient, or black
+  cutting to white — and heavy grain still moves it more than a subtle cut
+  does, because a gradient operator is a high-pass filter and grain is
+  high-frequency. The 5 px pre-blur reduces that but does not remove it. This
+  is why `combined` is the default and is weighted 60/40 toward the histogram.
+  Use `histogram` alone on soft material; use `edge` alone only for the case
+  the histogram cannot see — the palette held, the framing changed. *Planned
+  fix:* none scheduled. The two methods cover each other's blind spots, and a
+  metric that handled both would be a different detector — feature matching or
+  a learned embedding — not a tuned constant.
 
 ## Environment notes (not bugs)
 

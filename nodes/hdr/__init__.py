@@ -40,6 +40,7 @@ from radiance.nodes.hdr.tonemap import (
     HDRExpandDynamicRange,
     HDRToneMap,
 )
+from radiance.nodes.aggregate import fold_in_module_nodes
 logger = logging.getLogger("radiance.nodes.hdr")
 
 NODE_CLASS_MAPPINGS = {
@@ -85,5 +86,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceRelightEngine": "◎ Relight Engine",
     "RadianceHDRLatentEncoder": "◎ HDR Latent Encoder",
 }
+
+# Publishing is the default: sweep this package for nodes its leaf modules
+# declare but the mapping above does not list. See nodes/aggregate.py — this is
+# what stopped seventeen finished nodes from ever reaching the menu.
+fold_in_module_nodes(__name__, NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS, logger)
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

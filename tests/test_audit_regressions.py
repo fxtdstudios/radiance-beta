@@ -145,7 +145,7 @@ def test_tile_feather_ramp_is_nonzero_at_image_border():
 # 8x8 black image by a blanket except.
 
 def test_skip_does_not_retain_missing_frame_slots(tmp_path):
-    from radiance.nodes_io import _resolve_sequence_paths
+    from radiance.nodes.io.write import _resolve_sequence_paths
 
     for f in (1001, 1002, 1005):
         (tmp_path / f"plate.{f:04d}.exr").write_bytes(b"")
@@ -159,7 +159,7 @@ def test_skip_does_not_retain_missing_frame_slots(tmp_path):
 
 def test_open_ended_range_does_not_explode(tmp_path):
     """end_frame=0 means 'read all'; it used to expand to ~99k phantom slots."""
-    from radiance.nodes_io import _resolve_sequence_paths
+    from radiance.nodes.io.write import _resolve_sequence_paths
 
     for f in (1001, 1002, 1003):
         (tmp_path / f"plate.{f:04d}.exr").write_bytes(b"")
@@ -172,7 +172,7 @@ def test_open_ended_range_does_not_explode(tmp_path):
 
 def test_black_mode_still_reserves_slots(tmp_path):
     """The other branch must keep working: Black fills gaps deliberately."""
-    from radiance.nodes_io import _resolve_sequence_paths
+    from radiance.nodes.io.write import _resolve_sequence_paths
 
     for f in (1001, 1003):
         (tmp_path / f"plate.{f:04d}.exr").write_bytes(b"")
@@ -191,7 +191,7 @@ def test_black_mode_still_reserves_slots(tmp_path):
 def test_delivery_format_map_targets_real_write_formats():
     pytest.importorskip("aiohttp")
     from radiance.delivery.handler import _UI_TO_WRITE_FORMAT
-    from radiance.nodes_io import WRITE_FORMATS
+    from radiance.nodes.io.write import WRITE_FORMATS
 
     for ui, mapped in _UI_TO_WRITE_FORMAT.items():
         assert mapped in WRITE_FORMATS, f"{ui!r} maps to unknown format {mapped!r}"
@@ -200,7 +200,7 @@ def test_delivery_format_map_targets_real_write_formats():
 def test_delivery_colorspace_map_targets_real_colorspaces():
     pytest.importorskip("aiohttp")
     from radiance.delivery.handler import _UI_TO_WRITE_COLORSPACE
-    from radiance.nodes_io import OUTPUT_COLOR_SPACES
+    from radiance.nodes.io.write import OUTPUT_COLOR_SPACES
 
     for ui, mapped in _UI_TO_WRITE_COLORSPACE.items():
         assert mapped in OUTPUT_COLOR_SPACES, f"{ui!r} maps to unknown space {mapped!r}"
@@ -220,7 +220,7 @@ def test_write_kwargs_match_writer_signature():
     """Pin the handler's call against RadianceWrite.write's real parameters."""
     pytest.importorskip("aiohttp")
     import inspect
-    from radiance.nodes_io import RadianceWrite
+    from radiance.nodes.io.write import RadianceWrite
 
     params = set(inspect.signature(RadianceWrite.write).parameters)
     used = {"image", "output_path", "format", "filename",

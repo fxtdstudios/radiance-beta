@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/version-3.3.0-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
-[![Nodes](https://img.shields.io/badge/nodes-111-c8a96e?style=for-the-badge)](#node-map)
+[![Nodes](https://img.shields.io/badge/nodes-131-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
 [![Hugging Face](https://img.shields.io/badge/Hugging_Face-RUDRA_models-ffd21e?style=for-the-badge)](https://huggingface.co/fxtdstudios/RUDRA)
 
@@ -106,7 +106,7 @@ pip install -r requirements_mac_silicon.txt
 
 ### Verify
 
-Start ComfyUI and look for `Radiance: successfully loaded 111 nodes` in the log.
+Start ComfyUI and look for `Radiance: successfully loaded 131 nodes` in the log.
 A lower count means a node module failed to import — usually a missing optional
 dependency; the Environment Guard table printed at startup shows which.
 
@@ -228,7 +228,7 @@ FXTD STUDIOS/Radiance
 └─ Pipeline
 ```
 
-Radiance provides **111 nodes** (plus any Gizmos you create). Some nodes depend on optional packages and your ComfyUI environment.
+Radiance provides **131 nodes** (plus any Gizmos you create). Some nodes depend on optional packages and your ComfyUI environment.
 
 Node names follow standard compositing vocabulary under the **Radiance** menu — `Grade`, `CDL`, `OCIO ColorSpace`, `Roto`, `Defocus`, `Viewer`, `Read`/`Write` — so they read the way they do in Nuke or Flame. AI and generation nodes keep a `Radiance` prefix (`Radiance Sampler`, `Radiance VAE Decode`) to mark the diffusion layer. You can still find any node by typing "radiance" in the search.
 
@@ -328,28 +328,17 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 
 ### Structural debt
 
-- [ ] **Retire the legacy `nodes_*.py` layer.** Measured 2026-08-16, and the
-      earlier "~39 keys defined twice" was wrong: of 46 root modules, **34 are
-      already pure re-export shims** and only **12 still publish nodes of their
-      own** — 34 keys, of which exactly **one** (`RadianceViewer`) is genuinely
-      dual-published. So this is a migration of twelve named files, not a
-      hunt for duplicates: `nodes_cdl` (3), `nodes_colorscience` (4),
-      `nodes_curves` (2), `nodes_grade` (3), `nodes_io` (5), `nodes_loader` (6),
-      `nodes_ocio` (1), `nodes_qc` (2), `nodes_radiance_viewer` (1),
-      `nodes_realtime_preview` (5), `nodes_sampler` (1), `nodes_workspace` (1).
-      Seven modules carry aiohttp route-registration guards because of it.
-- [ ] **Split the monoliths** — `hdr/vae.py` (3324 lines), `nodes_io.py`
-      (2972), `nodes/monitor/viewer.py` (1220).
-- [ ] **`delivery/handler.py` imports node classes**, inverting the library →
-      UI layering. Bigger than it looks: `RadianceWrite.write` is 118 lines
-      depending on module-level helpers inside `nodes_io.py`, and
-      `radiance.image` is replaced by a stub in `tests/conftest.py`, so this
-      untangles as part of splitting the monoliths rather than on its own.
-- [ ] Decide whether chained Energy Mask nodes should stack. Today the first one
-      wins and the second is silently ignored.
-- [ ] `histogram` and `edge` scene-cut methods run on different score scales,
-      so one threshold widget cannot mean the same thing for both. Documented,
-      not yet unified.
+- [ ] **Split the monoliths** — `hdr/vae.py` (3324 lines),
+      `nodes/io/write.py` (2972), `nodes/monitor/viewer.py` (1220). The middle
+      one is the only thing still holding the item below open.
+- [ ] **`delivery/handler.py` still imports `RadianceWrite`.** The upscale half
+      of this is closed — the handler calls `radiance.image.upscale` directly
+      now, and the stated reason it could not (a `tests/conftest.py` stub that
+      shadowed the whole `radiance.image` package rather than just `defects`)
+      turned out to be a fixable stub, not a fact about the code. What is left
+      is the writer: `RadianceWrite.write` is 118 lines leaning on module-level
+      helpers in the same 2972-line file, so it comes out with that split
+      rather than before it.
 
 ### Done and verified
 
@@ -363,10 +352,17 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 - [x] Energy-Prioritized Sampling is reachable from a graph (#40) and no longer
       crashes on video latents.
 - [x] Nodes no longer write into the ComfyUI install directory.
-- [x] Scene-cut thresholds are absolute, so the same value means the same thing
-      on every clip and cut-free footage reports no cuts. The widget was
-      renamed to `distance_threshold` so a saved value cannot be silently
-      reinterpreted under the new meaning.
+- [x] **Scene-cut detection reports one calibrated 0–1 confidence, whichever
+      method you pick.** Unifying the two scales turned up the larger defect
+      underneath: `edge` was an *absolute* difference of gradient magnitudes,
+      so it tracked the footage's own contrast rather than the cut — the same
+      cut graded two stops down scored a quarter as high (0.0369 → 0.0092),
+      and grain on a detailed frame outscored a real cut in soft content. No
+      threshold constant could have fixed that, so it is a relative
+      (Bray–Curtis) distance now, with a 5 px pre-blur so a high-pass metric
+      stops measuring grain. `combined` is finally a real 60/40 blend instead
+      of a sum of incompatible units. Widget renamed to `cut_confidence`, and
+      `KNOWN_ISSUES.md` records what the edge method still cannot see.
 - [x] Tier-3 upscale honours `scale` — 2x no longer returns the top-left
       quarter of a 4x render.
 - [x] Optical flow is pyramidal: 1–5 px displacements recover to within 10%,
@@ -388,17 +384,47 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
       held it at ~18 nits everywhere (~0.85 stop bright at SDR). HLG keeps its
       BT.2408 anchor, which is a different and equally deliberate reference.
 - [x] Menu placement is declared per node, not guessed. `NODE_SECTIONS` covers
-      all 111; the keyword classifier is a warning-only fallback, and a test
+      all 131; the keyword classifier is a warning-only fallback, and a test
       fails if a registered node is missing from the table.
+- [x] **The legacy `nodes_*.py` layer is gone.** Forty pure re-export shims
+      deleted; the six modules that were still the real home of their code —
+      `nodes_io`, `nodes_sampler`, `nodes_workspace`, `nodes_realtime_preview`,
+      `nodes_loader`, `nodes_gizmo` — moved into `nodes/`, so the organized
+      package no longer imports *backwards* into the layer it was meant to
+      replace. `RadianceViewer`, the one genuinely dual-published node, now has
+      a single entry point. Nothing in the catalog moved: 111 keys in, 111 keys
+      out, verified key-by-key against a pre-refactor snapshot.
+- [x] **Twenty finished nodes published that had never appeared in anyone's
+      menu.** Each group's `__init__.py` hand-copied a selection of its
+      modules' node keys, and whatever nobody remembered to copy did not exist
+      as far as ComfyUI was concerned — the same defect as #40 and as
+      `RadianceGradeApply`, at scale. Found by widening the source scan once
+      the root layer stopped hiding it. `nodes/aggregate.py` inverts the
+      default: writing the node publishes it, and withholding one now requires
+      a named `WITHHELD_NODES` entry that a test reads. Catalog 111 → 131.
 - [x] `RadianceGradeApply` published — a complete node with 16 documented
       inputs that had been invisible in the menu, found because it had a
       branding override but no registration. Now `Bake Viewer Grade`, which
-      also settles the Grade naming overlap.
+      also settles the Grade naming overlap. `SECTION_OVERRIDES` is empty for
+      the first time; both entries it ever held were unpublished nodes.
+- [x] **Every node group imports without aiohttp or a running ComfyUI.**
+      `nodes/monitor/viewer.py` and `delivery/handler.py` imported
+      `aiohttp`/`server` at module scope and read `PromptServer.instance`
+      there, which the flat `nodes_realtime_preview.py` had hidden — moving it
+      into a package made importing any Review module run the viewer, and CI's
+      minimal-dependency job failed. `gizmo.py` and `workspace.py` had guarded
+      the same import for years. `tests/test_import_isolation.py` now proves
+      the property for all eleven groups in a subprocess with aiohttp and
+      `server` blocked, rather than for one hand-listed module in CI.
+- [x] Three compatibility alias keys (`RadianceImageLoader`,
+      `RadianceControlApply`, `RadianceWorkspace`) ship as `DEPRECATED`
+      subclasses: workflows saved against the old key still open, and the menu
+      shows one entry per node instead of two.
 - [x] Repository trimmed to what a user or contributor needs: the six internal
       audit and review write-ups are gone, `.comfyignore` no longer lists files
       that stopped existing, and the generated GPU report is ignored rather
       than committed.
-- [x] Suite: 2326 passed / 0 failed / 60 skipped, plus 27 JS tests.
+- [x] Suite: 2420 passed / 0 failed / 69 skipped, plus 27 JS tests.
 - [x] Released as **3.3.0**, not a patch: five changes alter what an unchanged
       graph does, and the changelog leads with them.
 

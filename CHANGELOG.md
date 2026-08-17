@@ -14,11 +14,14 @@ measurably wrong. But if you are partway through a job, finish it on 3.2.1.
    grey at 400 nits on a 4000-nit master). In signal terms: sRGB 0.3492 rather
    than 0.4610, PQ 0.3298 rather than 0.3478. **Re-check any master graded
    against the old midtone.** HLG is unchanged — it is anchored to BT.2408.
-2. **Scene-cut `threshold` is now `distance_threshold`**, and means an absolute
-   inter-frame distance rather than a fraction of the clip's own maximum. The
-   widget was renamed on purpose: your saved value would otherwise have been
-   silently reinterpreted. Existing workflows reset to the new default and need
-   re-tuning — histogram runs 0–2 (a cut is above ~0.3), edge roughly 0–0.5.
+2. **Scene-cut `threshold` is now `cut_confidence`**, on a calibrated 0–1 scale
+   that means the same thing for `histogram`, `edge` and `combined`: 0.5 is "as
+   different as a hard cut", lower is more sensitive. It was a fraction of the
+   clip's own maximum, then briefly an absolute inter-frame distance whose
+   useful value differed by method. The widget was renamed each time
+   deliberately — a saved value would otherwise have been silently
+   reinterpreted. Existing workflows reset to the new default and need
+   re-tuning. The `edge` metric itself changed with it; see Fixed.
 3. **Model downloads now refuse by default.** Set `RADIANCE_ALLOW_DOWNLOADS=1`
    to restore automatic fetching. Previously a first queue could pull 67 MB to
    2.4 GB with no prompt.
@@ -26,9 +29,45 @@ measurably wrong. But if you are partway through a job, finish it on 3.2.1.
    than the top-left quarter of a 4x render.
 5. **CDL Export and Flipbook GIF write to `output/`** instead of resolving
    their relative defaults against the ComfyUI install directory.
+6. **The node menu gains twenty entries.** Twenty finished nodes had never been
+   published; nothing you already had moves or changes. See Added.
+7. **Chained Energy Mask nodes now stack.** Two of them in series, or two
+   branches joined by Conditioning Combine, previously threw one mask away
+   silently. They add now. A graph with two Energy Masks will sample
+   differently — and, for the first time, the way it looks like it should.
 
 
 ### Added
+
+- **Twenty nodes published that had never reached the menu.** Every node group's
+  `__init__.py` hand-copied a selection of its modules' node keys into the
+  mapping ComfyUI reads, and nothing compared the two. Whatever nobody
+  remembered to copy did not exist as far as ComfyUI was concerned — not
+  broken, not disabled, simply invisible. Seventeen complete nodes were in that
+  state, plus three compatibility alias keys:
+
+  `RadianceHDRTurboEncoder`, `RadianceHDRPerChannelNorm`,
+  `RadianceHDRPerChannelDenorm`, `RadianceACESMetadataFile`,
+  `RadianceACES2Compliance`, `RadianceColorSpaceInfo`,
+  `RadianceLuminanceGuidance`, `RadianceHDRBlendValidator`,
+  `RadianceHDRAnalysis`, `RadianceNDISender`, `RadianceShotGradeRouter`,
+  `RadianceAudioCut`, `RadianceAudioTranscribe`, `RadianceLinearCheck`,
+  `RadianceCinemaStudio`, `RadianceCameraSync`, `RadianceVideoPromptBuilder`.
+
+  This is the third time the same defect has surfaced — issue #40 was a sampler
+  feature no node could reach, and `RadianceGradeApply` was a finished node
+  whose only trace was a menu-section override. `nodes/aggregate.py` inverts
+  the default: a group now sweeps its own modules, so writing the node is
+  enough to ship it, and withholding one takes a named `WITHHELD_NODES` entry
+  that a test reads back. Catalog 111 → 131.
+
+- **Compatibility aliases load without cluttering the menu.**
+  `RadianceImageLoader`, `RadianceControlApply` and `RadianceWorkspace` are
+  older keys for nodes that still exist. They ship as `DEPRECATED` subclasses:
+  a workflow saved against the old key opens normally, and node search shows
+  one entry per node rather than two. (Subclasses because `DEPRECATED` is read
+  off the class — pointing both keys at the same class object would have hidden
+  the canonical node too.)
 
 - **`RadianceGradeApply` reaches the menu**, published as **Bake Viewer Grade**.
   It bakes the Viewer's grading maths into the tensor — a complete node with 16
@@ -76,6 +115,35 @@ measurably wrong. But if you are partway through a job, finish it on 3.2.1.
 - `RadianceEnergyMask` is pinned to the Generate menu section; the keyword
   classifier would otherwise file anything named "...Mask" under VFX, away from
   the sampler it feeds.
+- **Chaining two Energy Mask nodes lost one of the masks, silently.** In series,
+  the second `attach_energy_mask` overwrote the key on every conditioning entry,
+  so the downstream node won; joined by Conditioning Combine, the sampler
+  stopped at the first entry carrying the key, so the upstream node won. The
+  node's own docstring described only the second case, and got it backwards for
+  the first. Layers accumulate now and the sampler sums `priority x mask` across
+  all of them, with the combined modifier floored at 0 so a stack of negative
+  priorities suppresses guidance instead of inverting it.
+
+- **The scene-cut `edge` metric had no meaningful threshold at all.** It was a
+  mean absolute difference of gradient magnitudes, which scales with the
+  footage's own contrast and texture rather than with how different two frames
+  are. Measured on one synthetic cut, re-graded:
+
+  | contrast | absolute (old) | relative (new) |
+  | --- | --- | --- |
+  | 100% | 0.0369 | 0.2950 |
+  | 50%  | 0.0185 | 0.2950 |
+  | 25%  | 0.0092 | 0.2950 |
+
+  The same cut, four times fainter. A threshold tuned on a bright exterior
+  found nothing in a dim interior, and grain on a detailed frame (0.039)
+  outscored a real cut in soft content (0.003). It is a relative (Bray-Curtis)
+  distance between edge maps now, bounded in [0, 1], with a 5 px pre-blur so a
+  high-pass metric stops measuring film grain. `combined` was the worst
+  casualty — `0.6 * histogram + 0.4 * edge` added two quantities with no shared
+  unit, so the nominal 40% edge contribution was a couple of percent; both
+  terms are calibrated confidences now and the weights mean what they say.
+  `KNOWN_ISSUES.md` records what the edge method still cannot see.
 
 ### Fixed
 
@@ -175,6 +243,28 @@ measurably wrong. But if you are partway through a job, finish it on 3.2.1.
 - **`gpu_acceptance_report.md` is no longer tracked.** `tools/gpu_acceptance.py`
   writes it on every run — a generated artifact that should never have been
   committed. Now ignored.
+
+- **The legacy `nodes_*.py` layer.** Forty root modules were pure re-export
+  shims over `nodes/`; they are deleted. Six were still the real home of their
+  code and moved into the package, which also reverses a dependency that ran
+  backwards — the organized `nodes/` package had been importing *from* the
+  layer it was introduced to replace:
+
+  | was | is |
+  | --- | --- |
+  | `nodes_io.py` | `nodes/io/write.py` |
+  | `nodes_sampler.py` | `nodes/generate/sampler.py` |
+  | `nodes_loader.py` | `nodes/generate/loader.py` |
+  | `nodes_workspace.py` | `nodes/pipeline/workspace.py` |
+  | `nodes_realtime_preview.py` | `nodes/monitor/realtime.py` |
+  | `nodes_gizmo.py` | `nodes/gizmo.py` |
+
+  `radiance.nodes_*` imports no longer resolve. Node keys are untouched, so no
+  saved workflow is affected — every one of the 111 pre-existing keys was
+  compared class-by-class and widget-by-widget against a snapshot taken before
+  the move. The package also drops to a single entry point: the separate
+  `.nodes_radiance_viewer` spec was publishing `RadianceViewer` alongside
+  `radiance.nodes.monitor`, the one genuine double-import the layer had.
 - **Dead `.comfyignore` entries.** Thirty-two of its paths no longer existed. A
   packaging exclusion list naming files that are already gone reads as
   protection it is not providing, so the file was rewritten around what is

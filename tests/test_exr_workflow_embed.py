@@ -48,26 +48,26 @@ PROMPT = {"1": {"class_type": "KSampler", "inputs": {}}}
 
 
 def _io():
-    """Import nodes_io as `radiance.nodes_io` so its internal `from . import
+    """Import nodes_io as `radiance.nodes.io.write` so its internal `from . import
     color_utils` relative imports resolve. Importing it as a bare top-level
     `nodes_io` module (the previous approach here) leaves it with no parent
     package, and that relative import raises ImportError before any test in
     this file can even run — this mirrors the working pattern already used in
     tests/test_io.py's `_import_io()`."""
     import importlib
-    if "radiance.nodes_io" in sys.modules:
-        return sys.modules["radiance.nodes_io"]
+    if "radiance.nodes.io.write" in sys.modules:
+        return sys.modules["radiance.nodes.io.write"]
     if "nodes_io" in sys.modules:
-        return sys.modules["nodes_io"]
+        return sys.modules["radiance.nodes.io.write"]
     root = Path(__file__).parent.parent
     parent = str(root.parent)
     if parent not in sys.path:
         sys.path.insert(0, parent)
     try:
-        return importlib.import_module("radiance.nodes_io")
+        return importlib.import_module("radiance.nodes.io.write")
     except ImportError:
         sys.path.insert(0, str(root))
-        return importlib.import_module("nodes_io")
+        return importlib.import_module("radiance.nodes.io.write")
 
 
 class TestWorkflowMetadataBuilder(unittest.TestCase):

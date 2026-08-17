@@ -266,16 +266,24 @@ def test_expected_node_count_matches_what_is_published():
     if radiance._LOAD_RESULT.failures:
         pytest.skip("environment is short a runtime dependency")
     assert len(radiance.NODE_CLASS_MAPPINGS) >= EXPECTED_MIN_NODE_COUNT
-    assert EXPECTED_MIN_NODE_COUNT >= 109, "the floor was not raised with the catalog"
+    assert EXPECTED_MIN_NODE_COUNT >= 129, "the floor was not raised with the catalog"
 
 
-def test_only_back_compat_aliases_remain_unregistered():
-    src = _src("tests/test_node_smoke.py")
-    block = src[src.index("_KNOWN_UNREGISTERED = frozenset({"):]
-    block = block[:block.index("})")]
-    keys = set(re.findall(r'"(\w+)"', block))
-    assert keys == {"RadianceImageLoader", "RadianceControlApply", "RadianceWorkspace"}, (
-        "the unregistered list should now contain only aliases of published nodes"
+def test_no_node_exists_in_source_without_reaching_the_menu():
+    """Everything written is published, or is written down as withheld.
+
+    The allowlist held three alias keys; widening the source scan past the
+    retired root `nodes_*.py` layer found seventeen more finished nodes in the
+    same state, none of them deliberate. All twenty ship now, the aliases as
+    DEPRECATED subclasses so they load saved workflows without doubling up in
+    the menu, and `nodes/aggregate.py` publishes leaf-module nodes by default
+    so the gap cannot silently reopen.
+    """
+    from test_node_smoke import TestCoverageSummary
+
+    assert TestCoverageSummary._KNOWN_UNREGISTERED == frozenset(), (
+        "a node is being withheld from the catalog: "
+        f"{sorted(TestCoverageSummary._KNOWN_UNREGISTERED)}"
     )
 
 

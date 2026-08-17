@@ -182,14 +182,28 @@ def test_known_unregistered_allowlist_is_a_ratchet():
     assert "fixed = self._KNOWN_UNREGISTERED - missing" in body
 
 
-def test_allowlist_entries_are_all_annotated_with_their_source_file():
+def test_every_withheld_node_carries_a_written_reason():
+    """A node that exists in source but not in the menu needs a reason on file.
+
+    This used to parse the literal `frozenset({...})` text and require exactly
+    three entries. The allowlist is empty now — those three alias keys ship as
+    DEPRECATED subclasses, and `nodes/aggregate.py` makes publishing the
+    default — so the assertion moved to the property that actually mattered:
+    whatever sits in there is explained on its own line.
+    """
+    from test_node_smoke import TestCoverageSummary
+
+    allowlist = TestCoverageSummary._KNOWN_UNREGISTERED
+    if not allowlist:
+        return
+
     src = _src("tests/test_node_smoke.py")
-    block = src[src.index("_KNOWN_UNREGISTERED = frozenset({"):]
-    block = block[:block.index("})")]
-    entries = re.findall(r'"(\w+)",\s*#\s*(\S+)', block)
-    quoted = re.findall(r'"(\w+)"', block)
-    assert len(entries) == len(quoted), "an allowlist entry has no source-file note"
-    assert len(entries) == 3
+    block = src[src.index("_KNOWN_UNREGISTERED = frozenset("):]
+    block = block[:block.index("\n\n")]
+    for key in sorted(allowlist):
+        assert re.search(rf'"{key}"\s*,?\s*#\s*\S+', block), (
+            f"{key} is withheld from the catalog with no reason written down"
+        )
 
 
 # ── 4. Startup reports a shortfall as an error ──────────────────────────────

@@ -9,7 +9,7 @@ from typing import Tuple, Optional
 import torch
 import numpy as np
 
-from radiance.nodes_io import _save_exr, _save_video_ffmpeg, _load_video_to_numpy, _read_sequence
+from radiance.nodes.io.write import _save_exr, _save_video_ffmpeg, _load_video_to_numpy, _read_sequence
 from radiance.path_utils import strip_path_quotes
 
 logger = logging.getLogger("radiance.mcp")

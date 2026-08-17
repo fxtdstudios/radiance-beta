@@ -38,7 +38,7 @@ def _load_dynamic_gizmos() -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Load user-generated gizmo nodes after the static catalog is ready."""
 
     try:
-        from radiance.nodes_gizmo import load_dynamic_gizmos
+        from radiance.nodes.gizmo import load_dynamic_gizmos
     except Exception as exc:  # pragma: no cover - optional runtime feature
         logger.warning("Failed to import dynamic Gizmo loader: %s", exc)
         logger.debug("Gizmo loader import failure details", exc_info=True)

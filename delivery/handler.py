@@ -11,8 +11,16 @@ import torch
 import numpy as np
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
-from aiohttp import web
-from server import PromptServer
+try:
+    from aiohttp import web
+    from server import PromptServer
+except ImportError:  # pragma: no cover - exercised by the CI import smoke-test
+    # Same guard, same reason as nodes/monitor/viewer.py: viewer.py imports
+    # this module at import time, so an unguarded aiohttp here made the whole
+    # Review node group unimportable without a running ComfyUI. aiohttp is a
+    # required ComfyUI dependency, so a real install never takes this branch.
+    web = None
+    PromptServer = None
 import folder_paths
 
 # Re-import modular components
@@ -244,12 +252,15 @@ def _export_aces_clip_xml(media_path: str, grading: dict, color_space: str, vers
 # "method POST is already registered" at startup and the whole pack fails to load
 # -- exactly the crash those two guards were written for.
 _RADIANCE_DELIVER_ROUTE_REGISTERED = getattr(
-    PromptServer.instance, "_radiance_deliver_route_registered", False)
+    getattr(PromptServer, "instance", None), "_radiance_deliver_route_registered", False)
 
 
 def _register_deliver_route(handler):
-    if _RADIANCE_DELIVER_ROUTE_REGISTERED:
-        logger.debug("[Deliver] Route already registered; skipping duplicate registration.")
+    # `PromptServer` is None when aiohttp/ComfyUI are absent (see the guarded
+    # import at the top). Reading `.instance` off None at module scope raised
+    # AttributeError and took the whole Review group down with it.
+    if _RADIANCE_DELIVER_ROUTE_REGISTERED or PromptServer is None:
+        logger.debug("[Deliver] Route already registered or no server; skipping.")
         return handler
     try:
         PromptServer.instance.routes.post('/radiance/deliver')(handler)
@@ -523,13 +534,18 @@ async def radiance_deliver_endpoint(request):
             # ─── AI Upscale (2x) ──────────────────────────────────────────
             if upscale_2x:
                 try:
-                    # LAYERING: delivery reaching up into the node surface.
-                    # The class is really defined in radiance/image/upscale.py,
-                    # but tests/conftest.py replaces `radiance.image` with a
-                    # stub exposing only `defects`, so importing the real
-                    # submodule here would break under the harness. Untangling
-                    # that is part of the monolith split, not a local fix.
-                    from radiance.nodes_upscale import RadianceAIUpscale
+                    # Imported from the library, not from the node surface.
+                    #
+                    # This used to read `from radiance.nodes_upscale import
+                    # RadianceAIUpscale` — delivery reaching up into the ComfyUI
+                    # node layer for a class that lives one directory away. The
+                    # stated reason was that tests/conftest.py replaced
+                    # `radiance.image` with a stub, so the real submodule could
+                    # not be imported under the harness. That was a fixable
+                    # stub, not a fact about the code: the stub now keeps a
+                    # __path__, so only `defects` is faked and every other
+                    # submodule loads from disk.
+                    from radiance.image.upscale import RadianceAIUpscale
                     upscaler = RadianceAIUpscale()
                     graded_tensor, _ = upscaler.upscale(
                         image=graded_tensor,
@@ -627,7 +643,7 @@ async def radiance_deliver_endpoint(request):
             # is 118 lines in nodes_io.py and depends on module-level helpers
             # in that same file, so extracting it is part of splitting that
             # monolith rather than a local fix. Tracked in the README.
-            from radiance.nodes_io import RadianceWrite
+            from radiance.nodes.io.write import RadianceWrite
             writer = RadianceWrite()
 
             is_exr = 'EXR' in output_format or 'exr' in output_format.lower()

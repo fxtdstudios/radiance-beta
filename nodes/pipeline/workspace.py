@@ -189,8 +189,18 @@ class RadianceProjectManager:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+# Compatibility alias. `RadianceProjectManager` is the published key (the
+# pipeline group registers it); `RadianceWorkspace` is the older name and has to
+# keep loading for workflows saved against it. Subclassed rather than aliased so
+# the DEPRECATED flag hides this entry from the node search without hiding the
+# canonical node, which is the same class object.
+class RadianceWorkspace(RadianceProjectManager):
+    """Deprecated alias of RadianceProjectManager. Loads, does not list."""
+    DEPRECATED = True
+
+
 NODE_CLASS_MAPPINGS = {
-    "RadianceWorkspace":        RadianceProjectManager,
+    "RadianceWorkspace":        RadianceWorkspace,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {

@@ -34,9 +34,9 @@ for mod in ["folder_paths", "comfy", "comfy.utils"]:
 
 def _import_delivery():
     if "nodes_hdr_delivery" in sys.modules:
-        return sys.modules["nodes_hdr_delivery"]
+        return sys.modules["radiance.nodes.hdr.delivery"]
     sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
-    return importlib.import_module("nodes_hdr_delivery")
+    return importlib.import_module("radiance.nodes.hdr.delivery")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

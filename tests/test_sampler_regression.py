@@ -19,21 +19,31 @@ import torch
 # Add parent directory to sys.path to import radiance modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Mock comfy and other dependencies before importing Radiance
-from torch_mock import MockModel, MockModelSampling, MockSampleModule, MockModelManagement
-sys.modules['comfy'] = type('module', (), {
-    'model_management': MockModelManagement,
-    'sample': MockSampleModule,
-    'samplers': type('module', (), {'calculate_sigmas': lambda m, s, t: torch.linspace(1.0, 0.0, t+1)}),
-    'utils': type('module', (), {'ProgressBar': lambda x: None}),
-    'model_base': type('module', (), {'ModelType': type('enum', (), {'FLOW_LTX_AV': 'FLOW_LTX_AV'})})
-})
-sys.modules['comfy.model_management'] = MockModelManagement
-sys.modules['comfy.sample'] = MockSampleModule
-sys.modules['comfy.samplers'] = sys.modules['comfy'].samplers
-sys.modules['comfy.utils'] = sys.modules['comfy'].utils
+# Augment conftest's comfy stub; never replace it.
+#
+# This file used to assign `sys.modules['comfy']` wholesale. That worked only
+# because it then imported the sampler by bare name and got a private copy of
+# the module which captured the replacement. Now that the sampler is a package
+# module, replacing the stub tears it out from under every module that had
+# already bound to it — `comfy.model_management.get_free_memory` vanishes and
+# sixteen nodes stop importing. Add only what this file needs, on top of
+# whatever conftest already installed.
+import types as _types  # noqa: E402
 
-from nodes_sampler import RadianceSamplerPro, get_flux_sigmas
+from torch_mock import MockModel, MockModelSampling, MockSampleModule, MockModelManagement  # noqa: E402
+
+import comfy  # installed by conftest  # noqa: E402
+import comfy.sample  # noqa: E402
+import comfy.samplers  # noqa: E402
+
+if not hasattr(comfy.samplers, "calculate_sigmas"):
+    comfy.samplers.calculate_sigmas = lambda m, s, t: torch.linspace(1.0, 0.0, t + 1)
+if not hasattr(comfy, "model_base"):
+    comfy.model_base = _types.SimpleNamespace(
+        ModelType=type("enum", (), {"FLOW_LTX_AV": "FLOW_LTX_AV"})
+    )
+
+from radiance.nodes.generate.sampler import RadianceSamplerPro, get_flux_sigmas
 
 class TestSamplerRegression(unittest.TestCase):
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Pipeline"
@@ -85,7 +95,7 @@ class TestSamplerRegression(unittest.TestCase):
         dtype = torch.float32
         
         # Internal noise functions from nodes_sampler
-        from nodes_sampler import (
+        from radiance.nodes.generate.sampler import (
             _perlin_noise, _spectral_noise, _brownian_noise, 
             _simplex_noise, _voronoi_noise, _curl_noise
         )
@@ -131,7 +141,7 @@ class TestNoiseMaskRegressions(unittest.TestCase):
         The sample() method must accept latent_image (not 'latent').
         """
         import inspect
-        from nodes_sampler import RadianceSamplerPro
+        from radiance.nodes.generate.sampler import RadianceSamplerPro
         sig = inspect.signature(RadianceSamplerPro.sample)
         self.assertIn("latent_image", sig.parameters,
                       "sample() must accept 'latent_image' — regression for NameError fixes")
@@ -139,7 +149,7 @@ class TestNoiseMaskRegressions(unittest.TestCase):
     def test_latent_image_copy_in_source(self):
         """Verify latent_image.copy() is used (not the stale latent.copy())."""
         import inspect
-        from nodes_sampler import RadianceSamplerPro
+        from radiance.nodes.generate.sampler import RadianceSamplerPro
         source = inspect.getsource(RadianceSamplerPro.sample)
         self.assertIn("latent_image.copy()", source,
                       "sample() must use latent_image.copy() — NameError 'latent' fix")
@@ -152,7 +162,7 @@ class TestNoiseMaskRegressions(unittest.TestCase):
         A direct latent_image['noise_mask'] would KeyError on non-inpaint latents.
         """
         import inspect
-        from nodes_sampler import RadianceSamplerPro
+        from radiance.nodes.generate.sampler import RadianceSamplerPro
         source = inspect.getsource(RadianceSamplerPro.sample)
         # The fixed line is: noise_mask = latent_image.get("noise_mask")
         self.assertIn('latent_image.get("noise_mask")', source,
@@ -164,7 +174,7 @@ class TestFluxShiftHelper(unittest.TestCase):
     """Pure math tests for flux_shift_sigmas (no model needed)."""
 
     def setUp(self):
-        from nodes_sampler import flux_shift_sigmas
+        from radiance.nodes.generate.sampler import flux_shift_sigmas
         self.fn = flux_shift_sigmas
 
     def test_shift_1_identity(self):
@@ -191,7 +201,7 @@ class TestCFGPlusPlusHelper(unittest.TestCase):
     """Pure math tests for apply_cfg_plus_plus."""
 
     def setUp(self):
-        from nodes_sampler import apply_cfg_plus_plus
+        from radiance.nodes.generate.sampler import apply_cfg_plus_plus
         self.fn = apply_cfg_plus_plus
 
     def test_full_progress_is_1(self):

@@ -25,7 +25,7 @@ skip_no_torch = unittest.skipUnless(HAS_TORCH, "real torch not available")
 # so it must be imported as part of the radiance package.
 # conftest.py installs the radiance.radiance_ocio stub; we just need
 # to make sure the radiance package root is on the path so that
-# `importlib.import_module("radiance.nodes_colorscience")` works.
+# `importlib.import_module("radiance.nodes.color.colorspace")` works.
 _RADIANCE_DIR = os.path.dirname(os.path.dirname(__file__))
 _MNT_DIR      = os.path.dirname(_RADIANCE_DIR)
 if _MNT_DIR not in sys.path:
@@ -34,15 +34,17 @@ if _RADIANCE_DIR not in sys.path:
     sys.path.insert(0, _RADIANCE_DIR)
 
 import importlib as _il
-_cs_mod = _il.import_module("radiance.nodes_colorscience")
+_cs_mod = _il.import_module("radiance.nodes.color.colorspace")
 
-from radiance.nodes_colorscience import (
+from radiance.nodes.color import (
+    NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS,
+)
+from radiance.nodes.color.colorspace import (
     _xy_to_XYZ,
     _build_bradford_matrix,
     _temperature_to_xy,
     _ILLUMINANT_XY,
-    NODE_CLASS_MAPPINGS,
-    NODE_DISPLAY_NAME_MAPPINGS,
     RadianceWhiteBalance,
 )
 

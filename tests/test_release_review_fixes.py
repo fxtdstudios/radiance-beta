@@ -39,7 +39,7 @@ def test_dotted_filenames_survive_the_version_suffix(tmp_path, filename, expecte
     defaulting to True, each render destroyed the previously approved one and
     reported success with the truncated path.
     """
-    from radiance.nodes_io import RadianceWrite
+    from radiance.nodes.io.write import RadianceWrite
 
     base = str(tmp_path / f"{filename}_v0001")
     out = RadianceWrite()._out_path(base, ".exr", overwrite=True)
@@ -49,7 +49,7 @@ def test_dotted_filenames_survive_the_version_suffix(tmp_path, filename, expecte
 @pytest.mark.real_torch
 def test_out_path_rejects_an_empty_name_with_a_readable_message(tmp_path):
     """It used to raise `ValueError: PosixPath('.') has an empty name`."""
-    from radiance.nodes_io import RadianceWrite
+    from radiance.nodes.io.write import RadianceWrite
 
     with pytest.raises(ValueError) as excinfo:
         RadianceWrite()._out_path("", ".exr", overwrite=True)
@@ -59,14 +59,14 @@ def test_out_path_rejects_an_empty_name_with_a_readable_message(tmp_path):
 
 @pytest.mark.real_torch
 def test_out_path_does_not_double_the_extension(tmp_path):
-    from radiance.nodes_io import RadianceWrite
+    from radiance.nodes.io.write import RadianceWrite
 
     out = RadianceWrite()._out_path(str(tmp_path / "shot.exr"), ".exr", overwrite=True)
     assert out.name == "shot.exr"
 
 
 def test_digital_cinema_write_has_a_usable_output_path_default():
-    from radiance.nodes_io import RadianceDigitalCinemaWrite
+    from radiance.nodes.io.write import RadianceDigitalCinemaWrite
 
     default = RadianceDigitalCinemaWrite.INPUT_TYPES()["required"]["output_path"][1]["default"]
     assert default, "output_path defaults to '', so the node crashes on a bare queue"
