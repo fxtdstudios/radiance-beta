@@ -1436,8 +1436,22 @@ class RadianceViewer {
             return v >= LOG_BREAK ? (Math.pow(2, (v - C) / A) - 1) / B : (v - C) / M;
         }
         if (idt.includes('N-Log')) {
-            if (v >= 0.328) return Math.pow((v - 0.363) / 0.241, 4) / Math.pow(10, 2.57);
-            return (v - 0.0) / 0.0; // linear region approximation — fallback
+            const NLOG_BREAK = 0.328;
+            const nlogCurve = (x) => Math.pow((x - 0.363) / 0.241, 4) / Math.pow(10, 2.57);
+            if (v >= NLOG_BREAK) return nlogCurve(v);
+            // Was `return (v - 0.0) / 0.0;` — a literal divide by zero, labelled
+            // "linear region approximation". It returns ±Infinity for any v != 0
+            // and NaN at v === 0, and this feeds _computeHDRZoneStats, so the
+            // whole stats object and the HDR peak badge read "Infinityk nit" or
+            // "NaN nit" for any N-Log plate whose p99.9 luma sits below the
+            // break — which is every low-key N-Log shot, since N-Log mid-grey is
+            // at ~0.363, above the break.
+            //
+            // This is a straight line from the origin to the curve's value at
+            // the break, so the two segments meet: continuous, monotonic, finite.
+            // It is a stand-in, not the published Nikon N-Log toe — swap it for
+            // the spec's linear segment when someone has the document to hand.
+            return v * (nlogCurve(NLOG_BREAK) / NLOG_BREAK);
         }
         if (idt.includes('F-Log2')) {
             return (Math.pow(10, (v - 0.384038) / 0.344676) - 0.092864) / 8.799461;
@@ -2107,6 +2121,12 @@ class RadianceViewer {
                 { label: 'Pin Current Frame', shortcut: 'A/B', action: () => this.pinCurrentFrame?.() },
             ],
             Edit: [
+                // These two work. Their keyboard shortcuts did not: the only
+                // Ctrl+Z / Ctrl+Y handler in the file sits inside the region of
+                // createHUD() after the unconditional `return` at ~11753, so it
+                // is never installed. The menu advertised a binding that did not
+                // exist. `_installUndoShortcuts` (called from createUI) restores
+                // it in live code.
                 { label: 'Undo', shortcut: 'Ctrl+Z', action: () => this.undo?.() },
                 { label: 'Redo', shortcut: 'Ctrl+Y', action: () => this.redo?.() },
                 'separator',
@@ -2483,7 +2503,14 @@ class RadianceViewer {
         Object.values(toolButtons).forEach(b => b.updateVisual());
         Object.values(trackButtons).forEach(b => b.updateVisual());
 
-        window.addEventListener('keydown', (e) => {
+        // Named and stored so destroy() can remove it. It used to be an
+        // anonymous listener on `window` with no reference kept, so it could
+        // never be removed: the closure captured `this`, `toolButtons` and
+        // `trackButtons`, and kept firing after the node was deleted. Pressing
+        // A/B/S/D/F/V anywhere in ComfyUI ran the handler once per destroyed
+        // viewer, each mutating a dead instance and calling updateVisual() on
+        // detached DOM. One more every time the node executed.
+        this._seqDockKeyHandler = (e) => {
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
             if (e.code === 'KeyA') {
                 this.activeTimelineTool = 'select';
@@ -2504,7 +2531,8 @@ class RadianceViewer {
                 this.activeTimelineTrack = this.activeTimelineTrack === 'V1' ? 'V2' : 'V1';
                 Object.values(trackButtons).forEach(b => b.updateVisual());
             }
-        });
+        };
+        window.addEventListener('keydown', this._seqDockKeyHandler);
 
         head.append(left, center, right);
         dock.appendChild(head);
@@ -3105,6 +3133,7 @@ class RadianceViewer {
         this.canvasWrapper.appendChild(this.viewerBar);
 
         this.sequenceDock = this.createSequenceDock();
+        this._installUndoShortcuts();
         this.canvasWrapper.appendChild(this.sequenceDock);
 
         // v5.0: WebGPU-preferred GPU chain (WebGPU → WebGL → 2D fallback)
@@ -10634,6 +10663,25 @@ else:
         });
 
         render();
+    }
+
+    _installUndoShortcuts() {
+        // The Edit menu offers Undo and Redo and labels them Ctrl+Z / Ctrl+Y.
+        // The handler that implemented those labels lives after the
+        // unconditional `return` in createHUD(), so it was never installed and
+        // the labels were a promise the app did not keep -- while _pushUndo()
+        // kept filling a 50-deep stack from live code the whole time.
+        if (this._undoKeyHandler) return;
+        this._undoKeyHandler = (e) => {
+            const t = e.target;
+            if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+            if (!(e.ctrlKey || e.metaKey)) return;
+            const active = RadianceViewer.activeInstance || this;
+            const k = (e.key || '').toLowerCase();
+            if (k === 'z' && !e.shiftKey) { e.preventDefault(); active.undo?.(); }
+            else if ((k === 'z' && e.shiftKey) || k === 'y') { e.preventDefault(); active.redo?.(); }
+        };
+        window.addEventListener('keydown', this._undoKeyHandler);
     }
 
     _renderReferenceSection(parent, title) {
@@ -18422,6 +18470,23 @@ else:
     }
 
     destroy() {
+        // Both of these were added to `window` and never removed.
+        if (this._seqDockKeyHandler) {
+            window.removeEventListener('keydown', this._seqDockKeyHandler);
+            this._seqDockKeyHandler = null;
+        }
+        if (this._undoKeyHandler) {
+            window.removeEventListener('keydown', this._undoKeyHandler);
+            this._undoKeyHandler = null;
+        }
+        if (this._timelineMouseMoveBound) {
+            window.removeEventListener('mousemove', this._timelineMouseMoveBound);
+            this._timelineMouseMoveBound = null;
+        }
+        if (this._timelineMouseUpBound) {
+            window.removeEventListener('mouseup', this._timelineMouseUpBound);
+            this._timelineMouseUpBound = null;
+        }
         // ── Resource Cleanup (merged from earlier definition) ──
         // Remove global event listeners
         this._removeApiListeners();
