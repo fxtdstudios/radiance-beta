@@ -539,9 +539,27 @@ def detect_vae_factor(vae: Any) -> int:
     Falls back to 8 for unknown model classes.
 
     ComfyUI exposes this as:
+      vae.spacial_compression_decode()    (comfy.sd.VAE's own helper -- tried first)
       vae.downscale_ratio          (int, most models)
       vae.latent_format.downscale_factor  (some wrappers)
     """
+    # ALBABIT-FIX: comfy.sd.VAE stores downscale_ratio as a plain int for most
+    # models, but as a (temporal_formula, h, w) tuple for LTX and other video
+    # VAEs -- the int-only checks below silently fell through for the tuple
+    # case, landing on VAE_FACTOR_DEFAULT (8) instead of LTX's real 32.
+    # spacial_compression_decode() (comfy/sd.py) already handles both forms
+    # (`try: return self.upscale_ratio[-1] except: return self.upscale_ratio`),
+    # so for any model whose ratio really is a plain int this returns the
+    # exact same value as the checks below -- only the tuple case changes.
+    compression_decode = getattr(vae, "spacial_compression_decode", None)
+    if callable(compression_decode):
+        try:
+            val = compression_decode()
+        except Exception:
+            val = None
+        if isinstance(val, (int, float)) and val > 0:
+            return int(val)
+
     for attr in ("downscale_ratio", "latent_downscale_factor"):
         val = getattr(vae, attr, None)
         if isinstance(val, int) and val > 0:
