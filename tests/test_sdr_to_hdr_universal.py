@@ -108,11 +108,25 @@ class TestMath(unittest.TestCase):
         self.assertTrue(self.torch.allclose(out[..., 0][below],
                                             luma_in[below], atol=1e-4))
 
-    def test_peak_reaches_target(self):
+    def test_sdr_white_reaches_reference_white_not_the_display_peak(self):
+        """Rewritten in 3.4 — this used to assert the defect.
+
+        It required SDR code 1.0 to come out at `peak_nits`: a white shirt at
+        the full mastering peak, 1000 nits, against the 203 that ITU-R BT.2408
+        defines as HDR Reference White. `reference_white_nits` separates the
+        two, and the old behaviour stays reachable by setting it to peak_nits,
+        which the second half asserts.
+        """
         img = self.torch.ones(1, 4, 4, 3)
+
         out, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.75, 1.6,
-                                      0.0, "Linear")
-        self.assertAlmostEqual(float(out.max()), 10.0, places=3)  # 1000/100 nits
+                                            0.0, "Linear")
+        self.assertAlmostEqual(float(out.max()), 2.03, places=3)   # 203 nits
+
+        out, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.75, 1.6,
+                                            0.0, "Linear",
+                                            reference_white_nits=1000.0)
+        self.assertAlmostEqual(float(out.max()), 10.0, places=3)   # 1000 nits
 
     def test_monotonic(self):
         img = self._gradient()

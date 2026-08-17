@@ -124,13 +124,55 @@ def _adaptive_knees(luma: torch.Tensor, percentile: float,
 def _soft_knee_expand(luma: torch.Tensor, knee: torch.Tensor,
                       peak_scale: float, shoulder_gamma: float) -> torch.Tensor:
     """
-    Inverse tone map: identity below the knee, smooth power-curve expansion
-    from the knee to `peak_scale` at L == 1. `knee` broadcasts per frame [B].
-    Returns the expanded luminance (same shape as `luma`).
+    Inverse tone map: identity below the knee, expansion from the knee to
+    `peak_scale` at L == 1, with the gradient continuous across the join.
+    `knee` broadcasts per frame [B]. Returns the expanded luminance.
+
+    The join used to be a bare power curve, ``k + (peak - k) * t**gamma``.
+    That is continuous in value and discontinuous in slope: below the knee the
+    curve is the identity, gradient 1; immediately above it the gradient is
+    ``(peak - k) * gamma * t**(gamma - 1) / (1 - k)``, which for any gamma > 1
+    goes to *zero* as t → 0. Measured at the shipped defaults (knee 0.75,
+    peak_scale 10.0):
+
+        shoulder_gamma   gradient below   gradient above
+              1.0             1.000            37.05
+              1.6             1.000             0.083
+              2.5             1.000             0.000
+
+    A gradient that drops from 1.0 to 0.08 across a single code value is a
+    visible ridge in any smooth gradient crossing the knee — a sky, a skin
+    falloff, the soft edge of a practical — and in adaptive mode the knee moves
+    per frame, so on video the ridge crawls. BT.2446 Method B specifies the
+    opposite: "the gradient of the exponential function is set to unity at the
+    breakpoint", and suggests a Bezier blend "to avoid artefacts at the join".
+    This module's own `_soft_peak_limit` has always been C¹ at its knee; only
+    the expansion was not.
+
+    The shoulder is now
+
+        f(t) = s·t + (1 − s)·t^gamma,   s = (1 − k) / (peak_scale − k)
+
+    which satisfies f(0) = 0, f(1) = 1 and f'(0) = s — and s is exactly the
+    value that makes the gradient in luminance space equal 1 at the knee. It
+    is monotonic for gamma ≥ 1 and keeps `shoulder_gamma`'s meaning: how hard
+    the expansion ramps once past the knee.
+
+    gamma = 1 collapses to a straight line from (k, k) to (1, peak_scale),
+    which has an unavoidable gradient step — a linear ramp to peak is what
+    that asks for. Values at or above 2 land within 0.2% of unity.
     """
     k = knee.view(-1, *([1] * (luma.dim() - 1)))
-    t = ((luma - k) / (1.0 - k).clamp(min=_EPS)).clamp(0.0, 1.0)
-    expanded = k + (peak_scale - k) * t.clamp(min=0.0) ** shoulder_gamma
+    span = (1.0 - k).clamp(min=_EPS)
+    t = ((luma - k) / span).clamp(0.0, 1.0)
+
+    # The gradient the shoulder must start with for the join to be C¹.
+    s = (span / (peak_scale - k).clamp(min=_EPS)).clamp(0.0, 1.0)
+
+    g = max(float(shoulder_gamma), 1.0)
+    shaped = s * t + (1.0 - s) * t.clamp(min=0.0) ** g
+
+    expanded = k + (peak_scale - k) * shaped
     return torch.where(luma > k, expanded, luma)
 
 
@@ -511,10 +553,36 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
             "required": {
                 "image": ("IMAGE", {"tooltip": "SDR still, image batch, or video frames [B,H,W,C]."}),
                 "inverse_oetf": (["sRGB", "Rec.709", "Gamma 2.2", "Gamma 2.4", "None"], {"default": "sRGB"}),
-                "peak_nits": ("FLOAT", {"default": 1000.0, "min": 200.0, "max": 10000.0, "step": 50.0}),
+                "peak_nits": ("FLOAT", {
+                    "default": 1000.0, "min": 200.0, "max": 10000.0, "step": 50.0,
+                    "tooltip": (
+                        "Mastering display peak. This is the ceiling the output "
+                        "is limited to and the value the PQ/HLG encode targets — "
+                        "not where SDR white lands. See reference_white_nits."
+                    ),
+                }),
+                "reference_white_nits": ("FLOAT", {
+                    "default": 203.0, "min": 100.0, "max": 1000.0, "step": 1.0,
+                    "tooltip": (
+                        "Where SDR diffuse white (code 1.0) lands, in nits. "
+                        "203 is the ITU-R BT.2408 HDR Reference White — a white "
+                        "shirt, a page, a cloud. Headroom above it belongs to "
+                        "speculars. Raise it for a brighter grade; setting it to "
+                        "peak_nits restores the pre-3.4 behaviour of slamming "
+                        "SDR white to the display peak."
+                    ),
+                }),
                 "knee_mode": (["adaptive", "manual"], {"default": "adaptive"}),
                 "knee": ("FLOAT", {"default": 0.75, "min": 0.05, "max": 0.99, "step": 0.01}),
-                "shoulder_gamma": ("FLOAT", {"default": 1.6, "min": 0.5, "max": 6.0, "step": 0.05}),
+                "shoulder_gamma": ("FLOAT", {
+                    "default": 2.0, "min": 1.0, "max": 6.0, "step": 0.05,
+                    "tooltip": (
+                        "How hard highlights ramp once past the knee. The join "
+                        "keeps a continuous gradient at any value ≥ 1; 2.0 and "
+                        "above sit within 0.2% of unity there. 1.0 is a "
+                        "straight line to peak and steps the gradient."
+                    ),
+                }),
                 "temporal_smoothing": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 0.98, "step": 0.01}),
                 "output_encoding": (["Linear", "Linear ACES2065-1 (AP0)", "PQ (HDR10)", "HLG"], {"default": "Linear"}),
             },
@@ -549,6 +617,12 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
     def convert(self, image: torch.Tensor, inverse_oetf: str, peak_nits: float,
                 knee_mode: str, knee: float, shoulder_gamma: float,
                 temporal_smoothing: float, output_encoding: str,
+                # Appended rather than slotted in beside peak_nits, for the same
+                # reason highlight_threshold below is: ComfyUI passes required
+                # inputs by keyword, so widget order is free, but a positional
+                # caller — every existing test, and any script driving the node
+                # directly — binds by position.
+                reference_white_nits: float = 203.0,
                 vae=None, rudra_size: str = "rudra_turbo", rudra_blend: float = 1.0,
                 model_meta: str = "", batch_mode: str = "Independent Images",
                 shadow_threshold: float = 0.05,
@@ -574,6 +648,23 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
         rgb, extra = img[..., :3], img[..., 3:]
         peak_scale = max(peak_nits, 100.0) / 100.0
 
+        # Where SDR diffuse white lands, as distinct from the display ceiling.
+        #
+        # The expansion used to target `peak_scale` at SDR code 1.0, so a white
+        # shirt or a page of text came out at the full mastering peak: measured
+        # 1000.00 nits at the shipped defaults, against the 203 nits ITU-R
+        # BT.2408 defines as HDR Reference White. Nearly five times reference,
+        # on the value the eye uses to judge exposure for the whole image.
+        #
+        # BT.2446 Method B, which is this node's method done to the standard,
+        # scales SDR by ~2 to reach 203 and then expands highlights above the
+        # breakpoint by 2.3x in display light. Separating the two numbers is
+        # what makes that possible: `peak_nits` is the ceiling and the encode
+        # target, `reference_white_nits` is where SDR white sits, and the range
+        # between them is headroom for speculars the learned path recovers.
+        white_scale = max(float(reference_white_nits), 100.0) / 100.0
+        white_scale = min(white_scale, peak_scale)
+
         # 1 ── decode to scene-linear
         lin = _inverse_oetf(rgb.clamp(0.0, 1.0), inverse_oetf)
 
@@ -586,12 +677,12 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
             knees = torch.full((img.shape[0],), float(knee),
                                dtype=lin.dtype, device=lin.device)
 
-        # 3 ── hue-preserving highlight expansion
-        luma_exp = _soft_knee_expand(luma, knees, peak_scale, float(shoulder_gamma))
+        # 3 ── hue-preserving highlight expansion, up to reference white
+        luma_exp = _soft_knee_expand(luma, knees, white_scale, float(shoulder_gamma))
         gain = luma_exp / luma.clamp(min=_EPS)
         expanded_hdr = lin * gain.unsqueeze(-1)
 
-        mask = ((luma_exp - luma) / max(peak_scale - 1.0, _EPS)).clamp(0.0, 1.0)
+        mask = ((luma_exp - luma) / max(white_scale - 1.0, _EPS)).clamp(0.0, 1.0)
         shadows = _shadow_mask(luma, float(shadow_threshold))
         clipped = _clipped_highlight_mask(rgb.clamp(0.0, 1.0), highlight_threshold)
 
