@@ -43,6 +43,18 @@ clear backlog.
 
 ## Minor
 
+- **`RadianceSDRToHDRUniversal`'s learned modes need a checkpoint you must
+  install yourself.** `Recover` and `Hybrid` are the reason the node is called
+  Universal, and with no RUDRA checkpoint in `models/radiance`, no
+  `RADIANCE_SDR2HDR_PIXEL`, and no VAE connected, they produce output
+  bit-identical to `Expand` — verified. That is a safe fallback rather than a
+  failure, but it used to be silent. From 3.4 the node's `report` output names
+  the path that ran and, when the learned path did not, why and what to
+  install; a WARNING is also logged. *Planned fix:* ship or auto-fetch a
+  default checkpoint, gated by `RADIANCE_ALLOW_DOWNLOADS` like every other
+  downloader.
+
+
 - **Naming overlap:** `Grade` / `Grade Apply` / `Apply Grade Info` read similarly;
   to be clarified during the Color cleanup.
 
