@@ -15722,7 +15722,6 @@ else:
     }
 
     renderOcioSection(container) {
-        const t = this.theme;
         const group = document.createElement('div');
         group.style.marginBottom = '4px';
 
@@ -15965,8 +15964,6 @@ else:
         paintTime();
         row('Position', timeBtn, 'Frames, seconds, or HH:MM:SS:FF. Non-drop-frame — drop-frame renumbers frames rather than dropping them, and is not implemented.');
 
-        const fpsRow = document.createElement('div');
-        fpsRow.style.cssText = 'display:flex; align-items:center; gap:6px;';
         const fpsSel = sel(
             [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60].map((f) => ({ id: String(f), label: `${f} fps` })),
             String(this.frameRate),
