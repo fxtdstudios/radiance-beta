@@ -416,6 +416,12 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
       the same import for years. `tests/test_import_isolation.py` now proves
       the property for all eleven groups in a subprocess with aiohttp and
       `server` blocked, rather than for one hand-listed module in CI.
+- [x] **A guard that guarded nothing.** `io/formats.py` caught a missing `cv2`
+      and set `HAS_CV2 = False` without binding `cv2`, so `viewer_utils.py`'s
+      `from radiance.io.formats import HAS_CV2, cv2` died anyway — with a
+      worse error than the ImportError the guard was written to absorb. It
+      only surfaced once retiring the flat layer made a Review import pull the
+      whole chain in.
 - [x] Three compatibility alias keys (`RadianceImageLoader`,
       `RadianceControlApply`, `RadianceWorkspace`) ship as `DEPRECATED`
       subclasses: workflows saved against the old key still open, and the menu
@@ -424,7 +430,9 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
       audit and review write-ups are gone, `.comfyignore` no longer lists files
       that stopped existing, and the generated GPU report is ignored rather
       than committed.
-- [x] Suite: 2420 passed / 0 failed / 69 skipped, plus 27 JS tests.
+- [x] Suite: 2421 passed / 0 failed / 69 skipped, plus 27 JS tests. Verified
+      from a checkout named `radiance-beta` as well as `radiance` — CI clones
+      the mirror under that name, and the suite has to mean the same thing there.
 - [x] Released as **3.3.0**, not a patch: five changes alter what an unchanged
       graph does, and the changelog leads with them.
 
