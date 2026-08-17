@@ -182,6 +182,9 @@ export class RadianceRenderer {
     // viewer reports the backend, rather than the toggle looking active
     // and doing nothing.
     setHDRHeatmap(v) { this.hdrHeatmap = v; }
+    // Magnification filter. Stored on the base so a backend without an
+    // implementation degrades to interpolated rather than throwing.
+    setPixelFilter(v) { this.pixelFilter = v === 'nearest' ? 'nearest' : 'linear'; }
 
     // OpenColorIO. The WebGL backend splices OCIO's generated GLSL into its
     // composite shader; the WebGPU backend has no WGSL path for it. Refusing

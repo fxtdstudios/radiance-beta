@@ -914,6 +914,21 @@ class RadianceViewer {
         this.showGrid = false;
         this.gridMode = 0; // 0=off, 1=thirds, 2=safe areas, 3=center
 
+        // Which published safe-area spec the boxes come from, and the framing
+        // matte, which is a separate question from delivery safety.
+        this.safeAreaPreset = localStorage.getItem('radiance_safe_preset') || 'modern';
+        this.matteMode = localStorage.getItem('radiance_matte') || 'off';
+        this.matteOpacity = 0.7;
+
+        // Nearest-neighbour vs linear magnification. RV binds this to `n`, and
+        // pixel-level inspection is meaningless through a bilinear filter.
+        this.pixelFilter = localStorage.getItem('radiance_pixel_filter') || 'linear';
+
+        // How the frame counter reads. Frames for a technical conversation,
+        // timecode for a delivery one.
+        this.timeDisplay = localStorage.getItem('radiance_time_display') || 'frames';
+        this.frameRate = 24;
+
         // Fullscreen
 
         // Fullscreen
@@ -3222,6 +3237,9 @@ class RadianceViewer {
                 if (this.renderer.init()) {
                     console.log('[Radiance] WebGL Renderer Initialized');
                     this._gpuBackend = 'webgl';
+                    // A fresh texture resets the mag filter, so the stored
+                    // choice has to be re-applied rather than assumed.
+                    this.renderer?.setPixelFilter?.(this.pixelFilter);
                     const savedPrec = localStorage.getItem('radiance_pipeline_precision') || 'f32';
                     if (savedPrec !== 'f32') this.renderer.setPipelinePrecision(savedPrec);
                 }
@@ -6314,6 +6332,9 @@ else:
             case 'b': this.channel = 'b'; this.showZdepth = false; this.render(); break;
             case 'l': this.channel = 'luma'; this.showZdepth = false; this.render(); break;
             case 'c': this.channel = 'rgb'; this.showZdepth = false; this.render(); break;
+            // RV binds nearest-neighbour to `n`. Pixel-peeping through a
+            // bilinear filter shows a blend of neighbours rather than pixels.
+            case 'n': this.togglePixelFilter(); break;
             case 'h': this.toggleHelp(); break;
             case 'w': this.toggleScope('waveform'); break;
             case 'm': this.toggleParadeMode(); break;
@@ -7476,6 +7497,10 @@ else:
         const w = this.overlayCanvas.width, h = this.overlayCanvas.height;
         ctx.clearRect(0, 0, w, h);
 
+        // Aspect matte first: it dims the picture, and the guides drawn after
+        // it must stay legible on top.
+        if (this.matteMode && this.matteMode !== 'off') this.drawAspectMatte(ctx);
+
         // Grid
         if (this.showGrid) this.drawGrid(ctx, w, h);
 
@@ -7655,6 +7680,70 @@ else:
         ctx.restore();
     }
 
+    /**
+     * The picture's rectangle in canvas space.
+     *
+     * Everything that measures the *frame* -- safe areas, the aspect matte --
+     * has to be placed against this, not against the canvas. The safe areas
+     * used to be drawn on the full canvas, so at any zoom or pan other than an
+     * exact fit the "93%" box bore no relationship to the picture at all. For a
+     * guide whose only purpose is delivery QC that is worse than not drawing it.
+     */
+    _imageRect() {
+        const w = (this.imageWidth || 0) * this.zoom;
+        const h = (this.imageHeight || 0) * this.zoom;
+        if (!(w > 0 && h > 0)) return null;
+        return { x: this.panX, y: this.panY, w, h };
+    }
+
+    /**
+     * Safe-area presets, with the standard each comes from.
+     *
+     * An unlabelled safe-area box is not usable for delivery QC -- the question
+     * is always "safe by whose spec", and the answer decides whether a graphic
+     * passes. Verified against the standards rather than from memory, because
+     * this viewer's own note had the attribution wrong in both directions:
+     *
+     *   SMPTE ST 2046-1 (and RP 218): action 93%, title 90%.
+     *   EBU R 95: action safe 3.5% inset, graphics safe 5% inset.
+     *
+     * Those are the same two boxes. The two bodies agree on the geometry and
+     * differ only in what they call the inner one -- "title" against
+     * "graphics" -- so one pair of boxes satisfies both, and saying so is more
+     * useful than offering them as rival options.
+     *
+     * 90/80 is *not* EBU. It is SMPTE's legacy 480-line pair, carried forward
+     * from RP 8 (1961) and RP 13 (1963) for compatibility with material cut for
+     * CRT overscan. It is offered because archive work needs it, and labelled
+     * legacy so nobody reaches for it by default.
+     */
+    static SAFE_AREA_PRESETS = [
+        {
+            id: 'modern', label: 'SMPTE ST 2046-1 / EBU R 95',
+            outer: 0.93, inner: 0.90,
+            outerLabel: 'Action safe 93%', innerLabel: 'Title / graphics safe 90%',
+            note: 'SMPTE ST 2046-1 and EBU R 95 specify the same two boxes; EBU calls the inner one graphics safe.',
+        },
+        {
+            id: 'legacy', label: 'Legacy 480-line (SMPTE RP 218)',
+            outer: 0.90, inner: 0.80,
+            outerLabel: 'Action safe 90% (legacy)', innerLabel: 'Title safe 80% (legacy)',
+            note: 'For 480-line archive material cut for CRT overscan. Not a current delivery spec.',
+        },
+    ];
+
+    /** Aspect-ratio mattes. Distinct from safe areas: this is framing, not QC. */
+    static MATTE_PRESETS = [
+        { id: 'off', label: 'Off', ratio: null },
+        { id: '2.39', label: '2.39:1 — Scope', ratio: 2.39 },
+        { id: '2.00', label: '2.00:1 — Univisium', ratio: 2.0 },
+        { id: '1.85', label: '1.85:1 — Flat', ratio: 1.85 },
+        { id: '1.78', label: '1.78:1 — 16:9', ratio: 16 / 9 },
+        { id: '1.33', label: '1.33:1 — 4:3', ratio: 4 / 3 },
+        { id: '1.00', label: '1:1 — Square', ratio: 1 },
+        { id: '0.5625', label: '9:16 — Vertical', ratio: 9 / 16 },
+    ];
+
     drawGrid(ctx, w, h) {
         // Grid mode: 1=thirds, 2=safe areas, 3=center, 4=all
 
@@ -7675,44 +7764,37 @@ else:
         const showActionSafe = showSafeFromGrid || this.safeAreaMode === 'action' || this.safeAreaMode === 'both';
         const showTitleSafe = showSafeFromGrid || this.safeAreaMode === 'title' || this.safeAreaMode === 'both';
 
-        // Action Safe (93% - broadcast safe)
-        if (showActionSafe) {
-            ctx.strokeStyle = 'rgba(0, 200, 255, 0.4)';
-            ctx.lineWidth = 1;
-            ctx.setLineDash([8, 4]);
-            const actionMargin = 0.035; // 3.5% margin = 93% visible
-            ctx.beginPath();
-            ctx.rect(
-                w * actionMargin, h * actionMargin,
-                w * (1 - 2 * actionMargin), h * (1 - 2 * actionMargin)
-            );
-            ctx.stroke();
-            ctx.setLineDash([]);
+        const rect = this._imageRect();
+        if (rect && (showActionSafe || showTitleSafe)) {
+            const preset = RadianceViewer.SAFE_AREA_PRESETS.find((p) => p.id === this.safeAreaPreset)
+                || RadianceViewer.SAFE_AREA_PRESETS[0];
 
-            // Label
-            ctx.fillStyle = 'rgba(0, 200, 255, 0.6)';
+            const box = (fraction, colour, dash, label) => {
+                const iw = rect.w * fraction, ih = rect.h * fraction;
+                const x = rect.x + (rect.w - iw) / 2, y = rect.y + (rect.h - ih) / 2;
+                ctx.strokeStyle = colour;
+                ctx.lineWidth = 1;
+                ctx.setLineDash(dash);
+                ctx.beginPath();
+                ctx.rect(x, y, iw, ih);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.fillStyle = colour;
+                ctx.font = '10px sans-serif';
+                ctx.fillText(label, x + 4, y + 13);
+            };
+
+            // Was 93% action against an 80% title box -- the modern action area
+            // paired with the legacy title area, which is not a spec anyone
+            // publishes. Both now come from the same preset.
+            if (showActionSafe) box(preset.outer, 'rgba(0, 200, 255, 0.55)', [8, 4], preset.outerLabel);
+            if (showTitleSafe) box(preset.inner, 'rgba(255, 200, 0, 0.55)', [4, 4], preset.innerLabel);
+
+            // Name the standard once, at the bottom of the frame. A box with a
+            // percentage on it still does not say whose percentage it is.
+            ctx.fillStyle = 'rgba(255,255,255,0.4)';
             ctx.font = '9px sans-serif';
-            ctx.fillText('Action Safe 93%', w * actionMargin + 4, h * actionMargin + 12);
-        }
-
-        // Title Safe (80% - text safe)
-        if (showTitleSafe) {
-            ctx.strokeStyle = 'rgba(255, 200, 0, 0.4)';
-            ctx.lineWidth = 1;
-            ctx.setLineDash([4, 4]);
-            const titleMargin = 0.10; // 10% margin = 80% visible
-            ctx.beginPath();
-            ctx.rect(
-                w * titleMargin, h * titleMargin,
-                w * (1 - 2 * titleMargin), h * (1 - 2 * titleMargin)
-            );
-            ctx.stroke();
-            ctx.setLineDash([]);
-
-            // Label
-            ctx.fillStyle = 'rgba(255, 200, 0, 0.6)';
-            ctx.font = '9px sans-serif';
-            ctx.fillText('Title Safe 80%', w * titleMargin + 4, h * titleMargin + 12);
+            ctx.fillText(preset.label, rect.x + 4, rect.y + rect.h - 5);
         }
 
         // Center cross (mode 3 or 4)
@@ -7729,6 +7811,52 @@ else:
             ctx.arc(w / 2, h / 2, 5, 0, Math.PI * 2);
             ctx.stroke();
         }
+    }
+
+    /**
+     * Aspect-ratio matte.
+     *
+     * Deliberately separate from the safe areas. A safe area answers "will this
+     * survive the delivery"; a matte answers "what will the audience see" while
+     * shooting or framing wider than the finish. Drawing them as one control
+     * conflates a QC guide with a creative one.
+     *
+     * Darkened rather than solid black so the matted region stays inspectable —
+     * the point of framing to a matte is usually to check what is *just* outside
+     * it.
+     */
+    drawAspectMatte(ctx) {
+        const preset = RadianceViewer.MATTE_PRESETS.find((p) => p.id === this.matteMode);
+        const rect = this._imageRect();
+        if (!preset?.ratio || !rect) return;
+
+        const current = rect.w / rect.h;
+        let inner;
+        if (preset.ratio > current) {
+            // Target is wider: bars top and bottom.
+            const ih = rect.w / preset.ratio;
+            inner = { x: rect.x, y: rect.y + (rect.h - ih) / 2, w: rect.w, h: ih };
+        } else {
+            const iw = rect.h * preset.ratio;
+            inner = { x: rect.x + (rect.w - iw) / 2, y: rect.y, w: iw, h: rect.h };
+        }
+
+        ctx.save();
+        ctx.fillStyle = `rgba(0, 0, 0, ${this.matteOpacity ?? 0.7})`;
+        // Four bars rather than a clipped fill: the matted area must dim, and
+        // the framed area must be left completely untouched.
+        ctx.fillRect(rect.x, rect.y, rect.w, inner.y - rect.y);
+        ctx.fillRect(rect.x, inner.y + inner.h, rect.w, (rect.y + rect.h) - (inner.y + inner.h));
+        ctx.fillRect(rect.x, inner.y, inner.x - rect.x, inner.h);
+        ctx.fillRect(inner.x + inner.w, inner.y, (rect.x + rect.w) - (inner.x + inner.w), inner.h);
+
+        ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(inner.x + 0.5, inner.y + 0.5, inner.w - 1, inner.h - 1);
+        ctx.fillStyle = 'rgba(255,255,255,0.5)';
+        ctx.font = '10px sans-serif';
+        ctx.fillText(preset.label, inner.x + 4, inner.y + inner.h - 6);
+        ctx.restore();
     }
 
 
@@ -15455,6 +15583,61 @@ else:
     //  no config loaded the viewer's own ACES 1.3 path runs exactly as before.
     // ═══════════════════════════════════════════════════════════════════════
 
+    /**
+     * Nearest-neighbour vs linear magnification.
+     *
+     * The state lives on the viewer and is pushed to the renderer, because a
+     * new texture resets the parameter and the choice has to survive a frame
+     * change.
+     */
+    togglePixelFilter() {
+        this.pixelFilter = this.pixelFilter === 'nearest' ? 'linear' : 'nearest';
+        localStorage.setItem('radiance_pixel_filter', this.pixelFilter);
+        this.renderer?.setPixelFilter?.(this.pixelFilter);
+        this._termLog?.('info', `[View] Magnification: ${this.pixelFilter === 'nearest' ? 'nearest neighbour' : 'linear'}`);
+        this.render();
+        this._lastRenderContent?.();
+    }
+
+    /**
+     * The frame position, in the unit the user asked for.
+     *
+     * Frames for a technical conversation, seconds for a rough one, timecode
+     * for a delivery one. The 8-digit HH:MM:SS:FF form is what a note from a
+     * client will be written in, and a viewer that can only count frames makes
+     * the reader do the arithmetic.
+     *
+     * Non-drop only, and it says so. Drop-frame timecode at 29.97 renumbers
+     * frames rather than dropping them, and printing a `;` separator without
+     * implementing that renumbering would be a lie in the one place people
+     * copy figures from.
+     */
+    formatFramePosition(frame = this.currentFrame, total = this.totalFrames) {
+        const fps = this.frameRate || 24;
+        const f = Math.max(0, Math.round(frame));
+        if (this.timeDisplay === 'frames') return `${f + 1} / ${total}`;
+        if (this.timeDisplay === 'seconds') return `${(f / fps).toFixed(2)}s`;
+        // Non-drop. Drop-frame at 29.97 renumbers frames rather than dropping
+        // them; emitting a ';' separator without that renumbering would be
+        // wrong in the one place people copy figures from.
+        const totalSec = f / fps;
+        const hh = Math.floor(totalSec / 3600);
+        const mm = Math.floor((totalSec % 3600) / 60);
+        const ss = Math.floor(totalSec % 60);
+        const ff = Math.round(f % fps);
+        const p = (n) => String(n).padStart(2, '0');
+        return `${p(hh)}:${p(mm)}:${p(ss)}:${p(ff)}`;
+    }
+
+    /** Cycle frames → seconds → timecode. */
+    cycleTimeDisplay() {
+        const order = ['frames', 'seconds', 'timecode'];
+        this.timeDisplay = order[(order.indexOf(this.timeDisplay) + 1) % order.length];
+        localStorage.setItem('radiance_time_display', this.timeDisplay);
+        this._lastRenderContent?.();
+        this.renderOverlay();
+    }
+
     _ocioSetStatus(level, text) {
         this.ocioStatus = text ? { level, text } : null;
         if (level === 'error') this._termLog?.('warn', `[OCIO] ${text}`);
@@ -15690,10 +15873,116 @@ else:
         container.appendChild(group);
     }
 
+    /**
+     * Framing and delivery guides.
+     *
+     * Safe areas and the aspect matte are deliberately separate controls. A
+     * safe area answers "will this survive the delivery"; a matte answers "what
+     * will the audience see". Conflating a QC guide with a creative one is how
+     * a graphic ends up placed against the wrong box.
+     */
+    renderFramingSection(container) {
+        const group = document.createElement('div');
+        const head = document.createElement('div');
+        head.style.cssText = 'color:#888; font-size:10px; margin-bottom:8px; text-transform:uppercase; font-weight:bold; letter-spacing:0.6px;';
+        head.textContent = 'Framing & Guides';
+        group.appendChild(head);
+
+        const box = document.createElement('div');
+        box.style.cssText = 'background: rgba(255,255,255,0.03); padding: 8px; border-radius: 6px; display:flex; flex-direction:column; gap:6px;';
+
+        const row = (labelText, node, title) => {
+            const r = document.createElement('div');
+            r.style.cssText = 'display:flex; align-items:center; gap:6px;';
+            if (title) r.title = title;
+            const l = document.createElement('div');
+            l.textContent = labelText;
+            l.style.cssText = 'font-size:10px; color:#888; width:78px; flex-shrink:0; font-weight:600;';
+            r.appendChild(l); r.appendChild(node);
+            box.appendChild(r);
+            return r;
+        };
+        const sel = (items, current, onPick) => {
+            const el = document.createElement('select');
+            el.style.cssText = 'flex:1; min-width:0; background:rgba(255,255,255,0.06); color:#ddd; border:1px solid rgba(255,255,255,0.14); border-radius:4px; padding:4px 6px; font-size:11px;';
+            items.forEach((it) => {
+                const o = document.createElement('option');
+                o.value = it.id; o.textContent = it.label;
+                if (it.id === current) o.selected = true;
+                el.appendChild(o);
+            });
+            el.onchange = () => onPick(el.value);
+            return el;
+        };
+
+        // ── Safe areas ──────────────────────────────────────────────────────
+        const presets = RadianceViewer.SAFE_AREA_PRESETS;
+        row('Safe areas', sel(presets, this.safeAreaPreset, (v) => {
+            this.safeAreaPreset = v;
+            localStorage.setItem('radiance_safe_preset', v);
+            this._lastRenderContent?.();
+            this.renderOverlay();
+        }), 'Which published specification the safe-area boxes come from.');
+
+        const active = presets.find((p) => p.id === this.safeAreaPreset) || presets[0];
+        const note = document.createElement('div');
+        note.style.cssText = 'font-size:9px; line-height:1.45; color:rgba(255,255,255,0.32);';
+        note.textContent = active.note;
+        box.appendChild(note);
+
+        // ── Aspect matte ────────────────────────────────────────────────────
+        row('Matte', sel(RadianceViewer.MATTE_PRESETS, this.matteMode, (v) => {
+            this.matteMode = v;
+            localStorage.setItem('radiance_matte', v);
+            this._lastRenderContent?.();
+            this.renderOverlay();
+        }), 'Darkens outside a target aspect ratio. Framing, not delivery QC — the safe areas above are the QC guide.');
+
+        // ── Magnification filter ────────────────────────────────────────────
+        const filterBtn = document.createElement('div');
+        const paintFilter = () => {
+            const near = this.pixelFilter === 'nearest';
+            filterBtn.textContent = near ? 'NEAREST (actual pixels)' : 'LINEAR (interpolated)';
+            filterBtn.style.cssText = `flex:1; text-align:center; padding:5px; border-radius:4px; font-size:10px;
+                font-weight:700; cursor:pointer; user-select:none;
+                background:${near ? 'rgba(0,242,255,0.10)' : 'rgba(255,255,255,0.06)'};
+                color:${near ? '#00f2ff' : '#aaa'};
+                border:1px solid ${near ? 'rgba(0,242,255,0.28)' : 'rgba(255,255,255,0.12)'};`;
+        };
+        filterBtn.onclick = () => { this.togglePixelFilter(); paintFilter(); };
+        paintFilter();
+        row('Magnify', filterBtn, 'Nearest shows the actual pixels; linear interpolates. Shortcut: N. Minification stays interpolated either way — nearest on a downscaled image shows detail that is not there.');
+
+        // ── Time display ────────────────────────────────────────────────────
+        const timeBtn = document.createElement('div');
+        const paintTime = () => {
+            timeBtn.textContent = `${this.timeDisplay.toUpperCase()} — ${this.formatFramePosition()}`;
+            timeBtn.style.cssText = `flex:1; text-align:center; padding:5px; border-radius:4px; font-size:10px;
+                font-weight:700; cursor:pointer; user-select:none; font-family:monospace;
+                background:rgba(255,255,255,0.06); color:#aaa; border:1px solid rgba(255,255,255,0.12);`;
+        };
+        timeBtn.onclick = () => { this.cycleTimeDisplay(); paintTime(); };
+        paintTime();
+        row('Position', timeBtn, 'Frames, seconds, or HH:MM:SS:FF. Non-drop-frame — drop-frame renumbers frames rather than dropping them, and is not implemented.');
+
+        const fpsRow = document.createElement('div');
+        fpsRow.style.cssText = 'display:flex; align-items:center; gap:6px;';
+        const fpsSel = sel(
+            [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60].map((f) => ({ id: String(f), label: `${f} fps` })),
+            String(this.frameRate),
+            (v) => { this.frameRate = parseFloat(v); paintTime(); this.renderOverlay(); },
+        );
+        row('Frame rate', fpsSel, 'Used only to convert frames to seconds and timecode. Taken from the file when the metadata carries it.');
+
+        group.appendChild(box);
+        container.appendChild(group);
+    }
+
     renderViewTab(container) {
         container.style.cssText = 'display: flex; flex-direction: column; flex: 1; gap: 12px; padding: 12px; min-height: 0; overflow-y: auto;';
 
         this.renderOcioSection(container);
+        this.renderFramingSection(container);
 
         // 0. Neural Network Monitor (Real-time 3D)
         const neuralGroup = document.createElement('div');
