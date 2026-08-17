@@ -3491,6 +3491,35 @@ vec3 getDenoiseColor(vec2 uv) {
     }
 
     // Load image as texture
+    /**
+     * Magnification filter for the image texture.
+     *
+     * `'nearest'` shows the actual pixels; `'linear'` interpolates. Inspecting
+     * a pixel through a bilinear filter shows a blend of its neighbours, which
+     * is why every reference viewer binds this to a key -- RV uses `n`.
+     *
+     * Only magnification changes. Minification stays interpolated: nearest on a
+     * downscaled image aliases badly and shows detail that is not there, which
+     * is the opposite of what this toggle is for.
+     */
+    setPixelFilter(mode) {
+        this.pixelFilter = mode === 'nearest' ? 'nearest' : 'linear';
+        this._applyPixelFilter();
+    }
+
+    _applyPixelFilter() {
+        const gl = this.gl;
+        const tex = this.textures?.image;
+        if (!gl || !tex) return;
+        // A float texture cannot filter linearly without the extension, so
+        // 'linear' falls back to nearest there rather than sampling as black.
+        const canLinear = !this._imageIsFloat || this.extColorFloatLinear;
+        const mag = (this.pixelFilter === 'nearest' || !canLinear) ? gl.NEAREST : gl.LINEAR;
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, mag);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+
     loadImageTexture(image) {
         const gl = this.gl;
 
@@ -3514,6 +3543,8 @@ vec3 getDenoiseColor(vec2 uv) {
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
         this.textures.image = texture;
+        this._imageIsFloat = false;
+        this._applyPixelFilter();   // a new texture resets to LINEAR otherwise
         this.imageWidth = image.width;
         this.imageHeight = image.height;
         this.isLinearTexture = false; // PNG/Image data is sRGB-encoded
@@ -3598,6 +3629,8 @@ vec3 getDenoiseColor(vec2 uv) {
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
 
         this.textures.image = texture;
+        this._imageIsFloat = true;
+        this._applyPixelFilter();
         this.imageWidth = width;
         this.imageHeight = height;
         this.isLinearTexture = true; // Float32 data is scene-linear

@@ -35,7 +35,7 @@ Artists get 32-bit, HDR, and ACES image tools, professional viewers, and VFX nod
 
 ## In action
 
-**The Radiance Viewer** — WebGPU-accelerated review at FP32/RGBA32F end to end: EXR channel and layer inspection, OpenColorIO 2.5 — load a show's config and the Display and View menus come from it, applied through OCIO's own GPU path — with a built-in ACES 1.3 pipeline as the fallback, exposure/tone/colour controls with lift-gamma-gain wheels, scopes (histogram, waveform, vectorscope, parade) with selectable scales — 10-bit and 12-bit code value, percent, mV, and nits for ST.2084 and HLG — data or video levels, and a switch for whether they measure before or after the viewer colour transforms, a pixel probe with per-region min/max/mean/median and NaN/Inf reporting, false colour, zebra, a nit-accurate HDR heatmap anchored to BT.2408 reference white, A/B compare with wipe, difference and blink, and a sequence timeline with per-frame thumbnails.
+**The Radiance Viewer** — WebGPU-accelerated review at FP32/RGBA32F end to end: EXR channel and layer inspection, OpenColorIO 2.5 — load a show's config and the Display and View menus come from it, applied through OCIO's own GPU path — with a built-in ACES 1.3 pipeline as the fallback, exposure/tone/colour controls with lift-gamma-gain wheels, scopes (histogram, waveform, vectorscope, parade) with selectable scales — 10-bit and 12-bit code value, percent, mV, and nits for ST.2084 and HLG — data or video levels, and a switch for whether they measure before or after the viewer colour transforms, a pixel probe with per-region min/max/mean/median and NaN/Inf reporting, false colour, zebra, a nit-accurate HDR heatmap anchored to BT.2408 reference white, safe areas labelled with the standard they come from (SMPTE ST 2046-1 / EBU R 95), aspect-ratio mattes, nearest-neighbour magnification on N, timecode, A/B compare with wipe, difference and blink, and a sequence timeline with per-frame thumbnails.
 
 <div align="center">
 <img src="viewer.png" width="920" alt="Radiance Viewer — inspector, colour transform, tone and colour wheels, scopes, sequence timeline">
@@ -193,6 +193,7 @@ The Project Manager node keeps its launchers (open, save, and links) in a single
 | W | Toggle waveform |
 | V | Toggle vectorscope |
 | A | Cycle A/B compare modes |
+| N | Nearest-neighbour / linear magnification |
 
 ### HDR VAE Decoders
 
