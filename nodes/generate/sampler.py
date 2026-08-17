@@ -1360,11 +1360,8 @@ class RadianceSamplerPro:
         # ── LTX-AV Dual CFG (audio_cfg) ──────────────────────────────────────
         # ALBABIT-FIX: mirrors comfy's own LTXVDualCFGGuider (comfy_extras/
         # nodes_lt.py) -- separate CFG for the video/audio halves of a packed
-        # LTX-AV latent (video first, then audio, per comfy.utils.pack_latents).
-        # Registers on set_model_sampler_cfg_function (noise-space slot);
-        # composes cleanly with the 3 post-cfg patches above since they now
-        # occupy a different slot, applied after this one. audio_cfg == 0
-        # (sentinel) or == cfg skips the patch entirely (plain single CFG).
+        # LTX-AV latent. Noise-space slot, so it composes cleanly with the 3
+        # post-cfg patches above (a different slot, applied after this one).
         if is_ltx_av and _HAS_NESTED_TENSOR and audio_cfg > 0.0 and not math.isclose(audio_cfg, cfg):
             _v_numel = None
             if getattr(work_latent, "is_nested", False):
