@@ -13,6 +13,15 @@
  */
 
 import { RadianceRenderer } from "./radiance_renderer.js";
+// The grade maths, emitted from one file for both backends. This backend used
+// to carry its own copy in WGSL and a *third* one in JS for the CPU readback,
+// and all three disagreed with WebGL. See js/radiance_grade.js.
+import {
+    WGSL as GRADE_WGSL,
+    applyLift as gradeLift, applyGain as gradeGain, applyOffset as gradeOffset,
+    applyGamma as gradeGamma, applyContrast as gradeContrast,
+    applySaturation as gradeSaturation,
+} from "./radiance_grade.js";
 
 // ── WGSL Shader Sources ────────────────────────────────────────────────────
 
@@ -43,6 +52,7 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
 
 function buildCompositeFragmentWGSL() {
     return `
+${GRADE_WGSL}
 // ── Radiance HDR Composite Shader (WebGPU/WGSL) ──────────────────────────
 // Ported from WebGL GLSL composite shader. Implements the full VFX-grade
 // color grading pipeline: IDT → Exposure → LMT → Primary Grading →
@@ -413,15 +423,14 @@ fn fs_main(@location(0) texcoord: vec2f) -> @location(0) vec4f {
     let gLift = vec3f(u.lift_r, u.lift_g, u.lift_b);
     let gGradeGamma = vec3f(u.grade_gamma_r, u.grade_gamma_g, u.grade_gamma_b);
     let gOffset = vec3f(u.offset_r, u.offset_g, u.offset_b);
-    color = color * gGain + gLift;
-    if (any(gGradeGamma != vec3f(1.0))) {
-        color = pow(max(color, vec3f(0.0)), 1.0 / gGradeGamma);
-    }
-    color += gOffset;
+    // Was: flat additive lift, unguarded gamma, unclamped contrast -- three
+    // separate disagreements with the WebGL backend, on a path the viewer
+    // *prefers* whenever navigator.gpu exists. Now the shared definition.
+    color = radGradeOrder(color, gOffset, gLift, gGain, gGradeGamma);
 
     // Contrast
     if (u.contrast != 1.0) {
-        color = (color - u.pivot) * u.contrast + u.pivot;
+        color = radContrast(color, u.contrast, u.pivot);
     }
 
     // Resolve-style controls
@@ -1260,10 +1269,11 @@ class RadianceWebGPURenderer extends RadianceRenderer {
             pixelsPromise = Promise.resolve(data);
         } else {
             // Fall back to CPU grading emulation on raw float pixels
-            pixelsPromise = this.readPixelsFloat32(scopeW, scopeH, 1.0).then(pixels => {
-                if (!pixels) return null;
-                return this._emulateGradingOnCPU(pixels);
-            });
+            // readPixelsFloat32 is synchronous now and returns a wrapper.
+            const readback = this.readPixelsFloat32(scopeW, scopeH, 1.0);
+            pixelsPromise = Promise.resolve(
+                readback ? this._emulateGradingOnCPU(readback.data) : null
+            );
         }
 
         pixelsPromise.then(pixels => {
@@ -1373,28 +1383,24 @@ class RadianceWebGPURenderer extends RadianceRenderer {
             g *= exp;
             b *= exp;
 
-            // Lift / Gain / Offset
-            r = r * gainR + liftR + offsetR;
-            g = g * gainG + liftG + offsetG;
-            b = b * gainB + liftB + offsetB;
-
-            // Gamma
-            r = r > 0.0 ? Math.pow(r, 1.0 / gammaR) : r;
-            g = g > 0.0 ? Math.pow(g, 1.0 / gammaG) : g;
-            b = b > 0.0 ? Math.pow(b, 1.0 / gammaB) : b;
-
-            // Contrast around pivot
-            if (con !== 1.0) {
-                r = r > 0.0 ? piv * Math.pow(r / piv, con) : r;
-                g = g > 0.0 ? piv * Math.pow(g / piv, con) : g;
-                b = b > 0.0 ? piv * Math.pow(b / piv, con) : b;
-            }
-
-            // Saturation
-            const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-            r = l + (r - l) * sat;
-            g = l + (g - l) * sat;
-            b = l + (b - l) * sat;
+            // Offset / Lift / Gain / Gamma / Contrast / Saturation, from the
+            // shared definition.
+            //
+            // This block used to be a third implementation of the grade, and
+            // the one that diverged most: flat additive lift where the shaders
+            // pivot at white, no gamma floor, and contrast as
+            // piv * pow(c/piv, con) -- a different curve from the linear form
+            // every other path used, and NaN at pivot 0, which the slider
+            // allows. It fed _getGradedPixels, so a dark or letterboxed frame
+            // that tripped the _isAllZeroes check landed here and the scopes
+            // silently measured a different grade from the one on screen.
+            let px = gradeOffset([r, g, b], [offsetR, offsetG, offsetB]);
+            px = gradeLift(px, [liftR, liftG, liftB]);
+            px = gradeGain(px, [gainR, gainG, gainB]);
+            px = gradeGamma(px, [gammaR, gammaG, gammaB]);
+            if (con !== 1.0) px = gradeContrast(px, con, piv);
+            if (sat !== 1.0) px = gradeSaturation(px, sat);
+            r = px[0]; g = px[1]; b = px[2];
 
             out[i] = Math.round(Math.max(0.0, Math.min(1.0, r)) * 255);
             out[i + 1] = Math.round(Math.max(0.0, Math.min(1.0, g)) * 255);
@@ -1626,8 +1632,29 @@ class RadianceWebGPURenderer extends RadianceRenderer {
 
     // ── Pixel readback for export ──────────────────────────────────────────
 
+    /**
+     * Read back float pixels.
+     *
+     * Contract matches the WebGL renderer's deliberately: a **synchronous**
+     * `{ data, width, height, graded }` or `null`. It used to return a
+     * `Promise<Float32Array>` -- a different type, a different shape, and no
+     * indication that the pixels were ungraded -- while WebGL returned a
+     * synchronous wrapper around a fully graded composite.
+     *
+     * The two consumers held contradictory expectations of the same method.
+     * `_renderScopeFromPixels` used `.then()`, so it worked; the 32-bit EXR
+     * export at `radiance_viewer.js` read `result.data` straight off the
+     * Promise, got `undefined`, and reported "[Export] EXR encoding failed" --
+     * an error blaming the encoder for a backend contract mismatch. The
+     * `!this.useWebGL` guard did not catch it because `_tryWebGPUUpgrade` sets
+     * `useWebGL = true`.
+     *
+     * `graded` is part of the contract, not decoration: this backend returns
+     * the ungraded scene-linear source, so anything writing a "graded" file
+     * has to know that and say so rather than silently export the wrong image.
+     */
     readPixelsFloat32(w, h, lutStrength) {
-        if (!this._lastSourcePixels || !this.imageWidth || !this.imageHeight) return Promise.resolve(null);
+        if (!this._lastSourcePixels || !this.imageWidth || !this.imageHeight) return null;
 
         // CPU-side nearest resample of the uploaded scene-linear source. This is
         // intentionally conservative: it keeps WebGPU scopes/export from relying
@@ -1649,7 +1676,7 @@ class RadianceWebGPURenderer extends RadianceRenderer {
                 out[di + 3] = src[si + 3];
             }
         }
-        return Promise.resolve(out);
+        return { data: out, width: w, height: h, graded: false };
     }
 
     // ── Reference shelf ────────────────────────────────────────────────────

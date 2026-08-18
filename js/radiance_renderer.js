@@ -178,6 +178,23 @@ export class RadianceRenderer {
     setGamma(r, g, b) { this.gradingGamma = g === undefined ? [r, r, r] : [r, g, b]; }
     setSaturation(v) { this.saturation = v; }
     setFalseColor(v) { this.falseColor = v; }
+    // WebGPU has no WGSL implementation yet; it stores the flag and the
+    // viewer reports the backend, rather than the toggle looking active
+    // and doing nothing.
+    setHDRHeatmap(v) { this.hdrHeatmap = v; }
+    // Magnification filter. Stored on the base so a backend without an
+    // implementation degrades to interpolated rather than throwing.
+    setPixelFilter(v) { this.pixelFilter = v === 'nearest' ? 'nearest' : 'linear'; }
+
+    // OpenColorIO. The WebGL backend splices OCIO's generated GLSL into its
+    // composite shader; the WebGPU backend has no WGSL path for it. Refusing
+    // here rather than storing the state means the viewer can tell the user the
+    // config is not being applied on this backend, instead of leaving a
+    // populated Display/View menu that changes nothing.
+    setOCIODisplay(_info) {
+        return { ok: false, enabled: false, error: 'OpenColorIO needs the WebGL backend; this renderer has no WGSL path for it.' };
+    }
+
     setZebra(v) { this.zebra = v; }
     setZebraThreshold(v) { this.zebraThreshold = v; }
     setGamutWarning(v) { this.gamutWarning = v; }

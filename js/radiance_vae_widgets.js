@@ -169,8 +169,8 @@ function syncWidgets(node) {
     if (setWidgetVisible(inverseTmW, !directHDR, node)) changed = true;
     if (setWidgetVisible(hdrScaleW, directHDR, node)) changed = true;
 
-    // ALBABIT-FIX: temporal_overlap is only read inside `if latent.ndim == 5
-    // and temporal_size > 0:` (hdr/vae.py:2763) -- matches its own tooltip
+    // ALBABIT-FIX: temporal_overlap is only read inside 'if latent.ndim == 5
+    // and temporal_size > 0:' (hdr/vae.py:2763) -- matches its own tooltip
     // ("Only active when temporal_size > 0").
     if (setWidgetVisible(temporalOverlapW, (parseInt(temporalSizeW?.value, 10) || 0) > 0, node)) changed = true;
 

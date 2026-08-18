@@ -11,8 +11,8 @@
 //      never recorded — "number", "combo", "INT" and "text" respectively. That
 //      is a per-module detail, so it is now an option rather than a fork.
 //
-//   2. Whether the hidden state also suppressed `draw` and the DOM nodes
-//      (`inputEl`, `element`). radiance_loader.js and radiance_upscale.js did;
+//   2. Whether the hidden state also suppressed 'draw' and the DOM nodes
+//      ('inputEl', 'element'). radiance_loader.js and radiance_upscale.js did;
 //      radiance_io.js and radiance_resolution.js did not, so DOM-backed widgets
 //      in those two modules kept painting after being "hidden". Every guard is
 //      conditional, so applying it everywhere is a strict superset of what the
