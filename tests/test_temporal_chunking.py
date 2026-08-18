@@ -181,22 +181,34 @@ class TestOverlapTrimPerChunk(unittest.TestCase):
 
 @skip_no_torch
 class TestTemporalChunkingSmoke(unittest.TestCase):
-    """decode() with temporal_size>0 must split latent, call VAE per chunk,
-    and return the correct frame count."""
+    """decode() with a 5D latent needing temporal chunking must route through
+    vae.decode_tiled() and return the correct frame count."""
 
     def _make_mock_vae(self, frames_per_lat_frame=6):
         """Mock VAE: vae.decode(5D_latent) → (1, F_out, H, W, 3) tensor.
-        F_out = frames_per_lat_frame * T_lat (simple linear ratio for testing)."""
+        F_out = frames_per_lat_frame * T_lat (simple linear ratio for testing).
+
+        ALBABIT-FIX: decode() now routes turbo_decoder=None + 5D latents
+        through vae.decode_tiled() instead of Radiance's old recursive
+        per-chunk vae.decode() loop, so decode_tiled needs the same
+        linear-ratio stand-in applied to the whole latent's T (it receives
+        the full latent, not pre-chunked).
+        """
         mock = MagicMock()
         mock.latent_dim = 3
+        mock.temporal_compression_decode.return_value = 1
         def _decode(lat):
             T = lat.shape[2] if lat.ndim == 5 else 1
             return torch.zeros(1, T * frames_per_lat_frame, 4, 4, 3)
         mock.decode.side_effect = _decode
+        def _decode_tiled(samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
+            T = samples.shape[2] if samples.ndim == 5 else 1
+            return torch.zeros(1, T * frames_per_lat_frame, 4, 4, 3)
+        mock.decode_tiled.side_effect = _decode_tiled
         return mock
 
     def test_no_overlap_frame_count(self):
-        """temporal_size=3, t_ov=0 on T=6 latent → 2 chunks, frames concatenated."""
+        """temporal_size=3, t_ov=0 on T=6 latent → decode_tiled(tile_t=3), correct frame count."""
         decoder = _make_decoder()
         mock_vae = self._make_mock_vae(frames_per_lat_frame=2)
         # 5D latent: (1, 4, 6, 4, 4) — 6 temporal latent frames
@@ -215,7 +227,7 @@ class TestTemporalChunkingSmoke(unittest.TestCase):
                          f"Expected 12 frames, got {img.shape[0]}")
 
     def test_with_overlap_frame_count(self):
-        """temporal_size=3, t_ov=1 on T=6 latent → TileEngine chunks with trim."""
+        """temporal_size=3, t_ov=1 on T=6 latent → decode_tiled(tile_t=3, overlap_t=1)."""
         decoder = _make_decoder()
         mock_vae = self._make_mock_vae(frames_per_lat_frame=2)
         latent_5d = torch.zeros(1, 4, 6, 4, 4)

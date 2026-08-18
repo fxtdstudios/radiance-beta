@@ -375,23 +375,43 @@ class TestEnergyCfgPatch:
 
         assert out.shape == cond.shape
 
-    def test_an_existing_cfg_function_is_wrapped_not_replaced(self):
-        """EPS must compose with guidance rescale and the SDR anchor."""
-        seen = {}
+    def test_ltxav_packed_latent_no_ops_with_one_warning(self, monkeypatch):
+        """LTX-AV's packed latent (comfy.utils.pack_latents) is (B, 1, N) --
+        3D, below the 4-D floor this patch assumes. Must not corrupt the
+        sample, and must warn once, not on every step."""
+        import radiance.nodes.generate.sampler as ns
 
-        def existing(args):
-            seen["cond_denoised"] = args["cond_denoised"]
-            return args["denoised"] * 0.0
+        warnings = []
+        monkeypatch.setattr(ns.logger, "warning", lambda *a, **k: warnings.append(a))
 
+        cond = torch.full((1, 1, 64), 5.0)
+        uncond = torch.ones(1, 1, 64)
+        args = _args(cond, uncond, cfg=1.0)
+
+        patch = _make_energy_cfg_patch([(torch.ones(1, 4, 4), 0.5)])
+        out1 = patch(args)
+        out2 = patch(args)
+
+        assert torch.equal(out1, args["denoised"])
+        assert torch.equal(out2, args["denoised"])
+        assert len(warnings) == 1
+
+    def test_composes_through_the_post_cfg_chain_not_manual_wrapping(self):
+        """EPS is registered on set_model_sampler_post_cfg_function, a list
+        ComfyUI chains automatically (comfy/samplers.py:600-603) -- it takes
+        no existing_cfg_fn and must not depend on the incoming
+        args["denoised"] (an earlier chain link's output) to produce its own
+        result, so it composes correctly regardless of chain position."""
         cond = torch.full((1, 4, 4, 4), 5.0)
         uncond = torch.ones(1, 4, 4, 4)
 
-        patch = _make_energy_cfg_patch([(torch.ones(1, 4, 4), 0.5)], existing_cfg_fn=existing)
-        out = patch(_args(cond, uncond, cfg=1.0))
+        patch = _make_energy_cfg_patch([(torch.ones(1, 4, 4), 0.5)])
+        args = _args(cond, uncond, cfg=1.0)
+        args["denoised"] = torch.zeros_like(cond)  # as if an earlier link already ran
+        out = patch(args)
 
-        assert torch.allclose(out, torch.zeros_like(out)), "the existing cfg fn did not run"
-        assert seen["cond_denoised"][0, 0, 0, 0].item() == pytest.approx(7.0), \
-            "the downstream cfg fn did not receive the EPS-boosted prediction"
+        assert out[0, 0, 0, 0].item() == pytest.approx(7.0), \
+            "EPS's own result must not be discarded in favor of the incoming denoised value"
 
     def test_mismatched_cond_uncond_shapes_pass_through(self):
         args = {
@@ -422,3 +442,106 @@ class TestEnergyCfgPatch:
             torch.nn.functional.interpolate = with_interpolate_banned
 
         assert torch.equal(first, second)
+
+
+class TestEnergyCfgPatchPackedMultiModality:
+    """LTX-AV's packed (video+audio) latent arrives as a flat (B, 1, N)
+    tensor. These pin the unpack -> mask video -> re-pack path that replaced
+    the old silent no-op (see project_radiance_sampler_deferred memory).
+
+    comfy.utils.pack_latents/unpack_latents aren't in the test stub (only
+    ProgressBar is), so tests that need them monkeypatch in a faithful
+    reimplementation of the real algorithm (comfy/utils.py: reshape each
+    tensor to (B, 1, -1), concatenate on the last dim; the shapes list is
+    what makes the inverse slicing possible).
+    """
+
+    @staticmethod
+    def _fake_pack(latents):
+        shapes = [tuple(t.shape) for t in latents]
+        flat = [t.reshape(t.shape[0], 1, -1) for t in latents]
+        return torch.cat(flat, dim=-1), shapes
+
+    @staticmethod
+    def _fake_unpack(combined, shapes):
+        if len(shapes) <= 1:
+            return [combined]
+        out, remaining = [], combined
+        for shape in shapes:
+            cut = 1
+            for d in shape[1:]:
+                cut *= d
+            piece, remaining = remaining[..., :cut], remaining[..., cut:]
+            out.append(piece.reshape([piece.shape[0]] + list(shape[1:])))
+        return out
+
+    def _patch_comfy_utils(self, monkeypatch):
+        import radiance.nodes.generate.sampler as ns
+        monkeypatch.setattr(ns.comfy.utils, "pack_latents", self._fake_pack, raising=False)
+        monkeypatch.setattr(ns.comfy.utils, "unpack_latents", self._fake_unpack, raising=False)
+        return ns
+
+    def test_video_stream_gets_masked_audio_stream_is_untouched(self, monkeypatch):
+        ns = self._patch_comfy_utils(monkeypatch)
+
+        video_cond = torch.full((1, 4, 8, 8), 5.0)
+        video_uncond = torch.ones(1, 4, 8, 8)
+        audio_cond = torch.full((1, 2, 10), 3.0)
+        audio_uncond = torch.full((1, 2, 10), 2.0)
+
+        packed_cond, shapes = ns.comfy.utils.pack_latents([video_cond, audio_cond])
+        packed_uncond, _ = ns.comfy.utils.pack_latents([video_uncond, audio_uncond])
+
+        mask = torch.zeros(1, 8, 8)
+        mask[:, :, 4:] = 1.0
+
+        patch = _make_energy_cfg_patch([(mask, 0.5)], latent_shapes=shapes)
+        out = patch(_args(packed_cond, packed_uncond, cfg=1.0))
+
+        out_video, out_audio = ns.comfy.utils.unpack_latents(out, shapes)
+
+        # Same math as test_guidance_is_boosted_inside_the_mask_only.
+        assert out_video[0, 0, 0, 0].item() == pytest.approx(5.0)
+        assert out_video[0, 0, 0, 7].item() == pytest.approx(7.0)
+        # Audio: EPS never touches it, plain CFG only (cfg=1 -> equals cond).
+        assert torch.allclose(out_audio, audio_cond)
+
+    def test_single_entry_latent_shapes_is_treated_as_non_packed(self):
+        """len(latent_shapes) <= 1 means "not actually multi-modal"; must
+        not attempt to unpack a single-stream latent that already has a
+        real shape."""
+        cond = torch.full((1, 4, 8, 8), 5.0)
+        uncond = torch.ones(1, 4, 8, 8)
+        mask = torch.zeros(1, 8, 8)
+        mask[:, :, 4:] = 1.0
+
+        patch = _make_energy_cfg_patch([(mask, 0.5)], latent_shapes=[tuple(cond.shape)])
+        out = patch(_args(cond, uncond, cfg=1.0))
+
+        assert out[0, 0, 0, 0].item() == pytest.approx(5.0)
+        assert out[0, 0, 0, 7].item() == pytest.approx(7.0)
+
+    def test_falls_back_to_warning_when_unpacking_raises(self, monkeypatch):
+        """If comfy.utils.unpack_latents fails for any reason (e.g. the
+        latent doesn't actually match latent_shapes), the sampler must not
+        crash; it falls through to the existing unsupported-shape warning."""
+        import radiance.nodes.generate.sampler as ns
+
+        def _boom(*a, **k):
+            raise RuntimeError("shape mismatch")
+        monkeypatch.setattr(ns.comfy.utils, "unpack_latents", _boom, raising=False)
+        warnings = []
+        monkeypatch.setattr(ns.logger, "warning", lambda *a, **k: warnings.append(a))
+
+        cond = torch.full((1, 1, 64), 5.0)
+        uncond = torch.ones(1, 1, 64)
+        args = _args(cond, uncond, cfg=1.0)
+
+        patch = _make_energy_cfg_patch(
+            [(torch.ones(1, 4, 4), 0.5)],
+            latent_shapes=[(1, 4, 2, 4, 4), (1, 2, 10)],
+        )
+        out = patch(args)
+
+        assert torch.equal(out, args["denoised"])
+        assert len(warnings) == 1

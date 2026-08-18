@@ -104,6 +104,36 @@ const PRESET_CONFIGS = {
         terminal_sigma_to_zero: true, force_exact_steps: true,
         description: "High-Res upscale. Uses Euler by default. If using a LoRA, adjust denoise as needed.",
     },
+    // ALBABIT-FIX: same steps/cfg/denoise/flux_shift as the LTX 2.3 pair --
+    // Dev has no official Comfy-Org template to source from. sampler is the
+    // one field NOT mirrored: verified against the official 2.5 T2V template
+    // (KSamplerSelect nodes), which uses euler_ancestral for both stages.
+    "▶ LTX 2.5 LowRes (20 steps)": {
+        steps: 20, start_step: 0, end_step: 0, cfg: 3.0, audio_cfg: 0.0, sampler: "euler_ancestral",
+        sampler_mode: "Standard", phase_split: 0.0, scheduler: "simple",
+        scheduler_mode: "Manual", denoise: 1.0, flux_shift: 3.0,
+        flux_guidance: 0.0, flux_guidance_profile: "Static", add_noise: true,
+        return_with_leftover_noise: false, seed: 0, control_after_generate: "fixed",
+        pag_scale: 0.0, model_type: "ltxav", sigma_blend_steps: 0, ays_schedule: false,
+        guidance_rescale_phi: 0.0, preview_method: "None", noise_type: "Gaussian",
+        conditioning_clip_target: "Auto",
+        tile_mode: false, refiner_start_step: 0, latent_format: "",
+        terminal_sigma_to_zero: true, force_exact_steps: true,
+        description: "LTX 2.5 (Dev) LowRes. Same base settings as LTX 2.3 LowRes — 20-step base generation.",
+    },
+    "▶ LTX 2.5 HighRes (40 steps)": {
+        steps: 40, start_step: 0, end_step: 0, cfg: 1.0, audio_cfg: 0.0, sampler: "euler_ancestral",
+        sampler_mode: "Standard", phase_split: 0.0, scheduler: "simple",
+        scheduler_mode: "Manual", denoise: 0.45, flux_shift: 6.0,
+        flux_guidance: 0.0, flux_guidance_profile: "Static", add_noise: true,
+        return_with_leftover_noise: false, seed: 0, control_after_generate: "fixed",
+        pag_scale: 0.0, model_type: "ltxav", sigma_blend_steps: 0, ays_schedule: false,
+        guidance_rescale_phi: 0.0, preview_method: "None", noise_type: "Gaussian",
+        conditioning_clip_target: "Auto",
+        tile_mode: false, refiner_start_step: 0, latent_format: "",
+        terminal_sigma_to_zero: true, force_exact_steps: true,
+        description: "LTX 2.5 (Dev) HighRes upscale. Same base settings as LTX 2.3 HighRes — will likely move to Manual Sigmas later.",
+    },
     "▶ HunyuanVideo (30 steps)": {
         steps: 30, cfg: 6.0, sampler: "euler", scheduler: "simple",
         denoise: 1.0, flux_shift: 7.0, flux_guidance: 0.0,
@@ -152,7 +182,9 @@ const PRESET_CONFIGS = {
 
 const LTX_PRESETS = [
     "▶ LTX 2.3 LowRes (20 steps)",
-    "▶ LTX 2.3 HighRes (40 steps)"
+    "▶ LTX 2.3 HighRes (40 steps)",
+    "▶ LTX 2.5 LowRes (20 steps)",
+    "▶ LTX 2.5 HighRes (40 steps)"
 ];
 
 // Model taxonomy — mirrors sampler_utils.py so the UI folds the same way the
@@ -238,7 +270,7 @@ function resolveModelType(presetVal, modelTypeVal) {
     // LTX workflow, causing Flux/WAN presets to be falsely classified as isLTX and
     // hiding flux_guidance / tile widgets even for non-LTX presets.
     const p = (presetVal || "").toLowerCase();
-    if (LTX_PRESETS.includes(presetVal) || p.includes("ltx 2.3")) return "ltxav";
+    if (LTX_PRESETS.includes(presetVal) || p.includes("ltx 2.3") || p.includes("ltx 2.5")) return "ltxav";
     if (p.includes("ltx"))      return "ltxv";
     if (p.includes("wan"))      return "wan";
     if (p.includes("hunyuan"))  return "hunyuan_video";
@@ -265,10 +297,11 @@ const LTX_INCOMPATIBLE_WIDGETS = [
     "tile_stride",
     "tile_blend",
     // ALBABIT-FIX: hide widgets that have no effect under LTX — single unified encoder,
-    // no AYS table, no CFG rescale, no PAG self-attention.
+    // no AYS table, no PAG self-attention. guidance_rescale_phi was here too but that
+    // predated the CFG-function contract fix; live-tested afterward and confirmed
+    // working (consistent saturation drop, no artifacts) -- removed from this list.
     "conditioning_clip_target",
     "ays_schedule",
-    "guidance_rescale_phi",
     "pag_scale"
 ];
 
@@ -507,6 +540,13 @@ function applyFolding(node) {
         LTX_INCOMPATIBLE_WIDGETS.forEach(name => hiddenNames.add(name));
     }
 
+    // 3.5f. audio_cfg (LTX 2.5 dual-CFG) is default-hidden -- shown for the
+    // two dedicated LTX 2.5 presets, or under "Auto" when model_meta detects
+    // an LTX 2.5 filename. LTX 2.3 keeps plain cfg (no separate audio scale).
+    const showAudioCfg = presetVal.toLowerCase().includes("ltx 2.5")
+        || (presetVal === "Auto" && _isAutoDetectedLtx25(node));
+    if (!showAudioCfg) hiddenNames.add("audio_cfg");
+
     // ── Apply the final state in one pass (preset_info / control_after_generate
     // are never added to hiddenNames, so they stay visible automatically) ──
     let visChanged = false;
@@ -514,7 +554,7 @@ function applyFolding(node) {
         if (setWidgetVisible(w, !hiddenNames.has(w.name), node)) visChanged = true;
     });
 
-    // 3.5f. sampler_mode combo: filter out individual choices that are dead
+    // 3.5g. sampler_mode combo: filter out individual choices that are dead
     // for the current state, rather than hiding the whole widget (Standard
     // and the Phase-Shift options remain meaningful for most models).
     // Mutates the combo's own option list -- a different mechanism from
@@ -552,7 +592,12 @@ function applyFolding(node) {
 
 function updateUILocks(node, presetName) {
     if (!node.widgets) return;
-    const isLTX = LTX_PRESETS.includes(presetName);
+    // ALBABIT-FIX: LTX_PRESETS holds the unicode-marker keys ("▶ LTX 2.3 …"),
+    // but presetName here is the raw backend combo value ("[V] LTX 2.3 …"),
+    // so this literal-equality check was always false -- dead code, no LTX
+    // widget was ever actually locked. resolveModelType() already does the
+    // real (substring-based) match; reuse it instead of a second stale check.
+    const isLTX = resolveModelType(presetName, "auto") === "ltxav";
     const isCustom = presetName === "Auto" || presetName === "Custom";
 
     node.widgets.forEach((widget) => {
@@ -717,6 +762,36 @@ function _findModelMetaSourceNode(node) {
     return originNode;
 }
 
+// ALBABIT-FIX: LTXVConcatAVLatent sits directly in front of latent_image on
+// BOTH pipeline stages, not just HighRes, so a one-hop check always found it
+// first and misclassified every stage as HighRes. LTXVLatentUpsampler is the
+// only unambiguous HighRes signal; walk back a bounded number of hops through
+// the video_latent chain looking for it (never audio_latent).
+const LTX_AV_UPSCALE_STAGE_MAX_HOPS = 6;
+function _nextLatentInputName(node) {
+    if (!node.inputs) return null;
+    if (node.inputs.some(i => i.name === "video_latent")) return "video_latent";
+    const latentInput = node.inputs.find(i => i.type === "LATENT");
+    return latentInput ? latentInput.name : null;
+}
+function _isLtxAvHighResStage(node) {
+    let current = node;
+    let inputName = "latent_image";
+    for (let hop = 0; hop < LTX_AV_UPSCALE_STAGE_MAX_HOPS; hop++) {
+        const input = current.inputs?.find(i => i.name === inputName);
+        if (!input || !input.link) return false;
+        const link = app.graph.links[input.link];
+        if (!link) return false;
+        const originNode = app.graph.getNodeById(link.origin_id);
+        if (!originNode) return false;
+        if (originNode.type === "LTXVLatentUpsampler") return true;
+        current = originNode;
+        inputName = _nextLatentInputName(current);
+        if (!inputName) return false;
+    }
+    return false;
+}
+
 // ALBABIT-FIX: some checkpoints need settings that differ from their
 // model_type's generic default -- only the exact filename can tell them
 // apart. Verified against official model cards. "turbo" needs detectedType
@@ -748,6 +823,20 @@ function _deriveDistillationOverride(filename, detectedType) {
     return null;
 }
 
+// ALBABIT-FIX: reuses the already-vetted "LTX 2.3/2.5 LowRes/HighRes" preset
+// objects as the Auto-mode default, applied per-stage (see
+// _isLtxAvHighResStage above) instead of a filename-based override.
+function _resolveLtxAvStageDefaults(unetName, isHighRes) {
+    if (!unetName) return null;
+    const f = unetName.toLowerCase();
+    const version = f.includes("2.5") ? "2.5" : f.includes("2.3") ? "2.3" : null;
+    if (!version) return null;
+    const key = isHighRes
+        ? `▶ LTX ${version} HighRes (40 steps)`
+        : `▶ LTX ${version} LowRes (20 steps)`;
+    return PRESET_CONFIGS[key] ?? null;
+}
+
 // ALBABIT-FIX: mirrors config/model_map.py's CHECKPOINT_PRESETS[...]["model_type"]
 // -- lets the Sampler resolve the Loader's architecture from its preset name
 // alone, no execution needed. Must be kept in sync by hand (same pattern
@@ -762,6 +851,7 @@ const LOADER_PRESET_MODEL_TYPE = {
     "Wan 2.2": "wan", "Wan 2.2 (Low VRAM)": "wan", "Wan 2.2 TI2V": "wan_ti2v",
     "LTX Video": "ltxv", "LTX Video (Low VRAM)": "ltxv",
     "LTX Video 2.3": "ltxav", "LTX Video 2.3 (Low VRAM)": "ltxav",
+    "LTX Video 2.5": "ltxav", "LTX Video 2.5 (Low VRAM)": "ltxav",
     "Cosmos World": "cosmos", "CogVideoX": "cogvideox", "Mochi": "mochi",
     "PixArt Sigma": "pixart", "AuraFlow": "aura_flow",
     "Lumina2": "lumina2", "Z-Image": "z_image",
@@ -885,6 +975,16 @@ function _isSdTurboActive(node) {
     return detectedType === "sdxl" && unetName.toLowerCase().includes("turbo");
 }
 
+// ALBABIT-FIX: same re-resolve-don't-cache pattern as _isSdTurboActive above.
+// Used to auto-show audio_cfg under "Auto" (no named preset) when model_meta
+// is wired to a Loader with an LTX 2.5 filename -- named presets already
+// handle their own visibility via presetVal, this only covers Auto.
+function _isAutoDetectedLtx25(node) {
+    const sourceNode = _findModelMetaSourceNode(node);
+    const unetName = sourceNode?.widgets?.find(w => w.name === "unet_name")?.value ?? "";
+    return unetName.toLowerCase().includes("2.5");
+}
+
 // ALBABIT-FIX: can't just check "is the widget still at its generic default"
 // -- after the first auto-write the value IS the derived one, so a later
 // Loader change would never re-apply. _radAutoValue tracks what WE last
@@ -920,10 +1020,10 @@ function _markLinkedWidget(widget, linked, inSync) {
 }
 
 // ALBABIT-FIX: extends the guidance/steps sync (above) to model_type/cfg/
-// sampler/scheduler/flux_shift, resolved from the linked Loader's preset/
-// model_type. Gated on preset (Auto/Custom) only -- not model_type=="auto"
-// too, since the per-field checks in _syncAutoValue() already protect any
-// field the user deliberately set (mirrors nodes_sampler.py).
+// sampler/scheduler/flux_shift/denoise (plus, for LTX-AV, which Sampler
+// stage this node is -- see _isLtxAvHighResStage). Gated on preset
+// (Auto/Custom) only -- the per-field checks in _syncAutoValue() already
+// protect any field the user deliberately set.
 function updateModelMetaDefaults(node) {
     if (!node.widgets) return;
     const presetW = node.widgets.find(w => w.name === "preset");
@@ -935,6 +1035,12 @@ function updateModelMetaDefaults(node) {
     const detectedType = _resolveLoaderModelType(sourceNode);
     const override = _deriveDistillationOverride(unetName, detectedType);
     const modelDefaults = MODEL_TYPE_SAMPLING_DEFAULTS[detectedType] ?? null;
+    // ALBABIT-FIX: stage-aware LTX-AV defaults (see _isLtxAvHighResStage /
+    // _resolveLtxAvStageDefaults above) take priority over the generic
+    // ltxav MODEL_TYPE_SAMPLING_DEFAULTS entry when resolvable.
+    const ltxavStage = detectedType === "ltxav"
+        ? _resolveLtxAvStageDefaults(unetName, _isLtxAvHighResStage(node))
+        : null;
     // ALBABIT-FIX: the scheduler widget's actual value is ignored server-side
     // for this case (a dedicated discrete schedule is used instead, see
     // get_sd_turbo_sigmas), so there's no specific value to sync it to, just
@@ -953,11 +1059,16 @@ function updateModelMetaDefaults(node) {
 
     const pairs = [
         [modelTypeW, validModelType],
-        [node.widgets.find(w => w.name === "flux_guidance"), override?.flux_guidance ?? modelDefaults?.guidance],
-        [node.widgets.find(w => w.name === "steps"), override?.steps ?? modelDefaults?.steps],
-        [node.widgets.find(w => w.name === "cfg"), override?.cfg ?? modelDefaults?.cfg],
-        [node.widgets.find(w => w.name === "sampler"), override?.sampler ?? modelDefaults?.sampler],
-        [node.widgets.find(w => w.name === "flux_shift"), modelDefaults?.flux_shift],
+        [node.widgets.find(w => w.name === "flux_guidance"), override?.flux_guidance ?? ltxavStage?.flux_guidance ?? modelDefaults?.guidance],
+        [node.widgets.find(w => w.name === "steps"), override?.steps ?? ltxavStage?.steps ?? modelDefaults?.steps],
+        [node.widgets.find(w => w.name === "cfg"), override?.cfg ?? ltxavStage?.cfg ?? modelDefaults?.cfg],
+        [node.widgets.find(w => w.name === "sampler"), override?.sampler ?? ltxavStage?.sampler ?? modelDefaults?.sampler],
+        [node.widgets.find(w => w.name === "flux_shift"), ltxavStage?.flux_shift ?? modelDefaults?.flux_shift],
+        // ALBABIT-FIX: denoise isn't part of the generic per-architecture
+        // tables (only meaningful for LTX-AV's two-stage LowRes/HighRes
+        // split so far) -- undefined everywhere else, same as any other
+        // unresolved field above.
+        [node.widgets.find(w => w.name === "denoise"), ltxavStage?.denoise],
     ];
 
     let changed = false;
@@ -973,7 +1084,7 @@ function updateModelMetaDefaults(node) {
         _syncAutoValue(schedulerW, undefined); // no value to track/force -- link only
         if (_markLinkedWidget(schedulerW, true, true)) changed = true;
     } else {
-        const schedulerDefault = modelDefaults?.scheduler;
+        const schedulerDefault = ltxavStage?.scheduler ?? modelDefaults?.scheduler;
         if (_syncAutoValue(schedulerW, schedulerDefault)) changed = true;
         const linked = schedulerDefault !== undefined;
         const inSync = linked && schedulerW && schedulerW.value === schedulerDefault;
@@ -1308,7 +1419,11 @@ app.registerExtension({
             const origConnect = this.onConnectionsChange;
             this.onConnectionsChange = function (...args) {
                 if (origConnect) origConnect.apply(this, args);
-                toggleFields(this);
+                // ALBABIT-FIX: deferred one tick -- calling toggleFields()
+                // synchronously here (mid LiteGraph link-drag completion) could
+                // leave its drag-state stuck ("Already dragging links." on the
+                // next attempt). The 250ms poll below re-syncs regardless.
+                setTimeout(() => toggleFields(this), 0);
             };
 
             // ALBABIT-FIX: polls because onConnectionsChange only fires on link
