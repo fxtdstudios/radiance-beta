@@ -343,8 +343,18 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 - [ ] **`rudra_full_decoder_ltx-video_ema.safetensors` is truncated at source**
       (23.0 MB against a declared ~36.0 MB). The loader detects it and degrades;
       the file still needs re-exporting.
-- [ ] Optical flow above ~8 px of motion is still unreliable; the pyramid is
-      bounded by the integration window, and going deeper measured worse.
+- [x] **Optical flow above ~8 px is characterised and bounded** — measured,
+      not estimated. The median displacement holds within a few percent out to
+      ~20 px; what degrades is field density inside half a pixel, which falls
+      100% / 84% / 71% / 58% / 29% at 3 / 8 / 12 / 16 / 20 px, and mask
+      propagation tears where the field is patchy. Deepening the pyramid is not
+      the fix: its ceiling is the 15x15 integration window, and going from four
+      levels to five made every displacement worse (at 8 px, 96% of the field
+      within half a pixel became 32%). Closed here as a property of pyramidal
+      Lucas-Kanade rather than an open defect, and written up under
+      [Known limitations](#known-limitations). Replacing the solver — DIS, or a
+      learned method — is the only route past it, and that is a new item rather
+      than a continuation of this one.
 
 ### Structural debt
 
