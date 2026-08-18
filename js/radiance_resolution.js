@@ -44,7 +44,7 @@ function setWidgetVisible(widget, visible, node) {
 // when the user toggles frame_computation.
 // ALBABIT-FIX follow-up: mirrors VIDEO_MODEL_TYPES in resolution.py —
 // model_types that emit 5D video latents and should auto-enable "enable_video".
-const VIDEO_MODEL_TYPES_JS = new Set(["WAN (16ch)", "WAN TI2V (48ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)", "Cosmos World (16ch)", "CogVideoX (16ch)"]);
+const VIDEO_MODEL_TYPES_JS = new Set(["WAN (16ch)", "WAN TI2V (48ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)", "Cosmos World (16ch)", "CogVideoX (16ch)", "MiniMax H3 (24ch)"]);
 
 // ALBABIT-FIX follow-up: mirrors SPATIAL_SCALE/_align_up in resolution.py —
 // recompute width/height instantly when model_type changes, instead of waiting
@@ -57,6 +57,9 @@ const SPATIAL_SCALE_JS = {
     // ALBABIT-FIX: WAN 2.2 TI2V-5B's VAE compresses 16x spatially (double
     // standard WAN's 8x) -- real bug fix, see resolution.py's SPATIAL_SCALE.
     "WAN TI2V (48ch)": 16,
+    // ALBABIT-FIX: MiniMax H3 — mirrors resolution.py's SPATIAL_SCALE (16px,
+    // confirmed against nodes_minimax_h3.py's plain height//16, width//16).
+    "MiniMax H3 (24ch)": 16,
     // ALBABIT-FIX: "Manual" -> scale=1, _alignUp is a no-op and the +/- step
     // becomes 1, so width/height are fully unconstrained.
     "Manual": 1,
@@ -92,6 +95,33 @@ function _alignNk1(val, stride) {
     return Math.max(1, Math.round((val - 1) / stride) * stride + 1);
 }
 
+// ALBABIT-FIX: MiniMax H3's frame grid is n%17==5 (5, 22, 39...), not a plain
+// stride*k+1 — mirrors resolution.py's _minimax_align_frame_count().
+function _alignMiniMaxFrames(val) {
+    let n = Math.max(5, Math.round(val));
+    while (n % 17 !== 5) n += 1;
+    return n;
+}
+
+function _isMiniMaxH3(modelType) {
+    return modelType === "MiniMax H3 (24ch)";
+}
+
+// ALBABIT-FIX: single source of truth for "duration_seconds -> aligned frame
+// count", shared by the Manual<->Auto sync, the label preview, and
+// duration_seconds's own precise-value correction below, so the three can
+// never disagree on the answer.
+function _autoSecondsFrames(modelType, durationSeconds, frameRateWidgetValue) {
+    const isMiniMax = _isMiniMaxH3(modelType);
+    const fps = isMiniMax ? 24.0 : (parseFloat(frameRateWidgetValue) || 24.0);
+    const stride = _frameStride(modelType);
+    const raw = (parseFloat(durationSeconds) || 0) * fps;
+    const frames = isMiniMax
+        ? _alignMiniMaxFrames(raw)
+        : Math.max(1, Math.round(raw / stride) * stride + 1);
+    return { frames, fps };
+}
+
 function _applyAlignment(node, modelTypeW, widthW, heightW) {
     if (!widthW || !heightW) return;
     const baseW = node._resBaseW ?? parseInt(widthW.value, 10);
@@ -112,7 +142,31 @@ function _frameStride(modelType) {
     if (m.includes("ltx") || m.includes("cosmos")) return 8;
     if (m.includes("mochi")) return 6;
     if (m.includes("wan") || m.includes("hunyuan")) return 4;
+    // ALBABIT-FIX: MiniMax H3's grid points (5, 22, 39...) are always exactly
+    // 17 apart, so 17 is the correct +/- step even though the grid's formula
+    // itself (17k+5) isn't the plain stride*k+1 pattern this function's name
+    // implies for every other entry.
+    if (m.includes("minimax")) return 17;
     return 4;
+}
+
+// ALBABIT-FIX: video_frames declares step=1 in Python, so a "-"/"+" click
+// moved by 1 while only stride*k+1 (or MiniMax's 17k+5) values are valid.
+// The snap-on-change logic below then corrected every click straight back
+// to its starting value, making "-" look completely broken.
+function _syncVideoFramesStep(modelTypeW, videoFramesW) {
+    _setWidgetStep(videoFramesW, _frameStride(modelTypeW?.value));
+}
+
+// ALBABIT-FIX: same class of bug as _syncVideoFramesStep, one level up.
+// duration_seconds's declared step (0.1) was too fine for durSecW.callback's
+// correction (below), so small clicks got snapped straight back. Step =
+// seconds per grid step (stride/fps), so a click always lands cleanly.
+function _syncDurationSecondsStep(modelTypeW, durSecW, frameRateW) {
+    if (!durSecW) return;
+    const isMiniMax = _isMiniMaxH3(modelTypeW?.value);
+    const fps = isMiniMax ? 24.0 : (frameRateW ? parseFloat(frameRateW.value) || 24.0 : 24.0);
+    _setWidgetStep(durSecW, _frameStride(modelTypeW?.value) / fps);
 }
 
 function refreshNodeSize(node) {
@@ -145,6 +199,10 @@ function updateResolutionMarkers(node) {
     const heightW      = node.widgets?.find(w => w.name === "height");
     const orientationW = node.widgets?.find(w => w.name === "orientation");
     const latentChW    = node.widgets?.find(w => w.name === "latent_channels");
+    const durSecW      = node.widgets?.find(w => w.name === "duration_seconds");
+    const modelTypeW   = node.widgets?.find(w => w.name === "model_type");
+    const frameRateW   = node.widgets?.find(w => w.name === "frame_rate");
+    const frameModeW   = node.widgets?.find(w => w.name === "frame_computation");
 
     const scaleActive = scaleFactorW && parseFloat(scaleFactorW.value) !== 1.0;
     const mpActive     = mpTargetW && parseFloat(mpTargetW.value) > 0;
@@ -163,6 +221,19 @@ function updateResolutionMarkers(node) {
 
     if (_setLabelMarker(orientationW, orientationW && orientationW.value !== "As Preset", " ✎")) changed = true;
     if (_setLabelMarker(latentChW, latentChW && parseInt(latentChW.value, 10) !== 0, " ✎")) changed = true;
+
+    // ALBABIT-FIX: duration_seconds had no live frame-count feedback while
+    // typing in Auto mode (video_frames stays hidden then). Previews the
+    // model_type-aligned result in the label, for every VIDEO_MODEL_TYPES
+    // entry. durSecW.callback (above) corrects the value itself to match.
+    const isAutoSecActive = durSecW && frameModeW && frameModeW.value === "Auto (Seconds)"
+        && VIDEO_MODEL_TYPES_JS.has(modelTypeW?.value);
+    if (isAutoSecActive) {
+        const { frames } = _autoSecondsFrames(modelTypeW.value, durSecW.value, frameRateW?.value);
+        if (_setLabelMarker(durSecW, true, ` → ${frames}f`)) changed = true;
+    } else if (_setLabelMarker(durSecW, false, "")) {
+        changed = true;
+    }
 
     if (changed) node.setDirtyCanvas(true, true);
 }
@@ -211,10 +282,15 @@ app.registerExtension({
                 const isAutoSec = frameModeW && frameModeW.value === "Auto (Seconds)";
 
                 // ALBABIT-FIX: pass node (this) so setWidgetVisible can splice the widgets array
+                // ALBABIT-FIX: MiniMax H3 has no variable-frame-rate support (see
+                // _isMiniMaxH3 above). Hidden rather than left showing a value
+                // the model can't actually use.
+                const isMiniMaxModel = _isMiniMaxH3(modelTypeW?.value);
+
                 setWidgetVisible(frameModeW,   isVideo, this);
                 setWidgetVisible(videoFramesW, isVideo && !isAutoSec, this);
                 setWidgetVisible(durSecW,      isVideo && isAutoSec, this);
-                setWidgetVisible(frameRateW,   isVideo, this);
+                setWidgetVisible(frameRateW,   isVideo && !isMiniMaxModel, this);
                 setWidgetVisible(batchSizeW,   !isVideo, this);
 
                 // FEATURE: mp_aspect_ratio only visible when mp_target > 0
@@ -245,15 +321,28 @@ app.registerExtension({
                     // model_type will enforce, instead of waiting for onExecuted.
                     _syncStepsToModelType(modelTypeW, widthW, heightW);
                     _applyAlignment(node, modelTypeW, widthW, heightW);
+                    _syncVideoFramesStep(modelTypeW, videoFramesW);
+                    _syncDurationSecondsStep(modelTypeW, durSecW, frameRateW);
 
-                    // Snap video_frames to a valid N*stride+1 value for the new model_type.
+                    // Snap video_frames to a valid frame count for the new model_type.
                     if (videoFramesW && VIDEO_MODEL_TYPES_JS.has(modelTypeW.value)) {
                         const val = parseInt(videoFramesW.value, 10);
-                        const aligned = _alignNk1(val, _frameStride(modelTypeW.value));
+                        const aligned = _isMiniMaxH3(modelTypeW.value)
+                            ? _alignMiniMaxFrames(val)
+                            : _alignNk1(val, _frameStride(modelTypeW.value));
                         if (aligned !== val) {
                             videoFramesW.value = aligned;
                             if (videoFramesW.inputEl) videoFramesW.inputEl.value = aligned;
                         }
+                    }
+
+                    // ALBABIT-FIX: force frame_rate to the model's fixed 24fps on
+                    // switch, so the hidden widget can't leave a stale value (e.g.
+                    // 90 left over from a different model_type) silently feeding
+                    // into duration_sec/the info string.
+                    if (frameRateW && _isMiniMaxH3(modelTypeW.value) && parseFloat(frameRateW.value) !== 24) {
+                        frameRateW.value = 24;
+                        if (frameRateW.inputEl) frameRateW.inputEl.value = 24;
                     }
 
                     toggleFields();
@@ -278,17 +367,40 @@ app.registerExtension({
                 frameModeW.callback = function () {
                     if (orig) orig.apply(this, arguments);
 
-                    const fps = frameRateW ? parseFloat(frameRateW.value) || 24.0 : 24.0;
-                    const stride = _frameStride(modelTypeW?.value);
-
                     if (frameModeW.value === "Manual (Frames)" && durSecW && videoFramesW) {
-                        const raw = parseFloat(durSecW.value) * fps;
-                        videoFramesW.value = Math.max(1, Math.round(raw / stride) * stride + 1);
+                        const { frames } = _autoSecondsFrames(modelTypeW?.value, durSecW.value, frameRateW?.value);
+                        videoFramesW.value = frames;
                     } else if (frameModeW.value === "Auto (Seconds)" && durSecW && videoFramesW) {
-                        durSecW.value = Math.round((videoFramesW.value / fps) * 10) / 10;
+                        // ALBABIT-FIX: 2 decimals, not 1. 1 wasn't precise enough to
+                        // round-trip stably (e.g. MiniMax's 107f rounded to 4.5s, which
+                        // re-aligns to 124f, not 107f). See _autoSecondsFrames above.
+                        const { fps } = _autoSecondsFrames(modelTypeW?.value, durSecW.value, frameRateW?.value);
+                        durSecW.value = Math.round((videoFramesW.value / fps) * 100) / 100;
                     }
 
                     toggleFields();
+                };
+            }
+
+            // ALBABIT-FIX: duration_seconds had no callback at all, so typing a new
+            // value while already in Auto (Seconds) mode never showed the PRECISE
+            // resulting duration, only the frame count via the label preview above.
+            // Corrects the typed value to the exact duration the aligned frame count
+            // will actually produce.
+            if (durSecW) {
+                const orig = durSecW.callback;
+                durSecW.callback = function () {
+                    if (orig) orig.apply(this, arguments);
+
+                    if (frameModeW?.value === "Auto (Seconds)" && VIDEO_MODEL_TYPES_JS.has(modelTypeW?.value)) {
+                        const { frames, fps } = _autoSecondsFrames(modelTypeW.value, durSecW.value, frameRateW?.value);
+                        const precise = Math.round((frames / fps) * 100) / 100;
+                        if (videoFramesW) videoFramesW.value = frames;
+                        if (parseFloat(durSecW.value) !== precise) {
+                            durSecW.value = precise;
+                            if (durSecW.inputEl) durSecW.inputEl.value = precise;
+                        }
+                    }
                 };
             }
 
@@ -303,7 +415,9 @@ app.registerExtension({
 
                     if (VIDEO_MODEL_TYPES_JS.has(modelTypeW?.value)) {
                         const val = parseInt(videoFramesW.value, 10);
-                        const aligned = _alignNk1(val, _frameStride(modelTypeW.value));
+                        const aligned = _isMiniMaxH3(modelTypeW.value)
+                            ? _alignMiniMaxFrames(val)
+                            : _alignNk1(val, _frameStride(modelTypeW.value));
                         if (aligned !== val) {
                             videoFramesW.value = aligned;
                             if (videoFramesW.inputEl) videoFramesW.inputEl.value = aligned;
@@ -422,6 +536,8 @@ app.registerExtension({
             node._resBaseW = widthW ? parseInt(widthW.value, 10) : undefined;
             node._resBaseH = heightW ? parseInt(heightW.value, 10) : undefined;
             _syncStepsToModelType(modelTypeW, widthW, heightW);
+            _syncVideoFramesStep(modelTypeW, videoFramesW);
+            _syncDurationSecondsStep(modelTypeW, durSecW, frameRateW);
 
             // ALBABIT-FIX: Defer initial toggleFields 100ms so Vue completes its first layout
             // pass before any widget is hidden. If we hide immediately, widget.computedHeight is
@@ -474,15 +590,26 @@ app.registerExtension({
                     }
                 }
                 _syncStepsToModelType(modelTypeW, widthW, heightW);
+                _syncVideoFramesStep(modelTypeW, videoFramesW);
+                _syncDurationSecondsStep(modelTypeW, durSecW, frameRateW);
 
                 const isVideo = enableVideoW.value === true || enableVideoW.value === 1;
                 const mpActive = mpTargetW ? parseFloat(mpTargetW.value) > 0 : false;
                 const isAutoSec = frameModeW && frameModeW.value === "Auto (Seconds)";
+                const isMiniMaxModel = _isMiniMaxH3(modelTypeW?.value);
+
+                // ALBABIT-FIX: a workflow saved with a stale frame_rate under
+                // MiniMax H3 would otherwise load hidden-but-wrong (see
+                // modelTypeW.callback above).
+                if (frameRateW && isMiniMaxModel && parseFloat(frameRateW.value) !== 24) {
+                    frameRateW.value = 24;
+                    if (frameRateW.inputEl) frameRateW.inputEl.value = 24;
+                }
 
                 setWidgetVisible(frameModeW,   isVideo, self);
                 setWidgetVisible(videoFramesW, isVideo && !isAutoSec, self);
                 setWidgetVisible(durSecW,      isVideo && isAutoSec, self);
-                setWidgetVisible(frameRateW,   isVideo, self);
+                setWidgetVisible(frameRateW,   isVideo && !isMiniMaxModel, self);
                 setWidgetVisible(batchSizeW,   !isVideo, self);
                 setWidgetVisible(mpAspectW,    mpActive, self);
                 refreshNodeSize(self);
