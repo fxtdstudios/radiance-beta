@@ -774,11 +774,27 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
                             upscale_model.load_sd(sd)
                         elif "post_upsample_res_blocks.0.conv2.bias" in sd:
                             from comfy.ldm.lightricks.latent_upsampler import LatentUpsampler
+                            # ALBABIT-FIX: scoped import -- a bare `import comfy.ops` here
+                            # would shadow the top-level `comfy` name for this whole function
+                            # (Python scoping), breaking the Audio VAE load right above.
+                            from comfy.ops import disable_weight_init
+                            from comfy.model_patcher import CoreModelPatcher
                             config = json.loads(metadata["config"])
-                            upscale_model = LatentUpsampler.from_config(config).to(
+                            # ALBABIT-FIX: from_config() requires `operations` (upstream API
+                            # change) and the raw nn.Module needs wrapping in a ModelPatcher --
+                            # LTXVLatentUpsampler reads `.load_device` off the returned object.
+                            # Same pattern as comfy_extras/nodes_hunyuan.py for this class.
+                            upscale_model = LatentUpsampler.from_config(config, operations=disable_weight_init).to(
                                 dtype=comfy.model_management.vae_dtype(allowed_dtypes=[torch.bfloat16, torch.float32])
                             )
-                            upscale_model.load_state_dict(sd)
+                            comfy.model_management.archive_model_dtypes(upscale_model)
+                            upscale_model_patcher = CoreModelPatcher(
+                                upscale_model,
+                                load_device=comfy.model_management.get_torch_device(),
+                                offload_device=comfy.model_management.unet_offload_device(),
+                            )
+                            upscale_model.load_state_dict(sd, assign=upscale_model_patcher.is_dynamic())
+                            upscale_model = upscale_model_patcher
                         else:
                             logger.warning(f"❌ Unrecognized upscale model architecture for: '{upscale_model_name}'")
                             info_lines.append(f"UPSCALE MODEL: unrecognized architecture ({upscale_model_name})")

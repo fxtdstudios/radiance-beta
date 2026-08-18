@@ -117,21 +117,6 @@ def _is_channel_mismatch_error(exc: BaseException) -> Optional[str]:
     return None
 
 
-def _existing_cfg_function(model):
-    """The sampler_cfg_function already registered on a ModelPatcher, or None.
-
-    ComfyUI's `set_model_sampler_cfg_function` writes to
-    `model.model_options["sampler_cfg_function"]`; there is no attribute of that
-    name. Two call sites here used `getattr(model, "model_sampler_cfg_function")`
-    and therefore always got None, so each later patch replaced the previous one
-    instead of wrapping it.
-    """
-    options = getattr(model, "model_options", None)
-    if isinstance(options, dict):
-        return options.get("sampler_cfg_function")
-    return None
-
-
 ENERGY_MASK_KEY = "radiance_energy_mask"
 ENERGY_PRIORITY_KEY = "radiance_energy_priority"
 ENERGY_LAYERS_KEY = "radiance_energy_layers"
@@ -215,16 +200,21 @@ def _collect_energy_layers(positive) -> List[Tuple["torch.Tensor", float]]:
     return layers
 
 
-def _make_energy_cfg_patch(layers, existing_cfg_fn=None):
-    """Build the EPS sampler_cfg_function from one or more energy layers.
+def _make_energy_cfg_patch(layers, latent_shapes=None):
+    """Build the EPS sampler_post_cfg_function from one or more energy layers.
 
     *layers* is a sequence of ``(mask, priority)`` pairs, as returned by
     `_collect_energy_layers`.
 
+    *latent_shapes* is the per-modality shape list captured from the work
+    latent at registration time (mirrors how the LTX-AV dual-CFG patch above
+    gets its own video/audio split from `work_latent.unbind()`): None for a
+    plain latent, or ``[tuple(p.shape) for p in work_latent.unbind()]`` when
+    nested. Lets EPS mask the video stream of a packed multi-modality latent
+    (e.g. LTX-AV) instead of no-op'ing on it; see `_energy_prioritized_cfg_patch`.
+
     Scales the guidance vector (cond − uncond) by ``1 + Σ priority_i · mask_i``,
-    leaving unmasked regions at the sampler's own cfg, then hands the modified
-    args to whatever cfg function was already registered (guidance rescale, SDR
-    anchor) so the patches compose instead of clobbering each other.
+    leaving unmasked regions at the sampler's own cfg.
 
     Summing is what makes chained Energy Mask nodes stack. It also means a
     stack of negative priorities can drive the modifier below zero, which would
@@ -245,6 +235,7 @@ def _make_energy_cfg_patch(layers, existing_cfg_fn=None):
     # Resizing the masks is per-step work that only depends on the latent
     # geometry, which never changes mid-sample. Cache the summed field.
     _cache: Dict[Any, Any] = {}
+    _warned_bad_shape = [False]
 
     def _energy_field(cond):
         """Σ priority_i · mask_i, resampled to the latent grid."""
@@ -290,30 +281,48 @@ def _make_energy_cfg_patch(layers, existing_cfg_fn=None):
         _cache[key] = total
         return total
 
+    def _boosted_cond(cond, uncond):
+        """cond, pushed further from uncond in high-energy mask regions."""
+        eps_modifier = (1.0 + _energy_field(cond)).clamp_min(0.0)
+        return uncond + (cond - uncond) * eps_modifier
+
     def _energy_prioritized_cfg_patch(args):
         cond = args["cond_denoised"]
         uncond = args["uncond_denoised"]
         cfg_val = args["cond_scale"]
 
+        # ALBABIT-FIX: a packed multi-modality latent (e.g. LTX-AV) arrives
+        # as a flat (B, 1, N) tensor with no spatial grid to overlay the mask
+        # against. Unpack (using shapes captured at registration time) to
+        # recover the video stream's real grid, mask that alone, leave any
+        # other stream (audio) untouched, then re-pack.
+        if latent_shapes and len(latent_shapes) > 1 and cond.ndim < 4 and cond.shape == uncond.shape:
+            try:
+                cond_parts = comfy.utils.unpack_latents(cond, latent_shapes)
+                uncond_parts = comfy.utils.unpack_latents(uncond, latent_shapes)
+                video_cond, video_uncond = cond_parts[0], uncond_parts[0]
+                if video_cond.ndim >= 4 and video_cond.shape == video_uncond.shape:
+                    cond_parts[0] = _boosted_cond(video_cond, video_uncond)
+                    packed_cond, _ = comfy.utils.pack_latents(cond_parts)
+                    return uncond + cfg_val * (packed_cond - uncond)
+            except Exception as _exc:
+                logger.debug(
+                    "[Energy Guidance] packed-latent unpack failed (%s: %s); "
+                    "falling back to the unsupported-shape warning.",
+                    type(_exc).__name__, _exc,
+                )
+
         if cond.ndim < 4 or cond.shape != uncond.shape:
-            # Unknown latent layout — pass through untouched rather than
-            # corrupting the sample.
-            if existing_cfg_fn is not None:
-                return existing_cfg_fn(args)
+            if not _warned_bad_shape[0]:
+                logger.warning(
+                    "[Energy Guidance] Latent shape %s isn't supported (need "
+                    "4+ dims, or a multi-modality latent with video as the "
+                    "first stream). EPS has no effect this run.", tuple(cond.shape),
+                )
+                _warned_bad_shape[0] = True
             return args["denoised"]
 
-        eps_modifier = (1.0 + _energy_field(cond)).clamp_min(0.0)
-        cond_eps = uncond + (cond - uncond) * eps_modifier
-
-        # Update args so downstream cfg functions (e.g. rescale) inherit the
-        # boosted prediction.
-        new_args = args.copy()
-        new_args["cond_denoised"] = cond_eps
-        new_args["denoised"] = uncond + cfg_val * (cond_eps - uncond)
-
-        if existing_cfg_fn is not None:
-            return existing_cfg_fn(new_args)
-        return new_args["denoised"]
+        return uncond + cfg_val * (_boosted_cond(cond, uncond) - uncond)
 
     return _energy_prioritized_cfg_patch
 
@@ -398,6 +407,17 @@ class RadianceSamplerPro:
                 "cfg": (
                     "FLOAT",
                     {"default": 1.0, "min": 0.0, "max": 20.0, "step": 0.1},
+                ),
+                "audio_cfg": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 100.0,
+                        "step": 0.1,
+                        "tooltip": "LTX-AV only (e.g. LTX 2.5): separate CFG scale for the audio "
+                                   "half of the latent. 0 = same as cfg (single-CFG, pre-2.5 behavior).",
+                    },
                 ),
                 "sampler": (comfy.samplers.KSampler.SAMPLERS,),
                 "sampler_mode": (SamplerMode.ALL, {"default": SamplerMode.STANDARD}),
@@ -1019,6 +1039,7 @@ class RadianceSamplerPro:
         start_step: int,
         end_step: int,
         cfg: float,
+        audio_cfg: float,
         sampler: str,
         sampler_mode: str,
         phase_split: float,
@@ -1281,13 +1302,14 @@ class RadianceSamplerPro:
         if guidance_rescale_phi > 0.0 and cfg > 1.0:
             phi = guidance_rescale_phi
 
+            # ALBABIT-FIX: was on set_model_sampler_cfg_function (noise-space
+            # single slot), but this math is denoised-space -- cfg_result
+            # silently became x - denoised. Moved to the correct API,
+            # set_model_sampler_post_cfg_function (comfy/samplers.py:600-603),
+            # and now reads args["denoised"] directly instead of recomputing.
             def guidance_rescale_patch(args):
-
+                guided = args["denoised"]
                 cond = args["cond_denoised"]
-                uncond = args["uncond_denoised"]
-                cfg_val = args["cond_scale"]
-
-                guided = uncond + cfg_val * (cond - uncond)
 
                 dims = list(range(1, guided.ndim))
                 guided_std = guided.std(dim=dims, keepdim=True).clamp(min=1e-6)
@@ -1296,25 +1318,19 @@ class RadianceSamplerPro:
                 rescaled = guided * (cond_std / guided_std)
                 return rescaled * phi + guided * (1.0 - phi)
 
-            model.set_model_sampler_cfg_function(guidance_rescale_patch)
+            model.set_model_sampler_post_cfg_function(guidance_rescale_patch)
             logger.info(f"Guidance Rescale applied (phi={phi:.2f})")
 
         if sdr_latent is not None and sdr_inject_steps > 0:
             _step_counter = [0]
             _sdr_ref_lat = sdr_latent.detach()
-            
-            # ComfyUI's ModelPatcher.set_model_sampler_cfg_function stores the
-            # callable in `model.model_options["sampler_cfg_function"]`. There is
-            # no `model_sampler_cfg_function` ATTRIBUTE, so the old
-            # `getattr(model, "model_sampler_cfg_function", None)` was always
-            # None and the set_... call below OVERWROTE the guidance-rescale
-            # patch registered above instead of wrapping it. With rescale and an
-            # SDR reference both on, rescale silently did nothing while the log
-            # still said "Guidance Rescale applied".
-            existing_cfg_fn = _existing_cfg_function(model)
 
+            # ALBABIT-FIX: same wrong-API bug as guidance_rescale_patch above.
+            # Moved to set_model_sampler_post_cfg_function, a list ComfyUI
+            # chains automatically, so the manual existing_cfg_fn chaining
+            # hack (compensating for the old single-slot clobbering) is gone.
             def _sdr_post_cfg_patch(args):
-                denoised = existing_cfg_fn(args) if existing_cfg_fn is not None else args["denoised"]
+                denoised = args["denoised"]
                 step = _step_counter[0]
                 _step_counter[0] += 1
                 if step >= sdr_inject_steps:
@@ -1339,7 +1355,7 @@ class RadianceSamplerPro:
                         return denoised
                 return (1.0 - blend) * denoised + blend * ref
 
-            model.set_model_sampler_cfg_function(_sdr_post_cfg_patch)
+            model.set_model_sampler_post_cfg_function(_sdr_post_cfg_patch)
             logger.info(f"[SDR Conditioning] Registered post-CFG SDR anchor patch (steps={sdr_inject_steps}, blend={sdr_blend:.2f}, decay={sdr_decay:.2f})")
 
         # ── Energy-Prioritized Sampling (EPS) Detection ──────────────────────
@@ -1350,11 +1366,20 @@ class RadianceSamplerPro:
         active_layers = [(m, p) for m, p in energy_layers if p != 0.0]
 
         if active_layers:
-            # See the note above: read model_options, not a nonexistent attribute.
-            existing_cfg_fn = _existing_cfg_function(model)
-
-            model.set_model_sampler_cfg_function(
-                _make_energy_cfg_patch(active_layers, existing_cfg_fn)
+            # ALBABIT-FIX: same wrong-API bug as the two patches above --
+            # was registered via set_model_sampler_cfg_function (noise-space
+            # single slot) despite computing a denoised-space result. Moved to
+            # set_model_sampler_post_cfg_function, which also removes the need
+            # for _make_energy_cfg_patch's own existing_cfg_fn chaining.
+            #
+            # ALBABIT-FIX: same video/audio split source as the LTX-AV dual-CFG
+            # patch below (work_latent.unbind()), so EPS can mask the video
+            # stream of a packed multi-modality latent instead of no-op'ing.
+            _energy_latent_shapes = None
+            if getattr(work_latent, "is_nested", False):
+                _energy_latent_shapes = [tuple(p.shape) for p in work_latent.unbind()]
+            model.set_model_sampler_post_cfg_function(
+                _make_energy_cfg_patch(active_layers, latent_shapes=_energy_latent_shapes)
             )
             logger.info(
                 "[Energy Guidance] Registered Energy-Prioritized Sampling (EPS) patch "
@@ -1366,6 +1391,39 @@ class RadianceSamplerPro:
                 "[Energy Guidance] %d energy mask(s) attached, all at priority=0 — "
                 "EPS is a no-op, not registering a patch.", len(energy_layers),
             )
+
+        # ── LTX-AV Dual CFG (audio_cfg) ──────────────────────────────────────
+        # ALBABIT-FIX: mirrors comfy's own LTXVDualCFGGuider (comfy_extras/
+        # nodes_lt.py) -- separate CFG for the video/audio halves of a packed
+        # LTX-AV latent. Noise-space slot, so it composes cleanly with the 3
+        # post-cfg patches above (a different slot, applied after this one).
+        if is_ltx_av and _HAS_NESTED_TENSOR and audio_cfg > 0.0 and not math.isclose(audio_cfg, cfg):
+            _v_numel = None
+            if getattr(work_latent, "is_nested", False):
+                parts = work_latent.unbind()
+                if len(parts) >= 2:
+                    _v_numel = math.prod(parts[0].shape[1:])
+            if _v_numel is None:
+                logger.warning(
+                    "[Radiance] audio_cfg=%.2f set but the latent isn't a nested "
+                    "audio+video tensor -- ignoring (using cfg=%.2f for both).",
+                    audio_cfg, cfg,
+                )
+            else:
+                _video_cfg, _audio_cfg, _v = cfg, audio_cfg, _v_numel
+
+                def _ltx_av_dual_cfg_patch(args):
+                    cond, uncond = args["cond"], args["uncond"]
+                    out = uncond + (cond - uncond) * _video_cfg
+                    out[..., _v:] = uncond[..., _v:] + (cond[..., _v:] - uncond[..., _v:]) * _audio_cfg
+                    return out
+
+                model.set_model_sampler_cfg_function(_ltx_av_dual_cfg_patch, disable_cfg1_optimization=True)
+                logger.info(
+                    "[Radiance] LTX-AV dual CFG active (video_cfg=%.2f, audio_cfg=%.2f).",
+                    _video_cfg, _audio_cfg,
+                )
+
         if SamplerMode.is_phase_shift(sampler_mode) and detected_type in VIDEO_MODEL_TYPES:
             logger.warning(
                 f"[v3.0.0] Phase-Shift mode is not supported for video model '{detected_type}' — "
