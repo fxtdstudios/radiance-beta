@@ -291,9 +291,23 @@ is worse than one that says so. Full detail in the [changelog](CHANGELOG.md).
   `"linear"` and `"gaussian_feather"` are genuinely different.
 - **`chromatic_adaptation` has no effect.** The white-point adaptation is baked
   into the precomputed conversion matrices.
-- **Optical flow is single-scale Lucas–Kanade**, not DIS. It recovers roughly
-  1% of a 5-pixel displacement, so mask propagation is effectively static above
-  about 2 pixels of motion.
+- **Optical flow is pyramidal Lucas–Kanade**, not DIS or a learned method, and
+  it thins out above roughly 8 px of motion. What degrades is the *field*, not
+  the estimate: the median displacement stays within a few percent out to about
+  20 px, but the fraction of the field landing within half a pixel falls from
+  100% at 3 px to 84% at 8, 71% at 12, 58% at 16 and 29% at 20. Mask
+  propagation tears where the field is patchy, so treat ~8 px as the working
+  limit rather than the point of failure.
+
+  Making the pyramid deeper does not fix it, and this was measured rather than
+  assumed. The ceiling is the integration window — the coarsest level has to
+  stay larger than the 15×15 window, so a short side of *S* allows about
+  log₂(*S*/15) levels. On a 256×512 plate, going from four levels to five made
+  every displacement worse (at 8 px, 96% of the field within half a pixel
+  became 32%), because a 15×15 window on a 16-pixel-tall level is solving over
+  most of the frame and that estimate propagates back down. Shrinking the
+  window with the level to buy depth was tried too, and measured worse for the
+  same reason.
 - **Scene-cut detection normalises by the batch maximum**, so the threshold has
   no absolute meaning and cut-free footage will still report cuts.
 
@@ -309,9 +323,14 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 - [ ] **Nothing has ever run in live ComfyUI on a GPU.** Every number in the
       audits is CPU and headless. Until a real graph renders a real frame, the
       verdict stays *ready with conditions*.
-- [ ] **Viewer JavaScript is unverified.** `radiance_viewer.js` and the WebGL /
-      WebGPU renderers have no automated coverage at all — the suite stops at
-      the Python boundary.
+- [ ] **The WebGPU backend is unverified, and the viewer panels are only
+      verified structurally.** 247 JavaScript tests now cover the grade maths,
+      the probe, the scope scales, OpenColorIO and the framing guides, and two
+      of them compile the real shaders in a headless WebGL2 context and compare
+      them against the CPU implementations they were generated from. What is
+      still open: no CI environment available exposes `navigator.gpu`, so the
+      WGSL half of the shared grade definition has never been compiled, and the
+      panel code is held by source assertions rather than by driving the UI.
 - [ ] **The public repo is 2.5 months behind.** `fxtdstudios/radiance` `main`
       is still at `64fee41` (2026-06-04); everything since lives in
       `fxtdstudios/radiance-beta`. Decide when beta merges down to public.
@@ -375,7 +394,8 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 - [x] Tiled VAE blending verified seamless and pinned by a test (the open note
       was stale — the cosine ramp had already landed).
 - [x] First JavaScript coverage: 27 tests over the shared DOM and widget
-      helpers, on `node --test`, wired into CI.
+      helpers, on `node --test`, wired into CI. Since grown to 247, including a
+      GPU lane that renders through the real shaders.
 - [x] Four commits merged to `radiance-beta` `main` via PR #43.
 - [x] **Both ACES 2.0 tone scales hit the published reference.** 18% grey now
       lands at 10.000 / 13.193 / 14.512 / 15.747 / 16.824 nits at peaks of
