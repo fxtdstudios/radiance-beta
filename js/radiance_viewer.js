@@ -8,6 +8,38 @@ import { RadianceNeuralMonitor } from "./radiance_neural.js";
 
 
 import { escapeHtml as _escapeHtml } from "./radiance_dom_utils.js";
+import {
+    sampleStats as _probeSampleStats,
+    rectFromCorners as _probeRectFromCorners,
+    pixelAt as _probePixelAt,
+    luminance as _probeLuminance,
+    nits as _probeNits,
+    exposureValue as _probeEV,
+    rgbToHsv as _probeRgbToHsv,
+    srgbToLinear as _probeSrgbToLinear,
+    hexSwatch as _probeHexSwatch,
+    formatValue as _probeFormat,
+    HDR_REFERENCE_WHITE_NITS as _PROBE_REF_WHITE,
+} from "./radiance_probe.js";
+import { gradePixel as _gradePixel } from "./radiance_grade.js";
+import {
+    SCOPE_SCALES as _SCOPE_SCALES,
+    LEVELS as _SCOPE_LEVELS,
+    scaleTicks as _scopeTicks,
+    scaleValue as _scopeValue,
+    describeMeasurement as _scopeDescribe,
+    logAssistPos as _logAssistPos,
+    logAssistInv as _logAssistInv,
+} from "./radiance_scope_units.js";
+// The façade only. It dynamic-imports the 4.7 MB WASM on first use, so nothing
+// is paid by a user who never opens a config.
+import {
+    initOCIO as _ocioInit,
+    isReady as _ocioReady,
+    builtinConfigs as _ocioBuiltins,
+    loadConfig as _ocioLoadConfig,
+    buildDisplayView as _ocioBuildDisplayView,
+} from "./radiance_ocio.js";
 
 class RadianceViewer {
     static singletonHUD = null;
@@ -799,6 +831,7 @@ class RadianceViewer {
         this.lutIntensity = 1.0;
 
         this.falseColor = false;
+        this.hdrHeatmap = false;   // absolute cd/m2, anchored to BT.2408 (203 nits)
         this.zebra = false;
         this.gamutWarning = false;
         this.clippingMonitor = false;
@@ -852,6 +885,27 @@ class RadianceViewer {
         this.scopeOverlay = false;
         this.waveformParadeMode = true; // true = RGB parade
         this.scopeMode = localStorage.getItem('radiance_scope_mode') || 'parade'; // parade|waveform|histogram|vectorscope|falsecolor
+
+        // Scope scale and measurement point. The scopes used to draw a graticule
+        // labelled 0/25/50/75/100 under a caption that read "Linear · 0–255" --
+        // two units in one panel, neither of them stated. These say which.
+        // 10-bit code value is the default because that is what a delivery spec
+        // is written in.
+        this.scopeScale = localStorage.getItem('radiance_scope_scale') || 'cv10';
+        this.scopeLevels = localStorage.getItem('radiance_scope_levels') || 'data';
+        this.scopeTransformed = localStorage.getItem('radiance_scope_xform') !== '0';
+        this.scopeHlgPeak = parseInt(localStorage.getItem('radiance_scope_hlg_peak') || '1000', 10) || 1000;
+
+        // OpenColorIO. Null until a config is loaded, and Radiance's own ACES
+        // 1.3 pipeline runs until then -- OCIO is a capability, not a
+        // dependency.
+        this.ocio = null;          // { summary, config } from radiance_ocio.js
+        this.ocioDisplay = '';
+        this.ocioView = '';
+        this.ocioSource = '';
+        this.ocioActive = false;
+        this.ocioStatus = null;    // { level: 'ok'|'warn'|'error', text }
+        this.ocioBusy = false;
         this.generationID = 0; // v3.1: Unique ID per execution to cancel stale async loads
 
         // Grid & Safe Areas
@@ -859,6 +913,21 @@ class RadianceViewer {
         // Grid & Safe Areas
         this.showGrid = false;
         this.gridMode = 0; // 0=off, 1=thirds, 2=safe areas, 3=center
+
+        // Which published safe-area spec the boxes come from, and the framing
+        // matte, which is a separate question from delivery safety.
+        this.safeAreaPreset = localStorage.getItem('radiance_safe_preset') || 'modern';
+        this.matteMode = localStorage.getItem('radiance_matte') || 'off';
+        this.matteOpacity = 0.7;
+
+        // Nearest-neighbour vs linear magnification. RV binds this to 'n', and
+        // pixel-level inspection is meaningless through a bilinear filter.
+        this.pixelFilter = localStorage.getItem('radiance_pixel_filter') || 'linear';
+
+        // How the frame counter reads. Frames for a technical conversation,
+        // timecode for a delivery one.
+        this.timeDisplay = localStorage.getItem('radiance_time_display') || 'frames';
+        this.frameRate = 24;
 
         // Fullscreen
 
@@ -868,6 +937,22 @@ class RadianceViewer {
         // Pixel data
         this.imageData = null;
         this.lastPixelColor = null;
+
+        // Pixel probe (see renderProbeTab). The viewer shipped four scopes and
+        // no probe, which is the wrong way round -- a scope characterises the
+        // frame, a probe answers "what is *that* pixel", and the second is the
+        // question a delivery note gets written from.
+        this.probeMode = 'cursor';        // cursor | region | frame
+        this.probeSource = 'source';      // source | rendered
+        this.probeRect = null;            // {x,y,w,h} in image pixels
+        this.probeHold = false;           // freeze the cursor readout (F key)
+        this._probeStats = null;          // last sampleStats() result
+        this._probeStatsMeta = null;      // what produced it, for the caption
+        this._probeCurrent = null;        // {x,y,r,g,b,a} under the cursor
+        this._probeDragging = false;
+        this._probeDragStart = null;
+        this._probePanelNodes = null;     // live DOM handles, so the readout
+                                          // updates without rebuilding the tab
 
         this.initialized = false; // Track if we've set initial size
 
@@ -985,9 +1070,26 @@ class RadianceViewer {
         this.controlsPanel = null;
 
         // HUD Panel Sizing and Position (persisted)
-        const savedHudWidth = localStorage.getItem('radiance_hud_width');
-        this.hudPanelWidth = savedHudWidth ? parseInt(savedHudWidth) : 580;
-        this.hudPanelMinWidth = 360;
+        //
+        // 580 was the width a two-column body needed; one column needs about
+        // 340. Measured on a 2000px-wide window, the panel was taking 38% of
+        // the width and the image canvas was left with 27% of the screen -- on
+        // a 2.39:1 plate that is a 882x369 picture, 43% of a 2048 frame's
+        // native size, which is under the 1:2 where grain and edge quality stop
+        // being judgeable. At 340 the same plate lands near 74% of native.
+        //
+        // The stored value is migrated once rather than left alone: anyone who
+        // has opened the viewer before has 580 (or whatever they dragged it to)
+        // in localStorage, and would see none of this. A width they set
+        // deliberately BELOW the old default is kept -- that was a choice.
+        const HUD_WIDTH_DEFAULT = 340;
+        let savedHudWidth = localStorage.getItem('radiance_hud_width');
+        if (savedHudWidth && !localStorage.getItem('radiance_hud_width_v2')) {
+            if (parseInt(savedHudWidth) >= 500) savedHudWidth = null;
+            localStorage.setItem('radiance_hud_width_v2', '1');
+        }
+        this.hudPanelWidth = savedHudWidth ? parseInt(savedHudWidth) : HUD_WIDTH_DEFAULT;
+        this.hudPanelMinWidth = 300;
         this.hudPanelMaxWidth = 1200;
         const savedHudHeight = localStorage.getItem('radiance_hud_height2');
         this.hudPanelHeight = savedHudHeight ? parseInt(savedHudHeight) : null; // null = auto
@@ -1419,8 +1521,22 @@ class RadianceViewer {
             return v >= LOG_BREAK ? (Math.pow(2, (v - C) / A) - 1) / B : (v - C) / M;
         }
         if (idt.includes('N-Log')) {
-            if (v >= 0.328) return Math.pow((v - 0.363) / 0.241, 4) / Math.pow(10, 2.57);
-            return (v - 0.0) / 0.0; // linear region approximation — fallback
+            const NLOG_BREAK = 0.328;
+            const nlogCurve = (x) => Math.pow((x - 0.363) / 0.241, 4) / Math.pow(10, 2.57);
+            if (v >= NLOG_BREAK) return nlogCurve(v);
+            // Was 'return (v - 0.0) / 0.0;' — a literal divide by zero, labelled
+            // "linear region approximation". It returns ±Infinity for any v != 0
+            // and NaN at v === 0, and this feeds _computeHDRZoneStats, so the
+            // whole stats object and the HDR peak badge read "Infinityk nit" or
+            // "NaN nit" for any N-Log plate whose p99.9 luma sits below the
+            // break — which is every low-key N-Log shot, since N-Log mid-grey is
+            // at ~0.363, above the break.
+            //
+            // This is a straight line from the origin to the curve's value at
+            // the break, so the two segments meet: continuous, monotonic, finite.
+            // It is a stand-in, not the published Nikon N-Log toe — swap it for
+            // the spec's linear segment when someone has the document to hand.
+            return v * (nlogCurve(NLOG_BREAK) / NLOG_BREAK);
         }
         if (idt.includes('F-Log2')) {
             return (Math.pow(10, (v - 0.384038) / 0.344676) - 0.092864) / 8.799461;
@@ -1609,7 +1725,7 @@ class RadianceViewer {
 
     // ── v4.3: Auto-IDT Inference ──────────────────────────────────────────────
     // Infers the input colorspace from three fingerprint tiers:
-    //   1. EXR metadata `colorSpace` / `chromaticities` attribute (most authoritative)
+    //   1. EXR metadata 'colorSpace' / 'chromaticities' attribute (most authoritative)
     //   2. Filename keyword scan (e.g. 'logc3', 'slog3', 'vlog')
     //   3. Data midgrey fingerprint — compares p50 luma to known camera profiles
     // Sets this.inputSpace and updates the IDT dropdown + shows a dismissible toast.
@@ -2090,6 +2206,12 @@ class RadianceViewer {
                 { label: 'Pin Current Frame', shortcut: 'A/B', action: () => this.pinCurrentFrame?.() },
             ],
             Edit: [
+                // These two work. Their keyboard shortcuts did not: the only
+                // Ctrl+Z / Ctrl+Y handler in the file sits inside the region of
+                // createHUD() after the unconditional 'return' at ~11753, so it
+                // is never installed. The menu advertised a binding that did not
+                // exist. '_installUndoShortcuts' (called from createUI) restores
+                // it in live code.
                 { label: 'Undo', shortcut: 'Ctrl+Z', action: () => this.undo?.() },
                 { label: 'Redo', shortcut: 'Ctrl+Y', action: () => this.redo?.() },
                 'separator',
@@ -2174,7 +2296,7 @@ class RadianceViewer {
         [
             ['Snapshot', () => this.showExportMenu?.({ target: actions })],
             ['Compare', () => this.cycleCompareMode()],
-            ['HDR', () => { this.falseColor = !this.falseColor; this.render(); }],
+            ['HDR', () => { this.toggleHDRHeatmap(); }],
             ['⚙', () => this.toggleControls()],
         ].forEach(([label, handler]) => {
             const btn = document.createElement('button');
@@ -2237,7 +2359,11 @@ class RadianceViewer {
             { label: 'Exposure', action: () => this.toggleControls() },
             { label: 'False Color', action: () => { this.falseColor = !this.falseColor; this.render(); } },
             { label: 'Zebra', action: () => { this.zebra = !this.zebra; this.render(); } },
-            { label: 'HDR Heatmap', action: () => { this.falseColor = !this.falseColor; this.render(); } },
+            // Was a second switch on 'falseColor' -- the same feature under two
+            // names, and neither reported nits. False Color is an *exposure*
+            // tool on display luma; this one reads scene luminance and maps
+            // absolute cd/m2 against BT.2408's 203-nit HDR Reference White.
+            { label: 'HDR Heatmap', action: () => { this.toggleHDRHeatmap(); } },
         ]);
         addSection('Analysis', [
             { label: 'Histogram', action: () => { this.scopeMode = 'histogram'; this._setReferenceTab('scopes'); this.updateScopes(); } },
@@ -2466,7 +2592,14 @@ class RadianceViewer {
         Object.values(toolButtons).forEach(b => b.updateVisual());
         Object.values(trackButtons).forEach(b => b.updateVisual());
 
-        window.addEventListener('keydown', (e) => {
+        // Named and stored so destroy() can remove it. It used to be an
+        // anonymous listener on 'window' with no reference kept, so it could
+        // never be removed: the closure captured 'this', 'toolButtons' and
+        // 'trackButtons', and kept firing after the node was deleted. Pressing
+        // A/B/S/D/F/V anywhere in ComfyUI ran the handler once per destroyed
+        // viewer, each mutating a dead instance and calling updateVisual() on
+        // detached DOM. One more every time the node executed.
+        this._seqDockKeyHandler = (e) => {
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
             if (e.code === 'KeyA') {
                 this.activeTimelineTool = 'select';
@@ -2487,7 +2620,8 @@ class RadianceViewer {
                 this.activeTimelineTrack = this.activeTimelineTrack === 'V1' ? 'V2' : 'V1';
                 Object.values(trackButtons).forEach(b => b.updateVisual());
             }
-        });
+        };
+        window.addEventListener('keydown', this._seqDockKeyHandler);
 
         head.append(left, center, right);
         dock.appendChild(head);
@@ -3088,6 +3222,7 @@ class RadianceViewer {
         this.canvasWrapper.appendChild(this.viewerBar);
 
         this.sequenceDock = this.createSequenceDock();
+        this._installUndoShortcuts();
         this.canvasWrapper.appendChild(this.sequenceDock);
 
         // v5.0: WebGPU-preferred GPU chain (WebGPU → WebGL → 2D fallback)
@@ -3102,6 +3237,9 @@ class RadianceViewer {
                 if (this.renderer.init()) {
                     console.log('[Radiance] WebGL Renderer Initialized');
                     this._gpuBackend = 'webgl';
+                    // A fresh texture resets the mag filter, so the stored
+                    // choice has to be re-applied rather than assumed.
+                    this.renderer?.setPixelFilter?.(this.pixelFilter);
                     const savedPrec = localStorage.getItem('radiance_pipeline_precision') || 'f32';
                     if (savedPrec !== 'f32') this.renderer.setPipelinePrecision(savedPrec);
                 }
@@ -3114,9 +3252,33 @@ class RadianceViewer {
             this.useWebGL = false;
         }
 
-        // WebGPU is the preferred backend. If it fails, the initialized WebGL
-        // renderer remains active.
-        if (navigator.gpu && typeof RadianceWebGPURenderer !== 'undefined' && this._gpuBackend !== 'webgpu') {
+        // WebGPU is opt-in, and off by default.
+        //
+        // It used to upgrade automatically wherever 'navigator.gpu' existed,
+        // which meant nobody chose it — and the backend it silently switched
+        // people to is the one missing four features the WebGL path has:
+        //
+        //   Masks and Qualifiers   no WGSL implementation; the base class
+        //                          stores the state and the shader never reads
+        //                          it, so every slider moves and nothing changes
+        //   HDR heatmap            not implemented in WGSL
+        //   OpenColorIO            no WGSL path; a loaded config cannot apply
+        //   Grade maths            lift, gamma and contrast each differed from
+        //                          WebGL until they were collapsed into
+        //                          js/radiance_grade.js — and the WGSL half of
+        //                          that collapse is still unverified, because
+        //                          no CI environment available here exposes
+        //                          navigator.gpu to compile it
+        //
+        // Defaulting to the backend with the missing features, and explaining
+        // the gaps with four separate in-panel banners, is a worse product than
+        // defaulting to the one that works. Anyone who wants WebGPU can still
+        // have it; they now have to ask.
+        if (localStorage.getItem('radiance_prefer_webgpu') === '1'
+            && navigator.gpu && typeof RadianceWebGPURenderer !== 'undefined'
+            && this._gpuBackend !== 'webgpu') {
+            console.warn('[Radiance] WebGPU is enabled by preference. Masks, qualifiers, '
+                + 'the HDR heatmap and OpenColorIO are not implemented on this backend.');
             this._tryWebGPUUpgrade();
         }
 
@@ -3276,7 +3438,9 @@ class RadianceViewer {
         this.bottomInfoBar.appendChild(this.infoRight);
 
         // False Color Legend (Overlay within Bottom Bar)
-        // v4.5: Extended with exact IRE thresholds so colorists can read zone boundaries
+        // The bands are labelled in percent, which is what they are. They were
+        // described as IRE thresholds; IRE is a legacy analogue-composite unit and
+        // these were never IRE values.
         this.fcLegend = document.createElement('div');
         this.fcLegend.style.cssText = `
             position: absolute; left: 50%; transform: translateX(-50%);
@@ -3891,7 +4055,7 @@ class RadianceViewer {
             item.style.cssText = `background: #111; border: 1px solid #222; padding: 6px 10px; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; font-size: 10px;`;
 
             const info = document.createElement('div');
-            // Escaped: `name` is the raw Filename textbox value and `path`/`qc`
+            // Escaped: 'name' is the raw Filename textbox value and 'path'/'qc'
             // come from the /radiance/deliver JSON. This was the one tainted
             // innerHTML in the file -- the same class already has escapeHtml()
             // and uses it correctly a few hundred lines up.
@@ -5056,7 +5220,7 @@ else:
             case 'export': {
                 if (!this.image) { this._termLog('warn', '[Export] No image loaded.'); break; }
 
-                // v4.0: `export exr32 [name]` — 32-bit graded EXR
+                // v4.0: 'export exr32 [name]' — 32-bit graded EXR
                 if (args[0] === 'exr32') {
                     this.exportSnapshot('exr32');
                     break;
@@ -5875,6 +6039,7 @@ else:
             const ctx = this._frameDataCanvas.getContext('2d');
             ctx.drawImage(this.image, 0, 0);
             this.imageData = ctx.getImageData(0, 0, this.image.width, this.image.height).data;
+            this._probeInvalidate();   // the probe measures this frame, not the last one
 
             // Update Z-Depth
             if (this.frameZdepthImages && this.frameZdepthImages[this.currentFrame]) {
@@ -6191,6 +6356,9 @@ else:
             case 'b': this.channel = 'b'; this.showZdepth = false; this.render(); break;
             case 'l': this.channel = 'luma'; this.showZdepth = false; this.render(); break;
             case 'c': this.channel = 'rgb'; this.showZdepth = false; this.render(); break;
+            // RV binds nearest-neighbour to 'n'. Pixel-peeping through a
+            // bilinear filter shows a blend of neighbours rather than pixels.
+            case 'n': this.togglePixelFilter(); break;
             case 'h': this.toggleHelp(); break;
             case 'w': this.toggleScope('waveform'); break;
             case 'm': this.toggleParadeMode(); break;
@@ -6480,31 +6648,17 @@ else:
         const con = this.contrast || 1.0;
         const piv = this.pivot || 0.18;
 
-        // Apply grade inline (mirrors apply_grading Python logic)
+        // The shared grade definition -- the same one the shaders are emitted
+        // from. This was a fourth hand-written copy, and it differed from the
+        // WebGL one it was meant to mirror by leaving contrast unclamped, so a
+        // .cube taken into Resolve did not match the viewer it came from.
         const applyGrade = (r, g, b) => {
-            // Lift (luma-pivoted additive shadow shift)
-            const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-            const lumaPivot = Math.max(0, 1 - luma);
-            r += lift[0] * lumaPivot;
-            g += lift[1] * lumaPivot;
-            b += lift[2] * lumaPivot;
-            // Gain (multiplicative slope)
-            r *= gain[0]; g *= gain[1]; b *= gain[2];
-            // Gamma (power curve on positives)
-            if (r > 0) r = Math.pow(r, 1.0 / Math.max(gamma[0], 0.01));
-            if (g > 0) g = Math.pow(g, 1.0 / Math.max(gamma[1], 0.01));
-            if (b > 0) b = Math.pow(b, 1.0 / Math.max(gamma[2], 0.01));
-            // Contrast (around pivot)
-            r = (r - piv) * con + piv;
-            g = (g - piv) * con + piv;
-            b = (b - piv) * con + piv;
-            // Saturation
-            const luma2 = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-            r = luma2 + sat * (r - luma2);
-            g = luma2 + sat * (g - luma2);
-            b = luma2 + sat * (b - luma2);
-            // Clamp to [0, 1] for LUT domain
-            return [Math.max(0, Math.min(1, r)), Math.max(0, Math.min(1, g)), Math.max(0, Math.min(1, b))];
+            const out = _gradePixel([r, g, b], {
+                lift, gain, gamma, contrast: con, pivot: piv, saturation: sat,
+            });
+            // Clamp to [0, 1] for the LUT domain -- a .cube cannot carry values
+            // outside it.
+            return out.map((v) => Math.max(0, Math.min(1, v)));
         };
 
         // .CUBE Ordering: R varies fastest, then G, then B
@@ -6606,16 +6760,33 @@ else:
         // the float data, and encodes it as an OpenEXR file with FLOAT pixel
         // type (pixelType=2) and uncompressed scanlines.
         if (format === 'exr32') {
-            if (!this.useWebGL || !this.renderer) {
-                this._termLog?.('warn', '[Export] EXR 32-bit export requires WebGL renderer.');
+            // The old guard was 'if (!this.useWebGL || !this.renderer)', which
+            // never fired on WebGPU: '_tryWebGPUUpgrade' sets 'useWebGL = true'.
+            // So a WebGPU user fell straight through to 'result.data' on what
+            // was then a Promise, got 'undefined', and was told "EXR encoding
+            // failed" -- the encoder blamed for a backend contract mismatch.
+            if (!this.renderer?.readPixelsFloat32) {
+                this._termLog?.('warn', '[Export] 32-bit EXR export needs a renderer with float readback.');
                 return;
             }
             const result = this.renderer.readPixelsFloat32(
                 this.imageWidth, this.imageHeight, this.lutIntensity || 1.0
             );
-            if (!result) {
+            if (!result || !result.data) {
                 this._termLog?.('warn', '[Export] Float32 readback failed (WebGL2 required).');
                 return;
+            }
+
+            // Both backends return '{data, width, height, graded}' now. Only
+            // WebGL renders the graded composite; WebGPU returns the ungraded
+            // scene-linear source. Writing that into a file called
+            // "radiance_graded_*.exr" without saying so is the kind of quiet
+            // wrongness that surfaces three weeks later in a review.
+            const isGraded = result.graded !== false;
+            if (!isGraded) {
+                this._termLog?.('warn',
+                    '[Export] This backend returns ungraded scene-linear pixels; '
+                    + 'the file will contain the source, not the grade.');
             }
 
             const blob = this._encodeEXR32(result.data, result.width, result.height);
@@ -6626,11 +6797,13 @@ else:
 
             const url = URL.createObjectURL(blob);
             const link = document.createElement('a');
-            link.download = `radiance_graded_${Date.now()}.exr`;
+            link.download = `radiance_${isGraded ? 'graded' : 'source'}_${Date.now()}.exr`;
             link.href = url;
             link.click();
             URL.revokeObjectURL(url);
-            this._termLog?.('success', `[Export] Saved 32-bit graded EXR: ${result.width}×${result.height}`);
+            this._termLog?.('success',
+                `[Export] Saved 32-bit ${isGraded ? 'graded' : 'source'} EXR: `
+                + `${result.width}×${result.height}`);
             return;
         }
 
@@ -7348,6 +7521,10 @@ else:
         const w = this.overlayCanvas.width, h = this.overlayCanvas.height;
         ctx.clearRect(0, 0, w, h);
 
+        // Aspect matte first: it dims the picture, and the guides drawn after
+        // it must stay legible on top.
+        if (this.matteMode && this.matteMode !== 'off') this.drawAspectMatte(ctx);
+
         // Grid
         if (this.showGrid) this.drawGrid(ctx, w, h);
 
@@ -7358,6 +7535,9 @@ else:
         if (this.maskState && this.maskState.type > 0 && this.maskState.showOverlay && !this.wipeEnabled) {
             this.drawMaskInteractiveOverlay(ctx);
         }
+
+        // Pixel probe region selection
+        if (this.probeRect && this._probeRegionActive()) this._probeDrawRegion(ctx);
 
         // Sprint 4: Render persistent probe dots
         if (this._probeMemory && this._probeMemory.length > 0) {
@@ -7524,6 +7704,70 @@ else:
         ctx.restore();
     }
 
+    /**
+     * The picture's rectangle in canvas space.
+     *
+     * Everything that measures the *frame* -- safe areas, the aspect matte --
+     * has to be placed against this, not against the canvas. The safe areas
+     * used to be drawn on the full canvas, so at any zoom or pan other than an
+     * exact fit the "93%" box bore no relationship to the picture at all. For a
+     * guide whose only purpose is delivery QC that is worse than not drawing it.
+     */
+    _imageRect() {
+        const w = (this.imageWidth || 0) * this.zoom;
+        const h = (this.imageHeight || 0) * this.zoom;
+        if (!(w > 0 && h > 0)) return null;
+        return { x: this.panX, y: this.panY, w, h };
+    }
+
+    /**
+     * Safe-area presets, with the standard each comes from.
+     *
+     * An unlabelled safe-area box is not usable for delivery QC -- the question
+     * is always "safe by whose spec", and the answer decides whether a graphic
+     * passes. Verified against the standards rather than from memory, because
+     * this viewer's own note had the attribution wrong in both directions:
+     *
+     *   SMPTE ST 2046-1 (and RP 218): action 93%, title 90%.
+     *   EBU R 95: action safe 3.5% inset, graphics safe 5% inset.
+     *
+     * Those are the same two boxes. The two bodies agree on the geometry and
+     * differ only in what they call the inner one -- "title" against
+     * "graphics" -- so one pair of boxes satisfies both, and saying so is more
+     * useful than offering them as rival options.
+     *
+     * 90/80 is *not* EBU. It is SMPTE's legacy 480-line pair, carried forward
+     * from RP 8 (1961) and RP 13 (1963) for compatibility with material cut for
+     * CRT overscan. It is offered because archive work needs it, and labelled
+     * legacy so nobody reaches for it by default.
+     */
+    static SAFE_AREA_PRESETS = [
+        {
+            id: 'modern', label: 'SMPTE ST 2046-1 / EBU R 95',
+            outer: 0.93, inner: 0.90,
+            outerLabel: 'Action safe 93%', innerLabel: 'Title / graphics safe 90%',
+            note: 'SMPTE ST 2046-1 and EBU R 95 specify the same two boxes; EBU calls the inner one graphics safe.',
+        },
+        {
+            id: 'legacy', label: 'Legacy 480-line (SMPTE RP 218)',
+            outer: 0.90, inner: 0.80,
+            outerLabel: 'Action safe 90% (legacy)', innerLabel: 'Title safe 80% (legacy)',
+            note: 'For 480-line archive material cut for CRT overscan. Not a current delivery spec.',
+        },
+    ];
+
+    /** Aspect-ratio mattes. Distinct from safe areas: this is framing, not QC. */
+    static MATTE_PRESETS = [
+        { id: 'off', label: 'Off', ratio: null },
+        { id: '2.39', label: '2.39:1 — Scope', ratio: 2.39 },
+        { id: '2.00', label: '2.00:1 — Univisium', ratio: 2.0 },
+        { id: '1.85', label: '1.85:1 — Flat', ratio: 1.85 },
+        { id: '1.78', label: '1.78:1 — 16:9', ratio: 16 / 9 },
+        { id: '1.33', label: '1.33:1 — 4:3', ratio: 4 / 3 },
+        { id: '1.00', label: '1:1 — Square', ratio: 1 },
+        { id: '0.5625', label: '9:16 — Vertical', ratio: 9 / 16 },
+    ];
+
     drawGrid(ctx, w, h) {
         // Grid mode: 1=thirds, 2=safe areas, 3=center, 4=all
 
@@ -7544,44 +7788,37 @@ else:
         const showActionSafe = showSafeFromGrid || this.safeAreaMode === 'action' || this.safeAreaMode === 'both';
         const showTitleSafe = showSafeFromGrid || this.safeAreaMode === 'title' || this.safeAreaMode === 'both';
 
-        // Action Safe (93% - broadcast safe)
-        if (showActionSafe) {
-            ctx.strokeStyle = 'rgba(0, 200, 255, 0.4)';
-            ctx.lineWidth = 1;
-            ctx.setLineDash([8, 4]);
-            const actionMargin = 0.035; // 3.5% margin = 93% visible
-            ctx.beginPath();
-            ctx.rect(
-                w * actionMargin, h * actionMargin,
-                w * (1 - 2 * actionMargin), h * (1 - 2 * actionMargin)
-            );
-            ctx.stroke();
-            ctx.setLineDash([]);
+        const rect = this._imageRect();
+        if (rect && (showActionSafe || showTitleSafe)) {
+            const preset = RadianceViewer.SAFE_AREA_PRESETS.find((p) => p.id === this.safeAreaPreset)
+                || RadianceViewer.SAFE_AREA_PRESETS[0];
 
-            // Label
-            ctx.fillStyle = 'rgba(0, 200, 255, 0.6)';
+            const box = (fraction, colour, dash, label) => {
+                const iw = rect.w * fraction, ih = rect.h * fraction;
+                const x = rect.x + (rect.w - iw) / 2, y = rect.y + (rect.h - ih) / 2;
+                ctx.strokeStyle = colour;
+                ctx.lineWidth = 1;
+                ctx.setLineDash(dash);
+                ctx.beginPath();
+                ctx.rect(x, y, iw, ih);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.fillStyle = colour;
+                ctx.font = '10px sans-serif';
+                ctx.fillText(label, x + 4, y + 13);
+            };
+
+            // Was 93% action against an 80% title box -- the modern action area
+            // paired with the legacy title area, which is not a spec anyone
+            // publishes. Both now come from the same preset.
+            if (showActionSafe) box(preset.outer, 'rgba(0, 200, 255, 0.55)', [8, 4], preset.outerLabel);
+            if (showTitleSafe) box(preset.inner, 'rgba(255, 200, 0, 0.55)', [4, 4], preset.innerLabel);
+
+            // Name the standard once, at the bottom of the frame. A box with a
+            // percentage on it still does not say whose percentage it is.
+            ctx.fillStyle = 'rgba(255,255,255,0.4)';
             ctx.font = '9px sans-serif';
-            ctx.fillText('Action Safe 93%', w * actionMargin + 4, h * actionMargin + 12);
-        }
-
-        // Title Safe (80% - text safe)
-        if (showTitleSafe) {
-            ctx.strokeStyle = 'rgba(255, 200, 0, 0.4)';
-            ctx.lineWidth = 1;
-            ctx.setLineDash([4, 4]);
-            const titleMargin = 0.10; // 10% margin = 80% visible
-            ctx.beginPath();
-            ctx.rect(
-                w * titleMargin, h * titleMargin,
-                w * (1 - 2 * titleMargin), h * (1 - 2 * titleMargin)
-            );
-            ctx.stroke();
-            ctx.setLineDash([]);
-
-            // Label
-            ctx.fillStyle = 'rgba(255, 200, 0, 0.6)';
-            ctx.font = '9px sans-serif';
-            ctx.fillText('Title Safe 80%', w * titleMargin + 4, h * titleMargin + 12);
+            ctx.fillText(preset.label, rect.x + 4, rect.y + rect.h - 5);
         }
 
         // Center cross (mode 3 or 4)
@@ -7598,6 +7835,52 @@ else:
             ctx.arc(w / 2, h / 2, 5, 0, Math.PI * 2);
             ctx.stroke();
         }
+    }
+
+    /**
+     * Aspect-ratio matte.
+     *
+     * Deliberately separate from the safe areas. A safe area answers "will this
+     * survive the delivery"; a matte answers "what will the audience see" while
+     * shooting or framing wider than the finish. Drawing them as one control
+     * conflates a QC guide with a creative one.
+     *
+     * Darkened rather than solid black so the matted region stays inspectable —
+     * the point of framing to a matte is usually to check what is *just* outside
+     * it.
+     */
+    drawAspectMatte(ctx) {
+        const preset = RadianceViewer.MATTE_PRESETS.find((p) => p.id === this.matteMode);
+        const rect = this._imageRect();
+        if (!preset?.ratio || !rect) return;
+
+        const current = rect.w / rect.h;
+        let inner;
+        if (preset.ratio > current) {
+            // Target is wider: bars top and bottom.
+            const ih = rect.w / preset.ratio;
+            inner = { x: rect.x, y: rect.y + (rect.h - ih) / 2, w: rect.w, h: ih };
+        } else {
+            const iw = rect.h * preset.ratio;
+            inner = { x: rect.x + (rect.w - iw) / 2, y: rect.y, w: iw, h: rect.h };
+        }
+
+        ctx.save();
+        ctx.fillStyle = `rgba(0, 0, 0, ${this.matteOpacity ?? 0.7})`;
+        // Four bars rather than a clipped fill: the matted area must dim, and
+        // the framed area must be left completely untouched.
+        ctx.fillRect(rect.x, rect.y, rect.w, inner.y - rect.y);
+        ctx.fillRect(rect.x, inner.y + inner.h, rect.w, (rect.y + rect.h) - (inner.y + inner.h));
+        ctx.fillRect(rect.x, inner.y, inner.x - rect.x, inner.h);
+        ctx.fillRect(inner.x + inner.w, inner.y, (rect.x + rect.w) - (inner.x + inner.w), inner.h);
+
+        ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(inner.x + 0.5, inner.y + 0.5, inner.w - 1, inner.h - 1);
+        ctx.fillStyle = 'rgba(255,255,255,0.5)';
+        ctx.font = '10px sans-serif';
+        ctx.fillText(preset.label, inner.x + 4, inner.y + inner.h - 6);
+        ctx.restore();
     }
 
 
@@ -7676,6 +7959,23 @@ else:
 
 
 
+            // Probe region drag. Deliberately below the wipe and mask handles
+            // -- those are direct manipulation of something already on screen
+            // and must keep priority -- and above panning, which stays reachable
+            // on shift or middle-drag while a region is being drawn.
+            if (this._probeRegionActive() && e.button === 0 && !e.shiftKey) {
+                const px = Math.floor(x), py = Math.floor(y);
+                if (px >= 0 && py >= 0 && px < this.imageWidth && py < this.imageHeight) {
+                    e.preventDefault();
+                    this._probeDragging = true;
+                    this._probeDragStart = { x: px, y: py };
+                    this.probeRect = _probeRectFromCorners(px, py, px, py);
+                    this.canvas.style.cursor = 'crosshair';
+                    this.renderOverlay();
+                    return;
+                }
+            }
+
             if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
                 e.preventDefault(); // Prevent middle-click auto-scroll which swallows mouseup
                 this.isPanning = true;
@@ -7751,6 +8051,19 @@ else:
                 return;
             }
 
+            if (this._probeDragging) {
+                const imgX = Math.floor((mx - this.panX) / this.zoom);
+                const imgY = Math.floor((my - this.panY) / this.zoom);
+                const cx = Math.max(0, Math.min(imgX, this.imageWidth - 1));
+                const cy = Math.max(0, Math.min(imgY, this.imageHeight - 1));
+                this.probeRect = _probeRectFromCorners(
+                    this._probeDragStart.x, this._probeDragStart.y, cx, cy,
+                );
+                this.renderOverlay();
+                this.updateCursor(e);
+                return;
+            }
+
             if (this.isPanning) {
                 if (e.buttons !== undefined && !(e.buttons & 1) && !(e.buttons & 4)) {
                     this.isPanning = false;
@@ -7773,6 +8086,16 @@ else:
         // Click-to-Focus for DoF
         this._winMouseUpHandler = (e) => {
             this.isPanning = false;
+
+            // Finishing a region drag measures it immediately. Requiring a
+            // second click on "Sample" after the drag would be one interaction
+            // too many for the panel's most-used path.
+            if (this._probeDragging) {
+                this._probeDragging = false;
+                this._probeDragStart = null;
+                this._probeComputeStats();
+                this.renderOverlay();
+            }
             if (this.isDraggingWipe) {
                 this.isDraggingWipe = false;
                 // Restore cursor based on current hover position
@@ -8035,6 +8358,21 @@ else:
             // Store probe for multi-probe display (Sprint 4)
             this._lastProbe = { imgX, imgY, dispStr, linStr, hex, isHDRPick };
 
+            // Feed the Probe panel. Sampled through _probeSampleOne rather than
+            // reused from the values above, because the panel's Source/Rendered
+            // switch has to actually change what is measured -- and coalesced to
+            // one repaint per frame, since a pointer can outrun the DOM.
+            if (!this.probeHold && this._probePanelNodes?.current?.isConnected) {
+                this._probeCurrent = this._probeSampleOne(imgX, imgY);
+                if (!this._probeRepaintQueued) {
+                    this._probeRepaintQueued = true;
+                    requestAnimationFrame(() => {
+                        this._probeRepaintQueued = false;
+                        this._probeRenderCurrent();
+                    });
+                }
+            }
+
             // Draw pixel loupe on overlay
             if (this.showLoupe) {
                 this.renderOverlay(); // Clear and redraw first
@@ -8044,6 +8382,10 @@ else:
             this.infoLeft.innerHTML = '';
             this.colorInfo.textContent = 'RGB: — — —';
             this.lastPixelColor = null;
+            if (!this.probeHold && this._probeCurrent) {
+                this._probeCurrent = null;
+                this._probeRenderCurrent();
+            }
         }
 
         // Update fixed right info stats continuously
@@ -8384,6 +8726,7 @@ else:
             const tempCtx = tempCanvas.getContext('2d');
             tempCtx.drawImage(src, 0, 0);
             this.imageData = tempCtx.getImageData(0, 0, src.width, src.height).data;
+            this._probeInvalidate();   // the probe measures this frame, not the last one
 
             // Load to WebGL renderer
             if (this.renderer) {
@@ -8446,6 +8789,7 @@ else:
                 const tempCtx = tempCanvas.getContext('2d');
                 tempCtx.drawImage(img, 0, 0);
                 this.imageData = tempCtx.getImageData(0, 0, img.width, img.height).data;
+                this._probeInvalidate();   // the probe measures this frame, not the last one
 
                 // Load to WebGL renderer
                 if (this.renderer) {
@@ -8598,6 +8942,7 @@ else:
         // v3.0 FIX: Store .data (Uint8ClampedArray), not ImageData object.
         // The rest of the code indexes this.imageData[i] for pixel values.
         this.imageData = ctx.getImageData(0, 0, width, height).data;
+        this._probeInvalidate();   // the probe measures this frame, not the last one
     }
 
     setCompareImage(img) {
@@ -9398,6 +9743,7 @@ else:
 
             // Analytics State
             this.renderer.setFalseColor(this.falseColor || false);
+        this.renderer.setHDRHeatmap?.(this.hdrHeatmap);
             this.renderer.setZebra(this.zebra || false);
             this.renderer.setZebraThreshold(this.zebraThreshold || 0.95);
             this.renderer.setGamutWarning(this.gamutWarning || false);
@@ -10430,7 +10776,7 @@ else:
                 .radiance-ref-tab:hover { color: var(--radiance-text); }
                 .radiance-ref-tab.is-active { color: var(--radiance-accent) !important; font-weight: 800; }
                 .radiance-ref-tab.is-active::after { content:""; position:absolute; left:20px; right:20px; bottom:0; height:2px; background:var(--radiance-accent); box-shadow:0 0 10px var(--radiance-accent-glow); }
-                .radiance-ref-body { display:grid; grid-template-columns:minmax(236px, 1fr) minmax(248px, 1fr); flex:1; min-height:0; overflow:hidden; background: #0c0c12; }
+                .radiance-ref-body { display:grid; grid-template-columns:1fr; flex:1; min-height:0; overflow:hidden; background: #0c0c12; }
                 .radiance-ref-col { min-width:0; min-height:0; overflow:auto; padding:16px 16px 14px; border-right:1px solid var(--radiance-panel-border); scrollbar-width:thin; scrollbar-color:rgba(255,255,255,.18) transparent; }
                 .radiance-ref-col:last-child { border-right:0; }
                 .radiance-ref-section { padding:0 0 15px; margin:0 0 15px; border-bottom:1px solid var(--radiance-panel-border); }
@@ -10541,7 +10887,7 @@ else:
                     .radiance-ref-wheels { grid-template-columns:repeat(3, minmax(0,1fr)); }
                     .radiance-ref-status-grid { grid-template-columns:1fr; }
                 }
-                @media (max-width: 1180px) { .radiance-ref-body { grid-template-columns:1fr; } .radiance-ref-col:first-child { border-right:0; border-bottom:1px solid var(--radiance-panel-border); } }
+                /* The two-column body collapsed here at 1180px; it is single-column at every width now, so this rule has nothing left to do. */
             `;
             document.head.appendChild(style);
         }
@@ -10559,24 +10905,39 @@ else:
         body.className = 'radiance-ref-body';
         shell.appendChild(body);
 
-        const left = document.createElement('div');
-        left.className = 'radiance-ref-col';
-        const right = document.createElement('div');
-        right.className = 'radiance-ref-col';
-        body.appendChild(left);
-        body.appendChild(right);
+        // One column. The body used to be two, and the tab bar above only ever
+        // switched the LEFT one -- '_renderReferenceGrade(right)' ran on every
+        // render regardless of the active tab. So picking INSPECTOR still showed
+        // the whole grade panel next to it, and picking GRADE showed the grade
+        // twice: a status summary on the left, the real controls on the right.
+        // The tabs were decoration on a panel that always displayed everything.
+        //
+        // That cost 484px of hard minimum (236 + 248) before padding, on a panel
+        // whose default width was 580 -- roughly a third of the window, to show
+        // the user two things when they asked for one. The picture got 27%.
+        const col = document.createElement('div');
+        col.className = 'radiance-ref-col';
+        body.appendChild(col);
 
         let activeTab = this._referenceRightTab || 'inspector';
         const render = () => {
-            left.innerHTML = '';
-            right.innerHTML = '';
+            col.innerHTML = '';
             [...tabs.children].forEach(btn => btn.classList.toggle('is-active', btn.dataset.tabId === activeTab));
-            if (activeTab === 'grade') this._renderReferenceGradeSummary(left);
-            else if (activeTab === 'effects') this._renderReferenceEffects(left);
-            else if (activeTab === 'scopes') this._renderReferenceScopes(left);
-            else if (activeTab === 'analysis') this._renderReferenceAnalysis(left);
-            else this._renderReferenceInspector(left);
-            this._renderReferenceGrade(right);
+            if (activeTab === 'grade') {
+                // The full control set, not the read-only summary.
+                this._renderReferenceGrade(col);
+            } else if (activeTab === 'effects') {
+                this._renderReferenceEffects(col);
+            } else if (activeTab === 'scopes') {
+                this._renderReferenceScopes(col);
+            } else if (activeTab === 'analysis') {
+                this._renderReferenceAnalysis(col);
+            } else {
+                // Inspector is "what is this frame", so the grade *status*
+                // belongs here. The controls that change it live on GRADE.
+                this._renderReferenceInspector(col);
+                this._renderReferenceGradeSummary(col);
+            }
             this._lastRenderContent = render;
         };
 
@@ -10602,6 +10963,44 @@ else:
         });
 
         render();
+    }
+
+    toggleHDRHeatmap() {
+        this.hdrHeatmap = !this.hdrHeatmap;
+        // Mutually exclusive with the other full-frame analysis overlays, the
+        // same way falseColor already is at ~5746 -- two of them at once shows
+        // neither.
+        if (this.hdrHeatmap) {
+            this.falseColor = false;
+            this.zebra = false;
+            this.focusPeaking = false;
+        }
+        this.renderer?.setHDRHeatmap?.(this.hdrHeatmap);
+        if (this.hdrHeatmap && this._gpuBackend === 'webgpu') {
+            this._termLog?.('warn',
+                '[HDR Heatmap] Not implemented in the WebGPU shader path yet — '
+                + 'no nits overlay will appear on this backend.');
+        }
+        this.render();
+    }
+
+    _installUndoShortcuts() {
+        // The Edit menu offers Undo and Redo and labels them Ctrl+Z / Ctrl+Y.
+        // The handler that implemented those labels lives after the
+        // unconditional 'return' in createHUD(), so it was never installed and
+        // the labels were a promise the app did not keep -- while _pushUndo()
+        // kept filling a 50-deep stack from live code the whole time.
+        if (this._undoKeyHandler) return;
+        this._undoKeyHandler = (e) => {
+            const t = e.target;
+            if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+            if (!(e.ctrlKey || e.metaKey)) return;
+            const active = RadianceViewer.activeInstance || this;
+            const k = (e.key || '').toLowerCase();
+            if (k === 'z' && !e.shiftKey) { e.preventDefault(); active.undo?.(); }
+            else if ((k === 'z' && e.shiftKey) || k === 'y') { e.preventDefault(); active.redo?.(); }
+        };
+        window.addEventListener('keydown', this._undoKeyHandler);
     }
 
     _renderReferenceSection(parent, title) {
@@ -11886,6 +12285,7 @@ else:
             { id: 'curves', label: '📈 CURVES' },
             { id: 'effects', label: '🎬 EFFECTS' },
             { id: 'masks', label: '🛡️ MASKS' },
+            { id: 'probe', label: '🔬 PROBE' },
             { id: 'view', label: '👁️ VIEW' }
         ];
         this._hudTabs = [];
@@ -11949,6 +12349,8 @@ else:
             } else if (active.activeTab === 'masks') {
                 active.renderQualifiersTab(tabContentContainer);
                 active.renderMasksTab(tabContentContainer);
+            } else if (active.activeTab === 'probe') {
+                active.renderProbeTab(tabContentContainer);
             } else if (active.activeTab === 'view') {
                 active.renderViewTab(tabContentContainer);
             } else if (active.activeTab === 'terminal') {
@@ -14224,7 +14626,30 @@ else:
     }
 
 
+    /**
+     * A banner for a control that the current backend cannot honour.
+     *
+     * The Masks and Qualifiers tabs are fully interactive on WebGPU and
+     * completely inert: the base renderer stores the state and the WGSL never
+     * reads it, so every slider moves and nothing changes. A control that
+     * silently does nothing is worse than a disabled one, because the user
+     * concludes the feature is broken rather than unavailable.
+     */
+    _backendUnsupportedNotice(container, what) {
+        if (this._gpuBackend !== 'webgpu') return false;
+        const n = document.createElement('div');
+        n.style.cssText = 'font-size:10px; line-height:1.5; color:#ffb020; font-family:monospace;'
+            + 'padding:8px; margin-bottom:8px; background:rgba(255,176,32,0.06);'
+            + 'border-radius:5px; border-left:2px solid rgba(255,176,32,0.5);';
+        n.textContent = `${what} are not implemented on the WebGPU backend. `
+            + 'The controls below will move and the picture will not change. '
+            + 'Radiance prefers WebGPU whenever the browser offers it.';
+        container.appendChild(n);
+        return true;
+    }
+
     renderQualifiersTab(container) {
+        this._backendUnsupportedNotice(container, 'Qualifiers');
         container.style.cssText = 'display: flex; flex-direction: column; flex: 1; gap: 10px; padding: 10px; min-height: 0; overflow-y: auto;';
 
         // Initialize state if missing
@@ -14356,6 +14781,7 @@ else:
     }
 
     renderMasksTab(container) {
+        this._backendUnsupportedNotice(container, 'Masks');
         container.style.cssText = 'display: flex; flex-direction: column; flex: 1; gap: 10px; padding: 10px; min-height: 0; overflow-y: auto;';
 
         const update = () => {
@@ -14621,8 +15047,998 @@ else:
         this.container.addEventListener('click', clickHandler);
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Pixel probe
+    //
+    //  The viewer shipped four scopes and no probe. That is the wrong way
+    //  round: a scope characterises a frame, a probe answers "what is *that*
+    //  pixel", and the second is the question a delivery note gets written
+    //  from. Nuke, RV, mrv2 and Resolve all ship one; this is that, using their
+    //  vocabulary so it is findable -- Current / Min / Max / Average / Median,
+    //  Pixel Selection vs Full Frame, source value vs final rendered value.
+    //
+    //  All the maths lives in radiance_probe.js and is unit-tested there. This
+    //  half is only sampling and presentation.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * The buffer the probe measures, and an honest description of what it is.
+     *
+     * Returns `{ error }` rather than throwing or silently substituting another
+     * source: a probe that quietly measures something other than what the
+     * dropdown says is worse than one that refuses.
+     */
+    _probeDescribe() {
+        if (this.probeSource === 'rendered') {
+            // Deliberately a *capture*, not a live read. 'readPixelsFloat32'
+            // pulls the whole frame off the GPU; doing that once per pointer
+            // move would stall the render loop at 4K. So the rendered pixels
+            // are snapshotted on demand and the caption states when — a probe
+            // reading a stale frame it admits to is useful, a probe that drops
+            // the viewer to 4 fps is not.
+            const cap = this._probeRendered;
+            if (!cap) return { error: 'Rendered pixels are captured on demand — press ↻ CAPTURE.' };
+            if (cap.error) return { error: cap.error };
+            return {
+                kind: 'rendered', width: cap.width, height: cap.height, channels: 4,
+                linear: true,
+                label: (cap.graded
+                    ? 'Rendered — graded composite, scene-linear'
+                    : 'Rendered — UNGRADED: this backend returns the source, not the grade')
+                    + ` · captured ${cap.at}`,
+                warn: !cap.graded,
+                captured: true,
+            };
+        }
+
+        if (this.hdrData?.data) {
+            const isLinear = this.hdrData.isLinear !== false;
+            const C = this.hdrData.channels || this.hdrData.shape?.[2] || 3;
+            return {
+                kind: 'hdr',
+                width: this.hdrData.width || this.imageWidth,
+                height: this.hdrData.height || this.imageHeight,
+                channels: C,
+                linear: isLinear,
+                label: `Source — float ${C}-channel${isLinear ? ', scene-linear' : ', display-encoded'}`,
+            };
+        }
+
+        if (this.imageData) {
+            return {
+                kind: 'quantised',
+                width: this.imageWidth, height: this.imageHeight, channels: 4,
+                linear: true,
+                label: 'Source — 8-bit, sRGB-decoded to linear (no float sidecar)',
+                quantised: true,
+            };
+        }
+
+        return { error: 'No image loaded.' };
+    }
+
+    /**
+     * The same thing, with the pixels attached.
+     *
+     * Split from `_probeDescribe` on purpose. The caption repaints on every
+     * pointer move and needs only the label; materialising the buffer to
+     * produce a string would decode a 4K frame to a 132 MB float array on the
+     * first mouse move and hitch the viewer for no reason at all.
+     */
+    _probeBuffer() {
+        const info = this._probeDescribe();
+        if (info.error) return info;
+        if (info.kind === 'rendered') return { ...info, data: this._probeRendered.data };
+        if (info.kind === 'hdr') return { ...info, data: this.hdrData.data };
+        return { ...info, data: this._probeLinearFromImageData() };
+    }
+
+    /**
+     * The 8-bit frame, decoded to scene-linear float once and cached.
+     *
+     * Built lazily and only for whole-frame or region statistics -- the cursor
+     * readout converts the four values it needs directly. At 4K this array is
+     * 132 MB, which is why it is not built on load and is dropped when the
+     * frame changes.
+     */
+    _probeLinearFromImageData() {
+        if (this._probeLinearCacheFor === this.imageData && this._probeLinearCache) {
+            return this._probeLinearCache;
+        }
+        const src = this.imageData;
+        const out = new Float32Array(src.length);
+        const lut = new Float32Array(256);
+        for (let i = 0; i < 256; i++) lut[i] = _probeSrgbToLinear(i / 255);
+        for (let i = 0; i < src.length; i += 4) {
+            out[i] = lut[src[i]];
+            out[i + 1] = lut[src[i + 1]];
+            out[i + 2] = lut[src[i + 2]];
+            out[i + 3] = src[i + 3] / 255;      // alpha is not gamma-encoded
+        }
+        this._probeLinearCache = out;
+        this._probeLinearCacheFor = this.imageData;
+        return out;
+    }
+
+    /**
+     * Snapshot the rendered frame off the GPU.
+     *
+     * Both backends declare whether their pixels are graded. WebGPU's are not —
+     * it returns ungraded source — and the caption has to say so, or every
+     * number in the panel gets attributed to a grade that was never applied.
+     * Same contract the 32-bit EXR export relies on.
+     */
+    _probeCaptureRendered() {
+        const stamp = () => new Date().toTimeString().slice(0, 8);
+        if (!this.renderer?.readPixelsFloat32) {
+            this._probeRendered = { error: 'This renderer has no float readback. WebGL2 is required.' };
+            return;
+        }
+        let r = null;
+        try {
+            r = this.renderer.readPixelsFloat32(
+                this.imageWidth, this.imageHeight, this.lutIntensity || 1.0,
+            );
+        } catch (e) {
+            this._probeRendered = { error: `Readback failed: ${e?.message || e}` };
+            return;
+        }
+        if (!r?.data) {
+            this._probeRendered = { error: 'Float readback returned nothing.' };
+            return;
+        }
+        this._probeRendered = {
+            data: r.data, width: r.width, height: r.height,
+            graded: r.graded !== false, at: stamp(),
+        };
+        this._probeStats = null;
+        this._probeStatsMeta = null;
+    }
+
+    /** One pixel, cheaply, without materialising the whole float frame. */
+    _probeSampleOne(x, y) {
+        if (x < 0 || y < 0 || x >= this.imageWidth || y >= this.imageHeight) return null;
+
+        if (this.probeSource === 'rendered') {
+            const cap = this._probeRendered;
+            if (!cap?.data) return null;
+            const p = _probePixelAt(cap.data, { width: cap.width, height: cap.height, channels: 4 }, x, y);
+            return p ? { x, y, ...p } : null;
+        }
+        if (this.hdrData?.data) {
+            const C = this.hdrData.channels || this.hdrData.shape?.[2] || 3;
+            const p = _probePixelAt(this.hdrData.data,
+                { width: this.hdrData.width || this.imageWidth, height: this.hdrData.height || this.imageHeight, channels: C },
+                x, y);
+            return p ? { x, y, ...p } : null;
+        }
+        if (this.imageData) {
+            const i = (y * this.imageWidth + x) * 4;
+            return {
+                x, y,
+                r: _probeSrgbToLinear(this.imageData[i] / 255),
+                g: _probeSrgbToLinear(this.imageData[i + 1] / 255),
+                b: _probeSrgbToLinear(this.imageData[i + 2] / 255),
+                a: this.imageData[i + 3] / 255,
+            };
+        }
+        return null;
+    }
+
+    /** Compute statistics for the current mode. Region and Full Frame only. */
+    _probeComputeStats() {
+        const buf = this._probeBuffer();
+        if (buf.error) {
+            this._probeStats = null;
+            this._probeStatsMeta = { error: buf.error };
+            this._probeRenderStats();
+            return;
+        }
+        const rect = this.probeMode === 'region'
+            ? (this.probeRect || null)
+            : { x: 0, y: 0, w: buf.width, h: buf.height };
+        if (this.probeMode === 'region' && !rect) {
+            this._probeStats = null;
+            this._probeStatsMeta = { error: 'Drag a rectangle on the image to select a region.' };
+            this._probeRenderStats();
+            return;
+        }
+        const t0 = (typeof performance !== 'undefined' ? performance.now() : 0);
+        this._probeStats = _probeSampleStats(buf.data, {
+            width: buf.width, height: buf.height, channels: buf.channels, rect,
+        });
+        this._probeStatsMeta = {
+            label: buf.label, warn: buf.warn, quantised: buf.quantised,
+            ms: (typeof performance !== 'undefined' ? performance.now() : 0) - t0,
+            mode: this.probeMode,
+        };
+        this._probeRenderStats();
+    }
+
+    /** Discard cached probe state when the frame underneath changes. */
+    _probeInvalidate() {
+        this._probeLinearCache = null;
+        this._probeLinearCacheFor = null;
+        this._probeRendered = null;
+        this._probeStats = null;
+        this._probeStatsMeta = null;
+        this._probeCurrent = null;
+    }
+
+    renderProbeTab(container) {
+        container.style.cssText = 'display: flex; flex-direction: column; flex: 1; gap: 10px; padding: 12px; min-height: 0; overflow-y: auto;';
+        const t = this.theme;
+        const nodes = {};
+        this._probePanelNodes = nodes;
+
+        const heading = (text, hint) => {
+            const d = document.createElement('div');
+            d.style.cssText = 'color:#888; font-size:10px; margin-bottom:6px; text-transform:uppercase; font-weight:bold; letter-spacing:0.6px;';
+            d.textContent = text;
+            if (hint) d.title = hint;
+            return d;
+        };
+
+        // A segmented control. Used twice; the two rows are the whole state of
+        // the panel, so they are the first thing in it.
+        const segmented = (options, current, onPick) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex; gap:4px; background:rgba(255,255,255,0.03); padding:3px; border-radius:6px;';
+            options.forEach((opt) => {
+                const b = document.createElement('div');
+                b.textContent = opt.label;
+                b.title = opt.hint || '';
+                const on = current === opt.id;
+                b.style.cssText = `
+                    flex:1; text-align:center; padding:5px 4px; font-size:10px; font-weight:700;
+                    border-radius:4px; cursor:pointer; user-select:none; transition:all .15s;
+                    color:${on ? '#00f2ff' : t.textDim};
+                    background:${on ? 'rgba(0,242,255,0.10)' : 'transparent'};
+                    border:1px solid ${on ? 'rgba(0,242,255,0.28)' : 'transparent'};
+                `;
+                b.onclick = () => onPick(opt.id);
+                row.appendChild(b);
+            });
+            return row;
+        };
+
+        // ── Sampling mode ───────────────────────────────────────────────────
+        const sampleGroup = document.createElement('div');
+        sampleGroup.appendChild(heading('Sampling'));
+        sampleGroup.appendChild(segmented([
+            { id: 'cursor', label: 'Cursor', hint: 'Follow the pointer, one pixel at a time.' },
+            { id: 'region', label: 'Region', hint: 'Drag a rectangle on the image and measure inside it.' },
+            { id: 'frame', label: 'Full Frame', hint: 'Measure every pixel.' },
+        ], this.probeMode, (id) => {
+            this.probeMode = id;
+            if (id !== 'region') this.probeRect = null;
+            this._probeStats = null;
+            this._probeStatsMeta = null;
+            this._lastRenderContent?.();
+            this.renderOverlay();
+        }));
+        container.appendChild(sampleGroup);
+
+        // ── Value source ────────────────────────────────────────────────────
+        const srcGroup = document.createElement('div');
+        srcGroup.appendChild(heading('Values'));
+        srcGroup.appendChild(segmented([
+            { id: 'source', label: 'Source', hint: 'The pixels as loaded, before the viewer grade.' },
+            { id: 'rendered', label: 'Rendered', hint: 'The pixels as displayed, after the grade and view transform.' },
+        ], this.probeSource, (id) => {
+            this.probeSource = id;
+            this._probeStats = null;
+            this._probeStatsMeta = null;
+            // Switching to Rendered captures straight away, so the panel is
+            // never sitting on an instruction the user has to read first.
+            if (id === 'rendered') this._probeCaptureRendered();
+            this._lastRenderContent?.();
+        }));
+        if (this.probeSource === 'rendered') {
+            const recap = document.createElement('button');
+            recap.textContent = '↻ CAPTURE';
+            recap.title = 'Re-read the rendered frame from the GPU. Do this after changing the grade.';
+            recap.style.cssText = 'width:100%; margin-top:6px; background:#22222a; color:#ddd; border:1px solid #3a3a44; padding:6px; border-radius:4px; font-size:10px; cursor:pointer; font-weight:700;';
+            recap.onclick = () => {
+                this._probeCaptureRendered();
+                if (this._probeCurrent) {
+                    this._probeCurrent = this._probeSampleOne(this._probeCurrent.x, this._probeCurrent.y);
+                }
+                this._probeRenderCurrent();
+                this._probeRenderStats();
+            };
+            srcGroup.appendChild(recap);
+        }
+        container.appendChild(srcGroup);
+
+        // What exactly is being measured. Never left blank -- an unlabelled
+        // number is an untrustworthy number.
+        const caption = document.createElement('div');
+        caption.style.cssText = 'font-size:9px; line-height:1.5; color:rgba(255,255,255,0.4); font-family:monospace; padding:6px 8px; background:rgba(255,255,255,0.02); border-radius:5px; border-left:2px solid rgba(0,242,255,0.3);';
+        nodes.caption = caption;
+        container.appendChild(caption);
+
+        // ── Current pixel ───────────────────────────────────────────────────
+        const curGroup = document.createElement('div');
+        curGroup.appendChild(heading('Current'));
+        const curBox = document.createElement('div');
+        curBox.style.cssText = 'font-family:monospace; font-size:10px; line-height:1.7; background:rgba(0,0,0,0.28); border:1px solid rgba(255,255,255,0.06); border-radius:6px; padding:8px;';
+        nodes.current = curBox;
+        curGroup.appendChild(curBox);
+        container.appendChild(curGroup);
+
+        const curActions = document.createElement('div');
+        curActions.style.cssText = 'display:flex; gap:6px;';
+        const holdBtn = document.createElement('button');
+        holdBtn.style.cssText = 'flex:1; background:#22222a; color:#ddd; border:1px solid #3a3a44; padding:6px; border-radius:4px; font-size:10px; cursor:pointer; font-weight:700;';
+        const paintHold = () => {
+            holdBtn.textContent = this.probeHold ? '⏸ HELD' : '⏵ LIVE';
+            holdBtn.style.color = this.probeHold ? '#ffcc00' : '#ddd';
+            holdBtn.style.borderColor = this.probeHold ? 'rgba(255,204,0,0.4)' : '#3a3a44';
+        };
+        holdBtn.title = 'Freeze the cursor readout so it can be read and copied without the pointer moving off the pixel.';
+        holdBtn.onclick = () => { this.probeHold = !this.probeHold; paintHold(); };
+        paintHold();
+        curActions.appendChild(holdBtn);
+
+        const copyBtn = document.createElement('button');
+        copyBtn.textContent = '⧉ COPY';
+        copyBtn.style.cssText = 'flex:1; background:#22222a; color:#ddd; border:1px solid #3a3a44; padding:6px; border-radius:4px; font-size:10px; cursor:pointer; font-weight:700;';
+        copyBtn.title = 'Copy the current readout as text.';
+        copyBtn.onclick = () => this._probeCopy(copyBtn);
+        curActions.appendChild(copyBtn);
+        container.appendChild(curActions);
+
+        // ── Statistics ──────────────────────────────────────────────────────
+        const statGroup = document.createElement('div');
+        statGroup.appendChild(heading('Statistics'));
+        const statBox = document.createElement('div');
+        statBox.style.cssText = 'font-family:monospace; font-size:10px; background:rgba(0,0,0,0.28); border:1px solid rgba(255,255,255,0.06); border-radius:6px; padding:8px; overflow-x:auto;';
+        nodes.stats = statBox;
+        statGroup.appendChild(statBox);
+        container.appendChild(statGroup);
+
+        if (this.probeMode !== 'cursor') {
+            const sampleBtn = document.createElement('button');
+            sampleBtn.textContent = this.probeMode === 'frame' ? '⛶ SAMPLE FRAME' : '▣ SAMPLE REGION';
+            sampleBtn.style.cssText = 'background:rgba(0,242,255,0.08); color:#00f2ff; border:1px solid rgba(0,242,255,0.28); padding:8px; border-radius:5px; font-size:10px; cursor:pointer; font-weight:800; letter-spacing:0.5px;';
+            sampleBtn.onclick = () => this._probeComputeStats();
+            container.appendChild(sampleBtn);
+        }
+
+        this._probeRenderCurrent();
+        this._probeRenderStats();
+    }
+
+    /** Repaint the Current block. Cheap enough to run per pointer move. */
+    _probeRenderCurrent() {
+        const nodes = this._probePanelNodes;
+        if (!nodes?.current || !nodes.current.isConnected) return;
+
+        const buf = this._probeDescribe();
+        nodes.caption.innerHTML = buf.error
+            ? `<span style="color:#ff8080">${_escapeHtml(buf.error)}</span>`
+            : `<span style="color:${buf.warn ? '#ffb020' : 'rgba(255,255,255,0.45)'}">${_escapeHtml(buf.label)}</span>`
+              + (buf.quantised ? '<br><span style="color:rgba(255,255,255,0.3)">Values are 8-bit quantised — 256 steps per channel.</span>' : '');
+
+        const p = this._probeCurrent;
+        if (!p) {
+            nodes.current.innerHTML = '<span style="color:rgba(255,255,255,0.3)">Move the pointer over the image.</span>';
+            return;
+        }
+
+        const Y = _probeLuminance(p.r, p.g, p.b);
+        const hsv = _probeRgbToHsv(p.r, p.g, p.b);
+        const ev = _probeEV(Y);
+        const nit = _probeNits(Y);
+        const hex = _probeHexSwatch(p.r, p.g, p.b);
+        const bad = [p.r, p.g, p.b, p.a].some((v) => !Number.isFinite(v));
+
+        const chan = (label, colour, v) => `
+            <div><span style="color:${colour}; font-weight:700">${label}</span>
+            <span style="color:${Number.isFinite(v) ? '#ddd' : '#ff5050'}"> ${_probeFormat(v).padStart(10)}</span></div>`;
+
+        nodes.current.innerHTML = `
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+                <div style="width:22px; height:22px; border-radius:4px; border:1px solid rgba(255,255,255,0.25); background:${hex}; flex-shrink:0;"
+                     title="Display swatch — clamped to the monitor. The numbers below are not."></div>
+                <span style="color:#888">X</span> <span style="color:#ddd">${p.x}</span>
+                <span style="color:#888">Y</span> <span style="color:#ddd">${p.y}</span>
+                <span style="color:rgba(255,255,255,0.35); margin-left:auto">${hex}</span>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:0 10px;">
+                ${chan('R', '#ff6060', p.r)}
+                ${chan('G', '#60ff90', p.g)}
+                ${chan('B', '#6090ff', p.b)}
+                ${chan('A', '#aaaaaa', p.a)}
+            </div>
+            <div style="margin-top:6px; padding-top:6px; border-top:1px solid rgba(255,255,255,0.06); display:grid; grid-template-columns:1fr 1fr; gap:0 10px;">
+                <div><span style="color:#cccccc; font-weight:700">Y</span> <span style="color:#ddd">${_probeFormat(Y)}</span></div>
+                <div title="Stops relative to 18% mid-grey."><span style="color:#d49dff; font-weight:700">EV</span>
+                    <span style="color:#ddd">${Number.isFinite(ev) ? (ev >= 0 ? '+' : '') + ev.toFixed(2) : '−∞'}</span></div>
+                <div title="Scene-linear luminance as cd/m², on ITU-R BT.2408's 203 cd/m² HDR Reference White.">
+                    <span style="color:#f97316; font-weight:700">nits</span> <span style="color:#ddd">${Number.isFinite(nit) ? nit.toFixed(1) : '—'}</span></div>
+                <div><span style="color:#888; font-weight:700">HSV</span>
+                    <span style="color:#ddd">${Number.isFinite(hsv.h) ? `${hsv.h.toFixed(0)}° ${hsv.s.toFixed(3)} ${_probeFormat(hsv.v, 3)}` : '—'}</span></div>
+            </div>
+            ${bad ? '<div style="margin-top:6px; color:#ff5050; font-weight:700">⚠ This pixel is not finite.</div>' : ''}
+        `;
+    }
+
+    /** Repaint the Statistics block. */
+    _probeRenderStats() {
+        const nodes = this._probePanelNodes;
+        if (!nodes?.stats || !nodes.stats.isConnected) return;
+        const box = nodes.stats;
+
+        if (this.probeMode === 'cursor') {
+            box.innerHTML = '<span style="color:rgba(255,255,255,0.3)">'
+                + 'One pixel has no distribution. Switch to Region or Full Frame for '
+                + 'min, max, mean and median.</span>';
+            return;
+        }
+        if (this._probeStatsMeta?.error) {
+            box.innerHTML = `<span style="color:#ffb020">${_escapeHtml(this._probeStatsMeta.error)}</span>`;
+            return;
+        }
+        const s = this._probeStats;
+        if (!s) {
+            box.innerHTML = '<span style="color:rgba(255,255,255,0.3)">Not sampled yet.</span>';
+            return;
+        }
+        if (s.count === 0) {
+            box.innerHTML = '<span style="color:rgba(255,255,255,0.3)">The selection is empty.</span>';
+            return;
+        }
+
+        const names = ['R', 'G', 'B', 'A'];
+        const colours = ['#ff6060', '#60ff90', '#6090ff', '#aaaaaa'];
+        const rows = [
+            ['Min', (c) => c.min], ['Max', (c) => c.max],
+            ['Mean', (c) => c.mean], ['Median', (c) => c.median],
+        ];
+        const present = s.channels.map((c, i) => (c ? i : -1)).filter((i) => i >= 0);
+
+        const head = `<tr><th style="text-align:left; color:#666; font-weight:600; padding-right:8px;"></th>`
+            + present.map((i) => `<th style="text-align:right; color:${colours[i] || '#aaa'}; font-weight:700; padding-left:10px;">${names[i] || `C${i}`}</th>`).join('')
+            + `</tr>`;
+        const body = rows.map(([label, get]) => `<tr>`
+            + `<td style="color:#888; font-weight:600; padding-right:8px;">${label}</td>`
+            + present.map((i) => `<td style="text-align:right; color:#ddd; padding-left:10px;">${_probeFormat(get(s.channels[i]))}</td>`).join('')
+            + `</tr>`).join('');
+
+        const approx = s.channels[present[0]]?.medianExact === false;
+        const px = s.count.toLocaleString();
+        const scope = this.probeMode === 'frame'
+            ? `full frame · ${px} px`
+            : `region ${s.rect.w}×${s.rect.h} at (${s.rect.x}, ${s.rect.y}) · ${px} px`;
+
+        // Non-finite and negative counts get their own line and their own
+        // colour. This is the number a probe exists to surface: a single NaN in
+        // a plate is invisible on screen and fatal downstream.
+        const flags = [];
+        if (s.nan) flags.push(`<span style="color:#ff5050; font-weight:700">${s.nan.toLocaleString()} NaN</span>`);
+        if (s.inf) flags.push(`<span style="color:#ff9040; font-weight:700">${s.inf.toLocaleString()} Inf</span>`);
+        if (s.negative) flags.push(`<span style="color:#ffcc00">${s.negative.toLocaleString()} negative</span>`);
+
+        box.innerHTML = `
+            <div style="color:rgba(255,255,255,0.35); font-size:9px; margin-bottom:6px;">${_escapeHtml(scope)}</div>
+            <table style="width:100%; border-collapse:collapse;">${head}${body}</table>
+            ${approx ? '<div style="color:rgba(255,255,255,0.3); font-size:9px; margin-top:6px;" title="Sorting every sample is not viable at this size; the median is read off a 16384-bin histogram.">Median estimated — sample exceeds the exact-sort limit.</div>' : ''}
+            ${flags.length
+                ? `<div style="margin-top:6px; padding-top:6px; border-top:1px solid rgba(255,255,255,0.06);">⚠ ${flags.join(' · ')}
+                   <div style="color:rgba(255,255,255,0.3); font-size:9px;">Excluded from every statistic above.</div></div>`
+                : '<div style="margin-top:6px; color:rgba(120,220,150,0.5); font-size:9px;">All samples finite.</div>'}
+        `;
+    }
+
+    /** The readout as plain text, for pasting into a note or a ticket. */
+    _probeCopy(btn) {
+        const p = this._probeCurrent;
+        const lines = [];
+        const buf = this._probeDescribe();
+        lines.push(`# Radiance pixel probe — ${buf.error || buf.label}`);
+        if (p) {
+            const Y = _probeLuminance(p.r, p.g, p.b);
+            const hsv = _probeRgbToHsv(p.r, p.g, p.b);
+            lines.push(`X ${p.x}  Y ${p.y}`);
+            lines.push(`R ${_probeFormat(p.r)}  G ${_probeFormat(p.g)}  B ${_probeFormat(p.b)}  A ${_probeFormat(p.a)}`);
+            lines.push(`Luma ${_probeFormat(Y)}  EV ${_probeFormat(_probeEV(Y), 2)}  ${_probeFormat(_probeNits(Y), 1)} cd/m² (BT.2408 ref white ${_PROBE_REF_WHITE})`);
+            lines.push(`HSV ${_probeFormat(hsv.h, 1)}° ${_probeFormat(hsv.s, 3)} ${_probeFormat(hsv.v, 3)}  Hex ${_probeHexSwatch(p.r, p.g, p.b)}`);
+        }
+        const s = this._probeStats;
+        if (s && s.count) {
+            const names = ['R', 'G', 'B', 'A'];
+            lines.push(`Samples ${s.count}  rect ${s.rect.x},${s.rect.y} ${s.rect.w}×${s.rect.h}`);
+            s.channels.forEach((c, i) => {
+                if (!c) return;
+                lines.push(`${names[i] || `C${i}`}  min ${_probeFormat(c.min)}  max ${_probeFormat(c.max)}`
+                    + `  mean ${_probeFormat(c.mean)}  median ${_probeFormat(c.median)}${c.medianExact ? '' : ' (estimated)'}`);
+            });
+            lines.push(`NaN ${s.nan}  Inf ${s.inf}  negative ${s.negative}`);
+        }
+        const text = lines.join('\n');
+        navigator.clipboard?.writeText(text).then(() => {
+            if (!btn) return;
+            const was = btn.textContent;
+            btn.textContent = '✓ COPIED';
+            setTimeout(() => { btn.textContent = was; }, 1200);
+        }).catch(() => this._termLog?.('warn', '[Probe] Clipboard write refused by the browser.'));
+    }
+
+    /** Draw the region rectangle on the overlay, in canvas space. */
+    _probeDrawRegion(ctx) {
+        const r = this.probeRect;
+        if (!r || r.w <= 0 || r.h <= 0) return;
+        const x = r.x * this.zoom + this.panX;
+        const y = r.y * this.zoom + this.panY;
+        const w = r.w * this.zoom;
+        const h = r.h * this.zoom;
+        ctx.save();
+        ctx.strokeStyle = '#00f2ff';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 3]);
+        ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+        ctx.setLineDash([]);
+        ctx.fillStyle = 'rgba(0,242,255,0.07)';
+        ctx.fillRect(x, y, w, h);
+        ctx.fillStyle = '#00f2ff';
+        ctx.font = 'bold 9px monospace';
+        ctx.fillText(`${r.w}×${r.h}`, x + 3, Math.max(10, y - 4));
+        ctx.restore();
+    }
+
+    /** True when a canvas drag should draw a probe region rather than pan. */
+    _probeRegionActive() {
+        return this.activeTab === 'probe' && this.probeMode === 'region';
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  OpenColorIO
+    //
+    //  The capability that decides whether the Viewer can be used on a show.
+    //  Nuke, RV, DJV, mrv2 and cineSync all load a show's config; without it
+    //  the Viewer's colour is its own opinion, which is fine for looking at
+    //  generations and useless for looking at work.
+    //
+    //  Two rules govern everything below. First, a Display/View menu that does
+    //  not change the picture is worse than no menu, so nothing is listed here
+    //  that is not actually applied. Second, OCIO is never a dependency: with
+    //  no config loaded the viewer's own ACES 1.3 path runs exactly as before.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Nearest-neighbour vs linear magnification.
+     *
+     * The state lives on the viewer and is pushed to the renderer, because a
+     * new texture resets the parameter and the choice has to survive a frame
+     * change.
+     */
+    togglePixelFilter() {
+        this.pixelFilter = this.pixelFilter === 'nearest' ? 'linear' : 'nearest';
+        localStorage.setItem('radiance_pixel_filter', this.pixelFilter);
+        this.renderer?.setPixelFilter?.(this.pixelFilter);
+        this._termLog?.('info', `[View] Magnification: ${this.pixelFilter === 'nearest' ? 'nearest neighbour' : 'linear'}`);
+        this.render();
+        this._lastRenderContent?.();
+    }
+
+    /**
+     * The frame position, in the unit the user asked for.
+     *
+     * Frames for a technical conversation, seconds for a rough one, timecode
+     * for a delivery one. The 8-digit HH:MM:SS:FF form is what a note from a
+     * client will be written in, and a viewer that can only count frames makes
+     * the reader do the arithmetic.
+     *
+     * Non-drop only, and it says so. Drop-frame timecode at 29.97 renumbers
+     * frames rather than dropping them, and printing a `;` separator without
+     * implementing that renumbering would be a lie in the one place people
+     * copy figures from.
+     */
+    formatFramePosition(frame = this.currentFrame, total = this.totalFrames) {
+        const fps = this.frameRate || 24;
+        const f = Math.max(0, Math.round(frame));
+        if (this.timeDisplay === 'frames') return `${f + 1} / ${total}`;
+        if (this.timeDisplay === 'seconds') return `${(f / fps).toFixed(2)}s`;
+        // Non-drop. Drop-frame at 29.97 renumbers frames rather than dropping
+        // them; emitting a ';' separator without that renumbering would be
+        // wrong in the one place people copy figures from.
+        const totalSec = f / fps;
+        const hh = Math.floor(totalSec / 3600);
+        const mm = Math.floor((totalSec % 3600) / 60);
+        const ss = Math.floor(totalSec % 60);
+        const ff = Math.round(f % fps);
+        const p = (n) => String(n).padStart(2, '0');
+        return `${p(hh)}:${p(mm)}:${p(ss)}:${p(ff)}`;
+    }
+
+    /** Cycle frames → seconds → timecode. */
+    cycleTimeDisplay() {
+        const order = ['frames', 'seconds', 'timecode'];
+        this.timeDisplay = order[(order.indexOf(this.timeDisplay) + 1) % order.length];
+        localStorage.setItem('radiance_time_display', this.timeDisplay);
+        this._lastRenderContent?.();
+        this.renderOverlay();
+    }
+
+    _ocioSetStatus(level, text) {
+        this.ocioStatus = text ? { level, text } : null;
+        if (level === 'error') this._termLog?.('warn', `[OCIO] ${text}`);
+        else if (text) this._termLog?.('info', `[OCIO] ${text}`);
+    }
+
+    /** Load a config, pick sensible defaults from it, and apply them. */
+    async _ocioLoad(source, name) {
+        this.ocioBusy = true;
+        this._ocioSetStatus('ok', 'Starting OpenColorIO…');
+        this._lastRenderContent?.();
+
+        const boot = await _ocioInit();
+        if (!boot.ok) {
+            this.ocioBusy = false;
+            this._ocioSetStatus('error', boot.error);
+            this._lastRenderContent?.();
+            return;
+        }
+
+        const loaded = await _ocioLoadConfig(source, { name });
+        this.ocioBusy = false;
+        if (loaded.error) {
+            this._ocioSetStatus('error', loaded.error);
+            this._lastRenderContent?.();
+            return;
+        }
+
+        this.ocio = loaded;
+        this.ocioDisplay = loaded.defaultDisplay;
+        this.ocioView = loaded.defaultView;
+        this.ocioSource = loaded.suggestedSource;
+        this._ocioSetStatus(
+            loaded.warning ? 'warn' : 'ok',
+            loaded.warning
+                ? `Loaded ${loaded.name} with warnings: ${loaded.warning}`
+                : `Loaded ${loaded.name} — OCIO ${loaded.version.major}.${loaded.version.minor}, `
+                  + `${loaded.displays.length} displays, ${loaded.colorSpaces.length} colour spaces.`,
+        );
+        this._ocioApply();
+    }
+
+    /**
+     * Build the current (source → display / view) and hand it to the renderer.
+     *
+     * Every failure turns OCIO back off rather than leaving it half-applied.
+     * Half-applied is the state where the menu says one thing and the picture
+     * shows another, which is the outcome this whole feature exists to avoid.
+     */
+    _ocioApply() {
+        if (!this.ocio?.config) return;
+        const built = _ocioBuildDisplayView(this.ocio.config, {
+            source: this.ocioSource, display: this.ocioDisplay, view: this.ocioView,
+        });
+        if (built.error) {
+            this._ocioDisable(built.error);
+            return;
+        }
+        const res = this.renderer?.setOCIODisplay?.(built);
+        if (!res || !res.ok) {
+            this._ocioDisable(res?.error || 'This renderer cannot apply an OCIO transform.');
+            return;
+        }
+        this.ocioActive = true;
+        this._ocioSetStatus(
+            built.isNoOp ? 'warn' : 'ok',
+            built.isNoOp
+                ? `${built.label} — this view is a pass-through, so the picture will not change.`
+                : `Applied ${built.label}.`,
+        );
+        this._lastRenderContent?.();
+        this.render();
+    }
+
+    /** Return to Radiance's own display pipeline, and say why if there was a reason. */
+    _ocioDisable(reason = null) {
+        this.ocioActive = false;
+        this.renderer?.setOCIODisplay?.(null);
+        if (reason) this._ocioSetStatus('error', `${reason} Radiance's own display pipeline is in use.`);
+        this._lastRenderContent?.();
+        this.render();
+    }
+
+    renderOcioSection(container) {
+        const group = document.createElement('div');
+        group.style.marginBottom = '4px';
+
+        const head = document.createElement('div');
+        head.style.cssText = 'display:flex; align-items:center; gap:6px; margin-bottom:8px;';
+        head.innerHTML = `
+            <div style="color:#888; font-size:10px; text-transform:uppercase; font-weight:bold; letter-spacing:0.6px;">Colour Management</div>
+            <div style="font-size:9px; color:${this.ocioActive ? '#00ffcc' : 'rgba(255,255,255,0.25)'}; font-weight:700; letter-spacing:0.5px;">
+                ${this.ocioActive ? 'OCIO ACTIVE' : 'ACES 1.3 (built in)'}
+            </div>`;
+        group.appendChild(head);
+
+        const box = document.createElement('div');
+        box.style.cssText = 'background: rgba(255,255,255,0.03); padding: 8px; border-radius: 6px; display:flex; flex-direction:column; gap:6px;';
+
+        const row = (labelText, node) => {
+            const r = document.createElement('div');
+            r.style.cssText = 'display:flex; align-items:center; gap:6px;';
+            const l = document.createElement('div');
+            l.textContent = labelText;
+            l.style.cssText = 'font-size:10px; color:#888; width:64px; flex-shrink:0; font-weight:600;';
+            r.appendChild(l); r.appendChild(node);
+            return r;
+        };
+        const select = (values, current, onPick) => {
+            const s = document.createElement('select');
+            s.style.cssText = 'flex:1; min-width:0; background:rgba(255,255,255,0.06); color:#ddd; border:1px solid rgba(255,255,255,0.14); border-radius:4px; padding:4px 6px; font-size:11px;';
+            values.forEach((v) => {
+                const o = document.createElement('option');
+                o.value = v; o.textContent = v;
+                if (v === current) o.selected = true;
+                s.appendChild(o);
+            });
+            s.onchange = () => onPick(s.value);
+            return s;
+        };
+        const button = (label, onClick, accent = false) => {
+            const b = document.createElement('button');
+            b.textContent = label;
+            b.disabled = !!this.ocioBusy;
+            b.style.cssText = `flex:1; background:${accent ? 'rgba(0,242,255,0.08)' : '#22222a'}; color:${accent ? '#00f2ff' : '#ddd'};
+                border:1px solid ${accent ? 'rgba(0,242,255,0.28)' : '#3a3a44'}; padding:6px; border-radius:4px;
+                font-size:10px; cursor:${this.ocioBusy ? 'wait' : 'pointer'}; font-weight:700; opacity:${this.ocioBusy ? 0.5 : 1};`;
+            b.onclick = onClick;
+            return b;
+        };
+
+        // ── Load ────────────────────────────────────────────────────────────
+        const loadRow = document.createElement('div');
+        loadRow.style.cssText = 'display:flex; gap:6px;';
+
+        const fileBtn = button('📁 LOAD CONFIG…', () => {
+            const input = document.createElement('input');
+            input.type = 'file';
+            // .ocio is the config; a config directory also carries LUTs, which
+            // a file picker cannot reach -- see the note under the controls.
+            input.accept = '.ocio,.yaml,.yml';
+            input.onchange = async () => {
+                const f = input.files?.[0];
+                if (!f) return;
+                const text = await f.text();
+                await this._ocioLoad({ text }, f.name);
+            };
+            input.click();
+        }, true);
+        loadRow.appendChild(fileBtn);
+
+        if (this.ocio) {
+            loadRow.appendChild(button('✕ USE BUILT-IN', () => {
+                this.ocio = null;
+                this._ocioDisable();
+                this._ocioSetStatus('ok', 'Using Radiance\'s own ACES 1.3 pipeline.');
+                this._lastRenderContent?.();
+            }));
+        }
+        box.appendChild(loadRow);
+
+        // The bundled ACES configs. Someone with no config of their own still
+        // gets a correct, standard picture rather than our approximation of one.
+        const builtins = _ocioReady() ? _ocioBuiltins() : [];
+        if (builtins.length) {
+            const bSel = document.createElement('select');
+            bSel.style.cssText = 'flex:1; min-width:0; background:rgba(255,255,255,0.06); color:#ddd; border:1px solid rgba(255,255,255,0.14); border-radius:4px; padding:4px 6px; font-size:11px;';
+            const none = document.createElement('option');
+            none.value = ''; none.textContent = 'Bundled ACES config…';
+            bSel.appendChild(none);
+            builtins.forEach((c) => {
+                const o = document.createElement('option');
+                o.value = c.id; o.textContent = c.label;
+                bSel.appendChild(o);
+            });
+            bSel.onchange = () => {
+                if (bSel.value) this._ocioLoad({ builtin: bSel.value }, bSel.selectedOptions[0].textContent);
+            };
+            box.appendChild(row('Bundled', bSel));
+        } else if (!_ocioReady()) {
+            box.appendChild(button('⚙ START OPENCOLORIO', () => this._ocioLoad(
+                { builtin: 'ocio://cg-config-v2.2.0_aces-v1.3_ocio-v2.4' }, 'ACES CG (bundled)')));
+        }
+
+        // ── Input / Display / View ──────────────────────────────────────────
+        if (this.ocio) {
+            const spaces = this.ocio.colorSpaces.map((c) => c.name);
+            box.appendChild(row('Input', select(spaces, this.ocioSource, (v) => {
+                this.ocioSource = v; this._ocioApply();
+            })));
+            box.appendChild(row('Display', select(this.ocio.displays, this.ocioDisplay, (v) => {
+                this.ocioDisplay = v;
+                const views = this.ocio.viewsByDisplay[v] || [];
+                // The previous view may not exist on the new display. Keeping
+                // the stale name would fail the next build with a confusing
+                // error about a view the user did not choose.
+                if (!views.includes(this.ocioView)) this.ocioView = views[0] || '';
+                this._ocioApply();
+            })));
+            box.appendChild(row('View', select(
+                this.ocio.viewsByDisplay[this.ocioDisplay] || [], this.ocioView, (v) => {
+                    this.ocioView = v; this._ocioApply();
+                })));
+
+            if (this.ocio.looks?.length) {
+                const note = document.createElement('div');
+                note.style.cssText = 'font-size:9px; color:rgba(255,255,255,0.3); line-height:1.4;';
+                note.textContent = `This config defines ${this.ocio.looks.length} look${this.ocio.looks.length > 1 ? 's' : ''}. `
+                    + 'Looks are not applied yet — only the view\'s own look, where the view carries one.';
+                box.appendChild(note);
+            }
+        }
+
+        // ── Status ──────────────────────────────────────────────────────────
+        if (this.ocioStatus) {
+            const colour = { ok: 'rgba(255,255,255,0.45)', warn: '#ffb020', error: '#ff8080' }[this.ocioStatus.level];
+            const s = document.createElement('div');
+            s.style.cssText = `font-size:9px; line-height:1.5; font-family:monospace; color:${colour};
+                padding:6px 8px; background:rgba(0,0,0,0.25); border-radius:4px; border-left:2px solid ${colour};`;
+            s.textContent = this.ocioStatus.text;
+            box.appendChild(s);
+        }
+
+        const caveat = document.createElement('div');
+        caveat.style.cssText = 'font-size:9px; color:rgba(255,255,255,0.28); line-height:1.4;';
+        caveat.textContent = 'A config that references LUT files on disk cannot resolve them from a '
+            + 'file picker — the browser only receives the one file you choose. Configs built from '
+            + 'built-in transforms, which includes every ACES config, load completely.';
+        box.appendChild(caveat);
+
+        group.appendChild(box);
+        container.appendChild(group);
+    }
+
+    /**
+     * Framing and delivery guides.
+     *
+     * Safe areas and the aspect matte are deliberately separate controls. A
+     * safe area answers "will this survive the delivery"; a matte answers "what
+     * will the audience see". Conflating a QC guide with a creative one is how
+     * a graphic ends up placed against the wrong box.
+     */
+    renderFramingSection(container) {
+        const group = document.createElement('div');
+        const head = document.createElement('div');
+        head.style.cssText = 'color:#888; font-size:10px; margin-bottom:8px; text-transform:uppercase; font-weight:bold; letter-spacing:0.6px;';
+        head.textContent = 'Framing & Guides';
+        group.appendChild(head);
+
+        const box = document.createElement('div');
+        box.style.cssText = 'background: rgba(255,255,255,0.03); padding: 8px; border-radius: 6px; display:flex; flex-direction:column; gap:6px;';
+
+        const row = (labelText, node, title) => {
+            const r = document.createElement('div');
+            r.style.cssText = 'display:flex; align-items:center; gap:6px;';
+            if (title) r.title = title;
+            const l = document.createElement('div');
+            l.textContent = labelText;
+            l.style.cssText = 'font-size:10px; color:#888; width:78px; flex-shrink:0; font-weight:600;';
+            r.appendChild(l); r.appendChild(node);
+            box.appendChild(r);
+            return r;
+        };
+        const sel = (items, current, onPick) => {
+            const el = document.createElement('select');
+            el.style.cssText = 'flex:1; min-width:0; background:rgba(255,255,255,0.06); color:#ddd; border:1px solid rgba(255,255,255,0.14); border-radius:4px; padding:4px 6px; font-size:11px;';
+            items.forEach((it) => {
+                const o = document.createElement('option');
+                o.value = it.id; o.textContent = it.label;
+                if (it.id === current) o.selected = true;
+                el.appendChild(o);
+            });
+            el.onchange = () => onPick(el.value);
+            return el;
+        };
+
+        // ── Safe areas ──────────────────────────────────────────────────────
+        const presets = RadianceViewer.SAFE_AREA_PRESETS;
+        row('Safe areas', sel(presets, this.safeAreaPreset, (v) => {
+            this.safeAreaPreset = v;
+            localStorage.setItem('radiance_safe_preset', v);
+            this._lastRenderContent?.();
+            this.renderOverlay();
+        }), 'Which published specification the safe-area boxes come from.');
+
+        const active = presets.find((p) => p.id === this.safeAreaPreset) || presets[0];
+        const note = document.createElement('div');
+        note.style.cssText = 'font-size:9px; line-height:1.45; color:rgba(255,255,255,0.32);';
+        note.textContent = active.note;
+        box.appendChild(note);
+
+        // ── Aspect matte ────────────────────────────────────────────────────
+        row('Matte', sel(RadianceViewer.MATTE_PRESETS, this.matteMode, (v) => {
+            this.matteMode = v;
+            localStorage.setItem('radiance_matte', v);
+            this._lastRenderContent?.();
+            this.renderOverlay();
+        }), 'Darkens outside a target aspect ratio. Framing, not delivery QC — the safe areas above are the QC guide.');
+
+        // ── Magnification filter ────────────────────────────────────────────
+        const filterBtn = document.createElement('div');
+        const paintFilter = () => {
+            const near = this.pixelFilter === 'nearest';
+            filterBtn.textContent = near ? 'NEAREST (actual pixels)' : 'LINEAR (interpolated)';
+            filterBtn.style.cssText = `flex:1; text-align:center; padding:5px; border-radius:4px; font-size:10px;
+                font-weight:700; cursor:pointer; user-select:none;
+                background:${near ? 'rgba(0,242,255,0.10)' : 'rgba(255,255,255,0.06)'};
+                color:${near ? '#00f2ff' : '#aaa'};
+                border:1px solid ${near ? 'rgba(0,242,255,0.28)' : 'rgba(255,255,255,0.12)'};`;
+        };
+        filterBtn.onclick = () => { this.togglePixelFilter(); paintFilter(); };
+        paintFilter();
+        row('Magnify', filterBtn, 'Nearest shows the actual pixels; linear interpolates. Shortcut: N. Minification stays interpolated either way — nearest on a downscaled image shows detail that is not there.');
+
+        // ── Time display ────────────────────────────────────────────────────
+        const timeBtn = document.createElement('div');
+        const paintTime = () => {
+            timeBtn.textContent = `${this.timeDisplay.toUpperCase()} — ${this.formatFramePosition()}`;
+            timeBtn.style.cssText = `flex:1; text-align:center; padding:5px; border-radius:4px; font-size:10px;
+                font-weight:700; cursor:pointer; user-select:none; font-family:monospace;
+                background:rgba(255,255,255,0.06); color:#aaa; border:1px solid rgba(255,255,255,0.12);`;
+        };
+        timeBtn.onclick = () => { this.cycleTimeDisplay(); paintTime(); };
+        paintTime();
+        row('Position', timeBtn, 'Frames, seconds, or HH:MM:SS:FF. Non-drop-frame — drop-frame renumbers frames rather than dropping them, and is not implemented.');
+
+        const fpsSel = sel(
+            [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60].map((f) => ({ id: String(f), label: `${f} fps` })),
+            String(this.frameRate),
+            (v) => { this.frameRate = parseFloat(v); paintTime(); this.renderOverlay(); },
+        );
+        row('Frame rate', fpsSel, 'Used only to convert frames to seconds and timecode. Taken from the file when the metadata carries it.');
+
+        // ── Renderer backend ────────────────────────────────────────────────
+        // Opt-in, and stated plainly. A user who turns this on should know
+        // exactly what stops working rather than discovering it one inert
+        // panel at a time.
+        if (typeof navigator !== 'undefined' && navigator.gpu) {
+            const on = localStorage.getItem('radiance_prefer_webgpu') === '1';
+            const gpuBtn = document.createElement('div');
+            gpuBtn.textContent = on ? 'WEBGPU (experimental)' : 'WEBGL (recommended)';
+            gpuBtn.style.cssText = `flex:1; text-align:center; padding:5px; border-radius:4px; font-size:10px;
+                font-weight:700; cursor:pointer; user-select:none;
+                background:${on ? 'rgba(255,176,32,0.10)' : 'rgba(255,255,255,0.06)'};
+                color:${on ? '#ffb020' : '#aaa'};
+                border:1px solid ${on ? 'rgba(255,176,32,0.35)' : 'rgba(255,255,255,0.12)'};`;
+            gpuBtn.title = 'WebGPU does not implement masks, qualifiers, the HDR heatmap or '
+                + 'OpenColorIO. Takes effect on reload.';
+            gpuBtn.onclick = () => {
+                const next = localStorage.getItem('radiance_prefer_webgpu') === '1' ? '0' : '1';
+                localStorage.setItem('radiance_prefer_webgpu', next);
+                this._termLog?.('warn', next === '1'
+                    ? '[Renderer] WebGPU enabled — masks, qualifiers, HDR heatmap and OCIO are '
+                      + 'not implemented there. Reload to apply.'
+                    : '[Renderer] WebGL restored. Reload to apply.');
+                this._lastRenderContent?.();
+            };
+            row('Backend', gpuBtn, 'Which GPU backend renders the picture. Changing it takes effect on reload.');
+
+            if (on) {
+                const warn = document.createElement('div');
+                warn.style.cssText = 'font-size:9px; line-height:1.45; color:#ffb020;';
+                warn.textContent = 'Masks, qualifiers, the HDR heatmap and OpenColorIO are not '
+                    + 'implemented on WebGPU. Their controls will move and the picture will not change.';
+                box.appendChild(warn);
+            }
+        }
+
+        group.appendChild(box);
+        container.appendChild(group);
+    }
+
     renderViewTab(container) {
         container.style.cssText = 'display: flex; flex-direction: column; flex: 1; gap: 12px; padding: 12px; min-height: 0; overflow-y: auto;';
+
+        this.renderOcioSection(container);
+        this.renderFramingSection(container);
 
         // 0. Neural Network Monitor (Real-time 3D)
         const neuralGroup = document.createElement('div');
@@ -15753,22 +17169,103 @@ else:
             this._lastRenderContent();
         }));
 
-        // v4.2: HDR ruler — nit-referenced guide lines (waveform + parade only)
-        if (!this.scopeHdrRuler) this.scopeHdrRuler = localStorage.getItem('radiance_scope_hdr_ruler') === '1';
-        const isWaveformLike = this.scopeMode === 'waveform' || this.scopeMode === 'parade';
-        if (isWaveformLike) {
-            optRow.appendChild(makeOptBtn('HDR RULER', this.scopeHdrRuler, () => {
-                this.scopeHdrRuler = !this.scopeHdrRuler;
-                localStorage.setItem('radiance_scope_hdr_ruler', this.scopeHdrRuler ? '1' : '0');
+        // Data vs Video levels. The distinction decides where 0% and 100% sit,
+        // and reading a legal-range error as a grading choice is exactly what
+        // happens when a scope does not say which it is showing.
+        optRow.appendChild(makeOptBtn(
+            this.scopeLevels === 'video' ? 'VIDEO LEVELS' : 'DATA LEVELS',
+            this.scopeLevels === 'video',
+            () => {
+                this.scopeLevels = this.scopeLevels === 'video' ? 'data' : 'video';
+                localStorage.setItem('radiance_scope_levels', this.scopeLevels);
                 this._lastRenderContent();
-            }));
-        }
+            },
+        )).title = (_SCOPE_LEVELS.find((l) => l.id === this.scopeLevels) || _SCOPE_LEVELS[0]).hint;
+
+        // Nuke's "include viewer colour transforms". Without it the user cannot
+        // tell whether the scope is measuring the source or the display, and
+        // those are different pictures.
+        optRow.appendChild(makeOptBtn(
+            this.scopeTransformed ? 'VIEWER XFORM' : 'SOURCE',
+            !!this.scopeTransformed,
+            () => {
+                this.scopeTransformed = !this.scopeTransformed;
+                localStorage.setItem('radiance_scope_xform', this.scopeTransformed ? '1' : '0');
+                this._lastRenderContent();
+            },
+        )).title = 'Measure after the viewer colour transforms (what the display receives), or before them (the source as loaded).';
 
         const logNote = document.createElement('div');
-        logNote.textContent = this.scopeLogView ? 'LogC · shadows expanded' : 'Linear · 0–255';
+        logNote.textContent = this.scopeLogView ? 'LogC assist' : '';
         logNote.style.cssText = 'font-size: 10px; color: #666; margin-left: auto; font-weight: 600;';
         optRow.appendChild(logNote);
         container.appendChild(optRow);
+
+        // ─── Scale selector ────────────────────────────────
+        // The scales are Resolve's set. IRE is deliberately absent: Resolve does
+        // not list it, it is a legacy analogue-composite unit, and offering it
+        // signals the opposite of expertise.
+        const scaleRow = document.createElement('div');
+        scaleRow.style.cssText = 'display: flex; gap: 6px; width: 100%; align-items: center; margin-bottom: 4px;';
+
+        const scaleLbl = document.createElement('div');
+        scaleLbl.textContent = 'SCALE';
+        scaleLbl.style.cssText = 'font-size: 10px; color: #666; font-weight: 700; letter-spacing: 0.5px;';
+        scaleRow.appendChild(scaleLbl);
+
+        const scaleSel = document.createElement('select');
+        scaleSel.style.cssText = 'flex: 1; background: rgba(255,255,255,0.06); color: #ddd; border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 4px 6px; font-size: 11px; font-weight: 600;';
+        _SCOPE_SCALES.forEach((s) => {
+            const o = document.createElement('option');
+            o.value = s.id;
+            o.textContent = `${s.label}  (${s.unit})`;
+            if (s.id === this.scopeScale) o.selected = true;
+            scaleSel.appendChild(o);
+        });
+        scaleSel.onchange = () => {
+            this.scopeScale = scaleSel.value;
+            localStorage.setItem('radiance_scope_scale', this.scopeScale);
+            this._lastRenderContent();
+        };
+        scaleRow.appendChild(scaleSel);
+
+        if (this.scopeScale === 'nits-hlg') {
+            const peakSel = document.createElement('select');
+            peakSel.title = 'HLG nominal peak luminance. The system gamma follows it (BT.2100).';
+            peakSel.style.cssText = 'background: rgba(255,255,255,0.06); color: #ddd; border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 4px 6px; font-size: 11px; font-weight: 600;';
+            [400, 600, 1000, 2000, 4000].forEach((p) => {
+                const o = document.createElement('option');
+                o.value = String(p);
+                o.textContent = `${p} nit peak`;
+                if (p === this.scopeHlgPeak) o.selected = true;
+                peakSel.appendChild(o);
+            });
+            peakSel.onchange = () => {
+                this.scopeHlgPeak = parseInt(peakSel.value, 10);
+                localStorage.setItem('radiance_scope_hlg_peak', String(this.scopeHlgPeak));
+                this._lastRenderContent();
+            };
+            scaleRow.appendChild(peakSel);
+        }
+        container.appendChild(scaleRow);
+
+        // ─── What is being measured ────────────────────────
+        // Never blank. An unlabelled scope is an ambiguous instrument, and an
+        // ambiguous instrument is an untrusted one.
+        const desc = _scopeDescribe(this.scopeScale, this._scopeCtx());
+        const measureNote = document.createElement('div');
+        measureNote.style.cssText = 'font-size: 9px; line-height: 1.5; color: rgba(255,255,255,0.4); font-family: monospace; padding: 6px 8px; background: rgba(255,255,255,0.02); border-radius: 5px; border-left: 2px solid rgba(106,138,255,0.35); margin-bottom: 4px;';
+        measureNote.innerHTML =
+            `<b style="color:rgba(255,255,255,0.6)">${_escapeHtml(desc.label)}</b> · ${_escapeHtml(desc.levels)}`
+            + `<br>${_escapeHtml(desc.detail)}`
+            + `<br>Measured ${_escapeHtml(desc.measuredAt)}.`
+            // The scopes read an 8-bit canvas. A 10-bit scale over that shows
+            // the right number on a 256-step signal, not 1024 steps of
+            // precision. Saying so is the difference between a scale and a claim.
+            + '<br><span style="color:rgba(255,255,255,0.3)">Sampled at 8 bits — the scale converts the value, it does not add precision.</span>'
+            + (this.scopeLogView ? '<br><span style="color:#ffc844">LogC assist is on — the plot is reshaped and the graticule is reshaped with it, so the labels still read true.</span>' : '')
+            + (desc.warn ? `<br><span style="color:#ff9040">⚠ ${_escapeHtml(desc.warn)}</span>` : '');
+        container.appendChild(measureNote);
 
         // ─── Scope Canvas ──────────────────────────────────
         const isSquare = this.scopeMode === 'vectorscope';
@@ -15780,6 +17277,35 @@ else:
         canvas.height = cH;
         canvas.style.cssText = `background: #010102; border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 8px; width: 100%; height: auto; aspect-ratio: ${cW}/${cH}; box-shadow: inset 0 0 30px rgba(0,0,0,0.9);`;
         container.appendChild(canvas);
+
+        // Point at a trace and read its value. The graticule gives you the
+        // marked positions; this gives you every position in between, which is
+        // where the answer usually is.
+        const axis = (this.scopeMode === 'histogram') ? 'x'
+            : (this.scopeMode === 'waveform' || this.scopeMode === 'parade') ? 'y'
+            : null;
+        if (axis) {
+            const readout = document.createElement('div');
+            readout.style.cssText = 'font-family: monospace; font-size: 10px; color: rgba(255,255,255,0.45); min-height: 14px; margin-top: -2px;';
+            readout.textContent = 'Point at the scope to read a value.';
+            container.appendChild(readout);
+            const desc = _scopeDescribe(this.scopeScale, this._scopeCtx());
+            const digits = (_SCOPE_SCALES.find((s) => s.id === this.scopeScale) || _SCOPE_SCALES[0]).digits;
+            canvas.addEventListener('mousemove', (e) => {
+                const r = canvas.getBoundingClientRect();
+                const p = axis === 'y'
+                    ? 1 - (e.clientY - r.top) / r.height
+                    : (e.clientX - r.left) / r.width;
+                const norm = this._scopePlotInv(p, this.scopeLogView);
+                const v = _scopeValue(norm, this.scopeScale, this._scopeCtx());
+                readout.textContent = Number.isFinite(v)
+                    ? `${v.toFixed(digits)} ${desc.unit}`
+                    : '—';
+            });
+            canvas.addEventListener('mouseleave', () => {
+                readout.textContent = 'Point at the scope to read a value.';
+            });
+        }
 
         // ─── Extract Pixel Data ─────────────────────────────
         if (!this.image) {
@@ -15795,8 +17321,13 @@ else:
         tmp.width = sampleW; tmp.height = sampleH;
         const tctx = tmp.getContext('2d');
 
-        // Sample from graded GL canvas if possible, else fall back to raw image
-        const srcCanvas = (this.glCanvas && this.glCanvas.width > 0) ? this.glCanvas : this.image;
+        // Where the measurement is taken. Nuke calls this "include viewer colour
+        // transforms"; with it off the scope reads the source as loaded, with it
+        // on it reads what the display receives. The scopes used to always take
+        // the second and never say so.
+        const canUseGL = !!(this.glCanvas && this.glCanvas.width > 0);
+        const srcCanvas = (this.scopeTransformed && canUseGL) ? this.glCanvas : this.image;
+        this._scopeMeasuredTransformed = this.scopeTransformed && canUseGL;
         tctx.drawImage(srcCanvas, 0, 0, sampleW, sampleH);
         const imgData = tctx.getImageData(0, 0, sampleW, sampleH);
 
@@ -15815,10 +17346,9 @@ else:
 
         // ─── Render Based on Mode ───────────────────────────
         const logFlag = this.scopeLogView;
-        const hdrRuler = !!(this.scopeHdrRuler && this.hdrData);
         switch (this.scopeMode) {
-            case 'parade': this._drawScopeParade(ctx, pixels, sampleW, sampleH, cW, cH, logFlag, hdrRuler); break;
-            case 'waveform': this._drawScopeWaveform(ctx, pixels, sampleW, sampleH, cW, cH, logFlag, hdrRuler); break;
+            case 'parade': this._drawScopeParade(ctx, pixels, sampleW, sampleH, cW, cH, logFlag); break;
+            case 'waveform': this._drawScopeWaveform(ctx, pixels, sampleW, sampleH, cW, cH, logFlag); break;
             case 'histogram': this._drawScopeHistogram(ctx, pixels, cW, cH, logFlag); break;
             case 'vectorscope': this._drawScopeVectorscope(ctx, pixels, cW, cH); break;
             case 'chromaticity': this._drawScopeChromaticity(ctx, pixels, cW, cH); break;
@@ -15854,7 +17384,65 @@ else:
     }
 
     // ─── RGB Parade ──────────────────────────────────────────
-    _drawScopeParade(ctx, data, imgW, imgH, w, h, logView, hdrRuler = false) {
+    /** The scale context the units module needs, gathered in one place. */
+    _scopeCtx() {
+        return {
+            levels: this.scopeLevels || 'data',
+            peakNits: this.scopeHlgPeak || 1000,
+            transformed: this._scopeMeasuredTransformed !== false,
+        };
+    }
+
+    /**
+     * Where a normalised value lands on the plot.
+     *
+     * LogC assist reshapes the pixels before they are plotted, so the graticule
+     * has to be reshaped by the same curve or every label moves off its line.
+     * Reshaping it is what keeps the numbers true under log assist rather than
+     * merely warning that they are not.
+     */
+    _scopePlotPos(v, logView) {
+        return logView ? _logAssistPos(v) : v;
+    }
+
+    /** Its inverse — a position on the plot back to a normalised value. */
+    _scopePlotInv(p, logView) {
+        return logView ? _logAssistInv(p) : Math.min(Math.max(p, 0), 1);
+    }
+
+    /**
+     * The horizontal graticule, in the selected scale's units.
+     *
+     * One implementation for waveform and parade. Every line carries its number
+     * and the panel carries the unit, so there is no position on either scope
+     * whose value has to be guessed.
+     */
+    _drawScopeGraticule(ctx, w, h, logView, opts = {}) {
+        const ctxScale = this._scopeCtx();
+        const ticks = _scopeTicks(this.scopeScale, ctxScale);
+        const unit = _scopeDescribe(this.scopeScale, ctxScale).unit;
+
+        ctx.save();
+        ctx.lineWidth = opts.lineWidth || 2;
+        ctx.font = '15px monospace';
+        ctx.setLineDash(opts.dash || []);
+        ticks.forEach((t) => {
+            const y = h - this._scopePlotPos(t.at, logView) * h;
+            ctx.strokeStyle = t.emphasis ? 'rgba(255,200,80,0.45)' : 'rgba(255,255,255,0.09)';
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+            ctx.fillStyle = t.emphasis ? '#ffc844' : 'rgba(255,255,255,0.34)';
+            ctx.fillText(t.label, 4, Math.max(14, y - 4));
+        });
+        ctx.setLineDash([]);
+
+        // The unit, once, where it cannot be mistaken for a value.
+        ctx.fillStyle = 'rgba(255,255,255,0.45)';
+        ctx.font = 'bold 15px monospace';
+        ctx.fillText(unit, w - 8 - ctx.measureText(unit).width, h - 8);
+        ctx.restore();
+    }
+
+    _drawScopeParade(ctx, data, imgW, imgH, w, h, logView) {
         ctx.fillStyle = '#050508';
         ctx.fillRect(0, 0, w, h);
 
@@ -15900,89 +17488,32 @@ else:
         ctx.moveTo(secW * 2, 0); ctx.lineTo(secW * 2, h);
         ctx.stroke();
 
-        // Guide lines — three modes: HDR nit / log IRE / linear IRE
-        const R = v => v / (v + 1); // Reinhard display proxy for HDR ruler
-        const guides = hdrRuler
-            ? [
-                { v: R(0),       lbl: '0',        color: '#2a2a2a' },
-                { v: R(0.0049),  lbl: '1 nit',    color: '#2a3020' },
-                { v: R(0.018),   lbl: 'SDR mid',  color: '#2a4020' },
-                { v: R(1.0),     lbl: '203 nit',  color: '#3a4010' },
-                { v: R(4.926),   lbl: '1k nit',   color: '#4a3a08' },
-                { v: R(49.26),   lbl: '10k nit',  color: '#5a2a05' },
-              ]
-            : logView
-            ? [{ v: 0, lbl: '0' }, { v: 0.5, lbl: '~18%' }, { v: 0.74, lbl: '~90%' }, { v: 1, lbl: '100' }]
-            : [{ v: 0, lbl: '0' }, { v: 0.5, lbl: '50%' }, { v: 1, lbl: '100' }];
+        // The graticule, in the selected scale's units.
+        //
+        // What was here before was an "HDR ruler" that placed nit labels using
+        // a Reinhard curve, v/(v+1), as a display proxy. The pixels being
+        // plotted had come through the actual ACES display transform, not
+        // Reinhard, so the lines sat wherever that unrelated curve put them:
+        // "203 nit" was drawn at exactly half height regardless of what the
+        // viewer was doing. Nit readings now come from ST.2084 or HLG, which
+        // are defined on the signal actually being measured.
+        this._drawScopeGraticule(ctx, w, h, logView, { dash: [6, 6], lineWidth: 1 });
 
-        ctx.setLineDash([6, 6]);
-        ctx.font = '14px monospace';
-        guides.forEach(g => {
-            const y = h - g.v * h;
-            ctx.strokeStyle = g.color || '#333';
-            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
-            ctx.fillStyle = hdrRuler ? '#886633' : '#444';
-            if (g.lbl) ctx.fillText(g.lbl, 4, y - 4);
-        });
-        ctx.setLineDash([]);
-
-        // Mode label (bottom-right)
-        const modeLabel = hdrRuler ? 'PARADE·HDR·NIT' : logView ? 'LOG' : '';
-        if (modeLabel) {
-            ctx.fillStyle = hdrRuler ? '#cc8833' : '#554400';
+        if (logView) {
+            ctx.fillStyle = '#554400';
             ctx.font = '16px monospace';
-            ctx.fillText(modeLabel, w - (hdrRuler ? 155 : 40), h - 6);
+            ctx.fillText('LOG', 8, h - 8);
         }
     }
 
     // ─── Luma Waveform ───────────────────────────────────────
-    _drawScopeWaveform(ctx, data, imgW, imgH, w, h, logView, hdrRuler = false) {
+    _drawScopeWaveform(ctx, data, imgW, imgH, w, h, logView) {
         ctx.fillStyle = '#050508';
         ctx.fillRect(0, 0, w, h);
 
-        // ── Guide lines ────────────────────────────────────────────────────────
-        // HDR ruler: nit-referenced stops using Reinhard curve (v / (v+1)) as
-        // display proxy. Scene-linear nit values: 0.18 SDR mid / 1.0 = 203 nit
-        // / 4.9 ≈ 1k nit / 49 ≈ 10k nit (displayed via Reinhard tonemap).
-        const guides = hdrRuler
-            ? (() => {
-                // Convert scene-linear peak value → display [0–1] via Reinhard
-                const R = v => v / (v + 1);
-                return [
-                    { v: R(0),        lbl: '0 nit',     color: '#333' },
-                    { v: R(0.0049),   lbl: '1 nit',     color: '#2a3a2a' },
-                    { v: R(0.018),    lbl: 'SDR mid',   color: '#2a4a2a' },
-                    { v: R(0.18),     lbl: '~36 nit',   color: '#2a5a2a' },
-                    { v: R(1.0),      lbl: '203 nit',   color: '#3a4a2a' },
-                    { v: R(4.926),    lbl: '1k nit',    color: '#4a4a20' },
-                    { v: R(49.26),    lbl: '10k nit',   color: '#5a3a10' },
-                ];
-              })()
-            : logView
-            ? [
-                { v: 0,    lbl: '0',      color: '#333' },
-                { v: 0.18, lbl: '~black', color: '#2a3a2a' },
-                { v: 0.50, lbl: '~18%',   color: '#2a4a2a' },
-                { v: 0.74, lbl: '~90%',   color: '#2a5a2a' },
-                { v: 1.0,  lbl: '100',    color: '#333' },
-              ]
-            : [
-                { v: 0,    lbl: '0',  color: '#333' },
-                { v: 0.25, lbl: '25', color: '#2a3a2a' },
-                { v: 0.50, lbl: '50', color: '#2a4a2a' },
-                { v: 0.75, lbl: '75', color: '#2a5a2a' },
-                { v: 1.0,  lbl: '100',color: '#333' },
-              ];
-
-        ctx.lineWidth = 2;
-        ctx.font = '16px monospace';
-        guides.forEach(g => {
-            const y = h - g.v * h;
-            ctx.strokeStyle = g.color || '#2a2a2a';
-            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
-            ctx.fillStyle = hdrRuler ? '#886633' : '#444';
-            ctx.fillText(g.lbl, 4, y - 4);
-        });
+        // The graticule, in the selected scale's units. See _drawScopeParade for
+        // why the old nit ruler was removed rather than kept alongside.
+        this._drawScopeGraticule(ctx, w, h, logView);
 
         // ── Plot luma dots ─────────────────────────────────────────────────────
         const step = Math.max(1, Math.floor(imgW / w));
@@ -16001,9 +17532,9 @@ else:
         ctx.globalAlpha = 1.0;
 
         // ── Label ──────────────────────────────────────────────────────────────
-        ctx.fillStyle = hdrRuler ? '#cc8833' : '#5a5';
+        ctx.fillStyle = '#5a5';
         ctx.font = '18px monospace';
-        ctx.fillText(hdrRuler ? 'LUMA·HDR·NIT' : logView ? 'LUMA·LOG' : 'LUMA', 8, 22);
+        ctx.fillText(logView ? 'LUMA·LOG' : 'LUMA', 8, 22);
     }
 
     // ─── Histogram ───────────────────────────────────────────
@@ -16021,11 +17552,22 @@ else:
         let max = 1;
         for (let i = 0; i < 256; i++) max = Math.max(max, hR[i], hG[i], hB[i]);
 
-        // Grid
-        ctx.strokeStyle = '#222'; ctx.lineWidth = 2;
-        for (let i = 1; i < 4; i++) {
-            const x = (i / 4) * w;
-            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+        // Grid — the histogram's axis is horizontal, so the same ticks the
+        // waveform draws as lines are drawn here as columns. It used to be four
+        // evenly spaced unlabelled lines with "0" and "255" in the corners,
+        // which named a unit the panel did not otherwise use.
+        {
+            const ticks = _scopeTicks(this.scopeScale, this._scopeCtx());
+            ctx.lineWidth = 1;
+            ctx.font = '15px monospace';
+            ticks.forEach((t) => {
+                const x = this._scopePlotPos(t.at, logView) * w;
+                ctx.strokeStyle = t.emphasis ? 'rgba(255,200,80,0.45)' : 'rgba(255,255,255,0.08)';
+                ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+                ctx.fillStyle = t.emphasis ? '#ffc844' : 'rgba(255,255,255,0.32)';
+                const tw = ctx.measureText(t.label).width;
+                ctx.fillText(t.label, Math.min(Math.max(x - tw / 2, 2), w - tw - 2), h - 8);
+            });
         }
 
         const drawCurve = (hist, color) => {
@@ -16064,13 +17606,17 @@ else:
         drawCurve(hB, '#4488ff');
         ctx.globalAlpha = 1.0;
 
-        // Labels
-        ctx.fillStyle = '#666'; ctx.font = '16px monospace';
-        ctx.fillText(logView ? 'LOG·0' : '0', 4, h - 6);
-        ctx.fillText(logView ? 'LOG·255' : '255', w - 75, h - 6);
+        // The unit, once, where it cannot be mistaken for a tick value.
+        {
+            const unit = _scopeDescribe(this.scopeScale, this._scopeCtx()).unit;
+            ctx.fillStyle = 'rgba(255,255,255,0.45)';
+            ctx.font = 'bold 15px monospace';
+            ctx.fillText(unit, w - 8 - ctx.measureText(unit).width, 20);
+        }
         if (logView) {
             ctx.fillStyle = '#554400';
-            ctx.fillText('LOG', w - 40, 20);
+            ctx.font = '16px monospace';
+            ctx.fillText('LOG', 8, 20);
         }
     }
 
@@ -16220,34 +17766,34 @@ else:
                 const srcX = Math.floor(x * sx), srcY = Math.floor(y * sy);
                 const idx = (srcY * imgW + srcX) * 4;
                 const luma = data[idx] * 0.2126 + data[idx + 1] * 0.7152 + data[idx + 2] * 0.0722;
-                const ire = luma / 255; // 0..1
+                const level = luma / 255; // 0..1 -- normalised display level, not IRE
 
                 let r, g, b;
-                if (ire < 0.02) {
+                if (level < 0.02) {
                     // Under black — purple
                     r = 80; g = 0; b = 120;
-                } else if (ire < 0.10) {
+                } else if (level < 0.10) {
                     // Deep shadows — blue
                     r = 20; g = 40; b = 180;
-                } else if (ire < 0.25) {
+                } else if (level < 0.25) {
                     // Shadows — cyan
                     r = 0; g = 140; b = 180;
-                } else if (ire < 0.40) {
+                } else if (level < 0.40) {
                     // Low mid — teal
                     r = 0; g = 160; b = 100;
-                } else if (ire < 0.55) {
+                } else if (level < 0.55) {
                     // Mid — green (proper exposure)
                     r = 40; g = 180; b = 40;
-                } else if (ire < 0.68) {
+                } else if (level < 0.68) {
                     // Upper mid — yellow-green
                     r = 160; g = 180; b = 0;
-                } else if (ire < 0.80) {
+                } else if (level < 0.80) {
                     // Highlights — yellow
                     r = 220; g = 200; b = 0;
-                } else if (ire < 0.90) {
+                } else if (level < 0.90) {
                     // Hot highlights — orange
                     r = 240; g = 120; b = 0;
-                } else if (ire < 0.97) {
+                } else if (level < 0.97) {
                     // Near clipping — red
                     r = 230; g = 30; b = 30;
                 } else {
@@ -16268,17 +17814,18 @@ else:
         ctx.fillStyle = '#aaa'; ctx.font = '18px monospace';
         ctx.fillText('FALSE COLOR', w - 138, 22);
 
-        // IRE scale bar
+        // False-colour ramp bar. Named an "IRE scale" for no reason -- it carries
+        // no values at all, it is the legend for the colours above it.
         const barX = w - 14, barH = h - 20, barY = 18;
-        const ireColors = [
+        const falseColorRamp = [
             [80, 0, 120], [20, 40, 180], [0, 140, 180], [0, 160, 100],
             [40, 180, 40], [160, 180, 0], [220, 200, 0], [240, 120, 0],
             [230, 30, 30], [255, 50, 150]
         ];
-        const segH = barH / ireColors.length;
-        ireColors.forEach((c, i) => {
+        const segH = barH / falseColorRamp.length;
+        falseColorRamp.forEach((c, i) => {
             ctx.fillStyle = `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
-            ctx.fillRect(barX, barY + (ireColors.length - 1 - i) * segH, 10, segH);
+            ctx.fillRect(barX, barY + (falseColorRamp.length - 1 - i) * segH, 10, segH);
         });
     }
 
@@ -16859,7 +18406,7 @@ else:
             b = (b - piv) * con + piv;
 
             // 8. Log Wheels (Shadow/Midtone/Highlight)
-            // Precise reimplementation of `applyLogWheels` from glsl
+            // Precise reimplementation of 'applyLogWheels' from glsl
             const logLuma = r * 0.2126 + g * 0.7152 + b * 0.0722;
 
             // Shadow curve log_s(x)
@@ -18390,6 +19937,23 @@ else:
     }
 
     destroy() {
+        // Both of these were added to 'window' and never removed.
+        if (this._seqDockKeyHandler) {
+            window.removeEventListener('keydown', this._seqDockKeyHandler);
+            this._seqDockKeyHandler = null;
+        }
+        if (this._undoKeyHandler) {
+            window.removeEventListener('keydown', this._undoKeyHandler);
+            this._undoKeyHandler = null;
+        }
+        if (this._timelineMouseMoveBound) {
+            window.removeEventListener('mousemove', this._timelineMouseMoveBound);
+            this._timelineMouseMoveBound = null;
+        }
+        if (this._timelineMouseUpBound) {
+            window.removeEventListener('mouseup', this._timelineMouseUpBound);
+            this._timelineMouseUpBound = null;
+        }
         // ── Resource Cleanup (merged from earlier definition) ──
         // Remove global event listeners
         this._removeApiListeners();
@@ -18454,6 +20018,7 @@ else:
         this.frameHDRData = null;
         this.frameImages = null;
         this.imageData = null;
+        this._probeInvalidate();   // the probe measures this frame, not the last one
         // Clear container
         if (this.container) this.container.innerHTML = '';
 

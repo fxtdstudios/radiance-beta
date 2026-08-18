@@ -467,7 +467,7 @@ app.registerExtension({
 		// and looked for widgets (write_mode, bit_depth, alpha_mode...) that only
 		// existed on that class in the pre-v3 fork. In the Beta, that class was
 		// reduced to a 4-parameter shim, and all the real widgets live on
-		// "RadianceWrite" itself, behind a single flat `format` dropdown (prefix
+		// "RadianceWrite" itself, behind a single flat 'format' dropdown (prefix
 		// "IMG │"/"SEQ │"/"VID │" — no separate write_mode widget). The old code
 		// was dead: it never matched a class that actually has these widgets.
 		// Rewritten from scratch against the current widget set, deriving the

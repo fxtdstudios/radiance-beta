@@ -1,5 +1,8 @@
 // WebGL Context Manager — extends abstract RadianceRenderer base class
 import { RadianceRenderer } from "./radiance_renderer.js";
+// The grade maths, emitted from one file for both backends and both CPU
+// paths. See js/radiance_grade.js for what used to be four implementations.
+import { GLSL as GRADE_GLSL } from "./radiance_grade.js";
 
 class RadianceWebGLRenderer extends RadianceRenderer {
     constructor(canvas) {
@@ -1542,7 +1545,7 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             uniform float u_gamma;
             uniform float u_saturation;
             uniform bool u_isLinear;
-
+${GRADE_GLSL}
             // sRGB OETF (linear → display)
             vec3 linearToSRGB(vec3 linear) {
                 bvec3 cutoff = lessThan(linear, vec3(0.0031308));
@@ -1576,7 +1579,10 @@ class RadianceWebGLRenderer extends RadianceRenderer {
 
                 // Gamma (artistic control)
                 if (u_gamma != 1.0) {
-                    color = pow(max(color, vec3(0.0)), vec3(1.0 / u_gamma));
+                    // Was pow(max(color,0), 1.0 / u_gamma) with no floor: at
+                    // gamma 0 that is 1/0 = Infinity and the image splits into
+                    // hard black and blown. radGamma carries the floor.
+                    color = radGamma(color, vec3(u_gamma));
                 }
 
                 // Display transform (sRGB OETF)
@@ -1654,6 +1660,7 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             uniform vec2 u_texSize;
 
             uniform bool u_falseColor;
+            uniform bool u_hdrHeatmap;
             uniform bool u_zebra;
             uniform float u_zebraThreshold;
 
@@ -1751,6 +1758,19 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             // v4.0: Pre-computed multi-pass bloom texture (Kawase chain result)
             uniform sampler2D u_bloomTex;
             uniform int u_bloomTexEnabled;
+
+            // ── OpenColorIO ─────────────────────────────────────────────────
+            // When a config is loaded, OpenColorIO 2.5 generates the GLSL below
+            // from the show's config and it replaces this shader's display
+            // transform entirely. The block declares its own helpers, its own
+            // LUT samplers and OCIODisplay(). Nothing in Radiance
+            // re-implements it -- that is the point: the config decides.
+            // With no config loaded the entry point still has to exist or the
+            // shader will not compile; u_ocioEnabled is false, so the stub is
+            // never reached.
+            uniform bool u_ocioEnabled;
+${this._ocioShaderSource || '            vec4 OCIODisplay(vec4 inPixel) { return inPixel; }'}
+            // ── end OpenColorIO ─────────────────────────────────────────────
 
             // ── v3.2 Phase 11: Anamorphic Streaks + k2 Distortion ────────────
             uniform float u_lensDistortionK2;   // Brown-Conrady quartic term
@@ -2113,6 +2133,57 @@ const float GOLDEN_ANGLE = 2.39996323;
                 if (v >= 0.38) return vec3(0.0, 1.0, 1.0);       // Cyan (Dark Skin / Shadows)
                 if (v >= 0.02) return vec3(v);                   // Deep Grey
                 return vec3(0.6, 0.0, 0.8);                      // Purple (Clipped Black)
+            }
+
+            // ── HDR nits heatmap ────────────────────────────────────────
+            // getFalseColorMap above is an *exposure* tool: ARRI-style stops on
+            // display luma, 0-1, which says nothing about absolute luminance.
+            // The menu offered "HDR Heatmap" as a separate entry and wired it to
+            // the same falseColor flag, so the two were one feature under two
+            // names and neither reported nits.
+            //
+            // This maps scene luminance to absolute cd/m2, with the boundaries
+            // an HDR colourist actually works to. The argument arrives in the
+            // internal scale where 1.0 == 100 nits, the same convention the
+            // SDR->HDR nodes use, so nits = v * 100.
+            //
+            // No backticks in here. This comment sits inside a JS template
+            // literal, so a backtick terminates the shader string and every
+            // line after it is parsed as JavaScript. That is exactly what
+            // happened: a backtick-quoted 'v' in this comment broke the whole
+            // module, and the viewer node rendered with no UI at all.
+            //
+            // The anchor is ITU-R BT.2408: HDR Reference White = 203 cd/m2,
+            // "the nominal signal level obtained from an HDR camera and a 100%
+            // reflectance white card" -- 58% PQ, 75% HLG. That is the boundary
+            // that matters: below it is diffuse, above it is specular. A
+            // heatmap without it is a colour ramp; with it, it is instrumentation.
+            //
+            //     nits        band                       colour
+            //     < 0.01      below the noise floor      near-black
+            //     0.01 - 5    deep shadow                indigo
+            //     5 - 50      shadow to low midtone      blue -> teal
+            //     50 - 203    midtone up to diffuse      teal -> green
+            //     = 203       BT.2408 Reference White    white line
+            //     203 - 400   specular, comfortable      yellow
+            //     400 - 1000  specular, bright           orange
+            //     1000 - 4000 mastering headroom         red
+            //     > 4000      beyond common masters      magenta
+            vec3 getHDRHeatmap(float v) {
+                float nits = max(v, 0.0) * 100.0;
+
+                // A visible band either side of reference white, so the eye can
+                // land on 203 without reading a legend.
+                if (nits >= 200.0 && nits <= 206.0) return vec3(1.0, 1.0, 1.0);
+
+                if (nits < 0.01)   return vec3(0.04, 0.02, 0.08);
+                if (nits < 5.0)    return mix(vec3(0.15, 0.05, 0.45), vec3(0.10, 0.25, 0.75), nits / 5.0);
+                if (nits < 50.0)   return mix(vec3(0.10, 0.25, 0.75), vec3(0.05, 0.70, 0.70), (nits - 5.0) / 45.0);
+                if (nits < 203.0)  return mix(vec3(0.05, 0.70, 0.70), vec3(0.20, 0.85, 0.25), (nits - 50.0) / 153.0);
+                if (nits < 400.0)  return mix(vec3(0.95, 0.95, 0.20), vec3(1.00, 0.75, 0.10), (nits - 203.0) / 197.0);
+                if (nits < 1000.0) return mix(vec3(1.00, 0.75, 0.10), vec3(1.00, 0.40, 0.05), (nits - 400.0) / 600.0);
+                if (nits < 4000.0) return mix(vec3(1.00, 0.40, 0.05), vec3(0.90, 0.05, 0.05), (nits - 1000.0) / 3000.0);
+                return vec3(1.0, 0.0, 1.0);
             }
 
             // ACES Tone Mapping (Approx)
@@ -2584,40 +2655,16 @@ const float GOLDEN_ANGLE = 2.39996323;
                 return vec3(ACEScct_to_lin(v.r), ACEScct_to_lin(v.g), ACEScct_to_lin(v.b));
             }
 
+${GRADE_GLSL}
             vec3 applyGrading(vec3 color, vec3 lift, vec3 gamma, vec3 gain, vec3 offset) {
-                // Resolve-Style Grading
-
-                // 1. Offset (Global Add)
-                color += offset;
-
-                // 2. Lift (Shadows - Pivoted at White)
-                // Lift adds to blacks, but has 0 effect at 1.0
-                // Simple formula: color + lift * (1.0 - luma)
-                // Using luminance for pivot to avoid color shifts
-                float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-                // Clamp luma to 0..1 for pivot
-                float pivot = clamp(1.0 - luma, 0.0, 1.0);
-                color += lift * pivot;
-
-                // 3. Gain (Slope - Pivoted at Black)
-                color *= gain;
-
-                // 4. Gamma (Power - Mids)
-                // Safe pow
-                color = max(color, 0.0);
-                if (any(notEqual(gamma, vec3(1.0)))) {
-                     color.r = pow(color.r, 1.0 / max(0.01, gamma.r));
-                     color.g = pow(color.g, 1.0 / max(0.01, gamma.g));
-                     color.b = pow(color.b, 1.0 / max(0.01, gamma.b));
-                }
-
-                return color;
+                // Resolve-style order: Offset, Lift (pivoted at white), Gain
+                // (pivoted at black), Gamma. Every step is the shared
+                // definition; see js/radiance_grade.js.
+                return radGradeOrder(color, offset, lift, gain, gamma);
             }
 
             vec3 applyContrast(vec3 color, float contrast, float pivot) {
-                // v3.2: Clamping to prevent extreme separation
-                float c = clamp(contrast, 0.0, 5.0);
-                return (color - pivot) * c + pivot;
+                return radContrast(color, contrast, pivot);
             }
 
             // v2.5 Pro Pro: Cinematic S-Curve Shadows/Highlights
@@ -3073,6 +3120,39 @@ vec3 getDenoiseColor(vec2 uv) {
             color = mix(color, lutted, u_lutStrength);
         }
 
+        // Scene-linear, captured before the display transform flattens it.
+        // The HDR heatmap reports absolute cd/m2, and after tone mapping that
+        // information is gone -- color from here on is display-referred.
+        vec3 sceneLinearForHeatmap = color;
+
+        // 6 & 7. Display transform.
+        //
+        // With an OCIO config loaded, OCIODisplay() *is* steps 6 and 7: it
+        // carries the view transform, the display encoding and the output OETF,
+        // exactly as the show's config specifies them. Running our tonemap or
+        // our sRGB OETF alongside it would double-apply a transfer function --
+        // the same class of bug the u_lutIsDisplayTransform flag below exists to
+        // prevent -- so this branch replaces both, and there is no partial mode
+        // where some of ours and some of the config's both apply.
+        if (u_ocioEnabled) {
+            // Exactly 0.0 has to be nudged off zero first.
+            //
+            // OCIO's generated inverse-EOTF chains reach pow(x, y) with y <= 0,
+            // which GLSL leaves *undefined* at x == 0. Measured on the ACES
+            // configs through a WebGL2 context: scene-linear black came back as
+            // 1.3e16 on the Rec.1886 view, 7.7e14 on P3-D65 and NaN on sRGB and
+            // Display P3. Black is the most common pixel in a frame -- night
+            // shots, letterbox bars, mattes -- so this is not an edge case.
+            //
+            // The nudge is confined to exact zeros. Anything down to 1e-30 goes
+            // through the chain correctly, and negatives do too (OCIO clamps
+            // them itself), so a blanket max() would change legitimately
+            // negative scene-linear pixels for no reason. 1e-10 lands within a
+            // hundredth of an 8-bit code value of where the CPU path puts zero.
+            vec3 ocioIn = mix(color, vec3(1e-10), vec3(equal(color, vec3(0.0))));
+            color = OCIODisplay(vec4(ocioIn, 1.0)).rgb;
+        } else {
+
         // 6. Display LUT / Tonemap  (runs after 5. LUT)
         if (u_displayLutMode > 0) {
             vec3 transformed = applyDisplayLUT(color, u_displayLutMode);
@@ -3094,6 +3174,8 @@ vec3 getDenoiseColor(vec2 uv) {
             color = applySoftClip(color, u_softClip);
             color = linearToSRGB(max(color, vec3(0.0)));
         }
+
+        }   // end !u_ocioEnabled
 
         // 7a. Film Grain — Photochemical-quality, static by default
         // ─────────────────────────────────────────────────────────
@@ -3187,6 +3269,12 @@ vec3 getDenoiseColor(vec2 uv) {
 
         if (u_falseColor) {
             color = getFalseColorMap(lumaDisplay);
+        }
+
+        // Reads scene luminance, not display luma: the whole point is absolute
+        // cd/m2, which the display transform has already thrown away.
+        if (u_hdrHeatmap) {
+            color = getHDRHeatmap(dot(sceneLinearForHeatmap, vec3(0.2126, 0.7152, 0.0722)));
         }
 
         if (u_zebra) {
@@ -3409,6 +3497,41 @@ vec3 getDenoiseColor(vec2 uv) {
     }
 
     // Load image as texture
+    /**
+     * Magnification filter for the image texture.
+     *
+     * `'nearest'` shows the actual pixels; `'linear'` interpolates. Inspecting
+     * a pixel through a bilinear filter shows a blend of its neighbours, which
+     * is why every reference viewer binds this to a key -- RV uses `n`.
+     *
+     * Only magnification changes. Minification stays interpolated: nearest on a
+     * downscaled image aliases badly and shows detail that is not there, which
+     * is the opposite of what this toggle is for.
+     */
+    setPixelFilter(mode) {
+        this.pixelFilter = mode === 'nearest' ? 'nearest' : 'linear';
+        this._applyPixelFilter();
+    }
+
+    _applyPixelFilter() {
+        const gl = this.gl;
+        const tex = this.textures?.image;
+        if (!gl || !tex) return;
+        // A float texture cannot filter linearly without the extension, so
+        // 'linear' falls back to nearest there rather than sampling as black.
+        const canLinear = !this._imageIsFloat || this.extColorFloatLinear;
+        const mag = (this.pixelFilter === 'nearest' || !canLinear) ? gl.NEAREST : gl.LINEAR;
+        // Unit 0 explicitly. Without it this binds the image texture to
+        // whichever unit happened to be active -- unit 3 is the depth map,
+        // unit 4 the reference -- and then leaves it there. Unit 0 is where the
+        // image belongs and where the composite shader expects it, so binding
+        // it here is also the correct resting state; unbinding to null would
+        // just make the next draw rebind it.
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, mag);
+    }
+
     loadImageTexture(image) {
         const gl = this.gl;
 
@@ -3432,6 +3555,8 @@ vec3 getDenoiseColor(vec2 uv) {
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
         this.textures.image = texture;
+        this._imageIsFloat = false;
+        this._applyPixelFilter();   // a new texture resets to LINEAR otherwise
         this.imageWidth = image.width;
         this.imageHeight = image.height;
         this.isLinearTexture = false; // PNG/Image data is sRGB-encoded
@@ -3516,6 +3641,8 @@ vec3 getDenoiseColor(vec2 uv) {
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
 
         this.textures.image = texture;
+        this._imageIsFloat = true;
+        this._applyPixelFilter();
         this.imageWidth = width;
         this.imageHeight = height;
         this.isLinearTexture = true; // Float32 data is scene-linear
@@ -3677,7 +3804,10 @@ vec3 getDenoiseColor(vec2 uv) {
         }
 
         console.log(`[Radiance] Float32 readback: ${w}×${h} (${(flipped.byteLength / 1048576).toFixed(1)} MB)`);
-        return { data: flipped, width: w, height: h };
+        // graded: true -- this path renders the full composite pipeline into
+        // an RGBA32F FBO first. The WebGPU backend returns the ungraded source
+        // and says so, so callers can tell the two apart instead of assuming.
+        return { data: flipped, width: w, height: h, graded: true };
     }
 
     // Load 3D LUT from .cube file data (WebGL2: float32, WebGL1: fallback)
@@ -4015,8 +4145,13 @@ vec3 getDenoiseColor(vec2 uv) {
             gl.bindTexture(gl.TEXTURE_2D, null);
         }
 
+        // OpenColorIO — binds the config's LUTs and switches the shader's
+        // display transform over to OCIODisplay(). No-op when nothing is loaded.
+        this._applyOCIOUniforms(program);
+
         // Analytics Uniforms
         this._ui1(program, 'u_falseColor', this.falseColor ? 1 : 0);
+        this._ui1(program, 'u_hdrHeatmap', this.hdrHeatmap ? 1 : 0);
         this._ui1(program, 'u_zebra', this.zebra ? 1 : 0);
         this._uf1(program, 'u_zebraThreshold', this.zebraThreshold);
         this._ui1(program, 'u_gamutWarning', this.gamutWarning ? 1 : 0);
@@ -4154,6 +4289,10 @@ vec3 getDenoiseColor(vec2 uv) {
 
 
 
+    setHDRHeatmap(enabled) {
+        this.hdrHeatmap = !!enabled;
+    }
+
     setFalseColor(enabled) {
         this.falseColor = enabled;
     }
@@ -4199,6 +4338,169 @@ vec3 getDenoiseColor(vec2 uv) {
         this.lutIsDisplayTransform = !!v;
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    //  OpenColorIO
+    //
+    //  info is what radiance_ocio.js returns from buildDisplayView(): the
+    //  GLSL OpenColorIO generated for this (source → display / view), plus the
+    //  LUT textures and uniforms that code expects to find bound. Pass null to
+    //  go back to Radiance's own display pipeline.
+    //
+    //  This recompiles the composite program, so it is called when the view
+    //  changes and never per frame.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    setOCIODisplay(info) {
+        const gl = this.gl;
+        this._releaseOCIOTextures();
+
+        if (!info || !info.shaderText) {
+            this._ocioShaderSource = null;
+            this._ocio = null;
+            this.ocioEnabled = false;
+            this._rebuildCompositeProgram();
+            return { ok: true, enabled: false };
+        }
+
+        // Indent the generated block so a compile error's line number still
+        // lines up with something readable when the source is dumped.
+        this._ocioShaderSource = info.shaderText
+            .split('\n').map((l) => '            ' + l).join('\n');
+
+        const rebuilt = this._rebuildCompositeProgram();
+        if (!rebuilt) {
+            // A shader that will not compile must not leave the viewer with a
+            // dead program. Fall back to Radiance's own pipeline and report --
+            // a black viewport with no explanation is the worst outcome here.
+            this._ocioShaderSource = null;
+            this._ocio = null;
+            this.ocioEnabled = false;
+            this._rebuildCompositeProgram();
+            return { ok: false, enabled: false, error: 'The generated OCIO shader did not compile. See the console for the source.' };
+        }
+
+        this._ocio = {
+            functionName: info.functionName,
+            uniforms: info.uniforms || [],
+            textures: (info.textures || []).map((t, i) => ({
+                ...t,
+                unit: 7 + i,        // 0–6 belong to the composite shader
+                glTexture: this._createOCIOTexture(t),
+            })),
+            label: info.label || '',
+        };
+
+        // WebGL2 guarantees 16 fragment texture units. A config needing more
+        // than nine LUTs is not something to fail silently on.
+        const max = gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS);
+        if (7 + this._ocio.textures.length > max) {
+            const need = 7 + this._ocio.textures.length;
+            this._releaseOCIOTextures();
+            this._ocioShaderSource = null;
+            this._ocio = null;
+            this.ocioEnabled = false;
+            this._rebuildCompositeProgram();
+            return { ok: false, enabled: false, error: `This view needs ${need} texture units and the GPU has ${max}.` };
+        }
+
+        this.ocioEnabled = true;
+        return { ok: true, enabled: true };
+    }
+
+    _rebuildCompositeProgram() {
+        const gl = this.gl;
+        const next = this.createProgram(this.getBasicVertexShader(), this.getCompositeFragmentShader());
+        if (!next) return false;
+        const prev = this.programs.composite;
+        this.programs.composite = next;
+        // The uniform-location and value caches are keyed on the program, and
+        // the old program's entries would otherwise shadow the new one's.
+        this._uniformValueCache?.clear?.();
+        this._uniformCache?.clear?.();
+        if (prev && prev !== next) gl.deleteProgram(prev);
+        return true;
+    }
+
+    _createOCIOTexture(t) {
+        const gl = this.gl;
+        const tex = gl.createTexture();
+        const target = t.dimensions === 3 ? gl.TEXTURE_3D : gl.TEXTURE_2D;
+        // OCIO hands back 1 channel for a 1D LUT and 3 for a 3D LUT. Uploading
+        // a 1-channel LUT as RGB would read the wrong samples per texel.
+        const internal = t.channels === 1 ? gl.R32F : gl.RGB32F;
+        const format = t.channels === 1 ? gl.RED : gl.RGB;
+
+        // 32-bit float textures are NOT filterable in WebGL2 unless
+        // OES_texture_float_linear is enabled, and enabling means calling
+        // getExtension -- merely having it in getSupportedExtensions() does
+        // nothing. Without the call, LINEAR sampling of an R32F LUT returns
+        // zero, and measured through a real context that made every HDR view
+        // in the ACES configs render solid black while compiling cleanly and
+        // reporting no error anywhere.
+        if (this._ocioFloatLinear === undefined) {
+            this._ocioFloatLinear = !!gl.getExtension('OES_texture_float_linear');
+            if (!this._ocioFloatLinear) {
+                console.warn('[Radiance] OES_texture_float_linear is unavailable; '
+                    + 'OCIO LUTs will be sampled without interpolation, which will band.');
+            }
+        }
+        const wantsNearest = /nearest/i.test(t.interpolation || '');
+        const filter = (wantsNearest || !this._ocioFloatLinear) ? gl.NEAREST : gl.LINEAR;
+
+        gl.bindTexture(target, tex);
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+        if (t.dimensions === 3) {
+            gl.texImage3D(target, 0, internal, t.width, t.height, t.depth, 0, format, gl.FLOAT, t.values);
+            gl.texParameteri(target, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+        } else {
+            gl.texImage2D(target, 0, internal, t.width, t.height, 0, format, gl.FLOAT, t.values);
+        }
+        gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, filter);
+        gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, filter);
+        gl.texParameteri(target, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(target, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.bindTexture(target, null);
+        return tex;
+    }
+
+    _releaseOCIOTextures() {
+        if (!this._ocio?.textures) return;
+        for (const t of this._ocio.textures) {
+            if (t.glTexture) this.gl.deleteTexture(t.glTexture);
+        }
+    }
+
+    /** Bind OCIO's textures and uniforms. Called once per draw of the composite. */
+    _applyOCIOUniforms(program) {
+        const gl = this.gl;
+        this._ui1(program, 'u_ocioEnabled', this.ocioEnabled ? 1 : 0);
+        if (!this.ocioEnabled || !this._ocio) return;
+
+        for (const t of this._ocio.textures) {
+            gl.activeTexture(gl.TEXTURE0 + t.unit);
+            gl.bindTexture(t.dimensions === 3 ? gl.TEXTURE_3D : gl.TEXTURE_2D, t.glTexture);
+            this._ui1(program, t.samplerName, t.unit);
+        }
+
+        // Dynamic properties. Radiance does not enable any yet, so OCIO
+        // normally emits none -- but a uniform left unset would silently read
+        // zero and change the picture, so anything that does appear is set, and
+        // anything unrecognised is reported rather than skipped quietly.
+        for (const u of this._ocio.uniforms) {
+            const loc = this.getUniform(program, u.name);
+            if (!loc) continue;
+            switch (u.type) {
+                case 'double': gl.uniform1f(loc, Number(u.value)); break;
+                case 'bool': gl.uniform1i(loc, u.value ? 1 : 0); break;
+                case 'float3': gl.uniform3fv(loc, Float32Array.from(u.value)); break;
+                case 'vector_float': gl.uniform1fv(loc, Float32Array.from(u.value)); break;
+                case 'vector_int': gl.uniform1iv(loc, Int32Array.from(u.value)); break;
+                default:
+                    console.warn('[Radiance] OCIO uniform type not handled:', u.type, u.name);
+            }
+        }
+    }
+
 
 
 
@@ -4215,6 +4517,13 @@ vec3 getDenoiseColor(vec2 uv) {
 
         // v4.3: Bloom FBO chain (6-level Kawase) — was never freed
         this._destroyBloomFBOs();
+
+        // OpenColorIO LUT textures. A show config can carry several 3D LUTs,
+        // and the pattern in this method is that everything with a lifetime
+        // longer than a frame gets freed here explicitly rather than left to
+        // context loss.
+        this._releaseOCIOTextures();
+        this._ocio = null;
 
         // v4.3: Scope offscreen FBO + texture — was never freed
         if (this.scopeFBO)  { gl.deleteFramebuffer(this.scopeFBO);  this.scopeFBO  = null; }
@@ -4249,7 +4558,7 @@ vec3 getDenoiseColor(vec2 uv) {
 
         // Null the maps. They previously kept the now-invalid handles, so a
         // scope debounce that fired after teardown passed the
-        // `if (!this.gl || !this.programs[mode]) return;` guard and issued
+        // if (!this.gl || !this.programs[mode]) return; guard and issued
         // useProgram/bindTexture on deleted objects -- INVALID_OPERATION spam
         // and a corrupted GL state shared with everything else on the page.
         this.textures = {};
