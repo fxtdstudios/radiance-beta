@@ -343,7 +343,7 @@ app.registerExtension({
                         node._resBaseH = parseInt(match[2], 10);
                         // Remember the preset's own (pre-alignment) resolution and name, so
                         // manual width/height edits can detect when they drift from it (or
-                        // come back to it) and toggle `preset` accordingly.
+                        // come back to it) and toggle 'preset' accordingly.
                         node._presetRawW = node._resBaseW;
                         node._presetRawH = node._resBaseH;
                         node._lastPresetName = presetW.value;
@@ -363,7 +363,7 @@ app.registerExtension({
                 };
             }
 
-            // Switches `preset` to "Custom" if the user edits width/height away from
+            // Switches 'preset' to "Custom" if the user edits width/height away from
             // what the current preset (aligned for the current model_type) would
             // produce — e.g. typing 1000 while preset=HD 1080p/model_type=LTXV
             // snaps to 992 (still a valid 32px alignment) but no longer matches the
@@ -377,7 +377,7 @@ app.registerExtension({
 
             // Reverse of the above: if the user edits width/height back to exactly
             // what the previously-selected preset (aligned for the current
-            // model_type) would produce, switch `preset` back to that preset.
+            // model_type) would produce, switch 'preset' back to that preset.
             const _restorePresetIfMatching = () => {
                 if (!presetW || presetW.value !== "Custom" || !node._lastPresetName) return;
                 if (node._presetRawW == null || node._presetRawH == null) return;
