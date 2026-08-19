@@ -667,13 +667,11 @@ def get_model_vae_param(model_hint: str, param: str, default=None):
     return cfg.get(param, default)
 
 
-# ALBABIT-FIX: each preset only carries model_type/weight_dtype/clip_dtype —
-# the only fields _apply_preset_override() (nodes_loader.py) actually reads;
-# file-matching hints and CLIP slot layout live in js/radiance_loader.js
-# (PRESET_CONFIGS/PRESET_SLOTS), the single source of truth for the loader
-# UI's auto-fill. "default" dtypes (no dtype_map entry) let ComfyUI's own
-# VRAM-aware auto-selection apply. Keys sorted alphabetically ("Custom"
-# pinned first) to match the preset dropdown order.
+# ALBABIT-FIX: each preset only carries model_type/weight_dtype/clip_dtype,
+# the only fields _apply_preset_override() (nodes_loader.py) reads; hints
+# and CLIP slot layout live in js/radiance_loader.js instead. "default"
+# dtypes let ComfyUI's own VRAM-aware auto-selection apply. Keys stay
+# alphabetical ("Custom" pinned first) to match the dropdown order.
 CHECKPOINT_PRESETS: dict = {
     "Custom": {},
     "AuraFlow": {
@@ -732,14 +730,10 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "default",
     },
-    # ALBABIT-FIX: 2B and 13B merged into one preset -- identical model_type/
-    # clip_dtype/vae_hints/clip_hints already (the only real difference was
-    # weight_dtype: fp16 vs fp8, reflecting size, not distillation). "default"
-    # lets comfy.sd's own model_management.unet_dtype() auto-pick based on the
-    # actual loaded file's real parameter count -- same approach already used
-    # for Flux.2's own wide size range (Klein 4B through Dev). Explicit "(Low
-    # VRAM)" sibling added for users who want to force fp8 regardless (same
-    # pattern as Flux.1/Flux.2/LTX Video 2.3's own Low VRAM variants).
+    # ALBABIT-FIX: 2B and 13B merged into one preset, identical model_type/
+    # clip_dtype/vae_hints/clip_hints already. "default" weight_dtype lets
+    # comfy.sd auto-pick per the real loaded file's size; the "(Low VRAM)"
+    # sibling forces fp8 instead, same pattern as Flux.1/Flux.2/LTX 2.3.
     "LTX Video": {
         "model_type": "ltxv",  # ALBABIT-FIX: "ltx" → "ltxv" — matches sampler_utils.py
         "weight_dtype": "default",
@@ -811,14 +805,10 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp16",
         "clip_dtype": "fp16",
     },
-    # ALBABIT-FIX: Large, Large Turbo, and Medium all merged into one preset --
-    # same model_type/weight_dtype/clip_dtype already, and (unlike Flux.2
-    # Dev/Klein) Large and Medium even share identical vae_hints/clip_hints
-    # (js/radiance_loader.js), so there's no downstream CLIP-size branching
-    # to worry about either. Turbo is Large's distilled variant (Sampler
-    # tells it apart by filename); Large vs Medium is resolved the same way
-    # Flux.2 Dev/Klein's unet_hints are -- a combined hint list, no separate
-    # preset needed.
+    # ALBABIT-FIX: Large, Large Turbo, and Medium merged into one preset,
+    # same model_type/weight_dtype/clip_dtype/vae_hints/clip_hints already.
+    # Turbo is Large's distilled variant (Sampler tells it apart by
+    # filename); Large vs Medium resolved via a combined unet_hints list.
     "SD3.5": {
         "model_type": "sd3.5",
         "weight_dtype": "fp16",
@@ -846,12 +836,10 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "default",
     },
-    # ALBABIT-FIX: separate preset for Wan 2.2 checkpoints — same CLIP
-    # slot layout as Wan 2.1, distinct unet_hints (js/radiance_loader.js) to
-    # avoid matching the wrong version when both are installed.
-    # weight_dtype now "default" -- same reasoning as "Wan 2.1" above, for
-    # consistency/user choice (comfy.sd auto-picks per the real loaded file).
-    # See "Wan 2.2 (Low VRAM)" for the old forced-fp8 behavior.
+    # ALBABIT-FIX: separate preset for Wan 2.2, same CLIP slot layout as Wan
+    # 2.1 but distinct unet_hints to avoid matching the wrong version when
+    # both are installed. weight_dtype "default" for the same reason as
+    # "Wan 2.1" above; see "Wan 2.2 (Low VRAM)" for the forced-fp8 sibling.
     "Wan 2.2": {
         "model_type": "wan",
         "weight_dtype": "default",
@@ -862,13 +850,10 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "default",
     },
-    # ALBABIT-FIX: TI2V-5B is a single-UNET WAN 2.2 variant (no high/low_noise pair)
-    # and requires wan2.2_vae.safetensors (48ch), not wan_2.1_vae (16ch).
-    # model_type "wan_ti2v" (was "wan") -- real bug fix, see model/detect.py:
-    # "wan" implies 16 latent channels everywhere downstream (Resolution's empty
-    # latent, VRAM estimate) but TI2V-5B's real VAE is 48ch -- picking "WAN
-    # (16ch)" in Resolution for this preset built a wrong-shaped latent, a
-    # crash risk at sampling, not just a metadata inaccuracy.
+    # ALBABIT-FIX: TI2V-5B is a single-UNET WAN 2.2 variant (no high/low_noise
+    # pair), 48ch VAE not 16ch. model_type "wan_ti2v" (was "wan") is a real bug
+    # fix: "wan" implies 16ch everywhere downstream, so Resolution built a
+    # wrong-shaped, crash-risk latent for this preset before.
     "Wan 2.2 TI2V": {
         "model_type": "wan_ti2v",
         "weight_dtype": "default",

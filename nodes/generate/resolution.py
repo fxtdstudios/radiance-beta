@@ -41,28 +41,20 @@ PRESETS: Dict[str, Tuple[int, int, str, str]] = {
 
 PRESET_NAMES = ["Custom"] + list(PRESETS.keys())
 
-# ALBABIT-FIX: model-specific behavior (alignment, video-latent detection,
-# WAN frame rule, frame stride, latent_format) is now driven entirely by `model_type`
-# (see SPATIAL_SCALE, VIDEO_MODEL_TYPES, LATENT_FORMAT_MAP below) instead of preset
+# ALBABIT-FIX: model-specific behavior is now driven entirely by `model_type`
+# (SPATIAL_SCALE, VIDEO_MODEL_TYPES, LATENT_FORMAT_MAP below), not preset
 # category. Presets are now plain Cinema/Social resolutions, model-agnostic.
 #
-# Deferred items (not addressed in this refactor):
-#  - WAN previously got a 16px alignment heuristic; it now falls back to the 8px
-#    default (SPATIAL_SCALE has no WAN entry). Revisit if WAN needs 16px alignment.
-#  - VIDEO_MODEL_TYPES audited against ComfyUI's comfy_extras/ (2026-06-12):
-#    LTXV (8), WAN (4), HunyuanVideo (4), CogVideoX (4,
-#    AutoencoderKLCogVideoX.temporal_compression_ratio default), Mochi (6,
-#    nodes_mochi.py: (length-1)//6+1), and Cosmos (8, nodes_cosmos.py, Cosmos 1.0
-#    "World" text/image-to-video — e.g. Cosmos-1_0-Diffusion-7B-Text2World) all
-#    have verified TEMPORAL_SCALE entries and are included in VIDEO_MODEL_TYPES.
-#    Cosmos Predict2 (stride 4) is NOT covered by the "Cosmos World (16ch)" entry —
-#    revisit if Predict2 support is needed.
-#  - Flux.1 vs Flux.2 (and other version-specific) alignment distinctions are not
-#    further differentiated beyond the existing SPATIAL_SCALE/LATENT_CHANNELS entries.
-#  - MiniMax H3 audited against comfy_extras/nodes_minimax_h3.py (2026-08-18):
-#    its 17k+5 frame grid isn't a fixed divisor, so it has no TEMPORAL_SCALE
-#    entry (see _minimax_align_frame_count/_minimax_video_latent_t instead).
-#    Audio (32ch stereo) is out of scope for this node.
+# Deferred:
+#  - WAN lost its 16px alignment heuristic, falls back to the 8px default now
+#    (no SPATIAL_SCALE entry). Revisit if 16px is actually needed.
+#  - VIDEO_MODEL_TYPES audited vs comfy_extras/ (2026-06-12), verified
+#    TEMPORAL_SCALE: LTXV/Cosmos 8, WAN/HunyuanVideo/CogVideoX 4, Mochi 6
+#    ((length-1)//6+1 per nodes_mochi.py). Cosmos Predict2 (stride 4) NOT covered.
+#  - Flux.1 vs Flux.2 alignment not further split beyond existing entries.
+#  - MiniMax H3 audited (2026-08-18): 17k+5 frame grid has no TEMPORAL_SCALE
+#    entry (_minimax_align_frame_count/_minimax_video_latent_t instead).
+#    Audio (32ch stereo) out of scope for this node.
 
 # Model types that emit 5D latent (1, C, T, H, W)
 VIDEO_MODEL_TYPES = {"WAN (16ch)", "WAN TI2V (48ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)", "Cosmos World (16ch)", "CogVideoX (16ch)", "MiniMax H3 (24ch)"}
@@ -242,12 +234,9 @@ TEMPORAL_SCALE = {
 # Bytes per latent element (ComfyUI usually uses float32 internally = 4 bytes)
 LATENT_ELEMENT_BYTES = 4
 # ALBABIT-FIX: this used to be a separate MODEL_BASE_VRAM dict, hand-duplicated
-# from model/detect.py's _BASE_VRAM -- it drifted (missing the CLIP/text-encoder
-# cost entirely, plus several UNET numbers had gone stale vs _BASE_VRAM) causing
-# this node's "Est. VRAM" to disagree with the Loader's own estimate for the
-# same checkpoint (e.g. Flux.2: 20.0 GB shown here vs the Loader's real 28.0 GB,
-# UNET+CLIP). Reuses _BASE_VRAM/_BASE_CLIP_VRAM directly now -- one source of
-# truth, see _estimate_vram() below.
+# from model/detect.py's _BASE_VRAM. It drifted (missing CLIP cost, stale UNET
+# numbers), disagreeing with the Loader's own estimate (Flux.2: 20.0 GB shown
+# here vs 28.0 GB real). Reuses _BASE_VRAM/_BASE_CLIP_VRAM directly now.
 
 LATENT_SCALE = 8  # VAE downscale factor
 

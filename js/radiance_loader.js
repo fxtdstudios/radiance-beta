@@ -141,13 +141,11 @@ const PRESET_CONFIGS = {
         "extra_widgets": ["offload_mode"],
         "offload_mode": "cpu_offload",
     },
-    // ALBABIT-FIX: Dev and Klein merged into one preset now that Auto-Detect
-    // tells them apart on its own (model/detect.py, single_blocks count), so
-    // unet_hints cover both families. Quality-first, same philosophy as
-    // MiniMax H3's presets below: full precision first, falling through to
-    // each variant's -fp8 tier. "Flux.2 (Low VRAM)" inverts this and never
-    // lists a full-precision file, even as a fallback (several need a
-    // separate gated-repo license too), leaving the widget unmatched instead.
+    // ALBABIT-FIX: Dev and Klein merged into one preset, Auto-Detect tells
+    // them apart on its own. Quality-first (full precision, then -fp8),
+    // same philosophy as MiniMax H3's presets below. "Flux.2 (Low VRAM)"
+    // inverts this and never lists a full-precision file, even as a
+    // fallback, leaving the widget unmatched instead.
     "Flux.2": {
         "unet_hints": [
             "flux2-dev.safetensors",
@@ -217,13 +215,10 @@ const PRESET_CONFIGS = {
             "clip_l":      ["clip_l.safetensors", "clip_l"],
         },
     },
-    // ALBABIT-FIX: 2B and 13B merged into one preset -- same reasoning as the
-    // config/model_map.py comment: identical vae_hints/clip_hints already,
-    // weight_dtype now "default" (comfy.sd auto-picks per the actual loaded
-    // file's real size). unet_hints/upscale_hints list 13B-specific patterns
-    // first -- the old 2B list's bare "ltxv"/"ltx_video" fallback would
-    // otherwise match a 13B-named file first via substring (findMatchingFile
-    // stops at the first hint that matches anything, in list order).
+    // ALBABIT-FIX: 2B and 13B merged into one preset, identical vae_hints/
+    // clip_hints, weight_dtype "default" (comfy.sd auto-picks per file size).
+    // unet_hints/upscale_hints list 13B-specific patterns first so the old
+    // bare "ltxv" 2B fallback can't out-match a 13B file via substring.
     "LTX Video": {
         "unet_hints":    ["ltx-video-13b", "ltxv-13b", "ltx_13b", "ltx-video-2b", "ltxv-2b", "ltx_video", "ltxv"],
         "vae_hints":     ["Baked VAE (from UNET)", "ltxvideo_vae", "ltx_vae", "ltxv_vae", "causal_vae"],
@@ -231,13 +226,9 @@ const PRESET_CONFIGS = {
             "llm_encoder": ["t5xxl_fp8_e4m3fn", "t5xxl_fp16", "t5xxl"],
         },
         "extra_widgets": ["upscale_model_name"],
-        // ALBABIT-FIX: real filenames confirmed on Lightricks/LTX-Video's HF
-        // repo -- "spatial" (resolution) and "temporal" (frame count/motion)
-        // upscalers are genuinely separate files, not the same file with a
-        // toggle. Reference 13B workflow uses the spatial one (with
-        // temporal_upsample=false), matching the "upscale = higher resolution"
-        // expectation here -- 0.9.8 listed first as the newer generation
-        // (same "prefer newest" convention as LTX 2.3's own upscale_hints).
+        // ALBABIT-FIX: spatial (resolution) and temporal (motion) upscalers
+        // are separate files, confirmed on Lightricks' HF repo. 0.9.8 first
+        // as the newer generation.
         "upscale_hints": ["ltxv-spatial-upscaler-0.9.8", "ltxv-spatial-upscaler-0.9.7", "ltxv-13b", "ltx_13b", "ltxv", "ltx_video", "latent_upsampler", "upsampler"],
         // ALBABIT-FIX: 2B's standard workflow is a single Sampler -- no
         // latent-upscale stage -- so leave upscale_model_name on "None"
@@ -259,13 +250,7 @@ const PRESET_CONFIGS = {
         // Flux.1/Flux.2/LTX Video 2.3's own "(Low VRAM)" siblings.
         "extra_widgets": ["upscale_model_name", "offload_mode"],
         "offload_mode": "cpu_offload",
-        // ALBABIT-FIX: real filenames confirmed on Lightricks/LTX-Video's HF
-        // repo -- "spatial" (resolution) and "temporal" (frame count/motion)
-        // upscalers are genuinely separate files, not the same file with a
-        // toggle. Reference 13B workflow uses the spatial one (with
-        // temporal_upsample=false), matching the "upscale = higher resolution"
-        // expectation here -- 0.9.8 listed first as the newer generation
-        // (same "prefer newest" convention as LTX 2.3's own upscale_hints).
+        // ALBABIT-FIX: same real spatial-upscaler hints as "LTX Video" above.
         "upscale_hints": ["ltxv-spatial-upscaler-0.9.8", "ltxv-spatial-upscaler-0.9.7", "ltxv-13b", "ltx_13b", "ltxv", "ltx_video", "latent_upsampler", "upsampler"],
         // ALBABIT-FIX: 2B's standard workflow is a single Sampler -- no
         // latent-upscale stage -- so leave upscale_model_name on "None"
@@ -370,10 +355,8 @@ const PRESET_CONFIGS = {
     // ALBABIT-FIX: quality-first for "MiniMax H3", same philosophy as
     // Flux.2's Dev-first unet_hints above. bf16 exceeds a 32GB card's native
     // capacity but still runs via ComfyUI's automatic lowvram partial-load,
-    // at a real-world cost of about +37% generation time on a 5090, not a
-    // dealbreaker. "MiniMax H3 (Low VRAM)" never lists bf16, even as a
-    // fallback, leaving the widget unmatched instead of silently reaching
-    // for a file that large under a "Low VRAM" label.
+    // at a measured real-world cost of about +37% time on a 5090. "MiniMax
+    // H3 (Low VRAM)" never lists bf16, even as a fallback.
     "MiniMax H3": {
         "unet_hints": [
             "minimax_h3_fl2va_bf16.safetensors", "minimax_h3_fl2va_bf16",
@@ -386,10 +369,15 @@ const PRESET_CONFIGS = {
         "vae_hints":     ["minimax_h3_video_vae_fp16.safetensors", "minimax_h3_video_vae"],
         "audio_vae_hints": ["minimax_h3_audio_vae_fp32.safetensors", "minimax_h3_audio_vae"],
         "clip_hints":    {
+            // ALBABIT-FIX: bf16 first, matching the UNET's quality-first
+            // priority above. Live A/B test (5090): swapping the text
+            // encoder's precision cost near-zero extra time, since it only
+            // runs once (prompt encoding) versus the UNET's cost every
+            // sampling step.
             "llm_encoder": [
+                "qwen3vl_32b_minimax_h3_bf16.safetensors", "qwen3vl_32b_minimax_h3_bf16",
                 "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "qwen3vl_32b_minimax_h3_nvfp4_awq",
                 "qwen3vl_32b_minimax_h3_int8_convrot.safetensors", "qwen3vl_32b_minimax_h3_int8_convrot",
-                "qwen3vl_32b_minimax_h3_bf16.safetensors", "qwen3vl_32b_minimax_h3_bf16",
                 "qwen3vl_32b_minimax_h3", "qwen3vl",
             ],
         },
@@ -434,24 +422,19 @@ const PRESET_CONFIGS = {
             "clip_l": ["clip_l.safetensors", "clip_l"],
         },
     },
-    // ALBABIT-FIX: Large, Large Turbo, and Medium all merged into one preset --
-    // vae_hints/clip_hints are identical across all three (unlike Flux.2
-    // Dev/Klein, no clip_size_hints branching needed), so a combined
-    // unet_hints list is enough. Large listed first (flagship, quality-first,
-    // same convention as Flux.2's Dev-before-Klein ordering); Turbo is Large's
-    // distilled variant (Sampler tells it apart by filename via
-    // _deriveDistillationOverride, unaffected by this merge).
+    // ALBABIT-FIX: Large, Large Turbo, and Medium merged into one preset,
+    // identical vae_hints/clip_hints, so a combined unet_hints list is
+    // enough (Large first, flagship). Turbo is Large's distilled variant,
+    // Sampler tells it apart by filename, unaffected by this merge.
     "SD3.5": {
         "unet_hints":    [
             "sd3.5_large", "sd3-5_large", "sd3.5_large_turbo", "sd3.5_turbo", "sd3-5_turbo",
             "sd3.5_medium", "sd3-5_medium",
         ],
-        // ALBABIT-FIX: every official SD3.5 release (ComfyUI's own bundled
-        // workflow template, the Comfy-Org HF repo, the official examples page)
-        // ships VAE baked into the main checkpoint -- no standalone SD3.5 VAE
-        // file was found anywhere. "Baked VAE (from UNET)" listed first so it's
-        // the auto-fill default; the old hints stay as a fallback in case a
-        // standalone file does turn up for some user.
+        // ALBABIT-FIX: every official SD3.5 release ships VAE baked into the
+        // checkpoint, no standalone file found anywhere. "Baked VAE (from
+        // UNET)" listed first as the auto-fill default; old hints kept as
+        // a fallback in case a standalone file turns up for some user.
         "vae_hints":     ["Baked VAE (from UNET)", "sd3_vae", "sd3.5_vae", "sd3"],
         "clip_hints":    {
             "clip_l": ["clip_l.safetensors", "clip_l"],
@@ -468,22 +451,11 @@ const PRESET_CONFIGS = {
             "clip_g": ["clip_g.safetensors", "clip_g"],
         },
     },
-    // ALBABIT-FIX: unet_hints previously matched any Wan 2.1 file regardless
-    // of size -- with both 1.3B and 14B installed, findMatchingFile would
-    // pick whichever sorted first in the file list, not the user's intent.
-    // ALBABIT-FIX (bug caught by Albabit, 2026-07-17): a first attempt added
-    // bare "14b"/"1.3b" tokens directly to unet_hints -- but findMatchingFile
-    // tests each hint against EVERY available file with no architecture
-    // awareness, so a bare "14b" also matched Wan 2.2's own 14B-class
-    // high_noise/low_noise files (e.g. "wan2.2_i2v_high_noise_14B_fp16..."),
-    // hijacking "Wan 2.1"'s auto-fill onto a completely different
-    // architecture. Fixed via unet_size_priority (see _resolveUnetMatch)
-    // instead: size tokens are now only ever considered among files that
-    // ALREADY matched one of these architecture-identifying unet_hints, never
-    // tested against the full file list on their own. VAE/T5 untouched --
-    // confirmed shared across both sizes on HF (Comfy-Org/Wan_2.1_ComfyUI_repackaged:
-    // single wan_2.1_vae.safetensors + umt5_xxl_* files, no size-specific
-    // variants) -- no 🧲 needed here.
+    // ALBABIT-FIX: 1.3B/14B size resolved via unet_size_priority
+    // (_resolveUnetMatch), not bare "14b"/"1.3b" hints (bug caught by
+    // Albabit: those also matched Wan 2.2's own 14B-class files, no
+    // architecture awareness in findMatchingFile). VAE/T5 are shared
+    // across both sizes on HF, no size handling needed there.
     "Wan 2.1": {
         "unet_hints":    ["wan2.1", "wan_2.1", "wan-2.1", "Wan2.1"],
         "unet_size_priority": ["14b", "1.3b"],
@@ -739,20 +711,14 @@ function autoFillPresetFiles(node, cleanPreset) {
 // no longer match what autoFillPresetFiles() would pick right now, with a "✎"
 // label marker (same pattern as radiance_sampler.js/radiance_prompt.js).
 const PRESET_MARKER = " ✎";
-// ALBABIT-FIX: "🧲" marks unet_name whenever the file is a recognized preset
-// variant AND its model_meta output actually reaches a live Sampler right now
-// (see _isModelMetaConnected below) -- the marker's whole justification is
-// "this feeds the Sampler's model_meta magnets", so it's gated on that link
-// actually existing, not just on the file being recognized. llm_encoder's own
-// "🧲" under Klein's clip_size_hints is a DIFFERENT, Loader-internal fact
-// (unet_name's size determines the right CLIP file) with no relation to
-// model_meta/the Sampler -- left ungated, same category as "⛓" below.
+// ALBABIT-FIX: "🧲" marks unet_name only when its model_meta output actually
+// reaches a live Sampler (_isModelMetaConnected below), not just when the
+// file is recognized. llm_encoder's own "🧲" under clip_size_hints is a
+// different, Loader-internal fact with no Sampler relation, left ungated.
 const LINKED_MARKER = " 🧲";
-// ALBABIT-FIX: for companion_linked presets (Wan 2.2), either the high_noise
-// or low_noise UNET is a valid pick -- "⛓" marks unet_name instead of "✎"
-// to signal its companion is auto-loaded server-side, not a manual mistake.
-// Purely a Loader-internal fact (nodes_loader.py's _find_wan_moe_companion()
-// runs regardless of what's downstream) -- unlike "🧲" above, NOT gated on
+// ALBABIT-FIX: for companion_linked presets (Wan 2.2), "⛓" marks unet_name
+// instead of "✎" to signal its companion is auto-loaded server-side, not a
+// manual mistake. Purely Loader-internal, unlike "🧲" above, not gated on
 // model_meta being connected.
 const COMPANION_MARKER = " ⛓";
 
@@ -893,12 +859,9 @@ function refreshNodeSize(node) {
     if (!node.computeSize) return;
 
     const sz = node.computeSize();
-    // ALBABIT-FIX: directly mutating node.size[i] updates the LiteGraph
-    // model but Vue's node component never observes it, so the rendered
-    // box keeps its old (larger) height forever. node.setSize(...) is the
-    // API Vue's resize handling actually reacts to, and computeSize() is
-    // already correct synchronously here (no DOM-timing issue), so a
-    // single immediate call is enough.
+    // ALBABIT-FIX: directly mutating node.size[i] updates LiteGraph but Vue's
+    // node component never observes it, keeping the old height forever.
+    // node.setSize(...) is the API Vue's resize handling actually reacts to.
     node.setSize([Math.max(node.size[0], sz[0]), sz[1]]);
     app.graph.setDirtyCanvas(true, true);
 }
@@ -940,14 +903,9 @@ function updateLoaderUI(node, forceAutoFill = false) {
         if (w.name === "preset" || w.name === "unet_name") {
             setWidgetVisible(w, true, node);
         } else if (w.name === "vae_name") {
-            // ALBABIT-FIX: hide vae_name once it's resolved to the "Baked VAE
-            // (from UNET)" sentinel -- nothing left to choose, same treatment
-            // as weight_dtype/model_type/clip_dtype above. Stays visible if a
-            // real standalone file was found/selected instead (e.g. the
-            // preset's vae_hints matched a real file the user has installed),
-            // so it can still be seen/changed. "Custom" mode (isCustom branch
-            // above) always shows it regardless, as the manual-control escape
-            // hatch.
+            // ALBABIT-FIX: hide vae_name once resolved to "Baked VAE (from
+            // UNET)", nothing left to choose. Stays visible for a real
+            // standalone file instead. "Custom" mode always shows it.
             setWidgetVisible(w, w.value !== "Baked VAE (from UNET)", node);
         } else if (ALL_CLIP_WIDGETS.includes(w.name)) {
             const shouldShow = activeSlots.includes(w.name);
@@ -963,15 +921,11 @@ function updateLoaderUI(node, forceAutoFill = false) {
     updatePresetDivergenceMarkers(node);
 }
 
-// ALBABIT-FIX: app.registerExtension({ nodeCreated, loadedGraphNode }) wraps
-// presetW.callback / modelTypeW.callback AFTER Vue (Nodes 2.0) has already
-// mounted the combo widget components, so the wrapped callback is never
-// invoked when the user changes the dropdown (no console output, nothing is
-// folded/auto-filled). The beforeRegisterNodeDef + prototype.onNodeCreated /
-// onConfigure pattern (as used in radiance_sampler.js) hooks the node before
-// widget construction, so the wrapped callbacks are the ones Vue captures and
-// actually fire on user interaction. The preset/auto-fill logic itself
-// (updateLoaderUI, autoFillPresetFiles, PRESET_SLOTS, ...) is unchanged.
+// ALBABIT-FIX: app.registerExtension's nodeCreated/loadedGraphNode wraps
+// callbacks AFTER Vue (Nodes 2.0) has already mounted the widgets, so the
+// wrapped callback never fires on user interaction. beforeRegisterNodeDef +
+// prototype.onNodeCreated/onConfigure (same as radiance_sampler.js) hooks
+// before widget construction instead, so Vue captures the wrapped version.
 app.registerExtension({
     name: "Radiance.UnifiedLoaderSync",
 
@@ -1057,13 +1011,11 @@ app.registerExtension({
             const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
             this._configuredByLoad = true;
             const node = this;
-            // ALBABIT-FIX: a single 100ms reapply can fire before graph.configure()
-            // has finished applying the saved "preset" widget value, so
-            // updateLoaderUI reads the still-default value and folds as if
-            // "Custom" (showing every widget) — and nothing corrects it
-            // afterwards. Mirror radiance_sampler.js's onConfigure: 150ms for
-            // Vue's first layout pass, 600ms as a safety net for heavy
-            // workflows where configure() takes longer than 150ms.
+            // ALBABIT-FIX: a single 100ms reapply can fire before
+            // graph.configure() finishes applying the saved "preset" value,
+            // folding as "Custom" with nothing to correct it after. Mirrors
+            // radiance_sampler.js: 150ms for Vue's first layout pass, 600ms
+            // as a safety net for heavier workflows.
             setTimeout(() => updateLoaderUI(node, false), 150);
             setTimeout(() => updateLoaderUI(node, false), 600);
             return r;
