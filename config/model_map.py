@@ -115,6 +115,30 @@ RADIANCE_MODEL_MAP: dict = {
         "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/loras/ltx-2.5-22b-distilled-lora-450-bf16.safetensors",
         "type": "loras",
     },
+    # MiniMax H3 (huggingface.co/Comfy-Org/MiniMax-H3). fl2va = text/image-to-
+    # video, the fl2va_bf16/pruned_int8_convrot pair matches the "MiniMax H3"
+    # / "MiniMax H3 (Low VRAM)" preset pair below. ref2va (reference-to-video)
+    # is a separate checkpoint family, not catalogued. Out of scope for now.
+    "minimax_h3_fl2va_bf16.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_bf16.safetensors",
+        "type": "diffusion_models",
+    },
+    "minimax_h3_fl2va_pruned_int8_convrot.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "type": "diffusion_models",
+    },
+    "minimax_h3_video_vae_fp16.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors",
+        "type": "vae",
+    },
+    "minimax_h3_audio_vae_fp32.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors",
+        "type": "vae",
+    },
+    "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "type": "text_encoders",
+    },
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -598,6 +622,20 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "fp8_e4m3fn",
     },
+    # ALBABIT-FIX: both presets keep weight_dtype/clip_dtype at "default".
+    # The size difference is a smaller checkpoint (unet_hints in
+    # radiance_loader.js), not a dtype cast; the pruned/nvfp4_awq files use
+    # MiniMax's own quantization, already detected natively by comfy.sd.
+    "MiniMax H3": {
+        "model_type": "minimax",
+        "weight_dtype": "default",
+        "clip_dtype": "default",
+    },
+    "MiniMax H3 (Low VRAM)": {
+        "model_type": "minimax",
+        "weight_dtype": "default",
+        "clip_dtype": "default",
+    },
     "Lumina2": {
         "model_type": "lumina2",
         "weight_dtype": "fp16",
@@ -701,6 +739,8 @@ VIDEO_PRESET_NAMES: set = {
     "LTX Video 2.3 (Low VRAM)",
     "LTX Video 2.5",
     "LTX Video 2.5 (Low VRAM)",
+    "MiniMax H3",
+    "MiniMax H3 (Low VRAM)",
     "Mochi",
     "Wan 2.1",
     "Wan 2.1 (Low VRAM)",
@@ -714,5 +754,5 @@ VIDEO_PRESET_NAMES: set = {
 # filtered. "ltx" renamed to "ltxv" to match sampler_utils.py.
 VIDEO_MODEL_TYPES: set = {
     "hunyuan_video", "wan", "wan_ti2v", "ltxv", "ltxav",
-    "cosmos", "cogvideox", "mochi",
+    "cosmos", "cogvideox", "mochi", "minimax",
 }

@@ -36,6 +36,7 @@ from ...loader_utils import (
     load_unet_and_baked_vae,
     load_clip_stack,
     load_standalone_vae,
+    construct_audio_vae,
     apply_lora_stack,
     _unet_cache,
     _clip_cache,
@@ -154,6 +155,8 @@ MODEL_TYPES = [
     "cosmos", "cogvideox", "mochi",
     # ALBABIT-FIX: Chroma (distilled Flux) and Flux.2 / Flux.2 Klein
     "chroma", "flux2", "flux2-klein",
+    # ALBABIT-FIX: MiniMax H3, a joint video+audio DiT, 24ch video latent.
+    "minimax",
 ]
 
 WEIGHT_DTYPES = ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"]
@@ -381,7 +384,7 @@ class RadianceUnifiedLoader:
         # ════════════════════════════════════════════════════════════════
         # No audio_vae_name slot on the base loader -- always passed "None".
         model, vae, _audio_vae, unet_time, unet_cache_hit, vae_time, vae_cache_hit = load_unet_and_baked_vae(
-            unet_path, unet_name, weight_dtype, offload_mode, vae_name, "None",
+            unet_path, unet_name, weight_dtype, offload_mode, vae_name, "None", resolved_type,
             caching, divider, info_lines
         )
 
@@ -642,7 +645,7 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
         # 4. LOAD UNET  (+ optional baked VAE / Audio VAE extraction)
         # ════════════════════════════════════════════════════════════════
         model, vae, audio_vae, unet_time, unet_cache_hit, vae_time, vae_cache_hit = load_unet_and_baked_vae(
-            unet_path, unet_name, weight_dtype, offload_mode, vae_name, audio_vae_name,
+            unet_path, unet_name, weight_dtype, offload_mode, vae_name, audio_vae_name, resolved_type,
             caching, divider, info_lines
         )
 
@@ -656,7 +659,7 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
             if companion_path:
                 model_low_noise, _, _, _, _, _, _ = load_unet_and_baked_vae(
                     companion_path, companion_name, weight_dtype, offload_mode,
-                    "None", "None", caching, divider, info_lines
+                    "None", "None", resolved_type, caching, divider, info_lines
                 )
             else:
                 logger.warning(f"WAN 2.2 companion UNET not found: '{companion_name}'")
@@ -704,14 +707,8 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
                     info_lines.append(f"AUDIO VAE: {audio_vae_name} (cached)")
                 else:
                     try:
-                        # ALBABIT-FIX: AudioVAE no longer takes sd directly
-                        # (ComfyUI 0.22.0+) — use state_dict_prefix_replace +
-                        # comfy.sd.VAE, mirroring LTXVAudioVAELoader.
                         sd, metadata = comfy.utils.load_torch_file(audio_vae_path, return_metadata=True)
-                        sd = comfy.utils.state_dict_prefix_replace(
-                            sd, {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."}, filter_keys=True
-                        )
-                        audio_vae = comfy.sd.VAE(sd=sd, metadata=metadata)
+                        audio_vae = construct_audio_vae(sd, metadata, resolved_type)
                         av_time = time.time() - t0
                         logger.info(f"Audio VAE loaded {divider} {audio_vae_name} {divider} {av_time:.1f}s")
                         info_lines.append(f"AUDIO VAE: {audio_vae_name} ({av_time:.1f}s)")
