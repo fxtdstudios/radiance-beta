@@ -52,6 +52,10 @@ const PRESET_SLOTS = {
     "LTX Video 2.5": ["llm_encoder"],
     "LTX Video 2.5 (Low VRAM)": ["llm_encoder"],
     "Lumina2": ["llm_encoder"],
+    // ALBABIT-FIX: MiniMax H3's conditioning encoder is a single Qwen3-VL-32B
+    // checkpoint. One llm_encoder slot, same shape as Flux.2/Z-Image.
+    "MiniMax H3": ["llm_encoder"],
+    "MiniMax H3 (Low VRAM)": ["llm_encoder"],
     "Mochi": ["t5xxl"],
     "PixArt Sigma": ["t5xxl"],
     "SD 1.5": ["clip_l"],
@@ -345,6 +349,28 @@ const PRESET_CONFIGS = {
         "clip_hints":    {
             "llm_encoder": ["gemma_2_2b", "gemma2_2b", "gemma_2"],
         },
+    },
+    "MiniMax H3": {
+        "unet_hints":    ["minimax_h3_fl2va_bf16.safetensors", "minimax_h3_fl2va_bf16", "minimax_h3_fl2va"],
+        "vae_hints":     ["minimax_h3_video_vae_fp16.safetensors", "minimax_h3_video_vae"],
+        "audio_vae_hints": ["minimax_h3_audio_vae_fp32.safetensors", "minimax_h3_audio_vae"],
+        "clip_hints":    {
+            "llm_encoder": ["qwen3vl_32b_minimax_h3_bf16.safetensors", "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "qwen3vl_32b_minimax_h3", "qwen3vl"],
+        },
+        "extra_widgets": ["audio_vae_name"],
+    },
+    "MiniMax H3 (Low VRAM)": {
+        "unet_hints":    ["minimax_h3_fl2va_pruned_int8_convrot.safetensors", "minimax_h3_fl2va_pruned_int8_convrot", "minimax_h3_fl2va_pruned"],
+        "vae_hints":     ["minimax_h3_video_vae_fp16.safetensors", "minimax_h3_video_vae"],
+        "audio_vae_hints": ["minimax_h3_audio_vae_fp32.safetensors", "minimax_h3_audio_vae"],
+        // ALBABIT-FIX: nvfp4_awq (what Albabit's own checkpoint set uses) is
+        // tried first here, the lightest available quantization. The bf16
+        // preset above prefers full precision first instead.
+        "clip_hints":    {
+            "llm_encoder": ["qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "qwen3vl_32b_minimax_h3_int8_convrot.safetensors", "qwen3vl_32b_minimax_h3", "qwen3vl"],
+        },
+        "extra_widgets": ["audio_vae_name", "offload_mode"],
+        "offload_mode": "cpu_offload",
     },
     "Mochi": {
         "unet_hints":    ["mochi_preview", "mochi-1-preview", "genmo_mochi", "mochi"],
