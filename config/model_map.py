@@ -30,6 +30,90 @@ RADIANCE_MODEL_MAP: dict = {
         "url": "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors",
         "type": "vae",
     },
+    # Flux.2 Dev (huggingface.co/black-forest-labs/FLUX.2-dev, gated repo, request
+    # access first). fp8mixed is Comfy-Org's split/quantized repackaging, ungated.
+    "flux2-dev.safetensors": {
+        "url": "https://huggingface.co/black-forest-labs/FLUX.2-dev/resolve/main/flux2-dev.safetensors",
+        "type": "diffusion_models",
+    },
+    "flux2_dev_fp8mixed.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/diffusion_models/flux2_dev_fp8mixed.safetensors",
+        "type": "diffusion_models",
+    },
+    "mistral_3_small_flux2_bf16.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/text_encoders/mistral_3_small_flux2_bf16.safetensors",
+        "type": "text_encoders",
+    },
+    "mistral_3_small_flux2_fp8.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/text_encoders/mistral_3_small_flux2_fp8.safetensors",
+        "type": "text_encoders",
+    },
+    "mistral_3_small_flux2_fp4_mixed.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/text_encoders/mistral_3_small_flux2_fp4_mixed.safetensors",
+        "type": "text_encoders",
+    },
+    "flux2-vae.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors",
+        "type": "vae",
+    },
+    # Flux.2 Klein 9B (huggingface.co/black-forest-labs, full-precision repos
+    # gated, -fp8 repos ungated). Base = distillation-free variant, more
+    # flexible CFG/steps, same shape as Dev vs Klein.
+    "flux-2-klein-9b.safetensors": {
+        "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/resolve/main/flux-2-klein-9b.safetensors",
+        "type": "diffusion_models",
+    },
+    "flux-2-klein-9b-fp8.safetensors": {
+        "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-fp8/resolve/main/flux-2-klein-9b-fp8.safetensors",
+        "type": "diffusion_models",
+    },
+    "flux-2-klein-base-9b.safetensors": {
+        "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9B/resolve/main/flux-2-klein-base-9b.safetensors",
+        "type": "diffusion_models",
+    },
+    "flux-2-klein-base-9b-fp8.safetensors": {
+        "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9b-fp8/resolve/main/flux-2-klein-base-9b-fp8.safetensors",
+        "type": "diffusion_models",
+    },
+    "qwen_3_8b.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/resolve/main/split_files/text_encoders/qwen_3_8b.safetensors",
+        "type": "text_encoders",
+    },
+    "qwen_3_8b_fp8mixed.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/resolve/main/split_files/text_encoders/qwen_3_8b_fp8mixed.safetensors",
+        "type": "text_encoders",
+    },
+    "qwen_3_8b_fp4mixed.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/resolve/main/split_files/text_encoders/qwen_3_8b_fp4mixed.safetensors",
+        "type": "text_encoders",
+    },
+    # Flux.2 Klein 4B: full-precision UNET and both text encoders share one
+    # Comfy-Org repo (ungated), unlike the 9B tier above; -fp8 UNET variants
+    # are on their own black-forest-labs repos, also ungated here.
+    "flux-2-klein-4b.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-4b/resolve/main/split_files/diffusion_models/flux-2-klein-4b.safetensors",
+        "type": "diffusion_models",
+    },
+    "flux-2-klein-4b-fp8.safetensors": {
+        "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-4b-fp8/resolve/main/flux-2-klein-4b-fp8.safetensors",
+        "type": "diffusion_models",
+    },
+    "flux-2-klein-base-4b.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-4b/resolve/main/split_files/diffusion_models/flux-2-klein-base-4b.safetensors",
+        "type": "diffusion_models",
+    },
+    "flux-2-klein-base-4b-fp8.safetensors": {
+        "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-base-4b-fp8/resolve/main/flux-2-klein-base-4b-fp8.safetensors",
+        "type": "diffusion_models",
+    },
+    "qwen_3_4b.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-4b/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors",
+        "type": "text_encoders",
+    },
+    "qwen_3_4b_fp4_flux2.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-4b/resolve/main/split_files/text_encoders/qwen_3_4b_fp4_flux2.safetensors",
+        "type": "text_encoders",
+    },
     # LTX-2.3 transformer (46 GB) — only needed for generation, NOT for decoder training.
     "ltx-2.3-22b-dev.safetensors": {
         "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-dev.safetensors",
