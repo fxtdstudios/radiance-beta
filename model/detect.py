@@ -256,12 +256,10 @@ _BASE_VRAM = {
     "minimax": 66.0,
 }
 
-# ALBABIT-FIX: per-architecture state-dict key remap applied before handing a
-# standalone/baked audio-VAE state dict to comfy.sd.VAE(). Absent means no
-# remap needed, the common case (comfy.sd.VAE() already auto-detects MiniMax
-# H3's audio VAE from its raw keys). LTX-AV's own audio-VAE checkpoint
-# namespaces its tensors under audio_vae./vocoder., which needs stripping
-# first, mirroring LTXVAudioVAELoader's own remap.
+# ALBABIT-FIX: per-architecture key remap before handing an audio-VAE state
+# dict to comfy.sd.VAE(). Absent means no remap needed (comfy.sd.VAE() auto-
+# detects MiniMax H3's audio VAE natively). LTX-AV namespaces its tensors
+# under audio_vae./vocoder., which needs stripping first.
 AUDIO_VAE_KEY_REMAP = {
     "ltxav": {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."},
 }

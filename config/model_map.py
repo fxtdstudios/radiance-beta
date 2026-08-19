@@ -123,6 +123,49 @@ RADIANCE_MODEL_MAP: dict = {
         "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled-1.1.safetensors",
         "type": "diffusion_models",
     },
+    # Superseded by -1.1 above, kept only because it's still a real file and
+    # still a hint fallback for whoever downloaded it before -1.1 shipped.
+    "ltx-2.3-22b-distilled.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled.safetensors",
+        "type": "diffusion_models",
+    },
+    # fp8 tier lives on a separate official Lightricks repo, not a subfolder
+    # of the main LTX-2.3 one.
+    "ltx-2.3-22b-dev-fp8.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.3-fp8/resolve/main/ltx-2.3-22b-dev-fp8.safetensors",
+        "type": "diffusion_models",
+    },
+    "ltx-2.3-spatial-upscaler-x2-1.1.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+        "type": "latent_upscale_models",
+    },
+    # ltx-2.3-spatial-upscaler-x2-1.0.safetensors (still a real unet_hints
+    # fallback for whoever already has it on disk) was removed from the
+    # Lightricks repo, confirmed by Albabit; its old URL 404s now, so it is
+    # deliberately not catalogued here for auto-download.
+    "gemma_3_12B_it.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it.safetensors",
+        "type": "text_encoders",
+    },
+    "gemma_3_12B_it_fp4_mixed.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors",
+        "type": "text_encoders",
+    },
+    # LTX23_video_vae_bf16 / LTX23_audio_vae_bf16 / text_projection: community
+    # repackaging (Kijai/LTX2.3_comfy), not an official Lightricks/Comfy-Org
+    # repo. Confirmed acceptable to catalogue as a source by Albabit.
+    "LTX23_video_vae_bf16.safetensors": {
+        "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_video_vae_bf16.safetensors",
+        "type": "vae",
+    },
+    "LTX23_audio_vae_bf16.safetensors": {
+        "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_audio_vae_bf16.safetensors",
+        "type": "vae",
+    },
+    "ltx-2.3_text_projection_bf16.safetensors": {
+        "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/text_encoders/ltx-2.3_text_projection_bf16.safetensors",
+        "type": "text_encoders",
+    },
     # LTX-2 Video-VAE (AutoencoderKLLTX2Video, 32x/8x/128ch, 2.44 GB) — shared by LTX-2
     # and LTX-2.3. This is all the RUDRA decoder needs to encode HDR -> latents.
     "ltx2_vae_config.json": {

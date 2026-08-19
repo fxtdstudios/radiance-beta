@@ -142,16 +142,12 @@ const PRESET_CONFIGS = {
         "offload_mode": "cpu_offload",
     },
     // ALBABIT-FIX: Dev and Klein merged into one preset now that Auto-Detect
-    // can tell them apart on its own (model/detect.py, single_blocks count).
+    // tells them apart on its own (model/detect.py, single_blocks count), so
     // unet_hints cover both families. Quality-first, same philosophy as
-    // MiniMax H3's presets below: full precision first (Dev bf16, Klein
-    // bf16/Base bf16, both sizes), falling through to each variant's -fp8
-    // tier, then generic substrings as a last resort. "Flux.2 (Low VRAM)"
-    // inverts this and never lists a full-precision file, even as a
-    // fallback: those either need a separate gated-repo license (Dev,
-    // Klein 9B/Base 9B) or are simply much larger, so silently landing on
-    // one under a "Low VRAM" label would defeat the preset's purpose. It
-    // leaves the widget unmatched instead, same as MiniMax H3 (Low VRAM).
+    // MiniMax H3's presets below: full precision first, falling through to
+    // each variant's -fp8 tier. "Flux.2 (Low VRAM)" inverts this and never
+    // lists a full-precision file, even as a fallback (several need a
+    // separate gated-repo license too), leaving the widget unmatched instead.
     "Flux.2": {
         "unet_hints": [
             "flux2-dev.safetensors",
@@ -293,6 +289,10 @@ const PRESET_CONFIGS = {
             "text_projection": ["ltx-2.3_text_projection_bf16.safetensors", "ltx-2.3_text_projection", "text_projection", "Baked (from UNET)"],
         },
         "extra_widgets": ["upscale_model_name", "audio_vae_name"],
+        // ALBABIT-FIX: x2-1.0 was removed from the Lightricks repo, replaced
+        // by x2-1.1. Kept here only so a local file from before the removal
+        // still auto-matches. Deliberately not in RADIANCE_MODEL_MAP, its
+        // old download URL 404s now.
         "upscale_hints": ["ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "ltx-2.3-spatial-upscaler-x2-1.0.safetensors", "ltx-2.3", "ltx_2.3", "latent_upsampler", "upsampler"],
     },
     "LTX Video 2.3 (Low VRAM)": {
@@ -368,17 +368,12 @@ const PRESET_CONFIGS = {
         },
     },
     // ALBABIT-FIX: quality-first for "MiniMax H3", same philosophy as
-    // Flux.2's Dev-first unet_hints above (bf16 before fp8/pruned/quantized
-    // tiers). bf16 requests far more than a 32GB card holds natively, but
-    // still runs via ComfyUI's own automatic lowvram partial-load
-    // (comfy/model_management.py), streaming the overflow from system RAM.
-    // Real-world cost on a 5090 was about +37% generation time for the full
-    // vs pruned+int8 UNET, not the much larger hit naive VRAM-vs-file-size
-    // math would suggest. "MiniMax H3 (Low VRAM)" stays on the pruned/
-    // quantized tier instead and never lists bf16, even as a fallback:
-    // silently landing on the ~66GB file under a "Low VRAM" label would
-    // contradict that preset's own promise of staying fast and light, so it
-    // leaves the widget unmatched (manual pick) rather than reaching that far.
+    // Flux.2's Dev-first unet_hints above. bf16 exceeds a 32GB card's native
+    // capacity but still runs via ComfyUI's automatic lowvram partial-load,
+    // at a real-world cost of about +37% generation time on a 5090, not a
+    // dealbreaker. "MiniMax H3 (Low VRAM)" never lists bf16, even as a
+    // fallback, leaving the widget unmatched instead of silently reaching
+    // for a file that large under a "Low VRAM" label.
     "MiniMax H3": {
         "unet_hints": [
             "minimax_h3_fl2va_bf16.safetensors", "minimax_h3_fl2va_bf16",
