@@ -108,11 +108,14 @@ class TestMiniMaxH3Tables:
         assert "minimax" in _BASE_VRAM
         assert "minimax" in _BASE_CLIP_VRAM
 
-    def test_model_map_lists_both_diffusion_model_variants_with_hf_urls(self):
+    def test_model_map_lists_every_diffusion_model_variant_with_hf_urls(self):
         from radiance.config.model_map import RADIANCE_MODEL_MAP
         for fname in (
             "minimax_h3_fl2va_bf16.safetensors",
+            "minimax_h3_fl2va_pruned_bf16.safetensors",
+            "minimax_h3_fl2va_int8_convrot.safetensors",
             "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+            "minimax_h3_fl2va_pruned_fp8_scaled.safetensors",
         ):
             assert fname in RADIANCE_MODEL_MAP
             entry = RADIANCE_MODEL_MAP[fname]
@@ -126,11 +129,18 @@ class TestMiniMaxH3Tables:
             assert fname in RADIANCE_MODEL_MAP
             assert RADIANCE_MODEL_MAP[fname]["type"] == "vae"
 
-    def test_model_map_lists_text_encoder(self):
+    def test_model_map_lists_every_text_encoder_variant(self):
         from radiance.config.model_map import RADIANCE_MODEL_MAP
-        fname = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
-        assert fname in RADIANCE_MODEL_MAP
-        assert RADIANCE_MODEL_MAP[fname]["type"] == "text_encoders"
+        for fname in (
+            "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+            "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+            "qwen3vl_32b_minimax_h3_bf16.safetensors",
+        ):
+            assert fname in RADIANCE_MODEL_MAP
+            entry = RADIANCE_MODEL_MAP[fname]
+            assert entry["type"] == "text_encoders"
+            assert entry["url"].startswith("https://huggingface.co/Comfy-Org/MiniMax-H3/")
+            assert entry["url"].endswith(fname)
 
 
 class TestConstructAudioVae:
