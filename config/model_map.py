@@ -116,15 +116,35 @@ RADIANCE_MODEL_MAP: dict = {
         "type": "loras",
     },
     # MiniMax H3 (huggingface.co/Comfy-Org/MiniMax-H3). fl2va = text/image-to-
-    # video, the fl2va_bf16/pruned_int8_convrot pair matches the "MiniMax H3"
-    # / "MiniMax H3 (Low VRAM)" preset pair below. ref2va (reference-to-video)
-    # is a separate checkpoint family, not catalogued. Out of scope for now.
+    # video, every diffusion_models/text_encoders quantization tier Comfy-Org
+    # publishes for it. bf16 is the "MiniMax H3" preset's default UNET
+    # (quality-first, same philosophy as the Flux.2 preset): it exceeds a
+    # 32GB card's native capacity alongside a text encoder, so ComfyUI's own
+    # automatic lowvram partial-load streams the overflow from system RAM,
+    # but the real-world cost measured on a 5090 was only about +37%
+    # generation time, not a dealbreaker. pruned_int8_convrot (matches the
+    # official workflow) is the "MiniMax H3 (Low VRAM)" preset's default
+    # instead, for users who want the lighter/faster tier. ref2va (reference-
+    # to-video) is a separate checkpoint family, not catalogued. Out of scope
+    # for now.
     "minimax_h3_fl2va_bf16.safetensors": {
         "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_bf16.safetensors",
         "type": "diffusion_models",
     },
     "minimax_h3_fl2va_pruned_int8_convrot.safetensors": {
         "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "type": "diffusion_models",
+    },
+    "minimax_h3_fl2va_int8_convrot.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_int8_convrot.safetensors",
+        "type": "diffusion_models",
+    },
+    "minimax_h3_fl2va_pruned_bf16.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_bf16.safetensors",
+        "type": "diffusion_models",
+    },
+    "minimax_h3_fl2va_pruned_fp8_scaled.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_fp8_scaled.safetensors",
         "type": "diffusion_models",
     },
     "minimax_h3_video_vae_fp16.safetensors": {
@@ -137,6 +157,14 @@ RADIANCE_MODEL_MAP: dict = {
     },
     "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors": {
         "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "type": "text_encoders",
+    },
+    "qwen3vl_32b_minimax_h3_int8_convrot.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+        "type": "text_encoders",
+    },
+    "qwen3vl_32b_minimax_h3_bf16.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors",
         "type": "text_encoders",
     },
 }

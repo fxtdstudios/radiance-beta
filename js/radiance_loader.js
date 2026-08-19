@@ -350,24 +350,52 @@ const PRESET_CONFIGS = {
             "llm_encoder": ["gemma_2_2b", "gemma2_2b", "gemma_2"],
         },
     },
+    // ALBABIT-FIX: quality-first for "MiniMax H3", same philosophy as
+    // Flux.2's Dev-first unet_hints above (bf16 before fp8/pruned/quantized
+    // tiers). bf16 requests far more than a 32GB card holds natively, but
+    // still runs via ComfyUI's own automatic lowvram partial-load
+    // (comfy/model_management.py), streaming the overflow from system RAM.
+    // Real-world cost on a 5090 was about +37% generation time for the full
+    // vs pruned+int8 UNET, not the much larger hit naive VRAM-vs-file-size
+    // math would suggest. "MiniMax H3 (Low VRAM)" stays on the pruned/
+    // quantized tier instead and never lists bf16, even as a fallback:
+    // silently landing on the ~66GB file under a "Low VRAM" label would
+    // contradict that preset's own promise of staying fast and light, so it
+    // leaves the widget unmatched (manual pick) rather than reaching that far.
     "MiniMax H3": {
-        "unet_hints":    ["minimax_h3_fl2va_bf16.safetensors", "minimax_h3_fl2va_bf16", "minimax_h3_fl2va"],
+        "unet_hints": [
+            "minimax_h3_fl2va_bf16.safetensors", "minimax_h3_fl2va_bf16",
+            "minimax_h3_fl2va_pruned_int8_convrot.safetensors", "minimax_h3_fl2va_pruned_int8_convrot",
+            "minimax_h3_fl2va_pruned_fp8_scaled.safetensors", "minimax_h3_fl2va_pruned_fp8_scaled",
+            "minimax_h3_fl2va_int8_convrot.safetensors", "minimax_h3_fl2va_int8_convrot",
+            "minimax_h3_fl2va_pruned_bf16.safetensors", "minimax_h3_fl2va_pruned_bf16",
+            "minimax_h3_fl2va",
+        ],
         "vae_hints":     ["minimax_h3_video_vae_fp16.safetensors", "minimax_h3_video_vae"],
         "audio_vae_hints": ["minimax_h3_audio_vae_fp32.safetensors", "minimax_h3_audio_vae"],
         "clip_hints":    {
-            "llm_encoder": ["qwen3vl_32b_minimax_h3_bf16.safetensors", "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "qwen3vl_32b_minimax_h3", "qwen3vl"],
+            "llm_encoder": [
+                "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "qwen3vl_32b_minimax_h3_nvfp4_awq",
+                "qwen3vl_32b_minimax_h3_int8_convrot.safetensors", "qwen3vl_32b_minimax_h3_int8_convrot",
+                "qwen3vl_32b_minimax_h3_bf16.safetensors", "qwen3vl_32b_minimax_h3_bf16",
+                "qwen3vl_32b_minimax_h3", "qwen3vl",
+            ],
         },
         "extra_widgets": ["audio_vae_name"],
     },
     "MiniMax H3 (Low VRAM)": {
-        "unet_hints":    ["minimax_h3_fl2va_pruned_int8_convrot.safetensors", "minimax_h3_fl2va_pruned_int8_convrot", "minimax_h3_fl2va_pruned"],
+        "unet_hints": [
+            "minimax_h3_fl2va_pruned_int8_convrot.safetensors", "minimax_h3_fl2va_pruned_int8_convrot",
+            "minimax_h3_fl2va_pruned_fp8_scaled.safetensors", "minimax_h3_fl2va_pruned_fp8_scaled",
+            "minimax_h3_fl2va_pruned",
+        ],
         "vae_hints":     ["minimax_h3_video_vae_fp16.safetensors", "minimax_h3_video_vae"],
         "audio_vae_hints": ["minimax_h3_audio_vae_fp32.safetensors", "minimax_h3_audio_vae"],
-        // ALBABIT-FIX: nvfp4_awq (what Albabit's own checkpoint set uses) is
-        // tried first here, the lightest available quantization. The bf16
-        // preset above prefers full precision first instead.
         "clip_hints":    {
-            "llm_encoder": ["qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "qwen3vl_32b_minimax_h3_int8_convrot.safetensors", "qwen3vl_32b_minimax_h3", "qwen3vl"],
+            "llm_encoder": [
+                "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "qwen3vl_32b_minimax_h3_nvfp4_awq",
+                "qwen3vl_32b_minimax_h3_int8_convrot.safetensors", "qwen3vl_32b_minimax_h3_int8_convrot",
+            ],
         },
         "extra_widgets": ["audio_vae_name", "offload_mode"],
         "offload_mode": "cpu_offload",
