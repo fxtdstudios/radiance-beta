@@ -143,14 +143,23 @@ const PRESET_CONFIGS = {
     },
     // ALBABIT-FIX: Dev and Klein merged into one preset now that Auto-Detect
     // can tell them apart on its own (model/detect.py, single_blocks count).
-    // unet_hints cover both families -- Dev first (flagship, quality-first),
-    // then Klein's sizes/distillation states (4B/9B, Base/distilled).
+    // unet_hints cover both families. Quality-first, same philosophy as
+    // MiniMax H3's presets below: full precision first (Dev bf16, Klein
+    // bf16/Base bf16, both sizes), falling through to each variant's -fp8
+    // tier, then generic substrings as a last resort. "Flux.2 (Low VRAM)"
+    // inverts this and never lists a full-precision file, even as a
+    // fallback: those either need a separate gated-repo license (Dev,
+    // Klein 9B/Base 9B) or are simply much larger, so silently landing on
+    // one under a "Low VRAM" label would defeat the preset's purpose. It
+    // leaves the widget unmatched instead, same as MiniMax H3 (Low VRAM).
     "Flux.2": {
         "unet_hints": [
-            "flux2-dev.safetensors", "flux2_dev_fp8mixed.safetensors",
-            "flux-2-klein-9b.safetensors",
-            "flux-2-klein-base-4b.safetensors",
-            "flux-2-klein-base-9b-fp8.safetensors",
+            "flux2-dev.safetensors",
+            "flux-2-klein-9b.safetensors", "flux-2-klein-base-9b.safetensors",
+            "flux-2-klein-4b.safetensors", "flux-2-klein-base-4b.safetensors",
+            "flux2_dev_fp8mixed.safetensors",
+            "flux-2-klein-9b-fp8.safetensors", "flux-2-klein-base-9b-fp8.safetensors",
+            "flux-2-klein-4b-fp8.safetensors", "flux-2-klein-base-4b-fp8.safetensors",
             "klein-9b-kv", "klein-base", "klein-9b", "klein-4b",
             "flux2-dev", "flux2_dev", "flux.2-dev",
             "flux2-klein", "flux2_klein", "flux.2-klein", "klein",
@@ -162,33 +171,41 @@ const PRESET_CONFIGS = {
             // Dev's encoder (Mistral) -- also the fallback when unet_name
             // isn't a recognized Klein size (see clip_size_hints, which
             // takes priority whenever a Klein 4B/9B file is detected).
-            "llm_encoder": ["mistral_3_small_flux2_bf16", "mistral_3_small_flux2_fp8", "mistral_3_small_flux2", "mistral_3", "mistral"],
+            "llm_encoder": [
+                "mistral_3_small_flux2_bf16.safetensors", "mistral_3_small_flux2_fp8.safetensors",
+                "mistral_3_small_flux2_fp4_mixed.safetensors",
+                "mistral_3_small_flux2_bf16", "mistral_3_small_flux2_fp8", "mistral_3_small_flux2", "mistral_3", "mistral",
+            ],
         },
         // ALBABIT-FIX: Klein's encoder (Qwen) must match its size (4B->qwen_3_4b,
         // 9B->qwen_3_8b*) -- resolved dynamically from the size token detected
-        // in unet_name. Quality-first: bf16 before fp8/fp4mixed.
+        // in unet_name. Quality-first: bf16 before fp8mixed/fp4mixed/fp4_flux2.
         "clip_size_hints": {
-            "9b": ["qwen_3_8b.safetensors", "qwen_3_8b", "qwen_3_8b_fp8mixed", "qwen_3_8b_fp4mixed", "qwen3_8b"],
-            "4b": ["qwen_3_4b.safetensors", "qwen_3_4b", "qwen3_4b"],
+            "9b": [
+                "qwen_3_8b.safetensors", "qwen_3_8b_fp8mixed.safetensors", "qwen_3_8b_fp4mixed.safetensors",
+                "qwen_3_8b", "qwen3_8b",
+            ],
+            "4b": [
+                "qwen_3_4b.safetensors", "qwen_3_4b_fp4_flux2.safetensors",
+                "qwen_3_4b", "qwen3_4b",
+            ],
         },
     },
     "Flux.2 (Low VRAM)": {
         "unet_hints": [
-            "flux2-dev.safetensors", "flux2_dev_fp8mixed.safetensors",
-            "flux-2-klein-9b.safetensors",
-            "flux-2-klein-base-4b.safetensors",
-            "flux-2-klein-base-9b-fp8.safetensors",
-            "klein-9b-kv", "klein-base", "klein-9b", "klein-4b",
-            "flux2-dev", "flux2_dev", "flux.2-dev",
-            "flux2-klein", "flux2_klein", "flux.2-klein", "klein",
+            "flux2_dev_fp8mixed.safetensors",
+            "flux-2-klein-9b-fp8.safetensors", "flux-2-klein-base-9b-fp8.safetensors",
+            "flux-2-klein-4b-fp8.safetensors", "flux-2-klein-base-4b-fp8.safetensors",
         ],
         "vae_hints":     ["flux2-vae", "flux2_vae", "flux2_ae", "full_encoder_small_decoder"],
         "clip_hints":    {
-            "llm_encoder": ["mistral_3_small_flux2_bf16", "mistral_3_small_flux2_fp8", "mistral_3_small_flux2", "mistral_3", "mistral"],
+            "llm_encoder": [
+                "mistral_3_small_flux2_fp8.safetensors", "mistral_3_small_flux2_fp4_mixed.safetensors",
+            ],
         },
         "clip_size_hints": {
-            "9b": ["qwen_3_8b.safetensors", "qwen_3_8b", "qwen_3_8b_fp8mixed", "qwen_3_8b_fp4mixed", "qwen3_8b"],
-            "4b": ["qwen_3_4b.safetensors", "qwen_3_4b", "qwen3_4b"],
+            "9b": ["qwen_3_8b_fp8mixed.safetensors", "qwen_3_8b_fp4mixed.safetensors"],
+            "4b": ["qwen_3_4b_fp4_flux2.safetensors"],
         },
         // ALBABIT-FIX: "Low VRAM" presets force offload_mode — expose the
         // widget so the user can still override it (e.g. on a higher-VRAM
