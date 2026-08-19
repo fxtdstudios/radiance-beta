@@ -79,13 +79,10 @@ _ARCH_HEURISTICS = [
     (lambda ks, f: any("blocks.block0.blocks.0.block.attn.to_q.0.weight" in k for k in ks), "cosmos"),
     # ALBABIT-FIX: CogVideoX UNET.
     (lambda ks, f: any("blocks.0.norm1.linear.weight" in k for k in ks), "cogvideox"),
-    # ALBABIT-FIX: WAN 2.2 TI2V-5B shares patch_embedding/time_embedding keys
-    # with every other WAN variant but its patch_embedding.weight takes 48
-    # input channels instead of 16 (verified on real checkpoints: TI2V-5B is
-    # [3072, 48, 1, 2, 2] vs 14B/1.3B's [*, 16, 1, 2, 2]) -- must be checked
-    # before the generic "wan" entry (different LATENT_CHANNELS/VAE/latent
-    # format, real crash risk otherwise: a 16ch empty latent fed to a UNET
-    # that expects 48ch).
+    # ALBABIT-FIX: TI2V-5B shares patch_embedding keys with every WAN variant
+    # but takes 48 input channels not 16 ([3072,48,1,2,2] vs [*,16,1,2,2] on
+    # real checkpoints). Must be checked before the generic "wan" entry, a
+    # 16ch empty latent fed to a 48ch UNET is a real crash risk.
     (lambda ks, f: any("patch_embedding" in k for k in ks)
      and any("time_embedding" in k for k in ks)
      and not any("joint_blocks" in k for k in ks)

@@ -190,13 +190,11 @@ class RadianceUnifiedLoader:
         # weights ship inside the main UNET checkpoint (see assemble_clip_paths).
         text_projection_list = ["None", "Baked (from UNET)"] + folder_paths.get_filename_list("text_encoders")
         text_projection_slot = lambda tip: (text_projection_list, {"default": "None", "tooltip": tip})
-        # ALBABIT-FIX: AuraFlow's official example workflow (CheckpointLoaderSimple
-        # only, no separate CLIPLoader) and its HF repo (fal/AuraFlow-v0.2, only a
-        # generic diffusers-format text_encoder/ folder, no distinct ComfyUI-ready
-        # filename) confirm it has no standalone text encoder file either -- same
-        # "Baked (from UNET)" mechanism as text_projection, on the t5xxl slot
-        # (AuraFlow's real encoder is a T5 variant per comfy.text_encoders.aura_t5,
-        # not clip_l -- see assemble_clip_paths/CLIP_SLOT_ORDER).
+        # ALBABIT-FIX: AuraFlow has no standalone text encoder file either
+        # (official workflow uses CheckpointLoaderSimple only, its HF repo
+        # only ships a diffusers-format folder). Same "Baked (from UNET)"
+        # mechanism as text_projection, on the t5xxl slot (AuraFlow's real
+        # encoder is T5, not clip_l, see assemble_clip_paths/CLIP_SLOT_ORDER).
         t5xxl_list = ["None", "Baked (from UNET)"] + folder_paths.get_filename_list("text_encoders")
         t5xxl_slot = lambda tip: (t5xxl_list, {"default": "None", "tooltip": tip})
 
@@ -233,13 +231,11 @@ class RadianceUnifiedLoader:
                                 "architecture. Override manually if detection fails."},
                 ),
                 # ── VAE ──
-                # ALBABIT-FIX: "Baked VAE (from UNET)" lets checkpoint-style files
-                # that embed their own VAE (e.g. SD3.5) skip the standalone vae_name
-                # file entirely -- same mechanism RadianceVideoLoader already uses
-                # for LTX 2.3. Appended (not prepended) so the raw combo default
-                # for architectures with real separate VAE files (Flux, SDXL,
-                # SD1.5...) is unchanged; per-preset auto-fill (vae_hints) is what
-                # actually selects it for presets where it's the norm.
+                # ALBABIT-FIX: "Baked VAE (from UNET)" lets checkpoint-style
+                # files (e.g. SD3.5) skip the standalone vae_name file, same
+                # mechanism as RadianceVideoLoader's LTX 2.3. Appended, not
+                # prepended, so the raw combo default stays unchanged for
+                # architectures with real separate VAE files.
                 "vae_name": (
                     folder_paths.get_filename_list("vae") + ["Baked VAE (from UNET)"],
                     {"tooltip": "VAE for encoding/decoding latents. "

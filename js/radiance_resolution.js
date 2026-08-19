@@ -207,12 +207,9 @@ function updateResolutionMarkers(node) {
     const scaleActive = scaleFactorW && parseFloat(scaleFactorW.value) !== 1.0;
     const mpActive     = mpTargetW && parseFloat(mpTargetW.value) > 0;
 
-    // ALBABIT-FIX: only redraw when a label actually changed -- this runs
-    // every 250ms via the polling loop (see onNodeCreated), and calling
-    // setDirtyCanvas unconditionally on every tick was the same "reassign
-    // even when unchanged" anti-pattern fixed in the Sampler's
-    // updateSigmaLocks() (radiance_sampler.js) after it interrupted manual
-    // widget typing there.
+    // ALBABIT-FIX: only redraw when a label actually changed, this runs
+    // every 250ms via the polling loop. Unconditional setDirtyCanvas here
+    // was the same anti-pattern fixed in the Sampler's updateSigmaLocks().
     let changed = false;
     if (_setLabelMarker(scaleFactorW, scaleActive, " 📐")) changed = true;
     if (_setLabelMarker(mpTargetW, mpActive, " 📐")) changed = true;
