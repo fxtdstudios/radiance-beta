@@ -323,14 +323,29 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 - [ ] **Nothing has ever run in live ComfyUI on a GPU.** Every number in the
       audits is CPU and headless. Until a real graph renders a real frame, the
       verdict stays *ready with conditions*.
-- [ ] **The WebGPU backend is unverified, and the viewer panels are only
-      verified structurally.** 247 JavaScript tests now cover the grade maths,
-      the probe, the scope scales, OpenColorIO and the framing guides, and two
-      of them compile the real shaders in a headless WebGL2 context and compare
-      them against the CPU implementations they were generated from. What is
-      still open: no CI environment available exposes `navigator.gpu`, so the
-      WGSL half of the shared grade definition has never been compiled, and the
-      panel code is held by source assertions rather than by driving the UI.
+- [x] **The WGSL grade is compiled and compared, and the panels are driven
+      rather than grepped.** 256 JavaScript tests, all green. The claim that no
+      CI environment exposes `navigator.gpu` was true of the browser and wrong
+      about the environment: headless Chromium has no `navigator.gpu` at all —
+      absent, not blocked, under `--enable-unsafe-webgpu` with SwiftShader,
+      with `--use-vulkan=swiftshader`, and with the Blink runtime flag, while
+      WebGL2 works in the same browser — but Deno ships WebGPU, and Mesa's
+      lavapipe gives it a software Vulkan device, so the runner still needs no
+      GPU. The emitted WGSL now runs the same 60-case matrix as the GLSL
+      against the same JS functions: 58 comparable samples, worst deviation
+      3.1e-7 against a 2e-6 tolerance, the two excluded for the same fp32 range
+      reason. Checked by mutation, not just by passing — reverting the WGSL to
+      flat lift, to unguarded gamma, or to the power-form contrast each turns
+      the suite red, and those are precisely the three ways the WebGPU path
+      used to disagree with WebGL. The panels are loaded in a real browser
+      against stubbed ComfyUI modules, built, and then operated: selects
+      changed, toggles clicked, state and store and label checked afterwards.
+      That immediately found one: switching the safe-area preset to Legacy
+      480-line left the caption below it still reading "SMPTE ST 2046-1 and EBU
+      R 95 specify the same two boxes" — right boxes, wrong standard named, in
+      a QC guide. Fixed. Still open, and smaller: the panel harness drives the
+      framing, scope, probe, OCIO and view sections, not every control in the
+      viewer.
 - [ ] **The public repo is 2.5 months behind.** `fxtdstudios/radiance` `main`
       is still at `64fee41` (2026-06-04); everything since lives in
       `fxtdstudios/radiance-beta`. Decide when beta merges down to public.
@@ -404,8 +419,9 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 - [x] Tiled VAE blending verified seamless and pinned by a test (the open note
       was stale — the cosine ramp had already landed).
 - [x] First JavaScript coverage: 27 tests over the shared DOM and widget
-      helpers, on `node --test`, wired into CI. Since grown to 247, including a
-      GPU lane that renders through the real shaders.
+      helpers, on `node --test`, wired into CI. Since grown to 256, including a
+      GPU lane that renders through the real shaders in both dialects and a
+      browser lane that builds and operates the panels.
 - [x] Four commits merged to `radiance-beta` `main` via PR #43.
 - [x] **Both ACES 2.0 tone scales hit the published reference.** 18% grey now
       lands at 10.000 / 13.193 / 14.512 / 15.747 / 16.824 nits at peaks of
