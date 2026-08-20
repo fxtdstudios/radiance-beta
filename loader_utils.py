@@ -316,7 +316,7 @@ def _require_baked_vae(vae, unet_name: str):
         )
 
 
-def construct_audio_vae(sd: dict, metadata, resolved_type: str) -> "comfy.sd.VAE":
+def construct_audio_vae(sd: dict, metadata, resolved_type: str) -> comfy.sd.VAE:
     """Build a comfy.sd.VAE from a raw audio-VAE state dict.
 
     Applies the architecture's key remap first if AUDIO_VAE_KEY_REMAP has one

@@ -14,7 +14,6 @@ import time
 
 import torch
 import folder_paths
-import comfy.sd
 import comfy.utils
 import comfy.model_management
 from comfy.cldm.control_types import UNION_CONTROLNET_TYPES
