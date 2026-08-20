@@ -7,6 +7,7 @@ import hashlib
 from typing import Dict, Any, Tuple
 
 import folder_paths
+import comfy.nested_tensor
 
 from radiance.model.detect import _BASE_VRAM, _BASE_CLIP_VRAM
 
@@ -257,6 +258,9 @@ def _align_up(val: int, scale: int) -> int:
 # 39...), not the stride*k+1 pattern every other VIDEO_MODEL_TYPES entry uses.
 MINIMAX_H3_MODEL_TYPE = "MiniMax H3 (24ch)"
 MINIMAX_H3_FPS = 24  # hardcoded FPS in nodes_minimax_h3.py — no variable-fps support
+# ALBABIT-FIX: audio latent's own temporal fps (AUDIO_LATENT_FPS in
+# nodes_minimax_h3.py), unrelated to the video's 24fps.
+MINIMAX_H3_AUDIO_FPS = 40
 
 
 def _minimax_align_frame_count(n: int) -> int:
@@ -265,6 +269,15 @@ def _minimax_align_frame_count(n: int) -> int:
     while n % 17 != 5:
         n += 1
     return n
+
+
+def _minimax_audio_latent_t(frame_count: int) -> int:
+    """Audio latent frame count for a given (already-aligned) video frame count.
+
+    Mirrors nodes_minimax_h3.py's temporal_shape() exactly: round(duration * 40).
+    """
+    duration = frame_count / MINIMAX_H3_FPS
+    return round(duration * MINIMAX_H3_AUDIO_FPS)
 
 
 def _minimax_video_latent_t(frame_count: int) -> int:
@@ -1135,6 +1148,18 @@ class RadianceResolution:
             logger.info(
                 f"Video latent 5D: (1, {latent_c}, {lat_t}, {lat_h}, {lat_w})"
             )
+            if model_type == MINIMAX_H3_MODEL_TYPE:
+                # ALBABIT-FIX: real bug, found live. MiniMaxH3Model.forward()
+                # does audio_src = x[1] unconditionally (comfy/ldm/minimax/
+                # model.py), even for pure T2V with no real audio content. A
+                # plain video-only tensor crashes with IndexError the instant
+                # sampling starts; the model needs a genuine NestedTensor
+                # (video, audio) pair, silence encoded as zeros, mirroring
+                # nodes_minimax_h3.py's _empty_av_latent() exactly.
+                audio_t = _minimax_audio_latent_t(_minimax_align_frame_count(actual_batch))
+                audio = torch.zeros(1, 32, 2, audio_t, dtype=torch.float32)
+                latent = comfy.nested_tensor.NestedTensor((latent, audio))
+                logger.info(f"Audio latent (silent): (1, 32, 2, {audio_t})")
         else:
             latent = torch.zeros(actual_batch, latent_c, lat_h, lat_w, dtype=torch.float32)
 
