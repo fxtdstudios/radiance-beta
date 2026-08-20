@@ -326,12 +326,10 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "steps": 64,
         "guidance_type": "cfg",
     },
-    # ALBABIT-FIX: MiniMax H3, verified against Comfy-Org's official T2V
-    # workflow template (KSamplerSelect=res_multistep, BasicScheduler=
-    # simple/20 steps). BasicGuider has no cfg input at all (zero widgets on
-    # that node in the template); cfg=1.0 pins it inert, same trick flux/ltxv
-    # already use, no alternate guidance mechanism to route to either so no
-    # guidance_type. No shift node in the reference pipeline, left neutral.
+    # ALBABIT-FIX: verified against Comfy-Org's official T2V workflow
+    # template (KSamplerSelect=res_multistep, BasicScheduler=simple/20
+    # steps). BasicGuider has zero widgets, so cfg=1.0 just pins it inert,
+    # same trick flux/ltxv use. No shift node in the reference pipeline.
     "minimax": {
         "cfg": 1.0,
         "scheduler": "simple",

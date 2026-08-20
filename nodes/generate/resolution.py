@@ -1150,12 +1150,10 @@ class RadianceResolution:
             )
             if model_type == MINIMAX_H3_MODEL_TYPE:
                 # ALBABIT-FIX: real bug, found live. MiniMaxH3Model.forward()
-                # does audio_src = x[1] unconditionally (comfy/ldm/minimax/
-                # model.py), even for pure T2V with no real audio content. A
-                # plain video-only tensor crashes with IndexError the instant
-                # sampling starts; the model needs a genuine NestedTensor
-                # (video, audio) pair, silence encoded as zeros, mirroring
-                # nodes_minimax_h3.py's _empty_av_latent() exactly.
+                # (comfy/ldm/minimax/model.py) does audio_src = x[1]
+                # unconditionally, crashing a video-only latent even for
+                # pure T2V. Needs a real NestedTensor(video, audio) pair,
+                # silence as zeros, mirroring _empty_av_latent() exactly.
                 audio_t = _minimax_audio_latent_t(_minimax_align_frame_count(actual_batch))
                 audio = torch.zeros(1, 32, 2, audio_t, dtype=torch.float32)
                 latent = comfy.nested_tensor.NestedTensor((latent, audio))

@@ -171,6 +171,24 @@ class TestHDRVAEDecodeContract(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "4D image latent or 5D video latent"):
             RadianceHDRVAEDecode().apply({"samples": "bad"}, object())
 
+    @pytest.mark.real_torch
+    def test_av_latent_decodes_only_the_video_stream(self):
+        """MiniMax H3 (and any future AV model) hands this node a nested
+        video+audio latent. This node only does HDR/tonemap/RUDRA on the
+        video stream, same split ComfyUI's own LTXVSeparateAVLatent uses
+        (unbind()[0] = video, [1] = audio); audio is a separate node's job."""
+        video = torch.zeros(1, 24, 3, 2, 2)
+        audio = torch.zeros(1, 32, 2, 5)
+
+        class FakeAVLatent:
+            is_nested = True
+
+            def unbind(self):
+                return [video, audio]
+
+        RadianceHDRVAEDecode().apply({"samples": FakeAVLatent()}, object())
+        self.assertIs(FakeDecode.last_kwargs["samples"]["samples"], video)
+
 
 if __name__ == "__main__":
     unittest.main()
