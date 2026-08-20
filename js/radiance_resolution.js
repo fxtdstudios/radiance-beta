@@ -158,15 +158,26 @@ function _syncVideoFramesStep(modelTypeW, videoFramesW) {
     _setWidgetStep(videoFramesW, _frameStride(modelTypeW?.value));
 }
 
-// ALBABIT-FIX: same class of bug as _syncVideoFramesStep, one level up.
-// duration_seconds's declared step (0.1) was too fine for durSecW.callback's
-// correction (below), so small clicks got snapped straight back. Step =
-// seconds per grid step (stride/fps), so a click always lands cleanly.
+// ALBABIT-FIX: same class of bug as _syncVideoFramesStep, one level up. Step
+// = seconds per grid step (stride/fps), so a click lands cleanly. Also sets
+// precision (never explicit, Python only declares step=0.1).
 function _syncDurationSecondsStep(modelTypeW, durSecW, frameRateW) {
     if (!durSecW) return;
     const isMiniMax = _isMiniMaxH3(modelTypeW?.value);
     const fps = isMiniMax ? 24.0 : (frameRateW ? parseFloat(frameRateW.value) || 24.0 : 24.0);
-    _setWidgetStep(durSecW, _frameStride(modelTypeW?.value) / fps);
+    const stepSeconds = _frameStride(modelTypeW?.value) / fps;
+    _setWidgetStep(durSecW, stepSeconds);
+    if (!durSecW.options) durSecW.options = {};
+    durSecW.options.precision = 2;
+    // ALBABIT-FIX: options.step/step2 only drive the +/- click delta. The
+    // native widget commit path snaps independently via options.round,
+    // which stayed at Python's declared 0.1 default and silently knocked an
+    // already grid-aligned click result back off-grid on every click,
+    // before durSecW.callback's own correction even ran (root cause of the
+    // intermittent "-" stall: each click compounded on that corrupted
+    // value instead of the aligned one). Syncing round to the same grid
+    // step stops the corruption at the source.
+    durSecW.options.round = stepSeconds;
 }
 
 function refreshNodeSize(node) {
@@ -389,6 +400,12 @@ app.registerExtension({
                 durSecW.callback = function () {
                     if (orig) orig.apply(this, arguments);
 
+                    // ALBABIT-FIX: now that _syncDurationSecondsStep keeps
+                    // options.round grid-aligned, a +/- click already lands
+                    // correctly by the time orig.apply() above returns, so
+                    // this rarely has to do anything. Left as a fallback for
+                    // values that aren't grid-aligned yet (typed or pasted
+                    // directly, or a model_type switch landing mid-grid).
                     if (frameModeW?.value === "Auto (Seconds)" && VIDEO_MODEL_TYPES_JS.has(modelTypeW?.value)) {
                         const { frames, fps } = _autoSecondsFrames(modelTypeW.value, durSecW.value, frameRateW?.value);
                         const precise = Math.round((frames / fps) * 100) / 100;
