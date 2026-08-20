@@ -2,6 +2,35 @@
 
 All notable changes to FXTD Radiance will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **The emitted WGSL is compiled and compared against the JS it comes from.**
+  `radiance_grade.js` emits GLSL and WGSL from the same file as its JS
+  functions; only the GLSL half was ever compiled, because headless Chromium
+  has no `navigator.gpu` at all -- absent rather than blocked, under every flag
+  combination tried, while WebGL2 works in the same browser. Deno ships WebGPU
+  and Mesa's lavapipe provides a software Vulkan device, so the WGSL now runs
+  the same 60-case matrix as the GLSL, on a runner with no GPU. Worst deviation
+  3.1e-7 against a 2e-6 tolerance. Reverting the WGSL to any of the three ways
+  the WebGPU path used to disagree with WebGL -- flat lift, unguarded gamma,
+  power-form contrast -- turns the suite red.
+- **The viewer panels are built and operated in a browser.** The panel code was
+  held by source assertions, which cannot tell you a panel builds; the week the
+  Viewer node rendered with no UI, every text-level check passed. The panels
+  now load against stubbed ComfyUI modules, get built, and get driven --
+  selects changed, toggles clicked -- with the instance state, the persisted
+  setting and the control label all checked afterwards.
+
+### Fixed
+
+- **The safe-area caption no longer describes the previous preset.** Switching
+  to Legacy 480-line redrew the boxes at 90/80 correctly but left the note
+  beneath reading "SMPTE ST 2046-1 and EBU R 95 specify the same two boxes".
+  The guide was right and the standard named under it was wrong, which in a QC
+  overlay is the worse half. Found by driving the panel, not by reading it.
+
 ## [3.4.0] - 2026-08-17
 
 A Viewer release. Everything below is in the Viewer unless it says otherwise.

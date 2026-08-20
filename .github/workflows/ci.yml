@@ -304,7 +304,7 @@ jobs:
   # slower than the rest of the suite. Not optional: it is the only check that
   # has caught the "compiles cleanly, renders black" class of bug here.
   gpu-test:
-    name: "GPU: OCIO display transform"
+    name: "GPU: shaders and panels"
     runs-on: ubuntu-latest
 
     steps:
@@ -327,6 +327,29 @@ jobs:
       # the whole composite shader.
       - name: Compile the emitted grade shader and compare against the JS
         run: node --test js/tests/grade_gpu.test.mjs
+
+      # The panels, built and operated in a real browser rather than asserted
+      # against the source. This is what would have caught the week the viewer
+      # node rendered with no UI: the module stopped parsing, so it stopped
+      # registering, and every text-level check still passed.
+      - name: Build and drive the viewer panels
+        run: node --test js/tests/panel_dom.test.mjs
+
+      # The WGSL half of the grade needs a different runtime. Headless Chromium
+      # has no navigator.gpu at all — not blocked, absent, under every flag
+      # combination including --enable-unsafe-webgpu with SwiftShader and with
+      # Vulkan — while WebGL2 works in the same browser. Deno ships WebGPU, and
+      # mesa-vulkan-drivers provides lavapipe, a software Vulkan device, so this
+      # needs no GPU on the runner.
+      - name: Install a software Vulkan driver for Deno's WebGPU
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Compile the emitted WGSL and compare against the JS
+        run: node --test js/tests/grade_wgsl_gpu.test.mjs
 
   # ── YAML / TOML lint ────────────────────────────────────────────────────────
   lint-config:

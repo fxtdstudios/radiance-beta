@@ -15940,17 +15940,29 @@ else:
 
         // ── Safe areas ──────────────────────────────────────────────────────
         const presets = RadianceViewer.SAFE_AREA_PRESETS;
+
+        // The caption is built before the row so the change handler can repaint
+        // it. It used to be written once: picking Legacy left "SMPTE ST 2046-1
+        // and EBU R 95 specify the same two boxes" sitting under a 90/80 guide
+        // that is explicitly not a current delivery spec. The boxes were right
+        // and their stated provenance was wrong, which in a QC guide is the
+        // worse of the two.
+        const note = document.createElement('div');
+        note.style.cssText = 'font-size:9px; line-height:1.45; color:rgba(255,255,255,0.32);';
+        const paintNote = () => {
+            const active = presets.find((p) => p.id === this.safeAreaPreset) || presets[0];
+            note.textContent = active.note;
+        };
+
         row('Safe areas', sel(presets, this.safeAreaPreset, (v) => {
             this.safeAreaPreset = v;
             localStorage.setItem('radiance_safe_preset', v);
+            paintNote();
             this._lastRenderContent?.();
             this.renderOverlay();
         }), 'Which published specification the safe-area boxes come from.');
 
-        const active = presets.find((p) => p.id === this.safeAreaPreset) || presets[0];
-        const note = document.createElement('div');
-        note.style.cssText = 'font-size:9px; line-height:1.45; color:rgba(255,255,255,0.32);';
-        note.textContent = active.note;
+        paintNote();
         box.appendChild(note);
 
         // ── Aspect matte ────────────────────────────────────────────────────
