@@ -7,7 +7,16 @@ import hashlib
 from typing import Dict, Any, Tuple
 
 import folder_paths
-import comfy.nested_tensor
+
+# ALBABIT-FIX: guarded like sampler.py/sampler_utils.py already do. An
+# unguarded import here would take down this whole node group's __init__.py
+# (Sampler, Loader, Prompt, VAE Decode, not just Resolution) on any ComfyUI
+# predating NestedTensor.
+try:
+    import comfy.nested_tensor
+    _HAS_NESTED_TENSOR = True
+except ImportError:
+    _HAS_NESTED_TENSOR = False
 
 from radiance.model.detect import _BASE_VRAM, _BASE_CLIP_VRAM
 
@@ -268,6 +277,20 @@ def _minimax_align_frame_count(n: int) -> int:
     n = max(5, n)
     while n % 17 != 5:
         n += 1
+    return n
+
+
+def _minimax_floor_frame_count(n: int) -> int:
+    """Snap DOWN to the nearest valid MiniMax H3 frame count (n % 17 == 5).
+
+    Companion to _minimax_align_frame_count (up): _minimax_video_latent_t
+    already floors internally for off-grid input, this exposes that same
+    floored frame count so audio_t derives from the identical basis instead
+    of a separately ceiling-aligned one, which drifted the two out of sync.
+    """
+    n = max(5, n)
+    while n % 17 != 5:
+        n -= 1
     return n
 
 
@@ -1154,7 +1177,18 @@ class RadianceResolution:
                 # unconditionally, crashing a video-only latent even for
                 # pure T2V. Needs a real NestedTensor(video, audio) pair,
                 # silence as zeros, mirroring _empty_av_latent() exactly.
-                audio_t = _minimax_audio_latent_t(_minimax_align_frame_count(actual_batch))
+                if not _HAS_NESTED_TENSOR:
+                    raise RuntimeError(
+                        "MiniMax H3 needs comfy.nested_tensor, which this ComfyUI "
+                        "install doesn't have. Update ComfyUI to a version with "
+                        "NestedTensor support to use this model_type."
+                    )
+                # ALBABIT-FIX: real bug, found via code review, not live. Was
+                # feeding a ceiling-aligned frame count here while lat_t above
+                # uses a floor-aligned one for the same off-grid actual_batch,
+                # so video and audio drifted out of sync (audio ran longer).
+                # _minimax_floor_frame_count matches what lat_t already uses.
+                audio_t = _minimax_audio_latent_t(_minimax_floor_frame_count(actual_batch))
                 audio = torch.zeros(1, 32, 2, audio_t, dtype=torch.float32)
                 latent = comfy.nested_tensor.NestedTensor((latent, audio))
                 logger.info(f"Audio latent (silent): (1, 32, 2, {audio_t})")
