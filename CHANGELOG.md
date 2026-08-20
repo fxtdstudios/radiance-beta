@@ -4,6 +4,28 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **The write engine moved out of the node layer.** `radiance/io/writer.py`
+  now holds the format tables, the output colour-space application, every save
+  backend and `write_frames` itself; `RadianceWrite.write` is a signature and a
+  delegation, and `delivery/handler.py` calls the engine directly instead of
+  instantiating the node to save a file. `nodes/io/write.py` drops from 2972 to
+  2201 lines and re-imports the moved helpers under their old private names, so
+  the reader, `RadianceEXRMultiPart` and `RadianceDigitalCinemaWrite` are
+  untouched. The node's parameter list is unchanged, so saved workflows keep
+  loading.
+
+  Coercing a file path or a VideoHelperSuite dict to frames still needs the
+  decoders, which belong to the reader — the engine takes a `read_media`
+  callback for that rather than importing upward, and the delivery path does
+  not supply one because it hands the writer a tensor.
+
+  Verified byte-for-byte across 42 cases: every write format, every output
+  colour space, and each of the named behaviours. The only differences are the
+  DPX header's creation timestamp, which differs between two runs of identical
+  code.
+
 ### Added
 
 - **The emitted WGSL is compiled and compared against the JS it comes from.**
@@ -16,6 +38,13 @@ All notable changes to FXTD Radiance will be documented in this file.
   3.1e-7 against a 2e-6 tolerance. Reverting the WGSL to any of the three ways
   the WebGPU path used to disagree with WebGL -- flat lift, unguarded gamma,
   power-form contrast -- turns the suite red.
+- **`tests/test_writer_layering.py`.** Six tests that make the write engine's
+  independence checkable rather than asserted in a docstring: the engine's AST
+  carries no node-layer import at any depth, it imports and writes a file in a
+  bare interpreter with no ComfyUI, the handler neither imports nor instantiates
+  the node, the node's signature still matches the engine's, and the handler's
+  keyword arguments are all real parameters — which is the delivery bug that
+  shipped, as a test.
 - **The viewer panels are built and operated in a browser.** The panel code was
   held by source assertions, which cannot tell you a panel builds; the week the
   Viewer node rendered with no UI, every text-level check passed. The panels
