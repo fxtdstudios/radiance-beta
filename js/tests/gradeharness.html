@@ -8,10 +8,9 @@
   emitted GLSL in a real WebGL2 context and compares it to the JS, pixel by
   pixel, over the grade settings a user can actually reach.
 
-  The WGSL half cannot be checked here: this container's Chromium has no
-  `navigator.gpu` at all. `grade.test.mjs` holds the two dialects to the same
-  set of functions structurally; that is weaker, and it is stated as such rather
-  than papered over.
+  The WGSL half is checked by `js/tests/wgslharness.mjs`, which does the same
+  thing on a real WebGPU device under Deno -- headless Chromium has no
+  `navigator.gpu` at all, so the two dialects need two runtimes.
 
   Driven by `js/tests/grade_gpu.test.mjs`.
 -->
