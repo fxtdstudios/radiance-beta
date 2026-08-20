@@ -70,9 +70,10 @@ MODEL_TYPES = [
     "cosmos",
     "cogvideox",
     "mochi",  # ALBABIT-FIX: Mochi-1 — match Resolution/Loader model types
+    "minimax",  # ALBABIT-FIX: MiniMax H3, matches Resolution/Loader/Prompt model types
 ]
 
-VIDEO_MODEL_TYPES = {"wan", "wan_ti2v", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "mochi"}
+VIDEO_MODEL_TYPES = {"wan", "wan_ti2v", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "mochi", "minimax"}
 
 # ALBABIT-FIX: flux2/flux2-klein use guidance_embed like flux (not external CFG)
 # ALBABIT-FIX: lumina2 removed -- its official workflow uses a plain KSampler
@@ -90,6 +91,11 @@ GUIDANCE_EMBED_MODELS = {"flux", "flux2", "flux2-klein", "ltxv"}
 # ALBABIT-FIX: wan_ti2v added -- same CFG-guided convention as "wan" (its
 # official workflow's KSampler uses a real cfg value, no guidance-embed node).
 CFG_GUIDED_MODELS = {"wan", "wan_ti2v", "hunyuan_video", "sdxl", "sd1.5", "sd3", "sd3.5", "ltxav", "cogvideox", "mochi", "lumina2", "z_image"}
+
+# ALBABIT-FIX: "minimax" belongs in neither set above on purpose. Its reference
+# pipeline uses BasicGuider, which has no cfg input and no guidance-embed
+# mechanism either; cfg is pinned inert via MODEL_DEFAULTS instead of routed
+# through either widget family.
 
 MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
     # ALBABIT-FIX: steps=20 added, verified against Comfy-Org's official
@@ -320,6 +326,18 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "steps": 64,
         "guidance_type": "cfg",
     },
+    # ALBABIT-FIX: verified against Comfy-Org's official T2V workflow
+    # template (KSamplerSelect=res_multistep, BasicScheduler=simple/20
+    # steps). BasicGuider has zero widgets, so cfg=1.0 just pins it inert,
+    # same trick flux/ltxv use. No shift node in the reference pipeline.
+    "minimax": {
+        "cfg": 1.0,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "res_multistep",
+        "steps": 20,
+    },
     # ALBABIT-FIX: previously fell back to "sd1.5" (cfg=7.0/dpmpp_2m/normal) --
     # verified against AuraFlow's own official ComfyUI workflow, which
     # contradicts all three. No shift node present (unlike Lumina2, which
@@ -480,6 +498,7 @@ def detect_by_config(model) -> Optional[str]:
             "Flux": "flux", "FluxSchnell": "flux", "FluxInpaint": "flux", "Flux2": "flux2",
             "CogVideoX": "cogvideox", "CogVideo": "cogvideox",
             "Mochi": "mochi",  # ALBABIT-FIX: Mochi-1 config class detection
+            "MiniMaxH3": "minimax",  # ALBABIT-FIX: MiniMax H3 config class detection
         }
         for pattern, mtype in config_map.items():
             if pattern in config_cls: return mtype
@@ -506,6 +525,7 @@ def detect_by_architecture(model) -> Optional[str]:
             return "hunyuan_video"
         if "cogvideo" in model_cls or "cogvideo" in model_module: return "cogvideox"
         if "mochi" in model_cls or "mochi" in model_module: return "mochi"  # ALBABIT-FIX
+        if "minimax" in model_cls or "minimax" in model_module: return "minimax"  # ALBABIT-FIX
         if "lumina" in full_path:
             if hasattr(diffusion_model, "hidden_size") and diffusion_model.hidden_size >= 3840:
                 return "z_image"
@@ -860,6 +880,7 @@ WORKFLOW_PRESETS = [
     "[V] LTX 2.5 LowRes (20 steps)",
     "[V] LTX 2.5 HighRes (40 steps)",
     "[V] HunyuanVideo (30 steps)",
+    "[V] MiniMax H3 T2V (20 steps)",
 
     "[Q] Draft (4-step / AYS)",
     "[Q] Fast (8-step / AYS)",

@@ -277,6 +277,19 @@ class RadianceHDRVAEDecode:
                 "Make sure you connect a valid LATENT output."
             )
         latent_tensor = samples["samples"]
+        if getattr(latent_tensor, "is_nested", False):
+            # ALBABIT-FIX: AV latent (e.g. MiniMax H3). This node only does
+            # video (HDR/tonemap/RUDRA); peels the video stream the same way
+            # ComfyUI's own LTXVSeparateAVLatent does (unbind()[0] = video).
+            # Decode audio separately via a native VAEDecodeAudio fed from
+            # the same latent and vae.
+            latent_tensor = latent_tensor.unbind()[0]
+            samples = {**samples, "samples": latent_tensor}
+            logger.info(
+                "[RadianceHDRVAEDecode] AV latent detected, decoding the video "
+                "stream only. Use a native VAEDecodeAudio (same latent/vae "
+                "inputs) for the audio track."
+            )
         if not isinstance(latent_tensor, torch.Tensor) or latent_tensor.ndim not in (4, 5):
             raise RuntimeError(
                 "The LATENT 'samples' value must be a 4D image latent or 5D video latent tensor."

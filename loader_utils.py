@@ -28,6 +28,7 @@ from radiance.model.detect import (
     estimate_vram_usage,
     LATENT_CHANNELS,
     CLIP_SLOT_ORDER,
+    AUDIO_VAE_KEY_REMAP,
     _BASE_VRAM,
     _DTYPE_MULT,
 )
@@ -315,6 +316,26 @@ def _require_baked_vae(vae, unet_name: str):
         )
 
 
+def construct_audio_vae(sd: dict, metadata, resolved_type: str) -> comfy.sd.VAE:
+    """Build a comfy.sd.VAE from a raw audio-VAE state dict.
+
+    Applies the architecture's key remap first if AUDIO_VAE_KEY_REMAP has one
+    (LTX-AV's audio_vae./vocoder. checkpoint namespace); most architectures
+    (e.g. MiniMax H3) have none, since comfy.sd.VAE() already auto-detects
+    their audio VAE from the raw, unprefixed keys.
+
+    When a remap applies, state_dict_prefix_replace(..., filter_keys=True)
+    pops the matched keys out of the CALLER's `sd` in place, on top of
+    returning the renamed copy used here. load_unet_and_baked_vae relies on
+    this so its own baked-VAE/model extraction doesn't see the audio-VAE
+    weights mixed back in.
+    """
+    remap = AUDIO_VAE_KEY_REMAP.get(resolved_type)
+    if remap:
+        sd = comfy.utils.state_dict_prefix_replace(sd, remap, filter_keys=True)
+    return comfy.sd.VAE(sd=sd, metadata=metadata)
+
+
 def load_unet_and_baked_vae(
     unet_path: str,
     unet_name: str,
@@ -322,6 +343,7 @@ def load_unet_and_baked_vae(
     offload_mode: str,
     vae_name: str,
     audio_vae_name: str,
+    resolved_type: str,
     caching: bool,
     divider: str,
     info_lines: list[str],
@@ -398,15 +420,7 @@ def load_unet_and_baked_vae(
                 # (often multi-GB) UNET file from disk twice.
                 t_av0 = time.time()
                 sd, metadata = comfy.utils.load_torch_file(unet_path, return_metadata=True)
-                # AudioVAE no longer takes sd directly (ComfyUI 0.22.0+) —
-                # use state_dict_prefix_replace + comfy.sd.VAE, mirroring
-                # the built-in LTXVAudioVAELoader. filter_keys=True pops
-                # the audio_vae./vocoder. keys out of sd, which is correct
-                # since they aren't part of the main UNET state dict anyway.
-                sd_audio = comfy.utils.state_dict_prefix_replace(
-                    sd, {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."}, filter_keys=True
-                )
-                audio_vae = comfy.sd.VAE(sd=sd_audio, metadata=metadata)
+                audio_vae = construct_audio_vae(sd, metadata, resolved_type)
                 av_time = time.time() - t_av0
                 logger.info("Audio VAE extracted natively from UNET")
                 info_lines.append(f"AUDIO VAE: Baked from UNET ({av_time:.1f}s)")
