@@ -107,6 +107,17 @@ function _isMiniMaxH3(modelType) {
     return modelType === "MiniMax H3 (24ch)";
 }
 
+// ALBABIT-FIX: shared by modelTypeW.callback and onConfigure's reapply,
+// which used to each inline this same check. The hidden widget can't leave
+// a stale value (e.g. 90 left over from a different model_type) silently
+// feeding into duration_sec/the info string.
+function _forceMiniMaxFrameRate(modelTypeW, frameRateW) {
+    if (frameRateW && _isMiniMaxH3(modelTypeW?.value) && parseFloat(frameRateW.value) !== 24) {
+        frameRateW.value = 24;
+        if (frameRateW.inputEl) frameRateW.inputEl.value = 24;
+    }
+}
+
 // ALBABIT-FIX: single source of truth for "duration_seconds -> aligned frame
 // count", shared by the Manual<->Auto sync, the label preview, and
 // duration_seconds's own precise-value correction below, so the three can
@@ -164,7 +175,7 @@ function _syncVideoFramesStep(modelTypeW, videoFramesW) {
 function _syncDurationSecondsStep(modelTypeW, durSecW, frameRateW) {
     if (!durSecW) return;
     const isMiniMax = _isMiniMaxH3(modelTypeW?.value);
-    const fps = isMiniMax ? 24.0 : (frameRateW ? parseFloat(frameRateW.value) || 24.0 : 24.0);
+    const fps = isMiniMax ? 24.0 : (parseFloat(frameRateW?.value) || 24.0);
     const stepSeconds = _frameStride(modelTypeW?.value) / fps;
     _setWidgetStep(durSecW, stepSeconds);
     if (!durSecW.options) durSecW.options = {};
@@ -344,14 +355,7 @@ app.registerExtension({
                         }
                     }
 
-                    // ALBABIT-FIX: force frame_rate to the model's fixed 24fps on
-                    // switch, so the hidden widget can't leave a stale value (e.g.
-                    // 90 left over from a different model_type) silently feeding
-                    // into duration_sec/the info string.
-                    if (frameRateW && _isMiniMaxH3(modelTypeW.value) && parseFloat(frameRateW.value) !== 24) {
-                        frameRateW.value = 24;
-                        if (frameRateW.inputEl) frameRateW.inputEl.value = 24;
-                    }
+                    _forceMiniMaxFrameRate(modelTypeW, frameRateW);
 
                     toggleFields();
                 };
@@ -613,12 +617,8 @@ app.registerExtension({
                 const isMiniMaxModel = _isMiniMaxH3(modelTypeW?.value);
 
                 // ALBABIT-FIX: a workflow saved with a stale frame_rate under
-                // MiniMax H3 would otherwise load hidden-but-wrong (see
-                // modelTypeW.callback above).
-                if (frameRateW && isMiniMaxModel && parseFloat(frameRateW.value) !== 24) {
-                    frameRateW.value = 24;
-                    if (frameRateW.inputEl) frameRateW.inputEl.value = 24;
-                }
+                // MiniMax H3 would otherwise load hidden-but-wrong.
+                _forceMiniMaxFrameRate(modelTypeW, frameRateW);
 
                 setWidgetVisible(frameModeW,   isVideo, self);
                 setWidgetVisible(videoFramesW, isVideo && !isAutoSec, self);
