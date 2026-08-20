@@ -94,6 +94,7 @@ import json
 import logging
 import os
 import re
+import weakref
 import torch
 from typing import Optional
 
@@ -832,11 +833,14 @@ DEFAULT_YEAR: int = int(os.environ.get("RADIANCE_DEFAULT_YEAR",
 # These architectures use T5/LLM encoders that prefer natural language prose.
 # Comma-separated keyword chains perform significantly worse on them.
 PROSE_ARCHS = {"flux", "sd3", "sd3.5", "wan", "ltxv", "ltxav", "pixart",  # ALBABIT-FIX: "ltx" → "ltxv"
-               "hunyuan_video", "aura_flow"}
+               "hunyuan_video", "aura_flow", "minimax"}
 
 # Architectures where negative prompts have near-zero practical effect.
 # (CFG guidance in these models operates differently; negatives waste token budget.)
-_WEAK_NEG_ARCHS = {"flux", "wan", "ltxv", "ltxav", "hunyuan_video"}  # ALBABIT-FIX: "ltx" → "ltxv"
+# ALBABIT-FIX: "minimax" is a stronger case than the others here. MiniMax H3's
+# own reference workflow (comfy_extras/nodes_minimax_h3.py) uses BasicGuider,
+# not CFGGuider, and its node has no negative conditioning output at all.
+_WEAK_NEG_ARCHS = {"flux", "wan", "ltxv", "ltxav", "hunyuan_video", "minimax"}  # ALBABIT-FIX: "ltx" → "ltxv"
 
 
 @functools.lru_cache(maxsize=4)
@@ -913,26 +917,37 @@ def _detect_arch_from_clip(clip, target_arch: str,
             return arch
 
     # ── Priority 3: tokenizer key fingerprinting (cached per clip object) ────
-    # Use id(clip) as cache key — avoids holding a reference to the clip object
-    # while still deduplicated per loaded model.
-    _clip_id = id(clip)
-    if _clip_id not in _detect_arch_from_clip._key_cache:
+    # ALBABIT-FIX: was keyed on id(clip) in a plain dict, so a collected
+    # clip's entry stuck around and a later object reusing that freed
+    # address inherited its stale fingerprint (real, reproducible under
+    # pytest's object churn). WeakKeyDictionary keyed on the object itself
+    # evicts on real collection, so a reused address can't inherit it.
+    try:
+        keys = _detect_arch_from_clip._key_cache.get(clip)
+    except TypeError:
+        keys = None  # clip doesn't support weak references, don't cache
+    if keys is None:
         try:
             test_tokens = clip.tokenize("test")
-            _detect_arch_from_clip._key_cache[_clip_id] = frozenset(test_tokens.keys())
+            keys = frozenset(test_tokens.keys())
         except Exception as e:
             logger.debug(f"[Encoder] Arch detection failed: {e}, defaulting to sdxl")
-            _detect_arch_from_clip._key_cache[_clip_id] = frozenset()
-    keys = _detect_arch_from_clip._key_cache[_clip_id]
+            keys = frozenset()
+        try:
+            _detect_arch_from_clip._key_cache[clip] = keys
+        except TypeError:
+            pass
 
-    # ALBABIT-FIX: LTXAVGemmaTokenizer registers as "gemma3_12b" — exact key match.
-    # The old check used substring "gemma" which never matched "gemma3_12b" in a frozenset.
-    # Without this, LTX-AV fell through to "sdxl" fallback (wrong arch, wrong prompt path).
-    # LTX 2.5's Gemma4-based tokenizer registers under a different key, "gemma4"
-    # (comfy/text_encoders/gemma4.py Gemma4Tokenizer), so it needs its own check
-    # -- same fallback-to-sdxl gap, just for the newer encoder.
+    # ALBABIT-FIX: LTXAVGemmaTokenizer registers as "gemma3_12b", exact key
+    # match (the old substring check for "gemma" never matched it, falling
+    # through to "sdxl"). LTX 2.5's Gemma4Tokenizer registers under "gemma4"
+    # instead, same fallback gap, its own check.
     if "gemma3_12b" in keys or "gemma4" in keys:
         return "ltxav"
+    # MiniMax H3's Qwen3-VL-32B encoder registers as "qwen3vl_32b" (name=
+    # in comfy/text_encoders/minimax.py's MiniMaxH3TEModel/Tokenizer).
+    if "qwen3vl_32b" in keys:
+        return "minimax"
     # LTX-V (pre-2.3, T5-based) — still matched by key fragments
     if any(k in keys for k in ("ltxv", "ltx")):
         return "ltxv"
@@ -959,9 +974,9 @@ def _detect_arch_from_clip(clip, target_arch: str,
     return "sdxl"  # Safe fallback — structured format for CLIP-only
 
 
-# Per-clip fingerprint cache (dict so it auto-evicts naturally per Python GC;
-# set is bounded by the number of distinct clips ever loaded in a session).
-_detect_arch_from_clip._key_cache = {}
+# Per-clip fingerprint cache. WeakKeyDictionary, not a plain dict: entries
+# are removed automatically when the clip object itself is collected.
+_detect_arch_from_clip._key_cache = weakref.WeakKeyDictionary()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                  SCENE MOOD VOCABULARY  (v3.0)
@@ -993,6 +1008,11 @@ _MOOD_VOCAB = {
 }
 
 
+# Per-encoder pad token id, keyed by the same tokenizer dict key used in
+# _real_token_count below. Anything not listed here uses CLIP's 49407.
+_PAD_IDS = {"t5xxl": 0, "llm": 0, "qwen3vl_32b": 151643}
+
+
 def _real_token_count(clip, text: str, tokens: dict = None) -> int:
     """
     Get actual token count using the connected CLIP tokenizer.
@@ -1001,7 +1021,9 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
     v3.1 FIX: For T5/LLM encoders, tokens are padded to a fixed length
     (e.g., 256 or 512). shape[-1] returns the padded length, not the
     actual token count. We count non-padding tokens where possible.
-    T5 uses pad_token_id=0; CLIP uses pad_token_id=49407.
+    T5/generic LLM use pad_token_id=0; CLIP uses pad_token_id=49407;
+    MiniMax H3's Qwen3-VL-32B ("qwen3vl_32b") uses 151643 (its own
+    special_tokens config in comfy/text_encoders/minimax.py).
 
     v2.3.3 [BUG-I3]: Removed redundant `import torch as _torch` — torch
     is already imported at module level.
@@ -1014,7 +1036,7 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
 
     try:
         # Try each known encoder key in order of preference
-        for key in ("t5xxl", "l", "g", "llm"):
+        for key in ("t5xxl", "l", "g", "llm", "qwen3vl_32b"):
             if key in tokens and tokens[key]:
                 tok_data = tokens[key][0]
                 if hasattr(tok_data, "shape"):
@@ -1022,7 +1044,7 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
                     # no multi-chunk structure. Count non-pad tokens directly.
                     # [BUG-I3] Use module-level torch directly
                     if torch.is_tensor(tok_data):
-                        pad_id = 0 if key in ("t5xxl", "llm") else 49407
+                        pad_id = _PAD_IDS.get(key, 49407)
                         non_pad = (tok_data != pad_id).sum().item()
                         if non_pad > 0:
                             return non_pad
@@ -1039,7 +1061,7 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
                     #
                     # [BUG-M4] v2.3.3: Explicit tuple validation
                     if isinstance(tok_data[0], (tuple, list)) and len(tok_data[0]) >= 1:
-                        pad_id = 0 if key in ("t5xxl", "llm") else 49407
+                        pad_id = _PAD_IDS.get(key, 49407)
                         total_non_pad = 0
                         total_len = 0
                         for chunk in tokens[key]:   # iterate ALL chunks
@@ -1687,7 +1709,14 @@ class RadianceCinematicPromptEncoder:
         # ── Resolve architecture automatically ──────────────────────────────
         resolved_arch = _detect_arch_from_clip(clip, "Auto", model_meta)
         use_prose = resolved_arch in PROSE_ARCHS
-        token_limit = 256 if use_prose else 77
+        # ALBABIT-FIX: Qwen3-VL-32B's own tokenizer has no practical limit
+        # (max_length=99999999 in comfy/text_encoders/qwen3vl.py), and MiniMax
+        # H3's example prompts run several hundred words. The usual 256-token
+        # prose ceiling would silently truncate them.
+        if resolved_arch == "minimax":
+            token_limit = 2048
+        else:
+            token_limit = 256 if use_prose else 77
 
         # ── Apply style preset ──────────────────────────────────────────────
         settings = {
@@ -1702,11 +1731,10 @@ class RadianceCinematicPromptEncoder:
 
         # ── Build prompt ────────────────────────────────────────────────────
         # ALBABIT-FIX: ltxav uses the same _build_prose_prompt path as Flux/WAN.
-        # Gemma3-12B understands visual descriptors (camera, lens, aperture, lighting)
-        # for video; the DualLinearProjection audio head has learned weights that
-        # map purely visual gear terms to near-zero audio influence — no corruption.
-        # Note: quoted dialogue in base_prompt (e.g. 'says "Hello!"') WILL generate
-        # audible speech — this is intended LTX-AV behaviour, not a bug.
+        # Gemma3-12B's audio head learns near-zero influence from purely
+        # visual gear terms, no corruption. Note: quoted dialogue in
+        # base_prompt (e.g. 'says "Hello!"') WILL generate audible speech,
+        # intended LTX-AV behaviour, not a bug.
         final_prompt, negative_prompt, _ = build_cinematic_prompt_v3(
             base_prompt=base_prompt,
             base_prompt_b="",
@@ -1773,14 +1801,21 @@ class RadianceCinematicPromptEncoder:
         neg_tokens = clip.tokenize(safe_negative)
         negative_cond = _encode_tokens(clip, neg_tokens)
 
-        return (
-            positive_cond,
-            negative_cond,
-            final_prompt,
-            negative_prompt,
-            resolved_arch,
-            int(real_count),
-        )
+        # ALBABIT-FIX: weak_neg_arch only known post-execution (resolved_arch
+        # depends on the real CLIP/model_meta), so js/radiance_prompt.js flags
+        # negative_prompt with a label marker via onExecuted, same convention
+        # as engine.py's rudra_fallback/log_overexposure_risk.
+        return {
+            "ui": {"weak_neg_arch": [resolved_arch in _WEAK_NEG_ARCHS]},
+            "result": (
+                positive_cond,
+                negative_cond,
+                final_prompt,
+                negative_prompt,
+                resolved_arch,
+                int(real_count),
+            ),
+        }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                         NODE MAPPINGS

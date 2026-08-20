@@ -30,6 +30,90 @@ RADIANCE_MODEL_MAP: dict = {
         "url": "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors",
         "type": "vae",
     },
+    # Flux.2 Dev (huggingface.co/black-forest-labs/FLUX.2-dev, gated repo, request
+    # access first). fp8mixed is Comfy-Org's split/quantized repackaging, ungated.
+    "flux2-dev.safetensors": {
+        "url": "https://huggingface.co/black-forest-labs/FLUX.2-dev/resolve/main/flux2-dev.safetensors",
+        "type": "diffusion_models",
+    },
+    "flux2_dev_fp8mixed.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/diffusion_models/flux2_dev_fp8mixed.safetensors",
+        "type": "diffusion_models",
+    },
+    "mistral_3_small_flux2_bf16.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/text_encoders/mistral_3_small_flux2_bf16.safetensors",
+        "type": "text_encoders",
+    },
+    "mistral_3_small_flux2_fp8.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/text_encoders/mistral_3_small_flux2_fp8.safetensors",
+        "type": "text_encoders",
+    },
+    "mistral_3_small_flux2_fp4_mixed.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/text_encoders/mistral_3_small_flux2_fp4_mixed.safetensors",
+        "type": "text_encoders",
+    },
+    "flux2-vae.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors",
+        "type": "vae",
+    },
+    # Flux.2 Klein 9B (huggingface.co/black-forest-labs, full-precision repos
+    # gated, -fp8 repos ungated). Base = distillation-free variant, more
+    # flexible CFG/steps, same shape as Dev vs Klein.
+    "flux-2-klein-9b.safetensors": {
+        "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/resolve/main/flux-2-klein-9b.safetensors",
+        "type": "diffusion_models",
+    },
+    "flux-2-klein-9b-fp8.safetensors": {
+        "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-fp8/resolve/main/flux-2-klein-9b-fp8.safetensors",
+        "type": "diffusion_models",
+    },
+    "flux-2-klein-base-9b.safetensors": {
+        "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9B/resolve/main/flux-2-klein-base-9b.safetensors",
+        "type": "diffusion_models",
+    },
+    "flux-2-klein-base-9b-fp8.safetensors": {
+        "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9b-fp8/resolve/main/flux-2-klein-base-9b-fp8.safetensors",
+        "type": "diffusion_models",
+    },
+    "qwen_3_8b.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/resolve/main/split_files/text_encoders/qwen_3_8b.safetensors",
+        "type": "text_encoders",
+    },
+    "qwen_3_8b_fp8mixed.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/resolve/main/split_files/text_encoders/qwen_3_8b_fp8mixed.safetensors",
+        "type": "text_encoders",
+    },
+    "qwen_3_8b_fp4mixed.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/resolve/main/split_files/text_encoders/qwen_3_8b_fp4mixed.safetensors",
+        "type": "text_encoders",
+    },
+    # Flux.2 Klein 4B: full-precision UNET and both text encoders share one
+    # Comfy-Org repo (ungated), unlike the 9B tier above; -fp8 UNET variants
+    # are on their own black-forest-labs repos, also ungated here.
+    "flux-2-klein-4b.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-4b/resolve/main/split_files/diffusion_models/flux-2-klein-4b.safetensors",
+        "type": "diffusion_models",
+    },
+    "flux-2-klein-4b-fp8.safetensors": {
+        "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-4b-fp8/resolve/main/flux-2-klein-4b-fp8.safetensors",
+        "type": "diffusion_models",
+    },
+    "flux-2-klein-base-4b.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-4b/resolve/main/split_files/diffusion_models/flux-2-klein-base-4b.safetensors",
+        "type": "diffusion_models",
+    },
+    "flux-2-klein-base-4b-fp8.safetensors": {
+        "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-base-4b-fp8/resolve/main/flux-2-klein-base-4b-fp8.safetensors",
+        "type": "diffusion_models",
+    },
+    "qwen_3_4b.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-4b/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors",
+        "type": "text_encoders",
+    },
+    "qwen_3_4b_fp4_flux2.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-4b/resolve/main/split_files/text_encoders/qwen_3_4b_fp4_flux2.safetensors",
+        "type": "text_encoders",
+    },
     # LTX-2.3 transformer (46 GB) — only needed for generation, NOT for decoder training.
     "ltx-2.3-22b-dev.safetensors": {
         "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-dev.safetensors",
@@ -38,6 +122,49 @@ RADIANCE_MODEL_MAP: dict = {
     "ltx-2.3-22b-distilled-1.1.safetensors": {  # ALBABIT-FIX: v1.1 — better audio + aesthetics over original distilled
         "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled-1.1.safetensors",
         "type": "diffusion_models",
+    },
+    # Superseded by -1.1 above, kept only because it's still a real file and
+    # still a hint fallback for whoever downloaded it before -1.1 shipped.
+    "ltx-2.3-22b-distilled.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled.safetensors",
+        "type": "diffusion_models",
+    },
+    # fp8 tier lives on a separate official Lightricks repo, not a subfolder
+    # of the main LTX-2.3 one.
+    "ltx-2.3-22b-dev-fp8.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.3-fp8/resolve/main/ltx-2.3-22b-dev-fp8.safetensors",
+        "type": "diffusion_models",
+    },
+    "ltx-2.3-spatial-upscaler-x2-1.1.safetensors": {
+        "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+        "type": "latent_upscale_models",
+    },
+    # ltx-2.3-spatial-upscaler-x2-1.0.safetensors (still a real unet_hints
+    # fallback for whoever already has it on disk) was removed from the
+    # Lightricks repo, confirmed by Albabit; its old URL 404s now, so it is
+    # deliberately not catalogued here for auto-download.
+    "gemma_3_12B_it.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it.safetensors",
+        "type": "text_encoders",
+    },
+    "gemma_3_12B_it_fp4_mixed.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors",
+        "type": "text_encoders",
+    },
+    # LTX23_video_vae_bf16 / LTX23_audio_vae_bf16 / text_projection: community
+    # repackaging (Kijai/LTX2.3_comfy), not an official Lightricks/Comfy-Org
+    # repo. Confirmed acceptable to catalogue as a source by Albabit.
+    "LTX23_video_vae_bf16.safetensors": {
+        "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_video_vae_bf16.safetensors",
+        "type": "vae",
+    },
+    "LTX23_audio_vae_bf16.safetensors": {
+        "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_audio_vae_bf16.safetensors",
+        "type": "vae",
+    },
+    "ltx-2.3_text_projection_bf16.safetensors": {
+        "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/text_encoders/ltx-2.3_text_projection_bf16.safetensors",
+        "type": "text_encoders",
     },
     # LTX-2 Video-VAE (AutoencoderKLLTX2Video, 32x/8x/128ch, 2.44 GB) — shared by LTX-2
     # and LTX-2.3. This is all the RUDRA decoder needs to encode HDR -> latents.
@@ -114,6 +241,58 @@ RADIANCE_MODEL_MAP: dict = {
     "ltx-2.5-22b-distilled-lora-450-bf16.safetensors": {
         "url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main/loras/ltx-2.5-22b-distilled-lora-450-bf16.safetensors",
         "type": "loras",
+    },
+    # MiniMax H3 (huggingface.co/Comfy-Org/MiniMax-H3). fl2va = text/image-to-
+    # video, every diffusion_models/text_encoders quantization tier Comfy-Org
+    # publishes for it. bf16 is the "MiniMax H3" preset's default UNET
+    # (quality-first, same philosophy as the Flux.2 preset): it exceeds a
+    # 32GB card's native capacity alongside a text encoder, so ComfyUI's own
+    # automatic lowvram partial-load streams the overflow from system RAM,
+    # but the real-world cost measured on a 5090 was only about +37%
+    # generation time, not a dealbreaker. pruned_int8_convrot (matches the
+    # official workflow) is the "MiniMax H3 (Low VRAM)" preset's default
+    # instead, for users who want the lighter/faster tier. ref2va (reference-
+    # to-video) is a separate checkpoint family, not catalogued. Out of scope
+    # for now.
+    "minimax_h3_fl2va_bf16.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_bf16.safetensors",
+        "type": "diffusion_models",
+    },
+    "minimax_h3_fl2va_pruned_int8_convrot.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "type": "diffusion_models",
+    },
+    "minimax_h3_fl2va_int8_convrot.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_int8_convrot.safetensors",
+        "type": "diffusion_models",
+    },
+    "minimax_h3_fl2va_pruned_bf16.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_bf16.safetensors",
+        "type": "diffusion_models",
+    },
+    "minimax_h3_fl2va_pruned_fp8_scaled.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_fl2va_pruned_fp8_scaled.safetensors",
+        "type": "diffusion_models",
+    },
+    "minimax_h3_video_vae_fp16.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors",
+        "type": "vae",
+    },
+    "minimax_h3_audio_vae_fp32.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors",
+        "type": "vae",
+    },
+    "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "type": "text_encoders",
+    },
+    "qwen3vl_32b_minimax_h3_int8_convrot.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+        "type": "text_encoders",
+    },
+    "qwen3vl_32b_minimax_h3_bf16.safetensors": {
+        "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors",
+        "type": "text_encoders",
     },
 }
 
@@ -488,13 +667,11 @@ def get_model_vae_param(model_hint: str, param: str, default=None):
     return cfg.get(param, default)
 
 
-# ALBABIT-FIX: each preset only carries model_type/weight_dtype/clip_dtype —
-# the only fields _apply_preset_override() (nodes_loader.py) actually reads;
-# file-matching hints and CLIP slot layout live in js/radiance_loader.js
-# (PRESET_CONFIGS/PRESET_SLOTS), the single source of truth for the loader
-# UI's auto-fill. "default" dtypes (no dtype_map entry) let ComfyUI's own
-# VRAM-aware auto-selection apply. Keys sorted alphabetically ("Custom"
-# pinned first) to match the preset dropdown order.
+# ALBABIT-FIX: each preset only carries model_type/weight_dtype/clip_dtype,
+# the only fields _apply_preset_override() (nodes_loader.py) reads; hints
+# and CLIP slot layout live in js/radiance_loader.js instead. "default"
+# dtypes let ComfyUI's own VRAM-aware auto-selection apply. Keys stay
+# alphabetical ("Custom" pinned first) to match the dropdown order.
 CHECKPOINT_PRESETS: dict = {
     "Custom": {},
     "AuraFlow": {
@@ -553,14 +730,10 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "default",
     },
-    # ALBABIT-FIX: 2B and 13B merged into one preset -- identical model_type/
-    # clip_dtype/vae_hints/clip_hints already (the only real difference was
-    # weight_dtype: fp16 vs fp8, reflecting size, not distillation). "default"
-    # lets comfy.sd's own model_management.unet_dtype() auto-pick based on the
-    # actual loaded file's real parameter count -- same approach already used
-    # for Flux.2's own wide size range (Klein 4B through Dev). Explicit "(Low
-    # VRAM)" sibling added for users who want to force fp8 regardless (same
-    # pattern as Flux.1/Flux.2/LTX Video 2.3's own Low VRAM variants).
+    # ALBABIT-FIX: 2B and 13B merged into one preset, identical model_type/
+    # clip_dtype/vae_hints/clip_hints already. "default" weight_dtype lets
+    # comfy.sd auto-pick per the real loaded file's size; the "(Low VRAM)"
+    # sibling forces fp8 instead, same pattern as Flux.1/Flux.2/LTX 2.3.
     "LTX Video": {
         "model_type": "ltxv",  # ALBABIT-FIX: "ltx" → "ltxv" — matches sampler_utils.py
         "weight_dtype": "default",
@@ -598,6 +771,20 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "fp8_e4m3fn",
     },
+    # ALBABIT-FIX: both presets keep weight_dtype/clip_dtype at "default".
+    # The size difference is a smaller checkpoint (unet_hints in
+    # radiance_loader.js), not a dtype cast; the pruned/nvfp4_awq files use
+    # MiniMax's own quantization, already detected natively by comfy.sd.
+    "MiniMax H3": {
+        "model_type": "minimax",
+        "weight_dtype": "default",
+        "clip_dtype": "default",
+    },
+    "MiniMax H3 (Low VRAM)": {
+        "model_type": "minimax",
+        "weight_dtype": "default",
+        "clip_dtype": "default",
+    },
     "Lumina2": {
         "model_type": "lumina2",
         "weight_dtype": "fp16",
@@ -618,14 +805,10 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp16",
         "clip_dtype": "fp16",
     },
-    # ALBABIT-FIX: Large, Large Turbo, and Medium all merged into one preset --
-    # same model_type/weight_dtype/clip_dtype already, and (unlike Flux.2
-    # Dev/Klein) Large and Medium even share identical vae_hints/clip_hints
-    # (js/radiance_loader.js), so there's no downstream CLIP-size branching
-    # to worry about either. Turbo is Large's distilled variant (Sampler
-    # tells it apart by filename); Large vs Medium is resolved the same way
-    # Flux.2 Dev/Klein's unet_hints are -- a combined hint list, no separate
-    # preset needed.
+    # ALBABIT-FIX: Large, Large Turbo, and Medium merged into one preset,
+    # same model_type/weight_dtype/clip_dtype/vae_hints/clip_hints already.
+    # Turbo is Large's distilled variant (Sampler tells it apart by
+    # filename); Large vs Medium resolved via a combined unet_hints list.
     "SD3.5": {
         "model_type": "sd3.5",
         "weight_dtype": "fp16",
@@ -653,12 +836,10 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "default",
     },
-    # ALBABIT-FIX: separate preset for Wan 2.2 checkpoints — same CLIP
-    # slot layout as Wan 2.1, distinct unet_hints (js/radiance_loader.js) to
-    # avoid matching the wrong version when both are installed.
-    # weight_dtype now "default" -- same reasoning as "Wan 2.1" above, for
-    # consistency/user choice (comfy.sd auto-picks per the real loaded file).
-    # See "Wan 2.2 (Low VRAM)" for the old forced-fp8 behavior.
+    # ALBABIT-FIX: separate preset for Wan 2.2, same CLIP slot layout as Wan
+    # 2.1 but distinct unet_hints to avoid matching the wrong version when
+    # both are installed. weight_dtype "default" for the same reason as
+    # "Wan 2.1" above; see "Wan 2.2 (Low VRAM)" for the forced-fp8 sibling.
     "Wan 2.2": {
         "model_type": "wan",
         "weight_dtype": "default",
@@ -669,13 +850,10 @@ CHECKPOINT_PRESETS: dict = {
         "weight_dtype": "fp8_e4m3fn",
         "clip_dtype": "default",
     },
-    # ALBABIT-FIX: TI2V-5B is a single-UNET WAN 2.2 variant (no high/low_noise pair)
-    # and requires wan2.2_vae.safetensors (48ch), not wan_2.1_vae (16ch).
-    # model_type "wan_ti2v" (was "wan") -- real bug fix, see model/detect.py:
-    # "wan" implies 16 latent channels everywhere downstream (Resolution's empty
-    # latent, VRAM estimate) but TI2V-5B's real VAE is 48ch -- picking "WAN
-    # (16ch)" in Resolution for this preset built a wrong-shaped latent, a
-    # crash risk at sampling, not just a metadata inaccuracy.
+    # ALBABIT-FIX: TI2V-5B is a single-UNET WAN 2.2 variant (no high/low_noise
+    # pair), 48ch VAE not 16ch. model_type "wan_ti2v" (was "wan") is a real bug
+    # fix: "wan" implies 16ch everywhere downstream, so Resolution built a
+    # wrong-shaped, crash-risk latent for this preset before.
     "Wan 2.2 TI2V": {
         "model_type": "wan_ti2v",
         "weight_dtype": "default",
@@ -701,6 +879,8 @@ VIDEO_PRESET_NAMES: set = {
     "LTX Video 2.3 (Low VRAM)",
     "LTX Video 2.5",
     "LTX Video 2.5 (Low VRAM)",
+    "MiniMax H3",
+    "MiniMax H3 (Low VRAM)",
     "Mochi",
     "Wan 2.1",
     "Wan 2.1 (Low VRAM)",
@@ -714,5 +894,5 @@ VIDEO_PRESET_NAMES: set = {
 # filtered. "ltx" renamed to "ltxv" to match sampler_utils.py.
 VIDEO_MODEL_TYPES: set = {
     "hunyuan_video", "wan", "wan_ti2v", "ltxv", "ltxav",
-    "cosmos", "cogvideox", "mochi",
+    "cosmos", "cogvideox", "mochi", "minimax",
 }

@@ -139,6 +139,15 @@ const PRESET_CONFIGS = {
         denoise: 1.0, flux_shift: 7.0, flux_guidance: 0.0,
         description: "HunyuanVideo — shift=7, CFG=6.",
     },
+    // ALBABIT-FIX: matches the official T2V template's KSamplerSelect
+    // (res_multistep) + BasicScheduler (simple, 20 steps). cfg=1.0 is inert
+    // (BasicGuider has no cfg input at all). The widget itself hides for
+    // this model_type, see resolveModelType()/hiddenNames below.
+    "▶ MiniMax H3 T2V (20 steps)": {
+        steps: 20, cfg: 1.0, sampler: "res_multistep", scheduler: "simple",
+        denoise: 1.0, flux_shift: 1.0, flux_guidance: 0.0,
+        description: "MiniMax H3 text-to-video. BasicGuider pipeline, cfg has no effect.",
+    },
     "◈ Draft (4-step / AYS)": {
         steps: 4, cfg: 1.0, sampler: "euler", scheduler: "simple",
         denoise: 1.0, flux_shift: 1.0, flux_guidance: 3.5,
@@ -274,6 +283,7 @@ function resolveModelType(presetVal, modelTypeVal) {
     if (p.includes("ltx"))      return "ltxv";
     if (p.includes("wan"))      return "wan";
     if (p.includes("hunyuan"))  return "hunyuan_video";
+    if (p.includes("minimax"))  return "minimax";
     if (p.includes("z_image"))  return "z_image";
     if (p.includes("lumina"))   return "lumina2";
     // ALBABIT-FIX: return "sd3.5" (canonical form, matches Loader/detect.py)
@@ -521,6 +531,14 @@ function applyFolding(node) {
     // gates it on that exact condition) -- moot for guidance-embed models,
     // whose cfg is pinned at 1.0 by design.
     if (usesGuidanceEmbed) hiddenNames.add("guidance_rescale_phi");
+
+    // 3.5c-2. MiniMax H3's reference pipeline uses BasicGuider, which has no
+    // cfg input at all. Unlike guidance-embed models (flux_guidance stands
+    // in for it), there's no alternate widget either, so cfg just hides.
+    if (effectiveModel === "minimax") {
+        hiddenNames.add("cfg");
+        hiddenNames.add("guidance_rescale_phi");
+    }
 
     // 3.5d. SDXL Turbo's discrete schedule (get_sd_turbo_sigmas) ignores
     // scheduler/scheduler_mode/terminal_sigma_to_zero/force_exact_steps
@@ -855,6 +873,7 @@ const LOADER_PRESET_MODEL_TYPE = {
     "Cosmos World": "cosmos", "CogVideoX": "cogvideox", "Mochi": "mochi",
     "PixArt Sigma": "pixart", "AuraFlow": "aura_flow",
     "Lumina2": "lumina2", "Z-Image": "z_image",
+    "MiniMax H3": "minimax", "MiniMax H3 (Low VRAM)": "minimax",
 };
 
 // ALBABIT-FIX: mirrors sampler_utils.py's MODEL_DEFAULTS. "guidance" here is
@@ -943,6 +962,11 @@ const MODEL_TYPE_SAMPLING_DEFAULTS = {
     // ALBABIT-FIX: steps=20 added, from the diffusers pipeline's own default
     // parameter (no official ComfyUI workflow found -- moderate confidence).
     pixart:        { cfg: 4.5,  sampler: "dpmpp_2m", scheduler: "normal",     flux_shift: 1.0,  guidance: 0.0, steps: 20 },
+    // ALBABIT-FIX: mirrors sampler_utils.py's MODEL_DEFAULTS["minimax"].
+    // Matches the official T2V template (KSamplerSelect=res_multistep,
+    // BasicScheduler=simple/20 steps). cfg=1.0 is inert (BasicGuider has no
+    // cfg input at all); the widget itself hides regardless, see applyFolding.
+    minimax:       { cfg: 1.0,  sampler: "res_multistep", scheduler: "simple", flux_shift: 1.0, guidance: 0.0, steps: 20 },
 };
 
 function _resolveLoaderModelType(loaderNode) {

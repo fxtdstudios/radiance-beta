@@ -79,13 +79,10 @@ _ARCH_HEURISTICS = [
     (lambda ks, f: any("blocks.block0.blocks.0.block.attn.to_q.0.weight" in k for k in ks), "cosmos"),
     # ALBABIT-FIX: CogVideoX UNET.
     (lambda ks, f: any("blocks.0.norm1.linear.weight" in k for k in ks), "cogvideox"),
-    # ALBABIT-FIX: WAN 2.2 TI2V-5B shares patch_embedding/time_embedding keys
-    # with every other WAN variant but its patch_embedding.weight takes 48
-    # input channels instead of 16 (verified on real checkpoints: TI2V-5B is
-    # [3072, 48, 1, 2, 2] vs 14B/1.3B's [*, 16, 1, 2, 2]) -- must be checked
-    # before the generic "wan" entry (different LATENT_CHANNELS/VAE/latent
-    # format, real crash risk otherwise: a 16ch empty latent fed to a UNET
-    # that expects 48ch).
+    # ALBABIT-FIX: TI2V-5B shares patch_embedding keys with every WAN variant
+    # but takes 48 input channels not 16 ([3072,48,1,2,2] vs [*,16,1,2,2] on
+    # real checkpoints). Must be checked before the generic "wan" entry, a
+    # 16ch empty latent fed to a 48ch UNET is a real crash risk.
     (lambda ks, f: any("patch_embedding" in k for k in ks)
      and any("time_embedding" in k for k in ks)
      and not any("joint_blocks" in k for k in ks)
@@ -93,6 +90,12 @@ _ARCH_HEURISTICS = [
     (lambda ks, f: any("patch_embedding" in k for k in ks)
      and any("time_embedding" in k for k in ks)
      and not any("joint_blocks" in k for k in ks), "wan"),
+    # ALBABIT-FIX: MiniMax H3, a joint video+audio DiT. Verified directly
+    # against both real checkpoint variants (bf16 and pruned_int8_convrot):
+    # both keys are present in each, with no equivalent in any other
+    # supported architecture.
+    (lambda ks, f: any("audio_patch_proj" in k for k in ks)
+     and any("video_patch_proj" in k for k in ks), "minimax"),
     # ALBABIT-FIX: return "ltxv" (not "ltx") — matches sampler_utils.py vocabulary
     (lambda ks, f: any("patchify_proj" in k for k in ks), "ltxv"),
     (lambda ks, f: any("patch_embedding" in k for k in ks)
@@ -120,6 +123,10 @@ LATENT_CHANNELS = {
     # a real wan2.2_ti2v_5B_fp16.safetensors checkpoint's patch_embedding.weight
     # shape ([3072, 48, 1, 2, 2]) and against comfy/latent_formats.py.
     "wan_ti2v": 48,
+    # ALBABIT-FIX: MiniMax H3's video VAE is 24 latent channels. Its native
+    # audio stream (32ch, comfy.ldm.minimax.audio_vae) isn't tracked here,
+    # since this table is UNET/video-latent-only, matching every other entry.
+    "minimax": 24,
 }
 
 _FORMAT_MAP = {
@@ -134,6 +141,7 @@ _FORMAT_MAP = {
     # ALBABIT-FIX: Chroma and Flux.2 / Flux.2 Klein (share the 128ch VAE)
     "chroma": "chroma_16ch", "flux2": "flux2_128ch", "flux2-klein": "flux2_128ch",
     "wan_ti2v": "wan_ti2v_48ch",
+    "minimax": "minimax_24ch",
 }
 
 CLIP_SLOT_ORDER = {
@@ -169,6 +177,10 @@ CLIP_SLOT_ORDER = {
     # other WAN variant -- confirmed via the official TI2V-5B workflow's
     # CLIPLoader (umt5_xxl_fp8_e4m3fn_scaled.safetensors, type "wan").
     "wan_ti2v": ["t5xxl"],
+    # ALBABIT-FIX: MiniMax H3's conditioning encoder is a single Qwen3-VL-32B
+    # checkpoint (truncated to 50 layers). One llm_encoder slot, no
+    # companion clip_l/text_projection file, same shape as flux2/z_image.
+    "minimax": ["llm_encoder"],
 }
 
 _CLIP_TYPE_VARIANTS = {
@@ -183,6 +195,10 @@ _CLIP_TYPE_VARIANTS = {
     # ALBABIT-FIX: Flux.2 Klein shares CLIPType.FLUX2 with Flux.2 Dev (the
     # auto-generated "FLUX2-KLEIN" enum name doesn't exist).
     "flux2-klein": ["FLUX2"],
+    # ALBABIT-FIX: "minimax" deliberately has no entry here. comfy.sd.CLIPType.
+    # MINIMAX already exists (verified directly), and get_clip_type_enum()'s
+    # own generic fallback (model_type.upper()) already produces "MINIMAX"
+    # unaided, so no override candidates are needed.
 }
 
 _BASE_CLIP_VRAM = {
@@ -196,6 +212,10 @@ _BASE_CLIP_VRAM = {
     "chroma": 3.5, "flux2": 8.0, "flux2-klein": 3.0,
     # ALBABIT-FIX: same umt5-xxl CLIP as "wan" -- identical VRAM cost.
     "wan_ti2v": 3.0,
+    # ALBABIT-FIX: MiniMax H3's Qwen3-VL-32B encoder (truncated to 50 layers)
+    # is heavier than Flux.2's Mistral-3 24B (8.0). Rough parameter-count
+    # scaling, not a sourced benchmark like ltxav's own correction below.
+    "minimax": 10.0,
 }
 
 _DTYPE_MULT = {
@@ -225,6 +245,20 @@ _BASE_VRAM = {
     # ALBABIT-FIX: WAN 2.2 TI2V-5B is a ~5B DiT (vs "wan"'s 14B) -- rough
     # estimate, not sourced from a specific benchmark like the others above.
     "wan_ti2v": 7.0,
+    # ALBABIT-FIX: matches the real fl2va bf16 checkpoint's file size (66.3GB).
+    # The pruned_int8_convrot preset is a genuinely smaller checkpoint, not a
+    # dtype cast of this one, so it over-estimates there. Same accepted
+    # imprecision as every other architecture sharing one number across
+    # differently-sized presets (e.g. "wan"'s 1.3B vs 14B variants).
+    "minimax": 66.0,
+}
+
+# ALBABIT-FIX: per-architecture key remap before handing an audio-VAE state
+# dict to comfy.sd.VAE(). Absent means no remap needed (comfy.sd.VAE() auto-
+# detects MiniMax H3's audio VAE natively). LTX-AV namespaces its tensors
+# under audio_vae./vocoder., which needs stripping first.
+AUDIO_VAE_KEY_REMAP = {
+    "ltxav": {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."},
 }
 
 

@@ -14,7 +14,6 @@ import time
 
 import torch
 import folder_paths
-import comfy.sd
 import comfy.utils
 import comfy.model_management
 from comfy.cldm.control_types import UNION_CONTROLNET_TYPES
@@ -36,6 +35,7 @@ from ...loader_utils import (
     load_unet_and_baked_vae,
     load_clip_stack,
     load_standalone_vae,
+    construct_audio_vae,
     apply_lora_stack,
     _unet_cache,
     _clip_cache,
@@ -154,6 +154,8 @@ MODEL_TYPES = [
     "cosmos", "cogvideox", "mochi",
     # ALBABIT-FIX: Chroma (distilled Flux) and Flux.2 / Flux.2 Klein
     "chroma", "flux2", "flux2-klein",
+    # ALBABIT-FIX: MiniMax H3, a joint video+audio DiT, 24ch video latent.
+    "minimax",
 ]
 
 WEIGHT_DTYPES = ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"]
@@ -187,13 +189,11 @@ class RadianceUnifiedLoader:
         # weights ship inside the main UNET checkpoint (see assemble_clip_paths).
         text_projection_list = ["None", "Baked (from UNET)"] + folder_paths.get_filename_list("text_encoders")
         text_projection_slot = lambda tip: (text_projection_list, {"default": "None", "tooltip": tip})
-        # ALBABIT-FIX: AuraFlow's official example workflow (CheckpointLoaderSimple
-        # only, no separate CLIPLoader) and its HF repo (fal/AuraFlow-v0.2, only a
-        # generic diffusers-format text_encoder/ folder, no distinct ComfyUI-ready
-        # filename) confirm it has no standalone text encoder file either -- same
-        # "Baked (from UNET)" mechanism as text_projection, on the t5xxl slot
-        # (AuraFlow's real encoder is a T5 variant per comfy.text_encoders.aura_t5,
-        # not clip_l -- see assemble_clip_paths/CLIP_SLOT_ORDER).
+        # ALBABIT-FIX: AuraFlow has no standalone text encoder file either
+        # (official workflow uses CheckpointLoaderSimple only, its HF repo
+        # only ships a diffusers-format folder). Same "Baked (from UNET)"
+        # mechanism as text_projection, on the t5xxl slot (AuraFlow's real
+        # encoder is T5, not clip_l, see assemble_clip_paths/CLIP_SLOT_ORDER).
         t5xxl_list = ["None", "Baked (from UNET)"] + folder_paths.get_filename_list("text_encoders")
         t5xxl_slot = lambda tip: (t5xxl_list, {"default": "None", "tooltip": tip})
 
@@ -230,13 +230,11 @@ class RadianceUnifiedLoader:
                                 "architecture. Override manually if detection fails."},
                 ),
                 # ── VAE ──
-                # ALBABIT-FIX: "Baked VAE (from UNET)" lets checkpoint-style files
-                # that embed their own VAE (e.g. SD3.5) skip the standalone vae_name
-                # file entirely -- same mechanism RadianceVideoLoader already uses
-                # for LTX 2.3. Appended (not prepended) so the raw combo default
-                # for architectures with real separate VAE files (Flux, SDXL,
-                # SD1.5...) is unchanged; per-preset auto-fill (vae_hints) is what
-                # actually selects it for presets where it's the norm.
+                # ALBABIT-FIX: "Baked VAE (from UNET)" lets checkpoint-style
+                # files (e.g. SD3.5) skip the standalone vae_name file, same
+                # mechanism as RadianceVideoLoader's LTX 2.3. Appended, not
+                # prepended, so the raw combo default stays unchanged for
+                # architectures with real separate VAE files.
                 "vae_name": (
                     folder_paths.get_filename_list("vae") + ["Baked VAE (from UNET)"],
                     {"tooltip": "VAE for encoding/decoding latents. "
@@ -381,7 +379,7 @@ class RadianceUnifiedLoader:
         # ════════════════════════════════════════════════════════════════
         # No audio_vae_name slot on the base loader -- always passed "None".
         model, vae, _audio_vae, unet_time, unet_cache_hit, vae_time, vae_cache_hit = load_unet_and_baked_vae(
-            unet_path, unet_name, weight_dtype, offload_mode, vae_name, "None",
+            unet_path, unet_name, weight_dtype, offload_mode, vae_name, "None", resolved_type,
             caching, divider, info_lines
         )
 
@@ -642,7 +640,7 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
         # 4. LOAD UNET  (+ optional baked VAE / Audio VAE extraction)
         # ════════════════════════════════════════════════════════════════
         model, vae, audio_vae, unet_time, unet_cache_hit, vae_time, vae_cache_hit = load_unet_and_baked_vae(
-            unet_path, unet_name, weight_dtype, offload_mode, vae_name, audio_vae_name,
+            unet_path, unet_name, weight_dtype, offload_mode, vae_name, audio_vae_name, resolved_type,
             caching, divider, info_lines
         )
 
@@ -656,7 +654,7 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
             if companion_path:
                 model_low_noise, _, _, _, _, _, _ = load_unet_and_baked_vae(
                     companion_path, companion_name, weight_dtype, offload_mode,
-                    "None", "None", caching, divider, info_lines
+                    "None", "None", resolved_type, caching, divider, info_lines
                 )
             else:
                 logger.warning(f"WAN 2.2 companion UNET not found: '{companion_name}'")
@@ -704,14 +702,8 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
                     info_lines.append(f"AUDIO VAE: {audio_vae_name} (cached)")
                 else:
                     try:
-                        # ALBABIT-FIX: AudioVAE no longer takes sd directly
-                        # (ComfyUI 0.22.0+) — use state_dict_prefix_replace +
-                        # comfy.sd.VAE, mirroring LTXVAudioVAELoader.
                         sd, metadata = comfy.utils.load_torch_file(audio_vae_path, return_metadata=True)
-                        sd = comfy.utils.state_dict_prefix_replace(
-                            sd, {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."}, filter_keys=True
-                        )
-                        audio_vae = comfy.sd.VAE(sd=sd, metadata=metadata)
+                        audio_vae = construct_audio_vae(sd, metadata, resolved_type)
                         av_time = time.time() - t0
                         logger.info(f"Audio VAE loaded {divider} {audio_vae_name} {divider} {av_time:.1f}s")
                         info_lines.append(f"AUDIO VAE: {audio_vae_name} ({av_time:.1f}s)")

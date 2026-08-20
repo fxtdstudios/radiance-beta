@@ -8,6 +8,16 @@ from typing import Dict, Any, Tuple
 
 import folder_paths
 
+# ALBABIT-FIX: guarded like sampler.py/sampler_utils.py already do. An
+# unguarded import here would take down this whole node group's __init__.py
+# (Sampler, Loader, Prompt, VAE Decode, not just Resolution) on any ComfyUI
+# predating NestedTensor.
+try:
+    import comfy.nested_tensor
+    _HAS_NESTED_TENSOR = True
+except ImportError:
+    _HAS_NESTED_TENSOR = False
+
 from radiance.model.detect import _BASE_VRAM, _BASE_CLIP_VRAM
 
 logger = logging.getLogger("radiance.resolution")
@@ -41,27 +51,23 @@ PRESETS: Dict[str, Tuple[int, int, str, str]] = {
 
 PRESET_NAMES = ["Custom"] + list(PRESETS.keys())
 
-# ALBABIT-FIX: model-specific behavior (alignment, video-latent detection,
-# WAN frame rule, frame stride, latent_format) is now driven entirely by `model_type`
-# (see SPATIAL_SCALE, VIDEO_MODEL_TYPES, LATENT_FORMAT_MAP below) instead of preset
+# ALBABIT-FIX: model-specific behavior is now driven entirely by `model_type`
+# (SPATIAL_SCALE, VIDEO_MODEL_TYPES, LATENT_FORMAT_MAP below), not preset
 # category. Presets are now plain Cinema/Social resolutions, model-agnostic.
 #
-# Deferred items (not addressed in this refactor):
-#  - WAN previously got a 16px alignment heuristic; it now falls back to the 8px
-#    default (SPATIAL_SCALE has no WAN entry). Revisit if WAN needs 16px alignment.
-#  - VIDEO_MODEL_TYPES audited against ComfyUI's comfy_extras/ (2026-06-12):
-#    LTXV (8), WAN (4), HunyuanVideo (4), CogVideoX (4,
-#    AutoencoderKLCogVideoX.temporal_compression_ratio default), Mochi (6,
-#    nodes_mochi.py: (length-1)//6+1), and Cosmos (8, nodes_cosmos.py, Cosmos 1.0
-#    "World" text/image-to-video — e.g. Cosmos-1_0-Diffusion-7B-Text2World) all
-#    have verified TEMPORAL_SCALE entries and are included in VIDEO_MODEL_TYPES.
-#    Cosmos Predict2 (stride 4) is NOT covered by the "Cosmos World (16ch)" entry —
-#    revisit if Predict2 support is needed.
-#  - Flux.1 vs Flux.2 (and other version-specific) alignment distinctions are not
-#    further differentiated beyond the existing SPATIAL_SCALE/LATENT_CHANNELS entries.
+# Deferred:
+#  - WAN lost its 16px alignment heuristic, falls back to the 8px default now
+#    (no SPATIAL_SCALE entry). Revisit if 16px is actually needed.
+#  - VIDEO_MODEL_TYPES audited vs comfy_extras/ (2026-06-12), verified
+#    TEMPORAL_SCALE: LTXV/Cosmos 8, WAN/HunyuanVideo/CogVideoX 4, Mochi 6
+#    ((length-1)//6+1 per nodes_mochi.py). Cosmos Predict2 (stride 4) NOT covered.
+#  - Flux.1 vs Flux.2 alignment not further split beyond existing entries.
+#  - MiniMax H3 audited (2026-08-18): 17k+5 frame grid has no TEMPORAL_SCALE
+#    entry (_minimax_align_frame_count/_minimax_video_latent_t instead).
+#    Audio (32ch stereo) out of scope for this node.
 
 # Model types that emit 5D latent (1, C, T, H, W)
-VIDEO_MODEL_TYPES = {"WAN (16ch)", "WAN TI2V (48ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)", "Cosmos World (16ch)", "CogVideoX (16ch)"}
+VIDEO_MODEL_TYPES = {"WAN (16ch)", "WAN TI2V (48ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)", "Cosmos World (16ch)", "CogVideoX (16ch)", "MiniMax H3 (24ch)"}
 
 # Latent format string matching nodes_sampler.py latent_format input
 LATENT_FORMAT_MAP = {
@@ -102,6 +108,10 @@ LATENT_FORMAT_MAP = {
     "HunyuanVideo (16ch)": "hunyuan_video",
     # ALBABIT-FIX: Flux.2 latent format (comfy.latent_formats.Flux2)
     "Flux.2 / Flux.2 Klein (128ch)": "flux2",
+    # ALBABIT-FIX: matches comfy/supported_models.py's MiniMaxH3.unet_config
+    # ("image_model": "minimax_h3"). RadianceSamplerPro doesn't recognize this
+    # latent_format yet — Sampler-side support is a separate, later task.
+    "MiniMax H3 (24ch)": "minimax_h3",
 }
 
 # Common aspect ratios for megapixel target mode
@@ -135,6 +145,11 @@ MODEL_TYPES = [
     # ALBABIT-FIX: Flux.2 / Flux.2 Klein — 128ch latent like LTXV, but ×16 spatial
     # downscale (vs ×32 for LTXV) and no 5D/video handling.
     "Flux.2 / Flux.2 Klein (128ch)",
+    # ALBABIT-FIX: MiniMax H3 — 24ch video latent, 16px spatial (comfy_extras/
+    # nodes_minimax_h3.py's _empty_av_latent: height//16, width//16). Video-only:
+    # the model's native audio stream (32ch stereo) isn't produced here — pair
+    # with a separate audio latent + "Concat AV Latent" for the full AV pipeline.
+    "MiniMax H3 (24ch)",
 ]
 
 ORIENTATIONS = ["As Preset", "Landscape", "Portrait", "Square"]
@@ -158,6 +173,9 @@ LATENT_CHANNELS = {
     "HunyuanVideo (16ch)": 16,
     # ALBABIT-FIX: Flux.2 latent is 128 channels (comfy.latent_formats.Flux2)
     "Flux.2 / Flux.2 Klein (128ch)": 128,
+    # ALBABIT-FIX: MiniMax H3's video stream is 24 latent channels (the 32ch
+    # audio stream isn't produced by this node, see MODEL_TYPES comment above).
+    "MiniMax H3 (24ch)": 24,
 }
 
 # ── Per-model latent spatial downscale factor (VAE compression) ─────────────────
@@ -177,6 +195,11 @@ SPATIAL_SCALE = {
     # no entry at all, silently falling back to the 8px default -- wrong latent
     # size, not just a metadata inaccuracy.
     "WAN TI2V (48ch)": 16,
+    # ALBABIT-FIX: MiniMax H3's video VAE compresses 16x spatially, confirmed
+    # against comfy_extras/nodes_minimax_h3.py's _empty_av_latent (plain
+    # height//16, width//16 — the bespoke adapt_canvas() short-edge/area-cap
+    # logic in that file is a recommended-range helper, not enforced here).
+    "MiniMax H3 (24ch)": 16,
     # ALBABIT-FIX: "Manual" uses scale=1 -> _align_up is a no-op, so width/height
     # are fully unconstrained (no rounding, +/- step of 1) for experimental models.
     "Manual": 1,
@@ -211,18 +234,19 @@ TEMPORAL_SCALE = {
     # ALBABIT-FIX: "Manual" uses stride=1 -> any video_frames value satisfies
     # (n-1)%1==0, so frame-count snapping/validation is fully unconstrained.
     "Manual": 1,
+    # ALBABIT-FIX: MiniMax H3 deliberately has NO entry here — its 17k+5 frame
+    # grid isn't a fixed divisor (see _minimax_align_frame_count/_minimax_
+    # video_latent_t below), so generate() branches on MINIMAX_H3_MODEL_TYPE
+    # before ever reaching this table's .get(model_type, 4) fallback.
 }
 
 # ── VRAM Estimation Metadata ──────────────────────────────────────────────────
 # Bytes per latent element (ComfyUI usually uses float32 internally = 4 bytes)
 LATENT_ELEMENT_BYTES = 4
 # ALBABIT-FIX: this used to be a separate MODEL_BASE_VRAM dict, hand-duplicated
-# from model/detect.py's _BASE_VRAM -- it drifted (missing the CLIP/text-encoder
-# cost entirely, plus several UNET numbers had gone stale vs _BASE_VRAM) causing
-# this node's "Est. VRAM" to disagree with the Loader's own estimate for the
-# same checkpoint (e.g. Flux.2: 20.0 GB shown here vs the Loader's real 28.0 GB,
-# UNET+CLIP). Reuses _BASE_VRAM/_BASE_CLIP_VRAM directly now -- one source of
-# truth, see _estimate_vram() below.
+# from model/detect.py's _BASE_VRAM. It drifted (missing CLIP cost, stale UNET
+# numbers), disagreeing with the Loader's own estimate (Flux.2: 20.0 GB shown
+# here vs 28.0 GB real). Reuses _BASE_VRAM/_BASE_CLIP_VRAM directly now.
 
 LATENT_SCALE = 8  # VAE downscale factor
 
@@ -235,6 +259,53 @@ LATENT_SCALE = 8  # VAE downscale factor
 def _align_up(val: int, scale: int) -> int:
     """Round UP to the nearest multiple of `scale` (never down)."""
     return max(scale, math.ceil(val / scale) * scale)
+
+
+# ── MiniMax H3 temporal grid ─────────────────────────────────────────────────
+# ALBABIT-FIX: mirrors comfy_extras/nodes_minimax_h3.py's align_frame_count()/
+# video_latent_t() verbatim — the model's frame count snaps to n%17==5 (5, 22,
+# 39...), not the stride*k+1 pattern every other VIDEO_MODEL_TYPES entry uses.
+MINIMAX_H3_MODEL_TYPE = "MiniMax H3 (24ch)"
+MINIMAX_H3_FPS = 24  # hardcoded FPS in nodes_minimax_h3.py — no variable-fps support
+# ALBABIT-FIX: audio latent's own temporal fps (AUDIO_LATENT_FPS in
+# nodes_minimax_h3.py), unrelated to the video's 24fps.
+MINIMAX_H3_AUDIO_FPS = 40
+
+
+def _minimax_align_frame_count(n: int) -> int:
+    """Snap UP to the nearest valid MiniMax H3 frame count (n % 17 == 5)."""
+    n = max(5, n)
+    while n % 17 != 5:
+        n += 1
+    return n
+
+
+def _minimax_floor_frame_count(n: int) -> int:
+    """Snap DOWN to the nearest valid MiniMax H3 frame count (n % 17 == 5).
+
+    Companion to _minimax_align_frame_count (up): _minimax_video_latent_t
+    already floors internally for off-grid input, this exposes that same
+    floored frame count so audio_t derives from the identical basis instead
+    of a separately ceiling-aligned one, which drifted the two out of sync.
+    """
+    n = max(5, n)
+    while n % 17 != 5:
+        n -= 1
+    return n
+
+
+def _minimax_audio_latent_t(frame_count: int) -> int:
+    """Audio latent frame count for a given (already-aligned) video frame count.
+
+    Mirrors nodes_minimax_h3.py's temporal_shape() exactly: round(duration * 40).
+    """
+    duration = frame_count / MINIMAX_H3_FPS
+    return round(duration * MINIMAX_H3_AUDIO_FPS)
+
+
+def _minimax_video_latent_t(frame_count: int) -> int:
+    """Latent temporal size for a frame count (rounds down to the grid if unaligned)."""
+    return 2 if frame_count <= 5 else ((frame_count - 5) // 17) * 5 + 2
 
 
 def _estimate_vram(w: int, h: int, c: int, b: int, format_key: str = "flux", spatial_scale: int = 8) -> float:
@@ -781,6 +852,9 @@ class RadianceResolution:
                             "Drives pixel alignment, video-latent shape, frame-count "
                             "rules, latent_format, and the Est. VRAM readout.\n"
                             "Flux/SD3/Cosmos = 16ch. SDXL/SD 1.5 = 4ch. Mochi = 12ch.\n"
+                            "MiniMax H3 = 24ch video-only (fixed 24fps, 17k+5 frame "
+                            "grid); pair with an audio latent + 'Concat AV Latent' "
+                            "for the full AV pipeline.\n"
                             "'Manual': no alignment/frame-count constraints; use "
                             "'latent_channels' for experimental/unlisted models.\n"
                             "Est. VRAM assumes a full load; actual usage may be lower "
@@ -879,7 +953,8 @@ class RadianceResolution:
                             "Total number of video frames. "
                             "5D-latent models require (stride*k+1) — e.g. 4k+1 for "
                             "WAN/HunyuanVideo (1, 5, 9, 13...), 8k+1 for LTXV (1, 9, 17...), "
-                            "6k+1 for Mochi (1, 7, 13...). "
+                            "6k+1 for Mochi (1, 7, 13...). MiniMax H3 uses its own 17k+5 "
+                            "grid instead (5, 22, 39, 56...). "
                             "A warning is logged if this constraint is violated. "
                             "Ignored when frame_computation = 'Auto (Seconds)'."
                         ),
@@ -1001,15 +1076,31 @@ class RadianceResolution:
         # ALBABIT-FIX: Restored from previous radiance version — auto frame count from
         # a target duration, aligned to the model's temporal stride (n*stride + 1).
         if enable_video and frame_computation == "Auto (Seconds)":
-            raw_frames = duration_seconds * float(frame_rate)
+            if model_type == MINIMAX_H3_MODEL_TYPE:
+                # ALBABIT-FIX: MiniMax H3 has no variable-frame-rate support.
+                # nodes_minimax_h3.py's FPS=24 is hardcoded, so the grid alignment
+                # always assumes 24fps regardless of the frame_rate widget.
+                if frame_rate != MINIMAX_H3_FPS:
+                    logger.warning(
+                        f"MiniMax H3 is fixed at {MINIMAX_H3_FPS}fps. frame_rate="
+                        f"{frame_rate} only affects the frame_rate/duration_sec "
+                        f"outputs, not this frame-grid alignment."
+                    )
+                video_frames = _minimax_align_frame_count(int(round(duration_seconds * MINIMAX_H3_FPS)))
+                logger.info(
+                    f"Auto-Seconds: {duration_seconds}s @ {MINIMAX_H3_FPS}fps (fixed) -> "
+                    f"Aligned to {video_frames} frames (17k+5 grid)"
+                )
+            else:
+                raw_frames = duration_seconds * float(frame_rate)
 
-            stride = TEMPORAL_SCALE.get(model_type, 4)
+                stride = TEMPORAL_SCALE.get(model_type, 4)
 
-            video_frames = max(1, int(round(raw_frames / stride)) * stride + 1)
-            logger.info(
-                f"Auto-Seconds: {duration_seconds}s @ {frame_rate}fps -> "
-                f"Aligned to {video_frames} frames (stride {stride})"
-            )
+                video_frames = max(1, int(round(raw_frames / stride)) * stride + 1)
+                logger.info(
+                    f"Auto-Seconds: {duration_seconds}s @ {frame_rate}fps -> "
+                    f"Aligned to {video_frames} frames (stride {stride})"
+                )
 
         # Estimate VRAM
         v_count = video_frames if enable_video else batch_size
@@ -1021,7 +1112,17 @@ class RadianceResolution:
         # ── Step 5: Video frame count validation (model_type-driven) ────────────
         # 5D-latent models require frame count = (stride*k + 1): 1, 5, 9, 13...
         # for stride=4 (WAN/HunyuanVideo), or 1, 9, 17... for stride=8 (LTXV), etc.
-        if enable_video and model_type in VIDEO_MODEL_TYPES:
+        if enable_video and model_type == MINIMAX_H3_MODEL_TYPE:
+            aligned = _minimax_align_frame_count(video_frames)
+            if aligned != video_frames:
+                lower = aligned - 17
+                neighbors = f"{lower} or {aligned}" if lower >= 5 else str(aligned)
+                logger.warning(
+                    f"MiniMax H3 requires frame count % 17 == 5 (5, 22, 39, 56...). "
+                    f"Got {video_frames}. Nearest valid value(s): {neighbors}. "
+                    f"Using {video_frames} may cause sampler errors or incorrect output."
+                )
+        elif enable_video and model_type in VIDEO_MODEL_TYPES:
             stride = TEMPORAL_SCALE.get(model_type, 4)
             if (video_frames - 1) % stride != 0:
                 k_low  = (video_frames - 1) // stride
@@ -1056,15 +1157,41 @@ class RadianceResolution:
         lat_w = w // spatial_scale
 
         if is_video_latent:
-            # ALBABIT-FIX: Restored from previous radiance version — compress the raw
-            # frame count to the latent's temporal dimension via the 3D VAE block
-            # equation: (frames - 1) // temporal_scale + 1.
-            temporal_scale = TEMPORAL_SCALE.get(model_type, 4)
-            lat_t = (actual_batch - 1) // temporal_scale + 1
+            if model_type == MINIMAX_H3_MODEL_TYPE:
+                # ALBABIT-FIX: 17k+5 grid, not a fixed divisor. See
+                # _minimax_video_latent_t (mirrors nodes_minimax_h3.py exactly).
+                lat_t = _minimax_video_latent_t(actual_batch)
+            else:
+                # ALBABIT-FIX: Restored from previous radiance version — compress the raw
+                # frame count to the latent's temporal dimension via the 3D VAE block
+                # equation: (frames - 1) // temporal_scale + 1.
+                temporal_scale = TEMPORAL_SCALE.get(model_type, 4)
+                lat_t = (actual_batch - 1) // temporal_scale + 1
             latent = torch.zeros(1, latent_c, lat_t, lat_h, lat_w, dtype=torch.float32)
             logger.info(
                 f"Video latent 5D: (1, {latent_c}, {lat_t}, {lat_h}, {lat_w})"
             )
+            if model_type == MINIMAX_H3_MODEL_TYPE:
+                # ALBABIT-FIX: real bug, found live. MiniMaxH3Model.forward()
+                # (comfy/ldm/minimax/model.py) does audio_src = x[1]
+                # unconditionally, crashing a video-only latent even for
+                # pure T2V. Needs a real NestedTensor(video, audio) pair,
+                # silence as zeros, mirroring _empty_av_latent() exactly.
+                if not _HAS_NESTED_TENSOR:
+                    raise RuntimeError(
+                        "MiniMax H3 needs comfy.nested_tensor, which this ComfyUI "
+                        "install doesn't have. Update ComfyUI to a version with "
+                        "NestedTensor support to use this model_type."
+                    )
+                # ALBABIT-FIX: real bug, found via code review, not live. Was
+                # feeding a ceiling-aligned frame count here while lat_t above
+                # uses a floor-aligned one for the same off-grid actual_batch,
+                # so video and audio drifted out of sync (audio ran longer).
+                # _minimax_floor_frame_count matches what lat_t already uses.
+                audio_t = _minimax_audio_latent_t(_minimax_floor_frame_count(actual_batch))
+                audio = torch.zeros(1, 32, 2, audio_t, dtype=torch.float32)
+                latent = comfy.nested_tensor.NestedTensor((latent, audio))
+                logger.info(f"Audio latent (silent): (1, 32, 2, {audio_t})")
         else:
             latent = torch.zeros(actual_batch, latent_c, lat_h, lat_w, dtype=torch.float32)
 
