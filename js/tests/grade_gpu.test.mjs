@@ -8,11 +8,10 @@
  * a user can actually reach, including the ones the old unguarded paths turned
  * into Infinity or NaN.
  *
- * **The WGSL half is not covered.** This container's Chromium has no
- * `navigator.gpu`, so the WebGPU shader cannot be compiled here at all.
- * `grade.test.mjs` holds the two dialects to the same set of functions
- * structurally, which is weaker. Saying so is the point: a gap that is written
- * down is a known gap, and one that is quietly skipped is a surprise later.
+ * The WGSL half lives in `grade_wgsl_gpu.test.mjs`. It is a separate file
+ * because it needs a separate runtime: headless Chromium has no
+ * `navigator.gpu` at all — absent, not disabled — so the WebGPU shader is
+ * compiled under Deno against Mesa's lavapipe software Vulkan driver instead.
  *
  * Skips when Playwright is unavailable — a skipped GPU test is visible in the
  * output, a missing one is not.
@@ -146,10 +145,7 @@ test('no grade setting produces a non-finite pixel on the GPU', { skip }, () => 
     }
 });
 
-// Not a failure. The gap is real, it is not closeable in this environment, and
-// a red suite trains people to ignore red. Node reports todo separately so it
-// stays visible until someone runs it somewhere with WebGPU.
-test('the emitted WGSL is verified against the JS too',
-    { skip, todo: 'no navigator.gpu in headless Chromium — the WGSL half is structural only' }, () => {
-        assert.fail('WGSL cannot be compiled in this environment');
-    });
+// The WGSL half used to sit here as a standing `todo`, because headless
+// Chromium has no navigator.gpu under any flag combination. It is now a real
+// test in grade_wgsl_gpu.test.mjs, run under Deno on a software Vulkan
+// adapter, over this same case matrix.
