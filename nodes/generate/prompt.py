@@ -94,6 +94,7 @@ import json
 import logging
 import os
 import re
+import weakref
 import torch
 from typing import Optional
 
@@ -916,24 +917,31 @@ def _detect_arch_from_clip(clip, target_arch: str,
             return arch
 
     # ── Priority 3: tokenizer key fingerprinting (cached per clip object) ────
-    # Use id(clip) as cache key — avoids holding a reference to the clip object
-    # while still deduplicated per loaded model.
-    _clip_id = id(clip)
-    if _clip_id not in _detect_arch_from_clip._key_cache:
+    # ALBABIT-FIX: was keyed on id(clip) in a plain dict, so a collected
+    # clip's entry stuck around and a later object reusing that freed
+    # address inherited its stale fingerprint (real, reproducible under
+    # pytest's object churn). WeakKeyDictionary keyed on the object itself
+    # evicts on real collection, so a reused address can't inherit it.
+    try:
+        keys = _detect_arch_from_clip._key_cache.get(clip)
+    except TypeError:
+        keys = None  # clip doesn't support weak references, don't cache
+    if keys is None:
         try:
             test_tokens = clip.tokenize("test")
-            _detect_arch_from_clip._key_cache[_clip_id] = frozenset(test_tokens.keys())
+            keys = frozenset(test_tokens.keys())
         except Exception as e:
             logger.debug(f"[Encoder] Arch detection failed: {e}, defaulting to sdxl")
-            _detect_arch_from_clip._key_cache[_clip_id] = frozenset()
-    keys = _detect_arch_from_clip._key_cache[_clip_id]
+            keys = frozenset()
+        try:
+            _detect_arch_from_clip._key_cache[clip] = keys
+        except TypeError:
+            pass
 
-    # ALBABIT-FIX: LTXAVGemmaTokenizer registers as "gemma3_12b" — exact key match.
-    # The old check used substring "gemma" which never matched "gemma3_12b" in a frozenset.
-    # Without this, LTX-AV fell through to "sdxl" fallback (wrong arch, wrong prompt path).
-    # LTX 2.5's Gemma4-based tokenizer registers under a different key, "gemma4"
-    # (comfy/text_encoders/gemma4.py Gemma4Tokenizer), so it needs its own check
-    # -- same fallback-to-sdxl gap, just for the newer encoder.
+    # ALBABIT-FIX: LTXAVGemmaTokenizer registers as "gemma3_12b", exact key
+    # match (the old substring check for "gemma" never matched it, falling
+    # through to "sdxl"). LTX 2.5's Gemma4Tokenizer registers under "gemma4"
+    # instead, same fallback gap, its own check.
     if "gemma3_12b" in keys or "gemma4" in keys:
         return "ltxav"
     # MiniMax H3's Qwen3-VL-32B encoder registers as "qwen3vl_32b" (name=
@@ -966,9 +974,9 @@ def _detect_arch_from_clip(clip, target_arch: str,
     return "sdxl"  # Safe fallback — structured format for CLIP-only
 
 
-# Per-clip fingerprint cache (dict so it auto-evicts naturally per Python GC;
-# set is bounded by the number of distinct clips ever loaded in a session).
-_detect_arch_from_clip._key_cache = {}
+# Per-clip fingerprint cache. WeakKeyDictionary, not a plain dict: entries
+# are removed automatically when the clip object itself is collected.
+_detect_arch_from_clip._key_cache = weakref.WeakKeyDictionary()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                  SCENE MOOD VOCABULARY  (v3.0)
@@ -1723,11 +1731,10 @@ class RadianceCinematicPromptEncoder:
 
         # ── Build prompt ────────────────────────────────────────────────────
         # ALBABIT-FIX: ltxav uses the same _build_prose_prompt path as Flux/WAN.
-        # Gemma3-12B understands visual descriptors (camera, lens, aperture, lighting)
-        # for video; the DualLinearProjection audio head has learned weights that
-        # map purely visual gear terms to near-zero audio influence — no corruption.
-        # Note: quoted dialogue in base_prompt (e.g. 'says "Hello!"') WILL generate
-        # audible speech — this is intended LTX-AV behaviour, not a bug.
+        # Gemma3-12B's audio head learns near-zero influence from purely
+        # visual gear terms, no corruption. Note: quoted dialogue in
+        # base_prompt (e.g. 'says "Hello!"') WILL generate audible speech,
+        # intended LTX-AV behaviour, not a bug.
         final_prompt, negative_prompt, _ = build_cinematic_prompt_v3(
             base_prompt=base_prompt,
             base_prompt_b="",
