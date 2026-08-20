@@ -77,6 +77,17 @@ function _applyNegStrengthLock(node, hidden) {
     refreshNodeSize(node);
 }
 
+// ALBABIT-FIX: shared by the poll loop and onConfigure below, which used to
+// each inline this same sequence.
+function _refreshLiveState(node) {
+    updatePresetDivergenceMarkers(node);
+    const liveState = _liveMiniMaxState(node);
+    if (liveState !== null) {
+        _applyNegPromptLock(node, liveState);
+        _applyNegStrengthLock(node, liveState);
+    }
+}
+
 // ALBABIT-FIX: apply_style_preset() used to overwrite these 7 widgets on
 // every execution, not just on selection (same bug class as the Sampler's
 // _apply_presets). This file fills them once on selection and flags a later
@@ -438,14 +449,7 @@ app.registerExtension({
             // approach as js/radiance_sampler.js's marker refresh. Also
             // covers the connected Loader's own preset/model_type changing
             // live, which _liveMiniMaxState reads directly.
-            this._presetMarkerInterval = setInterval(() => {
-                updatePresetDivergenceMarkers(self);
-                const liveState = _liveMiniMaxState(self);
-                if (liveState !== null) {
-                    _applyNegPromptLock(self, liveState);
-                    _applyNegStrengthLock(self, liveState);
-                }
-            }, 250);
+            this._presetMarkerInterval = setInterval(() => _refreshLiveState(self), 250);
             const origOnRemoved = this.onRemoved;
             this.onRemoved = function () {
                 if (self._presetMarkerInterval) {
@@ -462,16 +466,8 @@ app.registerExtension({
         nodeType.prototype.onConfigure = function (info) {
             if (onConfigure) onConfigure.apply(this, arguments);
             const self = this;
-            const applyLiveState = () => {
-                updatePresetDivergenceMarkers(self);
-                const liveState = _liveMiniMaxState(self);
-                if (liveState !== null) {
-                    _applyNegPromptLock(self, liveState);
-                    _applyNegStrengthLock(self, liveState);
-                }
-            };
-            setTimeout(applyLiveState, 150);
-            setTimeout(applyLiveState, 600);
+            setTimeout(() => _refreshLiveState(self), 150);
+            setTimeout(() => _refreshLiveState(self), 600);
         };
 
         // ALBABIT-FIX: label marker always reflects the last real run. The
