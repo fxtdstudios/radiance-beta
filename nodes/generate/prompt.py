@@ -832,11 +832,14 @@ DEFAULT_YEAR: int = int(os.environ.get("RADIANCE_DEFAULT_YEAR",
 # These architectures use T5/LLM encoders that prefer natural language prose.
 # Comma-separated keyword chains perform significantly worse on them.
 PROSE_ARCHS = {"flux", "sd3", "sd3.5", "wan", "ltxv", "ltxav", "pixart",  # ALBABIT-FIX: "ltx" → "ltxv"
-               "hunyuan_video", "aura_flow"}
+               "hunyuan_video", "aura_flow", "minimax"}
 
 # Architectures where negative prompts have near-zero practical effect.
 # (CFG guidance in these models operates differently; negatives waste token budget.)
-_WEAK_NEG_ARCHS = {"flux", "wan", "ltxv", "ltxav", "hunyuan_video"}  # ALBABIT-FIX: "ltx" → "ltxv"
+# ALBABIT-FIX: "minimax" is a stronger case than the others here. MiniMax H3's
+# own reference workflow (comfy_extras/nodes_minimax_h3.py) uses BasicGuider,
+# not CFGGuider, and its node has no negative conditioning output at all.
+_WEAK_NEG_ARCHS = {"flux", "wan", "ltxv", "ltxav", "hunyuan_video", "minimax"}  # ALBABIT-FIX: "ltx" → "ltxv"
 
 
 @functools.lru_cache(maxsize=4)
@@ -933,6 +936,10 @@ def _detect_arch_from_clip(clip, target_arch: str,
     # -- same fallback-to-sdxl gap, just for the newer encoder.
     if "gemma3_12b" in keys or "gemma4" in keys:
         return "ltxav"
+    # MiniMax H3's Qwen3-VL-32B encoder registers as "qwen3vl_32b" (name=
+    # in comfy/text_encoders/minimax.py's MiniMaxH3TEModel/Tokenizer).
+    if "qwen3vl_32b" in keys:
+        return "minimax"
     # LTX-V (pre-2.3, T5-based) — still matched by key fragments
     if any(k in keys for k in ("ltxv", "ltx")):
         return "ltxv"
@@ -993,6 +1000,11 @@ _MOOD_VOCAB = {
 }
 
 
+# Per-encoder pad token id, keyed by the same tokenizer dict key used in
+# _real_token_count below. Anything not listed here uses CLIP's 49407.
+_PAD_IDS = {"t5xxl": 0, "llm": 0, "qwen3vl_32b": 151643}
+
+
 def _real_token_count(clip, text: str, tokens: dict = None) -> int:
     """
     Get actual token count using the connected CLIP tokenizer.
@@ -1001,7 +1013,9 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
     v3.1 FIX: For T5/LLM encoders, tokens are padded to a fixed length
     (e.g., 256 or 512). shape[-1] returns the padded length, not the
     actual token count. We count non-padding tokens where possible.
-    T5 uses pad_token_id=0; CLIP uses pad_token_id=49407.
+    T5/generic LLM use pad_token_id=0; CLIP uses pad_token_id=49407;
+    MiniMax H3's Qwen3-VL-32B ("qwen3vl_32b") uses 151643 (its own
+    special_tokens config in comfy/text_encoders/minimax.py).
 
     v2.3.3 [BUG-I3]: Removed redundant `import torch as _torch` — torch
     is already imported at module level.
@@ -1014,7 +1028,7 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
 
     try:
         # Try each known encoder key in order of preference
-        for key in ("t5xxl", "l", "g", "llm"):
+        for key in ("t5xxl", "l", "g", "llm", "qwen3vl_32b"):
             if key in tokens and tokens[key]:
                 tok_data = tokens[key][0]
                 if hasattr(tok_data, "shape"):
@@ -1022,7 +1036,7 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
                     # no multi-chunk structure. Count non-pad tokens directly.
                     # [BUG-I3] Use module-level torch directly
                     if torch.is_tensor(tok_data):
-                        pad_id = 0 if key in ("t5xxl", "llm") else 49407
+                        pad_id = _PAD_IDS.get(key, 49407)
                         non_pad = (tok_data != pad_id).sum().item()
                         if non_pad > 0:
                             return non_pad
@@ -1039,7 +1053,7 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
                     #
                     # [BUG-M4] v2.3.3: Explicit tuple validation
                     if isinstance(tok_data[0], (tuple, list)) and len(tok_data[0]) >= 1:
-                        pad_id = 0 if key in ("t5xxl", "llm") else 49407
+                        pad_id = _PAD_IDS.get(key, 49407)
                         total_non_pad = 0
                         total_len = 0
                         for chunk in tokens[key]:   # iterate ALL chunks
@@ -1687,7 +1701,14 @@ class RadianceCinematicPromptEncoder:
         # ── Resolve architecture automatically ──────────────────────────────
         resolved_arch = _detect_arch_from_clip(clip, "Auto", model_meta)
         use_prose = resolved_arch in PROSE_ARCHS
-        token_limit = 256 if use_prose else 77
+        # ALBABIT-FIX: Qwen3-VL-32B's own tokenizer has no practical limit
+        # (max_length=99999999 in comfy/text_encoders/qwen3vl.py), and MiniMax
+        # H3's example prompts run several hundred words. The usual 256-token
+        # prose ceiling would silently truncate them.
+        if resolved_arch == "minimax":
+            token_limit = 2048
+        else:
+            token_limit = 256 if use_prose else 77
 
         # ── Apply style preset ──────────────────────────────────────────────
         settings = {
@@ -1773,14 +1794,21 @@ class RadianceCinematicPromptEncoder:
         neg_tokens = clip.tokenize(safe_negative)
         negative_cond = _encode_tokens(clip, neg_tokens)
 
-        return (
-            positive_cond,
-            negative_cond,
-            final_prompt,
-            negative_prompt,
-            resolved_arch,
-            int(real_count),
-        )
+        # ALBABIT-FIX: weak_neg_arch only known post-execution (resolved_arch
+        # depends on the real CLIP/model_meta), so js/radiance_prompt.js flags
+        # negative_prompt with a label marker via onExecuted, same convention
+        # as engine.py's rudra_fallback/log_overexposure_risk.
+        return {
+            "ui": {"weak_neg_arch": [resolved_arch in _WEAK_NEG_ARCHS]},
+            "result": (
+                positive_cond,
+                negative_cond,
+                final_prompt,
+                negative_prompt,
+                resolved_arch,
+                int(real_count),
+            ),
+        }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                         NODE MAPPINGS
