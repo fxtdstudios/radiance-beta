@@ -107,6 +107,21 @@ function _isMiniMaxH3(modelType) {
     return modelType === "MiniMax H3 (24ch)";
 }
 
+// ALBABIT-FIX: shared by modelTypeW.callback and videoFramesW.callback,
+// which used to each inline this same snap. A no-op unless the widget is
+// actually showing a value the model_type would reject.
+function _snapVideoFramesToGrid(modelTypeW, videoFramesW) {
+    if (!videoFramesW || !VIDEO_MODEL_TYPES_JS.has(modelTypeW?.value)) return;
+    const val = parseInt(videoFramesW.value, 10);
+    const aligned = _isMiniMaxH3(modelTypeW.value)
+        ? _alignMiniMaxFrames(val)
+        : _alignNk1(val, _frameStride(modelTypeW.value));
+    if (aligned !== val) {
+        videoFramesW.value = aligned;
+        if (videoFramesW.inputEl) videoFramesW.inputEl.value = aligned;
+    }
+}
+
 // ALBABIT-FIX: shared by modelTypeW.callback and onConfigure's reapply,
 // which used to each inline this same check. The hidden widget can't leave
 // a stale value (e.g. 90 left over from a different model_type) silently
@@ -344,16 +359,7 @@ app.registerExtension({
                     _syncDurationSecondsStep(modelTypeW, durSecW, frameRateW);
 
                     // Snap video_frames to a valid frame count for the new model_type.
-                    if (videoFramesW && VIDEO_MODEL_TYPES_JS.has(modelTypeW.value)) {
-                        const val = parseInt(videoFramesW.value, 10);
-                        const aligned = _isMiniMaxH3(modelTypeW.value)
-                            ? _alignMiniMaxFrames(val)
-                            : _alignNk1(val, _frameStride(modelTypeW.value));
-                        if (aligned !== val) {
-                            videoFramesW.value = aligned;
-                            if (videoFramesW.inputEl) videoFramesW.inputEl.value = aligned;
-                        }
-                    }
+                    _snapVideoFramesToGrid(modelTypeW, videoFramesW);
 
                     _forceMiniMaxFrameRate(modelTypeW, frameRateW);
 
@@ -431,16 +437,7 @@ app.registerExtension({
                 videoFramesW.callback = function () {
                     if (orig) orig.apply(this, arguments);
 
-                    if (VIDEO_MODEL_TYPES_JS.has(modelTypeW?.value)) {
-                        const val = parseInt(videoFramesW.value, 10);
-                        const aligned = _isMiniMaxH3(modelTypeW.value)
-                            ? _alignMiniMaxFrames(val)
-                            : _alignNk1(val, _frameStride(modelTypeW.value));
-                        if (aligned !== val) {
-                            videoFramesW.value = aligned;
-                            if (videoFramesW.inputEl) videoFramesW.inputEl.value = aligned;
-                        }
-                    }
+                    _snapVideoFramesToGrid(modelTypeW, videoFramesW);
                 };
             }
 

@@ -1073,10 +1073,14 @@ class RadianceResolution:
         # ── Step 3: Latent Format & VRAM Estimation (model_type-driven) ──────────
         latent_format = LATENT_FORMAT_MAP.get(model_type, "flux" if LATENT_CHANNELS.get(model_type, 16) >= 16 else "sdxl")
 
+        # ALBABIT-FIX: hoisted, was re-checked 4 times below (audit finding,
+        # no behavior change).
+        is_minimax_h3 = model_type == MINIMAX_H3_MODEL_TYPE
+
         # ALBABIT-FIX: Restored from previous radiance version — auto frame count from
         # a target duration, aligned to the model's temporal stride (n*stride + 1).
         if enable_video and frame_computation == "Auto (Seconds)":
-            if model_type == MINIMAX_H3_MODEL_TYPE:
+            if is_minimax_h3:
                 # ALBABIT-FIX: MiniMax H3 has no variable-frame-rate support.
                 # nodes_minimax_h3.py's FPS=24 is hardcoded, so the grid alignment
                 # always assumes 24fps regardless of the frame_rate widget.
@@ -1112,7 +1116,7 @@ class RadianceResolution:
         # ── Step 5: Video frame count validation (model_type-driven) ────────────
         # 5D-latent models require frame count = (stride*k + 1): 1, 5, 9, 13...
         # for stride=4 (WAN/HunyuanVideo), or 1, 9, 17... for stride=8 (LTXV), etc.
-        if enable_video and model_type == MINIMAX_H3_MODEL_TYPE:
+        if enable_video and is_minimax_h3:
             aligned = _minimax_align_frame_count(video_frames)
             if aligned != video_frames:
                 lower = aligned - 17
@@ -1157,7 +1161,7 @@ class RadianceResolution:
         lat_w = w // spatial_scale
 
         if is_video_latent:
-            if model_type == MINIMAX_H3_MODEL_TYPE:
+            if is_minimax_h3:
                 # ALBABIT-FIX: 17k+5 grid, not a fixed divisor. See
                 # _minimax_video_latent_t (mirrors nodes_minimax_h3.py exactly).
                 lat_t = _minimax_video_latent_t(actual_batch)
@@ -1171,7 +1175,7 @@ class RadianceResolution:
             logger.info(
                 f"Video latent 5D: (1, {latent_c}, {lat_t}, {lat_h}, {lat_w})"
             )
-            if model_type == MINIMAX_H3_MODEL_TYPE:
+            if is_minimax_h3:
                 # ALBABIT-FIX: real bug, found live. MiniMaxH3Model.forward()
                 # (comfy/ldm/minimax/model.py) does audio_src = x[1]
                 # unconditionally, crashing a video-only latent even for
