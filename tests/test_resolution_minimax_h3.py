@@ -38,6 +38,7 @@ from nodes.generate.resolution import (
     MINIMAX_H3_FPS,
     MINIMAX_H3_AUDIO_FPS,
     _minimax_align_frame_count,
+    _minimax_floor_frame_count,
     _minimax_video_latent_t,
     _minimax_audio_latent_t,
 )
@@ -109,6 +110,33 @@ class TestMinimaxAlignFrameCount:
 
     def test_one_above_grid_point_rounds_up_a_full_cycle(self):
         assert _minimax_align_frame_count(23) == 39
+
+
+class TestMinimaxFloorFrameCount:
+    """Companion to _minimax_align_frame_count, snapping down instead of up."""
+
+    def test_already_on_grid_is_unchanged(self):
+        for n in (5, 22, 39, 56, 124):
+            assert _minimax_floor_frame_count(n) == n
+
+    def test_rounds_down_to_previous_grid_point(self):
+        # Same hand-verified pair as the align-up test: 80 % 17 == 12,
+        # nearest grid points are 73 and 90; this one floors to 73.
+        assert _minimax_floor_frame_count(80) == 73
+
+    def test_never_goes_below_five(self):
+        assert _minimax_floor_frame_count(1) == 5
+        assert _minimax_floor_frame_count(0) == 5
+
+    def test_matches_what_video_latent_t_already_uses_internally(self):
+        """_minimax_video_latent_t floors off-grid input internally (see
+        TestMinimaxVideoLatentT.test_off_grid_input_floor_snaps_to_lower_grid_neighbor).
+        This must produce the identical t for the floored frame count as for
+        the raw one, or audio_t (derived from the floored count) would drift
+        out of sync with the video stream it's supposed to pair with."""
+        for raw in (80, 81, 89):
+            floored = _minimax_floor_frame_count(raw)
+            assert _minimax_video_latent_t(floored) == _minimax_video_latent_t(raw)
 
 
 class TestMinimaxVideoLatentT:
@@ -203,6 +231,18 @@ class TestGenerateMiniMaxH3Latent:
         assert latent["samples"].shape[2] == 22
         text = "\n".join(str(call) for call in mock_logger.warning.call_args_list)
         assert "17" in text and "80" in text
+
+    def test_off_grid_manual_frames_keep_video_and_audio_in_sync(self):
+        """Real bug caught in code review: audio_t used to derive from a
+        ceiling-aligned frame count (90) while video used a floor-aligned one
+        (73) for this same off-grid input, drifting the two streams out of
+        sync. Both must now derive from the identical floored basis."""
+        node = RadianceResolution()
+        latent, *_ = self._generate(node, video_frames=80)
+        video, audio = latent["samples"].tensors
+        assert video.shape[2] == _minimax_video_latent_t(73)
+        # audio_t = round((73/24)*40) = 122, not round((90/24)*40) = 150.
+        assert audio.shape[3] == 122
 
     def test_auto_seconds_uses_fixed_24fps_regardless_of_frame_rate_widget(self):
         node = RadianceResolution()
