@@ -36,9 +36,32 @@ from nodes.generate.resolution import (
     LATENT_FORMAT_MAP,
     MINIMAX_H3_MODEL_TYPE,
     MINIMAX_H3_FPS,
+    MINIMAX_H3_AUDIO_FPS,
     _minimax_align_frame_count,
     _minimax_video_latent_t,
+    _minimax_audio_latent_t,
 )
+
+
+class _FakeNestedTensor:
+    """conftest.py stubs comfy.nested_tensor.NestedTensor to None ("some
+    builds don't have it"). MiniMax H3 genuinely needs a working one, so
+    this augments the stub rather than replacing conftest's module wholesale
+    (same convention as test_sampler_regression.py's torch_mock augmentation).
+    Mirrors the real class's constructor + shape/tensors access only, all
+    generate() and these tests actually touch."""
+
+    def __init__(self, tensors):
+        self.tensors = list(tensors)
+        self.is_nested = True
+
+    @property
+    def shape(self):
+        return self.tensors[0].shape
+
+
+import comfy.nested_tensor  # installed by conftest  # noqa: E402
+comfy.nested_tensor.NestedTensor = _FakeNestedTensor
 
 
 class TestMiniMaxH3Registration:
@@ -107,6 +130,23 @@ class TestMinimaxVideoLatentT:
         assert _minimax_video_latent_t(80) == _minimax_video_latent_t(73) == 22
 
 
+class TestMinimaxAudioLatentT:
+    """Mirrors comfy_extras/nodes_minimax_h3.py's temporal_shape()'s audio_t:
+    round((frame_count / 24) * 40). Hand-verified, not re-derived from the
+    same formula under test."""
+
+    def test_minimum_grid_value(self):
+        assert _minimax_audio_latent_t(5) == 8
+
+    def test_hand_verified_grid_values(self):
+        assert _minimax_audio_latent_t(22) == 37
+        assert _minimax_audio_latent_t(124) == 207
+        assert _minimax_audio_latent_t(141) == 235
+
+    def test_fps_constant_matches_reference(self):
+        assert MINIMAX_H3_AUDIO_FPS == 40
+
+
 class TestGenerateMiniMaxH3Latent:
     """End-to-end generate() calls. Exercises the three MiniMax-specific
     branch points (Auto-Seconds, frame-count validation, latent construction)
@@ -131,6 +171,22 @@ class TestGenerateMiniMaxH3Latent:
         assert (w, h, c) == (1344, 768, 24)
         assert fmt == "minimax_h3"
         assert frames == 124
+
+    def test_latent_is_a_genuine_video_audio_pair(self):
+        """MiniMaxH3Model.forward() does audio_src = x[1] unconditionally
+        (comfy/ldm/minimax/model.py). A plain video-only tensor crashes
+        with IndexError the instant sampling starts, even for pure T2V with
+        no real audio content. Regression guard for that real, live-found bug."""
+        node = RadianceResolution()
+        latent, *_ = self._generate(node, video_frames=124)
+        samples = latent["samples"]
+        assert samples.is_nested is True
+        assert len(samples.tensors) == 2
+        video, audio = samples.tensors
+        assert tuple(video.shape) == (1, 24, 37, 48, 84)
+        # audio_t = round((124/24)*40) = 207, silence encoded as zeros.
+        assert tuple(audio.shape) == (1, 32, 2, 207)
+        assert torch.count_nonzero(audio) == 0
 
     def test_off_grid_manual_frames_warns_but_does_not_override(self, monkeypatch):
         # ALBABIT-FIX: radiance's "radiance" logger has propagate=False
