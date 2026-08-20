@@ -1,5 +1,18 @@
 import { app } from "../../scripts/app.js";
 
+// ALBABIT-FIX: only known post-execution (resolved_arch depends on the real
+// CLIP/model_meta), same convention as radiance_vae_widgets.js's RUDRA/
+// overexposure markers (engine.py's "ui" channel via onExecuted).
+const WEAK_NEG_MARKER = " ⚠ no CFG, ignored";
+
+function _setLabelMarker(widget, marker) {
+    if (!widget) return;
+    if (widget._radOrigLabel === undefined && !marker) return;
+    if (widget._radOrigLabel === undefined) widget._radOrigLabel = widget.label ?? widget.name;
+    const wanted = marker ? widget._radOrigLabel + marker : widget._radOrigLabel;
+    if (widget.label !== wanted) widget.label = wanted;
+}
+
 // ALBABIT-FIX: apply_style_preset() used to overwrite these 7 widgets on
 // every execution, not just on selection (same bug class as the Sampler's
 // _apply_presets — see radiance_sampler.js). Python now respects the live
@@ -379,6 +392,18 @@ app.registerExtension({
             const self = this;
             setTimeout(() => updatePresetDivergenceMarkers(self), 150);
             setTimeout(() => updatePresetDivergenceMarkers(self), 600);
+        };
+
+        // ALBABIT-FIX: flags negative_prompt after a run where the resolved
+        // architecture has no real CFG to apply it to (e.g. MiniMax H3's
+        // BasicGuider pipeline), so typing there isn't silently wasted.
+        const onExecuted = nodeType.prototype.onExecuted;
+        nodeType.prototype.onExecuted = function (message) {
+            if (onExecuted) onExecuted.apply(this, arguments);
+            const weakNeg = !!message?.weak_neg_arch?.[0];
+            const negW = this.widgets?.find(w => w.name === "negative_prompt");
+            _setLabelMarker(negW, weakNeg ? WEAK_NEG_MARKER : null);
+            this.setDirtyCanvas?.(true, true);
         };
     }
 });
