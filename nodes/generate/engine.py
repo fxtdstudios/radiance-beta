@@ -227,6 +227,21 @@ class RadianceHDRVAEDecode:
                 ),
             },
         )
+        # ALBABIT-FIX: Restored from previous radiance version. Accepts
+        # RadianceResolution's crop_bbox output to crop off model-alignment
+        # padding (e.g. LTX's 32px turning a 1920x1080 request into 1920x1088)
+        # right here, instead of needing a separate crop node after this one.
+        types["optional"]["crop_bbox"] = (
+            "BOUNDING_BOX",
+            {
+                "forceInput": True,
+                "tooltip": (
+                    "Optional: connect RadianceResolution's crop_bbox output to "
+                    "crop off model-alignment padding (e.g. 1920x1088 -> "
+                    "1920x1080) after decode."
+                ),
+            },
+        )
         return types
 
     def apply(
@@ -254,6 +269,7 @@ class RadianceHDRVAEDecode:
         rudra_decoder: str = "Disabled",
         decoder_size: str = "rudra_turbo",
         model_meta: str = "",
+        crop_bbox: dict = None,             # ALBABIT-FIX: broadcast-resolution crop from RadianceResolution
         **kwargs,                           # BUG 8 FIX: forward remaining params
     ):
         # Lazily instantiate once; RadianceVAE4KDecode is stateless so one
@@ -466,6 +482,15 @@ class RadianceHDRVAEDecode:
                     f"for display-referred target_space='{target_space}' — would blow highlights. "
                     f"Use a scene-referred space (Linear, ACEScg, LogC4 etc.) for HDR scaling."
                 )
+
+        # ALBABIT-FIX: Restored from previous radiance version. Crops off
+        # model-alignment padding using RadianceResolution's crop_bbox output,
+        # instead of needing a separate crop node after this one.
+        if crop_bbox:
+            bx, by = int(crop_bbox.get("x", 0)), int(crop_bbox.get("y", 0))
+            bw = int(crop_bbox.get("width", image.shape[2]))
+            bh = int(crop_bbox.get("height", image.shape[1]))
+            image = image[:, by:by + bh, bx:bx + bw, :]
 
         # BUG 7 FIX: emit decode settings as metadata JSON
         if rudra_actually_used:
