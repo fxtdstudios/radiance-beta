@@ -62,6 +62,7 @@ class FakeDecode:
         FakeDecode.last_kwargs = kwargs
         channels = 4 if kwargs.get("alpha") is not None else 3
         image = torch.zeros(1, 2, 2, channels)
+        image[0, 1, 1, :] = 5.0  # distinct value at (y=1, x=1), for crop_bbox offset tests
         metadata = {
             "resolution": "2x2",
             "latent_format": "engine_fmt",
@@ -188,6 +189,22 @@ class TestHDRVAEDecodeContract(unittest.TestCase):
 
         RadianceHDRVAEDecode().apply({"samples": FakeAVLatent()}, object())
         self.assertIs(FakeDecode.last_kwargs["samples"]["samples"], video)
+
+    @pytest.mark.real_torch
+    def test_crop_bbox_slices_the_decoded_image(self):
+        """crop_bbox comes from RadianceResolution (offset, then size), same
+        contract as ComfyUI's own BOUNDING_BOX convention."""
+        result = RadianceHDRVAEDecode().apply(
+            self.samples, object(), crop_bbox={"x": 1, "y": 1, "width": 1, "height": 1},
+        )
+        image = result["result"][0]
+        self.assertEqual(tuple(image.shape), (1, 1, 1, 3))
+        self.assertEqual(image[0, 0, 0, 0].item(), 5.0)
+
+    @pytest.mark.real_torch
+    def test_no_crop_bbox_leaves_the_image_untouched(self):
+        result = RadianceHDRVAEDecode().apply(self.samples, object())
+        self.assertEqual(tuple(result["result"][0].shape), (1, 2, 2, 3))
 
 
 if __name__ == "__main__":

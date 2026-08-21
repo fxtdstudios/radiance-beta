@@ -789,6 +789,7 @@ class RadianceResolution:
         cls,
         preset, width, height, orientation, model_type, batch_size,
         scale_factor=1.0, latent_channels=0, enable_video=False,
+        crop_to_broadcast_resolution=True,
         frame_computation="Manual (Frames)", duration_seconds=5.0,
         video_frames=81, frame_rate=24.0, mp_target=0.0,
         mp_aspect_ratio="16:9", unique_id="",
@@ -797,6 +798,7 @@ class RadianceResolution:
         state = (
             f"{preset}|{width}|{height}|{orientation}|{model_type}|{batch_size}|"
             f"{scale_factor}|{latent_channels}|{enable_video}|"
+            f"{crop_to_broadcast_resolution}|"
             f"{frame_computation}|{duration_seconds}|{video_frames}|"
             f"{frame_rate}|{mp_target}|{mp_aspect_ratio}"
         )
@@ -932,6 +934,23 @@ class RadianceResolution:
                     "BOOLEAN",
                     {"default": False, "tooltip": "Enable video sequence mode (replaces batch parameter)."},
                 ),
+                # ALBABIT-FIX: Restored from previous radiance version, generalized to
+                # images too (old fork was video-only). crop_bbox below always reports
+                # the diff between the requested size and align_val's padding, for any
+                # preset/model_type/custom size, not just a fixed table of broadcast
+                # standards like the old fork's 1088->1080 lookup.
+                "crop_to_broadcast_resolution": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": (
+                            "Compute crop_bbox to remove model-alignment padding "
+                            "(e.g. 1920x1088 -> 1920x1080 for LTX's 32px grid). "
+                            "Wire crop_bbox into RadianceHDRVAEDecode's crop_bbox "
+                            "input to actually apply the crop after decode."
+                        ),
+                    },
+                ),
                 # ALBABIT-FIX: Restored from previous radiance version — lets the user pick
                 # a target duration in seconds instead of a raw frame count.
                 "frame_computation": (
@@ -973,8 +992,8 @@ class RadianceResolution:
     # ALBABIT-FIX: Restored from previous radiance version — multi-output (width,
     # height, channels, info, frame_rate, frame_count, latent_format, duration_sec)
     # so this node can drive Sampler Pro / other downstream nodes directly.
-    RETURN_TYPES = ("LATENT", "INT", "INT", "INT", "STRING", "FLOAT", "INT", "STRING", "FLOAT")
-    RETURN_NAMES = ("latent", "width", "height", "channels", "info", "frame_rate", "frame_count", "latent_format", "duration_sec")
+    RETURN_TYPES = ("LATENT", "INT", "INT", "INT", "STRING", "FLOAT", "INT", "STRING", "FLOAT", "BOUNDING_BOX")
+    RETURN_NAMES = ("latent", "width", "height", "channels", "info", "frame_rate", "frame_count", "latent_format", "duration_sec", "crop_bbox")
     OUTPUT_TOOLTIPS = (
         "Empty latent tensor at the selected resolution.",
         "Final image width (pixels).",
@@ -985,6 +1004,7 @@ class RadianceResolution:
         "Total video frames (or batch size for images).",
         "Latent format string — wire to Sampler Pro latent_format input.",
         "Duration in seconds (video_frames / frame_rate). 0.0 for images.",
+        "Crop box {x, y, width, height} to remove model-alignment padding. Wire into RadianceHDRVAEDecode's crop_bbox input.",
     )
     FUNCTION = "generate"
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Generate"
@@ -1007,6 +1027,7 @@ class RadianceResolution:
         scale_factor: float = 1.0,
         latent_channels: int = 0,
         enable_video: bool = False,
+        crop_to_broadcast_resolution: bool = True,
         frame_computation: str = "Manual (Frames)",
         duration_seconds: float = 5.0,
         video_frames: int = 81,
@@ -1052,6 +1073,13 @@ class RadianceResolution:
         else:
             w, h = width, height
             category = "Custom"
+
+        # ALBABIT-FIX: captured before scale_factor, matching the old fork's
+        # "ignore scale_factor" crop design. scale_factor drives the LTX 2.3
+        # LowRes pass; the pipeline's own 2x upscale brings the decode back to
+        # the un-scaled size, so crop_bbox must target that, not this call's
+        # own scaled-down latent.
+        req_w, req_h = w, h
 
         # Apply scale factor — always surface it (not just on alignment
         # correction): a leftover scale_factor from a previous run silently
@@ -1112,6 +1140,7 @@ class RadianceResolution:
 
         # Apply orientation
         w, h = _apply_orientation(w, h, orientation)
+        req_w, req_h = _apply_orientation(req_w, req_h, orientation)
 
         # ── Step 5: Video frame count validation (model_type-driven) ────────────
         # 5D-latent models require frame count = (stride*k + 1): 1, 5, 9, 13...
@@ -1281,6 +1310,17 @@ class RadianceResolution:
 
         duration_sec = video_frames / frame_rate if enable_video else 0.0
 
+        # ALBABIT-FIX: full_w/full_h re-align req_w/req_h on their own rather
+        # than reusing w/h, for the same scale_factor reason as above. When
+        # disabled, crop_bbox is still a well-formed full-frame box, so wiring
+        # it downstream is always harmless regardless of the toggle state.
+        full_w, full_h = _align_up(req_w, align_val), _align_up(req_h, align_val)
+        if crop_to_broadcast_resolution:
+            crop_x, crop_y = (full_w - req_w) // 2, (full_h - req_h) // 2
+        else:
+            crop_x, crop_y, req_w, req_h = 0, 0, full_w, full_h
+        crop_bbox = {"x": crop_x, "y": crop_y, "width": req_w, "height": req_h}
+
         return {
             "ui": {
                 "images": preview_images,
@@ -1290,6 +1330,7 @@ class RadianceResolution:
             "result": (
                 latent_dict, w, h, latent_c, info,
                 float(frame_rate), int(actual_batch), latent_fmt, duration_sec,
+                crop_bbox,
             ),
         }
 
