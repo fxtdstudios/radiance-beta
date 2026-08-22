@@ -15,7 +15,7 @@ from .core import (
     _guided_filter_diffuse, _scharr_edges, _colorfulness,
     _ssao_multisampled, _reflection_mask, _albedo_retinex,
     _emission_glow, _roughness_from_specular, _transmission_mask,
-    _optical_flow_lk, _flow_to_hsv_image, _object_id_matte,
+    _optical_flow, _flow_to_hsv_image, _object_id_matte,
     _depth_anything_v2_infer, _normal_from_dsine, _surface_normals_gradient,
     _curvature_from_normals, _world_position_from_depth,
     _AUTO_DEPTH_CHOICES, _NORMAL_CONVENTIONS, _DA_CHOICE_TO_KEY,
@@ -372,7 +372,10 @@ class RadianceMultipassMaster:
         if prev_frame is not None:
             pf_in = _match_optional_image(prev_frame, B, H, W)
             prev_luma = _luminance(pf_in, weights)
-            flow_u, flow_v = _optical_flow_lk(luma, prev_luma, window_radius=lk_window_radius)
+            # `auto` is DIS where OpenCV is importable, which is every supported
+            # install; lk_window_radius still governs the Lucas-Kanade fallback.
+            flow_u, flow_v = _optical_flow(
+                luma, prev_luma, method="auto", window_radius=lk_window_radius)
 
             # Apply temporal coherence / EMA smoothing to reduce sub-pixel jitter
             if motion_coherence > 0.0 and batch_is_sequence:

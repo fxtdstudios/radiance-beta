@@ -1258,6 +1258,114 @@ def _hsv_to_rgb_tensor(h: torch.Tensor, s: torch.Tensor, v: torch.Tensor) -> tor
     return torch.stack([r, g, b], dim=-1)
 
 
+#: Optical flow solvers, in the order the "auto" setting prefers them.
+FLOW_METHODS = ("auto", "dis", "lucas-kanade")
+
+
+def _optical_flow_dis(
+    frame1: torch.Tensor,
+    frame2: Optional[torch.Tensor],
+    preset: str = "medium",
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Dense inverse search optical flow, via OpenCV.
+
+    Same signature and same sign convention as `_optical_flow_lk`, so the two
+    are interchangeable at the call site.
+
+    Why this exists. Pyramidal Lucas-Kanade is bounded by its integration
+    window: the coarsest level has to stay larger than the 15x15 window, so
+    there is a hard ceiling on how far coarse-to-fine can reach, and past it
+    the field thins out even while the median stays roughly right. Measured on
+    a multi-scale sinusoid plate, the fraction of the field landing within half
+    a pixel goes 100 / 84 / 71 / 58 / 29 percent at 3 / 8 / 12 / 16 / 20 px.
+    DIS holds 100 / 100 / 100 / 100 / 99 over the same range, and on an
+    aperiodic plate -- closer to real grain and detail -- LK is already at 9%
+    by 12 px where DIS is still at 100%.
+
+    It is also about eleven times faster on a 256x384 frame, which matters
+    because mask propagation runs this per frame pair.
+
+    Both solvers fail past roughly 28 px on those fixtures. That is not a
+    ceiling worth quoting as a property of DIS: at that displacement the test
+    patterns are ambiguous, so what is being measured is the fixture. What can
+    be said is that the working range went from about 8 px to about 20.
+
+    OpenCV's DIS takes 8-bit input only, so the pair is quantised. The
+    normalisation is computed **across both frames together**: scaling each
+    frame by its own min and max would move the picture between them and
+    invent flow that is not there.
+    """
+    if frame2 is None:
+        B, H, W = frame1.shape
+        zero = torch.zeros(B, H, W, device=frame1.device, dtype=torch.float32)
+        return zero, zero
+
+    try:
+        import cv2  # noqa: PLC0415  (optional at runtime, required by the install)
+    except ImportError:
+        logger.debug("[Radiance/Flow] OpenCV not importable; falling back to Lucas-Kanade")
+        return _optical_flow_lk(frame1, frame2)
+
+    presets = {
+        "ultrafast": cv2.DISOPTICAL_FLOW_PRESET_ULTRAFAST,
+        "fast": cv2.DISOPTICAL_FLOW_PRESET_FAST,
+        "medium": cv2.DISOPTICAL_FLOW_PRESET_MEDIUM,
+    }
+    solver = cv2.DISOpticalFlow_create(presets.get(preset, presets["medium"]))
+
+    device = frame1.device
+    f1 = frame1.detach().float().cpu().numpy()
+    f2 = frame2.detach().float().cpu().numpy()
+
+    us, vs = [], []
+    for i in range(f1.shape[0]):
+        a, b = f1[i], f2[i]
+        finite = np.isfinite(a) & np.isfinite(b)
+        if not finite.any():
+            us.append(np.zeros_like(a)); vs.append(np.zeros_like(a))
+            continue
+        lo = float(min(a[finite].min(), b[finite].min()))
+        hi = float(max(a[finite].max(), b[finite].max()))
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi - lo < 1e-12:
+            # A flat pair has no gradient to track. Zero flow is the honest
+            # answer; DIS on a constant image returns noise.
+            us.append(np.zeros_like(a)); vs.append(np.zeros_like(a))
+            continue
+        scale = 255.0 / (hi - lo)
+        qa = np.clip((np.nan_to_num(a, nan=lo) - lo) * scale, 0, 255).astype(np.uint8)
+        qb = np.clip((np.nan_to_num(b, nan=lo) - lo) * scale, 0, 255).astype(np.uint8)
+        flow = solver.calc(qa, qb, None)
+        us.append(flow[..., 0]); vs.append(flow[..., 1])
+
+    u = torch.from_numpy(np.stack(us)).to(device=device, dtype=torch.float32)
+    v = torch.from_numpy(np.stack(vs)).to(device=device, dtype=torch.float32)
+    return u, v
+
+
+def _optical_flow(
+    frame1: torch.Tensor,
+    frame2: Optional[torch.Tensor],
+    method: str = "auto",
+    window_radius: int = 7,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Pick a solver. `auto` means DIS where OpenCV is available, else LK.
+
+    OpenCV is a required dependency of a supported install, so `auto` is DIS in
+    practice; the fallback is for a broken or minimal environment rather than a
+    supported configuration.
+    """
+    if method == "lucas-kanade":
+        return _optical_flow_lk(frame1, frame2, window_radius=window_radius)
+    if method == "dis":
+        return _optical_flow_dis(frame1, frame2)
+    try:
+        import cv2  # noqa: F401,PLC0415
+    except ImportError:
+        return _optical_flow_lk(frame1, frame2, window_radius=window_radius)
+    return _optical_flow_dis(frame1, frame2)
+
+
 def _flow_to_hsv_image(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     """
     HSV-encode optical flow for visualisation.

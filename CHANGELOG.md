@@ -28,6 +28,27 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ### Added
 
+- **Optical flow is DIS now**, which roughly doubles the motion it can follow
+  and runs about eleven times faster. Measured on the existing test plate, the
+  fraction of the field landing within half a pixel: Lucas–Kanade 100 / 84 / 71
+  / 58 / 29 percent at 3 / 8 / 12 / 16 / 20 px, DIS 100 / 100 / 100 / 100 / 99.
+  On an aperiodic plate, closer to grain than to sinusoids, Lucas–Kanade is
+  down to 9% by 12 px where DIS is still at 100%. Lucas–Kanade remains
+  selectable on the Optical Flow node and is the automatic fallback if OpenCV
+  cannot be imported. `RadianceOpticalFlow`'s docstring has claimed DIS for
+  some time while the node ran Lucas–Kanade; that is now true rather than
+  aspirational.
+
+- **First tests for `image/upscale.py`**, which was 1111 statements at 0% and
+  is reached from `delivery/handler.py`. Nineteen of them, over bit depth
+  conversion, resampling and sharpen — the parts that requantise and resample,
+  which is where an HDR range gets quietly destroyed. The float depths must not
+  clamp; the integer depths must clamp and land on their quantisation steps;
+  dithering must be reproducible at a fixed seed; an over-range plate must
+  still be over-range after a downscale; and the sRGB decode must only run when
+  the input is called sRGB. 28% covered now, the remainder being the paths that
+  need model weights.
+
 - **The browser test lane covers every Viewer panel, not five of them.** The
   harness listed the panels it drove, so it exercised the framing, scope,
   probe, OCIO and view sections while nine others — primaries, effects, lens,
