@@ -28,6 +28,16 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ### Added
 
+- **First tests for `image/upscale.py`**, which was 1111 statements at 0% and
+  is reached from `delivery/handler.py`. Nineteen of them, over bit depth
+  conversion, resampling and sharpen — the parts that requantise and resample,
+  which is where an HDR range gets quietly destroyed. The float depths must not
+  clamp; the integer depths must clamp and land on their quantisation steps;
+  dithering must be reproducible at a fixed seed; an over-range plate must
+  still be over-range after a downscale; and the sRGB decode must only run when
+  the input is called sRGB. 28% covered now, the remainder being the paths that
+  need model weights.
+
 - **The browser test lane covers every Viewer panel, not five of them.** The
   harness listed the panels it drove, so it exercised the framing, scope,
   probe, OCIO and view sections while nine others — primaries, effects, lens,
