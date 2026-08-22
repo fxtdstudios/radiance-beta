@@ -377,34 +377,29 @@ quietly stop being true.
 
 **Structural debt**
 
-- [ ] **Split the remaining monoliths.** In order of size: `hdr/vae.py` (3460
+- [ ] **Split the remaining monoliths.** Largest first: `hdr/vae.py` (3460
       lines), `nodes/upscale/upscale.py` (3022), `image/upscale.py` (2741),
       `nodes/generate/sampler.py` (2008), `nodes/pipeline/workspace.py` (1905),
       `sampler_utils.py` (1876), `nodes/generate/prompt.py` (1795),
-      `nodes/monitor/viewer.py` (1233). This list previously named only two of
-      those and had both counts wrong. `nodes/io/write.py` is done: 2972 → 2201
-      when the write engine moved out, → 1262 when the read engine followed.
+      `nodes/monitor/viewer.py` (1233).
 
 **Test coverage**
 
-Measured: 46% of 27,598 statements. Every node has structural coverage — 399
-smoke tests over `RETURN_TYPES`, `INPUT_TYPES` and the execute method — so what
-is thin below is behaviour, not registration.
+46% of 27,645 statements. Every node has structural coverage — 399 smoke tests
+over `RETURN_TYPES`, `INPUT_TYPES` and the execute method — so what is thin
+below is behaviour, not registration.
 
-- [ ] **`image/upscale.py` — 28%, up from nothing.** Bit depth, resampling
-      and sharpen are covered. What is left needs weights or a GPU:
-      `RadianceAIUpscale`, the SUPIR path, and the tiling code.
-- [ ] **`loader_utils.py` (340 statements, 8%) and
-      `nodes/pipeline/workspace.py` (1069, 12%).** Model loading and the
-      workspace API, both reachable from a graph.
-- [ ] **`delivery/handler.py` — 22%, up from 10%.** The lookup tables, the
-      versioning, the session log and the ACES sidecar are covered, and a
-      master is now written end to end with no ComfyUI present — which is what
-      moving the write engine down a floor was for. What is left is the
-      endpoint body itself, 570 lines of it.
-- [ ] **`radiance_ocio.py` is at 48%**, up from 0. The bake, the cache, the
-      config listings and the route guard are covered; the HTTP endpoints
-      themselves and the display-view path are not.
+- [ ] **`loader_utils.py` — 340 statements, 8%.** Model loading: downloads,
+      architecture detection, CLIP assembly, caching.
+- [ ] **`nodes/pipeline/workspace.py` — 1069 statements, 12%.** The workspace
+      API, reachable from a graph and from the dashboards.
+- [ ] **`image/upscale.py` — 1111 statements, 28%.** What remains needs model
+      weights or a GPU: `RadianceAIUpscale`, the SUPIR path, and the tiling
+      code.
+- [ ] **`delivery/handler.py` — 452 statements, 24%.** What remains is the
+      endpoint body, 570 lines of it.
+- [ ] **`radiance_ocio.py` — 375 statements, 48%.** What remains is the HTTP
+      endpoints and the display-view bake path.
 
 ## Documentation
 
