@@ -193,7 +193,7 @@ class TestGenerateMiniMaxH3Latent:
 
     def test_on_grid_manual_frames_produces_correct_shape(self):
         node = RadianceResolution()
-        latent, w, h, c, info, fr, frames, fmt, dur = self._generate(node, video_frames=124)
+        latent, w, h, c, info, fr, frames, fmt, dur, crop_bbox = self._generate(node, video_frames=124)
         # width=1344, height=768 at 16px alignment -> unchanged; //16 -> 84x48.
         assert tuple(latent["samples"].shape) == (1, 24, 37, 48, 84)
         assert (w, h, c) == (1344, 768, 24)
@@ -223,7 +223,7 @@ class TestGenerateMiniMaxH3Latent:
         mock_logger = MagicMock()
         monkeypatch.setattr(resolution_module, "logger", mock_logger)
         node = RadianceResolution()
-        latent, w, h, c, info, fr, frames, fmt, dur = self._generate(node, video_frames=80)
+        latent, w, h, c, info, fr, frames, fmt, dur, crop_bbox = self._generate(node, video_frames=80)
         # video_frames output stays the user's raw value (warn-only, matching
         # the existing Manual-mode behavior for every other video model_type)...
         assert frames == 80
@@ -246,7 +246,7 @@ class TestGenerateMiniMaxH3Latent:
 
     def test_auto_seconds_uses_fixed_24fps_regardless_of_frame_rate_widget(self):
         node = RadianceResolution()
-        latent, w, h, c, info, fr, frames, fmt, dur = self._generate(
+        latent, w, h, c, info, fr, frames, fmt, dur, crop_bbox = self._generate(
             node, frame_computation="Auto (Seconds)", duration_seconds=5.0, frame_rate=30.0,
         )
         # 5.0s * 24fps (fixed) = 120 -> aligned up to 124, NOT the 150 that
@@ -281,7 +281,7 @@ class TestGenerateMiniMaxH3Latent:
 
     def test_width_height_align_to_16px(self):
         node = RadianceResolution()
-        latent, w, h, c, info, fr, frames, fmt, dur = self._generate(node, width=1350, height=770)
+        latent, w, h, c, info, fr, frames, fmt, dur, crop_bbox = self._generate(node, width=1350, height=770)
         assert w % 16 == 0 and h % 16 == 0
         assert w >= 1350 and h >= 770
 
@@ -306,13 +306,13 @@ class TestNonMiniMaxRegressionGuard:
 
     def test_ltxv_manual_frames_still_uses_stride_formula(self):
         node = RadianceResolution()
-        latent, w, h, c, info, fr, frames, fmt, dur = self._generate(node, video_frames=81)
+        latent, w, h, c, info, fr, frames, fmt, dur, crop_bbox = self._generate(node, video_frames=81)
         assert latent["samples"].shape[2] == (81 - 1) // 8 + 1
         assert fmt == "ltxav"
 
     def test_ltxv_auto_seconds_still_uses_frame_rate_widget(self):
         node = RadianceResolution()
-        latent, w, h, c, info, fr, frames, fmt, dur = self._generate(
+        latent, w, h, c, info, fr, frames, fmt, dur, crop_bbox = self._generate(
             node, frame_computation="Auto (Seconds)", duration_seconds=3.0, frame_rate=24.0,
         )
         # 3.0*24=72 -> round(72/8)*8+1 = 73 (unlike MiniMax, not fixed-24fps-only).
@@ -322,7 +322,7 @@ class TestNonMiniMaxRegressionGuard:
         mock_logger = MagicMock()
         monkeypatch.setattr(resolution_module, "logger", mock_logger)
         node = RadianceResolution()
-        latent, w, h, c, info, fr, frames, fmt, dur = self._generate(node, video_frames=80)
+        latent, w, h, c, info, fr, frames, fmt, dur, crop_bbox = self._generate(node, video_frames=80)
         assert frames == 80
         text = "\n".join(str(call) for call in mock_logger.warning.call_args_list)
         assert "stride*k" in text or "8k+1" in text or "requires frame count" in text
