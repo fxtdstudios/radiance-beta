@@ -1348,22 +1348,28 @@ def _optical_flow(
     frame2: Optional[torch.Tensor],
     method: str = "auto",
     window_radius: int = 7,
+    preset: str = "medium",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Pick a solver. `auto` means DIS where OpenCV is available, else LK.
 
     OpenCV is a required dependency of a supported install, so `auto` is DIS in
     practice; the fallback is for a broken or minimal environment rather than a
     supported configuration.
+
+    `window_radius` is Lucas-Kanade's and `preset` is DIS's. Both are carried
+    so a caller with one quality dial can drive whichever solver it gets --
+    otherwise the dial silently stops doing anything when the solver changes,
+    which is how this function shipped for one commit.
     """
     if method == "lucas-kanade":
         return _optical_flow_lk(frame1, frame2, window_radius=window_radius)
     if method == "dis":
-        return _optical_flow_dis(frame1, frame2)
+        return _optical_flow_dis(frame1, frame2, preset=preset)
     try:
         import cv2  # noqa: F401,PLC0415
     except ImportError:
         return _optical_flow_lk(frame1, frame2, window_radius=window_radius)
-    return _optical_flow_dis(frame1, frame2)
+    return _optical_flow_dis(frame1, frame2, preset=preset)
 
 
 def _flow_to_hsv_image(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
