@@ -28,6 +28,16 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ### Added
 
+- **The browser test lane covers every Viewer panel, not five of them.** The
+  harness listed the panels it drove, so it exercised the framing, scope,
+  probe, OCIO and view sections while nine others — primaries, effects, lens,
+  curves, qualifiers, masks, prompt, terminal and the HDR preview widget — were
+  held by source assertions. The list is now discovered from the class, so a
+  panel added later joins the check by existing, and the test asserts a floor
+  on the count so it cannot quietly shrink back. Building all fourteen found no
+  defect; driving the mask type selector found one worth pinning, and the new
+  assertion fails if the `parseInt` on it is ever dropped.
+
 - **The read engine moved below the node layer**, to `radiance/io/reader.py`.
   The decoders, the colour-space decode, path-kind detection, the image,
   sequence and video readers, the write-input coercion helpers and the UI probe
@@ -68,6 +78,24 @@ All notable changes to FXTD Radiance will be documented in this file.
   setting and the control label all checked afterwards.
 
 ### Fixed
+
+- **Every OCIO LUT baked in Python was an exact identity.** `bake_colorspace_lut`
+  and `bake_display_view_lut` looped over the cube calling
+  `applyRGB(python_list)`. OCIO's binding converts a list to a temporary
+  buffer, transforms that and discards it, so the list is never modified and
+  each lattice point was written back unchanged — the result was bit-identical
+  to its own input. 18% grey through ACEScg → sRGB Display came out as 0.18
+  instead of 0.47. That LUT is served over `POST /radiance/ocio/bake` and
+  loaded into the Viewer's renderer, so choosing a display transform from the
+  OCIO dropdown logged "[OCIO] Active" and changed nothing on screen. The bake
+  now applies to the array, which OCIO does modify in place, and matches its
+  own CPU processor exactly. It is also about 35x faster, and the
+  `hasattr(applyRGB)` branch guarding an unreachable "batch API if available"
+  fallback is gone with it. Found by writing the first tests this module has
+  ever had; `tests/test_ocio_manager.py` fails if the identity returns.
+- **OCIO LUT cache keys could collide.** The key was a colon-joined string of
+  unescaped names, so a display or view containing a colon could hash to the
+  same key as a different transform and be served the wrong LUT.
 
 - **The writer-layering tests now run on CI instead of failing and skipping.**
   Both bare-interpreter tests assumed the repository directory is named

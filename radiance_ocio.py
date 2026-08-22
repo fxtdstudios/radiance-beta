@@ -432,7 +432,7 @@ class OCIOConfigManager:
             return None
 
         cache_key = hashlib.md5(
-            f"cs:{src_space}:{dst_space}:{lut_size}".encode()
+            repr(("cs", src_space, dst_space, lut_size)).encode()
         ).hexdigest()
 
         if cache_key in self._lut_cache:
@@ -495,44 +495,43 @@ class OCIOConfigManager:
             np.ndarray of shape (size*size*size, 3), dtype float32
         """
         n = size
-        total = n * n * n
 
-        # Build lattice coordinates: R fastest, then G, then B
-        # This matches OpenGL texImage3D(TEXTURE_3D) memory layout
-        coords = np.zeros((total, 3), dtype=np.float32)
-        idx = 0
-        for b in range(n):
-            for g in range(n):
-                for r in range(n):
-                    coords[idx, 0] = r / (n - 1)
-                    coords[idx, 1] = g / (n - 1)
-                    coords[idx, 2] = b / (n - 1)
-                    idx += 1
+        # Lattice: R fastest, then G, then B, matching texImage3D(TEXTURE_3D)
+        # memory layout. Built with numpy rather than a triple loop -- at 65
+        # that loop was 274,625 iterations to produce a fixed ramp.
+        axis = np.arange(n, dtype=np.float32) / (n - 1)
+        coords = np.stack([
+            np.tile(axis, n * n),                  # R cycles every element
+            np.repeat(np.tile(axis, n), n),        # G every n
+            np.repeat(axis, n * n),                # B every n*n
+        ], axis=1).astype(np.float32)
 
-        # Apply the OCIO transform to every lattice point
-        # OCIO's applyRGB operates in-place on a packed float array
-        if hasattr(cpu_processor, "applyRGB"):
-            # Process each pixel (safest, works with all OCIO versions)
-            result = coords.copy()
-            for i in range(total):
-                pixel = result[i].tolist()
-                cpu_processor.applyRGB(pixel)
-                result[i, 0] = pixel[0]
-                result[i, 1] = pixel[1]
-                result[i, 2] = pixel[2]
-        else:
-            # Batch API if available (OCIO v2.2+)
-            result = coords.copy()
-            flat = result.ravel()
-            cpu_processor.apply(flat)
-            result = flat.reshape(total, 3)
-
+        # Apply on the array, not pixel by pixel.
+        #
+        # This used to build a Python list per lattice point and call
+        # applyRGB(list). OCIO's binding converts a list to a temporary buffer,
+        # transforms that, and discards it -- the list is not modified. So the
+        # loop wrote the input straight back and every baked LUT was an exact
+        # identity: 18% grey through ACEScg -> sRGB Display came out as 0.18
+        # instead of 0.47, and the viewer showed an untransformed picture under
+        # the name of the transform the user had picked.
+        #
+        # Given a contiguous float32 array, applyRGB does modify in place, and
+        # it is also ~35x faster than the loop was. The `hasattr(applyRGB)`
+        # branch that used to guard a "batch API if available" fallback is gone
+        # with it: applyRGB has always been present, so the fallback was
+        # unreachable and the slow path was the only path.
+        result = np.ascontiguousarray(coords)
+        cpu_processor.applyRGB(result)
         return result.astype(np.float32)
 
     def _make_cache_key(
         self, display: str, view: str, input_space: Optional[str], size: int
     ) -> str:
-        raw = f"dv:{display}:{view}:{input_space or 'default'}:{size}"
+        # repr of a tuple, not a colon-joined string: a display or view name
+        # containing a colon would otherwise let two different transforms hash
+        # to the same key and serve each other's LUT.
+        raw = repr(("dv", display, view, input_space, size))
         return hashlib.md5(raw.encode()).hexdigest()
 
     def clear_cache(self):
