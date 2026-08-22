@@ -394,7 +394,19 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
       fps auto sentinel, the broadcast-safe float exemption, PNG alpha, proxy
       scale, sequence padding) — hashed before and after. The only three that
       differ are non-deterministic between two runs of *identical* code, which
-      is the DPX header's creation timestamp. 2466 Python tests pass, up 6.
+      is the DPX header's creation timestamp. 2502 Python tests pass.
+
+      One correction to the above, found by CI: the two bare-interpreter tests
+      did `sys.path.insert(0, _ROOT.parent); import radiance`, which only
+      resolves when the checkout directory is itself named `radiance`. It is on
+      a working copy; it is not on GitHub, which checks out as
+      `radiance-beta/radiance-beta` — so one of them failed there and the other
+      reported itself *skipped*, because its "a dependency is missing" guard
+      caught `No module named 'radiance'` along with the third-party ones. The
+      claim that the engine imports standalone was therefore untested on CI in
+      both directions at once. Both now load the package from its `__init__`
+      path under an explicit module name, so the folder name is irrelevant, and
+      the skip guard names the packages it is allowed to skip for.
 
 ### Done and verified
 
