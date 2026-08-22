@@ -3,9 +3,9 @@ import logging
 import json
 
 try:
-    from radiance.nodes.vfx.multipass.core import _flow_to_hsv_image, _optical_flow_lk
+    from radiance.nodes.vfx.multipass.core import _flow_to_hsv_image, _optical_flow
 except Exception:
-    from .multipass.core import _flow_to_hsv_image, _optical_flow_lk
+    from .multipass.core import _flow_to_hsv_image, _optical_flow
 
 logger = logging.getLogger("radiance.motion")
 
@@ -16,8 +16,10 @@ class RadianceOpticalFlow:
     Generates high-precision 32-bit UV motion vectors between consecutive frames.
     Compatible with Nuke's VectorBlur and Radiance Motion Coherence patches.
     
-    Uses the DIS (Dense Inverse Search) algorithm for production-grade 
-    motion estimation in real-time.
+    Uses DIS (Dense Inverse Search), which this docstring claimed for some
+    time while the node actually ran pyramidal Lucas-Kanade. It does now.
+    Lucas-Kanade is still selectable, and is the fallback if OpenCV cannot be
+    imported.
     """
     
     @classmethod
@@ -30,6 +32,20 @@ class RadianceOpticalFlow:
                     "tooltip": "Scale factor for output vectors. 1.0 = pixel units."}),
                 "visualize": ("BOOLEAN", {"default": False,
                     "tooltip": "Outputs a color-coded visualization of the motion field."}),
+            },
+            "optional": {
+                "solver": (["Auto", "DIS", "Lucas-Kanade"], {
+                    "default": "Auto",
+                    "tooltip": (
+                        "Auto uses DIS, and falls back to Lucas-Kanade only if "
+                        "OpenCV is missing.\n"
+                        "DIS holds a dense field out to about 20 px of motion "
+                        "and is roughly 11x faster.\n"
+                        "Lucas-Kanade is the previous solver: accurate to about "
+                        "8 px, after which the field thins out even though the "
+                        "median stays close."
+                    ),
+                }),
             }
         }
 
@@ -40,7 +56,8 @@ class RadianceOpticalFlow:
     DESCRIPTION = "Estimate dense optical flow between adjacent frames."
 
     @torch.no_grad()
-    def analyze(self, images: torch.Tensor, preset: str, flow_scale: float, visualize: bool):
+    def analyze(self, images: torch.Tensor, preset: str, flow_scale: float,
+                visualize: bool, solver: str = "Auto"):
         B, H, W, C = images.shape
         device = images.device
         
@@ -60,7 +77,9 @@ class RadianceOpticalFlow:
         for i in range(1, B):
             curr = luma_norm[i : i + 1]
             prev = luma_norm[i - 1 : i]
-            u, v = _optical_flow_lk(curr, prev, window_radius=radius)
+            method = {"Auto": "auto", "DIS": "dis",
+                      "Lucas-Kanade": "lucas-kanade"}.get(solver, "auto")
+            u, v = _optical_flow(curr, prev, method=method, window_radius=radius)
             u = u * flow_scale
             v = v * flow_scale
             vec = torch.stack(

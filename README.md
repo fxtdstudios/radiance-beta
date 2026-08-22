@@ -207,7 +207,7 @@ A Lite Viewer exists for when you want a frame on the node and nothing else.
 
 ### VFX
 
-Plate prep, masks, roto, depth, optics, motion, and multipass. The Multipass Master extractor derives passes from a single image, which is useful for generated footage and is not a render pass; when you have real AOVs, the Multipass AOV Reader takes a multilayer EXR. Relighting works off either.
+Plate prep, masks, roto, depth, optics, motion, and multipass. Motion estimation is DIS optical flow, which stays dense out to about 20 px of movement; the older Lucas–Kanade solver is still selectable. The Multipass Master extractor derives passes from a single image, which is useful for generated footage and is not a render pass; when you have real AOVs, the Multipass AOV Reader takes a multilayer EXR. Relighting works off either.
 
 ### Video
 
@@ -307,23 +307,27 @@ is worse than one that says so. Full detail in the [changelog](CHANGELOG.md).
   `"linear"` and `"gaussian_feather"` are genuinely different.
 - **`chromatic_adaptation` has no effect.** The white-point adaptation is baked
   into the precomputed conversion matrices.
-- **Optical flow is pyramidal Lucas–Kanade**, not DIS or a learned method, and
-  it thins out above roughly 8 px of motion. What degrades is the *field*, not
-  the estimate: the median displacement stays within a few percent out to about
-  20 px, but the fraction of the field landing within half a pixel falls from
-  100% at 3 px to 84% at 8, 71% at 12, 58% at 16 and 29% at 20. Mask
-  propagation tears where the field is patchy, so treat ~8 px as the working
-  limit rather than the point of failure.
+- **Optical flow works to about 20 px of motion, not beyond.** The solver is
+  DIS (dense inverse search), and it holds a dense field — 99% or more of the
+  frame within half a pixel — out to 20 px on the test plates. Past roughly 28
+  px it fails, as does every other solver here, because the correspondence
+  becomes ambiguous rather than merely hard.
 
-  Making the pyramid deeper does not fix it, and this was measured rather than
-  assumed. The ceiling is the integration window — the coarsest level has to
-  stay larger than the 15×15 window, so a short side of *S* allows about
-  log₂(*S*/15) levels. On a 256×512 plate, going from four levels to five made
-  every displacement worse (at 8 px, 96% of the field within half a pixel
-  became 32%), because a 15×15 window on a 16-pixel-tall level is solving over
-  most of the frame and that estimate propagates back down. Shrinking the
-  window with the level to buy depth was tried too, and measured worse for the
-  same reason.
+  Pyramidal Lucas–Kanade is still selectable and is the fallback if OpenCV
+  cannot be imported. It is bounded by its 15×15 integration window: the
+  fraction of the field landing within half a pixel falls from 100% at 3 px to
+  84% at 8, 71% at 12, 58% at 16 and 29% at 20, and on aperiodic detail it is
+  already at 9% by 12 px. What degrades is the *field*, not the median, which
+  is the worst way for a flow solver to fail — the number you would check looks
+  right while the mask you propagate tears.
+
+  Deepening the LK pyramid does not help, and that was measured rather than
+  assumed: the coarsest level has to stay larger than the window, and going
+  from four levels to five on a 256×512 plate made every displacement worse (at
+  8 px, 96% of the field within half a pixel became 32%). Shrinking the window
+  with the level to buy depth was tried too, and measured worse for the same
+  reason.
+
 - **Scene-cut detection normalises by the batch maximum**, so the threshold has
   no absolute meaning and cut-free footage will still report cuts.
 
@@ -349,7 +353,7 @@ quietly stop being true.
 | **Catalog** | All 131 nodes declare their menu section explicitly; a test fails if a registered node is missing from the table. Withholding a node from the menu requires a named entry a test reads, so a finished node cannot go missing by omission. |
 | **Isolation** | Every one of the eleven node groups imports with `aiohttp` and `server` blocked, proven in a subprocess rather than for one hand-listed module. |
 | **Layering** | `radiance/io/writer.py` and `radiance/io/reader.py` import nothing above them, checked by AST walk *and* by running them in a bare interpreter with no ComfyUI present. |
-| **Suite** | 2547 Python tests and 257 JavaScript tests, at 46% statement coverage — the gaps are named under Open rather than left to be discovered. The JS side includes a GPU lane that compiles the real shaders in both GLSL and WGSL and compares them against the CPU implementations they were generated from, and a browser lane that builds all fourteen Viewer panels and operates their controls. Verified from a checkout named `radiance-beta` as well as `radiance`. |
+| **Suite** | 2566 Python tests and 257 JavaScript tests, at 46% statement coverage — the gaps are named under Open rather than left to be discovered. The JS side includes a GPU lane that compiles the real shaders in both GLSL and WGSL and compares them against the CPU implementations they were generated from, and a browser lane that builds all fourteen Viewer panels and operates their controls. Verified from a checkout named `radiance-beta` as well as `radiance`. |
 
 ### Open
 
@@ -370,11 +374,6 @@ quietly stop being true.
 - [ ] **`rudra_full_decoder_ltx-video_ema.safetensors` is truncated at source**
       (23.0 MB against a declared ~36.0 MB). The loader detects it and
       degrades; the file still needs re-exporting.
-- [ ] **Optical flow needs a different solver to go past ~8 px.** The current
-      limit is characterised and bounded rather than unknown — see
-      [Known limitations](#known-limitations) — and it is a property of
-      pyramidal Lucas–Kanade, not a defect in this implementation. DIS or a
-      learned method is the only route past it.
 
 **Structural debt**
 
