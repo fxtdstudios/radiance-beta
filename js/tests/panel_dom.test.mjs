@@ -154,15 +154,20 @@ test('the viewer module loads in a browser and registers its extension', { skip 
         `the viewer extension did not register — got ${JSON.stringify(loaded.extensions)}`);
 });
 
-test('every panel builds', { skip }, () => {
-    assert.ok(report?.ok, 'the harness did not finish');
+// Every assertion below reads `report`. If the harness never ran, the first
+// test says so and this keeps the rest from failing with a TypeError that
+// names a property instead of the problem.
+const noReport = report?.ok ? false
+    : 'the harness did not finish — see the module-load test above';
+
+test('every panel builds', { skip: skip || noReport }, () => {
     for (const [name, r] of Object.entries(report.built)) {
         assert.ok(r.ok, `${name} threw: ${r.error}`);
         assert.ok(r.nodes > 3, `${name} produced ${r.nodes} elements — that is an empty panel`);
     }
 });
 
-test('the framing selects offer exactly the presets that are defined', { skip }, () => {
+test('the framing selects offer exactly the presets that are defined', { skip: skip || noReport }, () => {
     // Against the definitions, not against a list retyped here. Adding a matte
     // ratio and forgetting to surface it is the failure this catches.
     const { safeOptions, matteOptions } = report.driven.framing;
@@ -172,7 +177,7 @@ test('the framing selects offer exactly the presets that are defined', { skip },
     assert.deepEqual(matteOptions.map((o) => o.text), report.presets.matte.map((p) => p.label));
 });
 
-test('changing a framing select updates the state, the store and the caption', { skip }, () => {
+test('changing a framing select updates the state, the store and the caption', { skip: skip || noReport }, () => {
     const d = report.driven.framing;
     assert.equal(d.safeState, 'legacy', 'the instance did not take the new preset');
     assert.equal(d.safeStored, 'legacy', 'the choice was not persisted');
@@ -188,7 +193,7 @@ test('changing a framing select updates the state, the store and the caption', {
         'the caption still describes the previous preset after the selection changed');
 });
 
-test('the framing toggles move their label with their state', { skip }, () => {
+test('the framing toggles move their label with their state', { skip: skip || noReport }, () => {
     // A toggle whose label lags its state reports the mode it is about to
     // leave, which on a magnification filter means the user cannot tell whether
     // they are looking at real pixels.
@@ -204,7 +209,7 @@ test('the framing toggles move their label with their state', { skip }, () => {
     assert.match(d.positionAfter.label, /SECONDS/);
 });
 
-test('the scope scale selector offers the shared scales and takes a change', { skip }, () => {
+test('the scope scale selector offers the shared scales and takes a change', { skip: skip || noReport }, () => {
     // Against SCOPE_SCALES from radiance_scope_units.js. A scope that quietly
     // drops a scale is back to being an unlabelled instrument.
     const d = report.driven.scopes;
@@ -214,7 +219,7 @@ test('the scope scale selector offers the shared scales and takes a change', { s
     assert.equal(d.stored, 'nits-pq');
 });
 
-test('drawing the colour panel does not fetch the OCIO WebAssembly', { skip }, () => {
+test('drawing the colour panel does not fetch the OCIO WebAssembly', { skip: skip || noReport }, () => {
     // 4.7 MB on the chance someone opens a tab is the reason the façade
     // dynamic-imports it. This is the assertion that keeps it lazy.
     assert.equal(report.driven.ocioWasmRequested, false,

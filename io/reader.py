@@ -943,6 +943,7 @@ def _probe_for_ui(path: str) -> Dict[str, Any]:
     return out
 
 def read_frames(
+    *,
     media_type: str = "Auto",
     path:   str = "",
     color_space: str = "Auto / Linear (pass-through)",
@@ -957,6 +958,12 @@ def read_frames(
     raw: bool = False,
     premultiplied: bool = False,
 ):
+    # Keyword-only. The parameter order below is the node's widget order,
+    # which is a contract saved workflows are matched against -- so it cannot
+    # be reordered to put `path` first, where a reader would expect it. Rather
+    # than leave `read_frames("/plate.exr")` quietly setting `media_type`, the
+    # positional form is simply not available.
+    #
     # `browse` is the node's: resolving a ComfyUI input-directory filename
     # needs folder_paths, which is exactly the kind of thing that does not
     # belong down here. The node resolves it and hands over a path.
