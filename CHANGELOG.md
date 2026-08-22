@@ -28,6 +28,15 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ### Added
 
+- **The delivery path is tested without ComfyUI**, which is what moving the
+  write engine down a floor was for. Twenty-nine tests over
+  `delivery/handler.py`: the two lookup tables are checked against the writer's
+  own format and colour-space tables rather than a list retyped in the test —
+  that mismatch is exactly what shipped once, as a TypeError the handler
+  swallowed into an HTTP 200 — plus version numbering, the atomic session log,
+  the ACES sidecar's CDL values, and a master written end to end from the same
+  call the endpoint makes. 10% to 22%.
+
 - **Optical flow is DIS now**, which roughly doubles the motion it can follow
   and runs about eleven times faster. Measured on the existing test plate, the
   fraction of the field landing within half a pixel: Lucas–Kanade 100 / 84 / 71
