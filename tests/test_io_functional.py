@@ -51,6 +51,38 @@ class TestImageRoundTrip:
         out, _, _ = _write_and_read(tmp_path, img[None], fmt)
         assert np.abs(out - img).max() < atol, f"{fmt}: precision loss too high"
 
+    @pytest.mark.parametrize("fmt", [
+        "IMG │ EXR (32-bit float)",
+        "IMG │ TIFF (32-bit float)",
+    ])
+    def test_the_float_formats_survive_negatives_and_over_range(self, tmp_path, fmt):
+        """The HDR claim, as a round trip rather than an assertion.
+
+        The parametrised test above samples 0.05..0.95, which is exactly the
+        range where a clamp is invisible. Scene-linear does not stay there: a
+        matrix conversion produces negatives, and a highlight is whatever the
+        renderer says it is. If anything on the write or read path clips to
+        [0, 1] -- a saturating cast, a stray np.clip, a PIL fallback picked up
+        by accident -- the values below come back wrong and nothing else in
+        this file notices.
+
+        Exact rather than approximate: both formats store float32, so a
+        round trip through them is a copy, and any tolerance at all would be
+        room for a quiet conversion to hide in.
+        """
+        img = np.array([
+            [-0.25, 0.0, 1.0],
+            [1.0000001, 4.0, 64.0],
+            [0.18, -1.5, 1e-6],
+            [12.5, 0.5, 3.0],
+        ], dtype=np.float32).reshape(2, 2, 3)
+        out, _, _ = _write_and_read(tmp_path, img[None], fmt)
+        assert out.dtype == np.float32, out.dtype
+        assert np.array_equal(out, img), (
+            f"{fmt} did not survive the round trip:\n"
+            f"  in  {img.ravel()}\n  out {out.ravel()}"
+        )
+
     @pytest.mark.parametrize("fmt,atol", [
         ("IMG │ JPEG", 0.05),
         ("IMG │ WEBP", 0.05),
