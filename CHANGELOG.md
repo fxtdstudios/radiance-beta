@@ -79,6 +79,24 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ### Fixed
 
+- **Every OCIO LUT baked in Python was an exact identity.** `bake_colorspace_lut`
+  and `bake_display_view_lut` looped over the cube calling
+  `applyRGB(python_list)`. OCIO's binding converts a list to a temporary
+  buffer, transforms that and discards it, so the list is never modified and
+  each lattice point was written back unchanged — the result was bit-identical
+  to its own input. 18% grey through ACEScg → sRGB Display came out as 0.18
+  instead of 0.47. That LUT is served over `POST /radiance/ocio/bake` and
+  loaded into the Viewer's renderer, so choosing a display transform from the
+  OCIO dropdown logged "[OCIO] Active" and changed nothing on screen. The bake
+  now applies to the array, which OCIO does modify in place, and matches its
+  own CPU processor exactly. It is also about 35x faster, and the
+  `hasattr(applyRGB)` branch guarding an unreachable "batch API if available"
+  fallback is gone with it. Found by writing the first tests this module has
+  ever had; `tests/test_ocio_manager.py` fails if the identity returns.
+- **OCIO LUT cache keys could collide.** The key was a colon-joined string of
+  unescaped names, so a display or view containing a colon could hash to the
+  same key as a different transform and be served the wrong LUT.
+
 - **The writer-layering tests now run on CI instead of failing and skipping.**
   Both bare-interpreter tests assumed the repository directory is named
   `radiance` -- true of a working copy, false on GitHub, which checks out as
