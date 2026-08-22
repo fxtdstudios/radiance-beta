@@ -349,7 +349,7 @@ quietly stop being true.
 | **Catalog** | All 131 nodes declare their menu section explicitly; a test fails if a registered node is missing from the table. Withholding a node from the menu requires a named entry a test reads, so a finished node cannot go missing by omission. |
 | **Isolation** | Every one of the eleven node groups imports with `aiohttp` and `server` blocked, proven in a subprocess rather than for one hand-listed module. |
 | **Layering** | `radiance/io/writer.py` and `radiance/io/reader.py` import nothing above them, checked by AST walk *and* by running them in a bare interpreter with no ComfyUI present. |
-| **Suite** | 2547 Python tests and 257 JavaScript tests, at 45% statement coverage — the gaps are named under Open rather than left to be discovered. The JS side includes a GPU lane that compiles the real shaders in both GLSL and WGSL and compares them against the CPU implementations they were generated from, and a browser lane that builds all fourteen Viewer panels and operates their controls. Verified from a checkout named `radiance-beta` as well as `radiance`. |
+| **Suite** | 2547 Python tests and 257 JavaScript tests, at 46% statement coverage — the gaps are named under Open rather than left to be discovered. The JS side includes a GPU lane that compiles the real shaders in both GLSL and WGSL and compares them against the CPU implementations they were generated from, and a browser lane that builds all fourteen Viewer panels and operates their controls. Verified from a checkout named `radiance-beta` as well as `radiance`. |
 
 ### Open
 
@@ -388,34 +388,27 @@ quietly stop being true.
 
 **Test coverage**
 
-Measured, not guessed: 44% of 27,616 statements. Every node has structural
-coverage (399 smoke tests over `RETURN_TYPES`, `INPUT_TYPES` and the execute
-method), so what is missing below is behaviour.
+Measured: 46% of 27,598 statements. Every node has structural coverage — 399
+smoke tests over `RETURN_TYPES`, `INPUT_TYPES` and the execute method — so what
+is thin below is behaviour, not registration.
 
-- [ ] **`image/upscale.py` — 1111 statements, 0% → 28%.** Bit depth,
-      resampling and sharpen are covered now, mostly for range: the float
-      depths must not clamp, the integer depths must clamp and land on their
-      quantisation steps, an over-range plate must still be over-range after a
-      downscale, and the sRGB decode must only run when the input is called
-      sRGB. What is left is `RadianceAIUpscale`, which needs model weights, and
-      the tiling paths.
+- [ ] **`image/upscale.py` — 28%, up from nothing.** Bit depth, resampling
+      and sharpen are covered. What is left needs weights or a GPU:
+      `RadianceAIUpscale`, the SUPIR path, and the tiling code.
 - [ ] **`loader_utils.py` (340 statements, 8%) and
       `nodes/pipeline/workspace.py` (1069, 12%).** Model loading and the
       workspace API, both reachable from a graph.
 - [ ] **`delivery/handler.py` — 452 statements, 10%.** The write engine came
       down a floor specifically so this could be exercised without ComfyUI.
       Nothing has used that yet.
-- [x] **conftest.py's stubs, audited.** Thirteen modules are installed into
-      `sys.modules`; nine are ComfyUI or torch and belong there. Three are
-      Radiance's own: `radiance.image` (already fixed — it carries a `__path__`
-      now, so only `defects` is stubbed and the rest loads from disk),
-      `radiance.radiance_ocio` (the one that hid the identity bake), and
-      `radiance.nodes_hdr_colorspace`, which is stale — that file no longer
-      exists. Separately, `test_node_smoke.py` installs a `PyOpenColorIO` stub
-      whenever the real one has not been imported yet, which is what made
-      `importorskip` useless in `test_ocio_manager.py`. Two smaller things left
-      alone: the bare `image` stub has no `__path__` where `radiance.image`
-      does, and the `nodes_hdr_colorspace` entry can go.
+- [ ] **Two stubs left over from the conftest audit.** The bare `image` stub
+      has no `__path__` where `radiance.image` has one, so flat
+      `import image.upscale` still fails where the packaged form works. And the
+      `radiance.nodes_hdr_colorspace` entry is stale — that file no longer
+      exists.
+- [ ] **`radiance_ocio.py` is at 48%**, up from 0. The bake, the cache, the
+      config listings and the route guard are covered; the HTTP endpoints
+      themselves and the display-view path are not.
 
 ## Documentation
 
