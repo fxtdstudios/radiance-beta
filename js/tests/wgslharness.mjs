@@ -66,6 +66,11 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 const out = { ok: false, cases: [], compiled: false };
 
 try {
+    if (!navigator.gpu) {
+        out.error = 'no WebGPU adapter: navigator.gpu is undefined (is --unstable-webgpu set?)';
+        console.log(JSON.stringify(out));
+        Deno.exit(0);
+    }
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) { out.error = 'no WebGPU adapter'; console.log(JSON.stringify(out)); Deno.exit(0); }
     const device = await adapter.requestDevice();
