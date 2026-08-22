@@ -4,7 +4,7 @@
 
 **Professional VFX, HDR color science, review, and DCC handoff for ComfyUI.**
 
-[![Version](https://img.shields.io/badge/version-3.3.0-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
+[![Version](https://img.shields.io/badge/version-3.4.0-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
 [![Nodes](https://img.shields.io/badge/nodes-131-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
@@ -14,7 +14,7 @@ Radiance is a production-grade node pack for ComfyUI built around 32-bit float a
 
 Artists get 32-bit, HDR, and ACES image tools, professional viewers, and VFX nodes. Supervisors and coordinators get project, shot, asset, and workflow management built directly into the canvas.
 
-[Install](#installation) · [Capabilities](#capabilities) · [Node Map](#node-map) · [DCC Handoff](#dcc-handoff) · [Known limitations](#known-limitations) · [Documentation](#documentation) · [Support](#support)
+[Install](#installation) · [Capabilities](#capabilities) · [Node Map](#node-map) · [DCC Handoff](#dcc-handoff) · [Known limitations](#known-limitations) · [Status](#status) · [Documentation](#documentation) · [Support](#support)
 
 </div>
 
@@ -311,223 +311,67 @@ is worse than one that says so. Full detail in the [changelog](CHANGELOG.md).
 - **Scene-cut detection normalises by the batch maximum**, so the threshold has
   no absolute meaning and cut-free footage will still report cuts.
 
-## Status & to-do
+## Status
 
-Where the project actually stands, so nothing is carried in someone's head.
-Ticked items are done and verified; unticked ones are the backlog.
-Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
-[changelog](CHANGELOG.md).
+Radiance is **ready with conditions**. Everything below is measured rather than
+asserted; the full history is in the [changelog](CHANGELOG.md), and per-defect
+detail in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
-### Blocking a release
+### Verified
 
-- [ ] **Nothing has ever run in live ComfyUI on a GPU.** Every number in the
-      audits is CPU and headless. Until a real graph renders a real frame, the
-      verdict stays *ready with conditions*.
-- [x] **The WGSL grade is compiled and compared, and the panels are driven
-      rather than grepped.** 256 JavaScript tests, all green. The claim that no
-      CI environment exposes `navigator.gpu` was true of the browser and wrong
-      about the environment: headless Chromium has no `navigator.gpu` at all —
-      absent, not blocked, under `--enable-unsafe-webgpu` with SwiftShader,
-      with `--use-vulkan=swiftshader`, and with the Blink runtime flag, while
-      WebGL2 works in the same browser — but Deno ships WebGPU, and Mesa's
-      lavapipe gives it a software Vulkan device, so the runner still needs no
-      GPU. The emitted WGSL now runs the same 60-case matrix as the GLSL
-      against the same JS functions: 58 comparable samples, worst deviation
-      3.1e-7 against a 2e-6 tolerance, the two excluded for the same fp32 range
-      reason. Checked by mutation, not just by passing — reverting the WGSL to
-      flat lift, to unguarded gamma, or to the power-form contrast each turns
-      the suite red, and those are precisely the three ways the WebGPU path
-      used to disagree with WebGL. The panels are loaded in a real browser
-      against stubbed ComfyUI modules, built, and then operated: selects
-      changed, toggles clicked, state and store and label checked afterwards.
-      That immediately found one: switching the safe-area preset to Legacy
-      480-line left the caption below it still reading "SMPTE ST 2046-1 and EBU
-      R 95 specify the same two boxes" — right boxes, wrong standard named, in
-      a QC guide. Fixed. Still open, and smaller: the panel harness drives the
-      framing, scope, probe, OCIO and view sections, not every control in the
-      viewer.
-- [ ] **The public repo is 2.5 months behind.** `fxtdstudios/radiance` `main`
-      is still at `64fee41` (2026-06-04); everything since lives in
+Standing properties of the shipped package. Pinned by a test unless the row
+says otherwise — an audit number that no test holds is a number that can
+quietly stop being true.
+
+| Area | What is verified |
+| :-- | :-- |
+| **EXR** | 32-bit float round-trips bit-exactly through EXR and TIFF, negatives and over-range highlights included — the clamp-free HDR claim, as a write-and-read rather than an assertion. 16-bit half holds to 1e-3. |
+| **Colour** | All 16 colour spaces land on published 18%-grey values. Both ACES 2.0 tone scales match the ACES Output Transform table exactly — 18% grey at 10.000 / 13.193 / 14.512 / 15.747 / 16.824 nits for peaks of 100 / 500 / 1000 / 2000 / 4000. HLG keeps its BT.2408 anchor. |
+| **Video** | Frame counts are exact from 1 to 100 frames across H.264, H.265 10-bit and ProRes. Sequences read correctly by frame number for `####`, `%04d` and explicit ranges. |
+| **Memory** | Flat across 150 consecutive 1080p runs — an audit measurement, not a standing test. |
+| **Security** | `weights_only` loads, sha256-pinned downloads, no `shell=True`, and no model weight downloads without `RADIANCE_ALLOW_DOWNLOADS=1` through a gate every downloader shares. Nodes never write into the ComfyUI install directory. |
+| **Catalog** | All 131 nodes declare their menu section explicitly; a test fails if a registered node is missing from the table. Withholding a node from the menu requires a named entry a test reads, so a finished node cannot go missing by omission. |
+| **Isolation** | Every one of the eleven node groups imports with `aiohttp` and `server` blocked, proven in a subprocess rather than for one hand-listed module. |
+| **Layering** | `radiance/io/writer.py` and `radiance/io/reader.py` import nothing above them, checked by AST walk *and* by running them in a bare interpreter with no ComfyUI present. |
+| **Suite** | 2509 Python tests and 256 JavaScript tests, the latter including a GPU lane that compiles the real shaders in both GLSL and WGSL and compares them against the CPU implementations, and a browser lane that builds and operates the viewer panels. Verified from a checkout named `radiance-beta` as well as `radiance`. |
+
+### Open
+
+**Blocking a release**
+
+- [ ] **Nothing has ever run in live ComfyUI on a GPU.** Every number above is
+      CPU and headless. Until a real graph renders a real frame, the verdict
+      stays *ready with conditions*.
+- [ ] **The public repo is behind.** `fxtdstudios/radiance` `main` is still at
+      `64fee41` (2026-06-04); everything since lives in
       `fxtdstudios/radiance-beta`. Decide when beta merges down to public.
 
-### Correctness backlog
+**Correctness**
 
 - [ ] **RUDRA video decoders were trained on stills.** `wan` / `ltx-video` /
-      `hunyuanvideo` checkpoints never saw multi-frame latents; real video falls
-      back to math expansion. Needs retraining, not patching.
+      `hunyuanvideo` checkpoints never saw multi-frame latents; real video
+      falls back to math expansion. Needs retraining, not patching.
 - [ ] **`rudra_full_decoder_ltx-video_ema.safetensors` is truncated at source**
-      (23.0 MB against a declared ~36.0 MB). The loader detects it and degrades;
-      the file still needs re-exporting.
-- [x] **Optical flow above ~8 px is characterised and bounded** — measured,
-      not estimated. The median displacement holds within a few percent out to
-      ~20 px; what degrades is field density inside half a pixel, which falls
-      100% / 84% / 71% / 58% / 29% at 3 / 8 / 12 / 16 / 20 px, and mask
-      propagation tears where the field is patchy. Deepening the pyramid is not
-      the fix: its ceiling is the 15x15 integration window, and going from four
-      levels to five made every displacement worse (at 8 px, 96% of the field
-      within half a pixel became 32%). Closed here as a property of pyramidal
-      Lucas-Kanade rather than an open defect, and written up under
-      [Known limitations](#known-limitations). Replacing the solver — DIS, or a
-      learned method — is the only route past it, and that is a new item rather
-      than a continuation of this one.
+      (23.0 MB against a declared ~36.0 MB). The loader detects it and
+      degrades; the file still needs re-exporting.
+- [ ] **Optical flow needs a different solver to go past ~8 px.** The current
+      limit is characterised and bounded rather than unknown — see
+      [Known limitations](#known-limitations) — and it is a property of
+      pyramidal Lucas–Kanade, not a defect in this implementation. DIS or a
+      learned method is the only route past it.
 
-### Structural debt
+**Structural debt**
 
-- [ ] **Split the monoliths** — `hdr/vae.py` (3460 lines),
-      `nodes/monitor/viewer.py` (1233). Both counts were stale here; those two
-      are what is left. **`nodes/io/write.py` is done**: 2972 → 2201 when the
-      write engine moved out, → 1262 now the read engine has. What remains is
-      the node surface — the two node classes, `RadianceEXRMultiPart`,
-      `RadianceDigitalCinemaRead` / `Write`, and the HTTP routes.
+- [ ] **Split the remaining monoliths** — `hdr/vae.py` (3460 lines) and
+      `nodes/monitor/viewer.py` (1233). `nodes/io/write.py` is done: 2972 →
+      2201 when the write engine moved out, → 1262 when the read engine
+      followed, and what is left there is the node surface.
 
-      The decoders, the colour-space decode, path-kind detection, the image /
-      sequence / video readers, the write-input coercion helpers and the UI
-      probe are `radiance/io/reader.py`, which imports nothing above it.
-      `RadianceRead.read` is a signature and a delegation, and the only thing
-      that stayed up is the browse widget, because resolving a filename in
-      ComfyUI's input directory needs `folder_paths` — the mirror of the
-      writer's `read_media` callback, and the last of the coupling.
+**Coverage**
 
-      Verified byte-for-byte over 215 cases: 18 fixtures spanning PNG 8-bit and
-      16-bit, JPEG, WebP, BMP, TIFF 16 and 32-float, DPX, Radiance HDR, EXR
-      half / float / RGBA, printf, hash and directory sequences, H.264 and
-      ProRes 4444 with alpha — crossed with every input colour space in the
-      menu and every read option: raw, premultiplied, proxy scale, frame
-      ranges, frame step, the missing-frame policy and the error policy. Not
-      one hash moved. `tests/test_reader_layering.py` holds the line, and each
-      of its assertions was checked by mutation rather than by passing:
-      smuggling a deferred `radiance.nodes` import into a function body,
-      importing `folder_paths`, decoding in the node again, and reordering the
-      engine's parameters each turn a different one of them red. 2509 Python
-      tests pass.
-- [x] **`delivery/handler.py` no longer imports the node layer at all.** The
-      writer moved to `radiance/io/writer.py` — the format tables, the colour
-      space application, every save backend and `write_frames` itself, 987
-      lines with nothing above them. `RadianceWrite.write` is now a signature
-      and a delegation, and the handler calls `write_frames` directly. The one
-      thing that could not come down is media *reading*: coercing a file path
-      or a VideoHelperSuite dict to frames needs the decoders, which are the
-      reader's and stay a floor up, so the engine takes a `read_media`
-      callback the node supplies and the delivery path does not — it hands the
-      writer a tensor. There is no lazy upward import hiding in a function
-      body; `tests/test_writer_layering.py` walks the AST rather than reading
-      the header, and imports the engine in a bare interpreter with no ComfyUI
-      to prove it stands alone. Verified byte-for-byte: 42 cases — every write
-      format, every output colour space, and each of the named behaviours (the
-      fps auto sentinel, the broadcast-safe float exemption, PNG alpha, proxy
-      scale, sequence padding) — hashed before and after. The only three that
-      differ are non-deterministic between two runs of *identical* code, which
-      is the DPX header's creation timestamp. 2502 Python tests pass.
-
-      One correction to the above, found by CI: the two bare-interpreter tests
-      did `sys.path.insert(0, _ROOT.parent); import radiance`, which only
-      resolves when the checkout directory is itself named `radiance`. It is on
-      a working copy; it is not on GitHub, which checks out as
-      `radiance-beta/radiance-beta` — so one of them failed there and the other
-      reported itself *skipped*, because its "a dependency is missing" guard
-      caught `No module named 'radiance'` along with the third-party ones. The
-      claim that the engine imports standalone was therefore untested on CI in
-      both directions at once. Both now load the package from its `__init__`
-      path under an explicit module name, so the folder name is irrelevant, and
-      the skip guard names the packages it is allowed to skip for.
-
-### Done and verified
-
-- [x] EXR 32-bit round-trip is bit-exact, including negatives and values > 1.
-- [x] All 16 colour spaces hit published 18%-grey values (a P0 fix — 10 of them
-      were silently identity without an OCIO config).
-- [x] Video frame counts are exact, 1–100 frames, H.264 / H.265-10bit / ProRes.
-- [x] Sequence reading is correct by frame number for `####`, `%04d` and ranges.
-- [x] Memory is flat across 150 × 1080p runs.
-- [x] Security: `weights_only` loads, sha256-pinned downloads, no `shell=True`.
-- [x] Energy-Prioritized Sampling is reachable from a graph (#40) and no longer
-      crashes on video latents.
-- [x] Nodes no longer write into the ComfyUI install directory.
-- [x] **Scene-cut detection reports one calibrated 0–1 confidence, whichever
-      method you pick.** Unifying the two scales turned up the larger defect
-      underneath: `edge` was an *absolute* difference of gradient magnitudes,
-      so it tracked the footage's own contrast rather than the cut — the same
-      cut graded two stops down scored a quarter as high (0.0369 → 0.0092),
-      and grain on a detailed frame outscored a real cut in soft content. No
-      threshold constant could have fixed that, so it is a relative
-      (Bray–Curtis) distance now, with a 5 px pre-blur so a high-pass metric
-      stops measuring grain. `combined` is finally a real 60/40 blend instead
-      of a sum of incompatible units. Widget renamed to `cut_confidence`, and
-      `KNOWN_ISSUES.md` records what the edge method still cannot see.
-- [x] Tier-3 upscale honours `scale` — 2x no longer returns the top-left
-      quarter of a 4x render.
-- [x] Optical flow is pyramidal: 1–5 px displacements recover to within 10%,
-      with 84–100% of the field inside half a pixel (was ~100% at 1 px, 17% at
-      3 px, 1% at 5 px).
-- [x] Model weights are never downloaded without consent —
-      `RADIANCE_ALLOW_DOWNLOADS=1` — through one gate shared by every
-      downloader. The multipass path previously had none.
-- [x] Tiled VAE blending verified seamless and pinned by a test (the open note
-      was stale — the cosine ramp had already landed).
-- [x] First JavaScript coverage: 27 tests over the shared DOM and widget
-      helpers, on `node --test`, wired into CI. Since grown to 256, including a
-      GPU lane that renders through the real shaders in both dialects and a
-      browser lane that builds and operates the panels.
-- [x] Four commits merged to `radiance-beta` `main` via PR #43.
-- [x] **Both ACES 2.0 tone scales hit the published reference.** 18% grey now
-      lands at 10.000 / 13.193 / 14.512 / 15.747 / 16.824 nits at peaks of
-      100 / 500 / 1000 / 2000 / 4000, matching the ACES Output Transform table
-      exactly. Previously the Daniele Evo node scaled grey with the display
-      (400 nits at a 4000-nit peak, ~24x reference) and the legacy transform
-      held it at ~18 nits everywhere (~0.85 stop bright at SDR). HLG keeps its
-      BT.2408 anchor, which is a different and equally deliberate reference.
-- [x] Menu placement is declared per node, not guessed. `NODE_SECTIONS` covers
-      all 131; the keyword classifier is a warning-only fallback, and a test
-      fails if a registered node is missing from the table.
-- [x] **The legacy `nodes_*.py` layer is gone.** Forty pure re-export shims
-      deleted; the six modules that were still the real home of their code —
-      `nodes_io`, `nodes_sampler`, `nodes_workspace`, `nodes_realtime_preview`,
-      `nodes_loader`, `nodes_gizmo` — moved into `nodes/`, so the organized
-      package no longer imports *backwards* into the layer it was meant to
-      replace. `RadianceViewer`, the one genuinely dual-published node, now has
-      a single entry point. Nothing in the catalog moved: 111 keys in, 111 keys
-      out, verified key-by-key against a pre-refactor snapshot.
-- [x] **Twenty finished nodes published that had never appeared in anyone's
-      menu.** Each group's `__init__.py` hand-copied a selection of its
-      modules' node keys, and whatever nobody remembered to copy did not exist
-      as far as ComfyUI was concerned — the same defect as #40 and as
-      `RadianceGradeApply`, at scale. Found by widening the source scan once
-      the root layer stopped hiding it. `nodes/aggregate.py` inverts the
-      default: writing the node publishes it, and withholding one now requires
-      a named `WITHHELD_NODES` entry that a test reads. Catalog 111 → 131.
-- [x] `RadianceGradeApply` published — a complete node with 16 documented
-      inputs that had been invisible in the menu, found because it had a
-      branding override but no registration. Now `Bake Viewer Grade`, which
-      also settles the Grade naming overlap. `SECTION_OVERRIDES` is empty for
-      the first time; both entries it ever held were unpublished nodes.
-- [x] **Every node group imports without aiohttp or a running ComfyUI.**
-      `nodes/monitor/viewer.py` and `delivery/handler.py` imported
-      `aiohttp`/`server` at module scope and read `PromptServer.instance`
-      there, which the flat `nodes_realtime_preview.py` had hidden — moving it
-      into a package made importing any Review module run the viewer, and CI's
-      minimal-dependency job failed. `gizmo.py` and `workspace.py` had guarded
-      the same import for years. `tests/test_import_isolation.py` now proves
-      the property for all eleven groups in a subprocess with aiohttp and
-      `server` blocked, rather than for one hand-listed module in CI.
-- [x] **A guard that guarded nothing.** `io/formats.py` caught a missing `cv2`
-      and set `HAS_CV2 = False` without binding `cv2`, so `viewer_utils.py`'s
-      `from radiance.io.formats import HAS_CV2, cv2` died anyway — with a
-      worse error than the ImportError the guard was written to absorb. It
-      only surfaced once retiring the flat layer made a Review import pull the
-      whole chain in.
-- [x] Three compatibility alias keys (`RadianceImageLoader`,
-      `RadianceControlApply`, `RadianceWorkspace`) ship as `DEPRECATED`
-      subclasses: workflows saved against the old key still open, and the menu
-      shows one entry per node instead of two.
-- [x] Repository trimmed to what a user or contributor needs: the six internal
-      audit and review write-ups are gone, `.comfyignore` no longer lists files
-      that stopped existing, and the generated GPU report is ignored rather
-      than committed.
-- [x] Suite: 2421 passed / 0 failed / 69 skipped, plus 27 JS tests. Verified
-      from a checkout named `radiance-beta` as well as `radiance` — CI clones
-      the mirror under that name, and the suite has to mean the same thing there.
-- [x] Released as **3.3.0**, not a patch: five changes alter what an unchanged
-      graph does, and the changelog leads with them.
+- [ ] **The panel harness does not drive every control.** It builds and
+      operates the framing, scope, probe, OCIO and view sections of the Viewer;
+      the rest of the panel code is still held by source assertions.
 
 ## Documentation
 
