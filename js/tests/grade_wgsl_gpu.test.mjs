@@ -39,8 +39,8 @@ function findDeno() {
     const candidates = [
         process.env.RADIANCE_TEST_DENO,
         join(process.env.HOME || '', '.deno', 'bin', 'deno'),
-        '/work/deno/bin/deno',
         '/usr/local/bin/deno',
+        '/opt/homebrew/bin/deno',
     ].filter(Boolean);
     for (const p of candidates) if (existsSync(p)) return p;
     try {
@@ -71,9 +71,17 @@ if (!skip) {
             skip = `the WGSL harness printed something that is not JSON: ${line.slice(0, 200)}`;
         }
     }
-    if (!skip && report && !report.ok && /no WebGPU adapter/.test(report.error || '')) {
-        skip = 'Deno found no WebGPU adapter — install mesa-vulkan-drivers for the '
-             + 'lavapipe software driver, or run somewhere with a GPU.';
+    // Environment failures skip; shader failures fail. The distinction matters
+    // because this runs on whatever adapter the machine has: a missing Vulkan
+    // ICD, a driver that will not hand out a device, a lost device mid-run --
+    // none of those are the WGSL being wrong, and turning them red would train
+    // people to ignore red. Anything else, including a compile error or a
+    // pipeline that will not build, is the thing under test.
+    const ENVIRONMENT = /no WebGPU adapter|requestDevice|device is lost|device was lost|Vulkan|adapter/i;
+    if (!skip && report && !report.ok && ENVIRONMENT.test(report.error || '')) {
+        skip = `no usable WebGPU device here (${report.error}) — install `
+             + 'mesa-vulkan-drivers for the lavapipe software driver, or run '
+             + 'somewhere with a GPU.';
     }
 }
 
