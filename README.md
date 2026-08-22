@@ -14,7 +14,7 @@ Radiance is a production-grade node pack for ComfyUI built around 32-bit float a
 
 Artists get 32-bit, HDR, and ACES image tools, professional viewers, and VFX nodes. Supervisors and coordinators get project, shot, asset, and workflow management built directly into the canvas.
 
-[Install](#installation) · [Capabilities](#capabilities) · [Node Map](#node-map) · [DCC Handoff](#dcc-handoff) · [Known limitations](#known-limitations) · [Status](#status) · [Documentation](#documentation) · [Support](#support)
+[Install](#installation) · [What it does](#what-it-does) · [Node map](#node-map) · [DCC Handoff](#dcc-handoff) · [Known limitations](#known-limitations) · [Status](#status) · [Documentation](#documentation) · [Support](#support)
 
 </div>
 
@@ -155,65 +155,81 @@ huggingface-cli download fxtdstudios/RUDRA --local-dir "ComfyUI/models/radiance"
 
 To get started quickly, drag [`workflows/start.json`](workflows/start.json) onto the ComfyUI canvas — a ready-made graph wiring the Radiance loader, Sampler Pro, HDR VAE decode, and viewers end to end.
 
-## Capabilities
+## What it does
 
-### Studio Dashboards
+### Reading and writing
 
-Radiance includes three production dashboards that open in-canvas — as an overlay on top of the ComfyUI graph rather than a new browser tab — from the Radiance Project Manager node. All three share a clean, dark interface.
+Read opens images, EXRs, video and numbered sequences from any absolute path, including UNC and mapped drives. It works out what a path is from the extension and the pattern, so `/renders/shot.%04d.exr`, `/frames/####.png` and a bare directory all resolve to a sequence. Open one frame of a sequence and it offers you the whole range.
 
-| Dashboard | Purpose |
-| :--- | :--- |
-| **Project Manager** | Show, sequence, and shot view with a status pipeline (WIP, Review, Approved, Retake), version history, a click-through shot panel, project storage, and recent outputs — backed by a live view of your saved workflows. |
-| **Workflow Library** | Browse, search, preview, and load saved workflows back into the canvas, organized by production bins. |
-| **Assets** | A media manager that scans your ComfyUI input and output folders and classifies images, videos, and image sequences (auto-grouped by frame range). Create custom bins, filter by type, search, drag and drop to import, and inspect each asset in a detail panel. |
+Video decodes through a single raw ffmpeg pipe at the source's own bit depth. 10, 12 and 16-bit survive. ProRes 4444 alpha comes out on the mask output, frame ranges are exact rather than approximate, and the container's colour tags are read instead of assumed. The `info` output is a JSON wire carrying resolution, frame count and range, bit depth, codec, EXR layers and windows, colour tags and timecode — Nuke's metadata tab, as something you can plug into.
 
-The Project Manager node keeps its launchers (open, save, and links) in a single compact panel on the node.
+Write covers PNG 8 and 16-bit, JPEG, TIFF 16 and 32-float, DPX, WebP, Radiance HDR, EXR half and float, H.264, H.265 10-bit, ProRes 422 and 4444, DNxHR, and numbered sequences of any of the still formats. It shows you the path that will actually land on disk before you run it, assembled by the same code that does the writing. `overwrite` is off by default; an existing file gets a unique suffix rather than being replaced.
 
-### Smart Interface
+### Colour
 
-- **Adaptive sampler.** The Radiance Sampler hides every parameter when no preset is selected, shows everything in Custom mode, and for a named preset shows only the parameters relevant to that model — so you only see the controls that matter.
-- **Inline video preview on Read.** MP4/MOV/WebM play directly on the node with scrubbing; production codecs the browser cannot decode (ProRes, DNxHR, MXF) fall back to a first-frame poster. Paths outside ComfyUI's folders need `RADIANCE_READ_ROOTS` (see Notes & Tips).
-- **Resolved-path readout on Write.** The node shows the exact path that will land on disk — output_path, filename, version and format combined by the same code that writes — plus a note line ("frame 1 only" when an IMG format receives a batch, sequence start frame, unique-suffix behaviour). `overwrite` defaults **off**: existing files get a unique suffix instead of being destroyed.
-- **In-canvas overlays.** Dashboards open over the graph and close with Esc, the dimmed background, or the close button, with an option to open in a full tab.
-- **Dynamic Gizmos.** Collapse any selection of nodes into a single styled custom node that you can save and reuse like any other node.
-- **Smart Backdrops.** Group nodes get a clear, tinted-glass background keyed to the node category instead of a near-invisible panel.
+Load a show's OCIO config and the Display and View menus come from it. Nothing is re-implemented: the transform is OCIO's own, applied through its generated GPU shader in the Viewer. With no config loaded, the built-in ACES 1.3 pipeline runs as before. OCIO is a capability here, not a dependency.
 
-### Viewers
+The grading nodes are the ones you would expect from a compositing package. Grade, Grade Match, CDL, Curves, Hue Curves, White Balance, LUT Apply and Blend, Colour Space Convert, and a QC pass. Sixteen colour spaces, including the camera logs — ARRI LogC3 and LogC4, Sony S-Log3, Panasonic V-Log, Canon Log 3, RED Log3G10, DaVinci Intermediate — plus PQ, HLG, ACEScg and ACEScct.
 
-- **Viewer** — a full review surface with OpenColorIO config support, waveform and vectorscope, a pixel probe (cursor, region and full-frame statistics, source or rendered values), channel isolation, A/B compare, focus peaking, frame stepping, and keyboard shortcuts (below).
-- **Radiance Lite Viewer** — a lightweight inline viewer for quick frame inspection.
+Both ACES 2.0 tone scales are implemented against the published Output Transform table.
+
+### HDR
+
+Log encoding happens before the VAE, not after it, and the Compress Log profiles are clamp-free from decode through to the file. Highlights above 1.0 reach disk. That is the claim the package is built on and there is a test that writes negatives and values up to 64.0 through EXR and TIFF and requires them back exactly.
+
+The HDR VAE Decode node has two decoders. Turbo is light enough to iterate with. Full is slower and reconstructs more. Both report the settings they used. Weights are the RUDRA models; see the install section for where they go.
+
+There is also HDR LoRA loading and application, a LoRA stack with per-LoRA model and CLIP strengths, tone mapping, HDR synthesis, and relighting.
+
+### The Viewer
+
+FP32 and RGBA32F end to end, on WebGL2.
+
+Scopes: histogram, waveform, vectorscope and parade. You pick the scale — 10 or 12-bit code value, percent, millivolts, or nits for ST.2084 and HLG — and data or video levels, and whether the scopes measure before or after the viewer's colour transforms. Every graticule line carries its number.
+
+The pixel probe samples a cursor, a region or the whole frame, and reports RGBA, luminance, EV, cd/m², HSV and hex, with min, max, mean and median per channel. NaN, Inf and negative counts are excluded from the statistics and reported separately, because a mean that quietly includes a NaN is worse than no mean.
+
+Then the things you reach for while looking: false colour, zebra, a nit-accurate HDR heatmap anchored to BT.2408 reference white, safe areas labelled with the standard they come from, aspect-ratio mattes, nearest-neighbour magnification, timecode, A/B compare with wipe, difference and blink, EXR channel and layer inspection, focus peaking, and a sequence timeline with per-frame thumbnails.
+
+A Lite Viewer exists for when you want a frame on the node and nothing else.
 
 | Key | Action |
 | :--- | :--- |
-| Space | Toggle playback |
+| Space | Play / pause |
 | Left / Right | Previous / next frame |
 | F | Fit to view |
-| 1 | 1:1 pixel zoom |
-| C / R / G / B / L | Color, red, green, blue, luma channels |
-| W | Toggle waveform |
-| V | Toggle vectorscope |
-| A | Cycle A/B compare modes |
-| N | Nearest-neighbour / linear magnification |
+| 1 | 1:1 pixels |
+| C / R / G / B / L | Colour, red, green, blue, luma |
+| W | Waveform |
+| V | Vectorscope |
+| A | Cycle A/B compare |
+| N | Nearest-neighbour / linear |
 
-### HDR VAE Decoders
+### VFX
 
-- **Turbo Decoder** — a lightweight, near-realtime decode to scene-linear for fast iteration.
-- **Full Decoder** — a deep decoder for production-quality reconstruction.
-- Both are available through the Radiance HDR VAE Decode node, which also reports the decode settings it used.
-- Decoder weights come from the [RUDRA models](#models-rudra-decoders) — see installation for the download and folder location.
+Plate prep, masks, roto, depth, optics, motion, and multipass. The Multipass Master extractor derives passes from a single image, which is useful for generated footage and is not a render pass; when you have real AOVs, the Multipass AOV Reader takes a multilayer EXR. Relighting works off either.
 
-### HDR LoRA
+### Video
 
-- **HDR LoRA Loader / Apply** — load and apply LoRAs tuned for HDR and scene-linear generation.
-- **LoRA Stack** — combine multiple LoRAs with individual model and CLIP strengths.
+Loader, prompt builder, sampler, text-to-video, image-to-video, routing, batch decode and export. Upscaling is available for stills and for video, with HDR and colour-encoding options so scene-linear input survives a backend that works in display space.
 
-### Dynamic Gizmos
+### Studio dashboards
 
-Select any group of nodes and collapse them into a single styled Gizmo node — a reusable, shareable custom node that loads automatically with Radiance.
+Three of them, opened from the Project Manager node. They render over the ComfyUI graph rather than in another tab, and close with Esc.
 
-## Node Map
+| Dashboard | What it holds |
+| :--- | :--- |
+| **Project Manager** | Shows, sequences and shots, with a WIP / Review / Approved / Retake pipeline, version history, a shot panel, project storage and recent outputs, read from your saved workflows. |
+| **Workflow Library** | Search, preview and load saved workflows back into the canvas, organised into bins. |
+| **Assets** | Scans the ComfyUI input and output folders, sorts images, video and sequences (grouped by frame range), and gives you bins, filters, search, drag-and-drop import and a detail panel. |
 
-Radiance nodes are organized under a single menu:
+### Things that make the graph easier to live with
+
+The Sampler shows nothing until you pick a preset, everything in Custom, and only the parameters that matter to the model you named. Read plays MP4, MOV and WebM on the node with scrubbing, and falls back to a first-frame poster for codecs the browser cannot decode. Group nodes get a tinted backdrop keyed to category instead of a near-invisible panel. And any selection of nodes can be collapsed into a Gizmo: one node, saved and reloaded like any other.
+
+## Node map
+
+Everything lives under one menu.
 
 ```text
 FXTD STUDIOS/Radiance
@@ -229,20 +245,20 @@ FXTD STUDIOS/Radiance
 └─ Pipeline
 ```
 
-Radiance provides **131 nodes** (plus any Gizmos you create). Some nodes depend on optional packages and your ComfyUI environment.
+**131 nodes**, plus whatever Gizmos you build. A few depend on optional packages.
 
-Node names follow standard compositing vocabulary under the **Radiance** menu — `Grade`, `CDL`, `OCIO ColorSpace`, `Roto`, `Defocus`, `Viewer`, `Read`/`Write` — so they read the way they do in Nuke or Flame. AI and generation nodes keep a `Radiance` prefix (`Radiance Sampler`, `Radiance VAE Decode`) to mark the diffusion layer. You can still find any node by typing "radiance" in the search.
+Compositing nodes use compositing names — `Grade`, `CDL`, `OCIO ColorSpace`, `Roto`, `Defocus`, `Viewer`, `Read`, `Write` — so they read the way they do in Nuke or Flame. The diffusion layer keeps a `Radiance` prefix, so `Radiance Sampler` and `Radiance VAE Decode` are obviously the AI ones. Typing "radiance" in the search still finds everything.
 
-| Group | Examples |
+| Group | What's in it |
 | :--- | :--- |
-| Core | Project Manager / Workspace, Resolution, workspace utilities |
-| Load & Save | Read, Write (EXR alpha and mask), image and mask loading, EXR multipart and sequence export, Digital Cinema (DPX) read and write |
-| Generate | Radiance Loader, Radiance Sampler, VAE Decode (HDR), prompt tools, LoRA stack, HDR LoRA, regional prompts |
-| Color | Grade, Grade Match, CDL, LUT Apply / Blend, Curves, Hue Curves, White Balance, Color Space Convert, QC, Policy Guard |
-| HDR | ACES 2.0, OCIO, HDR VAE encode/decode, tone mapping, HDR synthesis, relight, QC |
-| VFX | Plate prep, masks, roto, depth, optics, motion, multipass, AOV reader (real EXR layers), relight |
-| Video | Video loader, prompt builder, sampler, text-to-video, image-to-video, routing, batch decode, export |
-| Upscale | Image and video upscale (HDR and color aware), tiling, face restoration |
+| Core | Project Manager, Workspace, Resolution, workspace utilities |
+| Load & Save | Read, Write, EXR alpha and mask, EXR multipart, sequence export, DPX read and write |
+| Generate | Loader, Sampler, VAE Decode (HDR), prompt tools, LoRA stack, HDR LoRA, regional prompts |
+| Color | Grade, Grade Match, CDL, LUT Apply / Blend, Curves, Hue Curves, White Balance, Colour Space Convert, QC, Policy Guard |
+| HDR | ACES 2.0, OCIO, HDR VAE encode and decode, tone mapping, HDR synthesis, relight, QC |
+| VFX | Plate prep, masks, roto, depth, optics, motion, multipass, AOV reader, relight |
+| Video | Loader, prompt builder, sampler, text-to-video, image-to-video, routing, batch decode, export |
+| Upscale | Image and video upscale, tiling, face restoration |
 | Review | Viewer, Lite Viewer, scopes, focus peaking, contact sheets, flipbook, preview server |
 | Pipeline | Project Manager, Send to Nuke, DaVinci Resolve handoff |
 
@@ -326,14 +342,14 @@ quietly stop being true.
 | Area | What is verified |
 | :-- | :-- |
 | **EXR** | 32-bit float round-trips bit-exactly through EXR and TIFF, negatives and over-range highlights included — the clamp-free HDR claim, as a write-and-read rather than an assertion. 16-bit half holds to 1e-3. |
-| **Colour** | All 16 colour spaces land on published 18%-grey values. Both ACES 2.0 tone scales match the ACES Output Transform table exactly — 18% grey at 10.000 / 13.193 / 14.512 / 15.747 / 16.824 nits for peaks of 100 / 500 / 1000 / 2000 / 4000. HLG keeps its BT.2408 anchor. |
+| **Colour** | All 16 colour spaces land on published 18%-grey values. Both ACES 2.0 tone scales match the ACES Output Transform table exactly — 18% grey at 10.000 / 13.193 / 14.512 / 15.747 / 16.824 nits for peaks of 100 / 500 / 1000 / 2000 / 4000. HLG keeps its BT.2408 anchor. The OCIO bake is checked against OCIO's own CPU processor, exactly rather than approximately. |
 | **Video** | Frame counts are exact from 1 to 100 frames across H.264, H.265 10-bit and ProRes. Sequences read correctly by frame number for `####`, `%04d` and explicit ranges. |
 | **Memory** | Flat across 150 consecutive 1080p runs — an audit measurement, not a standing test. |
 | **Security** | `weights_only` loads, sha256-pinned downloads, no `shell=True`, and no model weight downloads without `RADIANCE_ALLOW_DOWNLOADS=1` through a gate every downloader shares. Nodes never write into the ComfyUI install directory. |
 | **Catalog** | All 131 nodes declare their menu section explicitly; a test fails if a registered node is missing from the table. Withholding a node from the menu requires a named entry a test reads, so a finished node cannot go missing by omission. |
 | **Isolation** | Every one of the eleven node groups imports with `aiohttp` and `server` blocked, proven in a subprocess rather than for one hand-listed module. |
 | **Layering** | `radiance/io/writer.py` and `radiance/io/reader.py` import nothing above them, checked by AST walk *and* by running them in a bare interpreter with no ComfyUI present. |
-| **Suite** | 2509 Python tests and 256 JavaScript tests, the latter including a GPU lane that compiles the real shaders in both GLSL and WGSL and compares them against the CPU implementations, and a browser lane that builds and operates the viewer panels. Verified from a checkout named `radiance-beta` as well as `radiance`. |
+| **Suite** | 2528 Python tests and 257 JavaScript tests, at 44% statement coverage — the gaps are named under Open rather than left to be discovered. The JS side includes a GPU lane that compiles the real shaders in both GLSL and WGSL and compares them against the CPU implementations they were generated from, and a browser lane that builds all fourteen Viewer panels and operates their controls. Verified from a checkout named `radiance-beta` as well as `radiance`. |
 
 ### Open
 
@@ -362,16 +378,33 @@ quietly stop being true.
 
 **Structural debt**
 
-- [ ] **Split the remaining monoliths** — `hdr/vae.py` (3460 lines) and
-      `nodes/monitor/viewer.py` (1233). `nodes/io/write.py` is done: 2972 →
-      2201 when the write engine moved out, → 1262 when the read engine
-      followed, and what is left there is the node surface.
+- [ ] **Split the remaining monoliths.** In order of size: `hdr/vae.py` (3460
+      lines), `nodes/upscale/upscale.py` (3022), `image/upscale.py` (2741),
+      `nodes/generate/sampler.py` (2008), `nodes/pipeline/workspace.py` (1905),
+      `sampler_utils.py` (1876), `nodes/generate/prompt.py` (1795),
+      `nodes/monitor/viewer.py` (1233). This list previously named only two of
+      those and had both counts wrong. `nodes/io/write.py` is done: 2972 → 2201
+      when the write engine moved out, → 1262 when the read engine followed.
 
-**Coverage**
+**Test coverage**
 
-- [ ] **The panel harness does not drive every control.** It builds and
-      operates the framing, scope, probe, OCIO and view sections of the Viewer;
-      the rest of the panel code is still held by source assertions.
+Measured, not guessed: 44% of 27,616 statements. Every node has structural
+coverage (399 smoke tests over `RETURN_TYPES`, `INPUT_TYPES` and the execute
+method), so what is missing below is behaviour.
+
+- [ ] **`image/upscale.py` — 1111 statements, 0%.** The largest untested
+      module in the repo, and live: `delivery/handler.py` imports
+      `RadianceAIUpscale` from it.
+- [ ] **`loader_utils.py` (340 statements, 8%) and
+      `nodes/pipeline/workspace.py` (1069, 12%).** Model loading and the
+      workspace API, both reachable from a graph.
+- [ ] **`delivery/handler.py` — 452 statements, 10%.** The write engine came
+      down a floor specifically so this could be exercised without ComfyUI.
+      Nothing has used that yet.
+- [ ] **conftest.py stubs modules out of the suite.** `radiance.radiance_ocio`
+      is replaced by a MagicMock with `HAS_OCIO = False`, so every OCIO test in
+      the suite tested the mock. That is how an OCIO bake that returned an
+      identity shipped. Worth auditing the other stubs for the same shape.
 
 ## Documentation
 
