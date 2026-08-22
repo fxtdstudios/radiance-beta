@@ -207,12 +207,11 @@ _radiance_ocio_stub.get_ocio_manager = MagicMock(return_value=_ocio_mgr_mock)
 _radiance_ocio_stub.HAS_OCIO = False
 sys.modules.setdefault("radiance.radiance_ocio", _radiance_ocio_stub)
 
-if not hasattr(sys.modules.get("torch"), "__version__"):
-    _hdr_cs_stub = types.ModuleType("radiance.nodes_hdr_colorspace")
-    for _attr in ("_EOTF_MAP", "_BRADFORD_CAT", "_PRIMARIES_MATRICES"):
-        setattr(_hdr_cs_stub, _attr, {})
-    _hdr_cs_stub._apply_matrix = MagicMock(return_value=MagicMock())
-    sys.modules.setdefault("radiance.nodes_hdr_colorspace", _hdr_cs_stub)
+# `radiance.nodes_hdr_colorspace` used to be stubbed here. That module was
+# retired with the rest of the flat nodes_*.py layer, so the stub stood in for
+# a file rather than for a dependency: nothing imports the name any more, and a
+# stub for something that does not exist is a place for a stale expectation to
+# hide.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -358,6 +357,11 @@ sys.modules.setdefault("radiance.image.defects", _defects_stub)
 # Also expose as bare `image` and `image.defects` for flat imports
 _bare_image_pkg = sys.modules.get("image") or types.ModuleType("image")
 _bare_image_pkg.defects = _defects_stub
+# Same __path__ as the packaged alias above. Without it the two spellings
+# disagree: `radiance.image.upscale` imports and the flat `image.upscale` does
+# not, which is a difference between two names for one directory.
+if not hasattr(_bare_image_pkg, "__path__"):
+    _bare_image_pkg.__path__ = [str(Path(__file__).resolve().parent.parent / "image")]
 sys.modules.setdefault("image",         _bare_image_pkg)
 sys.modules.setdefault("image.defects", _defects_stub)
 

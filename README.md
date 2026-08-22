@@ -353,7 +353,7 @@ quietly stop being true.
 | **Catalog** | All 131 nodes declare their menu section explicitly; a test fails if a registered node is missing from the table. Withholding a node from the menu requires a named entry a test reads, so a finished node cannot go missing by omission. |
 | **Isolation** | Every one of the eleven node groups imports with `aiohttp` and `server` blocked, proven in a subprocess rather than for one hand-listed module. |
 | **Layering** | `radiance/io/writer.py` and `radiance/io/reader.py` import nothing above them, checked by AST walk *and* by running them in a bare interpreter with no ComfyUI present. |
-| **Suite** | 2566 Python tests and 257 JavaScript tests, at 46% statement coverage — the gaps are named under Open rather than left to be discovered. The JS side includes a GPU lane that compiles the real shaders in both GLSL and WGSL and compares them against the CPU implementations they were generated from, and a browser lane that builds all fourteen Viewer panels and operates their controls. Verified from a checkout named `radiance-beta` as well as `radiance`. |
+| **Suite** | 2595 Python tests and 257 JavaScript tests, at 46% statement coverage — the gaps are named under Open rather than left to be discovered. The JS side includes a GPU lane that compiles the real shaders in both GLSL and WGSL and compares them against the CPU implementations they were generated from, and a browser lane that builds all fourteen Viewer panels and operates their controls. Verified from a checkout named `radiance-beta` as well as `radiance`. |
 
 ### Open
 
@@ -397,14 +397,11 @@ is thin below is behaviour, not registration.
 - [ ] **`loader_utils.py` (340 statements, 8%) and
       `nodes/pipeline/workspace.py` (1069, 12%).** Model loading and the
       workspace API, both reachable from a graph.
-- [ ] **`delivery/handler.py` — 452 statements, 10%.** The write engine came
-      down a floor specifically so this could be exercised without ComfyUI.
-      Nothing has used that yet.
-- [ ] **Two stubs left over from the conftest audit.** The bare `image` stub
-      has no `__path__` where `radiance.image` has one, so flat
-      `import image.upscale` still fails where the packaged form works. And the
-      `radiance.nodes_hdr_colorspace` entry is stale — that file no longer
-      exists.
+- [ ] **`delivery/handler.py` — 22%, up from 10%.** The lookup tables, the
+      versioning, the session log and the ACES sidecar are covered, and a
+      master is now written end to end with no ComfyUI present — which is what
+      moving the write engine down a floor was for. What is left is the
+      endpoint body itself, 570 lines of it.
 - [ ] **`radiance_ocio.py` is at 48%**, up from 0. The bake, the cache, the
       config listings and the route guard are covered; the HTTP endpoints
       themselves and the display-view path are not.
