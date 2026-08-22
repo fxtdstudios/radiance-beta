@@ -373,10 +373,33 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 
 ### Structural debt
 
-- [ ] **Split the monoliths** — `hdr/vae.py` (3324 lines),
-      `nodes/monitor/viewer.py` (1220). `nodes/io/write.py` came down from 2972
-      to 2201 when the write engine moved out; what is left there is the
-      reader, which is the next slice.
+- [ ] **Split the monoliths** — `hdr/vae.py` (3460 lines),
+      `nodes/monitor/viewer.py` (1233). Both counts were stale here; those two
+      are what is left. **`nodes/io/write.py` is done**: 2972 → 2201 when the
+      write engine moved out, → 1262 now the read engine has. What remains is
+      the node surface — the two node classes, `RadianceEXRMultiPart`,
+      `RadianceDigitalCinemaRead` / `Write`, and the HTTP routes.
+
+      The decoders, the colour-space decode, path-kind detection, the image /
+      sequence / video readers, the write-input coercion helpers and the UI
+      probe are `radiance/io/reader.py`, which imports nothing above it.
+      `RadianceRead.read` is a signature and a delegation, and the only thing
+      that stayed up is the browse widget, because resolving a filename in
+      ComfyUI's input directory needs `folder_paths` — the mirror of the
+      writer's `read_media` callback, and the last of the coupling.
+
+      Verified byte-for-byte over 215 cases: 18 fixtures spanning PNG 8-bit and
+      16-bit, JPEG, WebP, BMP, TIFF 16 and 32-float, DPX, Radiance HDR, EXR
+      half / float / RGBA, printf, hash and directory sequences, H.264 and
+      ProRes 4444 with alpha — crossed with every input colour space in the
+      menu and every read option: raw, premultiplied, proxy scale, frame
+      ranges, frame step, the missing-frame policy and the error policy. Not
+      one hash moved. `tests/test_reader_layering.py` holds the line, and each
+      of its assertions was checked by mutation rather than by passing:
+      smuggling a deferred `radiance.nodes` import into a function body,
+      importing `folder_paths`, decoding in the node again, and reordering the
+      engine's parameters each turn a different one of them red. 2509 Python
+      tests pass.
 - [x] **`delivery/handler.py` no longer imports the node layer at all.** The
       writer moved to `radiance/io/writer.py` — the format tables, the colour
       space application, every save backend and `write_frames` itself, 987
