@@ -54,6 +54,16 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ### Fixed
 
+- **The writer-layering tests now run on CI instead of failing and skipping.**
+  Both bare-interpreter tests assumed the repository directory is named
+  `radiance` -- true of a working copy, false on GitHub, which checks out as
+  `radiance-beta/radiance-beta`. One failed with `ModuleNotFoundError: No
+  module named 'radiance'`; the other swallowed the same error as "a
+  dependency is missing" and reported a skip, so the claim that the write
+  engine imports without ComfyUI was unverified on CI in both directions. They
+  now load the package from its `__init__` path under an explicit module name,
+  and the skip guard is limited to named third-party packages.
+
 - **The safe-area caption no longer describes the previous preset.** Switching
   to Legacy 480-line redrew the boxes at 90/80 correctly but left the note
   beneath reading "SMPTE ST 2046-1 and EBU R 95 specify the same two boxes".
