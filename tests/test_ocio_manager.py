@@ -20,6 +20,8 @@ never do.
 The tests below are therefore mostly about the bake. The rest of the manager
 gets the coverage it should have had.
 """
+import contextlib
+import importlib
 import importlib.util
 import os
 import pathlib
@@ -28,7 +30,45 @@ import sys
 import numpy as np
 import pytest
 
-PyOCIO = pytest.importorskip("PyOpenColorIO")
+
+def _is_real(mod):
+    """A real extension module, not a stand-in."""
+    return (mod is not None
+            and getattr(mod, "__file__", None) is not None
+            and hasattr(getattr(mod, "Config", None), "CreateFromBuiltinConfig"))
+
+
+@contextlib.contextmanager
+def _real_pyocio():
+    """Hand back the real PyOpenColorIO for the duration of the block.
+
+    tests/test_node_smoke.py installs a MagicMock at
+    sys.modules["PyOpenColorIO"] whenever the real one has not been imported
+    yet, and pytest collects it before this file. So `importorskip` here
+    returns the mock, which does not fail at import — it fails later, on every
+    attribute, as an AttributeError rather than a skip.
+
+    This swaps the real module in, yields it, and puts whatever was there back
+    afterwards, so the rest of the suite keeps the stub it expects.
+    """
+    saved = sys.modules.get("PyOpenColorIO")
+    if _is_real(saved):
+        yield saved
+        return
+    sys.modules.pop("PyOpenColorIO", None)
+    real = None
+    try:
+        try:
+            real = importlib.import_module("PyOpenColorIO")
+        except ImportError:
+            real = None
+        yield real if _is_real(real) else None
+    finally:
+        if saved is not None:
+            sys.modules["PyOpenColorIO"] = saved
+        else:
+            sys.modules.pop("PyOpenColorIO", None)
+
 
 # The real module, loaded from its file rather than imported by name.
 #
@@ -39,13 +79,17 @@ PyOCIO = pytest.importorskip("PyOpenColorIO")
 # a bake that returned an exact identity could ship. Loading it by path leaves
 # the stub in place for everyone else and gives these tests the real thing.
 _REAL = pathlib.Path(__file__).resolve().parent.parent / "radiance_ocio.py"
-_spec = importlib.util.spec_from_file_location("radiance_ocio_under_test", _REAL)
-ocio_module = importlib.util.module_from_spec(_spec)
-sys.modules["radiance_ocio_under_test"] = ocio_module
-_spec.loader.exec_module(ocio_module)
+with _real_pyocio() as _pyocio:
+    if _pyocio is None:
+        pytest.skip("PyOpenColorIO is not installed", allow_module_level=True)
+    PyOCIO = _pyocio
+    _spec = importlib.util.spec_from_file_location("radiance_ocio_under_test", _REAL)
+    ocio_module = importlib.util.module_from_spec(_spec)
+    sys.modules["radiance_ocio_under_test"] = ocio_module
+    _spec.loader.exec_module(ocio_module)
 
-if not getattr(ocio_module, "HAS_OCIO", False):
-    pytest.skip("PyOpenColorIO is not importable", allow_module_level=True)
+if not getattr(ocio_module, "HAS_OCIO", False):   # pragma: no cover - belt and braces
+    pytest.skip("PyOpenColorIO is not usable here", allow_module_level=True)
 
 OCIOConfigManager = ocio_module.OCIOConfigManager
 _is_inside_allowed_ocio_root = ocio_module._is_inside_allowed_ocio_root
