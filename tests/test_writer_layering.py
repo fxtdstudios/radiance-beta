@@ -18,12 +18,38 @@ and the endpoint returned HTTP 200 with status "error".
 """
 import ast
 import pathlib
+import re
 import subprocess
 import sys
 
 import pytest
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+#: Third-party packages a bare interpreter may legitimately lack. `radiance`
+#: is deliberately not here: if the package itself will not import, that is the
+#: failure these tests exist to report.
+_OPTIONAL = {"torch", "numpy", "imageio", "OpenEXR", "Imath", "cv2", "PIL"}
+
+# Importing the package as `radiance` in a bare subprocess, whatever the
+# checkout is called.
+#
+# These tests used to do `sys.path.insert(0, _ROOT.parent); import radiance`,
+# which only works when the repository directory happens to be named
+# `radiance`. It is on a working copy cloned as `radiance`; it is not on CI,
+# where GitHub checks the repo out as `radiance-beta/radiance-beta`, and
+# `import radiance` there is ModuleNotFoundError. Loading from the __init__
+# path under an explicit module name removes the dependency on the folder name
+# entirely -- and it is the package `__init__` that runs either way, which is
+# the whole point of the measurement below.
+_BOOT = (
+    "import importlib.util, sys;"
+    f"_s = importlib.util.spec_from_file_location('radiance', {str(_ROOT / '__init__.py')!r},"
+    f" submodule_search_locations=[{str(_ROOT)!r}]);"
+    "_p = importlib.util.module_from_spec(_s);"
+    "sys.modules['radiance'] = _p;"
+    "_s.loader.exec_module(_p);"
+)
 
 
 def _tree(rel):
@@ -64,10 +90,8 @@ def test_the_engine_pulls_in_no_node_module_of_its_own():
     # registers the node modules at import time -- that is the package's own
     # arrangement and not something the engine can or should change.
     code = (
-        "import sys;"
-        f"sys.path.insert(0, {str(_ROOT.parent)!r});"
-        "import radiance;"
-        "before=set(sys.modules);"
+        _BOOT
+        + "before=set(sys.modules);"
         "import radiance.io.writer as w;"
         "delta=[m for m in set(sys.modules)-before if m.startswith('radiance.nodes')];"
         "assert not delta, delta;"
@@ -85,9 +109,9 @@ def test_the_engine_writes_a_file_without_comfyui():
     # The point of the extraction, exercised end to end: no conftest, no node
     # import, no ComfyUI stubs -- just frames in and a file on disk.
     code = (
-        "import sys, tempfile, pathlib;"
-        f"sys.path.insert(0, {str(_ROOT.parent)!r});"
-        "import numpy as np, torch;"
+        "import tempfile, pathlib;"
+        + _BOOT
+        + "import numpy as np, torch;"
         "from radiance.io.writer import write_frames;"
         "d=tempfile.mkdtemp();"
         "img=torch.from_numpy(np.full((1,4,4,3), 0.5, dtype=np.float32));"
@@ -97,8 +121,13 @@ def test_the_engine_writes_a_file_without_comfyui():
         "print('ok')"
     )
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
-    if r.returncode != 0 and "No module named" in r.stderr:
-        pytest.skip(f"a dependency is missing in a bare interpreter: {r.stderr.strip().splitlines()[-1]}")
+    # Third-party only. A bare `No module named` catch also swallowed
+    # `No module named 'radiance'` -- so when the folder-name assumption above
+    # was wrong, this test reported itself as skipped rather than broken, and
+    # went on doing that on every CI run.
+    missing = re.search(r"No module named '([\w.]+)'", r.stderr)
+    if r.returncode != 0 and missing and missing.group(1).split(".")[0] in _OPTIONAL:
+        pytest.skip(f"a dependency is missing in a bare interpreter: {missing.group(1)}")
     assert r.returncode == 0, r.stderr[-2000:]
     assert "ok" in r.stdout
 
