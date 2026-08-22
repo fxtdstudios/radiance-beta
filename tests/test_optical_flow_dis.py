@@ -20,6 +20,8 @@ Both fail past roughly 28 px on these fixtures, but that is the fixture rather
 than the solver: at that displacement the patterns are ambiguous. The claim
 worth making is that the working range went from about 8 px to about 20.
 """
+import pathlib
+
 import pytest
 import torch
 
@@ -162,6 +164,57 @@ def test_the_solver_can_still_be_pinned_to_lucas_kanade(plate):
         _optical_flow(a, b, method="lucas-kanade")[0],
         _optical_flow_lk(a, b)[0],
     )
+
+
+def test_the_quality_dial_reaches_dis_and_not_only_lucas_kanade():
+    """The Optical Flow node has one Fast / Medium / Ultra widget and two
+    solvers behind it. When DIS became the default, that widget only fed
+    Lucas-Kanade's integration radius, so all three positions did the same
+    thing and nothing said so. Three labels have to map to three distinct DIS
+    presets, in the same order.
+    """
+    import ast
+    src = pathlib.Path(__file__).resolve().parent.parent / "nodes" / "vfx" / "motion.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    mapping = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict) and {"Fast", "Medium", "Ultra"} == {
+            k.value for k in node.keys if isinstance(k, ast.Constant)
+        }:
+            values = [v.value for v in node.values if isinstance(v, ast.Constant)]
+            if all(isinstance(v, str) for v in values):
+                mapping = dict(zip(
+                    [k.value for k in node.keys if isinstance(k, ast.Constant)], values))
+    assert mapping is not None, "no Fast/Medium/Ultra to DIS preset mapping in motion.py"
+    assert len(set(mapping.values())) == 3, (
+        f"the three widget positions collapse to {sorted(set(mapping.values()))} — "
+        "at least two of them do nothing"
+    )
+    order = ["ultrafast", "fast", "medium"]
+    assert [order.index(mapping[k]) for k in ("Fast", "Medium", "Ultra")] == [0, 1, 2], (
+        f"the dial is not monotonic in quality: {mapping}"
+    )
+
+
+def test_every_named_preset_is_one_dis_actually_has(plate):
+    """A preset name DIS does not know falls back to medium silently, which is
+    the same widget-does-nothing failure wearing a different hat."""
+    a, b = _pair(plate, dx=8)
+    for name in ("ultrafast", "fast", "medium"):
+        u, _ = _optical_flow_dis(a, b, preset=name)
+        assert float(u[:, 20:-20, 20:-20].median()) == pytest.approx(8, rel=0.05), name
+
+
+def test_the_dispatcher_passes_the_preset_through(plate, monkeypatch):
+    seen = {}
+    import radiance.nodes.vfx.multipass.core as core
+    real = core._optical_flow_dis
+    monkeypatch.setattr(core, "_optical_flow_dis",
+                        lambda f1, f2, preset="medium": seen.setdefault("preset", preset)
+                        or real(f1, f2, preset=preset))
+    a, b = _pair(plate, dx=8)
+    core._optical_flow(a, b, method="dis", preset="ultrafast")
+    assert seen["preset"] == "ultrafast"
 
 
 def test_the_dispatcher_falls_back_when_opencv_is_missing(plate, monkeypatch):
