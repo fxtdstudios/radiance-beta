@@ -28,6 +28,21 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ### Added
 
+- **The read engine moved below the node layer**, to `radiance/io/reader.py`.
+  The decoders, the colour-space decode, path-kind detection, the image,
+  sequence and video readers, the write-input coercion helpers and the UI probe
+  all left `nodes/io/write.py`, which is now 1262 lines — 2972 before the
+  writer moved, 2201 after it. `RadianceRead.read` is a signature and a
+  delegation; the browse widget stays in the node layer because resolving a
+  filename in ComfyUI's input directory needs `folder_paths`. Every private
+  name is re-exported, so `RadianceEXRMultiPart`, the digital-cinema nodes, the
+  HTTP routes and the two `nodes/pipeline` modules that reach in for
+  `_read_sequence` and `_load_video_to_numpy` are untouched. No node key, no
+  widget name and no widget order changed, so saved workflows are unaffected.
+  Verified byte-for-byte across 215 cases — 18 fixtures covering every image,
+  EXR, sequence and video kind, crossed with every input colour space and every
+  read option — with no hash moving.
+
 - **The emitted WGSL is compiled and compared against the JS it comes from.**
   `radiance_grade.js` emits GLSL and WGSL from the same file as its JS
   functions; only the GLSL half was ever compiled, because headless Chromium
