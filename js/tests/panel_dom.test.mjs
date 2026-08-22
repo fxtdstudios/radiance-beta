@@ -160,7 +160,16 @@ test('the viewer module loads in a browser and registers its extension', { skip 
 const noReport = report?.ok ? false
     : 'the harness did not finish — see the module-load test above';
 
-test('every panel builds', { skip: skip || noReport }, () => {
+test('every panel the viewer defines is built, not a chosen few', { skip: skip || noReport }, () => {
+    // The panel list is discovered from the prototype, not written here. This
+    // harness drove five of the viewer's fourteen panels while reading as
+    // though it covered the viewer — the same failure as a source assertion:
+    // it passes, and it is not looking at the thing. The floor makes losing a
+    // panel a failure too, so the list cannot quietly shrink back.
+    assert.ok(report.panels.length >= 14,
+        `only ${report.panels.length} panels discovered: ${report.panels.join(', ')}`);
+    assert.deepEqual(Object.keys(report.built).sort(), report.panels,
+        'a discovered panel was not built');
     for (const [name, r] of Object.entries(report.built)) {
         assert.ok(r.ok, `${name} threw: ${r.error}`);
         assert.ok(r.nodes > 3, `${name} produced ${r.nodes} elements — that is an empty panel`);
@@ -218,6 +227,19 @@ test('the scope scale selector offers the shared scales and takes a change', { s
     assert.equal(d.state, 'nits-pq');
     assert.equal(d.stored, 'nits-pq');
 });
+
+test('the mask type selector writes an int, not the string the DOM hands back',
+    { skip: skip || noReport }, () => {
+        // `<option value="1">` hands back "1". The mask type is compared
+        // numerically and passed to the renderer, so a string is a mask that
+        // silently stops matching. A source assertion cannot catch this: the
+        // parseInt is right there in the line it would read.
+        const d = report.driven.masks;
+        assert.ok(d.found, 'no mask type selector in the masks tab');
+        assert.equal(d.before, 0);
+        assert.equal(d.after, 1);
+        assert.equal(d.type, 'number', `mask type came back as ${d.type}`);
+    });
 
 test('drawing the colour panel does not fetch the OCIO WebAssembly', { skip: skip || noReport }, () => {
     // 4.7 MB on the chance someone opens a tab is the reason the façade

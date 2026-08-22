@@ -47,8 +47,29 @@ function makeInstance() {
         scopeScale: 'cv10', scopeLevels: 'data', scopeMeasurePoint: 'display',
         // Probe
         probeEnabled: false, probeMode: 'point', probeRadius: 0, probeSpace: 'scene',
+        // Masks. The same shape the constructor sets, because these field
+        // names are read straight into the shader uniforms -- a stub that
+        // invented its own would build a panel that cannot exist.
+        maskState: {
+            type: 0, center: [0.5, 0.5], scale: [0.3, 0.3],
+            feather: 0.2, rotation: 0.0, invert: false, showOverlay: false,
+        },
+        // The HDR widget returns early without data, which is correct
+        // behaviour and also means an empty panel that passes. Real frame data
+        // instead, and _hdrZoneStats deliberately left unset: the widget calls
+        // _computeHDRZoneStats() when it is missing, so the statistics are the
+        // viewer's own rather than eighteen fields copied here to go stale.
+        hdrData: (() => {
+            const px = 16 * 16, data = new Float32Array(px * 3);
+            for (let i = 0; i < px; i++) {
+                const v = (i / px) * 6;            // 0..6, so there is over-range
+                data[i * 3] = v; data[i * 3 + 1] = v * 0.8; data[i * 3 + 2] = v * 0.6;
+            }
+            return { data, width: 16, height: 16, channels: 3 };
+        })(),
         // Enough of the rest to let the builders run
         settings: {}, node: { id: 1 }, image: null, imageWidth: 0, imageHeight: 0,
+        renderer: null, requestRender() {},
         renderOverlay() {}, renderContent() {}, updateScopes() {},
         _lastRenderContent() {}, _scopeCtx() { return { peak: 1000, levels: this.scopeLevels }; },
         togglePixelFilter() {
@@ -93,8 +114,15 @@ window.__run = () => {
     out.presets.matte = V.MATTE_PRESETS.map((p) => ({ id: p.id, label: p.label }));
     out.presets.scopeScales = SCOPE_SCALES.map((s) => s.id);
 
-    for (const m of ['renderFramingSection', 'renderProbeTab', 'renderOcioSection',
-        'renderScopesTab', 'renderViewTab']) {
+    // Discovered from the prototype, not listed here. A hardcoded list is how
+    // this harness covered five of the fourteen panels while reading as though
+    // it covered the viewer: a panel added later joined nothing. The test
+    // asserts a floor on the count, so losing one is a failure too.
+    out.panels = Object.getOwnPropertyNames(V.prototype)
+        .filter((n) => /^render[A-Z].*(Tab|Section|Widget)$/.test(n))
+        .sort();
+
+    for (const m of out.panels) {
         const c = document.createElement('div');
         document.body.appendChild(c);
         try {
@@ -175,6 +203,27 @@ window.__run = () => {
             fire(scale, 'change');
             d.state = v.scopeScale;
             d.stored = localStorage.getItem('radiance_scope_scale');
+        }
+    }
+
+    // ── Driving the mask type ───────────────────────────────────────────────
+    {
+        const v = makeInstance();
+        const c = document.createElement('div');
+        document.body.appendChild(c);
+        v.renderMasksTab(c);
+        const d = out.driven.masks = {};
+        const sel = [...c.querySelectorAll('select')]
+            .find((s) => [...s.options].map((o) => o.textContent).join() === 'None,Circle,Box');
+        d.found = !!sel;
+        if (sel) {
+            d.before = v.maskState.type;
+            sel.value = '1';
+            fire(sel, 'change');
+            d.after = v.maskState.type;
+            // The widget stores an int; a string here means the whole shader
+            // comparison downstream is against the wrong type.
+            d.type = typeof v.maskState.type;
         }
     }
 
