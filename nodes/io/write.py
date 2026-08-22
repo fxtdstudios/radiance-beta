@@ -134,7 +134,6 @@ from ...io.writer import (  # noqa: F401  (re-exported for this module's other u
 from ...io.reader import (  # noqa: F401  (re-exported for this module's other users)
     INPUT_COLOR_SPACES,
     _INPUT_DECODERS,
-    _SEQUENCE_START_DEFAULT,
     _IMG_EXT,
     _VID_EXT,
     _EXR_EXT,
