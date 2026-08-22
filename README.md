@@ -333,7 +333,7 @@ quietly stop being true.
 | **Catalog** | All 131 nodes declare their menu section explicitly; a test fails if a registered node is missing from the table. Withholding a node from the menu requires a named entry a test reads, so a finished node cannot go missing by omission. |
 | **Isolation** | Every one of the eleven node groups imports with `aiohttp` and `server` blocked, proven in a subprocess rather than for one hand-listed module. |
 | **Layering** | `radiance/io/writer.py` and `radiance/io/reader.py` import nothing above them, checked by AST walk *and* by running them in a bare interpreter with no ComfyUI present. |
-| **Suite** | 2509 Python tests and 256 JavaScript tests, the latter including a GPU lane that compiles the real shaders in both GLSL and WGSL and compares them against the CPU implementations, and a browser lane that builds and operates the viewer panels. Verified from a checkout named `radiance-beta` as well as `radiance`. |
+| **Suite** | 2511 Python tests and 257 JavaScript tests. The JS side includes a GPU lane that compiles the real shaders in both GLSL and WGSL and compares them against the CPU implementations they were generated from, and a browser lane that builds all fourteen Viewer panels against stubbed ComfyUI modules and operates their controls — the panel list is discovered from the class, so a new panel joins the check by existing. Verified from a checkout named `radiance-beta` as well as `radiance`. |
 
 ### Open
 
@@ -366,12 +366,6 @@ quietly stop being true.
       `nodes/monitor/viewer.py` (1233). `nodes/io/write.py` is done: 2972 →
       2201 when the write engine moved out, → 1262 when the read engine
       followed, and what is left there is the node surface.
-
-**Coverage**
-
-- [ ] **The panel harness does not drive every control.** It builds and
-      operates the framing, scope, probe, OCIO and view sections of the Viewer;
-      the rest of the panel code is still held by source assertions.
 
 ## Documentation
 

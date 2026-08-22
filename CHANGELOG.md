@@ -28,6 +28,16 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ### Added
 
+- **The browser test lane covers every Viewer panel, not five of them.** The
+  harness listed the panels it drove, so it exercised the framing, scope,
+  probe, OCIO and view sections while nine others — primaries, effects, lens,
+  curves, qualifiers, masks, prompt, terminal and the HDR preview widget — were
+  held by source assertions. The list is now discovered from the class, so a
+  panel added later joins the check by existing, and the test asserts a floor
+  on the count so it cannot quietly shrink back. Building all fourteen found no
+  defect; driving the mask type selector found one worth pinning, and the new
+  assertion fails if the `parseInt` on it is ever dropped.
+
 - **The read engine moved below the node layer**, to `radiance/io/reader.py`.
   The decoders, the colour-space decode, path-kind detection, the image,
   sequence and video readers, the write-input coercion helpers and the UI probe
