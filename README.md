@@ -374,16 +374,27 @@ Detail for anything here is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and the
 ### Structural debt
 
 - [ ] **Split the monoliths** — `hdr/vae.py` (3324 lines),
-      `nodes/io/write.py` (2972), `nodes/monitor/viewer.py` (1220). The middle
-      one is the only thing still holding the item below open.
-- [ ] **`delivery/handler.py` still imports `RadianceWrite`.** The upscale half
-      of this is closed — the handler calls `radiance.image.upscale` directly
-      now, and the stated reason it could not (a `tests/conftest.py` stub that
-      shadowed the whole `radiance.image` package rather than just `defects`)
-      turned out to be a fixable stub, not a fact about the code. What is left
-      is the writer: `RadianceWrite.write` is 118 lines leaning on module-level
-      helpers in the same 2972-line file, so it comes out with that split
-      rather than before it.
+      `nodes/monitor/viewer.py` (1220). `nodes/io/write.py` came down from 2972
+      to 2201 when the write engine moved out; what is left there is the
+      reader, which is the next slice.
+- [x] **`delivery/handler.py` no longer imports the node layer at all.** The
+      writer moved to `radiance/io/writer.py` — the format tables, the colour
+      space application, every save backend and `write_frames` itself, 987
+      lines with nothing above them. `RadianceWrite.write` is now a signature
+      and a delegation, and the handler calls `write_frames` directly. The one
+      thing that could not come down is media *reading*: coercing a file path
+      or a VideoHelperSuite dict to frames needs the decoders, which are the
+      reader's and stay a floor up, so the engine takes a `read_media`
+      callback the node supplies and the delivery path does not — it hands the
+      writer a tensor. There is no lazy upward import hiding in a function
+      body; `tests/test_writer_layering.py` walks the AST rather than reading
+      the header, and imports the engine in a bare interpreter with no ComfyUI
+      to prove it stands alone. Verified byte-for-byte: 42 cases — every write
+      format, every output colour space, and each of the named behaviours (the
+      fps auto sentinel, the broadcast-safe float exemption, PNG alpha, proxy
+      scale, sequence padding) — hashed before and after. The only three that
+      differ are non-deterministic between two runs of *identical* code, which
+      is the DPX header's creation timestamp. 2466 Python tests pass, up 6.
 
 ### Done and verified
 
