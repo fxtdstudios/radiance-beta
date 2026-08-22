@@ -31,9 +31,10 @@ logger = logging.getLogger("radiance.delivery.handler")
 
 _SAFE_FILENAME_RE = re.compile(r'[^\w\s◎_.() -]', re.UNICODE)
 
-# ── UI → RadianceWrite vocabulary ───────────────────────────────────────────
-# The delivery panel (js/radiance_viewer.js) and RadianceWrite (nodes_io.py)
-# grew separate names for the same things; the JS comment still claims they
+# ── UI → write-engine vocabulary ────────────────────────────────────────────
+# The delivery panel (js/radiance_viewer.js) and the write engine
+# (radiance/io/writer.py) grew separate names for the same things; the JS
+# comment still claims they
 # "MUST exactly match", but they have not matched for some time. Translating at
 # this boundary keeps both sides untouched. Anything absent from these tables
 # has no writer implementation and is rejected explicitly rather than silently
@@ -635,16 +636,15 @@ async def radiance_deliver_endpoint(request):
             except Exception as exc:
                 logger.warning("[radiance.delivery.handler]: %s", exc)
 
-            # ─── Save using RadianceWrite Logic ────────────────────────────
+            # ─── Save through the write engine ─────────────────────────────
             #
-            # LAYERING: this is the delivery path reaching up into the node
-            # layer, which is backwards — it is why the handler cannot be
-            # tested without importing ComfyUI's node surface. The writer body
-            # is 118 lines in nodes_io.py and depends on module-level helpers
-            # in that same file, so extracting it is part of splitting that
-            # monolith rather than a local fix. Tracked in the README.
-            from radiance.nodes.io.write import RadianceWrite
-            writer = RadianceWrite()
+            # radiance.io.writer, not radiance.nodes.io.write. This used to
+            # instantiate the node and call .write() on it -- the delivery path
+            # reaching up into the node layer, which is why the handler could
+            # not be exercised without importing ComfyUI's node surface. The
+            # engine is a floor below both of us now and imports nothing above
+            # itself.
+            from radiance.io.writer import write_frames
 
             is_exr = 'EXR' in output_format or 'exr' in output_format.lower()
             bake_grade_exr = settings.get('bake_grade', False) and is_exr
@@ -686,12 +686,15 @@ async def radiance_deliver_endpoint(request):
 
             _progress_set(instance_key, {"current": 90, "total": 100, "status": "encoding", "message": "Encoding Master..."})
 
-            # NOTE: these kwargs must track RadianceWrite.write's real signature.
+            # NOTE: these kwargs must track write_frames' real signature.
             # They previously read filename_prefix / output_format /
             # output_color_space, none of which exist, and omitted the required
             # `format` -- so every delivery raised TypeError, was swallowed by the
             # handler below, and returned HTTP 200 with status "error".
-            path, _count = writer.write(
+            #
+            # No read_media callback: the delivery path always hands the writer
+            # a tensor, so the branch that needs a decoder is never reached.
+            path, _count = write_frames(
                 image=graded_tensor,
                 output_path=output_path,
                 format=_resolve_write_format(output_format),
