@@ -4,6 +4,74 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **RUDRA graded each tile and each frame separately.** A decoder with
+  dynamic-range conditioning (`dr_dim`) infers its conditioning vector from
+  whatever tensor it is handed, and the tiled and chunked decode paths handed
+  it spatial tiles and four-frame chunks. Neighbouring tiles of one frame were
+  therefore graded apart, up to the FiLM bound of 5% gain and 0.05 in log code,
+  roughly half a stop, and a clip's exposure breathed frame to frame. The
+  vector is now resolved once from the whole latent, by
+  `fast_vae.rudra_condition_for()`, and passed down to every tile and chunk in
+  `fast_vae.decode_to_linear_realtime` and in both `hdr/vae.py` decode paths.
+  A clip shares one vector across its frames; a batch of independent stills
+  keeps one per image, which is the correct behaviour there. Decoders without
+  conditioning are called exactly as before, with a single argument, so any
+  `nn.Module` still works as a `turbo_decoder`. Measured on a split-exposure
+  latent: the tile conditioning vectors differed by 8.3 in norm, and tiled
+  decode carried 29 times the error of the same test with an unconditioned
+  decoder. Pinned by 15 tests.
+
+- **The LTX stills warning fired on every LTX checkpoint, retrained or not.**
+  It now reads the frame count the training run stamped into the safetensors
+  metadata and warns only when the checkpoint declares one frame or declares
+  nothing.
+
+- **The OCIO CPU transform was an exact identity.** `apply_ocio_transform()`
+  called `applyRGB()` on a Python list, which OCIO transforms into a temporary
+  and discards, then wrote the untouched input back. The same defect the LUT
+  bake carried. It now applies to a contiguous float32 array. The function has
+  no callers yet, so no shipped output was affected.
+
+- **Denoise did nothing on delivery.** `delivery/handler.py` passed a `uint16`
+  array to OpenCV's bilateral filter, which accepts 8U and 32F only, and the
+  resulting exception was swallowed at DEBUG level. A colourist could set
+  Denoise, get HTTP 200 and "EXPORT COMPLETE", and receive a master with no
+  denoise and no warning. It now filters in float32, and a failure logs at
+  WARNING.
+
+- **Version backups evicted the newest instead of the oldest.**
+  `_create_version_backup` sorted filenames lexicographically, so past ten
+  versions `v10` sorted before `v2` and capacity eviction destroyed a newer
+  backup while keeping an older one. Sorting is now by version number.
+
+- **Every saved v3 workflow advertised a preview it did not have.** The pack
+  tested `"preview_image" in metadata` rather than its value, and `save` always
+  sets the key, so an empty string wrote a zero-byte `preview.png`,
+  `/workflows/list` reported `has_preview: True`, and `/workflows/preview`
+  returned 200 with no bytes.
+
+- **Legacy v1 workflows under 14 bytes lost their metadata.** The record reader
+  required the v2 binary header length from every container, but a v1 `.rad` is
+  plain-text JSON of any length, so a short one fell into the error path and
+  its sidecar was discarded.
+
+- **A completed download could be reported as a failure.** The ComfyUI listing
+  refresh sat inside the same `try` as the download, after the verified file
+  had already been moved into place, so a refresh that kept failing sent a
+  checksum-clean model down the failure path and the loader reported it
+  missing. The refresh now warns and the download reports success.
+
+- **The loader named CLIP encoders it never read.** `clip_slot_used` tested
+  `val is not None`, which counts ComfyUI's empty-combo sentinel `"None"` as a
+  loaded encoder. It now walks the architecture's own slot order and applies
+  the same emptiness test the path assembly uses.
+
+- **A refused delivery left the progress bar spinning.** Three validation
+  refusals returned before any progress update, and the client clears its poll
+  interval only on `done` or `error`.
+
 ### Changed
 
 - **The write engine moved out of the node layer.** `radiance/io/writer.py`

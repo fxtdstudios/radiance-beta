@@ -805,15 +805,13 @@ def apply_ocio_transform(
         out = img[..., :3].astype(np.float32).copy()
         h, w = out.shape[:2]
 
-        # Apply per-pixel (compatible with all OCIO versions)
+        # applyRGB mutates a contiguous float32 buffer in place. Handed a
+        # Python list it transforms a temporary and discards it, which is how
+        # this function returned its input unchanged for every pixel, the same
+        # defect the LUT bake carried. Give it the array.
         if hasattr(cpu, "applyRGB"):
-            flat = out.reshape(-1, 3)
-            for i in range(flat.shape[0]):
-                pixel = flat[i].tolist()
-                cpu.applyRGB(pixel)
-                flat[i, 0] = pixel[0]
-                flat[i, 1] = pixel[1]
-                flat[i, 2] = pixel[2]
+            flat = np.ascontiguousarray(out.reshape(-1, 3), dtype=np.float32)
+            cpu.applyRGB(flat)
             out = flat.reshape(h, w, 3)
 
         return out

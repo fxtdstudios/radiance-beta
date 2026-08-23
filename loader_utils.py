@@ -94,13 +94,6 @@ def _download_model(url: str, target_path: str, folder_type: str,
 
         os.replace(tmp_path, target_path)   # atomic move into final location
         logger.info("Download complete: %s", target_path)
-        # Refresh ComfyUI file listing
-        try:
-            folder_paths.folder_names_and_paths[folder_type]
-            folder_paths.get_filename_list(folder_type)
-        except Exception:
-            folder_paths.get_filename_list(folder_type)
-        return True
     except Exception as e:
         logger.error("Download failed for %s: %s", url, e)
         try:
@@ -108,10 +101,30 @@ def _download_model(url: str, target_path: str, folder_type: str,
                 os.remove(tmp_path)
         except OSError as _exc:
             logger.debug(
-                "[Radiance] _download_model(): ignoring %s from `if os.path.exists(tmp_path):`: %s",
-                type(_exc).__name__, _exc,
+                "Radiance: could not remove partial download %s: %s", tmp_path, _exc,
             )
         return False
+
+    # The file is verified and in place from here on. A failure to refresh
+    # ComfyUI's listing is a stale menu, not a failed download, and reporting
+    # it as one made the loader claim a model was missing that was on disk.
+    _exc = None
+    try:
+        folder_paths.folder_names_and_paths[folder_type]
+        folder_paths.get_filename_list(folder_type)
+    except Exception:
+        try:
+            folder_paths.get_filename_list(folder_type)   # one retry, as before
+            _exc = None
+        except Exception as _retry_exc:
+            _exc = _retry_exc
+    if _exc is not None:
+        logger.warning(
+            "Radiance: %s downloaded, but refreshing the %s listing failed (%s). "
+            "Restart ComfyUI if the file does not appear in the menu.",
+            os.path.basename(target_path), folder_type, _exc,
+        )
+    return True
 
 
 def ensure_model_exists(name: str, folder_type: str, auto_download: bool = False) -> str | None:
@@ -529,12 +542,15 @@ def load_clip_stack(
     # without this would silently reuse a CLIP stuck on CPU (or GPU).
     clip_key     = f"clip:{':'.join(clip_paths)}:{resolved_type}:{clip_dtype}:{offload_mode}:{clip_fps}"
 
-    clip_slot_used = []
-    for slot, val in [("clip_l", clip_l), ("clip_g", clip_g),
-                      ("t5xxl", t5xxl), ("llm_encoder", llm_encoder),
-                      ("text_projection", text_projection)]:
-        if val is not None:
-            clip_slot_used.append(slot)
+    # Report the slots the assembly actually walked, in its order. Testing
+    # `val is not None` counted ComfyUI's empty-combo sentinel "None" as a
+    # loaded encoder, so the HUD named encoders that were never read.
+    _slot_values = {"clip_l": clip_l, "clip_g": clip_g, "t5xxl": t5xxl,
+                    "llm_encoder": llm_encoder, "text_projection": text_projection}
+    clip_slot_used = [
+        slot for slot in CLIP_SLOT_ORDER.get(resolved_type, list(_slot_values))
+        if _slot_values.get(slot) not in (None, "", "None")
+    ]
 
     clip_time = 0.0
     clip_cache_hit = caching and _clip_cache.has(clip_key)

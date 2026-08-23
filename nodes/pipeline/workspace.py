@@ -341,12 +341,16 @@ def _create_version_backup(filepath: Path, message: str = "Auto-save", author: s
     # v1..v5 exist and v3 is deleted, len=4 → next_num=5, which collides with v5.
     # Parse the numeric suffix from each filename and take max+1.
     import re as _re
-    existing = sorted(versions_dir.glob(f"{stem}.v*{suffix}"))
-    max_ver = 0
-    for p in existing:
-        m = _re.search(r"\.v(\d+)" + _re.escape(suffix) + r"$", p.name)
-        if m:
-            max_ver = max(max_ver, int(m.group(1)))
+
+    def _ver_of(path) -> int:
+        m = _re.search(r"\.v(\d+)" + _re.escape(suffix) + r"$", path.name)
+        return int(m.group(1)) if m else 0
+
+    # Sort by version NUMBER, not by name. Lexicographic order puts v10 before
+    # v2, so once the counter passed ten the eviction below deleted a newer
+    # backup and kept an older one.
+    existing = sorted(versions_dir.glob(f"{stem}.v*{suffix}"), key=_ver_of)
+    max_ver = max((_ver_of(p) for p in existing), default=0)
     next_num = max_ver + 1
 
     # Evict oldest if at capacity
@@ -445,7 +449,10 @@ def _pack_rad_v3(
             zf.writestr(f"assets/{safe_name}", data)
         
         # New in v3.5: Store a high-res preview image if provided
-        if "preview_image" in metadata:
+        # Key presence is not a preview: save_workflow always sets this key,
+        # so an empty string wrote a zero-byte preview.png and every listing
+        # then advertised has_preview for a file with no preview.
+        if metadata.get("preview_image"):
             try:
                 # Expecting base64 string
                 p_data = metadata["preview_image"]
@@ -683,10 +690,10 @@ def _read_workflow_records() -> list[dict]:
 
         try:
             with open(rad_file, "rb") as f:
-                header_bytes = f.read(_RAD_HEADER_SIZE)
-                if len(header_bytes) < _RAD_HEADER_SIZE:
-                    raise ValueError("File too small to be a valid .rad container")
-                header_sample = header_bytes
+                # A v1 container is plain-text JSON of any length, so a short
+                # read is not an error here. Only the binary v2 branch below
+                # needs the full header, and it checks for itself.
+                header_sample = f.read(_RAD_HEADER_SIZE)
 
             if header_sample.startswith(RAD_MAGIC_V3):
                 full_data = rad_file.read_bytes()
@@ -698,7 +705,8 @@ def _read_workflow_records() -> list[dict]:
 
                 with zipfile.ZipFile(rad_file, "r") as zf:
                     meta["has_preview"] = "preview.png" in zf.namelist()
-            elif header_sample.startswith(RAD_MAGIC):
+            elif (header_sample.startswith(RAD_MAGIC)
+                  and len(header_sample) >= _RAD_HEADER_SIZE):
                 magic, ver, meta_len, graph_len = struct.unpack(_RAD_HEADER_FMT, header_sample)
                 with open(rad_file, "rb") as f:
                     f.seek(_RAD_HEADER_SIZE)

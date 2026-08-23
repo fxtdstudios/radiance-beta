@@ -340,6 +340,48 @@ def _apply_inverse_log(
     return fn(log_coded)
 
 
+def rudra_condition_for(
+    decoder: nn.Module,
+    latent: torch.Tensor,
+    video_frames: int | None = None,
+) -> torch.Tensor | None:
+    """One dynamic-range conditioning vector per sample, from WHOLE frames.
+
+    RUDRA decoders with ``dr_dim`` set infer their conditioning from the
+    statistics of whatever tensor they are handed. Hand them a spatial tile and
+    they condition on that tile's statistics, so neighbouring tiles of one frame
+    get different exposure treatment (up to the FiLM bound of +/-5% gain and
+    +/-0.05 in log code, roughly half a stop). Hand them one frame of a clip and
+    each frame conditions on itself, so the grade breathes over time.
+
+    Computing the vector once, here, from the full latent and passing it down as
+    ``dr_proj`` removes both. ``video_frames`` (T) makes the vector shared across
+    a clip's frames; leave it None for a batch of independent images, where
+    per-image conditioning is the correct behaviour.
+
+    Returns None for decoders without conditioning, which is every checkpoint
+    that predates dynamic-range conditioning.
+    """
+    if getattr(decoder, "dr_dim", None) is None:
+        return None
+    predictor = getattr(decoder, "predictor", None)
+    if predictor is None:
+        return None
+    try:
+        param_dtype = next(predictor.parameters()).dtype
+    except StopIteration:
+        param_dtype = latent.dtype
+    with torch.no_grad():
+        cond = predictor(latent.to(param_dtype))
+    if video_frames and video_frames > 1 and cond.shape[0] % video_frames == 0:
+        batch = cond.shape[0] // video_frames
+        cond = (cond.view(batch, video_frames, -1)
+                    .mean(dim=1, keepdim=True)
+                    .expand(batch, video_frames, -1)
+                    .reshape(cond.shape[0], -1))
+    return cond
+
+
 def _decode_with_optional_conditioning(
     decoder: nn.Module,
     x: torch.Tensor,
@@ -415,7 +457,13 @@ def decode_to_linear_realtime(
     else:
         x = x.to(dtype)              # raw: the space the decoders were trained on
 
-    # 2. Distilled decode pass
+    # 2. Resolve the dynamic-range conditioning ONCE, from the whole latent.
+    #    Without this the decoder re-derives it from every tile and every frame
+    #    it is handed -- see rudra_condition_for().
+    if dr_proj is None:
+        dr_proj = rudra_condition_for(decoder, x, T if is_video else None)
+
+    # 3. Distilled decode pass
     with torch.no_grad():
         with torch.autocast(device_type=device.type, dtype=dtype, enabled=(dtype != torch.float32)):
             if not tiled:
@@ -479,17 +527,17 @@ def decode_to_linear_realtime(
 
                 log_coded_bchw = (log_coded_bchw / weight_sum.clamp(min=1e-4)).to(dtype)
 
-    # 3. Convert (B, 3, H, W) → (B, H, W, 3) float32
+    # 4. Convert (B, 3, H, W) → (B, H, W, 3) float32
     log_coded = log_coded_bchw.permute(0, 2, 3, 1).float()
 
-    # 4. Soft-shoulder
+    # 5. Soft-shoulder
     knee, ceiling, _, _ = profile_params
     log_coded = _apply_soft_shoulder(log_coded, knee, ceiling)
 
     if return_log_coded:
         return log_coded
 
-    # 5. Apply inverse log curve → scene-linear
+    # 6. Apply inverse log curve → scene-linear
     linear = _apply_inverse_log(log_coded, _curve)
 
     return linear
@@ -633,6 +681,41 @@ def _validate_safetensors_size(path: str) -> Optional[str]:
                 f"{expected:,} ({n_oob} of {n_tensors} tensors out of bounds). "
                 f"The file is incomplete at its source — re-export/re-upload "
                 f"a full ~{expected / 1e6:.1f} MB checkpoint")
+    return None
+
+
+# Keys a training run can stamp into a checkpoint to declare how many frames
+# it actually saw. Written by scripts/training; absent from every checkpoint
+# that predates the multi-frame retrain.
+_MULTIFRAME_METADATA_KEYS = (
+    "radiance_train_frames",
+    "train_frames",
+    "temporal_frames",
+    "frames_per_sample",
+)
+
+
+def _declared_train_frames(ckpt_path: str) -> int | None:
+    """Frames per training sample as declared by the checkpoint, or None.
+
+    Only safetensors carries a metadata header; a .pth returns None and is
+    treated as undeclared.
+    """
+    if not ckpt_path or not ckpt_path.endswith(".safetensors"):
+        return None
+    try:
+        import safetensors
+        with safetensors.safe_open(ckpt_path, framework="pt") as handle:
+            meta = handle.metadata() or {}
+    except Exception as exc:  # unreadable header: undeclared, not an error
+        logger.debug("[Radiance RUDRA] no readable metadata on %s: %s", ckpt_path, exc)
+        return None
+    for key in _MULTIFRAME_METADATA_KEYS:
+        if key in meta:
+            try:
+                return int(float(meta[key]))
+            except (TypeError, ValueError):
+                logger.debug("[Radiance RUDRA] %s=%r is not a frame count", key, meta[key])
     return None
 
 
@@ -784,7 +867,8 @@ def load_radiance_decoder_weights(
                     f"checkpoint instead ({ckpt_path})."
                 )
                 model._radiance_resolved_type = resolved_type
-            if model_type == "ltx-video":
+            _train_frames = _declared_train_frames(ckpt_path)
+            if model_type == "ltx-video" and (_train_frames or 1) <= 1:
                 logger.warning(
                     "[Radiance RUDRA] LTX-Video decoder was trained on isolated still "
                     "images encoded as 1-frame videos via ltx_vae.safetensors (LTX v1). "
@@ -792,6 +876,11 @@ def load_radiance_decoder_weights(
                     "context across 81 frames — a distribution the decoder was never "
                     "trained on. Output quality may be severely degraded (abstract noise). "
                     "Retrain the decoder on actual LTX 2.3 video latents for correct results."
+                )
+            elif model_type == "ltx-video":
+                logger.info(
+                    "[Radiance RUDRA] LTX-Video decoder declares training on %d-frame "
+                    "sequences; the stills-only warning does not apply.", _train_frames,
                 )
         except Exception as e:
             # ALBABIT-FIX: previously fell through and returned the model with
