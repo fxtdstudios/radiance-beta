@@ -353,7 +353,7 @@ quietly stop being true.
 | **Catalog** | All 131 nodes declare their menu section explicitly; a test fails if a registered node is missing from the table. Withholding a node from the menu requires a named entry a test reads, so a finished node cannot go missing by omission. |
 | **Isolation** | Every one of the eleven node groups imports with `aiohttp` and `server` blocked, proven in a subprocess rather than for one hand-listed module. |
 | **Layering** | `radiance/io/writer.py` and `radiance/io/reader.py` import nothing above them, checked by AST walk *and* by running them in a bare interpreter with no ComfyUI present. |
-| **Suite** | 2595 Python tests and 257 JavaScript tests, at 46% statement coverage. The gaps are named under Open rather than left to be discovered. The JS side includes a GPU lane that compiles the real shaders in both GLSL and WGSL and compares them against the CPU implementations they were generated from, and a browser lane that builds all fourteen Viewer panels and operates their controls. Verified from a checkout named `radiance-beta` as well as `radiance`. |
+| **Suite** | 3199 Python tests and 258 JavaScript tests, at 53% statement coverage. The gaps are named under Open rather than left to be discovered. The JS side includes a GPU lane that compiles the real shaders in both GLSL and WGSL and compares them against the CPU implementations they were generated from, and a browser lane that builds all fourteen Viewer panels and operates their controls. Verified from a checkout named `radiance-beta` as well as `radiance`. |
 
 ### Open
 
@@ -362,9 +362,15 @@ quietly stop being true.
 - [ ] **Nothing has ever run in live ComfyUI on a GPU.** Every number above is
       CPU and headless. Until a real graph renders a real frame, the verdict
       stays *ready with conditions*.
-- [ ] **The public repo is behind.** `fxtdstudios/radiance` `main` is still at
-      `64fee41` (2026-06-04); everything since lives in
-      `fxtdstudios/radiance-beta`. Decide when beta merges down to public.
+- [ ] **The public repo is behind, and it is not a fast-forward.**
+      `fxtdstudios/radiance` `main` is still at `64fee41` (2026-06-04, 40
+      commits). `fxtdstudios/radiance-beta` `main` is 409 commits ahead, and
+      409 files differ. Public `main` also carries 3 commits beta never took
+      (PR #18, an outside contributor: ComfyUI compatibility fixes and a
+      movable viewer controls panel), and they touch the flat `nodes_*.py`
+      layout that no longer exists here. Beta has its own movable controls
+      panel; the compatibility fixes need checking one by one before public
+      is replaced, or that contributor's work is silently dropped.
 
 **Correctness**
 
@@ -377,29 +383,21 @@ quietly stop being true.
 
 **Structural debt**
 
-- [ ] **Split the remaining monoliths.** Largest first: `hdr/vae.py` (3460
+- [ ] **Split the remaining monoliths.** Largest first: `hdr/vae.py` (3494
       lines), `nodes/upscale/upscale.py` (3022), `image/upscale.py` (2741),
-      `nodes/generate/sampler.py` (2008), `nodes/pipeline/workspace.py` (1905),
-      `sampler_utils.py` (1876), `nodes/generate/prompt.py` (1795),
+      `nodes/generate/sampler.py` (2008), `nodes/pipeline/workspace.py` (1913),
+      `sampler_utils.py` (1897), `nodes/generate/prompt.py` (1830),
       `nodes/monitor/viewer.py` (1233).
 
 **Test coverage**
 
-46% of 27,645 statements. Every node has structural coverage (399 smoke tests
+53% of 27,782 statements. Every node has structural coverage (399 smoke tests
 over `RETURN_TYPES`, `INPUT_TYPES` and the execute method), so what is thin
 below is behaviour, not registration.
 
-- [ ] **`loader_utils.py`, 340 statements, 8%.** Model loading: downloads,
-      architecture detection, CLIP assembly, caching.
-- [ ] **`nodes/pipeline/workspace.py`, 1069 statements, 12%.** The workspace
-      API, reachable from a graph and from the dashboards.
-- [ ] **`image/upscale.py`, 1111 statements, 28%.** What remains needs model
-      weights or a GPU: `RadianceAIUpscale`, the SUPIR path, and the tiling
-      code.
-- [ ] **`delivery/handler.py`, 452 statements, 24%.** What remains is the
-      endpoint body, 570 lines of it.
-- [ ] **`radiance_ocio.py`, 375 statements, 48%.** What remains is the HTTP
-      endpoints and the display-view bake path.
+- [ ] **`image/upscale.py`, 1111 statements, 31%.** The one module that cannot
+      be finished on CPU: what remains is `RadianceAIUpscale`, the SUPIR path,
+      and the tiling code, all of which need model weights or a GPU.
 
 ## Documentation
 
