@@ -818,13 +818,19 @@ class TestLoadUnetAndBakedVae:
         assert unet_env.diffusion_calls == [(unet_env.path, {"dtype": torch.float16})]
         assert info[0].startswith("UNET: unet.safetensors [fp16] (")
 
-    @pytest.mark.parametrize("dtype,expected", [
-        ("fp8_e4m3fn", torch.float8_e4m3fn),
-        ("fp8_e5m2", torch.float8_e5m2),
-        ("bf16", torch.bfloat16),
-        ("fp32", torch.float32),
+    # Resolved by name, not at class-body time: CI runs with no torch at all
+    # and conftest's stub carries no float8 attributes, so touching them here
+    # took the whole file down at collection.
+    @pytest.mark.parametrize("dtype,attr", [
+        ("fp8_e4m3fn", "float8_e4m3fn"),
+        ("fp8_e5m2", "float8_e5m2"),
+        ("bf16", "bfloat16"),
+        ("fp32", "float32"),
     ])
-    def test_every_dtype_name_maps_to_a_torch_dtype(self, unet_env, dtype, expected):
+    def test_every_dtype_name_maps_to_a_torch_dtype(self, unet_env, dtype, attr):
+        expected = getattr(torch, attr, None)
+        if expected is None:
+            pytest.skip(f"this torch has no {attr}")
         call_unet(unet_env, weight_dtype=dtype)
         assert unet_env.diffusion_calls[0][1] == {"dtype": expected}
 
@@ -1098,11 +1104,14 @@ class TestLoadClipStack:
         assert ("clip_g.safetensors", "text_encoders", True) in clip_env.ensure_calls
         assert all(c[1] == "text_encoders" for c in clip_env.ensure_calls)
 
-    @pytest.mark.parametrize("dtype,expected", [
-        ("fp16", torch.float16), ("bf16", torch.bfloat16),
-        ("fp8_e4m3fn", torch.float8_e4m3fn), ("fp32", torch.float32),
+    @pytest.mark.parametrize("dtype,attr", [
+        ("fp16", "float16"), ("bf16", "bfloat16"),
+        ("fp8_e4m3fn", "float8_e4m3fn"), ("fp32", "float32"),
     ])
-    def test_clip_dtypes_map_through(self, clip_env, dtype, expected):
+    def test_clip_dtypes_map_through(self, clip_env, dtype, attr):
+        expected = getattr(torch, attr, None)
+        if expected is None:
+            pytest.skip(f"this torch has no {attr}")
         call_clip(clip_env, clip_l="clip_l.safetensors", clip_dtype=dtype)
         assert clip_env.load_clip_calls[0]["model_options"]["dtype"] is expected
 

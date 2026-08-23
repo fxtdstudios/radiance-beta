@@ -142,6 +142,7 @@ class TestMultipassContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "lossy compression"):
             writer.write_passes(passes, "safe", compression="DWAA", output_path=tempfile.mkdtemp())
 
+    @pytest.mark.real_torch
     @unittest.skipUnless(HAS_OPENEXR, "OpenEXR not installed")
     def test_writer_reader_roundtrip_preserves_data_contracts(self):
         with tempfile.TemporaryDirectory() as directory:
