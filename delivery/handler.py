@@ -271,6 +271,20 @@ def _register_deliver_route(handler):
     return handler
 
 
+def _progress_refuse(instance_key, message: str) -> None:
+    """Terminate the progress entry on a refusal.
+
+    The JS poll loop only clears its interval on status 'done' or 'error', so
+    an early return that left the entry on 'starting' pinned the client's
+    progress bar for the life of the process.
+    """
+    try:
+        _progress_set(instance_key, {"current": 0, "total": 100,
+                                     "status": "error", "message": message})
+    except Exception as _exc:  # progress is cosmetic, never the reason a call fails
+        logger.debug("[Radiance] could not set refusal progress: %s", _exc)
+
+
 async def radiance_deliver_endpoint(request):
     """
     VFX Delivery Endpoint: Receives grading state + export settings from HUD.
@@ -291,6 +305,7 @@ async def radiance_deliver_endpoint(request):
         _progress_set(instance_key, {"current": 0, "total": 100,
                                      "status": "starting", "message": "Preparing…"})
         if images is None:
+            _progress_refuse(instance_key, "No frames in cache")
             return web.json_response({"error": "No frames found in cache for this node. Run the workflow first.", "status": "error"}, status=400)
         
         # ─── Render Range ──────────────────────────────────────────────
@@ -336,6 +351,7 @@ async def radiance_deliver_endpoint(request):
             output_path = os.path.abspath(os.path.normpath(str(output_path)))
             if len(output_path) > 1024:
                 logger.warning(f"[Deliver] Rejected oversized output path (len={len(output_path)})")
+                _progress_refuse(instance_key, "Invalid output path")
                 return web.json_response({"error": "Invalid output path", "status": "error"}, status=400)
             try:
                 _allowed_root = os.path.abspath(folder_paths.get_output_directory())
@@ -349,6 +365,7 @@ async def radiance_deliver_endpoint(request):
                     _outside = True
                 if _outside:
                     logger.warning(f"[Deliver] Rejected output path outside ComfyUI output dir: {output_path[:120]}")
+                    _progress_refuse(instance_key, "Output path outside the output directory")
                     return web.json_response({"error": "Output path must be inside the ComfyUI output directory.", "status": "error"}, status=403)
 
         # Clamp numeric parameters to sane ranges
@@ -488,10 +505,24 @@ async def radiance_deliver_endpoint(request):
                             try:
                                 import cv2 as _cv2
                                 sigma = _denoise * 3.0
-                                f = _cv2.bilateralFilter((f * 65535).astype(np.uint16), d=5, sigmaColor=sigma*20, sigmaSpace=sigma*20).astype(np.float32) / 65535.0
+                                # OpenCV's bilateral filter takes 8U or 32F
+                                # only. uint16 raised every time and the
+                                # DEBUG-level except below swallowed it, so
+                                # Denoise silently did nothing.
+                                f = _cv2.bilateralFilter(
+                                    np.ascontiguousarray(f, dtype=np.float32),
+                                    d=5, sigmaColor=sigma, sigmaSpace=sigma * 20,
+                                )
+                            except ImportError as _exc:
+                                logger.warning(
+                                    "[Radiance] Denoise needs OpenCV and it is "
+                                    "not installed (%s); the master was written "
+                                    "without it.", _exc,
+                                )
                             except Exception as _exc:
-                                logger.debug(
-                                    "[Radiance] _run_export(): ignoring %s from `import cv2 as _cv2`: %s",
+                                logger.warning(
+                                    "[Radiance] Denoise failed (%s: %s); the "
+                                    "master was written without it.",
                                     type(_exc).__name__, _exc,
                                 )
 

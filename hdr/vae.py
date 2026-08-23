@@ -2011,6 +2011,23 @@ class RadianceVAE4KDecode:
 
         tile_idx = 0
         _tile_video_frames = None  # Populated on first tile if 3D VAE detected
+
+        # A conditioned RUDRA decoder infers its dynamic-range vector from
+        # whatever tensor it is given. Handed a tile, it conditions on that
+        # tile, so neighbouring tiles of one frame get different exposure
+        # treatment. Resolve it once here from the whole latent and pass it
+        # down, so every tile shares one grade.
+        _rudra_cond = None
+        if turbo_decoder is not None:
+            from radiance.fast_vae import rudra_condition_for
+            _cond_lat = latent
+            _cond_frames = None
+            if _cond_lat.ndim == 5:
+                _cB, _cC, _cF, _cH, _cW = _cond_lat.shape
+                _cond_lat = _cond_lat.permute(0, 2, 1, 3, 4).reshape(
+                    _cB * _cF, _cC, _cH, _cW).contiguous()
+                _cond_frames = _cF
+            _rudra_cond = rudra_condition_for(turbo_decoder, _cond_lat, _cond_frames)
         for yi, (ly1, ly2) in enumerate(tiles_y):
             for xi, (lx1, lx2) in enumerate(tiles_x):
                 # Extract latent tile
@@ -2036,7 +2053,14 @@ class RadianceVAE4KDecode:
                         _tile_outputs = []
                         for i in range(0, _tlat.shape[0], _chunk_size):
                             _chunk = _tlat[i:i+_chunk_size]
-                            _tile_outputs.append(turbo_decoder(_chunk).float().cpu())
+                            # Only pass the condition when there is one --
+                            # turbo_decoder is any nn.Module, and decoders
+                            # without conditioning take a single argument.
+                            _dec = (turbo_decoder(_chunk) if _rudra_cond is None
+                                    else turbo_decoder(
+                                        _chunk,
+                                        _rudra_cond[i:i + _chunk.shape[0]]))
+                            _tile_outputs.append(_dec.float().cpu())
                         tile_decoded = torch.cat(_tile_outputs, dim=0)
                     else:
                         tile_decoded = vae.decode(tile_lat).float().cpu()
@@ -3084,12 +3108,22 @@ class RadianceVAE4KDecode:
                         _lat = _lat.permute(0, 2, 1, 3, 4).reshape(_B * _F, _C, _H, _W).contiguous()
                         decoded_video_frames = _F
 
+                    # One dynamic-range condition for the whole latent, so a
+                    # clip does not re-grade itself every four frames.
+                    from radiance.fast_vae import rudra_condition_for
+                    _rudra_cond = rudra_condition_for(
+                        turbo_decoder, _lat, decoded_video_frames)
+
                     # Process in chunks to prevent cuDNN/VRAM hard-crashes on large batches
                     _chunk_size = 4
                     _outputs = []
                     for i in range(0, _lat.shape[0], _chunk_size):
                         _chunk = _lat[i:i+_chunk_size]
-                        _outputs.append(turbo_decoder(_chunk).float())
+                        _dec = (turbo_decoder(_chunk) if _rudra_cond is None
+                                else turbo_decoder(
+                                    _chunk,
+                                    _rudra_cond[i:i + _chunk.shape[0]]))
+                        _outputs.append(_dec.float())
                     img = torch.cat(_outputs, dim=0)
 
                     if img.shape[1] == 3:
