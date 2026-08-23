@@ -33,6 +33,14 @@ clear backlog.
   compute wasted). *Planned fix:* retrain the video checkpoints on real
   multi-frame sequences.
 
+  A retrained checkpoint no longer inherits the warning by filename: the loader
+  reads the frame count the training run stamped into the safetensors metadata
+  (`radiance_train_frames` and three aliases) and warns only when the
+  checkpoint declares one frame or declares nothing. Two node-side gates still
+  stand in the way of using retrained weights on video: `SDR → HDR Universal`
+  routes the Legacy RUDRA backend only when `img.shape[0] == 1`, and
+  `_rudra_reconstruct` refuses multi-frame outright.
+
 - **`rudra_full_decoder_ltx-video_ema.safetensors` truncated at the source.**
   The distributed file is 23,044,260 bytes while its header declares
   ~36,035,756 (45 of 124 tensors out of bounds) — confirmed identical across
