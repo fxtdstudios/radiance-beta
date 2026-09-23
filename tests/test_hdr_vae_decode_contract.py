@@ -140,6 +140,7 @@ class TestHDRVAEDecodeContract(unittest.TestCase):
         self.assertNotIn("rhdr_export", metadata)
         self.assertNotIn("rudra_decoder", metadata)
 
+    @pytest.mark.real_torch
     def test_legacy_direct_mode_name_still_selects_direct_hdr(self):
         """Graphs saved before 3.5 carry "Direct HDR / RUDRA"."""
         result = RadianceHDRVAEDecode().apply(

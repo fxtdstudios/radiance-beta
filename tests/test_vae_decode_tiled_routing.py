@@ -24,6 +24,8 @@ import types
 import importlib
 import unittest
 
+import pytest
+
 # ── Real torch check ──────────────────────────────────────────────────────────
 try:
     import torch
@@ -98,6 +100,7 @@ class _FakeVideoVAE:
         return torch.zeros(1, T * self._frames_per_lat_frame, 4, 4, 3)
 
 
+@pytest.mark.real_torch
 class TestUnifiedPathFastCase(unittest.TestCase):
     """Small resolution + short clip: neither spatial nor temporal tiling
     is needed, so decode() must skip decode_tiled() and call vae.decode()

@@ -22,8 +22,10 @@ torch = pytest.importorskip("torch")
 RADIANCE_TORCH_GATED = True
 
 try:
-    import PyOpenColorIO  # noqa: F401
-    HAS_OCIO = True
+    import PyOpenColorIO as _ocio  # noqa: F401
+    # Other test modules install a stand-in under this name; only the real
+    # library (a file on disk) counts.
+    HAS_OCIO = bool(getattr(_ocio, "__file__", None)) and hasattr(_ocio, "ColorSpaceTransform")
 except Exception:  # noqa: BLE001
     HAS_OCIO = False
 
@@ -86,6 +88,7 @@ def _rhdr(path):
 
 # ── tagging ──────────────────────────────────────────────────────────────────
 
+@pytest.mark.real_torch
 def test_auto_reads_comfy_images_as_srgb_and_hdr_as_linear():
     from radiance.nodes.monitor.viewer import resolve_viewer_input_space as r
     assert r("Auto", torch.rand(2, 8, 8, 3)) == ("srgb", "sRGB Encoded Rec.709 (sRGB)")

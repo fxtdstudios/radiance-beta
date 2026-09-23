@@ -26,7 +26,9 @@ import weakref
 
 import pytest
 import torch
-from torch.overrides import TorchFunctionMode
+# The conftest stub is a plain module, not a package: without real torch
+# this skips the module instead of failing collection (it broke CI).
+TorchFunctionMode = pytest.importorskip("torch.overrides").TorchFunctionMode
 
 import radiance.sampler_utils as su
 from radiance.sampler_utils import generate_noise

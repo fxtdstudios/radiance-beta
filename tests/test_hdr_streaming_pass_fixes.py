@@ -49,6 +49,8 @@ import pytest
 torch = pytest.importorskip("torch")
 
 RADIANCE_TORCH_GATED = True
+# Every test here needs real tensors; skip them all on the stub lane.
+pytestmark = pytest.mark.real_torch
 
 
 # ── ComfyUI stubs ────────────────────────────────────────────────────────────

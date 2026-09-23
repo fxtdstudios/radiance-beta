@@ -3,7 +3,11 @@ import os
 
 import pytest
 
-pytest.importorskip("PyOpenColorIO")
+_ocio = pytest.importorskip("PyOpenColorIO")
+# Another test can leave a stand-in module under this name; only the real
+# library (a file on disk) can be configured.
+if not getattr(_ocio, "__file__", None) or not hasattr(_ocio, "GetCurrentConfig"):
+    pytest.skip("PyOpenColorIO is not the real library here", allow_module_level=True)
 
 from radiance.color import ocio_setup
 
