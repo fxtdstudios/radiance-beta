@@ -54,7 +54,9 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from torch.utils._python_dispatch import TorchDispatchMode  # noqa: E402
+# Real torch only: the conftest stub has no submodules, and a bare import
+# here failed collection on the lightweight CI lane.
+TorchDispatchMode = pytest.importorskip("torch.utils._python_dispatch").TorchDispatchMode  # noqa: E402
 
 RADIANCE_TORCH_GATED = True
 
