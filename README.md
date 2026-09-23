@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/version-3.5.0-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
-[![Nodes](https://img.shields.io/badge/nodes-131-c8a96e?style=for-the-badge)](#node-map)
+[![Nodes](https://img.shields.io/badge/nodes-156-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
 [![Hugging Face](https://img.shields.io/badge/Hugging_Face-RUDRA_models-ffd21e?style=for-the-badge)](https://huggingface.co/fxtdstudios/RUDRA)
 
@@ -106,7 +106,7 @@ pip install -r requirements_mac_silicon.txt
 
 ### Verify
 
-Start ComfyUI and look for `Radiance: successfully loaded 131 nodes` in the log.
+Start ComfyUI and look for `Radiance: successfully loaded 156 nodes (v3.5.0)` in the log.
 A lower count means a node module failed to import, usually a missing optional
 dependency; the Environment Guard table printed at startup shows which.
 
@@ -248,7 +248,7 @@ FXTD STUDIOS/Radiance
 └─ Pipeline
 ```
 
-**131 nodes**, plus whatever Gizmos you build. A few depend on optional packages.
+**156 nodes**, plus whatever Gizmos you build. A few depend on optional packages.
 
 Compositing nodes use compositing names (`Grade`, `CDL`, `OCIO ColorSpace`, `Roto`, `Defocus`, `Viewer`, `Read`, `Write`), so they read the way they do in Nuke or Flame. The diffusion layer keeps a `Radiance` prefix, so `Radiance Sampler` and `Radiance VAE Decode` are obviously the AI ones. Typing "radiance" in the search still finds everything.
 
@@ -377,12 +377,13 @@ the gap is recorded under Open rather than quietly corrected.
 
 **Blocking a release**
 
-- [ ] **Nothing has ever run in live ComfyUI on a GPU.** Every number above is
-      CPU and headless. Until a real graph renders a real frame, the verdict
-      stays *ready with conditions*. This is now the only thing in the way of
-      the numbers above being trustworthy end to end: the CI gate that kept the
-      real-dependency lane from ever running was fixed in 3.4.0, so the suite
-      itself is honest, but honest about CPU.
+- [ ] **One full GPU render in live ComfyUI.** Checked on 2026-09-24 in a real
+      ComfyUI 0.32 with frontend 1.48 (CPU): all 156 nodes register, every
+      Radiance node can be created, saved and reloaded with no frontend error,
+      and `workflows/start.json` passes ComfyUI's own prompt validation. The
+      Viewer and the pixel SDR → HDR model have run live on the RTX 4080. What
+      is still owed is one real graph (sampler → HDR VAE Decode → Write)
+      rendering a frame on the GPU.
 - [ ] **The public repo is behind, and it is not a fast-forward.**
       `fxtdstudios/radiance` `main` (`16e885f`) is 5 commits the beta line
       never took. They were reviewed hunk by hunk on 2026-09-23: PR #18's
