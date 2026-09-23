@@ -37,7 +37,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def node():
     """Instantiate RadianceHDRAnalysis once per module."""
-    from nodes_engine import RadianceHDRAnalysis
+    from radiance.nodes.generate.engine import RadianceHDRAnalysis
     return RadianceHDRAnalysis()
 
 

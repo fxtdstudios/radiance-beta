@@ -455,9 +455,18 @@ def read_exr(path: Path) -> np.ndarray:
 # MXF extraction (ffmpeg)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _ffmpeg_bin() -> str:
+    """ffmpeg path — PATH first, then the imageio-ffmpeg bundle."""
+    try:
+        from radiance.core.ffmpeg import require_ffmpeg
+        return require_ffmpeg()
+    except Exception:
+        return "ffmpeg"
+
+
 def _ffmpeg_available() -> bool:
     try:
-        subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+        subprocess.run([_ffmpeg_bin(), "-version"], capture_output=True, check=True)
         return True
     except (FileNotFoundError, subprocess.CalledProcessError):
         return False
@@ -475,7 +484,7 @@ def extract_mxf_frames(mxf_path: Path,
     out_pattern = tmp_dir / f"{mxf_path.stem}_%06d.tif"
 
     cmd = [
-        "ffmpeg", "-y",
+        _ffmpeg_bin(), "-y",
         "-i", str(mxf_path),
         "-vf", f"fps={fps}",
         "-pix_fmt", "rgb48le",    # 16-bit RGB, little-endian

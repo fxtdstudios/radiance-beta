@@ -48,7 +48,7 @@ except ImportError:
 
 if HAS_TORCH:
     import torch
-    from nodes_hdr_encoder import _hdr_soft_compress, _hdr_soft_decompress
+    from radiance.nodes.hdr.encoder import _hdr_soft_compress, _hdr_soft_decompress
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pure-numpy reference implementations (match the torch originals exactly)

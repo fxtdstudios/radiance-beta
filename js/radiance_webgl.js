@@ -1,5 +1,8 @@
 // WebGL Context Manager — extends abstract RadianceRenderer base class
 import { RadianceRenderer } from "./radiance_renderer.js";
+// The grade maths, emitted from one file for both backends and both CPU
+// paths. See js/radiance_grade.js for what used to be four implementations.
+import { GLSL as GRADE_GLSL } from "./radiance_grade.js";
 
 class RadianceWebGLRenderer extends RadianceRenderer {
     constructor(canvas) {
@@ -45,6 +48,14 @@ class RadianceWebGLRenderer extends RadianceRenderer {
         this._frameCache = new Map();
         const _devMem = (typeof navigator !== 'undefined' && navigator.deviceMemory) || 4;
         this._frameCacheMaxSize = _devMem >= 16 ? 24 : _devMem >= 8 ? 16 : _devMem >= 4 ? 8 : 4;
+        // AUDIT-FIX (2026-08): count-based eviction alone is resolution-blind.
+        // 24 cached frames is 400 MB at 1080p fp16 but 6.8 GB at 8K fp16 --
+        // OOM long before the count limit is reached. Evict by BYTES as well,
+        // budget scaled to (an approximation of) machine size. Both limits
+        // apply; whichever is hit first evicts.
+        this._frameCacheBytes = 0;
+        this._frameCacheByteBudget =
+            (_devMem >= 16 ? 3.0 : _devMem >= 8 ? 2.0 : _devMem >= 4 ? 1.0 : 0.5) * 1024 * 1024 * 1024;
 
         this.init();
     }
@@ -89,14 +100,15 @@ class RadianceWebGLRenderer extends RadianceRenderer {
     }
 
     setMask(data) {
-        if (!data) return;
-        if (data.type !== undefined) this.mask.type = data.type;
-        if (data.center !== undefined) this.mask.center = data.center;
-        if (data.scale !== undefined) this.mask.scale = data.scale;
-        if (data.feather !== undefined) this.mask.feather = data.feather;
-        if (data.rotation !== undefined) this.mask.rotation = data.rotation;
-        if (data.invert !== undefined) this.mask.invert = data.invert;
-        if (data.showOverlay !== undefined) this.mask.showOverlay = data.showOverlay;
+        // BLACK-VIEWER FIX: this wrote to this.mask.type etc., and no
+        // constructor in the hierarchy ever created this.mask. The base
+        // class keeps the mask as flat fields (maskType, maskCenter, ...), so
+        // the very first render() after a frame loaded threw
+        // "Cannot set properties of undefined (setting 'type')" inside
+        // setMask, before the draw call, and the canvas stayed black on the
+        // WebGL backend. The uniform upload read the same phantom object.
+        // Both now go through the base class fields.
+        super.setMask(data);
     }
 
     setLift(r, g, b) { this.lift = (g === undefined) ? [r, r, r] : [r, g, b]; }
@@ -157,6 +169,9 @@ class RadianceWebGLRenderer extends RadianceRenderer {
                 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
                 gl.bindFramebuffer(gl.FRAMEBUFFER, this.scopeFBO);
                 gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.scopeTex, 0);
+                this._scopeFBOType = gl.UNSIGNED_BYTE;
+            } else {
+                this._scopeFBOType = precFmt.type;
             }
         }
 
@@ -198,9 +213,34 @@ class RadianceWebGLRenderer extends RadianceRenderer {
         gl.drawArrays(gl.POINTS, 0, this.scopePointCount);
         gl.disable(gl.BLEND);
 
-        // Read pixels — reuse pre-allocated buffer to avoid GC pressure (v3.1 PERF)
+        // Read pixels — reuse pre-allocated buffers to avoid GC pressure (v3.1 PERF)
+        //
+        // The type must match the colour attachment. This was hard-coded to
+        // UNSIGNED_BYTE while the scope FBO is created at pipelinePrecision,
+        // which defaults to f32 -> RGBA32F. Per WebGL2, RGBA/UNSIGNED_BYTE is
+        // only a valid ReadPixels pair for a NORMALIZED FIXED-POINT buffer, so
+        // on every GPU with EXT_color_buffer_float (i.e. all desktop GPUs) the
+        // call raised INVALID_OPERATION and left the buffer untouched --
+        // waveform, vectorscope, histogram, parade and chromaticity all stayed
+        // black or stale. The RGBA8 fallback above never fired because a float
+        // FBO *is* FRAMEBUFFER_COMPLETE.
         const pixels = this._scopePixels;
-        gl.readPixels(0, 0, size, size, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        const fboType = this._scopeFBOType || gl.UNSIGNED_BYTE;
+        if (fboType === gl.UNSIGNED_BYTE) {
+            gl.readPixels(0, 0, size, size, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        } else {
+            if (!this._scopePixelsF32 || this._scopePixelsF32.length !== size * size * 4) {
+                this._scopePixelsF32 = new Float32Array(size * size * 4);
+            }
+            const fpix = this._scopePixelsF32;
+            gl.readPixels(0, 0, size, size, gl.RGBA, gl.FLOAT, fpix);
+            // Scope points are additively blended in [0,1]; saturate to 8-bit
+            // for the ImageData copy below.
+            for (let i = 0; i < fpix.length; i++) {
+                const v = fpix[i];
+                pixels[i] = v <= 0 ? 0 : (v >= 1 ? 255 : (v * 255) | 0);
+            }
+        }
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.viewport(0, 0, this.canvas.width, this.canvas.height);
 
@@ -761,10 +801,11 @@ class RadianceWebGLRenderer extends RadianceRenderer {
      * @param {HTMLCanvasElement} targetCanvas  – destination 2D canvas (histogram HUD)
      * @param {boolean}           logScale      – if true, use log2 Y-axis for HDR content
      */
-    renderHistogram(targetCanvas, logScale = false) {
+    renderHistogram(targetCanvas, logScale = false, sourceTexture = null, isLinear = null) {
         if (!this.textures.image) return;
         // Use the existing histogram scope-point program (scatter by luma/channel)
-        this.renderScope('histogram', targetCanvas, this.textures.image, this.isLinearTexture);
+        this.renderScope('histogram', targetCanvas, sourceTexture || this.textures.image,
+            isLinear ?? this.isLinearTexture);
 
         // Overlay colored channel lines on top of the luma scatter
         const ctx = targetCanvas.getContext('2d');
@@ -800,10 +841,64 @@ class RadianceWebGLRenderer extends RadianceRenderer {
 
     // ── v3.0 #8: LRU GPU Frame Texture Cache ─────────────────────────────────
     /**
+     * Evict LRU entries until both the count limit and the byte budget can
+     * accommodate `incomingBytes`. O(evicted) via Map insertion-order.
+     */
+    _evictFrameCacheFor(incomingBytes) {
+        while (this._frameCache.size > 0 &&
+               (this._frameCache.size >= this._frameCacheMaxSize ||
+                this._frameCacheBytes + incomingBytes > this._frameCacheByteBudget)) {
+            const lruId = this._frameCache.keys().next().value;
+            const lruEntry = this._frameCache.get(lruId);
+            if (lruEntry) {
+                if (this.gl && lruEntry.tex) this.gl.deleteTexture(lruEntry.tex);
+                this._frameCacheBytes -= (lruEntry.bytes || 0);
+            }
+            this._frameCache.delete(lruId);
+        }
+        if (this._frameCacheBytes < 0) this._frameCacheBytes = 0;
+    }
+
+    /**
      * Upload a float16 frame and cache it by frameId.
      * LRU eviction is O(1) using Map insertion-order: the first key in the Map
      * is always the least-recently-used entry (delete-on-access + re-insert).
+     * Eviction is both count- and byte-budget-based (see _evictFrameCacheFor).
      */
+    _releaseImageTexture() {
+        const t = this.textures.image;
+        if (!t) return;
+        for (const e of this._frameCache.values()) if (e.tex === t) return;
+        this.gl.deleteTexture(t);
+        this.textures.image = null;
+    }
+
+    /**
+     * 3.5.0: compare input (the node's compare_image preview). WebGL never had
+     * this method, so the base-class stub threw and neither compare_image nor
+     * Pin Frame could reach the wipe. The preview PNG is display-referred (the
+     * node bakes it through the same view the A side uses), which is exactly
+     * what the wipe's B side samples. Kept in its own texture so it never
+     * deletes a reference-shelf still.
+     */
+    loadCompareTexture(img) {
+        const gl = this.gl;
+        if (!img) return null;
+        if (this._compareTex) gl.deleteTexture(this._compareTex);
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        this._compareTex = tex;
+        this.textures.reference = tex;
+        this.wipeRefEnabled = true;
+        return tex;
+    }
+
     loadFloat16TextureCached(frameId, fp16data, width, height, channels) {
         if (this._frameCache.has(frameId)) {
             // Promote to MRU: delete then re-insert at tail
@@ -817,16 +912,14 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             return entry.tex;
         }
 
-        // Evict LRU (first entry) if at capacity
-        if (this._frameCache.size >= this._frameCacheMaxSize) {
-            const lruId = this._frameCache.keys().next().value;
-            const lruEntry = this._frameCache.get(lruId);
-            if (lruEntry && this.gl) this.gl.deleteTexture(lruEntry.tex);
-            this._frameCache.delete(lruId);
-        }
+        const bytes = width * height * (channels || 4) * 2;
+        this._evictFrameCacheFor(bytes);
 
         const tex = this.loadFloat16Texture(fp16data, width, height, channels);
-        if (tex) this._frameCache.set(frameId, { tex });
+        if (tex) {
+            this._frameCache.set(frameId, { tex, bytes });
+            this._frameCacheBytes += bytes;
+        }
         return tex;
     }
 
@@ -846,16 +939,14 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             return entry.tex;
         }
 
-        // Evict LRU (first entry) if at capacity
-        if (this._frameCache.size >= this._frameCacheMaxSize) {
-            const lruId = this._frameCache.keys().next().value;
-            const lruEntry = this._frameCache.get(lruId);
-            if (lruEntry && this.gl) this.gl.deleteTexture(lruEntry.tex);
-            this._frameCache.delete(lruId);
-        }
+        const bytes = width * height * (channels || 4) * 4;
+        this._evictFrameCacheFor(bytes);
 
         const tex = this.loadFloat32Texture(data, width, height, channels);
-        if (tex) this._frameCache.set(frameId, { tex });
+        if (tex) {
+            this._frameCache.set(frameId, { tex, bytes });
+            this._frameCacheBytes += bytes;
+        }
         return tex;
     }
 
@@ -871,7 +962,8 @@ class RadianceWebGLRenderer extends RadianceRenderer {
      */
     static initDisplayP3(canvas) {
         const isP3 = window.matchMedia('(color-gamut: p3)').matches;
-        const isHDR = window.matchMedia('(color-gamut: rec2020)').matches;
+        // 3.5.0: HDR capability is (dynamic-range: high); rec2020 is a gamut.
+        const isHDR = window.matchMedia('(dynamic-range: high)').matches;
         let colorSpace = 'srgb';
 
         if (isHDR) {
@@ -1038,6 +1130,19 @@ class RadianceWebGLRenderer extends RadianceRenderer {
         console.log('[Radiance] Wipe drag listener attached');
     }
 
+    /**
+     * 3.5.0: what the shader's output values mean to the browser. 'srgb' by
+     * default; 'display-p3' when the view encodes for a Display P3 monitor
+     * (OCIO's "Display P3 - Display"). Returns false where unsupported.
+     */
+    setDisplayColorSpace(cs) {
+        const gl = this.gl;
+        if (!gl || !('drawingBufferColorSpace' in gl)) return false;
+        try { gl.drawingBufferColorSpace = cs; } catch { return false; }
+        this.displayColorSpace = gl.drawingBufferColorSpace;
+        return this.displayColorSpace === cs;
+    }
+
     init() {
         // B-7 FIX: Use Display-P3 colorSpace if detected by initDisplayP3()
         const colorSpace = this.canvas._radianceColorSpace || 'srgb';
@@ -1049,10 +1154,10 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             powerPreference: 'high-performance', // Request dedicated GPU
             desynchronized: true // Reduce latency
         };
-        // Only pass colorSpace if wide-gamut — avoids errors on older browsers
-        if (colorSpace !== 'srgb') {
-            ctxAttrs.colorSpace = colorSpace;
-        }
+        // 3.5.0: 'colorSpace' is not a WebGL context attribute (it was passed
+        // here and ignored). The drawing buffer's colour space is set with
+        // gl.drawingBufferColorSpace, per view, by setDisplayColorSpace().
+        void colorSpace;
 
         // WebGL 2.0 for float32 textures and advanced features
         this.gl = this.canvas.getContext('webgl2', ctxAttrs);
@@ -1146,6 +1251,7 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             this._attribCache.clear();
             this._uniformValueCache.clear();
             this._frameCache.clear();
+            this._frameCacheBytes = 0;
             this.programs = {};
             this.textures = {};
             this.framebuffers = {};
@@ -1489,7 +1595,7 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             uniform float u_gamma;
             uniform float u_saturation;
             uniform bool u_isLinear;
-
+${GRADE_GLSL}
             // sRGB OETF (linear → display)
             vec3 linearToSRGB(vec3 linear) {
                 bvec3 cutoff = lessThan(linear, vec3(0.0031308));
@@ -1523,7 +1629,10 @@ class RadianceWebGLRenderer extends RadianceRenderer {
 
                 // Gamma (artistic control)
                 if (u_gamma != 1.0) {
-                    color = pow(max(color, vec3(0.0)), vec3(1.0 / u_gamma));
+                    // Was pow(max(color,0), 1.0 / u_gamma) with no floor: at
+                    // gamma 0 that is 1/0 = Infinity and the image splits into
+                    // hard black and blown. radGamma carries the floor.
+                    color = radGamma(color, vec3(u_gamma));
                 }
 
                 // Display transform (sRGB OETF)
@@ -1601,6 +1710,7 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             uniform vec2 u_texSize;
 
             uniform bool u_falseColor;
+            uniform bool u_hdrHeatmap;
             uniform bool u_zebra;
             uniform float u_zebraThreshold;
 
@@ -1622,6 +1732,11 @@ class RadianceWebGLRenderer extends RadianceRenderer {
 
             // v2.2 Pro Comparison
             uniform bool u_wipeEnabled;
+            uniform bool u_exportSceneLinear;  // 3.5.0: graded EXR = scene-linear, no view, no overlays
+            uniform bool u_scopeSignal;        // 3.5.0: the displayed picture only, for the scopes
+            uniform float u_viewExposure;      // 3.5.0: viewer-only f-stops (never rendered out)
+            uniform float u_viewGamma;         // 3.5.0: viewer-only display gamma
+            uniform bool u_dither;             // 3.5.0: +-1/2 LSB triangular dither on the 8-bit output
             uniform float u_wipe;
             uniform bool u_wipeRefEnabled;
             uniform sampler2D u_referenceImage;
@@ -1698,6 +1813,19 @@ class RadianceWebGLRenderer extends RadianceRenderer {
             // v4.0: Pre-computed multi-pass bloom texture (Kawase chain result)
             uniform sampler2D u_bloomTex;
             uniform int u_bloomTexEnabled;
+
+            // ── OpenColorIO ─────────────────────────────────────────────────
+            // When a config is loaded, OpenColorIO 2.5 generates the GLSL below
+            // from the show's config and it replaces this shader's display
+            // transform entirely. The block declares its own helpers, its own
+            // LUT samplers and OCIODisplay(). Nothing in Radiance
+            // re-implements it -- that is the point: the config decides.
+            // With no config loaded the entry point still has to exist or the
+            // shader will not compile; u_ocioEnabled is false, so the stub is
+            // never reached.
+            uniform bool u_ocioEnabled;
+${this._ocioShaderSource || '            vec4 OCIODisplay(vec4 inPixel) { return inPixel; }'}
+            // ── end OpenColorIO ─────────────────────────────────────────────
 
             // ── v3.2 Phase 11: Anamorphic Streaks + k2 Distortion ────────────
             uniform float u_lensDistortionK2;   // Brown-Conrady quartic term
@@ -2047,19 +2175,79 @@ const float GOLDEN_ANGLE = 2.39996323;
                 return texture(lut, coords).rgb;
             }
 
-            vec3 getFalseColorMap(float v) {
-                // ARRI False Color standard (v is linear luminance mapped roughly 0-1)
-                // Using standard IRE mapping ranges
-                if (v >= 0.99) return vec3(1.0, 0.0, 0.0);       // Red (Clipped White)
-                if (v >= 0.97) return vec3(1.0, 1.0, 0.0);       // Yellow (Near Clip)
-                if (v >= 0.56) return vec3(v);                   // Light Grey
-                if (v >= 0.52) return vec3(1.0, 0.5, 0.8);       // Pink (Skin / +1 Stop)
-                if (v >= 0.45) return vec3(v);                   // True Grey
-                if (v >= 0.42) return vec3(0.0, 0.8, 0.2);       // Green (18% Mid Grey)
-                if (v >= 0.40) return vec3(v);                   // Dark Grey
-                if (v >= 0.38) return vec3(0.0, 1.0, 1.0);       // Cyan (Dark Skin / Shadows)
-                if (v >= 0.02) return vec3(v);                   // Deep Grey
-                return vec3(0.6, 0.0, 0.8);                      // Purple (Clipped Black)
+            // 3.5.0: ARRI false colour (ALEXA/AMIRA LF), bands in % of the
+            // Rec.709 video signal: purple 0-2.5 (black clip), blue 2.5-4,
+            // green 38-42 (18 % grey), pink 52-56 (one stop over, skin), yellow
+            // 97-99, red 99-100 (clip). Everything else is shown as luma grey.
+            // The signal is a fixed reference (BT.709 OETF of scene-linear
+            // luminance, which puts 18 % grey at 40.9 %), not whatever view is
+            // selected, so exposure reads the same under any view. The old map
+            // used custom bands (cyan at 38-40, green at 42-45) on the display
+            // luma, where 18 % grey never reached green.
+            float arriSignal(float y) {
+                y = max(y, 0.0);
+                return y < 0.018 ? 4.5 * y : 1.099 * pow(y, 0.45) - 0.099;
+            }
+            vec3 getFalseColorMap(float s) {
+                float p = s * 100.0;
+                if (p >= 99.0) return vec3(1.0, 0.0, 0.0);
+                if (p >= 97.0) return vec3(1.0, 1.0, 0.0);
+                if (p >= 52.0 && p < 56.0) return vec3(1.0, 0.5, 0.75);
+                if (p >= 38.0 && p < 42.0) return vec3(0.0, 0.85, 0.2);
+                if (p >= 2.5 && p < 4.0) return vec3(0.1, 0.35, 1.0);
+                if (p < 2.5) return vec3(0.55, 0.0, 0.8);
+                return vec3(clamp(s, 0.0, 1.0));
+            }
+
+            // ── HDR nits heatmap ────────────────────────────────────────
+            // getFalseColorMap above is an *exposure* tool: ARRI bands on a
+            // Rec.709 reference signal, which says nothing about absolute luminance.
+            // The menu offered "HDR Heatmap" as a separate entry and wired it to
+            // the same falseColor flag, so the two were one feature under two
+            // names and neither reported nits.
+            //
+            // This maps scene luminance to absolute cd/m2, with the boundaries
+            // an HDR colourist actually works to. The argument arrives in the
+            // internal scale where 1.0 == 100 nits, the same convention the
+            // SDR->HDR nodes use, so nits = v * 100.
+            //
+            // No backticks in here. This comment sits inside a JS template
+            // literal, so a backtick terminates the shader string and every
+            // line after it is parsed as JavaScript. That is exactly what
+            // happened: a backtick-quoted 'v' in this comment broke the whole
+            // module, and the viewer node rendered with no UI at all.
+            //
+            // The anchor is ITU-R BT.2408: HDR Reference White = 203 cd/m2,
+            // "the nominal signal level obtained from an HDR camera and a 100%
+            // reflectance white card" -- 58% PQ, 75% HLG. That is the boundary
+            // that matters: below it is diffuse, above it is specular. A
+            // heatmap without it is a colour ramp; with it, it is instrumentation.
+            //
+            //     nits        band                       colour
+            //     < 0.01      below the noise floor      near-black
+            //     0.01 - 5    deep shadow                indigo
+            //     5 - 50      shadow to low midtone      blue -> teal
+            //     50 - 203    midtone up to diffuse      teal -> green
+            //     = 203       BT.2408 Reference White    white line
+            //     203 - 400   specular, comfortable      yellow
+            //     400 - 1000  specular, bright           orange
+            //     1000 - 4000 mastering headroom         red
+            //     > 4000      beyond common masters      magenta
+            vec3 getHDRHeatmap(float v) {
+                float nits = max(v, 0.0) * 203.0;   // BT.2408: linear 1.0 = 203 nits, as the probe and nodes use
+
+                // A visible band either side of reference white, so the eye can
+                // land on 203 without reading a legend.
+                if (nits >= 200.0 && nits <= 206.0) return vec3(1.0, 1.0, 1.0);
+
+                if (nits < 0.01)   return vec3(0.04, 0.02, 0.08);
+                if (nits < 5.0)    return mix(vec3(0.15, 0.05, 0.45), vec3(0.10, 0.25, 0.75), nits / 5.0);
+                if (nits < 50.0)   return mix(vec3(0.10, 0.25, 0.75), vec3(0.05, 0.70, 0.70), (nits - 5.0) / 45.0);
+                if (nits < 203.0)  return mix(vec3(0.05, 0.70, 0.70), vec3(0.20, 0.85, 0.25), (nits - 50.0) / 153.0);
+                if (nits < 400.0)  return mix(vec3(0.95, 0.95, 0.20), vec3(1.00, 0.75, 0.10), (nits - 203.0) / 197.0);
+                if (nits < 1000.0) return mix(vec3(1.00, 0.75, 0.10), vec3(1.00, 0.40, 0.05), (nits - 400.0) / 600.0);
+                if (nits < 4000.0) return mix(vec3(1.00, 0.40, 0.05), vec3(0.90, 0.05, 0.05), (nits - 1000.0) / 3000.0);
+                return vec3(1.0, 0.0, 1.0);
             }
 
             // ACES Tone Mapping (Approx)
@@ -2111,6 +2299,13 @@ const float GOLDEN_ANGLE = 2.39996323;
             // L10 = ln(10) converts GLSL log() [natural] to log10 equivalent:
             //   log10(x) = log(x) / L10
             // ─────────────────────────────────────────────────────────────────
+            // 3.5.0: display modes that return an encoded signal (Rec.709
+            // BT.1886, every camera log encode). main() must not add the sRGB
+            // OETF on top of them.
+            bool displayModeEncodes(int m) {
+                return m == 2 || m == 4 || m == 6 || (m >= 11 && m <= 21);
+            }
+
             vec3 applyDisplayLUT(vec3 c, int mode) {
                 const float L10 = 2.302585; // ln(10)
 
@@ -2120,11 +2315,12 @@ const float GOLDEN_ANGLE = 2.39996323;
                 case 1: { // sRGB (Display) — linearToSRGB applied at end of main()
                     return c;
                 }
-                case 2: { // Rec.709 OETF (BT.709)
-                    bvec3 lo = lessThan(c, vec3(0.018));
-                    vec3 low  = c * 4.5;
-                    vec3 high = 1.099 * pow(max(c, vec3(0.018)), vec3(0.45)) - vec3(0.099);
-                    return mix(high, low, vec3(lo));
+                case 2: { // Rec.709 display: inverse BT.1886 EOTF (gamma 2.4)
+                    // 3.5.0: was the BT.709 camera OETF followed by the sRGB OETF,
+                    // i.e. encoded twice (18 % grey at ~67 %). A Rec.709 monitor
+                    // decodes with BT.1886, so the view encodes with its inverse,
+                    // once; main() skips the sRGB OETF for this mode.
+                    return pow(max(c, vec3(0.0)), vec3(1.0 / 2.4));
                 }
                 case 3: { // Filmic — Hable/Uncharted2
                     float A=0.15,B=0.50,C=0.10,D=0.20,E=0.02,F=0.30;
@@ -2207,24 +2403,17 @@ const float GOLDEN_ANGLE = 2.39996323;
                 }
 
                 case 20: { // DaVinci Intermediate (Blackmagic Design, 2020)
-                    // Official BMD spec: y = log10(x + A) * C + 0.5  for x >= cut
-                    //   A=0.0075, C=0.07329248, cut=0.00262409
-                    // Linear toe (C1-continuous):
-                    //   slope     = C / ((cut + A) * ln(10)) = 3.14404
-                    //   intercept = log10(cut+A)*C + 0.5 - slope*cut = 0.34556
-                    //
-                    // BUG-1 FIX: Previous implementation used log2-based formula
-                    //   C * (log2(x + A) + B)  with B=7.0
-                    // which is NOT the DaVinci Intermediate spec — it was an
-                    // ARRI-style log2 curve accidentally applied here. At 18% grey
-                    // it produced 0.336 instead of the correct 0.447 (delta 0.110).
-                    // The encode/decode pair was self-consistent but incompatible
-                    // with Python color_utils, causing a visible shift when Python-
-                    // encoded DaVinci footage was viewed through this IDT pipeline.
-                    const float di_A=0.0075, di_C=0.07329248, di_cut=0.00262409;
-                    const float di_slope=3.14403760, di_intercept=0.34555736;
-                    vec3 logV = log(max(c + di_A, vec3(1e-10))) / log(10.0) * di_C + 0.5;
-                    vec3 linV = c * di_slope + di_intercept;
+                    // Blackmagic "DaVinci Wide Gamut / DaVinci Intermediate" spec:
+                    //   x <= 0.00262409 : y = x * 10.44426855
+                    //   else            : y = (log2(x + 0.0075) + 7.0) * 0.07329248
+                    // 18 % grey -> 0.336, matching OpenColorIO's studio config and
+                    // Radiance's Python curves (color/encodings.py, color/transfer.py).
+                    // 3.5.0: an earlier "BUG-1 FIX" replaced this with a log10 curve
+                    // that put 18 % grey at 0.447; that was the error, not this.
+                    const float di_A=0.0075, di_B=7.0, di_C=0.07329248;
+                    const float di_M=10.44426855, di_cut=0.00262409;
+                    vec3 logV = (log2(max(c + di_A, vec3(1e-10))) + di_B) * di_C;
+                    vec3 linV = c * di_M;
                     return mix(linV, logV, vec3(greaterThan(c, vec3(di_cut))));
                 }
 
@@ -2296,20 +2485,11 @@ const float GOLDEN_ANGLE = 2.39996323;
                     return s * (pow(vec3(10.0), abs(c) / 0.224282) - 1.0) / 155.975327 - 0.01;
                 }
 
-                case 26: { // IDT DaVinci Intermediate → Linear
-                    // Inverse of corrected case 20 (log10-based):
-                    //   For y > cut_enc (0.353808): x = 10^((y - 0.5) / C) - A
-                    //   For y <= cut_enc:            x = (y - intercept) / slope
-                    //
-                    // BUG-1 FIX: Updated to match the corrected case 20.
-                    // Previous decode used exp2(c/C - B) which was the inverse of
-                    // the old (incorrect) log2 encode. Now uses pow(10, ...) to
-                    // invert the official log10 spec formula.
-                    const float di_A=0.0075, di_C=0.07329248;
-                    const float di_slope=3.14403760, di_intercept=0.34555736;
-                    const float di_log_cut=0.35380759; // log10(cut+A)*C + 0.5
-                    vec3 logBranch = pow(vec3(10.0), (c - 0.5) / di_C) - di_A;
-                    vec3 linBranch = (c - di_intercept) / di_slope;
+                case 26: { // IDT DaVinci Intermediate → Linear (inverse of case 20)
+                    const float di_A=0.0075, di_B=7.0, di_C=0.07329248;
+                    const float di_M=10.44426855, di_log_cut=0.02740668;
+                    vec3 logBranch = exp2(c / di_C - di_B) - di_A;
+                    vec3 linBranch = c / di_M;
                     return mix(linBranch, logBranch, vec3(greaterThan(c, vec3(di_log_cut))));
                 }
 
@@ -2531,44 +2711,24 @@ const float GOLDEN_ANGLE = 2.39996323;
                 return vec3(ACEScct_to_lin(v.r), ACEScct_to_lin(v.g), ACEScct_to_lin(v.b));
             }
 
+${GRADE_GLSL}
             vec3 applyGrading(vec3 color, vec3 lift, vec3 gamma, vec3 gain, vec3 offset) {
-                // Resolve-Style Grading
-
-                // 1. Offset (Global Add)
-                color += offset;
-
-                // 2. Lift (Shadows - Pivoted at White)
-                // Lift adds to blacks, but has 0 effect at 1.0
-                // Simple formula: color + lift * (1.0 - luma)
-                // Using luminance for pivot to avoid color shifts
-                float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-                // Clamp luma to 0..1 for pivot
-                float pivot = clamp(1.0 - luma, 0.0, 1.0);
-                color += lift * pivot;
-
-                // 3. Gain (Slope - Pivoted at Black)
-                color *= gain;
-
-                // 4. Gamma (Power - Mids)
-                // Safe pow
-                color = max(color, 0.0);
-                if (any(notEqual(gamma, vec3(1.0)))) {
-                     color.r = pow(color.r, 1.0 / max(0.01, gamma.r));
-                     color.g = pow(color.g, 1.0 / max(0.01, gamma.g));
-                     color.b = pow(color.b, 1.0 / max(0.01, gamma.b));
-                }
-
-                return color;
+                // Resolve-style order: Offset, Lift (pivoted at white), Gain
+                // (pivoted at black), Gamma. Every step is the shared
+                // definition; see js/radiance_grade.js.
+                return radGradeOrder(color, offset, lift, gain, gamma);
             }
 
             vec3 applyContrast(vec3 color, float contrast, float pivot) {
-                // v3.2: Clamping to prevent extreme separation
-                float c = clamp(contrast, 0.0, 5.0);
-                return (color - pivot) * c + pivot;
+                return radContrast(color, contrast, pivot);
             }
 
             // v2.5 Pro Pro: Cinematic S-Curve Shadows/Highlights
             vec3 applyShadowsHighlights(vec3 color, float shadows, float highlights) {
+                // 3.5.0: neutral is a no-op, and negatives survive. This ended in
+                // max(color, 0) on every pixel, so out-of-gamut scene values were
+                // zeroed before the gamut warning or the graded EXR saw them.
+                if (shadows == 0.0 && highlights == 0.0) return color;
                 float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
                 // Quadratic weights for smoother roll-off
                 float sWeight = pow(1.0 - smoothstep(0.0, 0.5, luma), 2.0);
@@ -2579,11 +2739,12 @@ const float GOLDEN_ANGLE = 2.39996323;
                 // highlights in [-1,1], expand(pos) or compress(neg)
                 color *= (1.0 + highlights * hWeight * 0.5);
 
-                return max(color, 0.0);
+                return color;
             }
 
             // v3.3: 3-Way Log Wheels (Shadow/Midtone/Highlight targeting)
             vec3 applyLogWheels(vec3 color, vec3 shadow, vec3 midtone, vec3 highlight) {
+                if (shadow == vec3(0.0) && midtone == vec3(0.0) && highlight == vec3(0.0)) return color;
                 float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
 
                 // Smooth weight distribution based on luminance
@@ -2593,7 +2754,7 @@ const float GOLDEN_ANGLE = 2.39996323;
 
                 // Log wheels are applied multiplicatively (similar to localized exposure)
                 color *= (1.0 + shadow * sWeight + midtone * mWeight + highlight * hWeight);
-                return max(color, 0.0);
+                return color;   // 3.5.0: a gain, so no clamp (see applyShadowsHighlights)
             }
 
             vec3 hash32(vec2 p) {
@@ -3020,6 +3181,47 @@ vec3 getDenoiseColor(vec2 uv) {
             color = mix(color, lutted, u_lutStrength);
         }
 
+        // Scene-linear, captured before the display transform flattens it.
+        // The HDR heatmap reports absolute cd/m2, and after tone mapping that
+        // information is gone -- color from here on is display-referred.
+        vec3 sceneLinearForHeatmap = color;
+        vec3 displayPreClamp = color;   // set after the view, before any clamp
+
+        // 3.5.0: viewer f-stop, Nuke-style: a look at the picture, not part of
+        // it. Applied after the grade and after the scene values the heatmap,
+        // false colour, gamut warning and graded EXR read, so none of them move.
+        bool viewerOnly = !u_scopeSignal && !u_exportSceneLinear;
+        if (viewerOnly && u_viewExposure != 0.0) color *= exp2(u_viewExposure);
+
+        // 6 & 7. Display transform.
+        //
+        // With an OCIO config loaded, OCIODisplay() *is* steps 6 and 7: it
+        // carries the view transform, the display encoding and the output OETF,
+        // exactly as the show's config specifies them. Running our tonemap or
+        // our sRGB OETF alongside it would double-apply a transfer function --
+        // the same class of bug the u_lutIsDisplayTransform flag below exists to
+        // prevent -- so this branch replaces both, and there is no partial mode
+        // where some of ours and some of the config's both apply.
+        if (u_ocioEnabled) {
+            // Exactly 0.0 has to be nudged off zero first.
+            //
+            // OCIO's generated inverse-EOTF chains reach pow(x, y) with y <= 0,
+            // which GLSL leaves *undefined* at x == 0. Measured on the ACES
+            // configs through a WebGL2 context: scene-linear black came back as
+            // 1.3e16 on the Rec.1886 view, 7.7e14 on P3-D65 and NaN on sRGB and
+            // Display P3. Black is the most common pixel in a frame -- night
+            // shots, letterbox bars, mattes -- so this is not an edge case.
+            //
+            // The nudge is confined to exact zeros. Anything down to 1e-30 goes
+            // through the chain correctly, and negatives do too (OCIO clamps
+            // them itself), so a blanket max() would change legitimately
+            // negative scene-linear pixels for no reason. 1e-10 lands within a
+            // hundredth of an 8-bit code value of where the CPU path puts zero.
+            vec3 ocioIn = mix(color, vec3(1e-10), vec3(equal(color, vec3(0.0))));
+            color = OCIODisplay(vec4(ocioIn, 1.0)).rgb;
+            displayPreClamp = color;
+        } else {
+
         // 6. Display LUT / Tonemap  (runs after 5. LUT)
         if (u_displayLutMode > 0) {
             vec3 transformed = applyDisplayLUT(color, u_displayLutMode);
@@ -3037,9 +3239,19 @@ vec3 getDenoiseColor(vec2 uv) {
         // (e.g. OCIO DisplayView bake) — those LUTs already contain sRGB OETF.
         // Applying linearToSRGB again would double-gamma and produce the
         // orange-cast / blown-highlight artefact visible on HDR content.
-        if (!u_lutIsDisplayTransform) {
+        if (!u_lutIsDisplayTransform && !displayModeEncodes(u_displayLutMode)) {
             color = applySoftClip(color, u_softClip);
+            displayPreClamp = linearToSRGB(max(color, vec3(0.0))) + min(color, vec3(0.0));
             color = linearToSRGB(max(color, vec3(0.0)));
+        } else {
+            displayPreClamp = color;
+        }
+
+        }   // end !u_ocioEnabled
+
+        // 3.5.0: viewer gamma on the display signal (1.0 = off).
+        if (viewerOnly && u_viewGamma > 0.0 && u_viewGamma != 1.0) {
+            color = pow(max(color, vec3(0.0)), vec3(1.0 / u_viewGamma));
         }
 
         // 7a. Film Grain — Photochemical-quality, static by default
@@ -3117,6 +3329,15 @@ vec3 getDenoiseColor(vec2 uv) {
             color *= v;
         }
 
+        // 3.5.0: scopes measure the picture the display receives, graded and
+        // through the view, and nothing drawn on top of it. They used to read
+        // the finished canvas (false colour, zebra, wipe and grids included)
+        // or the ungraded source texture.
+        if (u_scopeSignal) {
+            fragColor = vec4(clamp(sanitize(color), 0.0, 1.0), 1.0);
+            return;
+        }
+
         // 6b. Channel isolation
         if (u_channelMode == 1) { color = vec3(color.r); }
         else if (u_channelMode == 2) { color = vec3(color.g); }
@@ -3133,7 +3354,13 @@ vec3 getDenoiseColor(vec2 uv) {
         float lumaDisplay = dot(color, vec3(0.2126, 0.7152, 0.0722));
 
         if (u_falseColor) {
-            color = getFalseColorMap(lumaDisplay);
+            color = getFalseColorMap(arriSignal(dot(sceneLinearForHeatmap, vec3(0.2126, 0.7152, 0.0722))));
+        }
+
+        // Reads scene luminance, not display luma: the whole point is absolute
+        // cd/m2, which the display transform has already thrown away.
+        if (u_hdrHeatmap) {
+            color = getHDRHeatmap(dot(sceneLinearForHeatmap, vec3(0.2126, 0.7152, 0.0722)));
         }
 
         if (u_zebra) {
@@ -3142,18 +3369,22 @@ vec3 getDenoiseColor(vec2 uv) {
         }
 
         // 7b. Advanced Analytics (Gamut & Clipping)
+        // 3.5.0: both warnings read values the clamp has not touched yet.
+        // They used to test the display value after max(color, 0) and after
+        // the view's own clamp, so neither could ever fire.
         if (u_clippingMonitor) {
             float blink = step(0.5, fract(u_time * 2.0)); // 2Hz flash
-            if (any(greaterThan(color, vec3(1.0)))) {
-                color = mix(color, vec3(1.0, 0.0, 0.0), blink); // Flashing Red for Highlights
-            } else if (any(lessThan(color, vec3(0.0)))) {
-                color = mix(color, vec3(0.0, 0.0, 1.0), blink); // Flashing Blue for Shadows
+            if (any(greaterThanEqual(displayPreClamp, vec3(0.999)))) {
+                color = mix(color, vec3(1.0, 0.0, 0.0), blink); // at or over display white
+            } else if (all(lessThanEqual(sceneLinearForHeatmap, vec3(0.0)))) {
+                color = mix(color, vec3(0.0, 0.0, 1.0), blink); // crushed to black
             }
         }
 
         if (u_gamutWarning) {
-            // Check if color is outside Rec709/sRGB gamut hull (values < 0.0 or > 1.0)
-            if (any(lessThan(color, vec3(0.0))) || any(greaterThan(color, vec3(1.0)))) {
+            // A negative component in scene-linear is a colour outside the
+            // working gamut's triangle: it cannot be displayed without mapping.
+            if (any(lessThan(sceneLinearForHeatmap, vec3(-1e-4)))) {
                 color = vec3(1.0, 0.0, 1.0); // Solid Magenta
             }
         }
@@ -3202,6 +3433,28 @@ vec3 getDenoiseColor(vec2 uv) {
         // v3.2: Performance Hardening - Neutralize NaNs/Infs that may have
         // leaked from complex bokeh or bloom feedback loops.
         color = sanitize(color);
+
+        // 3.5.0: the "32-bit graded EXR" export. It used to read back this
+        // composite: tone mapped or OCIO display, sRGB OETF, wipe, grid,
+        // mattes and false colour all baked in. A graded EXR is the grade in
+        // scene-linear (Nuke writes the same), so it takes the colour captured
+        // after grade + LUT and before the display transform, with the
+        // source's alpha.
+        if (u_exportSceneLinear) {
+            fragColor = vec4(sanitize(sceneLinearForHeatmap), texture(u_image, v_texcoord).a);
+            return;
+        }
+
+        // 3.5.0: triangular (TPDF) dither of one 8-bit step before the
+        // drawing buffer quantises: removes banding in skies and gradients
+        // (the output was RGBA8 with no dither). Never in exports or scopes,
+        // which returned above.
+        if (u_dither) {
+            vec2 dp = gl_FragCoord.xy;
+            float n1 = fract(sin(dot(dp, vec2(12.9898, 78.233))) * 43758.5453);
+            float n2 = fract(sin(dot(dp + 17.0, vec2(39.3468, 11.135))) * 24634.6345);
+            color += (n1 + n2 - 1.0) / 255.0;
+        }
 
         fragColor = vec4(color, 1.0);
     }
@@ -3262,17 +3515,29 @@ vec3 getDenoiseColor(vec2 uv) {
                 float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
 
                 if (${mode === 'vectorscope' ? 'true' : 'false'}) {
-                    // Vectorscope (U/V)
-                    float u = (color.b - luma) * 0.492;
-                    float v = (color.r - luma) * 0.877;
-                    v_color = vec4(color, u_intensity);
-                    gl_Position = vec4(u * 2.0, v * 2.0, 0.0, 1.0);
+                    // 3.5.0: BT.709 Cb/Cr of the ENCODED signal (see
+                    // radiance_vectorscope.js). It used linear light with PAL
+                    // U/V weights. 0.5 chroma reaches SCOPE_RADIUS (0.9).
+                    vec3 enc = pixel.rgb;
+                    if (u_isLinear) {
+                        vec3 lc = max(enc, vec3(0.0));
+                        enc = mix(1.055 * pow(lc, vec3(1.0 / 2.4)) - 0.055, lc * 12.92,
+                                  vec3(lessThan(lc, vec3(0.0031308))));
+                    }
+                    float ey = dot(enc, vec3(0.2126, 0.7152, 0.0722));
+                    float cb = (enc.b - ey) / 1.8556;
+                    float cr = (enc.r - ey) / 1.5748;
+                    v_color = vec4(clamp(enc, 0.0, 1.0), u_intensity);
+                    gl_Position = vec4(cb * 2.0 * 0.9, cr * 2.0 * 0.9, 0.0, 1.0);
                 } else if (${mode === 'waveform' ? 'true' : 'false'}) {
                     // Waveform (X/Luma) or RGB Parade
 
                     // HDR: Use ST.2084 (PQ) non-linear mapping for the Y axis
                     // This allows seeing values from 0.001 to 10000 nits
-                    float L = luma;
+                    // 3.5.0: ST.2084 takes luminance / 10000 nits. Linear 1.0 is
+                    // 203 nits (BT.2408); it used to be fed as 10000 nits, so the
+                    // trace sat ~49x too high against a correct graticule.
+                    float L = luma * (203.0 / 10000.0);
                     float m1 = 2610.0 / 4096.0 / 4.0;
                     float m2 = 2523.0 / 4096.0 * 128.0;
                     float c1 = 3424.0 / 4096.0;
@@ -3285,7 +3550,8 @@ vec3 getDenoiseColor(vec2 uv) {
                         float val = (chanIdx < 1.0) ? color.r : (chanIdx < 2.0 ? color.g : color.b);
 
                         // Apply PQ to channel value too
-                        float val_pq = pow((c1 + c2 * pow(max(val, 1e-7), m1)) / (1.0 + c3 * pow(max(val, 1e-7), m1)), m2);
+                        float valN = val * (203.0 / 10000.0);
+                        float val_pq = pow((c1 + c2 * pow(max(valN, 1e-7), m1)) / (1.0 + c3 * pow(max(valN, 1e-7), m1)), m2);
 
                         vec3 chanCol = (chanIdx < 1.0) ? vec3(1.0, 0.1, 0.1) : (chanIdx < 2.0 ? vec3(0.1, 1.0, 0.1) : vec3(0.1, 0.4, 1.0));
                         float x_base = -1.0 + chanIdx * (2.0/3.0);
@@ -3356,12 +3622,48 @@ vec3 getDenoiseColor(vec2 uv) {
     }
 
     // Load image as texture
+    /**
+     * Magnification filter for the image texture.
+     *
+     * `'nearest'` shows the actual pixels; `'linear'` interpolates. Inspecting
+     * a pixel through a bilinear filter shows a blend of its neighbours, which
+     * is why every reference viewer binds this to a key -- RV uses `n`.
+     *
+     * Only magnification changes. Minification stays interpolated: nearest on a
+     * downscaled image aliases badly and shows detail that is not there, which
+     * is the opposite of what this toggle is for.
+     */
+    setPixelFilter(mode) {
+        this.pixelFilter = mode === 'nearest' ? 'nearest' : 'linear';
+        this._applyPixelFilter();
+    }
+
+    _applyPixelFilter() {
+        const gl = this.gl;
+        const tex = this.textures?.image;
+        if (!gl || !tex) return;
+        // A float texture cannot filter linearly without the extension, so
+        // 'linear' falls back to nearest there rather than sampling as black.
+        const canLinear = !this._imageIsFloat || this.extColorFloatLinear;
+        const mag = (this.pixelFilter === 'nearest' || !canLinear) ? gl.NEAREST : gl.LINEAR;
+        // Unit 0 explicitly. Without it this binds the image texture to
+        // whichever unit happened to be active -- unit 3 is the depth map,
+        // unit 4 the reference -- and then leaves it there. Unit 0 is where the
+        // image belongs and where the composite shader expects it, so binding
+        // it here is also the correct resting state; unbinding to null would
+        // just make the next draw rebind it.
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, mag);
+    }
+
     loadImageTexture(image) {
         const gl = this.gl;
 
-        if (this.textures.image) {
-            gl.deleteTexture(this.textures.image);
-        }
+        // 3.5.0: never delete a texture the frame cache still owns. This
+        // deleted the previous frame's cached texture on every upload, so a
+        // loop or scrub back bound a dead texture and showed black.
+        this._releaseImageTexture();
 
         const texture = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -3379,6 +3681,8 @@ vec3 getDenoiseColor(vec2 uv) {
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
         this.textures.image = texture;
+        this._imageIsFloat = false;
+        this._applyPixelFilter();   // a new texture resets to LINEAR otherwise
         this.imageWidth = image.width;
         this.imageHeight = image.height;
         this.isLinearTexture = false; // PNG/Image data is sRGB-encoded
@@ -3398,14 +3702,30 @@ vec3 getDenoiseColor(vec2 uv) {
             return null;
         }
 
+        // AUDIT-FIX (2026-08): fail BEFORE upload with an actionable message.
+        // Beyond MAX_TEXTURE_SIZE (8192 on many GPUs, 16384 on most desktop
+        // cards) texImage2D fails post-hoc into a black frame with only a
+        // cryptic GL error code. 8K DCI (8192 wide) sits exactly on the
+        // common limit; 12K+ plates exceed it everywhere.
+        const maxTex = this._maxTextureSize ||
+            (this._maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 8192);
+        if (width > maxTex || height > maxTex) {
+            console.error(
+                `[Radiance] Frame ${width}x${height} exceeds this GPU's texture ` +
+                `limit (${maxTex}px). Use the node's proxy_scale or downscale ` +
+                `upstream to view it; full-res data is unaffected.`);
+            return null;
+        }
+
         // WebGL2 requires EXT_color_buffer_float for some float texture operations
         if (!this.extColorBufferFloat) {
             console.warn('[Radiance] EXT_color_buffer_float not supported, float texture rendering might fail');
         }
 
-        if (this.textures.image) {
-            gl.deleteTexture(this.textures.image);
-        }
+        // 3.5.0: never delete a texture the frame cache still owns. This
+        // deleted the previous frame's cached texture on every upload, so a
+        // loop or scrub back bound a dead texture and showed black.
+        this._releaseImageTexture();
 
         const texture = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -3448,6 +3768,8 @@ vec3 getDenoiseColor(vec2 uv) {
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
 
         this.textures.image = texture;
+        this._imageIsFloat = true;
+        this._applyPixelFilter();
         this.imageWidth = width;
         this.imageHeight = height;
         this.isLinearTexture = true; // Float32 data is scene-linear
@@ -3468,9 +3790,22 @@ vec3 getDenoiseColor(vec2 uv) {
             return null;
         }
 
-        if (this.textures.image) {
-            gl.deleteTexture(this.textures.image);
+        // AUDIT-FIX (2026-08): same proactive texture-limit guard as
+        // loadFloat32Texture -- see the comment there.
+        const maxTex = this._maxTextureSize ||
+            (this._maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 8192);
+        if (width > maxTex || height > maxTex) {
+            console.error(
+                `[Radiance] Frame ${width}x${height} exceeds this GPU's texture ` +
+                `limit (${maxTex}px). Use the node's proxy_scale or downscale ` +
+                `upstream to view it; full-res data is unaffected.`);
+            return null;
         }
+
+        // 3.5.0: never delete a texture the frame cache still owns. This
+        // deleted the previous frame's cached texture on every upload, so a
+        // loop or scrub back bound a dead texture and showed black.
+        this._releaseImageTexture();
 
         const texture = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -3532,6 +3867,62 @@ vec3 getDenoiseColor(vec2 uv) {
         return { data: pixels, width: w, height: h };
     }
 
+    /**
+     * 3.5.0: the displayed picture (graded, through the view, no overlays) at
+     * w x h, rendered off-screen into an RGBA8 target. What the scopes measure.
+     * Also leaves it in this.textures.scopeSignal for the GPU scopes.
+     * @returns {{data: Uint8ClampedArray, width: number, height: number}|null}
+     */
+    readDisplaySignal(w, h, lutStrength = 1.0, read = true) {
+        const gl = this.gl;
+        if (!gl || !this.textures.image) return null;
+        w = Math.max(1, Math.round(w)); h = Math.max(1, Math.round(h));
+        let tex = this.textures.scopeSignal;
+        if (!tex || this._scopeSignalW !== w || this._scopeSignalH !== h) {
+            if (tex) gl.deleteTexture(tex);
+            tex = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, tex);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            this.textures.scopeSignal = tex;
+            this._scopeSignalW = w; this._scopeSignalH = h;
+        }
+        const fbo = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+        if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.deleteFramebuffer(fbo);
+            return null;
+        }
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        this._exportFBO = { fbo, width: w, height: h };
+        this.scopeSignal = true;
+        try {
+            this.render(lutStrength);
+        } finally {
+            this.scopeSignal = false;
+            this._exportFBO = null;
+        }
+        if (!read) {
+            gl.deleteFramebuffer(fbo);
+            return { data: null, width: w, height: h, texture: tex };
+        }
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+        const px = new Uint8Array(w * h * 4);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.deleteFramebuffer(fbo);
+        // Bottom-up -> top-down, as the CPU scopes index rows. The canvas
+        // (default framebuffer) was never touched, so nothing needs redrawing.
+        const out = new Uint8ClampedArray(w * h * 4);
+        for (let y = 0; y < h; y++) out.set(px.subarray((h - 1 - y) * w * 4, (h - y) * w * 4), y * w * 4);
+        return { data: out, width: w, height: h, texture: tex };
+    }
+
     // ── v4.0: Read pixels as Float32 for 32-bit EXR export ──────────────────
     // Renders the full composite pipeline at the specified resolution into an
     // offscreen RGBA32F FBO, then reads back the result as Float32Array.
@@ -3574,8 +3965,13 @@ vec3 getDenoiseColor(vec2 uv) {
         // Set export target — render() will bind this FBO instead of default framebuffer
         this._exportFBO = { fbo, width: w, height: h };
 
-        // Render composite pass into the FBO
-        this.render(lutStrength);
+        // Render composite pass into the FBO, scene-linear (see u_exportSceneLinear)
+        this.exportSceneLinear = true;
+        try {
+            this.render(lutStrength);
+        } finally {
+            this.exportSceneLinear = false;
+        }
 
         // Read back float32 pixels from the FBO
         gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
@@ -3597,7 +3993,10 @@ vec3 getDenoiseColor(vec2 uv) {
         }
 
         console.log(`[Radiance] Float32 readback: ${w}×${h} (${(flipped.byteLength / 1048576).toFixed(1)} MB)`);
-        return { data: flipped, width: w, height: h };
+        // graded: true -- this path renders the full composite pipeline into
+        // an RGBA32F FBO first. The WebGPU backend returns the ungraded source
+        // and says so, so callers can tell the two apart instead of assuming.
+        return { data: flipped, width: w, height: h, graded: true, sceneLinear: true };
     }
 
     // Load 3D LUT from .cube file data (WebGL2: float32, WebGL1: fallback)
@@ -3737,6 +4136,7 @@ vec3 getDenoiseColor(vec2 uv) {
             if (entry.tex) gl.deleteTexture(entry.tex);
         });
         this._frameCache.clear();
+        this._frameCacheBytes = 0;
 
         // Also clear active image textures if they were part of a sequence
         if (this.textures.image) {
@@ -3885,13 +4285,13 @@ vec3 getDenoiseColor(vec2 uv) {
         this._uf1(program, 'u_qualifierLumaSoft', this.qualifier.lS);
 
         // v3.1 Masking
-        this._ui1(program, 'u_maskType', this.mask.type);
-        this._uf2(program, 'u_maskCenter', this.mask.center[0], this.mask.center[1]);
-        this._uf2(program, 'u_maskScale', this.mask.scale[0], this.mask.scale[1]);
-        this._uf1(program, 'u_maskFeather', this.mask.feather);
-        this._uf1(program, 'u_maskRotation', this.mask.rotation);
-        this._ui1(program, 'u_maskInvert', this.mask.invert ? 1 : 0);
-        this._ui1(program, 'u_maskShowOverlay', this.mask.showOverlay ? 1 : 0);
+        this._ui1(program, 'u_maskType', this.maskType | 0);
+        this._uf2(program, 'u_maskCenter', this.maskCenter[0], this.maskCenter[1]);
+        this._uf2(program, 'u_maskScale', this.maskScale[0], this.maskScale[1]);
+        this._uf1(program, 'u_maskFeather', this.maskFeather);
+        this._uf1(program, 'u_maskRotation', this.maskRotation);
+        this._ui1(program, 'u_maskInvert', this.maskInvert ? 1 : 0);
+        this._ui1(program, 'u_maskShowOverlay', this.maskShowOverlay ? 1 : 0);
 
         this._uf2(program, 'u_texSize', this.imageWidth, this.imageHeight);
 
@@ -3934,8 +4334,13 @@ vec3 getDenoiseColor(vec2 uv) {
             gl.bindTexture(gl.TEXTURE_2D, null);
         }
 
+        // OpenColorIO — binds the config's LUTs and switches the shader's
+        // display transform over to OCIODisplay(). No-op when nothing is loaded.
+        this._applyOCIOUniforms(program);
+
         // Analytics Uniforms
         this._ui1(program, 'u_falseColor', this.falseColor ? 1 : 0);
+        this._ui1(program, 'u_hdrHeatmap', this.hdrHeatmap ? 1 : 0);
         this._ui1(program, 'u_zebra', this.zebra ? 1 : 0);
         this._uf1(program, 'u_zebraThreshold', this.zebraThreshold);
         this._ui1(program, 'u_gamutWarning', this.gamutWarning ? 1 : 0);
@@ -3948,7 +4353,9 @@ vec3 getDenoiseColor(vec2 uv) {
         this._ui1(program, 'u_channelMode', this.channelMode);
         this._ui1(program, 'u_focusPeaking', this.focusPeaking ? 1 : 0);
         this._uf1(program, 'u_focusPeakThreshold', this.focusPeakingThreshold);
-        this._ui1(program, 'u_displayLutMode', this.displayLutMode);
+        // 3.5.0: an 8-bit preview is already a display image; a view transform
+        // on top of it would apply the view twice.
+        this._ui1(program, 'u_displayLutMode', this.displayReferredTexture ? 0 : this.displayLutMode);
         this._ui1(program, 'u_inputLutMode', this.inputLutMode);
         this._uf1(program, 'u_displayLutStrength', this.displayLutStrength);
         this._ui1(program, 'u_lutIsDisplayTransform', this.lutIsDisplayTransform ? 1 : 0);
@@ -3964,6 +4371,11 @@ vec3 getDenoiseColor(vec2 uv) {
 
         // v2.2 Pro: Grids
         this._ui1(program, 'u_gridMode', this.gridMode);
+        this._ui1(program, 'u_exportSceneLinear', this.exportSceneLinear ? 1 : 0);
+        this._ui1(program, 'u_scopeSignal', this.scopeSignal ? 1 : 0);
+        this._uf1(program, 'u_viewExposure', this.viewExposure || 0.0);
+        this._uf1(program, 'u_viewGamma', this.viewGamma || 1.0);
+        this._ui1(program, 'u_dither', this.dither === false ? 0 : 1);
         this._uf4v(program, 'u_gridColor', this.gridColor);
 
         // v2.3: Denoise & Depth Eval
@@ -4073,6 +4485,10 @@ vec3 getDenoiseColor(vec2 uv) {
 
 
 
+    setHDRHeatmap(enabled) {
+        this.hdrHeatmap = !!enabled;
+    }
+
     setFalseColor(enabled) {
         this.falseColor = enabled;
     }
@@ -4118,6 +4534,170 @@ vec3 getDenoiseColor(vec2 uv) {
         this.lutIsDisplayTransform = !!v;
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    //  OpenColorIO
+    //
+    //  info is what radiance_ocio.js returns from buildDisplayView(): the
+    //  GLSL OpenColorIO generated for this (source → display / view), plus the
+    //  LUT textures and uniforms that code expects to find bound. Pass null to
+    //  go back to Radiance's own display pipeline.
+    //
+    //  This recompiles the composite program, so it is called when the view
+    //  changes and never per frame.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    setOCIODisplay(info) {
+        const gl = this.gl;
+        this._releaseOCIOTextures();
+
+        if (!info || !info.shaderText) {
+            this._ocioShaderSource = null;
+            this._ocio = null;
+            this.ocioEnabled = false;
+            this._rebuildCompositeProgram();
+            return { ok: true, enabled: false };
+        }
+
+        // Indent the generated block so a compile error's line number still
+        // lines up with something readable when the source is dumped.
+        this._ocioShaderSource = info.shaderText
+            .split('\n').map((l) => '            ' + l).join('\n');
+
+        const rebuilt = this._rebuildCompositeProgram();
+        if (!rebuilt) {
+            // A shader that will not compile must not leave the viewer with a
+            // dead program. Fall back to Radiance's own pipeline and report --
+            // a black viewport with no explanation is the worst outcome here.
+            this._ocioShaderSource = null;
+            this._ocio = null;
+            this.ocioEnabled = false;
+            this._rebuildCompositeProgram();
+            return { ok: false, enabled: false, error: 'The generated OCIO shader did not compile. See the console for the source.' };
+        }
+
+        this._ocio = {
+            functionName: info.functionName,
+            uniforms: info.uniforms || [],
+            textures: (info.textures || []).map((t, i) => ({
+                ...t,
+                unit: 7 + i,        // 0–6 belong to the composite shader
+                glTexture: this._createOCIOTexture(t),
+            })),
+            label: info.label || '',
+        };
+
+        // WebGL2 guarantees 16 fragment texture units. A config needing more
+        // than nine LUTs is not something to fail silently on.
+        const max = gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS);
+        if (7 + this._ocio.textures.length > max) {
+            const need = 7 + this._ocio.textures.length;
+            this._releaseOCIOTextures();
+            this._ocioShaderSource = null;
+            this._ocio = null;
+            this.ocioEnabled = false;
+            this._rebuildCompositeProgram();
+            return { ok: false, enabled: false, error: `This view needs ${need} texture units and the GPU has ${max}.` };
+        }
+
+        this.ocioEnabled = true;
+        return { ok: true, enabled: true };
+    }
+
+    _rebuildCompositeProgram() {
+        const gl = this.gl;
+        const next = this.createProgram(this.getBasicVertexShader(), this.getCompositeFragmentShader());
+        if (!next) return false;
+        const prev = this.programs.composite;
+        this.programs.composite = next;
+        // The uniform-location and value caches are keyed on the program, and
+        // the old program's entries would otherwise shadow the new one's.
+        this._uniformValueCache?.clear?.();
+        this._uniformCache?.clear?.();
+        if (prev && prev !== next) gl.deleteProgram(prev);
+        return true;
+    }
+
+    _createOCIOTexture(t) {
+        const gl = this.gl;
+        const tex = gl.createTexture();
+        const target = t.dimensions === 3 ? gl.TEXTURE_3D : gl.TEXTURE_2D;
+        // OCIO hands back 1 channel for a 1D LUT and 3 for a 3D LUT. Uploading
+        // a 1-channel LUT as RGB would read the wrong samples per texel.
+        const internal = t.channels === 1 ? gl.R32F : gl.RGB32F;
+        const format = t.channels === 1 ? gl.RED : gl.RGB;
+
+        // 32-bit float textures are NOT filterable in WebGL2 unless
+        // OES_texture_float_linear is enabled, and enabling means calling
+        // getExtension -- merely having it in getSupportedExtensions() does
+        // nothing. Without the call, LINEAR sampling of an R32F LUT returns
+        // zero, and measured through a real context that made every HDR view
+        // in the ACES configs render solid black while compiling cleanly and
+        // reporting no error anywhere.
+        if (this._ocioFloatLinear === undefined) {
+            this._ocioFloatLinear = !!gl.getExtension('OES_texture_float_linear');
+            if (!this._ocioFloatLinear) {
+                console.warn('[Radiance] OES_texture_float_linear is unavailable; '
+                    + 'OCIO LUTs will be sampled without interpolation, which will band.');
+            }
+        }
+        const wantsNearest = /nearest/i.test(t.interpolation || '');
+        const filter = (wantsNearest || !this._ocioFloatLinear) ? gl.NEAREST : gl.LINEAR;
+
+        gl.bindTexture(target, tex);
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+        if (t.dimensions === 3) {
+            gl.texImage3D(target, 0, internal, t.width, t.height, t.depth, 0, format, gl.FLOAT, t.values);
+            gl.texParameteri(target, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+        } else {
+            gl.texImage2D(target, 0, internal, t.width, t.height, 0, format, gl.FLOAT, t.values);
+        }
+        gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, filter);
+        gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, filter);
+        gl.texParameteri(target, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(target, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.bindTexture(target, null);
+        return tex;
+    }
+
+    _releaseOCIOTextures() {
+        if (!this._ocio?.textures) return;
+        for (const t of this._ocio.textures) {
+            if (t.glTexture) this.gl.deleteTexture(t.glTexture);
+        }
+    }
+
+    /** Bind OCIO's textures and uniforms. Called once per draw of the composite. */
+    _applyOCIOUniforms(program) {
+        const gl = this.gl;
+        const ocioOn = this.ocioEnabled && !this.displayReferredTexture;
+        this._ui1(program, 'u_ocioEnabled', ocioOn ? 1 : 0);
+        if (!ocioOn || !this._ocio) return;
+
+        for (const t of this._ocio.textures) {
+            gl.activeTexture(gl.TEXTURE0 + t.unit);
+            gl.bindTexture(t.dimensions === 3 ? gl.TEXTURE_3D : gl.TEXTURE_2D, t.glTexture);
+            this._ui1(program, t.samplerName, t.unit);
+        }
+
+        // Dynamic properties. Radiance does not enable any yet, so OCIO
+        // normally emits none -- but a uniform left unset would silently read
+        // zero and change the picture, so anything that does appear is set, and
+        // anything unrecognised is reported rather than skipped quietly.
+        for (const u of this._ocio.uniforms) {
+            const loc = this.getUniform(program, u.name);
+            if (!loc) continue;
+            switch (u.type) {
+                case 'double': gl.uniform1f(loc, Number(u.value)); break;
+                case 'bool': gl.uniform1i(loc, u.value ? 1 : 0); break;
+                case 'float3': gl.uniform3fv(loc, Float32Array.from(u.value)); break;
+                case 'vector_float': gl.uniform1fv(loc, Float32Array.from(u.value)); break;
+                case 'vector_int': gl.uniform1iv(loc, Int32Array.from(u.value)); break;
+                default:
+                    console.warn('[Radiance] OCIO uniform type not handled:', u.type, u.name);
+            }
+        }
+    }
+
 
 
 
@@ -4134,6 +4714,13 @@ vec3 getDenoiseColor(vec2 uv) {
 
         // v4.3: Bloom FBO chain (6-level Kawase) — was never freed
         this._destroyBloomFBOs();
+
+        // OpenColorIO LUT textures. A show config can carry several 3D LUTs,
+        // and the pattern in this method is that everything with a lifetime
+        // longer than a frame gets freed here explicitly rather than left to
+        // context loss.
+        this._releaseOCIOTextures();
+        this._ocio = null;
 
         // v4.3: Scope offscreen FBO + texture — was never freed
         if (this.scopeFBO)  { gl.deleteFramebuffer(this.scopeFBO);  this.scopeFBO  = null; }
@@ -4165,6 +4752,20 @@ vec3 getDenoiseColor(vec2 uv) {
         // Clear uniform caches
         this._uniformCache.clear();
         this._uniformValueCache.clear();
+
+        // Null the maps. They previously kept the now-invalid handles, so a
+        // scope debounce that fired after teardown passed the
+        // if (!this.gl || !this.programs[mode]) return; guard and issued
+        // useProgram/bindTexture on deleted objects -- INVALID_OPERATION spam
+        // and a corrupted GL state shared with everything else on the page.
+        this.textures = {};
+        this.programs = {};
+
+        // Explicitly release the driver context. Without this the context is
+        // only reclaimed on GC, which browsers do lazily; ~16 add/delete cycles
+        // hit Chrome's context limit and it starts killing the OLDEST context,
+        // which may be the live viewer or ComfyUI's own canvas.
+        try { this.gl.getExtension('WEBGL_lose_context')?.loseContext(); } catch (e) { /* best effort */ }
 
         console.log('[Radiance] WebGL renderer destroyed — all GPU resources released');
     }

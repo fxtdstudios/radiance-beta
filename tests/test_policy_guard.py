@@ -27,14 +27,18 @@ import numpy as np
 # ── Module under test ────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from nodes_qc import (
+# NODE_CLASS_MAPPINGS moved to the group package: the root
+# aggregator that used to build it was a shim over these classes.
+from radiance.nodes.color import (
+    NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS,
+)
+from radiance.nodes.color.qc import (
     _luma,
     _mean_saturation,
     _gamut_out_of_p3,
     _policy_analyse as _analyse,
     _evaluate_policy as _evaluate,
-    NODE_CLASS_MAPPINGS,
-    NODE_DISPLAY_NAME_MAPPINGS,
     RadiancePolicyGuard,
 )
 
@@ -300,3 +304,18 @@ class TestNodeRegistration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_guard_checks_every_frame_and_enforces_hdr_peak():
+    """Audit 3.5: only frame 0 was checked; HDR max_peak_nits never fired."""
+    import torch
+    from radiance.nodes.color.qc import RadiancePolicyGuard
+    clean = torch.full((1, 16, 16, 3), 0.4)
+    blown = torch.ones((1, 16, 16, 3))
+    clip = torch.cat([clean, clean, blown])
+    _, passed, rep, _, _ = RadiancePolicyGuard().run("Guard", image=clip)
+    assert passed is False and '"frames_checked": 3' in rep and '"worst_clipping_frame": 2' in rep
+    hot = torch.full((1, 16, 16, 3), 20.0)   # ~2000 nits at 1.0 = 100 nits
+    _, passed, rep, _, _ = RadiancePolicyGuard().run("Guard", image=hot, max_peak_nits=1000.0,
+                                                       max_clipping=1.0)
+    assert passed is False and "max_peak_nits" in rep

@@ -31,13 +31,15 @@ for mod in ["folder_paths", "comfy", "comfy.utils"]:
         sys.modules[mod] = types.ModuleType(mod)
 
 
-# ── Import helpers from nodes_grade ──────────────────────────────────────────
+# ── Import helpers from the grade module ─────────────────────────────────────
 def _import_grade():
-    """Import nodes_grade freshly, returning the module."""
-    if "nodes_grade" in sys.modules:
-        return sys.modules["nodes_grade"]
+    """The module that defines the grade maths and node classes.
+
+    `_apply_grade` and friends live here; the group package next door only
+    aggregates node keys, which is what the deleted nodes_grade shim conflated.
+    """
     sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
-    return importlib.import_module("nodes_grade")
+    return importlib.import_module("radiance.nodes.color.grade")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -208,9 +210,18 @@ class TestRadianceGradeAPI:
         self.mod = _import_grade()
 
     def test_node_registered(self):
-        assert "RadianceGrade" in self.mod.NODE_CLASS_MAPPINGS
-        assert "RadianceGradeMatch" in self.mod.NODE_CLASS_MAPPINGS
-        assert "RadianceApplyGradeInfo" in self.mod.NODE_CLASS_MAPPINGS
+        """Assert against what ComfyUI reads, not a module-local mapping.
+
+        This read `NODE_CLASS_MAPPINGS` off the deleted nodes_grade shim, which
+        built its own dict from the classes it had just imported — so the
+        assertion held whether or not the node ever reached the catalog. The
+        group package is what publishes.
+        """
+        from radiance.nodes.color import NODE_CLASS_MAPPINGS
+
+        assert "RadianceGrade" in NODE_CLASS_MAPPINGS
+        assert "RadianceGradeMatch" in NODE_CLASS_MAPPINGS
+        assert "RadianceApplyGradeInfo" in NODE_CLASS_MAPPINGS
 
     def test_input_types_have_required_keys(self):
         cls = self.mod.RadianceGrade

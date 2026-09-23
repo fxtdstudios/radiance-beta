@@ -37,7 +37,7 @@ skip_no_torch = unittest.skipUnless(HAS_TORCH, "real torch not available")
 # ── Module under test ────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from nodes_upscale import (
+from radiance.nodes.upscale.upscale import (
     _UPSCALE_MODEL_REGISTRY,
     _TIER_CHOICES,
     _gaussian_kernel_1d,
@@ -55,6 +55,12 @@ from nodes_upscale import (
     RadianceUpscaleRouter,
     RadianceUpscaleFaceRestore,
 )
+
+# This module already gates its torch-dependent tests correctly (they skip
+# cleanly against conftest's stub), so opt out of the automatic module-level
+# skip and keep the rest of the file running on the no-torch CI matrix.
+RADIANCE_TORCH_GATED = True
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────

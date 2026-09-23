@@ -273,22 +273,57 @@ class TestLogCurveContinuity:
 
 class TestSLog3BlackOffset:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Pipeline"
-    """Sony S-Log3 spec: camera black (scene x=−0.01) encodes to 95/1023."""
+    """Sony S-Log3: scene linear 0.0 encodes to 95/1023.
+
+    This class used to assert that linear −0.01 mapped to 95/1023, which
+    described the implementation rather than the spec. Sony's white paper gives
+    the toe as
+
+        x < 0.01125 :  (x * (171.2102946929 − 95) / 0.01125 + 95) / 1023
+
+    applied to x DIRECTLY — the +0.01 belongs to the log branch alone. The two
+    branches meet exactly at the cut: at x = 0.01125 both give 0.167361. The
+    old implementation used half the slope with a +0.01 shift on the input, so
+    black encoded to 0.127921 instead of 0.092864 (≈36 code values at 10-bit).
+    Encode and decode were mutually consistent, which is why every round-trip
+    test passed while the absolute mapping was wrong.
+    """
     def test_black_encodes_to_95cv(self):
-        black_linear = np.array([-0.01], dtype=np.float32)
-        encoded = float(linear_to_slog3(black_linear).item())
+        encoded = float(linear_to_slog3(np.array([0.0], dtype=np.float32)).item())
         expected = 95.0 / 1023.0
         assert abs(encoded - expected) < 1e-5, (
-            f"SLog3: camera black −0.01 encodes to {encoded:.6f}, "
+            f"SLog3: scene black 0.0 encodes to {encoded:.6f}, "
             f"expected {expected:.6f} (95/1023)"
         )
 
     def test_black_decodes_correctly(self):
         black_encoded = np.array([95.0 / 1023.0], dtype=np.float32)
         linear = float(slog3_to_linear(black_encoded).item())
-        assert abs(linear - (-0.01)) < 1e-5, (
-            f"SLog3: 95/1023 decodes to {linear:.6f}, expected −0.01"
+        assert abs(linear) < 1e-5, (
+            f"SLog3: 95/1023 decodes to {linear:.6f}, expected 0.0"
         )
+
+    def test_branches_meet_at_the_cut(self):
+        """Toe and log branch are C0-continuous at x = 0.01125 -> 0.167361."""
+        cut = np.array([0.01125], dtype=np.float32)
+        assert abs(float(linear_to_slog3(cut).item()) - 0.167361) < 1e-5
+
+    def test_matches_the_reference_curve_in_luts(self):
+        """color/luts.py carried the correct decode all along; they must agree.
+
+        Compared from 95/1023 (scene black) upward. Below that the two differ on
+        purpose: `_idt_slog3` is an IDT and clamps sub-black to 0, while
+        `slog3_to_linear` lets it go negative so a working space keeps its
+        footroom. Above black they are the same curve.
+        """
+        from radiance.color.luts import _idt_slog3
+
+        cv = np.linspace(95.0 / 1023.0, 1.0, 257).astype(np.float32)
+        assert np.max(np.abs(slog3_to_linear(cv) - _idt_slog3(cv))) < 2e-5
+
+    def test_sub_black_keeps_footroom(self):
+        """Below 95/1023 this decoder goes negative rather than clamping."""
+        assert float(slog3_to_linear(np.array([0.05], dtype=np.float32)).item()) < 0.0
 
     def test_sub_black_clamped(self):
         """Values below −0.01 should not produce NaN (clamped to camera black)."""

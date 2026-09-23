@@ -39,7 +39,7 @@ skip_no_torch = pytest.mark.skipif(not HAS_TORCH, reason="torch not available")
 # Import the module under test
 # ─────────────────────────────────────────────────────────────────────────────
 sys.path.insert(0, ".")
-from nodes_aces2 import (
+from radiance.nodes.hdr.aces2 import (
     _DanieleEvoParams,
     _daniele_evo_fwd,
     _daniele_evo_luma_preserving,
@@ -78,12 +78,17 @@ class TestDanieleEvoMath:
         assert abs(float(y[0]) - 0.10) < 0.001, f"Expected 0.10, got {y[0]:.5f}"
 
     def test_params_hdr_1000_middle_grey(self):
-        """18% scene grey at 1000 nit HDR should give ~100 nits (10% of 1000)."""
+        """18% grey at a 1000-nit peak is 14.512 nits, not 10% of the peak.
+
+        This test used to assert 100 nits — grey_target was a flat 10% of
+        whatever the display could do, so raising the peak raised the midtone
+        with it. ACES 2.0 publishes 10.000 / 14.512 / 16.824 nits at 100 /
+        1000 / 4000: the midtone barely moves while the highlights extend.
+        """
         p = _DanieleEvoParams(peak_nits=1000.0)
         y = _daniele_evo_fwd(np.array([0.18]), p)
-        # n=10, so 10% of peak = 1.0 (display-referred, before normalising by n)
-        expected = 0.10 * p.n   # = 1.0
-        assert abs(float(y[0]) - expected) < 0.01, f"Expected {expected:.3f}, got {y[0]:.5f}"
+        nits = float(y[0]) * 100.0
+        assert abs(nits - 14.512) < 0.01, f"Expected 14.512 nits, got {nits:.5f}"
 
     def test_black_maps_to_zero(self):
         """Zero scene luminance must produce zero display output."""
@@ -380,12 +385,12 @@ class TestEOTFEncoders:
 
     def test_pq_range(self):
         x = np.linspace(0, 10, 50, dtype=np.float32)
-        y = _pq_encode(x, 1000.0)
+        y = _pq_encode(x)
         assert y.min() >= 0.0
         assert y.max() <= 1.0 + 1e-5
 
     def test_pq_zero_in_zero_out(self):
-        assert _pq_encode(np.array([0.0]), 1000.0)[0] == pytest.approx(0.0, abs=0.01)
+        assert _pq_encode(np.array([0.0]))[0] == pytest.approx(0.0, abs=0.01)
 
     def test_hlg_range(self):
         x = np.linspace(0, 1, 50, dtype=np.float32)

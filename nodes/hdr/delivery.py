@@ -31,10 +31,10 @@ from radiance.color.ops import (
     PQ_C1 as _PQ_C1,
     PQ_C2 as _PQ_C2,
     PQ_C3 as _PQ_C3,
-    PQ_REF_WHITE_NITS as _REF_WHITE_NITS,
     M_REC709_TO_BT2020 as _M709_2020,
     linear_to_pq_bt2408 as _linear_to_pq,
     linear_to_hlg as _linear_to_hlg,
+    linear_to_hlg_bt2100 as _linear_to_hlg_bt2100,
     apply_matrix_3x3,
 )
 
@@ -91,9 +91,10 @@ class RadianceHDREncode:
     PQ (HDR10)      ST.2084 PQ — absolute nit encoding for HDR10, Dolby Vision,
                     and Blu-ray HDR. Reference white = 203 cd/m² (BT.2408).
                     Values above 1.0 represent highlights above reference white.
-    HLG (Broadcast) ARIB STD-B67 — relative encoding used by BBC, NHK, YouTube
-                    HDR. Highlights up to 12× reference white map within [0,1].
-                    No peak-nit metadata required.
+    HLG (Broadcast) BT.2100 HLG — relative encoding used by BBC, NHK, YouTube
+                    HDR. The same picture as PQ, transcoded for the 1000-nit
+                    reference display (BT.2408): reference white (1.0) at 75 %
+                    signal, 1000 nits at 100 %. No peak-nit metadata required.
 
     Both modes can optionally gamut-convert BT.709 → BT.2020 for delivery.
     OUTPUT_NODE = True — use for final delivery; wire a monitor in parallel.
@@ -117,14 +118,15 @@ class RadianceHDREncode:
             },
             "optional": {
                 "peak_nits": (
-                    [100, 1000, 4000, 10000],
-                    {"default": 1000,
+                    ["100", "1000", "4000", "10000"],
+                    {"default": "1000",
                      "tooltip": "[PQ] Mastering display peak luminance. "
                                 "1000 = HDR10, 4000/10000 = Dolby Vision grade."},
                 ),
                 "reference_white_nits": ("FLOAT", {
                     "default": 203.0, "min": 80.0, "max": 400.0, "step": 1.0,
-                    "tooltip": "[PQ] Nits where scene-linear 1.0 maps. BT.2408 recommends 203.",
+                    "tooltip": "[PQ / HLG] Nits where linear 1.0 (diffuse white) maps. BT.2408 recommends 203; "
+                               "HLG then puts 1.0 at 75 % signal.",
                 }),
                 "scene_linear_gain": ("FLOAT", {
                     "default": 1.0, "min": 0.1, "max": 8.0, "step": 0.1,
@@ -139,21 +141,31 @@ class RadianceHDREncode:
         }
 
     def encode(self, image: torch.Tensor, format: str = "PQ (HDR10)",
-               peak_nits: int = 1000, reference_white_nits: float = 203.0,
+               peak_nits="1000", reference_white_nits: float = 203.0,
                scene_linear_gain: float = 1.0, apply_bt2020: bool = False):
+        # ALBABIT-FIX: peak_nits is a string combo (ComfyUI sends dropdown
+        # values as strings) -- convert here, same pattern as nodes/video/hdr.py.
+        peak_nits = int(peak_nits)
         img = image[..., :3].clamp(min=0.0).float()
 
         if apply_bt2020:
             img = _apply_bt2020(img)
 
         if format == "PQ (HDR10)":
-            out = _linear_to_pq(img, peak_nits=peak_nits)
+            # ALBABIT-FIX: reference_white_nits was accepted but never passed to
+            # _linear_to_pq, which used the hardcoded 203 nits default regardless.
+            out = _linear_to_pq(img, peak_nits=peak_nits, reference_white_nits=reference_white_nits)
             logger.info("HDREncode PQ: peak=%d nits  ref=%.0f  bt2020=%s  peak_in=%.3f",
                         peak_nits, reference_white_nits, apply_bt2020, float(image[..., :3].max()))
         else:  # HLG
-            out = _linear_to_hlg(img * scene_linear_gain)
-            logger.info("HDREncode HLG: gain=%.2f  bt2020=%s  peak_in=%.3f",
-                        scene_linear_gain, apply_bt2020, float(image[..., :3].max()))
+            # 3.5.0: was the bare OETF on linear, which put reference white
+            # (1.0) at 100 % HLG and clipped every highlight. BT.2408 places it
+            # at 75 %; the BT.2100 transcode does that and matches OCIO.
+            out = _linear_to_hlg_bt2100(img * scene_linear_gain,
+                                        reference_white_nits=reference_white_nits)
+            logger.info("HDREncode HLG: gain=%.2f  ref=%.0f  bt2020=%s  peak_in=%.3f",
+                        scene_linear_gain, reference_white_nits, apply_bt2020,
+                        float(image[..., :3].max()))
 
         diag_logger.info("HDR_ENCODE format=%s peak_in=%.3f", format, float(image[..., :3].max()))
 
@@ -246,7 +258,7 @@ class RadianceHDRMonitor:
         if mode == "Rec.2100 PQ":
             out = _linear_to_pq(img, peak_nits=peak_nits)
         elif mode == "Rec.2100 HLG":
-            out = _linear_to_hlg(img)
+            out = _linear_to_hlg_bt2100(img)
         else:  # Preview (SDR)
             if abs(exposure) > 1e-4:
                 img = img * (2.0 ** exposure)

@@ -59,6 +59,22 @@ def _hdr_soft_compress(img: torch.Tensor, compression_ratio: float) -> torch.Ten
     return clamped * (1.0 - compression_ratio) + reinhard * compression_ratio
 
 
+#: Ceiling for the inverse of the soft-compress curve, in the module's
+#: convention where 1.0 == 100 nits.
+#:
+#: DECOMPRESS-POLE FIX: the maths below is right -- Reinhard's inverse IS
+#: unbounded as y -> 1 -- but the input clamp of ``1.0 - 1e-7`` chose to
+#: evaluate it one ten-millionth from the pole. At r=0.5 that returns ~2.5e6
+#: and on the r>=1 branch ~1e7, so any VAE-decoded pixel landing on code 1.0,
+#: which is every specular and every practical light source, decoded to a
+#: quarter of a billion nits. Both figures also overflow fp16 (max 65504), so
+#: an f16 .rhdr or EXR written from them stores Inf, not a big number.
+#: 10,000.0 linear is 1,000,000 nits: two orders above the brightest HDR
+#: mastering target anyone grades to, so no legitimate highlight is touched,
+#: and it still round-trips through fp16 as a finite value.
+_DECOMPRESS_MAX_LINEAR = 10_000.0
+
+
 def _hdr_soft_decompress(img: torch.Tensor, compression_ratio: float) -> torch.Tensor:
     """
     Inverse of _hdr_soft_compress — recovers scene-linear HDR from VAE-decoded output.
@@ -91,7 +107,7 @@ def _hdr_soft_decompress(img: torch.Tensor, compression_ratio: float) -> torch.T
 
     if r >= 1.0:
         # Pure Reinhard inverse
-        return y / (1.0 - y + eps)
+        return (y / (1.0 - y + eps)).clamp(max=_DECOMPRESS_MAX_LINEAR)
 
     # Breakpoint: values above this came from x > 1 (HDR side of clamp)
     y_break = 1.0 - r * 0.5
@@ -105,7 +121,7 @@ def _hdr_soft_decompress(img: torch.Tensor, compression_ratio: float) -> torch.T
     disc   = one_minus_y ** 2 + 4.0 * one_minus_r * y
     x_sdr  = (-one_minus_y + torch.sqrt(disc.clamp(min=0.0))) / (2.0 * one_minus_r + eps)
 
-    return torch.where(y > y_break, x_hdr, x_sdr)
+    return torch.where(y > y_break, x_hdr, x_sdr).clamp(max=_DECOMPRESS_MAX_LINEAR)
 
 
 def _compute_channel_stats(image: torch.Tensor):
@@ -176,6 +192,9 @@ class RadianceHDRTurboEncoder:
     FUNCTION      = "encode"
     CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
 
+    # VAE encode builds an autograd graph unless guarded: .eval() does not
+    # freeze parameters, so requires_grad stays True on every weight.
+    @torch.no_grad()
     def encode(self, image: torch.Tensor, vae, compression_ratio: float, exposure_offset: float):
         # 1. Exposure offset in scene-linear light
         img = image * (2.0 ** exposure_offset)
@@ -306,10 +325,24 @@ class RadianceHDRPerChannelDenorm:
 
     def denormalize(self, image: torch.Tensor, stats_json: str):
         import json
-        stats       = json.loads(stats_json)
-        mean        = torch.tensor(stats["mean"],  dtype=image.dtype, device=image.device)
-        std         = torch.tensor(stats["std"],   dtype=image.dtype, device=image.device)
-        norm_center = float(stats["norm_center"])
+
+        # `stats_json` is forceInput, so an empty or malformed value means the
+        # Norm node is not wired up. Say that, rather than surfacing a bare
+        # JSONDecodeError with a character offset into a string the user never
+        # typed.
+        try:
+            stats = json.loads(stats_json)
+            mean_v, std_v = stats["mean"], stats["std"]
+            norm_center = float(stats["norm_center"])
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ValueError(
+                "RadianceHDRPerChannelDenorm: `stats_json` must be the stats "
+                "output of RadianceHDRPerChannelNorm — connect that node's "
+                f"stats_json socket to this input. ({type(exc).__name__}: {exc})"
+            ) from exc
+
+        mean = torch.tensor(mean_v, dtype=image.dtype, device=image.device)
+        std = torch.tensor(std_v, dtype=image.dtype, device=image.device)
 
         mu  = mean.reshape(1, 1, 1, -1)
         sig = std.reshape(1, 1, 1, -1)
@@ -326,8 +359,8 @@ class RadianceHDRPerChannelDenorm:
 # CONSOLIDATED: RadianceHDRTurboDecoder removed (Consolidate 1 — 2026-04-26)
 #
 # The simple vae.decode() + soft-knee-decompress path is superseded by
-# ◎ Radiance HDR VAE Decode with rudra_decoder="Enabled", which uses the
-# trained CNN (RadianceTurboDecoder) for full HDR reconstruction.
+# ◎ Radiance HDR VAE Decode in Direct HDR mode; learned SDR→HDR recovery
+# lives in ◎ Radiance SDR → HDR Universal / Recover (RUDRA pixel model).
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -416,6 +449,9 @@ class RadianceHDRLatentEncoder:
             },
         }
 
+    # VAE encode builds an autograd graph unless guarded: .eval() does not
+    # freeze parameters, so requires_grad stays True on every weight.
+    @torch.no_grad()
     def encode(
         self,
         image: "torch.Tensor",

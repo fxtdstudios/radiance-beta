@@ -3,15 +3,15 @@ from __future__ import annotations
 
 import logging
 
-from radiance.nodes_sampler import RadianceSamplerPro
+from radiance.nodes.generate.sampler import RadianceSamplerPro
 from radiance.nodes.generate.engine import (
     RadianceHDRVAEDecode,
 )
-from radiance.nodes_loader import (
+from radiance.nodes.generate.loader import (
+    RadianceControlNetApply,
     RadianceLoraStack,
     RadianceUnifiedLoader,
     RadianceVideoLoader,
-    RadianceControlNetApply,
 )
 from radiance.nodes.generate.lora import RadianceHDRLoRALoader, RadianceHDRLoRAApply
 from radiance.nodes.generate.prompt import (
@@ -20,6 +20,8 @@ from radiance.nodes.generate.prompt import (
 from radiance.nodes.generate.regional import RadianceRegionalPrompt, RadianceRegionalGrid
 from radiance.nodes.generate.resolution import RadianceResolution
 from radiance.nodes.generate.denoise import RadianceDenoise
+from radiance.nodes.generate.energy import RadianceEnergyMask
+from radiance.nodes.aggregate import fold_in_module_nodes
 
 logger = logging.getLogger("radiance.nodes.generate")
 
@@ -28,8 +30,10 @@ NODE_CLASS_MAPPINGS = {
     "RadianceHDRVAEDecode": RadianceHDRVAEDecode,
     "RadianceLoraStack": RadianceLoraStack,
     "RadianceUnifiedLoader": RadianceUnifiedLoader,
-    "RadianceVideoLoader": RadianceVideoLoader,
+    # Written, complete and importable since v3, but never listed here,
+    # so it never appeared in ComfyUI's node menu.
     "RadianceControlNetApply": RadianceControlNetApply,
+    "RadianceVideoLoader": RadianceVideoLoader,
     "RadianceHDRLoRALoader": RadianceHDRLoRALoader,
     "RadianceHDRLoRAApply": RadianceHDRLoRAApply,
     "RadianceCinematicPromptEncoder": RadianceCinematicPromptEncoder,
@@ -37,6 +41,7 @@ NODE_CLASS_MAPPINGS = {
     "RadianceRegionalGrid": RadianceRegionalGrid,
     "RadianceResolution": RadianceResolution,
     "RadianceDenoise": RadianceDenoise,
+    "RadianceEnergyMask": RadianceEnergyMask,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -44,8 +49,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceHDRVAEDecode": "◎ HDR VAE Decode",
     "RadianceLoraStack": "◎ LoRA Stack",
     "RadianceUnifiedLoader": "◎ Radiance Read Models",
+    "RadianceControlNetApply": "◎ Radiance ControlNet Apply",
     "RadianceVideoLoader": "◎ Video Loader",
-    "RadianceControlNetApply": "◎ ControlNet Apply",
     "RadianceHDRLoRALoader": "◎ HDR LoRA Loader",
     "RadianceHDRLoRAApply": "◎ HDR LoRA Apply",
     "RadianceCinematicPromptEncoder": "◎ Cinematic Prompt Encoder",
@@ -53,6 +58,12 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceRegionalGrid": "◎ Regional Grid",
     "RadianceResolution": "◎ Resolution",
     "RadianceDenoise": "◎ Denoise",
+    "RadianceEnergyMask": "◎ Energy Mask",
 }
+
+# Publishing is the default: sweep this package for nodes its leaf modules
+# declare but the mapping above does not list. See nodes/aggregate.py — this is
+# what stopped seventeen finished nodes from ever reaching the menu.
+fold_in_module_nodes(__name__, NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS, logger)
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

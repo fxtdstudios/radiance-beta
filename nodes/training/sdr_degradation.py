@@ -380,8 +380,8 @@ def _gaussian_blur(x: _torch.Tensor, sigma: float) -> _torch.Tensor:
     kv = kernel.view(1, 1, ksize, 1).expand(C, 1, ksize, 1)
     y  = x.permute(0, 3, 1, 2)   # (B, C, H, W)
     pad = ksize // 2
-    y   = _F_conv.conv2d(y, kh, padding=(0, pad), groups=C)
-    y   = _F_conv.conv2d(y, kv, padding=(pad, 0), groups=C)
+    y   = _torch.nn.functional.conv2d(y, kh, padding=(0, pad), groups=C)
+    y   = _torch.nn.functional.conv2d(y, kv, padding=(pad, 0), groups=C)
     return y.permute(0, 2, 3, 1).clamp(0.0, 1.0)
 
 

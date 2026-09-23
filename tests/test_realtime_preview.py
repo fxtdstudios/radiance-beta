@@ -34,8 +34,8 @@ skip_no_torch = unittest.skipUnless(HAS_TORCH, "real torch not available")
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-import nodes_realtime_preview as _mod
-from nodes_realtime_preview import (
+from radiance.nodes.monitor import realtime as _mod
+from radiance.nodes.monitor.realtime import (
     _apply_false_color,
     _sobel_mag,
     _focus_peak,
@@ -53,6 +53,12 @@ from nodes_realtime_preview import (
     RadianceFrameStamp,
     RadiancePreviewServer,
 )
+
+# This module already gates its torch-dependent tests correctly (they skip
+# cleanly against conftest's stub), so opt out of the automatic module-level
+# skip and keep the rest of the file running on the no-torch CI matrix.
+RADIANCE_TORCH_GATED = True
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────

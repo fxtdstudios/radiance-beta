@@ -27,13 +27,23 @@ skip_no_torch = unittest.skipUnless(HAS_TORCH, "real torch not available")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from nodes_cdl import (
-    RadianceCDLTransform,
-    RadianceCDLImport,
-    RadianceCDLExport,
+# NODE_CLASS_MAPPINGS moved to the group package: the root
+# aggregator that used to build it was a shim over these classes.
+from radiance.nodes.color import (
     NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS,
 )
+from radiance.nodes.color.cdl import (
+    RadianceCDLTransform,
+    RadianceCDLImport,
+    RadianceCDLExport,
+)
+
+# This module already gates its torch-dependent tests correctly (they skip
+# cleanly against conftest's stub), so opt out of the automatic module-level
+# skip and keep the rest of the file running on the no-torch CI matrix.
+RADIANCE_TORCH_GATED = True
+
 
 
 def _img(b=1, h=4, w=4, fill=0.5):

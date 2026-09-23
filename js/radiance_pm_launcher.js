@@ -10,7 +10,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { app } from "../../scripts/app.js";
 
-console.log("[Radiance PM Launcher] module loaded");
+// ALBABIT-FIX: resolve extension base at runtime so the path works regardless of the install folder name (e.g. "radiance" vs "radiance-beta")
+const _EXT_BASE = import.meta.url.replace(/\/[^/]+$/, '');
 
 const NATIVE_BTN_NAMES = new Set([
     "launch_project_manager", "launch_dashboard", "launch_assets",
@@ -19,11 +20,13 @@ const NATIVE_BTN_NAMES = new Set([
 
 const openDash = (file, title) => {
     if (window.showRadianceDashboard) {
-        window.showRadianceDashboard(`/extensions/radiance/${file}`, title);
+        window.showRadianceDashboard(`${_EXT_BASE}/${file}`, title);
     } else {
-        window.open(`/extensions/radiance/${file}`, "_blank");
+        window.open(`${_EXT_BASE}/${file}`, "_blank");
     }
 };
+
+console.log("[Radiance PM Launcher] module loaded");
 
 function buildLauncher(node) {
     const mk = (tag, css, txt) => { const e = document.createElement(tag); e.style.cssText = css; if (txt != null) e.textContent = txt; return e; };
@@ -53,9 +56,9 @@ function buildLauncher(node) {
     saveRow.appendChild(ghost("Increment", () => node.incrementalSave && node.incrementalSave()));
     wrap.appendChild(saveRow);
     const footer = mk("div", "display:flex;justify-content:center;gap:10px;margin-top:4px;padding-top:7px;border-top:1px solid rgba(255,255,255,0.06);font-size:10.5px;color:#6c707a;");
-    footer.appendChild(flink("Docs", "https://radiance.fxtd.org/"));
+    footer.appendChild(flink("Docs", "https://www.fxtdstudios.com"));
     footer.appendChild(mk("span", "color:#3a3d42;", "·"));
-    footer.appendChild(flink("FXTD Studios", "https://www.fxtd.org"));
+    footer.appendChild(flink("FXTD Studios", "https://www.fxtdstudios.com"));
     wrap.appendChild(footer);
     return wrap;
 }

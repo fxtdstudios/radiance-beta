@@ -2,7 +2,7 @@
 ◎ Radiance Cinematic Prompt Encoder — v3.0.0
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Production-grade cinematic prompt builder with direct CLIP/T5 encoding.
-Auto-selects prose for Flux/T5/Kolors and structured keywords for SD1.5/SDXL.
+Auto-selects prose for Flux/T5 and structured keywords for SD1.5/SDXL.
 
 v2.4.0 Changelog (from audit):
 ───────────────────────────────────────
@@ -94,12 +94,13 @@ import json
 import logging
 import os
 import re
+import weakref
 import torch
 from typing import Optional
 
 logger = logging.getLogger("radiance.prompt")
 
-__version__ = "3.2.1"
+__version__ = "3.2.2"
 
 
 class CinematicDatasets:
@@ -831,12 +832,38 @@ DEFAULT_YEAR: int = int(os.environ.get("RADIANCE_DEFAULT_YEAR",
 
 # These architectures use T5/LLM encoders that prefer natural language prose.
 # Comma-separated keyword chains perform significantly worse on them.
-PROSE_ARCHS = {"flux", "sd3", "sd3.5", "wan", "ltx", "ltxav", "pixart", "kolors",
-               "hunyuan_video", "aura_flow"}
+PROSE_ARCHS = {"flux", "sd3", "sd3.5", "wan", "ltxv", "ltxav", "pixart",  # ALBABIT-FIX: "ltx" → "ltxv"
+               "hunyuan_video", "aura_flow", "minimax",
+               # 3.5.0: every T5 / LLM encoder the loader can report. They used
+               # to fall through to CLIP-style tag prompts with a 77-token cap.
+               "flux2", "flux2-klein", "z_image", "lumina2", "chroma", "qwen_image",
+               "hidream", "cosmos", "cogvideox", "mochi", "wan_ti2v", "krea2",
+               "hunyuan_image", "hunyuan_video_15", "kandinsky5", "kandinsky5_image",
+               "longcat_image", "omnigen2", "qwen3_llm", "qwen25_llm", "llm"}
+
+# Only these read their prompt through CLIP alone (77-token chunks, weighted
+# tags). Anything else, including an arch this file has never heard of, is a
+# T5 / LLM encoder and gets prose: a new model is far more likely to be
+# LLM-conditioned than CLIP-only.
+CLIP_ONLY_ARCHS = {"sd1.5", "sd2", "sdxl"}
+
+
+def _is_prose_arch(arch: str) -> bool:
+    return arch not in CLIP_ONLY_ARCHS
+
+# Guidance-distilled models: the sampler runs them at CFG 1, where ComfyUI
+# never evaluates the negative (CFGGuider skips the uncond pass at cfg 1.0),
+# and MiniMax H3's reference graph has no negative at all. Encoding the
+# automatic negative for them costs a full text-encoder pass for nothing.
+# Deliberately narrow: Wan, LTX and HunyuanVideo 1.5 run real CFG.
+_GUIDANCE_DISTILLED_ARCHS = {"flux", "flux2", "minimax"}
 
 # Architectures where negative prompts have near-zero practical effect.
 # (CFG guidance in these models operates differently; negatives waste token budget.)
-_WEAK_NEG_ARCHS = {"flux", "wan", "ltx", "ltxav", "hunyuan_video", "kolors"}
+# ALBABIT-FIX: "minimax" is a stronger case than the others here. MiniMax H3's
+# own reference workflow (comfy_extras/nodes_minimax_h3.py) uses BasicGuider,
+# not CFGGuider, and its node has no negative conditioning output at all.
+_WEAK_NEG_ARCHS = {"flux", "wan", "ltxv", "ltxav", "hunyuan_video", "minimax"}  # ALBABIT-FIX: "ltx" → "ltxv"
 
 
 @functools.lru_cache(maxsize=4)
@@ -913,46 +940,84 @@ def _detect_arch_from_clip(clip, target_arch: str,
             return arch
 
     # ── Priority 3: tokenizer key fingerprinting (cached per clip object) ────
-    # Use id(clip) as cache key — avoids holding a reference to the clip object
-    # while still deduplicated per loaded model.
-    _clip_id = id(clip)
-    if _clip_id not in _detect_arch_from_clip._key_cache:
+    # ALBABIT-FIX: was keyed on id(clip) in a plain dict, so a collected
+    # clip's entry stuck around and a later object reusing that freed
+    # address inherited its stale fingerprint (real, reproducible under
+    # pytest's object churn). WeakKeyDictionary keyed on the object itself
+    # evicts on real collection, so a reused address can't inherit it.
+    try:
+        keys = _detect_arch_from_clip._key_cache.get(clip)
+    except TypeError:
+        keys = None  # clip doesn't support weak references, don't cache
+    if keys is None:
         try:
             test_tokens = clip.tokenize("test")
-            _detect_arch_from_clip._key_cache[_clip_id] = frozenset(test_tokens.keys())
+            keys = frozenset(test_tokens.keys())
         except Exception as e:
             logger.debug(f"[Encoder] Arch detection failed: {e}, defaulting to sdxl")
-            _detect_arch_from_clip._key_cache[_clip_id] = frozenset()
-    keys = _detect_arch_from_clip._key_cache[_clip_id]
+            keys = frozenset()
+        try:
+            _detect_arch_from_clip._key_cache[clip] = keys
+        except TypeError:
+            pass
 
-    # LTX 2.3 / Gemma — distinct key names
-    if any(k in keys for k in ("gemma", "ltxv", "ltx")):
-        return "ltx"
-    # SD3/SD3.5: all three encoders simultaneously
+    # ALBABIT-FIX: LTXAVGemmaTokenizer registers as "gemma3_12b", exact key
+    # match (the old substring check for "gemma" never matched it, falling
+    # through to "sdxl"). LTX 2.5's Gemma4Tokenizer registers under "gemma4"
+    # instead, same fallback gap, its own check.
+    if "gemma3_12b" in keys or "gemma4" in keys:
+        return "ltxav"
+    # MiniMax H3's Qwen3-VL-32B encoder registers as "qwen3vl_32b" (name=
+    # in comfy/text_encoders/minimax.py's MiniMaxH3TEModel/Tokenizer).
+    if "qwen3vl_32b" in keys:
+        return "minimax"
+    # LTX-V (pre-2.3, T5-based) — still matched by key fragments
+    if any(k in keys for k in ("ltxv", "ltx")):
+        return "ltxv"
+    # SD3/SD3.5 (and HiDream, which adds an LLM): all three encoders
     if "t5xxl" in keys and "g" in keys and "l" in keys:
         return "sd3"
     # Flux: T5 + CLIP-L only (no CLIP-G)
     if "t5xxl" in keys and "l" in keys:
         return "flux"
-    # Wan / PixArt / other T5-only
+    # 3.5.0: tokenizer names from comfy/text_encoders (ComfyUI 0.32). Every
+    # one of these used to fall through to "sdxl".
+    if "umt5xxl" in keys:
+        return "wan"
+    if "mistral3_24b" in keys:
+        return "flux2"
+    if "qwen3_4b" in keys or "qwen3_8b" in keys:
+        return "qwen3_llm"          # Z-Image or Flux.2 Klein: same encoder
+    if "gemma2_2b" in keys:
+        return "lumina2"
+    if "qwen25_7b" in keys:
+        return "qwen25_llm"         # Qwen-Image or HunyuanVideo 1.5
+    if "pile_t5xl" in keys:
+        return "aura_flow"
+    # Wan / PixArt / Chroma / other T5-only
     if "t5xxl" in keys:
         return "wan"
-    # Generic LLM (Kolors, HunyuanVideo)
+    # Generic LLM (HunyuanVideo, older wrappers)
     if "llm" in keys:
-        return "kolors"
+        return "hunyuan_video"
     # SDXL: dual CLIP
     if "g" in keys and "l" in keys:
         return "sdxl"
     # SD1.5: CLIP-L only
     if "l" in keys:
         return "sd1.5"
+    # Any other encoder key is a T5 / LLM this list does not know yet. Prose
+    # is the right default for it; only a clip with no keys at all (tokenize
+    # failed) falls back to the CLIP-style path.
+    if keys - {"h"}:
+        return "llm"
 
     return "sdxl"  # Safe fallback — structured format for CLIP-only
 
 
-# Per-clip fingerprint cache (dict so it auto-evicts naturally per Python GC;
-# set is bounded by the number of distinct clips ever loaded in a session).
-_detect_arch_from_clip._key_cache = {}
+# Per-clip fingerprint cache. WeakKeyDictionary, not a plain dict: entries
+# are removed automatically when the clip object itself is collected.
+_detect_arch_from_clip._key_cache = weakref.WeakKeyDictionary()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                  SCENE MOOD VOCABULARY  (v3.0)
@@ -984,6 +1049,11 @@ _MOOD_VOCAB = {
 }
 
 
+# Per-encoder pad token id, keyed by the same tokenizer dict key used in
+# _real_token_count below. Anything not listed here uses CLIP's 49407.
+_PAD_IDS = {"t5xxl": 0, "llm": 0, "qwen3vl_32b": 151643}
+
+
 def _real_token_count(clip, text: str, tokens: dict = None) -> int:
     """
     Get actual token count using the connected CLIP tokenizer.
@@ -992,7 +1062,9 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
     v3.1 FIX: For T5/LLM encoders, tokens are padded to a fixed length
     (e.g., 256 or 512). shape[-1] returns the padded length, not the
     actual token count. We count non-padding tokens where possible.
-    T5 uses pad_token_id=0; CLIP uses pad_token_id=49407.
+    T5/generic LLM use pad_token_id=0; CLIP uses pad_token_id=49407;
+    MiniMax H3's Qwen3-VL-32B ("qwen3vl_32b") uses 151643 (its own
+    special_tokens config in comfy/text_encoders/minimax.py).
 
     v2.3.3 [BUG-I3]: Removed redundant `import torch as _torch` — torch
     is already imported at module level.
@@ -1005,7 +1077,7 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
 
     try:
         # Try each known encoder key in order of preference
-        for key in ("t5xxl", "l", "g", "llm"):
+        for key in ("t5xxl", "l", "g", "llm", "qwen3vl_32b"):
             if key in tokens and tokens[key]:
                 tok_data = tokens[key][0]
                 if hasattr(tok_data, "shape"):
@@ -1013,7 +1085,7 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
                     # no multi-chunk structure. Count non-pad tokens directly.
                     # [BUG-I3] Use module-level torch directly
                     if torch.is_tensor(tok_data):
-                        pad_id = 0 if key in ("t5xxl", "llm") else 49407
+                        pad_id = _PAD_IDS.get(key, 49407)
                         non_pad = (tok_data != pad_id).sum().item()
                         if non_pad > 0:
                             return non_pad
@@ -1030,7 +1102,7 @@ def _real_token_count(clip, text: str, tokens: dict = None) -> int:
                     #
                     # [BUG-M4] v2.3.3: Explicit tuple validation
                     if isinstance(tok_data[0], (tuple, list)) and len(tok_data[0]) >= 1:
-                        pad_id = 0 if key in ("t5xxl", "llm") else 49407
+                        pad_id = _PAD_IDS.get(key, 49407)
                         total_non_pad = 0
                         total_len = 0
                         for chunk in tokens[key]:   # iterate ALL chunks
@@ -1091,7 +1163,7 @@ def _build_prose_prompt(
 ) -> str:
     """
     Build a natural-language prose prompt for T5/LLM-based architectures
-    (Flux, SD3, Kolors, PixArt, Wan, LTX, HunyuanVideo).
+    (Flux, SD3, PixArt, Wan, LTX, HunyuanVideo).
     These encoders respond much better to flowing sentences than comma chains.
 
     v2.4.0 [BUG-C4]: scientificize() now applied BEFORE weight wrapping.
@@ -1105,11 +1177,11 @@ def _build_prose_prompt(
     # 1. Subject
     subject = base_prompt.strip()
 
-    # [BUG-C4] FIX: Apply NeuralGrammar BEFORE weight wrapping.
-    # Previously scientificize ran on "(subject:1.25)" — the parens were stripped,
-    # replaced words landed inside brackets, and the weight syntax was corrupted.
-    if any(kw in subject.lower() for kw in ("accurate", "precise", "visualize")):
-        subject = NeuralGrammar.scientificize(subject)
+    # 3.5.0: the subject is never rewritten. NeuralGrammar.scientificize used
+    # to run whenever it contained "accurate", "precise" or "visualize", and
+    # silently swapped "design", "process", "generation" and others for
+    # unrelated phrases ("the design of a gear" -> "the architectural
+    # composition of a gear").
 
     # Weight wrapping comes AFTER all text transforms
     if subject_weight != 1.0:
@@ -1366,7 +1438,7 @@ def build_cinematic_prompt_v3(
 
     # [FIX-2] target_arch is pre-resolved by the caller — no "Auto" path here.
     resolved_arch = target_arch
-    use_prose = resolved_arch in PROSE_ARCHS
+    use_prose = _is_prose_arch(resolved_arch)
 
     if use_prose:
         final_prompt = _build_prose_prompt(
@@ -1490,14 +1562,22 @@ def build_cinematic_prompt_v3(
     return (final_prompt, negative_prompt, token_count)
 
 
+# ALBABIT-FIX: fields with a live node widget. apply_style_preset() used to
+# overwrite these unconditionally on every execution -- the docstring's
+# "partial overrides... intentional" claim never held, since every preset
+# defines all 9 fields. Widgets are now respected; js/radiance_prompt.js
+# fills them on selection and flags later edits with a "●" marker.
+_WIDGET_BACKED_PRESET_FIELDS = frozenset({
+    "framing", "camera_type", "lens_focal", "aperture_dof",
+    "lighting", "style_aesthetic", "color_grading",
+})
+
+
 def apply_style_preset(preset_name, current_settings):
     """
-    Apply a style preset to the current settings.
-    Returns updated settings dict.
-
-    Note: Presets do partial overrides — fields not in the preset config
-    retain their current (manual) values. This is intentional so users can
-    select a preset and still tweak individual parameters.
+    Apply a style preset's widget-less fields (film_stock/shutter_speed/
+    aspect_ratio — no corresponding node widget exists for them) to the
+    current settings. Returns updated settings dict.
     """
     if (
         preset_name == "None (Custom)"
@@ -1507,10 +1587,15 @@ def apply_style_preset(preset_name, current_settings):
 
     preset = CinematicDatasets.PRESET_CONFIGS[preset_name]
     updated = current_settings.copy()
-    updated.update(preset)
+    for key, value in preset.items():
+        if key not in _WIDGET_BACKED_PRESET_FIELDS:
+            updated[key] = value
     return updated
 
 
+# Inference only. .eval() does not clear requires_grad on parameters, so an
+# unguarded forward still builds and retains an autograd graph.
+@torch.no_grad()
 def _encode_tokens(clip, tokens):
     """
     Encode CLIP tokens into conditioning.
@@ -1523,6 +1608,31 @@ def _encode_tokens(clip, tokens):
     
     cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
     return [[cond, {"pooled_output": pooled}]]
+
+
+
+def _zero_conditioning(cond):
+    """Zeroed copy of a conditioning list, as ComfyUI's ConditioningZeroOut.
+
+    Same shapes and keys as the positive, so every sampler accepts it; costs
+    no text-encoder pass.
+    """
+    out = []
+    for t in cond:
+        d = dict(t[1]) if len(t) > 1 and isinstance(t[1], dict) else {}
+        for key in ("pooled_output", "conditioning_lyrics"):
+            if torch.is_tensor(d.get(key)):
+                d[key] = torch.zeros_like(d[key])
+        base = t[0]
+        out.append([torch.zeros_like(base) if torch.is_tensor(base) else base, d])
+    return out
+
+
+# Prompt length each family was trained on. Longer prompts still reach the
+# encoder whole (ComfyUI's T5/LLM tokenizers take any length and CLIP is
+# chunked by 77); past this the model starts to ignore the tail, so it is
+# logged, never cut.
+_TRAINED_TOKEN_WINDOW = {"flux": 512, "wan": 512, "sd3": 256, "sd3.5": 256}
 
 
 class RadianceCinematicPromptEncoder:
@@ -1556,34 +1666,39 @@ class RadianceCinematicPromptEncoder:
                     {"multiline": True, "default": "A cinematic scene...",
                      "tooltip": "Primary subject/scene description."},
                 ),
+                # ALBABIT-FIX: default to "None (Custom)" so a freshly-added node starts
+                # blank rather than silently pre-loaded with "→ Classic Hollywood"'s
+                # look. The 7 style widget defaults below are set to "None" to match --
+                # js/radiance_prompt.js's resetToCustomDefaults() keeps them in sync
+                # whenever "None (Custom)" is (re)selected.
                 "style_preset": (
                     cls.STYLE_PRESETS,
-                    {"default": "→ Classic Hollywood",
+                    {"default": "None (Custom)",
                      "tooltip": "One-click style preset."},
                 ),
                 "framing": (
                     cls.FRAMING,
-                    {"default": "Medium Shot (MS)", "tooltip": "Shot framing type."},
+                    {"default": "None", "tooltip": "Shot framing type."},
                 ),
                 "camera_type": (
                     cls.CAMERAS,
-                    {"default": "ARRI Alexa 35", "tooltip": "Camera body."},
+                    {"default": "None", "tooltip": "Camera body."},
                 ),
                 "lens_focal": (
                     cls.LENSES,
-                    {"default": "50mm Standard Prime", "tooltip": "Lens + focal length."},
+                    {"default": "None", "tooltip": "Lens + focal length."},
                 ),
                 "aperture_dof": (
                     cls.APERTURES,
-                    {"default": "f/2.8 (Cinematic Separation)", "tooltip": "Depth of field."},
+                    {"default": "None", "tooltip": "Depth of field."},
                 ),
                 "lighting": (
                     cls.LIGHTING,
-                    {"default": "Cinematic Haze / Volumetric Fog", "tooltip": "Lighting style."},
+                    {"default": "None", "tooltip": "Lighting style."},
                 ),
                 "style_aesthetic": (
                     cls.STYLES,
-                    {"default": "Photorealistic (Raw)", "tooltip": "Visual aesthetic."},
+                    {"default": "None", "tooltip": "Visual aesthetic."},
                 ),
                 "color_grading": (
                     cls.COLOR_GRADING,
@@ -1599,9 +1714,22 @@ class RadianceCinematicPromptEncoder:
                     {"multiline": True, "default": "",
                      "tooltip": "Custom negative prompt. Appended after auto-negatives."},
                 ),
+                "negative_mode": (
+                    ["Auto", "Always encode", "Zero (skip encode)"],
+                    {"default": "Auto",
+                     "tooltip": "Auto: on guidance-distilled models (Flux, Flux.2, MiniMax H3) "
+                                "with no custom negative, return a zeroed negative instead of "
+                                "encoding one: ComfyUI never reads the negative at CFG 1, so this "
+                                "saves a full text-encoder pass. Always encode: pick this if you "
+                                "run those models above CFG 1 with a negative. Zero: never encode "
+                                "the negative."},
+                ),
                 "model_meta": (
                     "STRING",
-                    {"multiline": True, "default": "",
+                    # ALBABIT-FIX: forceInput -- this is always a wired value from the
+                    # Loader, never hand-typed; matches the other model_meta inputs
+                    # added to RUDRA-capable nodes (engine.py, uplift_universal.py).
+                    {"default": "", "forceInput": True,
                      "tooltip": "Optional JSON metadata from Radiance Read Models. "
                                 "When connected, architecture detection uses this before "
                                 "tokenizer heuristics."},
@@ -1628,36 +1756,37 @@ class RadianceCinematicPromptEncoder:
     )
     FUNCTION = "encode_cinematic"
     DESCRIPTION = (
-        "v3.2 — Professional cinematic encoder. Auto-detects architecture (T5/CLIP) "
-        "and auto-tunes negatives and break token splits under the hood. No parameter clutter."
+        "Professional cinematic encoder. Detects the text encoder (CLIP, T5 or LLM) "
+        "and writes the prompt in the form it reads best; skips the negative encode "
+        "on guidance-distilled models."
     )
 
     def encode_cinematic(
         self,
         clip,
         base_prompt="A cinematic scene...",
-        style_preset="→ Classic Hollywood",
-        framing="Medium Shot (MS)",
-        camera_type="ARRI Alexa 35",
-        lens_focal="50mm Standard Prime",
-        aperture_dof="f/2.8 (Cinematic Separation)",
-        lighting="Cinematic Haze / Volumetric Fog",
-        style_aesthetic="Photorealistic (Raw)",
+        style_preset="None (Custom)",
+        framing="None",
+        camera_type="None",
+        lens_focal="None",
+        aperture_dof="None",
+        lighting="None",
+        style_aesthetic="None",
         color_grading="None",
         negative_strength="Standard",
         negative_prompt="",
         model_meta="",
+        negative_mode="Auto",
     ):
         # ── Validation ──────────────────────────────────────────────────────
         if clip is None:
             raise RuntimeError("CLIP input is None. Connect a valid CLIP model.")
         if not base_prompt or not base_prompt.strip():
             raise ValueError("base_prompt cannot be empty.")
+        negative_prompt_in = negative_prompt
 
         # ── Resolve architecture automatically ──────────────────────────────
         resolved_arch = _detect_arch_from_clip(clip, "Auto", model_meta)
-        use_prose = resolved_arch in PROSE_ARCHS
-        token_limit = 256 if use_prose else 77
 
         # ── Apply style preset ──────────────────────────────────────────────
         settings = {
@@ -1671,6 +1800,11 @@ class RadianceCinematicPromptEncoder:
             settings = apply_style_preset(style_preset, settings)
 
         # ── Build prompt ────────────────────────────────────────────────────
+        # ALBABIT-FIX: ltxav uses the same _build_prose_prompt path as Flux/WAN.
+        # Gemma3-12B's audio head learns near-zero influence from purely
+        # visual gear terms, no corruption. Note: quoted dialogue in
+        # base_prompt (e.g. 'says "Hello!"') WILL generate audible speech,
+        # intended LTX-AV behaviour, not a bug.
         final_prompt, negative_prompt, _ = build_cinematic_prompt_v3(
             base_prompt=base_prompt,
             base_prompt_b="",
@@ -1698,53 +1832,56 @@ class RadianceCinematicPromptEncoder:
             prompt_weight_mode="balanced",
         )
 
-        # ── Auto-Enhance for older architectures ───────────────────────────
+        # ── Formatting clean-up (spacing, stray commas) ───────────────────────
         # Auto-fix punctuation/spacing. Prose archs don't need danbooru tag enhancers.
         final_prompt = enhance_prompt_grammar(final_prompt, "Grammar & Formatting", arch=resolved_arch)
 
-        # ── Auto BREAK Token insertion for CLIP ─────────────────────────────
-        # Only split long CLIP prompts (77 limit); bypass completely for T5/Flux
-        if not use_prose:
-            real_count = estimate_tokens(final_prompt)
-            if real_count > token_limit - 7:
-                final_prompt = insert_break_points(
-                    final_prompt, max_tokens=token_limit - 7, clip=clip
-                )
-
-        # ── Tokenize & Real token count ─────────────────────────────────────
+        # ── Tokenize, count, encode ─────────────────────────────────────────
+        # 3.5.0: no BREAK insertion and no truncation. ComfyUI has no BREAK
+        # syntax (that is A1111), so the word "break" was encoded into the
+        # prompt; and prompts over 77 CLIP tokens were cut to the first chunk,
+        # which dropped camera, lens and lighting (they come after the
+        # subject). ComfyUI already chunks long CLIP prompts and T5 / LLM
+        # tokenizers take any length.
         pos_tokens = clip.tokenize(final_prompt)
         real_count = _real_token_count(clip, final_prompt, tokens=pos_tokens)
+        window = _TRAINED_TOKEN_WINDOW.get(resolved_arch)
+        if window and real_count > window:
+            logger.warning(
+                "[Encoder] %d-token prompt on %s, trained on %d: the tail may carry "
+                "little weight. Nothing was cut.", real_count, resolved_arch, window)
 
-        # ── Auto-Truncation safety guard ────────────────────────────────────
-        if real_count > token_limit:
-            truncated = {}
-            for key in pos_tokens:
-                val = pos_tokens[key]
-                if isinstance(val, list):
-                    chunks_to_keep = max(1, (token_limit + 76) // 77)
-                    truncated[key] = val[:chunks_to_keep]
-                elif torch.is_tensor(val):
-                    truncated[key] = val[:, :token_limit]
-                else:
-                    truncated[key] = val
-            pos_tokens = truncated
-            real_count = _real_token_count(clip, final_prompt, tokens=pos_tokens)
-
-        # ── Encode conditioning ─────────────────────────────────────────────
         positive_cond = _encode_tokens(clip, pos_tokens)
 
-        safe_negative = negative_prompt if negative_prompt and negative_prompt.strip() else " "
-        neg_tokens = clip.tokenize(safe_negative)
-        negative_cond = _encode_tokens(clip, neg_tokens)
-
-        return (
-            positive_cond,
-            negative_cond,
-            final_prompt,
-            negative_prompt,
-            resolved_arch,
-            int(real_count),
+        user_negative = bool(negative_prompt_in and negative_prompt_in.strip())
+        skip_negative = (
+            negative_mode == "Zero (skip encode)"
+            or (negative_mode == "Auto" and not user_negative
+                and resolved_arch in _GUIDANCE_DISTILLED_ARCHS)
         )
+        if skip_negative:
+            negative_cond = _zero_conditioning(positive_cond)
+            negative_prompt = ""        # nothing was encoded; say so
+        else:
+            safe_negative = negative_prompt if negative_prompt and negative_prompt.strip() else " "
+            negative_cond = _encode_tokens(clip, clip.tokenize(safe_negative))
+
+        # ALBABIT-FIX: weak_neg_arch only known post-execution (resolved_arch
+        # depends on the real CLIP/model_meta), so js/radiance_prompt.js flags
+        # negative_prompt with a label marker via onExecuted, same convention
+        # as engine.py's rudra_fallback/log_overexposure_risk.
+        return {
+            "ui": {"weak_neg_arch": [resolved_arch in _WEAK_NEG_ARCHS],
+                   "negative_skipped": [bool(skip_negative)]},
+            "result": (
+                positive_cond,
+                negative_cond,
+                final_prompt,
+                negative_prompt,
+                resolved_arch,
+                int(real_count),
+            ),
+        }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                         NODE MAPPINGS

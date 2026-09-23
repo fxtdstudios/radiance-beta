@@ -1,11 +1,13 @@
 import json
 
+import pytest
+
 from radiance.nodes.generate.prompt import (
     RadianceCinematicPromptEncoder,
     _detect_arch_from_clip,
     build_cinematic_prompt_v3,
 )
-from radiance.nodes_loader import RadianceUnifiedLoader
+from radiance.nodes.generate.loader import RadianceUnifiedLoader
 
 
 class FakeClip:
@@ -66,6 +68,9 @@ def test_weak_negative_arch_downgrades_to_soft():
     assert "cartoon" not in negative
 
 
+# The encoder runs its token budget through torch; under conftest's stub the
+# conditioning it returns is a MagicMock rather than the CLIP payload.
+@pytest.mark.real_torch
 def test_encoder_returns_debug_outputs_and_uses_model_meta():
     clip = FakeClip(("t5xxl",))
     encoder = RadianceCinematicPromptEncoder()
@@ -77,7 +82,7 @@ def test_encoder_returns_debug_outputs_and_uses_model_meta():
         model_meta=json.dumps({"arch": "pixart"}),
     )
 
-    positive, negative, positive_text, negative_text, resolved_arch, token_count = result
+    positive, negative, positive_text, negative_text, resolved_arch, token_count = result["result"]
 
     assert positive == [["conditioning_1", {}]]
     assert negative == [["conditioning_2", {}]]
@@ -90,3 +95,46 @@ def test_encoder_returns_debug_outputs_and_uses_model_meta():
 def test_loader_exposes_model_meta_output_contract():
     assert RadianceUnifiedLoader.RETURN_TYPES[-1] == "STRING"
     assert RadianceUnifiedLoader.RETURN_NAMES[-1] == "model_meta"
+
+
+class TestMiniMaxArch:
+    """MiniMax H3's Qwen3-VL-32B encoder: architecture detection, prose
+    prompting, weak-negative handling, and its much higher token budget
+    (comfy/text_encoders/qwen3vl.py's tokenizer has no practical limit,
+    and MiniMax H3's own example prompts run several hundred words)."""
+
+    def test_qwen3vl_32b_key_detected_as_minimax(self):
+        clip = FakeClip(("qwen3vl_32b",))
+        assert _detect_arch_from_clip(clip, "Auto", None) == "minimax"
+
+    def test_minimax_is_a_prose_arch(self):
+        from radiance.nodes.generate.prompt import PROSE_ARCHS
+        assert "minimax" in PROSE_ARCHS
+
+    def test_minimax_is_a_weak_negative_arch(self):
+        from radiance.nodes.generate.prompt import _WEAK_NEG_ARCHS
+        assert "minimax" in _WEAK_NEG_ARCHS
+
+    @pytest.mark.real_torch
+    def test_minimax_ui_channel_flags_weak_neg_arch(self):
+        clip = FakeClip(("qwen3vl_32b",))
+        encoder = RadianceCinematicPromptEncoder()
+        result = encoder.encode_cinematic(clip, base_prompt="a rooftop chase at dusk")
+        assert result["ui"]["weak_neg_arch"] == [True]
+
+    @pytest.mark.real_torch
+    def test_non_minimax_ui_channel_does_not_flag_weak_neg_arch(self):
+        clip = FakeClip(("t5xxl", "g", "l"))  # sd3, not in _WEAK_NEG_ARCHS
+        encoder = RadianceCinematicPromptEncoder()
+        result = encoder.encode_cinematic(clip, base_prompt="a rooftop chase at dusk")
+        assert result["ui"]["weak_neg_arch"] == [False]
+
+    @pytest.mark.real_torch
+    def test_no_arch_truncates_a_long_prompt(self):
+        # 3.5.0: flux used to be cut to 256 tokens (4 FakeClip chunks). ComfyUI's
+        # T5 / LLM tokenizers take any length, so nothing is cut for any arch.
+        long_prompt = "detail " * 500
+        for keys in (("qwen3vl_32b",), ("t5xxl", "l")):
+            result = RadianceCinematicPromptEncoder().encode_cinematic(
+                FakeClip(keys), base_prompt=long_prompt)
+            assert result["result"][5] > 400, keys

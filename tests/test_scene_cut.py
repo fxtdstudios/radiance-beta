@@ -24,7 +24,7 @@ skip_no_torch = unittest.skipUnless(HAS_TORCH, "real torch not available")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from nodes_scene_cut import (
+from radiance.nodes.ai.scene_cut import (
     _luminance,
     _histogram_diff,
     _edge_diff,
@@ -35,6 +35,12 @@ from nodes_scene_cut import (
     RadianceSceneCutSplit,
     RadianceShotGradeRouter,
 )
+
+# This module already gates its torch-dependent tests correctly (they skip
+# cleanly against conftest's stub), so opt out of the automatic module-level
+# skip and keep the rest of the file running on the no-torch CI matrix.
+RADIANCE_TORCH_GATED = True
+
 
 
 def _batch(b, h=8, w=8, fill=0.5):
@@ -197,7 +203,12 @@ class TestDetectCuts(unittest.TestCase):
         frames = np.zeros((16, 8, 8, 3), dtype=np.float32)
         frames[:8, :, :4, :] = 1.0   # shot A: vertical edge at col 4
         frames[8:, :4, :, :] = 1.0   # shot B: horizontal edge at row 4
-        cuts, _ = detect_cuts(frames, method="edge", threshold=0.3, min_shot_frames=4)
+        # threshold is now an ABSOLUTE distance, and the edge metric runs on a
+        # smaller scale than the histogram one — an orientation flip like this
+        # scores ~0.22. Under the old batch-max normalisation any non-zero
+        # score could be pushed over any threshold, which is exactly why the
+        # number was meaningless.
+        cuts, _ = detect_cuts(frames, method="edge", threshold=0.15, min_shot_frames=4)
         self.assertGreater(len(cuts), 1)
 
     def test_methods_combined(self):

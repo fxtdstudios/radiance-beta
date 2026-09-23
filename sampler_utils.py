@@ -3,8 +3,10 @@ import time
 import math
 import logging
 import gc
+import json
 from typing import Tuple, Dict, Any, Optional, List
 from dataclasses import dataclass, field
+from radiance.core.tiling import blend_weight_2d, edge_overlaps_from_coords, clamp_overlap
 
 import comfy.samplers
 import comfy.sample
@@ -36,11 +38,9 @@ SIGMA_DISCONTINUITY_THRESHOLD = 0.01
 PAG_DEFAULT_SCALE = 0.0                       
 PAG_LAYER_NAMES = ["middle_block"]                               
 
-CFG_PLUS_PLUS_DEFAULT_SCALE = 1.6                           
+CFG_PLUS_PLUS_DEFAULT_SCALE = 1.6
 
-CFG_GUIDANCE_MODELS = {"wan", "hunyuan_video"}
-
-DYNAMIC_CFG_EARLY_MULTIPLIER = 1.2                                              
+DYNAMIC_CFG_EARLY_MULTIPLIER = 1.2
 DYNAMIC_CFG_LATE_MULTIPLIER = 0.7                                                
 DYNAMIC_CFG_EARLY_THRESHOLD = 0.15                      
 DYNAMIC_CFG_LATE_THRESHOLD = 0.85                      
@@ -48,68 +48,149 @@ DYNAMIC_CFG_LATE_THRESHOLD = 0.85
 MODEL_TYPES = [
     "auto",
     "flux",
+    # ALBABIT-FIX: flux2 / flux2-klein were absent — Loader uses them, Sampler silently fell back to "flux"
+    "flux2", "flux2-klein",
     "sd3",
-    "sd35",
+    # ALBABIT-FIX: renamed "sd35" → "sd3.5" to match Loader, model/detect.py, prompt.py
+    "sd3.5",
     "sdxl",
-    "sd15",
+    # ALBABIT-FIX: renamed "sd15" → "sd1.5" -- same rationale as sd3.5 above,
+    # converges on the Loader/model/detect.py form instead of diverging from it.
+    "sd1.5",
     "wan",
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B (48ch VAE, distinct from "wan"'s 16ch) —
+    # real bug fix, see model/detect.py.
+    "wan_ti2v",
     "ltxv",
-    "ltxav",                                     
+    "ltxav",
     "hunyuan_video",
     "lumina2",
     "z_image",
     "chroma",
     "cosmos",
     "cogvideox",
-    "stepvideo",
+    "mochi",  # ALBABIT-FIX: Mochi-1 — match Resolution/Loader model types
+    "minimax",  # ALBABIT-FIX: MiniMax H3, matches Resolution/Loader/Prompt model types
+    # 3.5: ComfyUI 0.32 families (see model/detect.py).
+    "qwen_image", "krea2", "hunyuan_image", "hunyuan_video_15",
+    "hidream", "omnigen2", "longcat_image", "kandinsky5", "kandinsky5_image",
 ]
 
-VIDEO_MODEL_TYPES = {"wan", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "stepvideo"}
+VIDEO_MODEL_TYPES = {"wan", "wan_ti2v", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "mochi", "minimax",
+                     "hunyuan_video_15", "kandinsky5"}
 
-GUIDANCE_EMBED_MODELS = {"flux", "lumina2", "z_image", "ltxv"}
+# ALBABIT-FIX: flux2/flux2-klein use guidance_embed like flux (not external CFG)
+# ALBABIT-FIX: lumina2 removed -- its official workflow uses a plain KSampler
+# cfg, no guidance-embed node (unlike Flux's FluxGuidance) -- see CFG_GUIDED_MODELS
+# ALBABIT-FIX: z_image removed too -- exact same situation as lumina2 (its
+# official workflow's KSampler uses cfg=4, no guidance-embed node either),
+# apparently missed when lumina2 got the same fix. Confirmed against
+# Comfy-Org's own bundled "image_z_image.json" template directly.
+# 3.5: LongCat-Image is a Flux transformer and its official template drives it
+# through FluxGuidance (4.0) like Flux.1, with cfg held at 4 under CFGNorm.
+GUIDANCE_EMBED_MODELS = {"flux", "flux2", "flux2-klein", "ltxv", "longcat_image"}
 
-CFG_GUIDED_MODELS = {"wan", "hunyuan_video", "sdxl", "sd15", "sd3", "sd35", "ltxav", "cogvideox", "stepvideo"}
+# ALBABIT-FIX: "sd35" renamed to "sd3.5" for consistency with Loader/detect.py
+# ALBABIT-FIX: lumina2 added -- classic external CFG, confirmed via its
+# official example workflow (plain KSampler cfg=4, no guidance-embed node)
+# ALBABIT-FIX: z_image added -- same evidence class as lumina2 above.
+# ALBABIT-FIX: wan_ti2v added -- same CFG-guided convention as "wan" (its
+# official workflow's KSampler uses a real cfg value, no guidance-embed node).
+CFG_GUIDED_MODELS = {"wan", "wan_ti2v", "hunyuan_video", "sdxl", "sd1.5", "sd3", "sd3.5", "ltxav", "cogvideox", "mochi", "lumina2", "z_image",
+                     # 3.5: every one of these runs a plain KSampler / CFGGuider with
+                     # a real cfg in its official Comfy-Org template.
+                     "qwen_image", "krea2", "hunyuan_image", "hunyuan_video_15",
+                     "hidream", "omnigen2", "kandinsky5", "kandinsky5_image"}
+
+# ALBABIT-FIX: "minimax" belongs in neither set above on purpose. Its reference
+# pipeline uses BasicGuider, which has no cfg input and no guidance-embed
+# mechanism either; cfg is pinned inert via MODEL_DEFAULTS instead of routed
+# through either widget family.
 
 MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    # ALBABIT-FIX: steps=20 added, verified against Comfy-Org's official
+    # Flux.1 Dev workflow template.
     "flux": {
         "cfg": 1.0,
         "scheduler": "simple",
         "guidance": 3.5,
         "shift": 1.0,
         "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
+        "steps": 20,
     },
+    # ALBABIT-FIX: Flux.2 Dev and Flux.2 Klein — guidance_embed models like Flux.1,
+    # same sampling defaults (scheduler=simple, cfg=1.0, guidance_embed). guidance
+    # verified against BFL's own example code (4.0, not Flux.1's 3.5). Klein's
+    # value is a fallback for when model_meta isn't connected -- Base (undistilled,
+    # guidance=4.0) and distilled (guidance~1.0) are architecturally identical and
+    # only distinguishable via model_meta's unet_file (see refine_distillation_from_meta).
+    # ALBABIT-FIX: steps=20 added, verified against Comfy-Org's official
+    # Flux.2 Dev/Klein workflow templates.
+    "flux2": {
+        "cfg": 1.0,
+        "scheduler": "simple",
+        "guidance": 4.0,
+        "shift": 1.0,
+        "sampler": "euler",
+        "steps": 20,
+    },
+    "flux2-klein": {
+        "cfg": 1.0,
+        "scheduler": "simple",
+        "guidance": 4.0,
+        "shift": 1.0,
+        "sampler": "euler",
+        "steps": 20,
+    },
+    # ALBABIT-FIX: cfg 4.5->5.45, sampler dpmpp_2m->euler, steps=30 -- all
+    # verified directly against the official SD3 Medium example workflow's
+    # embedded JSON (sd3_simple_example.png, comfyanonymous/ComfyUI_examples).
     "sd3": {
-        "cfg": 4.5,
+        "cfg": 5.45,
         "scheduler": "sgm_uniform",
         "guidance": 0.0,
         "shift": 1.0,
-        "sampler": "dpmpp_2m",
-        "denoise_range": (0.2, 1.0),
+        "sampler": "euler",
+        "steps": 30,
     },
-    "sd35": {
-        "cfg": 4.5,
+    # ALBABIT-FIX: renamed from "sd35" to "sd3.5" for consistency with Loader/detect.py.
+    # cfg/sampler verified against Comfy-Org's own official SD3.5 Large workflow
+    # (sd3.5-t2i-fp8-scaled-workflow.json) -- sampler was "dpmpp_2m" (wrong,
+    # should be "euler"); cfg confirmed against Albabit's own ComfyUI workflow (4.0).
+    # ALBABIT-FIX: steps=20 added, verified against Comfy-Org's official
+    # SD3.5 Large workflow template (same source already used for cfg/sampler).
+    "sd3.5": {
+        "cfg": 4.0,
         "scheduler": "sgm_uniform",
         "guidance": 0.0,
         "shift": 1.0,
-        "sampler": "dpmpp_2m",
-        "denoise_range": (0.2, 1.0),
+        "sampler": "euler",
+        "steps": 20,
     },
+    # ALBABIT-FIX: cfg 7.0->8.0, sampler dpmpp_2m->euler, scheduler
+    # karras->normal, matching ComfyUI's own official SDXL example workflow
+    # (sdxl_simple_example.json). steps=20 added from the same file (base
+    # stage runs steps 0-20 of a nominal 25-step schedule with the optional
+    # refiner stage disabled by default -- we don't have a 2-stage refiner
+    # split, so 20 is the actual number of steps that workflow runs).
     "sdxl": {
-        "cfg": 7.0,
-        "scheduler": "karras",
-        "guidance": 0.0,
-        "shift": 1.0,
-        "sampler": "dpmpp_2m",                                                               
-        "denoise_range": (0.3, 1.0),
-    },
-    "sd15": {
-        "cfg": 7.0,
+        "cfg": 8.0,
         "scheduler": "normal",
         "guidance": 0.0,
         "shift": 1.0,
-        "sampler": "dpmpp_2m",                                                               
-        "denoise_range": (0.3, 1.0),
+        "sampler": "euler",
+        "steps": 20,
+    },
+    # ALBABIT-FIX: cfg 7.0->8.0, sampler dpmpp_2m->euler, steps=20 -- all
+    # verified against ComfyUI's own default startup workflow (default.json,
+    # v1-5-pruned-emaonly, the graph shown on first launch).
+    "sd1.5": {
+        "cfg": 8.0,
+        "scheduler": "normal",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "euler",
+        "steps": 20,
     },
 
     "wan": {
@@ -117,17 +198,37 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "scheduler": "simple",
         "guidance": 0.0,
         "shift": 8.0,
-        "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
-        "guidance_type": "cfg",                                              
+        # ALBABIT-FIX: euler -> uni_pc, confirmed by 2 official Comfy-Org
+        # workflows (Wan 2.1 1.3B T2V and Wan 2.1 14B I2V 720P). steps=20
+        # added, from the same 14B I2V workflow (its KSampler uses steps=20).
+        "sampler": "uni_pc",
+        "steps": 20,
+        "guidance_type": "cfg",
     },
+    # ALBABIT-FIX: WAN 2.2 TI2V-5B -- verified against Comfy-Org's official
+    # bundled "video_wan2_2_5B_ti2v.json" workflow template. Same scheduler/
+    # shift/sampler/steps as "wan" above, only cfg genuinely differs (5 vs 6).
+    "wan_ti2v": {
+        "cfg": 5.0,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 8.0,
+        "sampler": "uni_pc",
+        "steps": 20,
+        "guidance_type": "cfg",
+    },
+    # ALBABIT-FIX: steps=30 added (was previously "faible confiance" from a
+    # Lightricks model card, now upgraded to "haute" -- confirmed by
+    # ComfyUI's own official LTX Video example workflow, corroborated by
+    # Lightricks' own 13B-dev first-pass config). The 2B-0.9.6-dev config
+    # suggests 40 instead -- our entry doesn't distinguish 2B/13B currently.
     "ltxv": {
         "cfg": 1.0,
         "scheduler": "simple",
-        "guidance": 3.5,                                   
+        "guidance": 3.5,
         "shift": 2.37,
         "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
+        "steps": 30,
         "guidance_type": "embedding",
     },
 
@@ -137,71 +238,244 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "guidance": 0.0,
         "shift": 3.0,                                                     
         "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
         "guidance_type": "cfg",
     },
+    # ALBABIT-FIX: steps=20 added, from the same official ComfyUI HunyuanVideo
+    # workflow already used for shift/sampler/scheduler. Note: Tencent's own
+    # CLI README recommends 50 steps -- a real divergence between the
+    # ComfyUI-native default and the creator's own recommendation, not
+    # resolved here (kept internally consistent with the single source
+    # already used for this architecture's other values).
     "hunyuan_video": {
         "cfg": 6.0,
         "scheduler": "simple",
         "guidance": 0.0,
         "shift": 7.0,
         "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
-        "guidance_type": "cfg",                                                       
+        "steps": 20,
+        "guidance_type": "cfg",
     },
+    # ALBABIT-FIX: Lumina2's official example workflow shows a plain KSampler
+    # cfg=4 with no guidance-embed node at all (unlike Flux's FluxGuidance) --
+    # it's classic external CFG, not embedded guidance. cfg 1.0->4.0,
+    # sampler euler->res_multistep, guidance_type embedding->cfg, steps=25
+    # added (matches the workflow's saved value; its own Note claims "36
+    # steps" as the official recommendation but the workflow itself uses 25).
     "lumina2": {
-        "cfg": 1.0,
+        "cfg": 4.0,
         "scheduler": "simple",
-        "guidance": 3.5,                                    
+        "guidance": 0.0,
         "shift": 6.0,
-        "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
-        "guidance_type": "embedding",
+        "sampler": "res_multistep",
+        "steps": 25,
+        "guidance_type": "cfg",
     },
+    # ALBABIT-FIX: steps=25 verified against Comfy-Org's official Z-Image
+    # (Base) workflow template -- its Turbo variant uses 8 steps instead, see
+    # refine_distillation_from_meta() below. Same template's KSampler also
+    # showed cfg=1.0/sampler="euler"/guidance_type="embedding" here were all
+    # wrong -- plain KSampler cfg=4, sampler="res_multistep", no
+    # guidance-embed node at all (exact same situation lumina2 was already
+    # fixed for, apparently missed for z_image at the time -- both share the
+    # same "lumina2" CLIPLoader type, consistent with a related architecture).
     "z_image": {
-        "cfg": 1.0,
+        "cfg": 4.0,
         "scheduler": "simple",
-        "guidance": 3.5,                                            
+        "guidance": 0.0,
         "shift": 3.0,
-        "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
-        "guidance_type": "embedding",
+        "sampler": "res_multistep",
+        "steps": 25,
+        "guidance_type": "cfg",
     },
+    # ALBABIT-FIX: steps=20 added, verified against ComfyUI's own official
+    # Cosmos-1.0 7B example workflow.
     "cosmos": {
         "cfg": 7.0,
         "scheduler": "simple",
         "guidance": 0.0,
         "shift": 3.0,
         "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
+        "steps": 20,
         "guidance_type": "cfg",
     },
     # ── v2.6.0: New video models ──────────────────────────────────────────────
+    # ALBABIT-FIX: steps=50 added, verified against THUDM's official
+    # CogVideoX-5b model card (num_inference_steps=50, guidance_scale=6 --
+    # cfg was already exact).
     "cogvideox": {
         "cfg": 6.0,
         "scheduler": "simple",
         "guidance": 0.0,
         "shift": 8.0,
         "sampler": "euler",
-        "denoise_range": (0.0, 1.0),
+        "steps": 50,
         "guidance_type": "cfg",
     },
-    "stepvideo": {
-        "cfg": 9.0,
+    # ALBABIT-FIX: cfg/scheduler/steps verified against lodestones' own official
+    # Chroma1-HD ComfyUI workflow (cfg was 1.0, wrong; scheduler was "simple",
+    # wrong -- should be "beta"). "steps" is a generic (non-distillation)
+    # fallback -- new for this architecture, see refine_distillation_from_meta's
+    # docstring/_configure_model_and_defaults for how it's resolved.
+    "chroma": {
+        "cfg": 3.8,
+        "scheduler": "beta",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "euler",
+        "steps": 26,
+    },
+    # ALBABIT-FIX: Mochi-1 (Genmo) — 12ch video VAE, T5XXL text encoder.
+    # steps=64 added, verified against Genmo's official Mochi 1 model card
+    # (num_inference_steps=64, cfg_schedule=[4.5]*64 -- cfg was already exact).
+    "mochi": {
+        "cfg": 4.5,
         "scheduler": "simple",
         "guidance": 0.0,
-        "shift": 13.0,
+        "shift": 6.0,
         "sampler": "euler",
-        "denoise_range": (0.0, 1.0),
+        "steps": 64,
         "guidance_type": "cfg",
     },
-    "chroma": {
+    # ALBABIT-FIX: verified against Comfy-Org's official T2V workflow
+    # template (KSamplerSelect=res_multistep, BasicScheduler=simple/20
+    # steps). BasicGuider has zero widgets, so cfg=1.0 just pins it inert,
+    # same trick flux/ltxv use. No shift node in the reference pipeline.
+    "minimax": {
+        "cfg": 1.0,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "res_multistep",
+        "steps": 20,
+    },
+    # ── 3.5: ComfyUI 0.32 families ─────────────────────────────────────────
+    # Each entry is read off Comfy-Org's official workflow template for the
+    # model (templates/<name>.json in Comfy-Org/workflow_templates) unless
+    # stated otherwise.
+    # Qwen-Image: the current official template ships the 8-step Lightning
+    # LoRA (cfg 1, 8 steps); these are the base-model values from the same
+    # graph without the LoRA (ModelSamplingAuraFlow shift 3.1, cfg 2.5).
+    "qwen_image": {
+        "cfg": 2.5,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 3.1,
+        "sampler": "euler",
+        "steps": 20,
+        "guidance_type": "cfg",
+    },
+    # Krea 2 Turbo: image_krea2_turbo_t2i.json (KSampler 8 steps, cfg 1, euler/simple).
+    "krea2": {
         "cfg": 1.0,
         "scheduler": "simple",
         "guidance": 0.0,
         "shift": 1.0,
         "sampler": "euler",
-        "denoise_range": (0.3, 1.0),
+        "steps": 8,
+        "guidance_type": "cfg",
+    },
+    # HunyuanImage 2.1: no Comfy-Org template yet. shift 5.0 is the model's
+    # own sampling_settings in comfy/supported_models.py; cfg 3.5 / 50 steps
+    # are the Tencent reference defaults.
+    "hunyuan_image": {
+        "cfg": 3.5,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 5.0,
+        "sampler": "euler",
+        "steps": 50,
+        "guidance_type": "cfg",
+    },
+    # HunyuanVideo 1.5: video_hunyuan_video_1.5_720p_t2v.json (CFGGuider 6,
+    # ModelSamplingSD3 shift 7, euler/simple 20 steps).
+    "hunyuan_video_15": {
+        "cfg": 6.0,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 7.0,
+        "sampler": "euler",
+        "steps": 20,
+        "guidance_type": "cfg",
+    },
+    # HiDream-I1 Full: hidream_i1_full.json (KSampler 50 steps, cfg 5,
+    # uni_pc/simple, ModelSamplingSD3 shift 3).
+    "hidream": {
+        "cfg": 5.0,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 3.0,
+        "sampler": "uni_pc",
+        "steps": 50,
+        "guidance_type": "cfg",
+    },
+    # OmniGen2: image_omnigen2_t2i.json (DualCFGGuider 5 / 2, euler/simple 20 steps).
+    "omnigen2": {
+        "cfg": 5.0,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "euler",
+        "steps": 20,
+        "guidance_type": "cfg",
+    },
+    # LongCat-Image: image_longcat_text_to_image.json (FluxGuidance 4,
+    # KSampler cfg 4 with CFGNorm, euler/simple 20 steps).
+    "longcat_image": {
+        "cfg": 4.0,
+        "scheduler": "simple",
+        "guidance": 4.0,
+        "shift": 1.0,
+        "sampler": "euler",
+        "steps": 20,
+    },
+    # Kandinsky 5 video: video_kandinsky5_t2v.json (KSampler 50 steps, cfg 5,
+    # euler_ancestral/beta, ModelSamplingSD3 shift 5).
+    "kandinsky5": {
+        "cfg": 5.0,
+        "scheduler": "beta",
+        "guidance": 0.0,
+        "shift": 5.0,
+        "sampler": "euler_ancestral",
+        "steps": 50,
+        "guidance_type": "cfg",
+    },
+    # Kandinsky 5 image: image_kandinsky5_t2i.json (KSampler 50 steps,
+    # cfg 3.5, euler/simple, ModelSamplingSD3 shift 3).
+    "kandinsky5_image": {
+        "cfg": 3.5,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 3.0,
+        "sampler": "euler",
+        "steps": 50,
+        "guidance_type": "cfg",
+    },
+    # ALBABIT-FIX: previously fell back to "sd1.5" (cfg=7.0/dpmpp_2m/normal) --
+    # verified against AuraFlow's own official ComfyUI workflow, which
+    # contradicts all three. No shift node present (unlike Lumina2, which
+    # reuses the same ModelSamplingAuraFlow node but at shift=6.0 -- confirmed
+    # NOT applicable to AuraFlow's own workflow, checked directly).
+    "aura_flow": {
+        "cfg": 3.48,
+        "scheduler": "sgm_uniform",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "euler",
+        "steps": 20,
+    },
+    # ALBABIT-FIX: previously fell back to "sd1.5" -- cfg/sampler verified
+    # against multiple independent community sources (weaker than AuraFlow's
+    # direct official workflow, moderate confidence). scheduler/shift kept at
+    # sd1.5-equivalent values, no better source found. steps=20 added, from
+    # the diffusers pipeline's own default parameter (no official ComfyUI
+    # workflow found for PixArt Sigma -- moderate confidence, same tier as cfg).
+    "pixart": {
+        "cfg": 4.5,
+        "scheduler": "normal",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "dpmpp_2m",
+        "steps": 20,
     },
 }
 
@@ -252,8 +526,11 @@ class SigmaCache:
             try:
                 if hasattr(model, "model") and hasattr(model.model, "model_config"):
                     config_name = type(model.model.model_config).__name__
-            except (AttributeError, RuntimeError):
-                pass
+            except (AttributeError, RuntimeError) as _exc:
+                logger.debug(
+                    "[Radiance] _make_key(): ignoring %s from `if hasattr(model, 'model') and hasattr(model.model, 'model_c…`: %s",
+                    type(_exc).__name__, _exc,
+                )
 
             return (config_name, round(sigma_max, 6), round(sigma_min, 6), scheduler, total_steps)
         except (AttributeError, RuntimeError):
@@ -314,7 +591,7 @@ class RadianceModelRegistry:
                 if res: return res
             except Exception as e:
                 logger.debug(f"Detector {detector.__name__} failed: {e}")
-        return "sd15"
+        return "sd1.5"
 
 @RadianceModelRegistry.register(priority=1)
 def detect_by_config(model) -> Optional[str]:
@@ -329,9 +606,11 @@ def detect_by_config(model) -> Optional[str]:
             "HunyuanVideo": "hunyuan_video",
             "Lumina2": "lumina2", "ZImage": "z_image",
             "Chroma": "chroma", "ChromaRadiance": "chroma",
-            "Flux": "flux", "FluxSchnell": "flux", "FluxInpaint": "flux", "Flux2": "flux",
+            # ALBABIT-FIX: Flux2 config class maps to "flux2", not "flux"
+            "Flux": "flux", "FluxSchnell": "flux", "FluxInpaint": "flux", "Flux2": "flux2",
             "CogVideoX": "cogvideox", "CogVideo": "cogvideox",
-            "StepVideo": "stepvideo",
+            "Mochi": "mochi",  # ALBABIT-FIX: Mochi-1 config class detection
+            "MiniMaxH3": "minimax",  # ALBABIT-FIX: MiniMax H3 config class detection
         }
         for pattern, mtype in config_map.items():
             if pattern in config_cls: return mtype
@@ -357,8 +636,8 @@ def detect_by_architecture(model) -> Optional[str]:
         if "hunyuan" in model_cls and ("video" in model_cls or "video" in model_module):
             return "hunyuan_video"
         if "cogvideo" in model_cls or "cogvideo" in model_module: return "cogvideox"
-        if "stepvideo" in model_cls or "stepvideo" in model_module or "step_video" in model_module:
-            return "stepvideo"
+        if "mochi" in model_cls or "mochi" in model_module: return "mochi"  # ALBABIT-FIX
+        if "minimax" in model_cls or "minimax" in model_module: return "minimax"  # ALBABIT-FIX
         if "lumina" in full_path:
             if hasattr(diffusion_model, "hidden_size") and diffusion_model.hidden_size >= 3840:
                 return "z_image"
@@ -366,8 +645,9 @@ def detect_by_architecture(model) -> Optional[str]:
         if "chroma" in full_path: return "chroma"
         
         if "mmdit" in model_cls or "sd3" in model_cls:
+            # ALBABIT-FIX: renamed to "sd3.5" for consistency with Loader/detect.py
             if hasattr(diffusion_model, "in_channels") and diffusion_model.in_channels >= 16:
-                return "sd35"
+                return "sd3.5"
             return "sd3"
         
         if "sdxl" in model_cls or hasattr(diffusion_model, "label_emb"): return "sdxl"
@@ -393,7 +673,55 @@ def detect_model_type(model) -> str:
 
 def get_model_defaults(model_type: str) -> Dict[str, Any]:
 
-    return MODEL_DEFAULTS.get(model_type, MODEL_DEFAULTS["sd15"])
+    return MODEL_DEFAULTS.get(model_type, MODEL_DEFAULTS["sd1.5"])
+
+
+def parse_model_meta(model_meta: str) -> Tuple[str, str]:
+    """Parse the Loader's model_meta JSON, returning (arch, unet_file). Empty
+    strings on missing/malformed input -- callers should treat that as
+    "no extra info available", not an error."""
+    if not model_meta:
+        return "", ""
+    try:
+        meta = json.loads(model_meta)
+        return meta.get("arch", "") or "", meta.get("unet_file", "") or ""
+    except Exception:
+        return "", ""
+
+
+def refine_distillation_from_meta(detected_type: str, unet_file: str) -> Optional[Dict[str, Any]]:
+    """
+    Some checkpoints need settings that differ from their model_type's generic
+    default -- only unet_file's exact filename can tell them apart. Verified
+    against official model cards. Not every override includes every key (e.g.
+    Krea Dev is guidance-only, BFL gives no steps recommendation) -- callers
+    must not assume "steps"/"cfg" are always present. Returns None when not
+    applicable, leaving the generic MODEL_DEFAULTS fallback in place.
+    """
+    if not unet_file:
+        return None
+    name = unet_file.lower()
+    if detected_type == "flux2-klein":
+        is_distilled = "base" not in name
+        return {"guidance": 1.0, "steps": 4} if is_distilled else {"guidance": 4.0, "steps": 50}
+    if detected_type == "flux" and "schnell" in name:
+        return {"guidance": 0.0, "steps": 4}
+    if detected_type == "flux" and "krea" in name:
+        return {"guidance": 4.5}
+    if detected_type == "sdxl" and "turbo" in name:
+        return {"cfg": 1.0, "steps": 1, "sampler": "euler_ancestral"}
+    # ALBABIT-FIX: cfg=1.6 (not the "pure" diffusers guidance_scale=0.0
+    # translation) to match the Sampler's own pre-existing "[F] SD3.5 Turbo
+    # (4 steps)" preset, already tuned in practice.
+    if detected_type == "sd3.5" and "turbo" in name:
+        return {"cfg": 1.6, "steps": 4}
+    # ALBABIT-FIX: verified against Comfy-Org's official Z-Image Turbo
+    # workflow template -- KSampler cfg=1/steps=8 (sampler stays
+    # "res_multistep", inherited unchanged from MODEL_DEFAULTS["z_image"]
+    # above, same for both Base and Turbo).
+    if detected_type == "z_image" and "turbo" in name:
+        return {"cfg": 1.0, "steps": 8}
+    return None
 
 def gradual_sigma_blend(
     sigmas_a: torch.Tensor, sigmas_b: torch.Tensor, blend_steps: int = 3
@@ -427,6 +755,10 @@ def gradual_sigma_blend(
     return result
 
 def log_tensor(name: str, tensor: Optional[torch.Tensor]) -> None:
+    # The stats below cost a full float copy and four GPU syncs; the f-string
+    # used to be built even when DEBUG was off, i.e. on every run.
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
 
     if tensor is None:
         logger.debug(f"{name}: None")
@@ -573,6 +905,12 @@ def compute_dynamic_cfg(
     EARLY_T = DYNAMIC_CFG_EARLY_THRESHOLD
     LATE_T = DYNAMIC_CFG_LATE_THRESHOLD
 
+    # At cfg <= 1.0 there is no unconditional pass to shape. Boosting 1.0 to
+    # 1.2 switched that pass ON for the early steps, doubling their cost for
+    # a change the model was never tuned for.
+    if base_cfg <= 1.0:
+        return base_cfg
+
     cfg_early = base_cfg * DYNAMIC_CFG_EARLY_MULTIPLIER
     cfg_late = base_cfg * DYNAMIC_CFG_LATE_MULTIPLIER
 
@@ -639,7 +977,10 @@ def compute_base_sigmas(
     return bs
 
 WORKFLOW_PRESETS = [
-    "None",
+    # ALBABIT-FIX: "None" renamed "Auto" -- it hides advanced widgets like
+    # "None" used to, but shows the model_meta-driven live values (cfg/
+    # sampler/scheduler/steps/model_type) instead of hiding everything.
+    "Auto",
     "Custom",
     "[F] Flux txt2img",
     "[F] Flux img2img",
@@ -656,9 +997,12 @@ WORKFLOW_PRESETS = [
     "[V] WAN txt2vid (30 steps)",
     "[V] WAN img2vid (20 steps)",
     "[V] LTX-Video (25 steps)",
-    "[V] LTX 2.3 LowRes (20 steps)",                                                
-    "[V] LTX 2.3 HighRes (40 steps)",                                                     
+    "[V] LTX 2.3 LowRes (20 steps)",
+    "[V] LTX 2.3 HighRes (40 steps)",
+    "[V] LTX 2.5 LowRes (20 steps)",
+    "[V] LTX 2.5 HighRes (40 steps)",
     "[V] HunyuanVideo (30 steps)",
+    "[V] MiniMax H3 T2V (20 steps)",
 
     "[Q] Draft (4-step / AYS)",
     "[Q] Fast (8-step / AYS)",
@@ -669,209 +1013,6 @@ WORKFLOW_PRESETS = [
     "[Q] z_image (25 steps)",
     "[Q] Lumina2 (25 steps)",
 ]
-
-PRESET_CONFIGS: Dict[str, Dict[str, Any]] = {
-    "[F] Flux txt2img": {
-        "steps": 25,
-        "cfg": 1.0,
-        "sampler": "euler",
-        "scheduler": "simple",
-        "denoise": 1.0,
-        "flux_shift": 1.0,
-        "flux_guidance": 3.5,
-    },
-    "[F] Flux img2img": {
-        "steps": 20,
-        "cfg": 1.0,
-        "sampler": "euler",
-        "scheduler": "simple",
-        "denoise": 0.75,
-        "flux_shift": 1.0,
-        "flux_guidance": 3.5,
-    },
-    "[F] Flux Inpaint": {
-        "steps": 25,
-        "cfg": 1.0,
-        "sampler": "euler",
-        "scheduler": "simple",
-        "denoise": 1.0,
-        "flux_shift": 1.0,
-        "flux_guidance": 4.0,
-    },
-    "[F] Flux High-Res Fix": {
-        "steps": 20,
-        "cfg": 1.0,
-        "sampler": "euler",
-        "scheduler": "simple",
-        "denoise": 0.5,
-        "flux_shift": 3.0,
-        "flux_guidance": 3.5,
-    },
-    "[F] Flux Fast (12 steps)": {
-        "steps": 12,
-        "cfg": 1.0,
-        "sampler": "euler",
-        "scheduler": "simple",
-        "denoise": 1.0,
-        "flux_shift": 1.0,
-        "flux_guidance": 3.5,
-    },
-    "[F] Flux Quality (28 steps)": {
-        "steps": 28,
-        "cfg": 1.0,
-        "sampler": "euler",
-        "scheduler": "simple",
-        "denoise": 1.0,
-        "flux_shift": 1.0,
-        "flux_guidance": 4.0,
-    },
-    "[F] Flux Cinematic (30 steps)": {
-        "steps": 30,
-        "cfg": 1.0,
-        "sampler": "euler",
-        "scheduler": "simple",
-        "denoise": 1.0,
-        "flux_shift": 1.0,
-        "flux_guidance": 4.0,
-    },
-
-    "[F] Flux Schnell (4 steps)": {
-        "steps": 4,
-        "cfg": 1.0,
-        "sampler": "euler",
-        "scheduler": "simple",
-        "denoise": 1.0,
-        "flux_shift": 1.0,
-        "flux_guidance": 0.0,                            
-    },
-    "[F] SD3.5 Turbo (4 steps)": {
-        "steps": 4,
-        "cfg": 1.6,
-        "sampler": "euler",
-        "scheduler": "sgm_uniform",
-        "denoise": 1.0,
-        "flux_shift": 1.0,
-        "flux_guidance": 0.0,
-    },
-    "[F] Flux Ultra Fast (8 steps)": {
-        "steps": 8,
-        "cfg": 1.0,
-        "sampler": "euler",
-        "scheduler": "simple",
-        "denoise": 1.0,
-        "flux_shift": 1.0,
-        "flux_guidance": 2.0,
-    },
-
-    "[V] WAN txt2vid (30 steps)": {
-        "steps": 30,
-        "cfg": 6.0,
-        "sampler": "euler",
-        "scheduler": "simple",
-        "denoise": 1.0,
-        "flux_shift": 8.0,
-        "flux_guidance": 0.0,
-    },
-    "[V] WAN img2vid (20 steps)": {
-        "steps": 20,
-        "cfg": 6.0,
-        "sampler": "euler",
-        "scheduler": "simple",
-        "denoise": 0.75,
-        "flux_shift": 8.0,
-        "flux_guidance": 0.0,
-    },
-    "[V] LTX-Video (25 steps)": {
-        "steps": 25,
-        "cfg": 1.0,
-        "sampler": "euler",
-        "scheduler": "simple",
-        "denoise": 1.0,
-        "flux_shift": 2.37,
-        "flux_guidance": 0.0,
-    },
-
-    "[V] LTX 2.3 LowRes (20 steps)": {
-        "steps": 20, 
-        "cfg": 3.0,
-        "sampler": "euler",
-        "scheduler": "beta",
-        "denoise": 1.0,
-        "flux_shift": 3.0,
-        "flux_guidance": 0.0,
-        "terminal_sigma_to_zero": True,
-        "force_exact_steps": True,
-        "model_type": "ltxav",
-    },
-    "[V] LTX 2.3 HighRes (40 steps)": {
-        "steps": 40,
-        "cfg": 3.0,
-        "sampler": "euler",
-        "scheduler": "beta",
-        "denoise": 0.45,
-        "flux_shift": 6.0,
-        "flux_guidance": 0.0,
-        "terminal_sigma_to_zero": True,
-        "force_exact_steps": True,
-        "model_type": "ltxav",
-    },
-    "[V] HunyuanVideo (30 steps)": {
-        "steps": 30,
-        "cfg": 6.0,
-        "sampler": "euler",
-        "scheduler": "simple",
-        "denoise": 1.0,
-        "flux_shift": 7.0,
-        "flux_guidance": 0.0,
-    },
-
-    "[Q] Draft (4-step / AYS)": {
-        "steps": 4, "cfg": 1.0, "sampler": "euler", "scheduler": "simple",
-        "denoise": 1.0, "flux_shift": 1.0, "flux_guidance": 3.5,
-        "ays_schedule": True,
-    },
-    "[Q] Fast (8-step / AYS)": {
-        "steps": 8, "cfg": 1.0, "sampler": "euler", "scheduler": "simple",
-        "denoise": 1.0, "flux_shift": 1.0, "flux_guidance": 3.5,
-        "ays_schedule": True,
-    },
-    "[Q] Balanced (20-step)": {
-        "steps": 20, "cfg": 1.0, "sampler": "euler", "scheduler": "simple",
-        "denoise": 1.0, "flux_shift": 1.0, "flux_guidance": 3.5,
-        "ays_schedule": False,
-    },
-    "[Q] Quality (35-step)": {
-        "steps": 35, "cfg": 1.0, "sampler": "euler", "scheduler": "simple",
-        "denoise": 1.0, "flux_shift": 1.0, "flux_guidance": 4.0,
-        "sampler_mode": "Phase-Shift (Euler\u2192SGM)", "ays_schedule": False,
-    },
-    "[Q] Cinema (60-step)": {
-        "steps": 60, "cfg": 1.0, "sampler": "euler", "scheduler": "simple",
-        "denoise": 1.0, "flux_shift": 1.5, "flux_guidance": 4.5,
-        "sampler_mode": "Phase-Shift (Euler\u2192SGM)", "ays_schedule": False,
-    },
-
-    "[Q] z_image (25 steps)": {
-        "steps": 25,
-        "cfg": 1.0,
-        "sampler": "euler",
-        "scheduler": "simple",
-        "denoise": 1.0,
-        "flux_shift": 3.0,
-        "flux_guidance": 3.5,
-        "model_type": "z_image",
-    },
-    "[Q] Lumina2 (25 steps)": {
-        "steps": 25,
-        "cfg": 1.0,
-        "sampler": "euler",
-        "scheduler": "simple",
-        "denoise": 1.0,
-        "flux_shift": 6.0,
-        "flux_guidance": 3.5,
-        "model_type": "lumina2",
-    },
-}
 
 def flux_shift_sigmas(sigmas: torch.Tensor, shift: float) -> torch.Tensor:
 
@@ -887,6 +1028,21 @@ def flux_shift_sigmas(sigmas: torch.Tensor, shift: float) -> torch.Tensor:
 
     shifted = shift * sigmas / denominator
     return shifted
+
+def get_sd_turbo_sigmas(model, steps: int, denoise: float) -> torch.Tensor:
+    """
+    Mirrors ComfyUI's own SDTurboScheduler node (comfy_extras/nodes_custom_sampler.py)
+    exactly. SD-Turbo/SDXL-Turbo are only distilled at 10 fixed discrete timesteps
+    (99, 199, ..., 999), not across the continuous sigma space the standard
+    schedulers (karras/normal/simple/...) sample from -- using one of those on a
+    Turbo checkpoint asks the model to denoise at noise levels it was never
+    trained to be good at.
+    """
+    model_sampling = model.get_model_object("model_sampling")
+    start_step = 10 - int(10 * denoise)
+    timesteps = torch.flip(torch.arange(1, 11) * 100 - 1, (0,))[start_step:start_step + steps]
+    sigmas = model_sampling.sigma(timesteps)
+    return torch.cat([sigmas, sigmas.new_zeros([1])])
 
 def get_flux_sigmas(
     model, scheduler: str, steps: int, denoise: float, shift: float = 1.0,
@@ -950,9 +1106,27 @@ def validate_step_range(
 
     return start, end
 
-def apply_pag_to_model(model, pag_scale: float):
+def apply_pag_to_model(model, pag_scale: float, cfg: Optional[float] = None):
 
     if pag_scale <= 0:
+        return model
+
+    # DEFECT: the patch below only acts on the batch slices whose cond_or_uncond
+    # entry is 1, i.e. the uncond pass. ComfyUI skips the uncond pass entirely at
+    # cfg <= 1.0, and even when it is forced to run, the CFG combine at cfg == 1.0
+    # is `uncond + 1.0 * (cond - uncond)` == cond, so a perturbed uncond cannot
+    # reach the output. The "PAG applied at scale" log used to fire at
+    # registration regardless, and this sampler's own cfg default is 1.0 (Flux),
+    # so the common case was a log line claiming PAG ran while nothing happened.
+    # Say so at registration, where the user can still act on it.
+    if cfg is not None and cfg <= 1.0:
+        logger.warning(
+            "[Radiance] pag_scale=%.2f has no effect at cfg=%.2f. PAG here perturbs "
+            "the unconditional pass, which ComfyUI does not run at cfg <= 1.0 (and "
+            "which cancels out of the CFG combine at exactly 1.0). Raise cfg above "
+            "1.0 to use PAG, or set pag_scale to 0 to silence this.",
+            pag_scale, cfg,
+        )
         return model
 
     try:
@@ -966,9 +1140,18 @@ def apply_pag_to_model(model, pag_scale: float):
         def pag_attention_patch(q, k, v, extra_options):
 
             cond_or_uncond = extra_options.get("cond_or_uncond", [0])
-            block_type = extra_options.get("block_type", "unknown")
 
-            if 1 not in cond_or_uncond or block_type != "middle":
+            # ComfyUI's attn1 patch sets extra_options["block"] = ("middle", i)
+            # plus "block_index". There is no "block_type" key -- this used to
+            # read `extra_options.get("block_type", "unknown")` and bail unless
+            # it equalled "middle", so the default never matched and the patch
+            # returned q, k, v unmodified on EVERY call while the line below
+            # still logged "PAG applied with scale ...". Read the key that
+            # exists, and tolerate either shape.
+            block = extra_options.get("block")
+            block_name = block[0] if isinstance(block, (tuple, list)) and block else block
+
+            if 1 not in cond_or_uncond or block_name != "middle":
                 return q, k, v
 
             k_out = k.clone()
@@ -986,14 +1169,38 @@ def apply_pag_to_model(model, pag_scale: float):
                     start = idx * chunk_size
                     end = min(start + chunk_size, batch_size)
 
-                    k_out[start:end] = q[start:end]
-                    v_out[start:end] = q[start:end]
+                    # Blend by pag_scale rather than replacing outright.
+                    # `pag_scale` was previously used only as an on/off gate and
+                    # stashed in model_options where nothing read it, so 0.1 and
+                    # 5.0 produced bit-identical results.
+                    #
+                    # NOTE: this is a self-attention perturbation, not the full
+                    # Ahn et al. 2024 method -- true PAG needs a third forward
+                    # pass combined as eps_u + s(eps_c - eps_u) + s_pag(eps_c -
+                    # eps_p), which ComfyUI's patch API cannot express here. The
+                    # tooltip says so.
+                    #
+                    # DEFECT: this used to clamp to 1.0 while the widget is
+                    # min 0.0 / max 5.0, so every value from 1.0 to 5.0 produced
+                    # a bit-identical render and four fifths of the slider was
+                    # dead. The blend is a lerp toward q; past w=1 it keeps
+                    # going in the same direction, which is what a scale above
+                    # full substitution should mean. Values <= 1.0 are
+                    # unchanged, so existing graphs render identically.
+                    w = max(float(pag_scale), 0.0)
+                    k_out[start:end] = k[start:end] * (1.0 - w) + q[start:end] * w
+                    v_out[start:end] = v[start:end] * (1.0 - w) + q[start:end] * w
 
             return q, k_out, v_out
 
         model_pag.set_model_attn1_patch(pag_attention_patch)
 
-        logger.info(f"PAG applied with scale {pag_scale} (attention hook active)")
+        logger.info(
+            "PAG-style self-attention perturbation applied at scale %.3f. This "
+            "is not the full Ahn et al. 2024 method (no separate perturbed "
+            "forward pass); treat it as a mid-block attention guidance term.",
+            pag_scale,
+        )
         return model_pag
 
     except (AttributeError, RuntimeError, TypeError) as e:
@@ -1003,20 +1210,7 @@ def apply_pag_to_model(model, pag_scale: float):
 
 AYS_ANCHORS = {
     "sdxl": [14.615, 6.315, 3.771, 1.181, 0.468, 0.131, 0.029, 0.0],
-    "sd15": [
-        14.615,
-        6.475,
-        3.861,
-        2.697,
-        1.886,
-        1.396,
-        0.963,
-        0.652,
-        0.399,
-        0.152,
-        0.029,
-        0.0,
-    ],
+    "sd1.5": [14.615, 6.475, 3.861, 2.697, 1.886, 1.396, 0.963, 0.652, 0.399, 0.152, 0.029, 0.0],
 
     "flux": [1.0, 0.90, 0.70, 0.45, 0.22, 0.08, 0.02, 0.0],
     "sd3": [14.615, 6.291, 3.438, 1.566, 0.741, 0.288, 0.079, 0.0],
@@ -1031,7 +1225,8 @@ def get_ays_sigmas(model_type: str, steps: int) -> Optional[torch.Tensor]:
     key = model_type if model_type in AYS_ANCHORS else None
     if key is None:
 
-        if model_type in ("sd35",):
+        # ALBABIT-FIX: renamed from "sd35" to "sd3.5"
+        if model_type in ("sd3.5",):
             key = "sd3"
         elif model_type in ("chroma",):
             key = "flux"
@@ -1188,6 +1383,82 @@ def build_sigma_report(
 
     return "\n".join(lines)
 
+# ── Per-frame seeding ────────────────────────────────────────────────────────
+#
+# Two defects lived in every `torch.manual_seed(seed + f)` in this file.
+#
+#   1. Overflow. The sampler's `seed` widget is min 0, max 0xFFFFFFFFFFFFFFFF.
+#      `seed + f` on a 5D latent with T >= 2 therefore exceeds the 64-bit range
+#      torch.manual_seed accepts and raises
+#      "RuntimeError: Overflow when unpacking long". The Uniform/Gaussian
+#      branch in generate_noise sits above that function's try/except, so it
+#      was not even caught: seed=2**64-1 with any of Uniform, Perlin, Spectral,
+#      Brownian, Simplex, Voronoi or Curl hard-failed the node.
+#
+#   2. Correlation between neighbouring seeds. `seed + f` makes run S frame f
+#      bit-identical to run S+1 frame f-1, so incrementing the seed produced a
+#      one-frame temporal SHIFT of the same noise rather than an independent
+#      draw. Anyone stepping the seed to explore variations was re-rendering
+#      the same noise field.
+#
+# derive_frame_seed mixes seed and frame through splitmix64's finalizer, which
+# decorrelates adjacent inputs and stays inside [0, 2**64-1] by construction.
+_SEED_MASK_64 = 0xFFFFFFFFFFFFFFFF
+_SPLITMIX_GAMMA = 0x9E3779B97F4A7C15
+
+#: Uniform noise is scaled to unit variance: Var(U[-s, s]) = s^2/3, so s = sqrt(3).
+_UNIFORM_HALF_RANGE = 3.0 ** 0.5
+
+
+def _mix64(x: int) -> int:
+    """splitmix64 finalizer. Avalanches every input bit across all 64 outputs."""
+    x &= _SEED_MASK_64
+    x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & _SEED_MASK_64
+    x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & _SEED_MASK_64
+    return (x ^ (x >> 31)) & _SEED_MASK_64
+
+
+def derive_frame_seed(seed: Optional[int], frame: int, stream: int = 0) -> int:
+    """A per-frame seed in [0, 2**64-1], independent across both seed and frame.
+
+    *stream* separates independent noise sequences that share a frame index
+    (e.g. the two draws per step in a temporally correlated walk).
+    """
+    base = int(seed if seed is not None else 0) & _SEED_MASK_64
+    offset = ((int(frame) + 1) * _SPLITMIX_GAMMA + int(stream)) & _SEED_MASK_64
+    return _mix64(base ^ _mix64(offset))
+
+
+def _fill_frame_(dst: torch.Tensor, kind: str, generator) -> torch.Tensor:
+    """Fill *dst* in place with one frame of noise, allocating nothing.
+
+    Writing straight into a slice of the output buffer is what keeps peak
+    memory at one frame instead of T frames; see generate_noise.
+    """
+    try:
+        if kind == "Gaussian":
+            return dst.normal_(generator=generator)
+        return dst.uniform_(-_UNIFORM_HALF_RANGE, _UNIFORM_HALF_RANGE, generator=generator)
+    except RuntimeError:
+        # Narrow dtypes (fp8) have no in-place normal_/uniform_ kernel. One
+        # frame-sized float32 temporary is still O(1/T) of the old list.
+        if kind == "Gaussian":
+            src = torch.randn(tuple(dst.shape), device=dst.device, generator=generator)
+        else:
+            src = (
+                torch.rand(tuple(dst.shape), device=dst.device, generator=generator) * 2 - 1
+            ) * _UNIFORM_HALF_RANGE
+        return dst.copy_(src)
+
+
+def _frame_generator(device) -> torch.Generator:
+    """A torch.Generator bound to *device*, falling back to CPU if unsupported."""
+    try:
+        return torch.Generator(device=device)
+    except (RuntimeError, TypeError):
+        return torch.Generator()
+
+
 def _temporally_correlate(
     noise_fn, shape: tuple, device: torch.device, alpha: float = 0.6,
     seed: Optional[int] = None,
@@ -1196,23 +1467,31 @@ def _temporally_correlate(
     B, C, T, H, W = shape
     frame_shape = (B, C, H, W)
 
-    frames = []
+    # MEMORY: this used to append T tensors of (B, C, H, W) to a Python list and
+    # then torch.stack them, so the list and the stacked copy were alive
+    # together, i.e. 2x the sequence at the moment of the stack on top of
+    # whatever the sampler already held. Write each frame straight into a
+    # pre-allocated buffer instead: peak is the buffer plus two working frames,
+    # independent of T.
+    result = torch.empty(shape, device=device)
+
     if seed is not None:
-        torch.manual_seed(seed)
+        torch.manual_seed(derive_frame_seed(seed, -1, stream=1))
     prev = noise_fn(frame_shape, device)
+    scale = math.sqrt(1 - alpha ** 2)
     for f in range(T):
         if seed is not None:
-            torch.manual_seed(seed + f + 1)                                   
+            torch.manual_seed(derive_frame_seed(seed, f))
         curr = noise_fn(frame_shape, device)
-        blended = alpha * prev + math.sqrt(1 - alpha ** 2) * curr
-        frames.append(blended)
-        prev = blended
+        # prev is carried into the next iteration, so it has to stay a tensor
+        # of its own rather than an alias of the output slice.
+        prev = alpha * prev + scale * curr
+        result[:, :, f].copy_(prev)
+    del prev, curr
 
-    result = torch.stack(frames, dim=2)                     
-
-    result = result - result.mean()
+    result -= result.mean()
     std = result.std().clamp(min=1e-6)
-    return result / std
+    return result.div_(std)
 
 def _perlin_noise(shape: tuple, device: torch.device, seed: Optional[int] = None) -> torch.Tensor:
 
@@ -1314,23 +1593,27 @@ def _brownian_noise(
     seed: Optional[int] = None,
 ) -> torch.Tensor:
 
+    # MEMORY: both walks below used to build a Python list of T frames and then
+    # torch.stack it, holding the list and the stacked copy at once. They now
+    # write each step into a pre-allocated buffer, so peak is the buffer plus
+    # the single carried frame. Seeds go through derive_frame_seed; see the
+    # note above it for the overflow and adjacent-seed defects that fixes.
     if len(shape) == 5 and shape[2] > 1:
         B, C, T, H, W = shape
-        alpha = 0.7                                          
+        alpha = 0.7
 
         frame_shape = (B, C, H, W)
-        noises = []
+        out = torch.empty(shape, device=device)
         if seed is not None:
-            torch.manual_seed(seed)
+            torch.manual_seed(derive_frame_seed(seed, -1, stream=1))
         prev = torch.randn(frame_shape, device=device)
+        scale = math.sqrt(1 - alpha ** 2)
         for f in range(T):
             if seed is not None:
-                torch.manual_seed(seed + f + 1)
-            curr = alpha * prev + math.sqrt(1 - alpha ** 2) * torch.randn(frame_shape, device=device)
-            noises.append(curr)
-            prev = curr
-
-        return torch.stack(noises, dim=2)
+                torch.manual_seed(derive_frame_seed(seed, f))
+            prev = alpha * prev + scale * torch.randn(frame_shape, device=device)
+            out[:, :, f].copy_(prev)
+        return out
 
     if frames is None or (len(shape) == 4 and shape[0] == 1):
         return _spectral_noise(shape, device, seed=seed)
@@ -1339,17 +1622,17 @@ def _brownian_noise(
     # old code used the global torch RNG state unmodified, so the same
     # seed could produce different output depending on upstream calls.
     alpha = 0.7
-    noises = []
+    out = torch.empty(shape, device=device)
     if seed is not None:
-        torch.manual_seed(seed)
+        torch.manual_seed(derive_frame_seed(seed, -1, stream=1))
     prev = torch.randn(shape[1:], device=device)
+    scale = math.sqrt(1 - alpha ** 2)
     for f in range(shape[0]):
         if seed is not None:
-            torch.manual_seed(seed + f + 1)
-        curr = alpha * prev + math.sqrt(1 - alpha ** 2) * torch.randn(shape[1:], device=device)
-        noises.append(curr)
-        prev = curr
-    return torch.stack(noises, dim=0)
+            torch.manual_seed(derive_frame_seed(seed, f))
+        prev = alpha * prev + scale * torch.randn(shape[1:], device=device)
+        out[f].copy_(prev)
+    return out
 
 
 # ── v2.4 Phase 4: New noise generators (pure PyTorch, no native deps) ─────────
@@ -1366,13 +1649,17 @@ def _simplex_noise(shape: tuple, device: torch.device,
 
     if len(shape) == 5:
         B, C, T, H, W = shape
-        # PERF-SIMPLEX-LOOP FIX: pre-generate all frames then stack — avoids
-        # repeated Python-level dispatch overhead across T iterations.
-        frames = [
-            _simplex_noise((B, C, H, W), device, seed=(seed or 0) + t)
-            for t in range(T)
-        ]
-        return torch.stack(frames, dim=2)
+        # MEMORY: the list comprehension here held all T frames alive at once
+        # and then torch.stack doubled that. Write each frame into the output
+        # buffer as it is produced. Seed via derive_frame_seed: `(seed or 0) + t`
+        # overflowed at seed=2**64-1 and shifted rather than changed the field
+        # between adjacent seeds.
+        out = torch.empty(shape, device=device)
+        for t in range(T):
+            out[:, :, t].copy_(
+                _simplex_noise((B, C, H, W), device, seed=derive_frame_seed(seed, t))
+            )
+        return out
 
     # Work on last 2 dims (spatial)
     out_shape = shape
@@ -1452,12 +1739,14 @@ def _voronoi_noise(shape: tuple, device: torch.device,
     """
     if len(shape) == 5:
         B, C, T, H, W = shape
-        # PERF-VORONOI-LOOP FIX: pre-generate all frames then stack.
-        frames = [
-            _voronoi_noise((B, C, H, W), device, seed=(seed or 0) + t)
-            for t in range(T)
-        ]
-        return torch.stack(frames, dim=2)
+        # MEMORY + SEED: same list-plus-stack and `(seed or 0) + t` defects as
+        # the simplex path above. See derive_frame_seed.
+        out = torch.empty(shape, device=device)
+        for t in range(T):
+            out[:, :, t].copy_(
+                _voronoi_noise((B, C, H, W), device, seed=derive_frame_seed(seed, t))
+            )
+        return out
 
     if len(shape) == 4:
         B, C, H, W = shape
@@ -1517,9 +1806,12 @@ def _curl_noise(shape: tuple, device: torch.device,
 
     if len(shape) == 5:
         B, C, T, H, W = shape
-        result = torch.zeros(shape, device=device)
+        # Already writes into a pre-allocated buffer. The seed derivation is the
+        # fix here: `(seed or 0) + t` overflowed torch.manual_seed at
+        # seed=2**64-1 and made adjacent seeds a one-frame shift of each other.
+        result = torch.empty(shape, device=device)
         for t in range(T):
-            result[:, :, t] = _curl_noise((B, C, H, W), device, seed=(seed or 0) + t)
+            result[:, :, t] = _curl_noise((B, C, H, W), device, seed=derive_frame_seed(seed, t))
         return result
 
     if len(shape) == 4:
@@ -1567,19 +1859,26 @@ def generate_noise(
     is_video = len(shape) == 5 and shape[2] > 1
     if is_video and noise_type in ("Gaussian", "Uniform"):
         B, C, T, H, W = shape
-        frame_shape = (B, C, H, W)
-        frame_noises = []
+        # MEMORY: this branch built a Python list of T (B, C, H, W) tensors and
+        # then torch.stack'd it, so the list and the stacked result were alive
+        # simultaneously -- two full copies of the whole sequence at the peak,
+        # before the sampler's own latent/work/noise/stage buffers are counted.
+        # Allocate the output once and fill each frame in place. Peak is now one
+        # copy of the sequence, flat in T.
+        #
+        # SEED: `torch.manual_seed(seed + f)` lived ABOVE the try/except below,
+        # so the overflow at seed=2**64-1 was not even caught. It also made
+        # adjacent seeds a one-frame shift of one another. derive_frame_seed
+        # fixes both; a dedicated Generator additionally stops this from
+        # stomping the global RNG state that the rest of the graph shares.
+        out = torch.empty(shape, device=device, dtype=dtype)
+        gen = _frame_generator(out.device)
         for f in range(T):
-            torch.manual_seed(seed + f)
-            if noise_type == "Gaussian":
-                frame_noises.append(torch.randn(frame_shape, device=device, dtype=dtype))
-            else:
-                frame_noises.append(
-                    (torch.rand(frame_shape, device=device, dtype=dtype) * 2 - 1) * (3 ** 0.5)
-                )
-        return torch.stack(frame_noises, dim=2)
+            gen.manual_seed(derive_frame_seed(seed, f))
+            _fill_frame_(out[:, :, f], noise_type, gen)
+        return out
 
-    torch.manual_seed(seed)
+    torch.manual_seed(int(seed) & _SEED_MASK_64)
 
     try:
         if noise_type == "Gaussian":
@@ -1676,15 +1975,189 @@ def merge_conditionings(
     return cond_a
 
 def route_conditioning(cond: List, target_key: str) -> List:
+    """No-op. Kept so existing graphs and imports keep working.
 
+    DEFECT: this used to write ``new_entry[1]["encoder_target"] = target_key``
+    and the sampler logged "Conditioning routed to clip_g". Nothing reads
+    ``encoder_target``: not ComfyUI 0.32.0, not 0.36.0, and nothing in Radiance.
+    The widget reported success and did nothing.
+
+    It cannot be made to work from here either. Which text encoder produced an
+    embedding is decided at ENCODE time; by the time a CONDITIONING list reaches
+    a sampler it is a finished tensor with no encoder identity left to change.
+    Routing to a specific slot means encoding with that slot's CLIP up front
+    (a separate CLIPTextEncode per encoder, e.g. ComfyUI's CLIPTextEncodeSDXL),
+    which is a graph change, not a sampler flag.
+
+    Returns *cond* unchanged and warns, rather than returning a copy carrying a
+    key that only makes the no-op harder to notice.
+    """
     if not target_key or target_key == "Auto":
         return cond
-    routed = []
-    for entry in cond:
-        new_entry = [entry[0], dict(entry[1]) if len(entry) > 1 else {}]
-        new_entry[1]["encoder_target"] = target_key
-        routed.append(new_entry)
-    return routed
+
+    logger.warning(
+        "[Radiance] conditioning_clip_target='%s' is ignored. Which text encoder "
+        "produced a CONDITIONING is fixed when it is encoded, so a sampler cannot "
+        "re-route it. Encode per-encoder instead (e.g. CLIPTextEncodeSDXL for "
+        "clip_l/clip_g, or a dedicated T5 encode for t5xxl) and feed that in. "
+        "Set this back to 'Auto' to silence this warning.",
+        target_key,
+    )
+    return cond
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Overlapping temporal windows, long-video sampling
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# A video model attends across the temporal axis, so slicing a long latent into
+# independent chunks and denoising each on its own produces visible seams and
+# content that drifts between chunks. The established fix is overlapping
+# windows with per-step blending: the clip is covered by windows that share
+# some latent frames, EVERY denoising step is evaluated per window, and the
+# overlapping frames are blended at that step before the next one begins.
+#
+# The per-step part is the whole point. Blending windows that have each been
+# denoised to completion re-creates exactly the seams the technique exists to
+# remove, because by then the two windows have committed to different content.
+#
+# The weighting below is the temporal form of what RadianceUpscaleVideo already
+# does for pixels (nodes/upscale/upscale.py), including its half-sample ramp
+# offset, which fixed a real black-frame bug: a ramp of the literal form
+# sin(pi * i / (2 * half)) is 0 at i == 0, so with overlap=1 the single shared
+# frame received a zero weight from both neighbours and normalised to black.
+# Offsetting by half a sample keeps the shape and makes every weight strictly
+# positive. The squaring is taken from core/tiling.py's spatial ramp: sin^2 and
+# cos^2 sum to exactly 1, so two overlapping ramps are a partition of unity
+# before any normalisation, not merely after it.
+
+
+def plan_temporal_windows(
+    total_frames: int, window_size: int, overlap: int
+) -> List[Tuple[int, int]]:
+    """Window bounds ``[(f0, f1), ...]`` covering ``range(total_frames)``.
+
+    The first window starts at frame 0 and the last ends at *total_frames*, so
+    every frame is covered. Windows are returned in ascending order and no
+    window is contained in another. A clip that fits in one window returns a
+    single full-length window, which is what makes windowing a no-op below the
+    threshold.
+
+    Pure function of its three arguments, so the same clip and settings always
+    produce the same plan, on any machine and on any rerun.
+    """
+    total_frames = int(total_frames)
+    window_size = int(window_size)
+    if total_frames <= 0:
+        return []
+    if window_size <= 0 or total_frames <= window_size:
+        return [(0, total_frames)]
+
+    # Shared with the spatial tilers: an overlap >= window collapses the stride
+    # to 1 and turns the run into total_frames windows.
+    overlap = clamp_overlap(window_size, overlap)
+    stride = max(1, window_size - overlap)
+
+    last_start = total_frames - window_size
+    starts: List[int] = []
+    cursor = 0
+    while True:
+        start = min(cursor, last_start)
+        if not starts or start > starts[-1]:
+            starts.append(start)
+        if start + window_size >= total_frames:
+            break
+        cursor += stride
+
+    # The final window is pulled back to end on the last frame, so it can sit
+    # closer to its predecessor than the stride. When that gap is smaller than
+    # the overlap, THREE windows cover the frames around the join, and three
+    # overlapping ramps cannot sum to one however they are shaped. The middle
+    # window is redundant there: dropping it leaves a gap of
+    # (last_start - starts[-3]) + stride < overlap + stride == window_size, so
+    # coverage stays continuous and every frame is shared by at most two
+    # windows. One drop always suffices, because the new gap is at least
+    # `stride`, and stride >= overlap once the overlap is clamped to half.
+    if len(starts) >= 3 and starts[-1] - starts[-2] < overlap:
+        del starts[-2]
+
+    return [(s, s + window_size) for s in starts]
+
+
+def temporal_window_weights(
+    windows: List[Tuple[int, int]], index: int, device=None, dtype=None
+) -> torch.Tensor:
+    """Blend weight per frame for ``windows[index]``, shaped (1, 1, L, 1, 1).
+
+    Ramp lengths come from the ACTUAL overlap with each neighbour rather than
+    from the requested overlap, because the last window is pulled back to end
+    on the final frame and can therefore share more frames with its predecessor
+    than the setting asks for. Using the real overlap keeps sin^2 + cos^2 == 1
+    across the shared region in that case too.
+
+    Every weight is strictly positive, so dividing by the accumulated weight is
+    safe and no frame can normalise to zero.
+    """
+    f0, f1 = windows[index]
+    length = f1 - f0
+    weight = torch.ones(length, device=device, dtype=dtype or torch.float32)
+    if length <= 1:
+        return weight.view(1, 1, length, 1, 1)
+
+    lead = windows[index - 1][1] - f0 if index > 0 else 0
+    trail = f1 - windows[index + 1][0] if index < len(windows) - 1 else 0
+
+    lead = max(lead, 0)
+    trail = max(trail, 0)
+
+    # A ramp must span the WHOLE shared region. Clamping it to half the window,
+    # as the spatial tiler does, would leave the frames beyond the ramp at full
+    # weight in both windows, and those frames would sum to 2 instead of 1. The
+    # real constraint is only that the two ramps inside one window must not
+    # touch, because where they overlap they multiply into a dip. The planner
+    # guarantees lead + trail <= length, so this is defensive; if it is ever
+    # violated, fall back to splitting the window between the two ramps rather
+    # than letting them cross.
+    if lead + trail > length:
+        half = max(0, length // 2)
+        lead = min(lead, half)
+        trail = min(trail, length - half)
+
+    if lead > 0:
+        i = torch.arange(lead, device=device, dtype=weight.dtype)
+        weight[:lead] = torch.sin(math.pi * (i + 0.5) / (2 * lead)) ** 2
+    if trail > 0:
+        # Counted from the last frame inward, then flipped into place, so the
+        # window fades out exactly as its successor fades in.
+        i = torch.arange(trail, device=device, dtype=weight.dtype)
+        weight[length - trail:] = (torch.sin(math.pi * (i + 0.5) / (2 * trail)) ** 2).flip(0)
+
+    return weight.view(1, 1, length, 1, 1)
+
+
+def slice_conds_temporally(c: Dict[str, Any], f0: int, f1: int, total_frames: int) -> Dict[str, Any]:
+    """Copy of the model kwargs *c* with temporal entries cut to ``[f0, f1)``.
+
+    Text embeddings carry no temporal axis and are shared by every window
+    untouched. Entries that DO carry one -- an image-to-video model's
+    ``c_concat`` conditioning frames, for instance -- have to follow the window
+    or the model is told about frames it is not being shown.
+
+    Anything that is not a 5D tensor whose temporal dim matches the clip is
+    passed through unchanged, which is the safe default: a wrong slice is worse
+    than no slice.
+    """
+    out = {}
+    for key, value in c.items():
+        if (
+            isinstance(value, torch.Tensor)
+            and value.ndim == 5
+            and value.shape[2] == total_frames
+        ):
+            out[key] = value[:, :, f0:f1]
+        else:
+            out[key] = value
+    return out
+
 
 def tile_sample(
     model,
@@ -1711,6 +2184,9 @@ def tile_sample(
         )
 
     B, C, H, W = latent_samples.shape
+    # An overlap >= tile_size collapses the stride to 1 and turns this into
+    # millions of tile inferences; only one of five tilers checked for it.
+    tile_overlap = clamp_overlap(tile_size, tile_overlap)
     step = max(1, tile_size - tile_overlap)
     device = latent_samples.device
 
@@ -1748,8 +2224,22 @@ def tile_sample(
                 seed=seed + idx,
             )
         except Exception as e:
-            logger.warning(f"[TileSample] Tile ({y1},{y2},{x1},{x2}) failed: {e} — using input")
-            t_out = t_latent
+            # DEFECT: this used to set `t_out = t_latent`, the UN-DENOISED input
+            # slice, feather it into the output and let the run report success.
+            # The condition that makes a tile fail is almost always OOM at high
+            # resolution, which is the exact condition tiling exists to avoid,
+            # so the failure mode was a finished plate with a rectangle of raw
+            # latent noise in it and nothing above INFO to say so. A delivery
+            # pipeline has to fail the node instead.
+            raise RuntimeError(
+                f"[Radiance] Tiled sampling failed on tile {idx + 1}/{len(tile_coords)} "
+                f"at latent rows {y1}:{y2}, cols {x1}:{x2} (tile_size={tile_size}, "
+                f"tile_overlap={tile_overlap}).\n\n"
+                f"The node fails rather than substituting the un-denoised input for "
+                f"this tile, which would have left raw latent noise in the output.\n\n"
+                f"If this is an out-of-memory error, lower tile_size or tile_overlap.\n\n"
+                f"Original error: {e}"
+            ) from e
 
         if t_out.device != device or t_out.dtype != latent_samples.dtype:
             t_out = t_out.to(device=device, dtype=latent_samples.dtype)
@@ -1758,17 +2248,19 @@ def tile_sample(
         tw = x2 - x1
 
         if tile_blend == "feather":
-
-            wy = torch.ones(th, device=device)
-            wx = torch.ones(tw, device=device)
-            fade = min(tile_overlap, th // 2, tw // 2)
-            if fade > 0:
-                ramp = (1 - torch.cos(torch.linspace(0, math.pi, fade, device=device))) / 2
-                wy[:fade] = ramp
-                wy[-fade:] = ramp.flip(0)
-                wx[:fade] = ramp
-                wx[-fade:] = ramp.flip(0)
-            w_tile = (wy.unsqueeze(1) * wx.unsqueeze(0)).unsqueeze(0).unsqueeze(0)
+            # Border-aware feather via the shared helper. The previous inline
+            # ramp started at exactly 0 and was applied to all four edges of
+            # every tile, including edges lying on the image border -- those
+            # pixels are covered by no other tile, so dividing by the
+            # accumulated weight gave 0/1e-6 == 0 and produced a black band
+            # around the whole latent (8 image pixels wide after the VAE).
+            ov_t, ov_b, ov_l, ov_r = edge_overlaps_from_coords(
+                y1, y2, x1, x2, H, W, tile_overlap
+            )
+            w_tile = blend_weight_2d(
+                th, tw, ov_t, ov_b, ov_l, ov_r,
+                device=device, dtype=latent_samples.dtype,
+            )
         elif tile_blend == "gaussian":
             sigma_h = th / 4.0
             sigma_w = tw / 4.0

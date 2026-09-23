@@ -1,4 +1,5 @@
 import torch
+import math
 import numpy as np
 import logging
 from typing import Tuple, Dict, Any
@@ -34,6 +35,12 @@ from radiance.color.transfer import (
 )
 
 logger = logging.getLogger("radiance.hdr.color")
+
+#: Scene-light value that BT.2100's HLG OETF maps to signal 0.75 — the reference
+#: white point (~203 nits on a 1000-nit display, per BT.2408). Diffuse white must
+#: land here, not at 1.0.
+_HLG_DIFFUSE_WHITE_SCENE = 0.26
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -438,6 +445,49 @@ class ColorSpaceConvert:
 
     # Industry-standard precomputed matrices
     FAST_MATRICES = {
+        # ── The three spaces that used to fall through ──────────────────
+        #
+        # `_get_primaries_key` returns "ACES2065-1", "DCI-P3" and "Display_P3"
+        # verbatim, and no "<name>_to_Rec709" key existed for them -- so the
+        # lookup below missed, logged a warning nobody reads, and applied NO
+        # primaries transform at all. Three of the twelve advertised spaces
+        # therefore returned the Rec.709 result byte-identically: (1,0,0) in
+        # ACES2065-1 gave [0.613097, 0.070194, 0.020616] where AP0->AP1 should
+        # give [1.4514, -0.0766, 0.0083].
+        #
+        # Derived from the published primaries and white points, Bradford-
+        # adapted to D65 where the source white differs (AP0 is D60, DCI-P3 is
+        # the DCI white). Each one maps [1,1,1] to [1,1,1] exactly.
+        "ACES2065-1_to_Rec709": np.array([
+            [2.5216861867, -1.1341309882, -0.3875551985],
+            [-0.2764799142, 1.3727190877, -0.0962391734],
+            [-0.0153780650, -0.1529753359, 1.1683534008],
+        ], dtype=np.float32),
+        "Rec709_to_ACES2065-1": np.array([
+            [0.4396329819, 0.3829886982, 0.1773783199],
+            [0.0897764430, 0.8134394287, 0.0967841283],
+            [0.0175411704, 0.1115465533, 0.8709122763],
+        ], dtype=np.float32),
+        "DCI-P3_to_Rec709": np.array([
+            [1.1575164062, -0.1549623781, -0.0025540281],
+            [-0.0415000715, 1.0455679231, -0.0040678515],
+            [-0.0180500390, -0.0785782727, 1.0966283116],
+        ], dtype=np.float32),
+        "Rec709_to_DCI-P3": np.array([
+            [0.8685797397, 0.1289191385, 0.0025011218],
+            [0.0345404103, 0.9618113864, 0.0036482034],
+            [0.0167714290, 0.0710399978, 0.9121885732],
+        ], dtype=np.float32),
+        "Display_P3_to_Rec709": np.array([
+            [1.2249401763, -0.2249401763, 0.0000000000],
+            [-0.0420569547, 1.0420569547, -0.0000000000],
+            [-0.0196375546, -0.0786360456, 1.0982736001],
+        ], dtype=np.float32),
+        "Rec709_to_Display_P3": np.array([
+            [0.8224619687, 0.1775380313, -0.0000000000],
+            [0.0331941989, 0.9668058011, -0.0000000000],
+            [0.0170826307, 0.0723974407, 0.9105199286],
+        ], dtype=np.float32),
         "sRGB_to_ACEScg": np.array(
             [
                 [0.613097, 0.339523, 0.047379],
@@ -551,7 +601,17 @@ class ColorSpaceConvert:
                 ),
                 "chromatic_adaptation": (
                     cls.CHROMATIC_ADAPTATIONS,
-                    {"default": "Bradford"},
+                    {
+                        "default": "Bradford",
+                        "tooltip": (
+                            "Chromatic adaptation method. NOTE: the D60<->D65 "
+                            "adaptation is already baked into the precomputed "
+                            "FAST_MATRICES this node converts with (Bradford), "
+                            "so changing this does not currently alter the "
+                            "output. Kept for workflow compatibility; selecting "
+                            "a non-Bradford method logs a warning."
+                        ),
+                    },
                 ),
                 "use_gpu": ("BOOLEAN", {"default": True,
                     "tooltip": "Run the effect on GPU via CUDA/MPS. Falls back to CPU if unavailable.",
@@ -727,6 +787,15 @@ class ColorSpaceConvert:
         use_gpu: bool = True,
     ) -> Tuple[torch.Tensor]:
 
+        # The conversion below goes through a Rec.709 hub using precomputed
+        # FAST_MATRICES, which already carry a Bradford D60<->D65 adaptation.
+        # `_get_gpu_adaptation_matrix` exists and is called from nowhere in the
+        # repo, so this widget has never changed a single pixel: "Bradford" and
+        # "None" return bit-identical tensors. Say so rather than letting a
+        # colourist believe they picked a CAT.
+        if chromatic_adaptation != "Bradford":
+            _warn_adaptation_is_baked_in(chromatic_adaptation)
+
         if source_space == target_space:
             # Still apply exposure/gamma if requested
             if exposure != 0.0 or gamma_adjust != 1.0:
@@ -828,6 +897,58 @@ _AP1_TO_XYZ = np.array(
     dtype=np.float32,
 )
 
+# ── Chromatic adaptation ────────────────────────────────────────────────────
+# AP1 (ACEScg) is defined at D60; sRGB, DaVinci Wide Gamut and ARRI Wide Gamut 4
+# are all D65. Crossing between them via XYZ without adapting the white point
+# leaves a visible tint on neutrals -- a D65 white arrives in ACEScg as a
+# non-neutral triplet. These constants supply the missing step.
+
+_WP_D65_XY = (0.3127, 0.3290)
+_WP_D60_XY = (0.32168, 0.33767)   # ACES white
+
+_BRADFORD = np.array(
+    [
+        [ 0.8951,  0.2664, -0.1614],
+        [-0.7502,  1.7135,  0.0367],
+        [ 0.0389, -0.0685,  1.0296],
+    ],
+    dtype=np.float64,
+)
+
+
+def _xy_to_XYZ(xy) -> np.ndarray:
+    x, y = xy
+    return np.array([x / y, 1.0, (1.0 - x - y) / y], dtype=np.float64)
+
+
+_warned_adaptation_methods: set = set()
+
+
+def _warn_adaptation_is_baked_in(method: str) -> None:
+    """One warning per method per process — this is a config fact, not an event."""
+    if method in _warned_adaptation_methods:
+        return
+    _warned_adaptation_methods.add(method)
+    logger.warning(
+        "[Radiance] chromatic_adaptation=%r has no effect. The white-point "
+        "adaptation is baked into the precomputed conversion matrices "
+        "(Bradford), so every option on this widget produces identical output. "
+        "Selecting a different CAT would need the hub conversion rebuilt.",
+        method,
+    )
+
+
+def _chromatic_adaptation(src_xy, dst_xy) -> np.ndarray:
+    """Bradford von-Kries adaptation matrix, XYZ(src white) -> XYZ(dst white)."""
+    src_cone = _BRADFORD @ _xy_to_XYZ(src_xy)
+    dst_cone = _BRADFORD @ _xy_to_XYZ(dst_xy)
+    scale = np.diag(dst_cone / src_cone)
+    return (np.linalg.inv(_BRADFORD) @ scale @ _BRADFORD).astype(np.float32)
+
+
+_ADAPT_D65_TO_D60 = _chromatic_adaptation(_WP_D65_XY, _WP_D60_XY)
+_ADAPT_D60_TO_D65 = _chromatic_adaptation(_WP_D60_XY, _WP_D65_XY)
+
 
 class DaVinciWideGamut:
     """
@@ -858,26 +979,25 @@ class DaVinciWideGamut:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = "Convert to/from DaVinci Wide Gamut and DaVinci Intermediate."
 
-    # DaVinci Wide Gamut to/from XYZ (D65)
+    # DaVinci Wide Gamut to/from XYZ (D65), per Blackmagic's published values.
+    #
+    # The third row used to read [-0.0099, -0.0315, 0.9417], which is wrong: a
+    # colour matrix's row sums are its implied white point, and that gave
+    # (0.9507, 1.0000, 0.9003) against D65's (0.95047, 1.0, 1.08883) -- roughly
+    # 17% short on blue, so every neutral picked up a green/yellow cast. Rows 0
+    # and 1 were already correct to 4dp. Verified: M @ [1,1,1] == D65 XYZ.
     DWG_TO_XYZ = np.array(
         [
-            [0.7006, 0.1487, 0.1014],
-            [0.2741, 0.8736, -0.1477],
-            [-0.0099, -0.0315, 0.9417],
+            [0.7006224, 0.1487748, 0.1010587],
+            [0.2741185, 0.8736319, -0.1477504],
+            [-0.0989629, -0.1378953, 1.3259160],
         ],
         dtype=np.float32,
     )
 
-    XYZ_TO_DWG = np.linalg.inv(
-        np.array(
-            [
-                [0.7006, 0.1487, 0.1014],
-                [0.2741, 0.8736, -0.1477],
-                [-0.0099, -0.0315, 0.9417],
-            ],
-            dtype=np.float32,
-        )
-    ).astype(np.float32)
+    # Derived from DWG_TO_XYZ rather than a second literal -- the duplicate
+    # literal that used to live here is how the two drifted apart.
+    XYZ_TO_DWG = np.linalg.inv(DWG_TO_XYZ).astype(np.float32)
 
     # v2.1: Use shared module-level matrices
     SRGB_TO_XYZ = _SRGB_TO_XYZ
@@ -939,11 +1059,12 @@ class DaVinciWideGamut:
                 result = xyz @ self.XYZ_TO_SRGB.T
 
             elif transform == "DaVinci WG to ACEScg":
-                xyz = img @ self.DWG_TO_XYZ.T
+                # DWG is D65, AP1 is D60 -- adapt, or neutrals pick up a tint.
+                xyz = img @ self.DWG_TO_XYZ.T @ _ADAPT_D65_TO_D60.T
                 result = xyz @ _XYZ_TO_AP1.T
 
             else:  # ACEScg to DaVinci WG
-                xyz = img @ _AP1_TO_XYZ.T
+                xyz = img @ _AP1_TO_XYZ.T @ _ADAPT_D60_TO_D65.T
                 result = xyz @ self.XYZ_TO_DWG.T
             
             result_batch[b] = result
@@ -979,26 +1100,22 @@ class ARRIWideGamut4:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = "Convert to/from ARRI Wide Gamut 4 (AWG4) for Alexa 35."
 
-    # ARRI Wide Gamut 4 to XYZ (D65)
+    # ARRI Wide Gamut 4 to XYZ (D65), per ARRI's published values.
+    #
+    # The third row used to read [-0.0094877, -0.0324927, 0.8954361], giving a
+    # white point of (0.9505, 1.0000, 0.8535) -- 22% short on blue. AWG4's
+    # primaries are chosen so the true third row is exactly [0, 0, 1.0890578].
+    # Verified: M @ [1,1,1] == D65 XYZ.
     AWG4_TO_XYZ = np.array(
         [
-            [0.7048583, 0.1290112, 0.1166296],
-            [0.2540892, 0.7814076, -0.0354969],
-            [-0.0094877, -0.0324927, 0.8954361],
+            [0.7048583, 0.1297603, 0.1158373],
+            [0.2545242, 0.7814777, -0.0360019],
+            [0.0000000, 0.0000000, 1.0890578],
         ],
         dtype=np.float32,
     )
 
-    XYZ_TO_AWG4 = np.linalg.inv(
-        np.array(
-            [
-                [0.7048583, 0.1290112, 0.1166296],
-                [0.2540892, 0.7814076, -0.0354969],
-                [-0.0094877, -0.0324927, 0.8954361],
-            ],
-            dtype=np.float32,
-        )
-    ).astype(np.float32)
+    XYZ_TO_AWG4 = np.linalg.inv(AWG4_TO_XYZ).astype(np.float32)
 
     # v2.1: Use shared module-level matrices
     SRGB_TO_XYZ = _SRGB_TO_XYZ
@@ -1018,11 +1135,12 @@ class ARRIWideGamut4:
         for b in range(batch):
             img = img_full[b]
             if direction == "AWG4 to ACEScg":
-                xyz = img @ self.AWG4_TO_XYZ.T
+                # AWG4 is D65, AP1 is D60 -- adapt, or neutrals pick up a tint.
+                xyz = img @ self.AWG4_TO_XYZ.T @ _ADAPT_D65_TO_D60.T
                 result = xyz @ self.XYZ_TO_AP1.T
 
             elif direction == "ACEScg to AWG4":
-                xyz = img @ self.AP1_TO_XYZ.T
+                xyz = img @ self.AP1_TO_XYZ.T @ _ADAPT_D60_TO_D65.T
                 result = xyz @ self.XYZ_TO_AWG4.T
 
             elif direction == "AWG4 to Linear sRGB":
@@ -1240,12 +1358,69 @@ class ACES2OutputTransform:
 
         return result
 
+    @staticmethod
+    def _tanh_tonescale_scalar(x, peak_scale, contrast, toe_power=2.0, pivot=0.18):
+        """The per-channel curve of `_apply_tonescale_drt`, for one value.
+
+        Used to probe where 18% grey lands so the input can be scaled to put
+        it on the ACES 2.0 reference. This duplicates the chain in the main
+        loop deliberately — the loop is vectorised over an image and this is
+        called once on a scalar. `test_aces2_reference_grey.py` asserts the two
+        agree, so the copy cannot drift silently.
+        """
+        channel = max(float(x), 1e-10)
+
+        log_contrast = np.log2(channel / pivot) * contrast
+        channel_contrast = float(np.power(2.0, log_contrast) * pivot)
+
+        cc_p = np.power(channel_contrast, toe_power)
+        channel_toe = float(
+            np.power(cc_p / (cc_p + np.power(0.01, toe_power)), 1.0 / toe_power)
+            * channel_contrast
+        )
+
+        knee = min(1.0, 0.9 * peak_scale)
+        headroom = max(peak_scale - knee, 1e-6)
+        if channel_toe < knee:
+            return channel_toe
+        return float(knee + headroom * np.tanh((channel_toe - knee) / headroom))
+
+    def _tanh_tonescale_grey(self, peak_scale, surround_factor):
+        """Where 18% scene grey lands on the uncorrected curve."""
+        return self._tanh_tonescale_scalar(0.18, peak_scale, 1.55 * surround_factor)
+
+    def _solve_grey_gain(self, target, peak_scale, surround_factor):
+        """Input gain g such that curve(0.18 * g) == target.
+
+        Scaling the input by target/curve(0.18) is not enough: the curve is
+        non-linear, so the correction has to be solved rather than computed.
+        The curve is monotonic in x, so bisection converges reliably and this
+        runs once per call, not per pixel.
+        """
+        contrast = 1.55 * surround_factor
+        f = lambda g: self._tanh_tonescale_scalar(0.18 * g, peak_scale, contrast)
+
+        lo, hi = 1e-4, 1.0
+        while f(hi) < target and hi < 1e6:
+            hi *= 2.0
+        if f(hi) < target:            # curve cannot reach it (peak too low)
+            return hi
+
+        for _ in range(60):
+            mid = math.sqrt(lo * hi)  # geometric: the curve is log-ish in x
+            if f(mid) < target:
+                lo = mid
+            else:
+                hi = mid
+        return math.sqrt(lo * hi)
+
     def _apply_tonescale_drt(
         self,
         rgb: np.ndarray,
         peak_luminance: float = 100.0,
         surround: str = "Dim",
         is_hdr: bool = False,
+        grey_anchor: bool = True,
     ) -> np.ndarray:
         """
         Apply ACES 2.0 DRT-style tonescale.
@@ -1260,10 +1435,31 @@ class ACES2OutputTransform:
         surround_factor = {"Dark": 0.9, "Dim": 1.0, "Average": 1.1}.get(surround, 1.0)
 
         peak_scale = peak_luminance / 100.0
+
+        # Anchor 18% grey where ACES 2.0 puts it.
+        #
+        # The log-contrast + tanh shaping below is an approximation of the
+        # reference DRT, and it held grey at ~18 nits on every peak: the right
+        # behaviour in kind (ACES 2.0 does keep the midtone nearly still as the
+        # display gets brighter) but ~0.85 stop above the 10-nit SDR reference.
+        # Scaling the input so 0.18 lands on the published value keeps the
+        # curve's highlight roll-off while putting the midtone where a
+        # reference monitor would.
+        from radiance.hdr.tonescale import aces2_midgrey_nits
+
+        _target_grey = aces2_midgrey_nits(peak_luminance) / 100.0
+        # HLG opts out: it passes a synthetic peak (100 / diffuse-white-scene
+        # = ~385) to shape the curve, not a display luminance, and its grey is
+        # governed by BT.2408 — reference grey at signal 0.38, about 26 nits on
+        # a 1000-nit HLG display — not by the ACES table. Anchoring it here
+        # moved HLG grey to signal 0.31 and broke that deliberate calibration.
+        if grey_anchor:
+            _grey_gain = self._solve_grey_gain(_target_grey, peak_scale, surround_factor)
+            rgb = rgb * _grey_gain
+
         contrast = 1.55 * surround_factor
         pivot = 0.18
         toe_power = 2.0
-        shoulder_power = 1.0 / 2.6
 
         result = np.zeros_like(rgb)
 
@@ -1289,22 +1485,42 @@ class ACES2OutputTransform:
                 * channel_contrast
             )
 
-            # Shoulder (highlights)
-            white_scale = peak_scale
-            channel_shoulder = white_scale * np.power(
-                np.maximum(channel_toe / white_scale, 1e-10), shoulder_power
-            )
+            # Shoulder (highlights).
+            #
+            # Two defects were fixed here:
+            #
+            # 1. Midtones tracked the peak. The old form ended in
+            #    `channel_shoulder / peak_scale`, which divided the WHOLE curve
+            #    -- not just the highlight region -- by the peak. Measured: 18%
+            #    grey rendered at 1.80 nits on a 1000-nit target and 0.45 nits
+            #    on a 4000-nit one. Raising the peak made the picture darker.
+            #    Diffuse midtones must sit at the same luminance regardless of
+            #    how much highlight headroom the display has.
+            #
+            # 2. A 10% step at the knee. The branches disagreed there: with
+            #    tanh(0) == 0 the upper branch evaluated to `white_scale` while
+            #    the lower gave `0.9 * white_scale`, so 0.8999*ws -> 0.89990 and
+            #    0.9001*ws -> 0.99999 -- a visible contour ring around every
+            #    highlight, and non-monotonic past it.
+            #
+            # The replacement keeps everything below the knee identity-mapped
+            # and rolls the excess into the available headroom with a tanh.
+            # It is continuous AND C1 at the knee (d/dx of h*tanh(x/h) is 1 at
+            # x=0, matching the identity below), monotonic everywhere, and
+            # asymptotes to exactly peak_scale.
+            #
+            # The knee sits at diffuse white for HDR, and at 0.9 for SDR so the
+            # existing SDR roll-off is preserved rather than becoming a clip.
+            knee = min(1.0, 0.9 * peak_scale)
+            headroom = max(peak_scale - knee, 1e-6)
+            excess = channel_toe - knee
             channel_shoulder = np.where(
-                channel_toe < white_scale * 0.9,
+                channel_toe < knee,
                 channel_toe,
-                white_scale
-                - (white_scale - channel_shoulder)
-                * np.tanh(
-                    (channel_toe - white_scale * 0.9) / (white_scale * 0.5 + 1e-10)
-                ),
+                knee + headroom * np.tanh(excess / headroom),
             )
 
-            result[..., c] = channel_shoulder / peak_scale
+            result[..., c] = channel_shoulder
 
         # Desaturate very bright highlights (path-to-white)
         luma = self._compute_luminance(result)
@@ -1420,14 +1636,38 @@ class ACES2OutputTransform:
             else:
                 peak_nits = 1000.0
         elif is_cinema:
-            peak_nits = 48.0  # DCI white
+            # 48 nits is the LUMINANCE OF CODE VALUE 1.0 on a DCI projector, not
+            # a scale factor on the scene. Feeding 48 here made peak_scale 0.48,
+            # so the tonescale knee landed at 0.432 with 0.048 of headroom and
+            # the shoulder saturated almost immediately: measured, ACEScg neutral
+            # 0.40 -> 0.75403, 0.50 -> 0.75405, 8.0 -> 0.75405. A theatrical DCP
+            # was flat above 0.4 scene-linear with a peak white of 0.754, i.e.
+            # about 27 nits instead of 48. DCI is a full-range [0,1] encode, so
+            # the tonescale runs SDR-normalised and the 48 belongs in the info
+            # string, not the maths.
+            peak_nits = 100.0
+        elif is_hlg:
+            # HLG is a RELATIVE system. BT.2100's OETF puts HLG reference white
+            # (diffuse white, ~203 nits on a 1000-nit display per BT.2408) at
+            # scene 0.26 -> signal 0.75, and signal 1.0 is the display peak.
+            #
+            # This branch used to fall through to `peak_luminance`, which
+            # defaults to 100, so the tonescale asymptoted at 1.0 and _hlg_encode
+            # mapped diffuse white straight to signal 1.0: measured 18% grey ->
+            # 127.5 nits (BT.2408 wants ~26) and diffuse white -> 1000 nits
+            # (wants ~203). Every HLG deliverable was roughly 5x over.
+            #
+            # Run the tonescale with diffuse white at 1.0 and its asymptote at
+            # 1/0.26, then scale by 0.26 before the OETF (see step 9).
+            peak_nits = 100.0 / _HLG_DIFFUSE_WHITE_SCENE
         else:
             peak_nits = peak_luminance
 
         # 6. Apply DRT tonescale
         # v2.1 FIX: Pass is_hdr flag so tonescale preserves HDR headroom
         tonemapped = self._apply_tonescale_drt(
-            img, peak_luminance=peak_nits, surround=surround, is_hdr=is_hdr
+            img, peak_luminance=peak_nits, surround=surround, is_hdr=is_hdr,
+            grey_anchor=not is_hlg,
         )
 
         # 7. Convert to output color space
@@ -1445,7 +1685,8 @@ class ACES2OutputTransform:
         if is_pq:
             output = self._pq_encode(output, peak_nits)
         elif is_hlg:
-            output = self._hlg_encode(output)
+            # Place diffuse white at the BT.2100 reference point before the OETF.
+            output = self._hlg_encode(output * _HLG_DIFFUSE_WHITE_SCENE)
         elif is_cinema:
             # DCI gamma 2.6
             output = np.power(np.clip(output, 0, 1), 1 / 2.6)
@@ -1456,7 +1697,16 @@ class ACES2OutputTransform:
         output = np.clip(output, 0, 1)
 
         info = f"ACES 2.0 | {input_colorspace} → {output_transform}"
-        if is_hdr:
+        if is_cinema:
+            # 48 nits is the projector luminance of code value 1.0; the maths
+            # above runs SDR-normalised.
+            info += " | Peak: 48 nits (DCI white)"
+        elif is_hlg:
+            # HLG is relative — the display peak is a property of the monitor,
+            # not of this encode. What this transform fixes is where diffuse
+            # white lands relative to the OETF.
+            info += " | HLG relative (diffuse white at the BT.2100 reference)"
+        elif is_hdr:
             info += f" | Peak: {peak_nits} nits"
         info += f" | Surround: {surround}"
 

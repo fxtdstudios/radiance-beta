@@ -17,6 +17,9 @@ from radiance.color.transfer import (
     acescct_to_linear, linear_to_acescct,
     tensor_srgb_to_linear, tensor_linear_to_srgb,
 )
+from radiance.color.ops import (
+    apply_matrix_3x3, M_REC709_TO_ACESCG, M_ACESCG_TO_REC709,
+)
 
 INPUT_COLORSPACES: list[str] = [
     "Linear (sRGB)",
@@ -50,8 +53,12 @@ _NUMPY_ENCODE_MAP = {
 
 
 def apply_input_transform(img_tensor: torch.Tensor, colorspace: str) -> torch.Tensor:
-    if colorspace in ("Linear (sRGB)", "ACEScg"):
+    if colorspace == "Linear (sRGB)":
         return img_tensor
+    if colorspace == "ACEScg":
+        # ACEScg is a different gamut (AP1), not just a curve — convert primaries
+        # back to the linear sRGB/Rec.709 working space.
+        return apply_matrix_3x3(img_tensor, M_ACESCG_TO_REC709)
     if colorspace == "sRGB (Standard)":
         return tensor_srgb_to_linear(img_tensor)
 
@@ -75,8 +82,13 @@ def apply_output_transform(
             (x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0
         )
 
-    if colorspace in ("Linear (sRGB)", "ACEScg"):
+    if colorspace == "Linear (sRGB)":
         return img_tensor
+    if colorspace == "ACEScg":
+        # Convert the linear sRGB/Rec.709 working primaries into ACEScg (AP1).
+        # Previously ACEScg was a no-op passthrough, so the data was mislabeled
+        # as ACEScg without the gamut matrix — wrong colors in that space only.
+        return apply_matrix_3x3(img_tensor, M_REC709_TO_ACESCG)
     if colorspace == "sRGB (Standard)":
         return tensor_linear_to_srgb(img_tensor)
 

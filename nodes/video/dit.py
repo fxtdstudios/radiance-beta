@@ -11,8 +11,10 @@
 # LTX-2.x latents:  [B, 128, T/8, H/32, W/32]  scale ≈ 1.0
 # HunyuanVideo:     [B, 16,  T/4, H/8,  W/8]   scale ≈ 0.476986
 # Wan2.1:           [B, 16,  T/4, H/8,  W/8]   scale ≈ 1.0   (dense DiT)
-# Wan2.2:           [B, 16,  T/4, H/8,  W/8]   scale ≈ 1.0   (MoE, 8-expert/2-active, NOT LoRA-compatible with 2.1)
-# CogVideoX:        [B, 16,  T,   H/8,  W/8]   scale ≈ 1.15258426
+# Wan2.2 14B:       [B, 16,  T/4, H/8,  W/8]   scale ≈ 1.0   (high/low-noise expert pair)
+# Wan2.2 TI2V 5B:   [B, 48,  T/4, H/16, W/16]  scale ≈ 1.0
+# HunyuanVideo 1.5: [B, 32,  T/4, H/16, W/16]
+# CogVideoX:        [B, 16,  T/4, H/8,  W/8]   scale ≈ 1.15258426
 #
 # ============================================================
 
@@ -102,9 +104,7 @@ _MODEL_SPECS: Dict[str, Dict] = {
         "std":  1.0,
         "temporal": True,
         "moe": True,
-        "moe_experts": 8,
-        "moe_active_experts": 2,
-        "description": "Alibaba Wan2.2 T2V 14B MoE — NOT weight-compatible with Wan2.1 LoRAs",
+        "description": "Alibaba Wan2.2 T2V 14B, two experts (high-noise and low-noise checkpoints)",
     },
     "Wan2.2-I2V-14B (16ch)": {
         "channels": 16,
@@ -115,14 +115,32 @@ _MODEL_SPECS: Dict[str, Dict] = {
         "std":  1.0,
         "temporal": True,
         "moe": True,
-        "moe_experts": 8,
-        "moe_active_experts": 2,
-        "description": "Alibaba Wan2.2 I2V 14B MoE — NOT weight-compatible with Wan2.1 LoRAs",
+        "description": "Alibaba Wan2.2 I2V 14B, two experts (high-noise and low-noise checkpoints)",
+    },
+    "Wan2.2-TI2V-5B (48ch)": {
+        "channels": 48,
+        "spatial_compression": 16,
+        "temporal_compression": 4,
+        "latent_scale": 1.0,
+        "mean": 0.0,
+        "std":  1.0,
+        "temporal": True,
+        "description": "Alibaba Wan2.2 TI2V 5B dense, Wan2.2 VAE",
+    },
+    "HunyuanVideo-1.5 (32ch)": {
+        "channels": 32,
+        "spatial_compression": 16,
+        "temporal_compression": 4,
+        "latent_scale": 1.0,
+        "mean": 0.0,
+        "std":  1.0,
+        "temporal": True,
+        "description": "Tencent HunyuanVideo 1.5",
     },
     "CogVideoX (16ch)": {
         "channels": 16,
         "spatial_compression": 8,
-        "temporal_compression": 1,   # CogVideoX encodes each frame independently
+        "temporal_compression": 4,   # CogVideoX 3D VAE: 4x temporal, (T-1)/4+1 latent frames
         "latent_scale": 1.15258426,
         "mean": 0.0,
         "std":  1.0,
@@ -145,7 +163,8 @@ MODEL_NAMES = list(_MODEL_SPECS.keys())
 
 
 def _get_spec(name: str) -> Dict:
-    return _MODEL_SPECS.get(name, _MODEL_SPECS["SD-VAE (4ch)"])
+    """A copy: callers update() it with dit_config and must not edit the table."""
+    return dict(_MODEL_SPECS.get(name, _MODEL_SPECS["SD-VAE (4ch)"]))
 
 
 # ===========================================================================

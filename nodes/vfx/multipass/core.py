@@ -2,9 +2,8 @@
 ◎ Radiance VFX Multipass Extractor  v3.0
 ════════════════════════════════════════════════════════════════════════════════
 
-Extracts industry-standard VFX compositing passes from a decoded float32 image.
-Designed to sit immediately after ◎ Radiance VAE Decode and produce named
-passes ready for Nuke, DaVinci Resolve, After Effects, or any EXR pipeline.
+Estimates compositing utility passes from a decoded float32 image. These are
+creative approximations unless replaced by renderer AOVs through the Reader.
 
 SIGNAL FLOW:
   IMAGE (float32 linear) ─► VFX Multipass v3.0 ─► beauty
@@ -26,9 +25,7 @@ SIGNAL FLOW:
                                                   ├─► roughness        (multi-scale spec sharpness)
                                                   ├─► transmission     (chroma dispersion + Fresnel)
                                                   ├─► motion_vector    (Lucas-Kanade optical flow)
-                                                  ├─► object_id_matte  (k-means crypto-style ID)
-                                                  ├─► pass_info        (STRING — human report)
-                                                  └─► pass_confidence  (STRING — JSON quality dict)
+                                                  └─► object_id_matte  (k-means segmentation ID)
 
 PASS SUMMARY v3.0:
   ┌───────────────────┬────────────────────────────────────────────────────────────┐
@@ -52,34 +49,24 @@ PASS SUMMARY v3.0:
   │ emission    v2.1  │ Z-score local brightness excess, colorfulness-weighted     │
   │ roughness   v2.1  │ Multi-scale specular sharpness ratio (inverted)            │
   │ transmission v2.1 │ Chromatic dispersion + Fresnel halo detection              │
-  │ motion_vec  v3.0  │ Lucas-Kanade optical flow (HSV, prev_frame optional)       │
+  │ motion_vec  v3.0  │ Lucas-Kanade raw XY flow, prev_frame optional              │
   │ object_id   v3.0  │ K-means color+spatial clustering → RGBA ID matte          │
-  │ pass_info         │ Human-readable stats report (STRING)                       │
-  │ pass_conf   v3.0  │ Per-pass quality confidence dict (STRING/JSON)             │
   └───────────────────┴────────────────────────────────────────────────────────────┘
 
 MOTION VECTOR (v3.0):
   Dense Lucas-Kanade optical flow — no OpenCV dependency, pure PyTorch.
   Connect prev_frame for true inter-frame flow. Without prev_frame the output
   is zero (static placeholder suitable for single-image workflows).
-  Visualization: HSV encoding — hue=direction, saturation=magnitude, value=1.
+  A separate visualization uses HSV hue/direction and value/magnitude.
   EXR raw channels: MV.X (horizontal px offset), MV.Y (vertical px offset).
 
 OBJECT ID MATTE (v3.0):
-  Cryptomatte-style per-object ID matte via k-means clustering on
+  Visual segmentation ID matte via k-means clustering on
   (R, G, B, luma, x_norm, y_norm) feature vectors.
   Each cluster receives a deterministic, visually-distinct RGBA color seeded
   by the golden-ratio hue spiral (maximally distinct hues at any K).
   Computation on max-192×192 downsampled image — keeps memory flat.
-  EXR: ID.R/G/B/A for Nuke Cryptomatte or manual matte extraction.
-
-PASS CONFIDENCE (v3.0):
-  JSON dictionary mapping pass name → float [0..1] quality estimate.
-  Scores: depth (0/1 binary), ao (variance), normal (well-defined ratio),
-          albedo (material colour spread), emission (peak outlier),
-          roughness (dynamic range), transmission (chroma shift),
-          edge (structural density), specular (contrast std-dev),
-          motion (mean magnitude relative to frame diagonal).
+  EXR: object_id.R/G/B/A for manual matte extraction. This is not Cryptomatte.
 
 DSINE AUTO-DISCOVER:
   Set dsine_model_path = "auto" to search ComfyUI model folders:
@@ -89,30 +76,30 @@ DSINE AUTO-DISCOVER:
 
 EXR EXPORT v3.0:
   Nuke/Resolve-compatible channel names:
-    beauty.RGBA  diffuse.RGB  specular.RGB  N.X/Y/Z  P.X/Y/Z
-    Z.R  AO.R  edge.R  albedo.RGB  emission.R  roughness.R  transmission.R
-    colorfulness.R  reflection.R  curvature.R  shadow.R  highlight.R  midtone.R
-    MV.X  MV.Y  MV_vis.RGB  ID.R  ID.G  ID.B  ID.A
+    beauty.RGBA  normal.NX/NY/NZ  Z  world_position.R/G/B
+    MV.X  MV.Y  object_id.R/G/B/A plus named RGB utility layers
 
 VERSION HISTORY:
   1.0 — Initial (Gaussian diffuse, depth concavity AO, Sobel edge)
   2.0 — Guided filter diffuse, SSAO, Scharr edges, normal map, curvature, world pos
   2.1 — Albedo (Retinex IID), Emission (Z-score glow), Roughness (spec sharpness),
         Transmission (chromatic dispersion + Fresnel)
-  3.0 — Motion vector (Lucas-Kanade), Object ID matte (k-means crypto-style),
-        Pass confidence scores (JSON), DSINE auto-discover
+  3.0 — Motion vector (Lucas-Kanade), Object ID matte (k-means), DSINE auto-discover
 """
 
 import os
-import json
 import math
 import logging
 import urllib.request
 from typing import Tuple, Dict, Any, Optional
 
 import torch
+
+from radiance.model.cache import GPUModelCache
 import torch.nn.functional as F
 import numpy as np
+
+from ....core.system.path_utils import strip_path_quotes
 
 logger = logging.getLogger("radiance.vfx_multipass")
 
@@ -208,8 +195,11 @@ def _get_comfy_models_dir(subdir: str) -> str:
     """
     try:
         import folder_paths  # type: ignore
+        # isinstance, not truthiness: a test that stubs folder_paths with a
+        # bare MagicMock makes `models_dir` a truthy Mock, and joining it
+        # created a literal "MagicMock/mock.models_dir/<id>/" tree on disk.
         base = getattr(folder_paths, "models_dir", None)
-        if base:
+        if isinstance(base, str) and base:
             path = os.path.join(base, subdir)
             os.makedirs(path, exist_ok=True)
             return path
@@ -243,8 +233,11 @@ def _verify_or_report_sha256(dest: str, info: dict, key: str) -> bool:
         logger.error(f"[Radiance] CHECKSUM MISMATCH for '{key}' (expected {expected}, got {actual}) — removing.")
         try:
             os.remove(dest)
-        except OSError:
-            pass
+        except OSError as _exc:
+            logger.debug(
+                "[Radiance] _verify_or_report_sha256(): ignoring %s from `os.remove(dest)`: %s",
+                type(_exc).__name__, _exc,
+            )
         return False
     logger.info(f"[Radiance] ✓ sha256 verified for '{key}'")
     return True
@@ -274,7 +267,19 @@ def _download_model(key: str, force: bool = False) -> Optional[str]:
         return dest
 
     size_mb = info["size_mb"]
-    logger.info(f"[Radiance] ── Auto-downloading: {info['note']}")
+
+    # This path had no consent gate of any kind: selecting a Depth Anything V2
+    # size or dsine_model_path="auto" and queueing would start the fetch.
+    from radiance.core.consent import require_consent
+    if not require_consent(
+        info.get("note", key),
+        size_mb=size_mb,
+        dest=dest,
+        url=info.get("url"),
+    ):
+        return None
+
+    logger.info(f"[Radiance] ── Downloading: {info['note']}")
     logger.info(f"[Radiance]   Size   : ~{size_mb} MB")
     logger.info(f"[Radiance]   Dest   : {dest}")
     logger.info(f"[Radiance]   Source : {info['url']}")
@@ -367,6 +372,9 @@ def _box_filter_bhwc(x: torch.Tensor, r: int) -> torch.Tensor:
     if r <= 0:
         return x
     B, H, W, C = x.shape
+    r = min(r, H - 1, W - 1)
+    if r <= 0:
+        return x
     ks = 2 * r + 1
     x4 = x.float().permute(0,3,1,2).reshape(B*C, 1, H, W)
     x4 = F.pad(x4, (r,r,0,0), mode="reflect")
@@ -415,7 +423,14 @@ def _gaussian_blur_bhwc(img: torch.Tensor, sigma: float) -> torch.Tensor:
         return img
     B, H, W, C = img.shape
     k1d, ks = _build_gaussian_kernel(sigma, img.device, torch.float32)
-    pad = ks // 2
+    pad = min(ks // 2, H - 1, W - 1)
+    if pad <= 0:
+        return img
+    if ks != 2 * pad + 1:
+        center = ks // 2
+        k1d = k1d[center - pad:center + pad + 1]
+        k1d = k1d / k1d.sum()
+        ks = 2 * pad + 1
     x   = img.float().permute(0,3,1,2).reshape(B*C, 1, H, W)
     x   = F.pad(x, (pad,pad,0,0), mode="reflect")
     x   = F.conv2d(x, k1d.view(1,1,1,ks))
@@ -475,7 +490,7 @@ def _dsine_auto_discover() -> Optional[str]:
         import folder_paths  # type: ignore
         search_dirs = []
         models_root = getattr(folder_paths, "models_dir", None)
-        if models_root:
+        if isinstance(models_root, str) and models_root:
             search_dirs.append(os.path.join(models_root, "normal_estimation"))
         for key in ("checkpoints", "vae"):
             if hasattr(folder_paths, "get_folder_paths"):
@@ -513,7 +528,8 @@ def _dsine_ensure_model() -> Optional[str]:
 
 
 # Module-level cache for the torch.hub DSINE model.
-_DSINE_HUB_CACHE: Dict[str, Any] = {}
+# Bounded LRU -- was an unbounded dict with no eviction path.
+_DSINE_HUB_CACHE = GPUModelCache(max_size=1)
 
 
 def _try_dsine_hub(img_bhwc: torch.Tensor, convention: str) -> "Optional[torch.Tensor]":
@@ -524,6 +540,15 @@ def _try_dsine_hub(img_bhwc: torch.Tensor, convention: str) -> "Optional[torch.T
     """
     try:
         if "model" not in _DSINE_HUB_CACHE:
+            # torch.hub fetches and runs code from GitHub; it went around the
+            # download consent every other Radiance download honours.
+            hub_repo = os.path.join(torch.hub.get_dir(), "hugoycj_DSINE-hub_main")
+            if not os.path.isdir(hub_repo):
+                from radiance.core.consent import require_consent
+                if not require_consent("DSINE normal model (torch.hub hugoycj/DSINE-hub)",
+                                       size_mb=280, dest=torch.hub.get_dir(),
+                                       url="https://github.com/hugoycj/DSINE-hub"):
+                    return None
             logger.info(
                 "[Radiance] Loading DSINE via torch.hub (hugoycj/DSINE-hub) — "
                 "first run downloads ~280 MB from GitHub Releases ..."
@@ -533,10 +558,10 @@ def _try_dsine_hub(img_bhwc: torch.Tensor, convention: str) -> "Optional[torch.T
                 trust_repo=True, force_reload=False, verbose=False,
             )
             model.eval()
-            _DSINE_HUB_CACHE["model"] = model
+            _DSINE_HUB_CACHE.put("model", model)
             logger.info("[Radiance] DSINE (torch.hub) ready.")
 
-        model  = _DSINE_HUB_CACHE["model"]
+        model  = _DSINE_HUB_CACHE.get("model")
         device = img_bhwc.device
         normals = []
         for b in range(img_bhwc.shape[0]):
@@ -572,6 +597,7 @@ def _normal_from_dsine(img_bhwc, dsine_model_path, convention):
       2. Fall back to ComfyUI model folder auto-discovery.
       3. Fall back to HuggingFace download (requires auth if repo is gated).
     """
+    dsine_model_path = strip_path_quotes(dsine_model_path)
     if dsine_model_path == "auto":
         # ── 1. torch.hub (preferred — no auth required) ───────────────────────
         result = _try_dsine_hub(img_bhwc, convention)
@@ -606,7 +632,13 @@ def _normal_from_dsine(img_bhwc, dsine_model_path, convention):
         if resolved not in _normal_from_dsine._cache:
             m = DSINE()
             st = torch.load(resolved, map_location="cpu", weights_only=True)
-            m.load_state_dict(st.get("model", st), strict=False)
+            # strict=False alone accepted any checkpoint, so a wrong or
+            # truncated file produced normals from random weights. Allow
+            # only the known-harmless extras; anything missing is a failure.
+            res = m.load_state_dict(st.get("model", st), strict=False)
+            if res.missing_keys:
+                raise RuntimeError(f"{len(res.missing_keys)} DSINE weights missing from {resolved} "
+                                   f"(e.g. {res.missing_keys[0]}); not a DSINE checkpoint")
             m.eval()
             _normal_from_dsine._cache[resolved] = m
             logger.info(f"[Radiance] DSINE loaded: {resolved}")
@@ -631,7 +663,8 @@ def _normal_from_dsine(img_bhwc, dsine_model_path, convention):
 #  DEPTH ANYTHING V2 — AUTO-INFER (v3.0)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_DA_PIPELINE_CACHE: Dict[str, Any] = {}   # hf_model_id → loaded pipeline
+# Bounded LRU -- was an unbounded dict with no eviction path.
+_DA_PIPELINE_CACHE = GPUModelCache(max_size=2)   # hf_model_id → loaded pipeline
 
 
 def _depth_anything_v2_infer(
@@ -669,10 +702,10 @@ def _depth_anything_v2_infer(
                 model=hf_pipe_id,
                 device=0 if device.type == "cuda" else -1,
             )
-            _DA_PIPELINE_CACHE[hf_pipe_id] = pipe
+            _DA_PIPELINE_CACHE.put(hf_pipe_id, pipe)
             logger.info(f"[Radiance] Depth Anything V2 ({model_key}) ready.")
 
-        pipe = _DA_PIPELINE_CACHE[hf_pipe_id]
+        pipe = _DA_PIPELINE_CACHE.get(hf_pipe_id)
         depths = []
         for b in range(B):
             arr = (img_bhwc[b, ..., :3].float().clamp(0.0, 1.0).cpu().numpy() * 255).astype(np.uint8)
@@ -715,10 +748,10 @@ def _depth_anything_v2_infer(
             state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
             model.load_state_dict(state)
             model.eval()
-            _DA_PIPELINE_CACHE[cache_key] = model
+            _DA_PIPELINE_CACHE.put(cache_key, model)
             logger.info(f"[Radiance] Depth Anything V2 ({encoder}) loaded from {ckpt_path}")
 
-        model = _DA_PIPELINE_CACHE[cache_key].to(device)
+        model = _DA_PIPELINE_CACHE.get(cache_key).to(device)
 
         # Normalise to ImageNet stats expected by ViT backbone
         mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1,3,1,1)
@@ -784,15 +817,7 @@ def _world_position_from_depth(
     px = gu * thf * d
     py = -gv * thf * d
     pz = d
-    pos = torch.stack([px, py, pz], dim=-1)
-
-    for c in range(3):
-        ch  = pos[..., c]
-        mn  = ch.reshape(B,-1).min(dim=1).values.view(B,1,1)
-        mx  = ch.reshape(B,-1).max(dim=1).values.view(B,1,1)
-        pos[..., c] = (ch - mn) / (mx - mn).clamp(min=1e-8)
-
-    return pos.contiguous()
+    return torch.stack([px, py, pz], dim=-1).contiguous()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -832,38 +857,30 @@ def _ssao_multisampled(
     bv, bu = torch.meshgrid(gy, gx, indexing="ij")
     base   = torch.stack([bu, bv], dim=-1).unsqueeze(0).expand(B,-1,-1,-1)
 
-    pu = 2.0 / W;  pv = 2.0 / H
+    pu = 2.0 / W
+    pv = 2.0 / H
     d_bchw = d.unsqueeze(1)
 
     angles    = [2.0*math.pi*i/n_samples for i in range(n_samples)]
     r_factors = [0.4, 0.7, 1.0]
 
-    all_grids, all_dirs = [], []
+    ao_sum = torch.zeros_like(d)
+    sample_count = 0
     for rf in r_factors:
         r = radius_px * rf
         for ang in angles:
             ca, sa = math.cos(ang), math.sin(ang)
-            sg = base + torch.tensor([ca*r*pu, sa*r*pv], device=dev, dtype=torch.float32)
-            all_grids.append(sg)
-            all_dirs.append((ca, sa))
+            grid = base + torch.tensor([ca*r*pu, sa*r*pv], device=dev, dtype=torch.float32)
+            sampled = F.grid_sample(
+                d_bchw, grid, mode="bilinear", padding_mode="border", align_corners=True
+            ).squeeze(1)
+            occ = (d - sampled).clamp(min=0.0)
+            if Nx is not None:
+                occ = occ * (0.5 + 0.5*(Nx*ca+Ny*sa).clamp(min=0.0))
+            ao_sum.add_(occ)
+            sample_count += 1
 
-    n_tot   = len(all_grids)
-    gc      = torch.cat(all_grids, dim=0)
-    dr      = d_bchw.repeat(n_tot, 1, 1, 1)
-    ds      = F.grid_sample(dr, gc, mode="bilinear",
-                            padding_mode="border", align_corners=True)
-    ds      = ds.squeeze(1).view(n_tot, B, H, W)
-    db      = d.unsqueeze(0).expand(n_tot,-1,-1,-1)
-    occ     = (db - ds).clamp(min=0.0)
-
-    if Nx is not None:
-        wts = torch.stack(
-            [(0.5 + 0.5*(Nx*ca+Ny*sa).clamp(min=0.0)) for ca,sa in all_dirs],
-            dim=0
-        )
-        occ = occ * wts
-
-    ao   = occ.mean(dim=0)
+    ao = ao_sum / max(sample_count, 1)
     flat = ao.view(B,-1)
     mx   = flat.max(dim=1).values.view(B,1,1).clamp(min=1e-8)
     return (ao / mx * strength).clamp(0.0, 1.0)
@@ -927,6 +944,27 @@ def _reflection_mask(specular: torch.Tensor, colorfulness: torch.Tensor) -> torc
     return _to_3ch_image((refl / mx).clamp(0.0, 1.0))
 
 
+def _metallic_mask(img: torch.Tensor, specular: torch.Tensor,
+                   colorfulness: torch.Tensor) -> torch.Tensor:
+    """Metallic heuristic: strong specular response with low chroma reads as metal
+    (metals show bright, near-achromatic highlights; dielectrics keep base colour).
+    Returns (B,H,W,3) normalized to 0..1."""
+    spec_luma = specular.float().mean(dim=-1)
+    metal = spec_luma * (1.0 - colorfulness.clamp(0.0, 1.0))
+    B = metal.shape[0]
+    mx = metal.view(B, -1).max(dim=1).values.view(B, 1, 1).clamp(min=1e-8)
+    return _to_3ch_image((metal / mx).clamp(0.0, 1.0))
+
+
+def _highpass_filter(img: torch.Tensor, radius: float = 3.0, strength: float = 1.0,
+                     contrast: float = 1.0) -> torch.Tensor:
+    """High-pass detail pass: image minus a blurred copy, scaled and re-centered to
+    mid-grey. Returns (B,H,W,3) in 0..1."""
+    low = _gaussian_blur_bhwc(img.float(), max(0.1, float(radius)))
+    high = (img.float() - low) * float(strength) * float(contrast)
+    return (high + 0.5).clamp(0.0, 1.0)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  MATERIAL — v2.1 PASSES
 # ─────────────────────────────────────────────────────────────────────────────
@@ -954,6 +992,16 @@ def _albedo_retinex(
     albedo_rgb  = (img.float() * scale).clamp(min=0.0)
     B    = albedo_rgb.shape[0]
     flat = albedo_rgb[...,:3].reshape(B, -1)
+    # torch.quantile refuses inputs above 2**24 elements per row. A UHD frame is
+    # 2160*3840*3 = 24,883,200, so this raised
+    # "RuntimeError: quantile() input tensor is too large" on every 4K plate and
+    # took the whole Multipass Master node with it. Subsample above the cap --
+    # the same treatment nodes/generate/engine.py already applies -- which for a
+    # 0.995 quantile over millions of samples is statistically indistinguishable.
+    _QUANTILE_MAX = 2 ** 24
+    if flat.shape[1] > _QUANTILE_MAX:
+        stride = (flat.shape[1] + _QUANTILE_MAX - 1) // _QUANTILE_MAX
+        flat = flat[:, ::stride]
     p995 = torch.quantile(flat, 0.995, dim=1).view(B,1,1,1).clamp(min=1e-8)
     return (albedo_rgb / p995).clamp(0.0, 1.0).to(img.dtype)
 
@@ -1053,31 +1101,45 @@ def _transmission_mask(
 #  MOTION VECTOR — Lucas-Kanade (v3.0)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _optical_flow_lk(
-    frame1: torch.Tensor,
-    frame2: Optional[torch.Tensor],
-    window_radius: int = 7,
+def _warp_by_flow(img: torch.Tensor, u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """Sample (B,H,W) *img* at each pixel displaced by (u, v) pixels.
+
+    Used to warp frame2 back towards frame1 between pyramid levels, so each
+    level only has to solve for the small residual motion its linearisation
+    can actually represent.
+    """
+    B, H, W = img.shape
+    dev, dt = img.device, img.dtype
+
+    ys, xs = torch.meshgrid(
+        torch.arange(H, device=dev, dtype=dt),
+        torch.arange(W, device=dev, dtype=dt),
+        indexing="ij",
+    )
+    # grid_sample wants normalised [-1, 1] coordinates.
+    gx = (xs.unsqueeze(0) + u) / max(W - 1, 1) * 2.0 - 1.0
+    gy = (ys.unsqueeze(0) + v) / max(H - 1, 1) * 2.0 - 1.0
+    grid = torch.stack([gx, gy], dim=-1)
+
+    warped = F.grid_sample(
+        img.unsqueeze(1), grid,
+        mode="bilinear", padding_mode="border", align_corners=True,
+    )
+    return warped.squeeze(1)
+
+
+def _lk_step(
+    f1: torch.Tensor,
+    f2: torch.Tensor,
+    window_radius: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """One windowed least-squares Lucas-Kanade solve, no pyramid.
+
+    Solves the 2x2 per-pixel system over a (2r+1)^2 integration window:
+      [SIx^2  SIxIy] [u]   [-SIxIt]
+      [SIxIy  SIy^2] [v] = [-SIyIt]
     """
-    Dense Lucas-Kanade optical flow via windowed least-squares (pure PyTorch).
-
-    Solves the 2×2 per-pixel system over a (2r+1)² integration window:
-      [ΣIx²  ΣIxIy] [u]   [-ΣIxIt]
-      [ΣIxIy ΣIy² ] [v] = [-ΣIyIt]
-
-    Returns (u, v): (B,H,W) flow in pixel units.
-    Returns zeros when frame2 is None (static / single-frame mode).
-    """
-    B, H, W = frame1.shape
-    dev = frame1.device
-
-    if frame2 is None:
-        zero = torch.zeros(B, H, W, device=dev, dtype=torch.float32)
-        return zero, zero
-
-    r  = max(1, window_radius)
-    f1 = frame1.float()
-    f2 = frame2.float()
+    r = max(1, window_radius)
 
     Ix, Iy = _scharr_gradient(f1)
     It     = f2 - f1
@@ -1098,11 +1160,93 @@ def _optical_flow_lk(
 
     u = (A12 * b2 - A22 * b1) / det_r
     v = (A12 * b1 - A11 * b2) / det_r
+    return u, v
+
+
+def _optical_flow_lk(
+    frame1: torch.Tensor,
+    frame2: Optional[torch.Tensor],
+    window_radius: int = 7,
+    levels: int = 4,
+    iterations: int = 6,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Dense pyramidal Lucas-Kanade optical flow (pure PyTorch).
+
+    Returns (u, v): (B,H,W) flow in pixel units.
+    Returns zeros when frame2 is None (static / single-frame mode).
+
+    Why the pyramid: a single windowed LK solve linearises the brightness
+    constancy equation as `It = f2 - f1`, which only holds while the
+    displacement stays inside the gradient's support — a couple of pixels.
+    The previous single-scale implementation therefore recovered roughly all
+    of a 1 px shift, 17% of 3 px and 1% of 5 px, which made mask propagation
+    effectively static on anything but the slowest moves.
+
+    Coarse-to-fine fixes that without changing the solver: at level L the
+    image is 2^L smaller, so a 8 px displacement looks like 0.5 px and is
+    inside the linear regime. Each level warps frame2 by the flow accumulated
+    so far and solves only for the residual, refining `iterations` times.
+    """
+    if frame2 is None:
+        B, H, W = frame1.shape
+        zero = torch.zeros(B, H, W, device=frame1.device, dtype=torch.float32)
+        return zero, zero
+
+    f1_full = frame1.float()
+    f2_full = frame2.float()
+    B, H, W = f1_full.shape
+
+    # Stop shrinking before the image is smaller than the integration window.
+    #
+    # Letting the radius shrink with the level to allow a deeper pyramid was
+    # tried and measured worse: a 2 px window on a coarse level is too noisy,
+    # and the bad estimate propagates down. A fixed window with more
+    # refinement iterations is both more accurate and more stable.
+    min_side = max(8, 2 * max(1, window_radius) + 1)
+    max_levels = 1
+    while max_levels < max(1, levels) and min(H, W) // (2 ** max_levels) >= min_side:
+        max_levels += 1
+
+    def _down(x, factor):
+        if factor == 1:
+            return x
+        h, w = max(1, H // factor), max(1, W // factor)
+        return F.interpolate(
+            x.unsqueeze(1), size=(h, w), mode="bilinear", align_corners=False
+        ).squeeze(1)
+
+    u = torch.zeros(B, max(1, H // (2 ** (max_levels - 1))),
+                    max(1, W // (2 ** (max_levels - 1))),
+                    device=f1_full.device, dtype=torch.float32)
+    v = torch.zeros_like(u)
+
+    for level in range(max_levels - 1, -1, -1):
+        factor = 2 ** level
+        f1 = _down(f1_full, factor)
+        f2 = _down(f2_full, factor)
+        lh, lw = f1.shape[-2:]
+
+        if u.shape[-2:] != (lh, lw):
+            # Moving down a level doubles the pixel scale, so the flow
+            # magnitude has to be rescaled as well as resampled.
+            sy = lh / u.shape[-2]
+            sx = lw / u.shape[-1]
+            u = F.interpolate(u.unsqueeze(1), size=(lh, lw),
+                              mode="bilinear", align_corners=False).squeeze(1) * sx
+            v = F.interpolate(v.unsqueeze(1), size=(lh, lw),
+                              mode="bilinear", align_corners=False).squeeze(1) * sy
+
+        for _ in range(max(1, iterations)):
+            f2_warped = _warp_by_flow(f2, u, v)
+            du, dv = _lk_step(f1, f2_warped, window_radius)
+            # Bound a single increment so a textureless window cannot throw
+            # the estimate across the frame in one step.
+            u = u + du.clamp(-1.0, 1.0)
+            v = v + dv.clamp(-1.0, 1.0)
 
     max_disp = max(H, W) * 0.5
-    u = u.clamp(-max_disp, max_disp)
-    v = v.clamp(-max_disp, max_disp)
-    return u, v
+    return u.clamp(-max_disp, max_disp), v.clamp(-max_disp, max_disp)
 
 
 def _hsv_to_rgb_tensor(h: torch.Tensor, s: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -1127,6 +1271,120 @@ def _hsv_to_rgb_tensor(h: torch.Tensor, s: torch.Tensor, v: torch.Tensor) -> tor
         b = torch.where(mask, bv, b)
 
     return torch.stack([r, g, b], dim=-1)
+
+
+#: Optical flow solvers, in the order the "auto" setting prefers them.
+FLOW_METHODS = ("auto", "dis", "lucas-kanade")
+
+
+def _optical_flow_dis(
+    frame1: torch.Tensor,
+    frame2: Optional[torch.Tensor],
+    preset: str = "medium",
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Dense inverse search optical flow, via OpenCV.
+
+    Same signature and same sign convention as `_optical_flow_lk`, so the two
+    are interchangeable at the call site.
+
+    Why this exists. Pyramidal Lucas-Kanade is bounded by its integration
+    window: the coarsest level has to stay larger than the 15x15 window, so
+    there is a hard ceiling on how far coarse-to-fine can reach, and past it
+    the field thins out even while the median stays roughly right. Measured on
+    a multi-scale sinusoid plate, the fraction of the field landing within half
+    a pixel goes 100 / 84 / 71 / 58 / 29 percent at 3 / 8 / 12 / 16 / 20 px.
+    DIS holds 100 / 100 / 100 / 100 / 99 over the same range, and on an
+    aperiodic plate -- closer to real grain and detail -- LK is already at 9%
+    by 12 px where DIS is still at 100%.
+
+    It is also about eleven times faster on a 256x384 frame, which matters
+    because mask propagation runs this per frame pair.
+
+    Both solvers fail past roughly 28 px on those fixtures. That is not a
+    ceiling worth quoting as a property of DIS: at that displacement the test
+    patterns are ambiguous, so what is being measured is the fixture. What can
+    be said is that the working range went from about 8 px to about 20.
+
+    OpenCV's DIS takes 8-bit input only, so the pair is quantised. The
+    normalisation is computed **across both frames together**: scaling each
+    frame by its own min and max would move the picture between them and
+    invent flow that is not there.
+    """
+    if frame2 is None:
+        B, H, W = frame1.shape
+        zero = torch.zeros(B, H, W, device=frame1.device, dtype=torch.float32)
+        return zero, zero
+
+    try:
+        import cv2  # noqa: PLC0415  (optional at runtime, required by the install)
+    except ImportError:
+        logger.debug("[Radiance/Flow] OpenCV not importable; falling back to Lucas-Kanade")
+        return _optical_flow_lk(frame1, frame2)
+
+    presets = {
+        "ultrafast": cv2.DISOPTICAL_FLOW_PRESET_ULTRAFAST,
+        "fast": cv2.DISOPTICAL_FLOW_PRESET_FAST,
+        "medium": cv2.DISOPTICAL_FLOW_PRESET_MEDIUM,
+    }
+    solver = cv2.DISOpticalFlow_create(presets.get(preset, presets["medium"]))
+
+    device = frame1.device
+    f1 = frame1.detach().float().cpu().numpy()
+    f2 = frame2.detach().float().cpu().numpy()
+
+    us, vs = [], []
+    for i in range(f1.shape[0]):
+        a, b = f1[i], f2[i]
+        finite = np.isfinite(a) & np.isfinite(b)
+        if not finite.any():
+            us.append(np.zeros_like(a)); vs.append(np.zeros_like(a))
+            continue
+        lo = float(min(a[finite].min(), b[finite].min()))
+        hi = float(max(a[finite].max(), b[finite].max()))
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi - lo < 1e-12:
+            # A flat pair has no gradient to track. Zero flow is the honest
+            # answer; DIS on a constant image returns noise.
+            us.append(np.zeros_like(a)); vs.append(np.zeros_like(a))
+            continue
+        scale = 255.0 / (hi - lo)
+        qa = np.clip((np.nan_to_num(a, nan=lo) - lo) * scale, 0, 255).astype(np.uint8)
+        qb = np.clip((np.nan_to_num(b, nan=lo) - lo) * scale, 0, 255).astype(np.uint8)
+        flow = solver.calc(qa, qb, None)
+        us.append(flow[..., 0]); vs.append(flow[..., 1])
+
+    u = torch.from_numpy(np.stack(us)).to(device=device, dtype=torch.float32)
+    v = torch.from_numpy(np.stack(vs)).to(device=device, dtype=torch.float32)
+    return u, v
+
+
+def _optical_flow(
+    frame1: torch.Tensor,
+    frame2: Optional[torch.Tensor],
+    method: str = "auto",
+    window_radius: int = 7,
+    preset: str = "medium",
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Pick a solver. `auto` means DIS where OpenCV is available, else LK.
+
+    OpenCV is a required dependency of a supported install, so `auto` is DIS in
+    practice; the fallback is for a broken or minimal environment rather than a
+    supported configuration.
+
+    `window_radius` is Lucas-Kanade's and `preset` is DIS's. Both are carried
+    so a caller with one quality dial can drive whichever solver it gets --
+    otherwise the dial silently stops doing anything when the solver changes,
+    which is how this function shipped for one commit.
+    """
+    if method == "lucas-kanade":
+        return _optical_flow_lk(frame1, frame2, window_radius=window_radius)
+    if method == "dis":
+        return _optical_flow_dis(frame1, frame2, preset=preset)
+    try:
+        import cv2  # noqa: F401,PLC0415
+    except ImportError:
+        return _optical_flow_lk(frame1, frame2, window_radius=window_radius)
+    return _optical_flow_dis(frame1, frame2, preset=preset)
 
 
 def _flow_to_hsv_image(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -1184,7 +1442,7 @@ def _object_id_matte(
     spatial_weight: float = 0.25,
 ) -> torch.Tensor:
     """
-    Cryptomatte-style per-object ID matte via k-means clustering.
+    Visual segmentation ID matte via k-means clustering; not Cryptomatte.
 
     Feature vector per pixel: [R, G, B, luma, x_norm*sw, y_norm*sw]
     Runs on ≤192×192 downsampled image to keep N·K memory-flat.
@@ -1232,18 +1490,26 @@ def _object_id_matte(
         init_i = torch.cat([init_i, extra])
     centroids = feat[:, init_i, :].clone()   # (B, K, 6)
 
-    # Lloyd's iterations — fully vectorised
+    # Chunk assignments so peak memory does not scale as B*N*K*features.
+    chunk_size = 4096
     for _ in range(n_iter):
-        diffs  = feat.unsqueeze(2) - centroids.unsqueeze(1)   # (B, N, K, 6)
-        labels = (diffs*diffs).sum(-1).argmin(-1)              # (B, N)
-        one_hot = F.one_hot(labels, K).float()                 # (B, N, K)
-        counts  = one_hot.sum(1)                               # (B, K)
-        new_c   = torch.bmm(one_hot.permute(0,2,1), feat) / (counts.unsqueeze(-1) + 1e-8)
-        empty   = (counts == 0).unsqueeze(-1).expand_as(centroids)
-        centroids = torch.where(empty, centroids, new_c)
+        sums = torch.zeros_like(centroids)
+        counts = torch.zeros(B, K, device=dev, dtype=torch.float32)
+        for start in range(0, N, chunk_size):
+            stop = min(start + chunk_size, N)
+            chunk = feat[:, start:stop]
+            labels = ((chunk.unsqueeze(2) - centroids.unsqueeze(1)) ** 2).sum(-1).argmin(-1)
+            for b in range(B):
+                sums[b].index_add_(0, labels[b], chunk[b])
+                counts[b].index_add_(0, labels[b], torch.ones(stop - start, device=dev))
+        new_c = sums / counts.clamp(min=1.0).unsqueeze(-1)
+        centroids = torch.where((counts == 0).unsqueeze(-1), centroids, new_c)
 
-    diffs  = feat.unsqueeze(2) - centroids.unsqueeze(1)
-    labels = (diffs*diffs).sum(-1).argmin(-1).reshape(B, H2, W2)
+    label_chunks = []
+    for start in range(0, N, chunk_size):
+        chunk = feat[:, start:min(start + chunk_size, N)]
+        label_chunks.append(((chunk.unsqueeze(2) - centroids.unsqueeze(1)) ** 2).sum(-1).argmin(-1))
+    labels = torch.cat(label_chunks, dim=1).reshape(B, H2, W2)
 
     if scale > 1:
         labels = F.interpolate(
@@ -1253,78 +1519,3 @@ def _object_id_matte(
     colors   = _cluster_id_colors(K, dev)    # (K, 4)
     id_matte = colors[labels]                 # (B, H, W, 4)
     return id_matte.to(img.dtype)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  PASS CONFIDENCE (v3.0)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _compute_pass_confidence(
-    depth_provided: bool,
-    normal_method: str,
-    pass_normal: torch.Tensor,
-    pass_ao: torch.Tensor,
-    pass_albedo: torch.Tensor,
-    pass_emission: torch.Tensor,
-    pass_roughness: torch.Tensor,
-    pass_transmission: torch.Tensor,
-    pass_specular: torch.Tensor,
-    edge_map: torch.Tensor,
-    motion_u: torch.Tensor,
-    motion_v: torch.Tensor,
-    pass_quality_hint: str = "",
-) -> str:
-    """
-    Per-pass quality confidence scores [0..1], returned as JSON string.
-
-    depth      — 1.0 if depth_map connected, 0.0 otherwise
-    ao         — AO map variance × 25 (structure richness)
-    normal_map — fraction of pixels with well-defined (near-unit) normal vectors
-    albedo     — mean absolute deviation from mean albedo (material colour spread)
-    emission   — peak emission value (0=no emitters, 1=strong)
-    roughness  — dynamic range of roughness map (spread = reliable)
-    transmission — peak chromatic shift value
-    edge       — fraction of pixels above 5% edge threshold (structural density)
-    specular   — specular contrast std-dev (spread = reliable)
-    motion     — mean flow magnitude relative to 10% of frame diagonal
-    """
-    with torch.no_grad():
-        conf: Dict[str, Any] = {}
-
-        conf["depth"] = 1.0 if depth_provided else 0.0
-
-        if depth_provided:
-            conf["ao"] = round(min(1.0, float(pass_ao[...,0].float().var()) * 25.0), 3)
-        else:
-            conf["ao"] = 0.0
-
-        N_dec = pass_normal.float() * 2.0 - 1.0
-        N_mag = torch.sqrt((N_dec**2).sum(-1))
-        conf["normal_map"]    = round(float((N_mag > 0.85).float().mean()), 3)
-        conf["normal_method"] = normal_method
-
-        alb      = pass_albedo[...,:3].float()
-        alb_mean = alb.mean(dim=(1,2,3), keepdim=True)
-        conf["albedo"] = round(min(1.0, float((alb - alb_mean).abs().mean()) * 6.0), 3)
-
-        conf["emission"]      = round(float(pass_emission[...,0].max()), 3)
-        conf["roughness"]     = round(min(1.0, float(pass_roughness[...,0].max())
-                                           - float(pass_roughness[...,0].min())), 3)
-        conf["transmission"]  = round(float(pass_transmission[...,0].max()), 3)
-        conf["edge"]          = round(float((edge_map.float() > 0.05).float().mean()), 3)
-        conf["specular"]      = round(min(1.0, float(pass_specular.float().std()) * 6.0), 3)
-
-        diag    = float(math.sqrt(motion_u.shape[1]**2 + motion_u.shape[2]**2))
-        mot_mag = float(torch.sqrt(motion_u**2 + motion_v**2).mean())
-        conf["motion"] = round(min(1.0, mot_mag / (diag * 0.1 + 1e-8)), 3)
-
-        if pass_quality_hint:
-            conf["_hint"] = pass_quality_hint
-
-    return json.dumps(conf, indent=2)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  MAIN NODE
-# ─────────────────────────────────────────────────────────────────────────────
-

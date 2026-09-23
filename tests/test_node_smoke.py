@@ -59,6 +59,28 @@ def _stub_module(name: str, **attrs) -> types.ModuleType:
     sys.modules[name] = m
     return m
 
+
+def _is_importable(name: str) -> bool:
+    """True when the real package is installed, whether or not it is imported.
+
+    ``name not in sys.modules`` is not the same question.  This module is
+    imported during collection, so a stub installed on that test alone leaks
+    into every test collected after it, and a real package that simply had not
+    been imported yet gets shadowed for the whole run.  That produced an
+    order-dependent failure: ``colour`` is installed on the full dependency
+    lane, but the colour-science cross-check in
+    ``test_colorspace_convert_regression.py`` saw this stub and failed with
+    ``module 'colour' has no attribute 'LOG_ENCODINGS'`` only when collection
+    ordered that file after this one.  Stub what is genuinely absent, nothing
+    else.
+    """
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
 def _ensure_stubs() -> None:
     """Install minimal stubs for ComfyUI and heavy optional deps."""
 
@@ -331,7 +353,7 @@ def _ensure_stubs() -> None:
         pil.ImageOps.equalize     = lambda *a, **k: mock.MagicMock()
 
     # ── cv2 ──
-    if "cv2" not in sys.modules:
+    if "cv2" not in sys.modules and not _is_importable("cv2"):
         cv2 = _stub_module("cv2")
         cv2.COLOR_BGR2RGB = 4
         cv2.COLOR_RGB2BGR = 4
@@ -347,11 +369,11 @@ def _ensure_stubs() -> None:
 
     # ── OpenEXR / Imath ──
     for name in ("OpenEXR", "Imath"):
-        if name not in sys.modules:
+        if name not in sys.modules and not _is_importable(name):
             _stub_module(name)
 
     # ── PyOpenColorIO ──
-    if "PyOpenColorIO" not in sys.modules:
+    if "PyOpenColorIO" not in sys.modules and not _is_importable("PyOpenColorIO"):
         ocio = _stub_module("PyOpenColorIO")
         ocio.__version__ = "stub"
         ocio.Config     = mock.MagicMock
@@ -359,7 +381,7 @@ def _ensure_stubs() -> None:
         ocio.ROLE_SCENE_LINEAR = "scene_linear"
 
     # ── colour ──
-    if "colour" not in sys.modules:
+    if "colour" not in sys.modules and not _is_importable("colour"):
         _stub_module("colour")
 
     # ── comfy (ComfyUI internals) — extended stub set ──
@@ -567,7 +589,6 @@ def _ensure_stubs() -> None:
                                           "PAG_DEFAULT_SCALE",
                                           "PAG_LAYER_NAMES",
                                           "CFG_PLUS_PLUS_DEFAULT_SCALE",
-                                          "CFG_GUIDANCE_MODELS",
                                           "MODEL_TYPES",
                                           "VIDEO_MODEL_TYPES",
                                           "GUIDANCE_EMBED_MODELS",
@@ -621,12 +642,10 @@ def _ensure_stubs() -> None:
                                           "tile_sample",
                                           "_build_latent_meta",
                                           "MODEL_DEFAULTS",
-                                          "PRESET_CONFIGS",
                                           "DYNAMIC_CFG_EARLY_MULTIPLIER",
                                           "DYNAMIC_CFG_LATE_MULTIPLIER",
                                           "DYNAMIC_CFG_EARLY_THRESHOLD",
                                           "DYNAMIC_CFG_LATE_THRESHOLD"],
-        "radiance.fast_vae":            ["decode_to_linear_realtime", "load_radiance_decoder_weights"],
         "radiance.nodes_hdr_colorspace":["HDR_COLORSPACES", "LOG_PROFILE_HDR_PARAMS"],
         "radiance.hdr":                 [],
         "radiance.hdr.vae":             ["LOG_PROFILE_HDR_PARAMS", "LOG_PROFILE_HDR_DEFAULT",
@@ -668,7 +687,6 @@ def _ensure_stubs() -> None:
         "PAG_DEFAULT_SCALE":                 3.0,
         "CFG_PLUS_PLUS_DEFAULT_SCALE":       1.0,
         "PAG_LAYER_NAMES":                   ["middle"],
-        "CFG_GUIDANCE_MODELS":               ["Auto"],
         "MODEL_TYPES":                       ["Auto"],
         "VIDEO_MODEL_TYPES":                 ["Auto"],
         "GUIDANCE_EMBED_MODELS":             ["Auto"],
@@ -678,10 +696,9 @@ def _ensure_stubs() -> None:
         "CLIP_TARGETS":                      ["auto"],
         "MULTI_COND_MODES":                  ["merge"],
         "TILE_BLEND_MODES":                  ["linear"],
-        "WORKFLOW_PRESETS":                  ["None", "Custom"],
+        "WORKFLOW_PRESETS":                  ["Auto", "Custom"],
         "AYS_ANCHORS":                       {},
         "MODEL_DEFAULTS":                    {},
-        "PRESET_CONFIGS":                    {},
     }
 
     for _sub_name, _attrs in _radiance_sub_stubs.items():
@@ -746,11 +763,21 @@ def _ensure_stubs() -> None:
 
 def _discover_node_keys_from_source() -> Dict[str, str]:
     """
-    Parse all nodes_*.py and color/*.py with AST to extract NODE_CLASS_MAPPINGS
-    keys without importing the files.  Returns {node_key: source_file}.
+    Parse the node modules with AST to extract NODE_CLASS_MAPPINGS keys without
+    importing the files.  Returns {node_key: source_file}.
+
+    This used to glob only the root `nodes_*.py` layer, which is why retiring
+    that layer made three keys silently vanish from the scan instead of
+    resolving: the aliases were declared in files that had moved into the
+    package. It now walks `nodes/` too, so a key is discovered wherever it
+    actually lives.
     """
     results: Dict[str, str] = {}
-    patterns = list(RADIANCE_ROOT.glob("nodes_*.py")) + list(RADIANCE_ROOT.glob("color/*.py"))
+    patterns = (
+        list(RADIANCE_ROOT.glob("nodes_*.py"))
+        + list(RADIANCE_ROOT.glob("nodes/**/*.py"))
+        + list(RADIANCE_ROOT.glob("color/*.py"))
+    )
     for fpath in sorted(patterns):
         try:
             src = fpath.read_text(encoding="utf-8")
@@ -771,8 +798,11 @@ def _discover_node_keys_from_source() -> Dict[str, str]:
 def _import_file(fpath: str) -> types.ModuleType | None:
     """Import a source file by path, returning the module or None on failure.
 
-    Sets __package__ = "radiance" so that relative imports (from . import x)
-    resolve against the pre-stubbed radiance.* entries in sys.modules.
+    Sets __package__ to the module's real parent package so that relative
+    imports resolve against the pre-stubbed radiance.* entries in sys.modules.
+    A file under `nodes/generate/` needs `radiance.nodes.generate`, not
+    `radiance` — with the wrong parent, `from ...core import x` walks off the
+    top of the package and the import fails.
     """
     path = RADIANCE_ROOT / fpath
     spec = importlib.util.spec_from_file_location(
@@ -782,10 +812,11 @@ def _import_file(fpath: str) -> types.ModuleType | None:
         return None
     mod = importlib.util.module_from_spec(spec)
     # Give the module a package context so relative imports work.
-    mod.__package__ = "radiance"
+    parent_parts = path.relative_to(RADIANCE_ROOT).parts[:-1]
+    mod.__package__ = ".".join(("radiance",) + parent_parts)
     # Register under the radiance namespace so cross-file relative imports
     # (e.g. from .color_utils import …) can find sibling stubs.
-    _mod_key = f"radiance.{path.stem}"
+    _mod_key = f"{mod.__package__}.{path.stem}"
     if _mod_key not in sys.modules:
         sys.modules[_mod_key] = mod
     try:
@@ -983,27 +1014,104 @@ class TestCoverageSummary(unittest.TestCase):
     """Meta-test: verify we are testing the expected number of nodes."""
 
     def test_minimum_node_count(self):
-        """At least 85 nodes must be discovered and importable without torch/GPU."""
+        """Every node the catalog publishes must be discovered and importable.
+
+        The floor was a hand-written 85 while 131 nodes registered, so a third
+        of the catalog could have stopped resolving with this green. There is
+        one floor now -- EXPECTED_MIN_NODE_COUNT in config/constants.py -- and
+        test_package_cleanup.py pins that constant to the real count.
+        """
+        from radiance.config.constants import EXPECTED_MIN_NODE_COUNT
+
+        degraded = self._environment_load_failures()
+        if degraded:
+            raise unittest.SkipTest(
+                "environment is missing runtime dependencies for: "
+                + ", ".join(degraded)
+            )
+
         count = len(_ALL_NODES)
         self.assertGreaterEqual(
-            count, 85,
-            f"Only {count} nodes were importable. Expected >= 85. "
-            "Check that stubs are adequate or that source files parse cleanly."
+            count, EXPECTED_MIN_NODE_COUNT,
+            f"Only {count} nodes were importable. Expected >= "
+            f"{EXPECTED_MIN_NODE_COUNT}. Check that stubs are adequate or that "
+            "source files parse cleanly."
         )
 
+    #: Node keys that appear in a NODE_CLASS_MAPPINGS literal in the source but
+    #: are deliberately not published to ComfyUI.
+    #:
+    #: This list was twelve entries long. Nine of them turned out to be complete,
+    #: importable node classes that the v3 reorganisation simply forgot to list
+    #: in a group's mapping dict — they are registered now. What remains is three
+    #: back-compat aliases: each points at a class that IS published under its
+    #: current key, so registering the old key would put a second, identical
+    #: entry in the node menu for no benefit.
+    #:
+    #: The list is a ratchet: it may shrink, and a shrink fails this test so the
+    #: entry gets removed, but it may never grow without someone editing here.
+    # Empty, and it should stay that way.
+    #
+    # It held three alias keys that "could not" be registered. They are all
+    # published now — as DEPRECATED subclasses, so saved workflows referencing
+    # the old key still load while the menu shows one entry per node. Widening
+    # this file's AST scan from the retired root `nodes_*.py` layer to the whole
+    # `nodes/` package turned up seventeen more nodes in the same state, none of
+    # which anyone had noticed; `nodes/aggregate.py` publishes by default now.
+    #
+    # An entry here means a node exists in source and deliberately does not
+    # ship. Write down why.
+    _KNOWN_UNREGISTERED = frozenset()
+
+    @staticmethod
+    def _environment_load_failures():
+        """Labels of node groups this machine could not import at all."""
+        try:
+            import radiance
+        except Exception:  # pragma: no cover - package import is tested elsewhere
+            return ()
+        result = getattr(radiance, "_LOAD_RESULT", None)
+        return tuple(f.source.label for f in getattr(result, "failures", ()) or ())
+
     def test_all_keys_have_class(self):
-        """Every key discovered by AST must resolve to an actual class."""
+        """Every key discovered by AST must resolve to an actual class.
+
+        This used to call `warnings.warn` instead of asserting, which meant a
+        node could stop resolving entirely and the suite still reported green --
+        twelve of them had, and the warning text blamed "torch/GPU at runtime"
+        for what is really a registration gap. Assert against an explicit
+        ratchet instead, so new breakage fails and known breakage is visible.
+        """
         all_keys = set(_discover_node_keys_from_source().keys())
         missing = all_keys - set(_ALL_NODES.keys())
-        # Nodes that failed to import are acceptable during a CI run without
-        # torch/GPU — record them but do not fail the suite.
-        if missing:
-            import warnings
-            warnings.warn(
-                f"{len(missing)} nodes could not be imported (likely require "
-                f"torch/GPU/ComfyUI at runtime): {sorted(missing)[:10]}...",
-                stacklevel=2,
+
+        # A machine short a runtime dependency drops whole node groups, which
+        # would show up here as dozens of extra "missing" keys and drown the
+        # signal we actually want. That case has its own loud ERROR at startup
+        # (see radiance.report_node_load_health); skip rather than double-report.
+        degraded = self._environment_load_failures()
+        if degraded:
+            raise unittest.SkipTest(
+                "environment is missing runtime dependencies for: "
+                + ", ".join(degraded)
             )
+
+        regressions = missing - self._KNOWN_UNREGISTERED
+        self.assertFalse(
+            regressions,
+            f"{len(regressions)} node key(s) no longer resolve to a class and "
+            f"are not in the known-unregistered allowlist: {sorted(regressions)}. "
+            "Either wire the node into the package entry point or, if the drop "
+            "is deliberate, add it to _KNOWN_UNREGISTERED with a reason.",
+        )
+
+        fixed = self._KNOWN_UNREGISTERED - missing
+        self.assertFalse(
+            fixed,
+            f"{len(fixed)} node key(s) now resolve but are still listed in "
+            f"_KNOWN_UNREGISTERED: {sorted(fixed)}. Remove them from the "
+            "allowlist so it keeps ratcheting down.",
+        )
 
 
 # ── ACES colour science round-trip tests ─────────────────────────────────────

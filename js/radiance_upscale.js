@@ -1,5 +1,16 @@
 import { app } from "../../../scripts/app.js";
 
+import {
+    forceWidgetReinsert as _forceWidgetReinsert,
+    setWidgetVisible as _setWidgetVisible,
+} from "./radiance_widget_utils.js";
+
+// Widget helpers now live in radiance_widget_utils.js; this module's only
+// local difference was the "text" fallback type, which is passed through.
+function setWidgetVisible(widget, visible, node) {
+    _setWidgetVisible(widget, visible, node, { fallbackType: "text" });
+}
+
 /**
  * Radiance AI Upscale Widget Visibility (v1.0)
  * Hides SUPIR-specific widgets when a non-SUPIR model is selected.
@@ -18,58 +29,14 @@ import { app } from "../../../scripts/app.js";
 // ALBABIT-FIX: SUPIR model name identifiers — must match _SUPIR_MODELS in upscale.py.
 const SUPIR_MODEL_NAMES = ["SUPIR-v0F_fp16", "SUPIR-v0Q_fp16"];
 
-// Copied verbatim from radiance_io.js — shared pattern across all Radiance JS extensions.
-function setWidgetVisible(widget, visible, node) {
-	if (!widget) return;
-
-	if (!widget.options) widget.options = {};
-	widget.options.hidden = !visible;
-
-	widget.hidden = !visible;
-	if (visible) {
-		if (widget.type === "hidden") {
-			widget.type = widget._origType || "text";
-			delete widget.computeSize;
-			delete widget._origComputeSize;
-			if (widget._origDraw !== undefined) {
-				widget.draw = widget._origDraw;
-				delete widget._origDraw;
-			} else {
-				delete widget.draw;
-			}
-			if (widget.inputEl) widget.inputEl.style.display = "";
-			if (widget.element)  widget.element.style.display  = "";
-			if (widget._origComputedHeight !== undefined) {
-				widget.computedHeight = widget._origComputedHeight;
-				delete widget._origComputedHeight;
-			} else {
-				widget.computedHeight = 32;
-			}
-		}
-	} else {
-		if (widget.type !== "hidden") {
-			widget._origType        = widget.type;
-			widget._origComputeSize = widget.computeSize;
-			widget._origComputedHeight = widget.computedHeight;
-			widget.type = "hidden";
-			widget.computeSize = () => [0, -4];
-			if (widget.draw) widget._origDraw = widget.draw;
-			widget.draw = function() {};
-			if (widget.inputEl) widget.inputEl.style.display = "none";
-			if (widget.element)  widget.element.style.display  = "none";
-			widget.computedHeight = 4;
-		}
-	}
-	if (node?.widgets) node.widgets.splice(0, 0);
-}
-
 function refreshNodeSize(node) {
-	if (node.computeSize) {
-		const sz = node.computeSize();
-		node.size[0] = Math.max(node.size[0], sz[0]);
-		node.size[1] = sz[1];
-		app.graph.setDirtyCanvas(true, true);
-	}
+	if (!node.computeSize) return;
+
+	const sz = node.computeSize();
+	// ALBABIT-FIX: node.setSize(...) is the API Vue's resize handling actually
+	// observes; raw node.size[i] mutation has zero visual effect.
+	node.setSize([Math.max(node.size[0], sz[0]), sz[1]]);
+	app.graph.setDirtyCanvas(true, true);
 }
 
 app.registerExtension({

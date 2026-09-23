@@ -208,12 +208,22 @@ def _log_import_failure(
     source: NodeModuleSpec,
     error: Exception,
 ) -> None:
-    """Log import failures consistently across entry point and node groups."""
+    """Log import failures consistently across entry point and node groups.
+
+    BUG FIX: optional-module failures used to log at DEBUG, which is
+    invisible in ComfyUI's default console output. A single broken
+    submodule inside a node *group* (e.g. radiance.nodes.hdr, which bundles
+    ~18 nodes behind one import) silently dropped every node in that group
+    with no visible trace — surfacing as "missing node" reports with no
+    clue why. WARNING keeps startup non-fatal (required=False groups still
+    don't crash ComfyUI) while making the failure and the exact module that
+    failed visible by default.
+    """
 
     if source.required:
         logger.error("%s: failed to load required module %s: %s", context, source.label, error)
     else:
-        logger.debug("%s: skipping optional module %s (%s)", context, source.label, error)
+        logger.warning("%s: skipping optional module %s (%s)", context, source.label, error)
     logger.debug("Import failure details for %s", source.label, exc_info=True)
 
 

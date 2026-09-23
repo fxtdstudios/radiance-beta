@@ -25,7 +25,6 @@ __all__ = [
     "DependencySpec",
     "CORE_DEPENDENCIES",
     "OPTIONAL_DEPENDENCIES",
-    "RUNTIME_ENV_DEFAULTS",
     "configure_runtime_environment",
     "missing_dependencies",
     "module_available",

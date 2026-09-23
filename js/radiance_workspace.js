@@ -4,12 +4,22 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
+import { escapeHtml } from "./radiance_dom_utils.js";
+
+// ALBABIT-FIX: resolve extension base at runtime so the path works regardless of the install folder name (e.g. "radiance" vs "radiance-beta")
+const _EXT_BASE = import.meta.url.replace(/\/[^/]+$/, '');
+
 const HEADER = "RAD_WORKSPACE_V1::";
 const SEARCH_DEBOUNCE_MS = 200;
 const TOAST_DURATION_MS = 3000;
 
 // Listen for postMessage updates from Studio Dashboard
 window.addEventListener("message", (event) => {
+    // Reject cross-origin senders. Without this, any page that can get a handle
+    // to this window could load an arbitrary graph, or ask for the user's graph
+    // back via the radiance_save_project_version reply below. The sibling
+    // handler in project_manager_dashboard.mjs already does this check.
+    if (event.origin !== window.location.origin) return;
     if (event.data && event.data.type === "radiance_load_workflow") {
         try {
             const graphData = typeof event.data.content === 'string' ? JSON.parse(event.data.content) : event.data.content;
@@ -60,11 +70,11 @@ window.addEventListener("message", (event) => {
                 .then(({ ok, data }) => {
                     if (!ok || !data.success) throw new Error(data.error || "Save failed");
                     showToast("Project Manager saved the current canvas.", "success");
-                    event.source?.postMessage({ type: "radiance_project_action_result", action: "save-version", success: true }, "*");
+                    event.source?.postMessage({ type: "radiance_project_action_result", action: "save-version", success: true }, window.location.origin);
                 })
                 .catch((err) => {
                     showToast(`Project Manager save failed: ${err.message}`, "error");
-                    event.source?.postMessage({ type: "radiance_project_action_result", action: "save-version", success: false, error: err.message }, "*");
+                    event.source?.postMessage({ type: "radiance_project_action_result", action: "save-version", success: false, error: err.message }, window.location.origin);
                 });
         } catch(err) {
             showToast(`Project Manager save failed: ${err.message}`, "error");
@@ -349,16 +359,6 @@ function promptRadianceAction(titleText, message, defaultValue = "", confirmLabe
     });
 }
 
-function escapeHtml(value) {
-    return String(value ?? "").replace(/[&<>"']/g, (char) => ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        "\"": "&quot;",
-        "'": "&#39;",
-    })[char]);
-}
-
 function escapeAttr(value) {
     return escapeHtml(value).replace(/`/g, "&#96;");
 }
@@ -515,18 +515,18 @@ app.registerExtension({
 
             // Keep the Project Manager dashboard separate from the workflow library.
             this.addWidget("button", "◎ PROJECT MANAGER", "launch_project_manager", () => {
-                window.showRadianceDashboard("/extensions/radiance/project_manager_dashboard.html", "Radiance Project Manager");
+                window.showRadianceDashboard("${_EXT_BASE}/project_manager_dashboard.html", "Radiance Project Manager");
             });
             this.addWidget("button", "WORKFLOW LIBRARY", "launch_dashboard", () => {
-                window.showRadianceDashboard("/extensions/radiance/workspace_dashboard.html", "Radiance Workflow Library");
+                window.showRadianceDashboard("${_EXT_BASE}/workspace_dashboard.html", "Radiance Workflow Library");
             });
             this.addWidget("button", "◎ ASSETS", "launch_assets", () => {
-                window.showRadianceDashboard("/extensions/radiance/assets_dashboard.html", "Radiance Assets");
+                window.showRadianceDashboard("${_EXT_BASE}/assets_dashboard.html", "Radiance Assets");
             });
             this.addWidget("button", "QUICK SAVE", "quick_save", () => this.saveToLibrary());
             this.addWidget("button", "INCREMENTAL SAVE", "inc_save", () => this.incrementalSave());
-            this.addWidget("button", "DOCUMENTATION", "docs_link", () => window.open("https://radiance.fxtd.org/", "_blank"));
-            this.addWidget("button", "FXTD STUDIOS", "site_link", () => window.open("https://www.fxtd.org", "_blank"));
+            this.addWidget("button", "DOCUMENTATION", "docs_link", () => window.open("https://www.fxtdstudios.com", "_blank"));
+            this.addWidget("button", "FXTD STUDIOS", "site_link", () => window.open("https://www.fxtdstudios.com", "_blank"));
 
             this.color = "#111111";
             this.bgcolor = "#111111";

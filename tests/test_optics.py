@@ -23,7 +23,7 @@ skip_no_torch = unittest.skipUnless(HAS_TORCH, "real torch not available")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from nodes_optics import (
+from radiance.nodes.vfx.optics import (
     NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS,
     RadianceLensDistortion,
@@ -31,6 +31,12 @@ from nodes_optics import (
     RadianceAnamorphicStreaks,
     RadianceVignette,
 )
+
+# This module already gates its torch-dependent tests correctly (they skip
+# cleanly against conftest's stub), so opt out of the automatic module-level
+# skip and keep the rest of the file running on the no-torch CI matrix.
+RADIANCE_TORCH_GATED = True
+
 
 
 def _img(b=1, h=16, w=16, fill=0.5):

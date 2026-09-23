@@ -220,7 +220,10 @@ class RadianceHDRStitch:
                 recon_up = F.interpolate(recon, size=size, mode="bilinear", align_corners=True)
                 recon = recon_up + lp_fused[l]
                 
-            stitched = recon.squeeze(0).permute(0, 2, 3, 1)
+            # recon is (B, C, H, W). This used to squeeze(0) first, which on a
+            # single frame (B == 1, the common case) left a 3-D tensor and the
+            # 4-D permute raised: the default blend mode failed on every still.
+            stitched = recon.permute(0, 2, 3, 1)
             stitched = stitched.clamp(min=0.0) # scene-linear float output (unclamped max!)
             
         logger.info(f"[HDR Stitch] Composited crop back into frame using {blend_mode} (Feather: {feather_radius}).")

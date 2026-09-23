@@ -1,13 +1,16 @@
 import json
+import logging
 import math
 from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 
+from ....performance import perf_finish, perf_start
 
 _NORMAL_INPUTS = ["OpenGL (Y-Up)", "DirectX (Y-Down)"]
 _LIGHT_TYPES = ["Directional", "Point"]
+logger = logging.getLogger("radiance.vfx.multipass.relight_comp")
 
 
 def _resize_bhwc(x: torch.Tensor, height: int, width: int) -> torch.Tensor:
@@ -26,7 +29,9 @@ def _match_batch(x: torch.Tensor, batch: int) -> torch.Tensor:
         return x
     if x.shape[0] > batch:
         return x[:batch]
-    return x[:1].expand(batch, -1, -1, -1)
+    if x.shape[0] == 1:
+        return x.expand(batch, -1, -1, -1)
+    raise ValueError(f"Batch mismatch: expected {batch} frames or a single broadcast frame, got {x.shape[0]}")
 
 
 def _match_image(
@@ -112,8 +117,11 @@ def _view_positions(
 def _blur_bhwc(x: torch.Tensor, radius: int) -> torch.Tensor:
     if radius <= 0:
         return x
-    k = radius * 2 + 1
     b, h, w, c = x.shape
+    radius = min(int(radius), max(0, h - 1), max(0, w - 1))
+    if radius <= 0:
+        return x
+    k = radius * 2 + 1
     x4 = x.permute(0, 3, 1, 2).reshape(b * c, 1, h, w)
     x4 = F.pad(x4, (radius, radius, radius, radius), mode="reflect")
     x4 = F.avg_pool2d(x4, kernel_size=k, stride=1)
@@ -121,7 +129,7 @@ def _blur_bhwc(x: torch.Tensor, radius: int) -> torch.Tensor:
 
 
 class RadianceMultipassRelight:
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
+    CATEGORY = "FXTD STUDIOS/Radiance/VFX"
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -139,6 +147,7 @@ class RadianceMultipassRelight:
                 "alpha": ("IMAGE",),
                 "shadow_mask": ("IMAGE",),
                 "depth_map": ("IMAGE",),
+                "world_position": ("IMAGE",),
                 "normal_convention": (_NORMAL_INPUTS, {"default": "OpenGL (Y-Up)"}),
                 "light_type": (_LIGHT_TYPES, {"default": "Directional"}),
                 "light_x": ("FLOAT", {"default": -0.35, "min": -10.0, "max": 10.0, "step": 0.01}),
@@ -151,7 +160,9 @@ class RadianceMultipassRelight:
                 "ambient": ("FLOAT", {"default": 0.03, "min": 0.0, "max": 4.0, "step": 0.01}),
                 "specular_intensity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 8.0, "step": 0.05}),
                 "depth_scale": ("FLOAT", {"default": 10.0, "min": 0.01, "max": 1000.0, "step": 0.1}),
+                "depth_near_is_white": ("BOOLEAN", {"default": True}),
                 "mix_with_beauty": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "output_premultiplied": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -171,6 +182,7 @@ class RadianceMultipassRelight:
         alpha: Optional[torch.Tensor] = None,
         shadow_mask: Optional[torch.Tensor] = None,
         depth_map: Optional[torch.Tensor] = None,
+        world_position: Optional[torch.Tensor] = None,
         normal_convention: str = "OpenGL (Y-Up)",
         light_type: str = "Directional",
         light_x: float = -0.35,
@@ -183,10 +195,13 @@ class RadianceMultipassRelight:
         ambient: float = 0.03,
         specular_intensity: float = 1.0,
         depth_scale: float = 10.0,
+        depth_near_is_white: bool = True,
         mix_with_beauty: float = 0.0,
+        output_premultiplied: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str]:
         batch, height, width, _ = albedo.shape
         device = albedo.device
+        _perf = perf_start(device)
         base = _match_image(albedo, batch, height, width, 3).to(device=device).clamp(min=0.0)
         normals = _decode_normal_map(
             _match_image(normal_map, batch, height, width, 3).to(device=device),
@@ -195,14 +210,24 @@ class RadianceMultipassRelight:
 
         rough = _scalar_pass(roughness, batch, height, width, 0.5, device).clamp(0.045, 1.0)
         metal = _scalar_pass(metallic, batch, height, width, 0.0, device)
-        spec = _scalar_pass(specular, batch, height, width, 0.5, device)
-        occlusion = _scalar_pass(ao, batch, height, width, 1.0, device)
+        spec = (
+            torch.ones((batch, height, width, 3), device=device, dtype=torch.float32)
+            if specular is None
+            else _match_image(specular, batch, height, width, 3).to(device=device).clamp(0.0, 1.0)
+        )
+        occlusion = _scalar_pass(ao, batch, height, width, 0.0, device)
+        accessibility = 1.0 - occlusion
         alpha_s = _scalar_pass(alpha, batch, height, width, 1.0, device)
         shadow = _scalar_pass(shadow_mask, batch, height, width, 0.0, device)
         visibility = (1.0 - shadow).clamp(0.0, 1.0)
 
         if light_type == "Point":
-            positions = _view_positions(batch, height, width, device, depth_map, depth_scale)
+            if world_position is not None:
+                positions = _match_image(world_position, batch, height, width, 3).to(device=device)
+            else:
+                positions = _view_positions(batch, height, width, device, depth_map, depth_scale)
+                if depth_map is not None and depth_near_is_white:
+                    positions[..., 2] = -positions[..., 2]
             light_pos = _color_tensor(light_x, light_y, light_z, device)
             l_vec = light_pos - positions
             dist2 = (l_vec * l_vec).sum(dim=-1, keepdim=True).clamp(min=1e-6)
@@ -233,7 +258,7 @@ class RadianceMultipassRelight:
         k = ((rough_v + 1.0) * (rough_v + 1.0)) / 8.0
         g_l = ndotl / (ndotl * (1.0 - k) + k + 1e-8)
         g_v = ndotv / (ndotv * (1.0 - k) + k + 1e-8)
-        f0_dielectric = 0.04 * spec.unsqueeze(-1)
+        f0_dielectric = 0.04 * spec
         f0 = f0_dielectric * (1.0 - metal.unsqueeze(-1)) + base * metal.unsqueeze(-1)
         fresnel = f0 + (1.0 - f0) * torch.pow((1.0 - vdoth).clamp(0.0, 1.0), 5.0)
         spec_brdf = (d_ggx * g_l * g_v * fresnel) / (4.0 * ndotl * ndotv + 1e-6)
@@ -247,14 +272,17 @@ class RadianceMultipassRelight:
             * float(specular_intensity)
         ).clamp(min=0.0)
 
-        ambient_light = light_color * float(ambient) * occlusion.unsqueeze(-1)
+        ambient_light = light_color * float(ambient) * accessibility.unsqueeze(-1)
         diffuse = base * (1.0 - metal.unsqueeze(-1)) * (diffuse_light + ambient_light)
         relit = (diffuse + specular_light).clamp(min=0.0)
-        relit = relit * alpha_s.unsqueeze(-1)
+        if output_premultiplied:
+            relit = relit * alpha_s.unsqueeze(-1)
 
         if beauty is not None and mix_with_beauty > 0.0:
             src = _match_image(beauty, batch, height, width, 3).to(device=device).clamp(min=0.0)
             mix = float(max(0.0, min(1.0, mix_with_beauty)))
+            if output_premultiplied:
+                src = src * alpha_s.unsqueeze(-1)
             relit = relit * (1.0 - mix) + src * mix
 
         lighting = (diffuse_light + ambient_light + specular_light).clamp(min=0.0)
@@ -271,32 +299,35 @@ class RadianceMultipassRelight:
                 "alpha": alpha is not None,
                 "shadow_mask": shadow_mask is not None,
                 "depth_map": depth_map is not None,
+                "world_position": world_position is not None,
             },
             "missing_optional_defaults": {
                 "roughness": 0.5 if roughness is None else None,
                 "metallic": 0.0 if metallic is None else None,
-                "specular": 0.5 if specular is None else None,
-                "ao": 1.0 if ao is None else None,
+                "specular": 1.0 if specular is None else None,
+                "ao": 0.0 if ao is None else None,
                 "alpha": 1.0 if alpha is None else None,
                 "shadow_mask": 0.0 if shadow_mask is None else None,
             },
             "light_type": light_type,
             "normal_convention": normal_convention,
+            "output_premultiplied": output_premultiplied,
             "note": "This node consumes supplied utility/PBR passes; it does not extract or hallucinate missing passes from beauty.",
         }
 
+        perf_finish(logger, "Multipass Relight", _perf, device)
         return (
-            relit.cpu(),
-            diffuse_light.cpu(),
-            specular_light.cpu(),
-            lighting.cpu(),
-            alpha_img.cpu(),
+            relit.contiguous(),
+            diffuse_light.contiguous(),
+            specular_light.contiguous(),
+            lighting.contiguous(),
+            alpha_img.contiguous(),
             json.dumps(info, indent=2),
         )
 
 
 class RadianceMultipassComposite:
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
+    CATEGORY = "FXTD STUDIOS/Radiance/VFX"
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -344,9 +375,18 @@ class RadianceMultipassComposite:
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str]:
         batch, height, width, _ = foreground.shape
         device = foreground.device
+        _perf = perf_start(device)
         fg_src = relit_foreground if relit_foreground is not None else foreground
         fg = _match_image(fg_src, batch, height, width, 3).to(device=device).clamp(min=0.0)
         matte = _scalar_pass(alpha, batch, height, width, 1.0, device)
+        if premultiplied_input:
+            straight_fg = torch.where(
+                matte.unsqueeze(-1) > 1e-8,
+                fg / matte.unsqueeze(-1).clamp(min=1e-8),
+                torch.zeros_like(fg),
+            )
+        else:
+            straight_fg = fg
         if alpha_invert:
             matte = 1.0 - matte
 
@@ -373,9 +413,9 @@ class RadianceMultipassComposite:
         if light_wrap > 0.0 and background is not None:
             soft_bg = _blur_bhwc(bg, int(light_wrap_radius))
             edge = (_blur_bhwc(visible_alpha.unsqueeze(-1), max(1, int(light_wrap_radius) // 2))[..., 0] - visible_alpha).clamp(0.0, 1.0)
-            fg = fg + soft_bg * edge.unsqueeze(-1) * float(light_wrap)
+            straight_fg = straight_fg + soft_bg * edge.unsqueeze(-1) * float(light_wrap)
 
-        premult = fg if premultiplied_input else fg * visible_alpha.unsqueeze(-1)
+        premult = straight_fg * visible_alpha.unsqueeze(-1)
         composite = premult + bg * (1.0 - visible_alpha).unsqueeze(-1)
         holdout = visible_alpha.unsqueeze(-1).expand(-1, -1, -1, 3).contiguous()
         depth_matte = front_mask.unsqueeze(-1).expand(-1, -1, -1, 3).contiguous()
@@ -390,11 +430,12 @@ class RadianceMultipassComposite:
             "note": "Composite uses supplied alpha/depth/shadow data only; it does not infer hidden mattes or object IDs.",
         }
 
+        perf_finish(logger, "Multipass Composite", _perf, device)
         return (
-            composite.cpu(),
-            premult.cpu(),
-            holdout.cpu(),
-            depth_matte.cpu(),
+            composite.contiguous(),
+            premult.contiguous(),
+            holdout.contiguous(),
+            depth_matte.contiguous(),
             json.dumps(info, indent=2),
         )
 
@@ -405,6 +446,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceMultipassRelight": "◎ Multipass: Real PBR Relight",
-    "RadianceMultipassComposite": "◎ Multipass: VFX Composite",
+    "RadianceMultipassRelight": "Multipass Relight",
+    "RadianceMultipassComposite": "Multipass Composite",
 }

@@ -21,12 +21,22 @@ skip_no_torch = unittest.skipUnless(HAS_TORCH, "real torch not available")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from nodes_curves import (
-    _rgb_to_hsl,
-    _hsl_to_rgb,
+# NODE_CLASS_MAPPINGS moved to the group package: the root
+# aggregator that used to build it was a shim over these classes.
+from radiance.nodes.color import (
     NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS,
 )
+from radiance.nodes.color.curves import (
+    _rgb_to_hsl,
+    _hsl_to_rgb_fast as _hsl_to_rgb,
+)
+
+# This module already gates its torch-dependent tests correctly (they skip
+# cleanly against conftest's stub), so opt out of the automatic module-level
+# skip and keep the rest of the file running on the no-torch CI matrix.
+RADIANCE_TORCH_GATED = True
+
 
 
 def _t(b=1, h=4, w=4, fill=0.5):

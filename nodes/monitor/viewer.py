@@ -1,3 +1,8 @@
+# ruff: noqa: F821
+# Many names (image_video_type, MAX_IMAGE_DIMENSION, apply_grading, the LUT/IDT
+# helpers, etc.) are injected into this module's globals at runtime via
+# `globals().update({... getattr(_viewer_utils, name) ...})` below. Static linters
+# cannot see through that, so F821 (undefined name) is disabled for this file.
 import json
 import struct
 import torch
@@ -10,8 +15,21 @@ import math
 import sys
 import io
 import traceback
-from aiohttp import web
-from server import PromptServer
+try:
+    from aiohttp import web
+    from server import PromptServer
+except ImportError:  # pragma: no cover - exercised by the CI import smoke-test
+    # Guarded because importing any module in this package runs this file, and
+    # a bare `from aiohttp import web` therefore made the whole Review group
+    # unimportable without a running ComfyUI. `nodes/gizmo.py` and
+    # `nodes/pipeline/workspace.py` have always guarded it for the same reason;
+    # this one did not, and the root `nodes_realtime_preview.py` shim hid that
+    # by being importable on its own — until it was retired into this package.
+    #
+    # aiohttp is a required dependency of ComfyUI, so this never degrades a
+    # real install; it keeps the module readable by tooling that has neither.
+    web = None
+    PromptServer = None
 import re
 
 # v3.1: Enable OpenEXR support in OpenCV
@@ -75,9 +93,145 @@ _VIEWER_UTIL_NAMES = (
 )
 globals().update({name: getattr(_viewer_utils, name) for name in _VIEWER_UTIL_NAMES})
 
+# ── 3.5.0: source colour tagging ───────────────────────────────────────────────
+# The viewer used to receive every frame as fp32 with no tag and treat all float
+# data as scene-linear, so an ordinary sRGB-encoded ComfyUI IMAGE was gamma-
+# encoded a second time (washed out), and the frontend fell back to guessing a
+# camera log curve from the frame's median. Every frame is now tagged; the names
+# are OpenColorIO ACES studio-config colour spaces, so the frontend hands them
+# straight to OCIO.
+VIEWER_INPUT_SPACES = [
+    "Auto",
+    "sRGB (ComfyUI IMAGE)",
+    "Linear Rec.709 (sRGB)",
+    "ACEScg",
+    "Linear Rec.2020",
+    "Linear P3-D65",
+    "ACES2065-1",
+]
+SRGB_COLORSPACE = "sRGB Encoded Rec.709 (sRGB)"
+
+
+def resolve_viewer_input_space(choice: str, image: Any) -> Tuple[str, str]:
+    """-> (encoding "srgb" | "linear", OCIO colour-space name).
+
+    Auto: a ComfyUI IMAGE is display-encoded sRGB by convention and lives in
+    0-1. Values above 1.0 or below 0 only come from scene-linear producers, so
+    they mark the batch linear (Rec.709 primaries, Radiance's working space).
+    The decision is per batch, never per frame, so a clip cannot flip between
+    two looks when one frame crosses 1.0.
+    """
+    if choice and choice != "Auto":
+        if choice.startswith("sRGB"):
+            return "srgb", SRGB_COLORSPACE
+        return "linear", choice
+    try:
+        t = image if isinstance(image, torch.Tensor) else None
+        if t is not None and t.numel():
+            rgb = t[..., :3] if t.shape[-1] >= 3 else t
+            hi = float(rgb.amax())
+            lo = float(rgb.amin())
+            if hi > 1.0 + 1e-3 or lo < -1e-3:
+                return "linear", "Linear Rec.709 (sRGB)"
+    except Exception:  # noqa: BLE001 - fall back to the ComfyUI convention
+        pass
+    return "srgb", SRGB_COLORSPACE
+
+
+def _video_fps(value: Any) -> Optional[float]:
+    """Frame rate of a ComfyUI VIDEO input, None for a plain IMAGE batch."""
+    try:
+        if hasattr(value, "get_components"):
+            rate = getattr(value.get_components(), "frame_rate", None)
+            if rate:
+                return float(rate)
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _viewer_cache_has_node(unique_id: Any) -> bool:
+    """True when the delivery cache still holds a frame set for this node."""
+    if unique_id is None or not str(unique_id).strip():
+        return False
+    node = str(unique_id).strip()
+    with _viewer_utils._VIEWER_CACHE_LOCK:
+        keys = list(_viewer_utils._VIEWER_CACHE.keys()) if hasattr(_viewer_utils, "_VIEWER_CACHE") \
+            else []
+    return any(k == node or str(k).endswith(":" + node) for k in keys)
+
+
+def _fp_tensor(value: Any) -> Any:
+    if hasattr(value, "get_components"):
+        try:
+            value = value.get_components().images
+        except Exception:  # noqa: BLE001
+            return repr(type(value))
+    if isinstance(value, dict) and "samples" in value:
+        value = value["samples"]
+    if isinstance(value, torch.Tensor):
+        flat = value.detach().reshape(-1)
+        step = max(1, flat.numel() // 65536)
+        sample = flat[::step].double()
+        return (tuple(value.shape), str(value.dtype), round(float(sample.sum()), 6),
+                round(float(sample.abs().sum()), 6))
+    return repr(value)
+
+
+def _viewer_fingerprint(image: Any, other: Dict[str, Any]) -> str:
+    """Identity of what the viewer would show: inputs plus widget values."""
+    parts = [_fp_tensor(image)]
+    for k in sorted(other):
+        if k in ("prompt", "extra_pnginfo"):
+            continue
+        parts.append((k, _fp_tensor(other[k])))
+    return repr(parts)
+
+
 # BUG-FIX: compiled at module level — was previously compiled inside the
 # hot delivery handler on every request, wasting time on every call.
 _SAFE_FILENAME_RE = re.compile(r'[^\w\s◎_.() -]', re.UNICODE)
+
+# ── Viewer temp-file bookkeeping ───────────────────────────────────────────────
+# Every execution wrote a fresh uuid4-named set of .rhdr/.exr/.png/.rpick files
+# and nothing ever removed them: there was no unlink/rmtree for viewer temp files
+# anywhere in the package. With bracketing forced on that is 12 files per frame,
+# so scrubbing a slider and re-queueing a 240-frame shot ten times left ~30,000
+# orphaned files and >100 GB in the temp directory until ComfyUI restarted.
+_VIEWER_TEMP_FILES: Dict[str, List[str]] = {}
+_VIEWER_TEMP_LOCK = __import__("threading").Lock()
+
+
+def _viewer_track_temp(instance_key: str, paths: List[str]) -> None:
+    """Record the files written for this instance's current generation."""
+    if not instance_key:
+        return
+    with _VIEWER_TEMP_LOCK:
+        _VIEWER_TEMP_FILES[instance_key] = list(paths)
+
+
+def _viewer_purge_temp(instance_key: str) -> int:
+    """Delete the previous generation's files for this instance. Returns the count."""
+    if not instance_key:
+        return 0
+    with _VIEWER_TEMP_LOCK:
+        stale = _VIEWER_TEMP_FILES.pop(instance_key, [])
+    removed = 0
+    for path in stale:
+        try:
+            os.unlink(path)
+            removed += 1
+        except FileNotFoundError as _exc:
+            logger.debug(
+                "[Radiance] _viewer_purge_temp(): ignoring %s from `os.unlink(path)`: %s",
+                type(_exc).__name__, _exc,
+            )
+        except OSError as exc:
+            logger.debug("[Radiance] Could not remove stale viewer temp %s: %s", path, exc)
+    if removed:
+        logger.debug("[Radiance] Purged %d stale viewer temp file(s) for %s", removed, instance_key)
+    return removed
+
 
 class RadianceViewer:
     """
@@ -106,6 +260,71 @@ class RadianceViewer:
                     image_video_type,
                     {"tooltip": "Z-Depth map to display when pressing Z button"},
                 ),
+                # ── Exposure bracketing ────────────────────────────────────
+                # This was a function default of True with no entry in
+                # INPUT_TYPES at all, so there was no widget and no way to turn
+                # it off. Every frame was processed three times, and the two
+                # bracket passes each wrote a .rhdr, a 32-bit .exr and a .rpick
+                # that nothing ever reads: the JS only requests the bracket
+                # PNG (imgData.filename), and the sole consumer of the rest was
+                # the status string "Low / High cached". 500 frames at 1080p was
+                # ~67 GB into temp/, two thirds of it for that label.
+                #
+                # It is now a visible control, it defaults off, and when it is
+                # on it writes only the PNG the viewer actually fetches.
+                "exposure_bracketing": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "label_on": "on",
+                        "label_off": "off",
+                        "tooltip": (
+                            "Write -2 EV / +2 EV preview thumbnails for the analysis shelf. "
+                            "One extra PNG per frame per bracket; off by default because a "
+                            "long shot pays for it on disk."
+                        ),
+                    },
+                ),
+                # ── 3.5.0: what the pixels are, how they travel, how fast ──
+                # Appended after exposure_bracketing so saved widget values keep
+                # their positions.
+                "input_space": (
+                    VIEWER_INPUT_SPACES,
+                    {
+                        "default": "Auto",
+                        "tooltip": (
+                            "What the incoming pixels are. A ComfyUI IMAGE is sRGB-encoded and is "
+                            "shown untouched, exactly as ComfyUI previews it. Linear sources (HDR "
+                            "Decode, SDR -> HDR, Read in a linear working space) are shown through "
+                            "OpenColorIO's ACES 2.0 SDR view. Auto: linear when any value is above "
+                            "1.0 or below 0, otherwise sRGB. Set it explicitly for linear material "
+                            "that stays inside 0-1."
+                        ),
+                    },
+                ),
+                "float_precision": (
+                    ["Half (16-bit)", "Full (32-bit)"],
+                    {
+                        "default": "Half (16-bit)",
+                        "tooltip": (
+                            "Precision of the float frames sent to the browser. Half is what "
+                            "OpenEXR, RV and Nuke's viewer cache use: exact for display and "
+                            "grading, half the size (about 60 MB less per 4K frame). Full keeps "
+                            "every fp32 bit for values above 65504 or bit-exact probing."
+                        ),
+                    },
+                ),
+                "fps": (
+                    "FLOAT",
+                    {
+                        "default": 0.0, "min": 0.0, "max": 240.0, "step": 0.001,
+                        "tooltip": (
+                            "Playback rate. 0 = the source's rate (a VIDEO input carries it), "
+                            "24 for an image batch. 23.976 / 29.97 / 59.94 are handled as the "
+                            "NTSC rates."
+                        ),
+                    },
+                ),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -129,14 +348,48 @@ class RadianceViewer:
 • 16-bit PNG + .rhdr HDR sidecar + .exr export
 • IMAGE passthrough — no longer a dead-end node"""
 
+    @classmethod
+    def IS_CHANGED(cls, image=None, unique_id=None, **kwargs):
+        """
+        Always re-execute.
+
+        This is an OUTPUT_NODE with side effects: it writes preview/RHDR/EXR
+        files and — critically — repopulates the process-global frame cache that
+        `/radiance/deliver` reads from. Without an IS_CHANGED, ComfyUI caches the
+        result and skips the node on re-queue, so once a viewer's entry is
+        evicted from the 8-slot cache the delivery endpoint answers "No frames
+        found in cache for this node. Run the workflow first." forever: re-queuing
+        skips the unchanged node, nothing repopulates the cache, and the only
+        escape is to perturb an upstream widget. NaN is ComfyUI's documented
+        always-dirty sentinel.
+
+        3.5.0: NaN on every queue also marked every node downstream of the
+        viewer dirty (the viewer passes its IMAGE through), so an unchanged
+        graph re-ran everything after it. Now: NaN only while this viewer has
+        nothing in the delivery cache; otherwise a fingerprint of what it would
+        show, so an unchanged viewer is skipped and so is everything after it.
+        """
+        try:
+            if not _viewer_cache_has_node(unique_id):
+                return float("NaN")
+            return _viewer_fingerprint(image, kwargs)
+        except Exception:  # noqa: BLE001 - never block execution on a fingerprint
+            return float("NaN")
+
     def view(
         self,
         image: Any,
-        bit_depth: str = "32-bit Float",
+        bit_depth: str = "16-bit Half",
         # Compare / Depth
         compare_image: Optional[Any] = None,
         zdepth: Optional[Any] = None,
-        exposure_bracketing: bool = True,
+        # Defaults to off and now matches the INPUT_TYPES widget. It used to
+        # default to True with no widget behind it, so it could not be turned
+        # off from the graph.
+        exposure_bracketing: bool = False,
+        input_space: str = "Auto",
+        float_precision: str = "",
+        fps: float = 0.0,
         # Hidden
         prompt: Optional[Any] = None,
         extra_pnginfo: Optional[Any] = None,
@@ -159,14 +412,19 @@ class RadianceViewer:
                 return x[0]
             return x
 
+        source_fps = _video_fps(image)
         image = _extract_tensor(image)
         if compare_image is not None:
             compare_image = _extract_tensor(compare_image)
         if zdepth is not None:
             zdepth = _extract_tensor(zdepth)
 
-        # ── Parse bit depth ──
-        use_16bit = "16-bit" in bit_depth and HAS_CV2
+        # 3.5.0: float_precision is the visible widget. The legacy bit_depth
+        # keyword is still accepted from scripts. Half is the default: RHDR
+        # does not need OpenCV, so the old HAS_CV2 gate on it is gone.
+        if float_precision:
+            bit_depth = "32-bit Float" if float_precision.startswith("Full") else "16-bit Half"
+        use_16bit = "16-bit" in bit_depth
         # v4.1: 32-bit Float — full IEEE 754 fp32 RHDR sidecar.
         # Uses RHDR format with flags=1 (fp32 marker) so viewer detects and
         # uploads as Float32 texture instead of HALF_FLOAT. Twice the VRAM of
@@ -190,6 +448,9 @@ class RadianceViewer:
                 "result": (image,),
             }
 
+        source_encoding, source_colorspace = resolve_viewer_input_space(input_space, image)
+        play_fps = float(fps) if fps and fps > 0 else (source_fps or 24.0)
+
         try:
             output_dir = folder_paths.get_temp_directory()
             batch_size = image.shape[0] if image.dim() == 4 else 1
@@ -202,6 +463,12 @@ class RadianceViewer:
 
             images_list: List[Dict[str, Any]] = []
 
+            # Purge the previous generation's temp files for this viewer before
+            # writing a new one, so repeated re-queues don't accumulate.
+            _purge_key = str(unique_id).strip() if unique_id and str(unique_id).strip() else str(id(self))
+            _viewer_purge_temp(_purge_key)
+
+            view_space = (source_encoding, source_colorspace)
             for frame_idx in range(batch_size):
                 try:
                     frame_result = self._process_frame(
@@ -212,6 +479,7 @@ class RadianceViewer:
                         use_32bit=use_32bit,
                         save_hdr_sidecar=save_hdr_sidecar,
                         prefix="◎ Radiance_viewer",
+                        view_space=view_space,
                     )
                     if frame_result is not None:
                         frame_result["frame"] = frame_idx
@@ -221,10 +489,24 @@ class RadianceViewer:
                     # ── Exposure Bracketing ────────────────────────────────────
                     if exposure_bracketing and frame_result is not None:
                         # Low (-2 EV)
+                        # Slice FIRST. These used to multiply the ENTIRE batch
+                        # inside the per-frame loop while _process_frame reads
+                        # only image[frame_idx] -- 2 full-batch allocations per
+                        # frame, i.e. O(B^2) memory traffic. A 120-frame 1080p
+                        # RGBA fp32 plate moved ~950 GB for one preview, and
+                        # OOM'd outright on a CUDA-resident tensor.
+                        #
+                        # preview_only: the bracket passes write the PNG and
+                        # nothing else. `bracketImages.forEach` in
+                        # js/radiance_viewer.js requests only imgData.filename,
+                        # so the bracket .rhdr, .exr and .rpick were written,
+                        # never fetched, and never deleted until the next
+                        # execution purged them. At 1080p that was ~45 GB of the
+                        # ~67 GB a 500-frame shot put into temp/.
                         low_res = self._process_frame(
-                            image * 0.25, frame_idx, output_dir, 
+                            image[frame_idx:frame_idx + 1] * 0.25, 0, output_dir,
                             use_16bit=use_16bit, use_32bit=use_32bit, save_hdr_sidecar=save_hdr_sidecar,
-                            prefix="◎ Radiance_bracket_low"
+                            prefix="◎ Radiance_bracket_low", preview_only=True, view_space=view_space
                         )
                         if low_res:
                             # v4.5 FIX: type must be "temp" — ComfyUI /api/view only
@@ -241,9 +523,9 @@ class RadianceViewer:
                             
                         # High (+2 EV)
                         high_res = self._process_frame(
-                            image * 4.0, frame_idx, output_dir, 
+                            image[frame_idx:frame_idx + 1] * 4.0, 0, output_dir,
                             use_16bit=use_16bit, use_32bit=use_32bit, save_hdr_sidecar=save_hdr_sidecar,
-                            prefix="◎ Radiance_bracket_high"
+                            prefix="◎ Radiance_bracket_high", preview_only=True, view_space=view_space
                         )
                         if high_res:
                             high_res["type"] = "temp"
@@ -264,10 +546,11 @@ class RadianceViewer:
                     use_16bit=use_16bit,
                     use_32bit=use_32bit,          # BUG-FIX (BUG-2): was omitted — compare always saved fp16
                     save_hdr_sidecar=save_hdr_sidecar,
+                    view_space=resolve_viewer_input_space(input_space, compare_image),
                 )
                 images_list.extend(compare_list)
 
-            # Z-Depth
+            # Z-Depth: data, never through a view transform (see _process_zdepth_image).
             if zdepth is not None:
                 zdepth_list = self._process_zdepth_image(
                     zdepth,
@@ -296,6 +579,28 @@ class RadianceViewer:
             }
             metadata_str = json.dumps(meta_dict, indent=2)
 
+            # Record every file this generation wrote so the next execution can
+            # remove it. Entries carry "filename" plus optional hdr/pick sidecars.
+            #
+            # BUG-FIX: "hdr_sidecar" was missing from this tuple. The zdepth
+            # branch stores its RHDR under that key only (_process_zdepth_image
+            # never sets hdr_filename), so every execution with a zdepth input
+            # orphaned one .rhdr per frame, permanently. That is exactly the
+            # leak _viewer_track_temp was written to close. _process_frame sets
+            # both keys to the same name, so the set() keeps it to one unlink.
+            _written: List[str] = []
+            _seen: set = set()
+            for _entry in images_list:
+                if not isinstance(_entry, dict):
+                    continue
+                for _k in ("filename", "hdr_filename", "hdr_sidecar",
+                           "pick_filename", "exr_filename"):
+                    _fn = _entry.get(_k)
+                    if _fn and str(_fn) not in _seen:
+                        _seen.add(str(_fn))
+                        _written.append(os.path.join(output_dir, str(_fn)))
+            _viewer_track_temp(_purge_key, _written)
+
             # ── v4.2: Delivery Cache (Update node frames) ───────────
             # Use ComfyUI's unique_id (stable graph node ID) as the cache key.
             # v4.1 used str(id(self)) which is the CPython memory address — this
@@ -304,7 +609,27 @@ class RadianceViewer:
             # this.node.id in LiteGraph JS, so the fallback also works.
             # BUG-FIX: empty string is falsy — an empty unique_id must also
             # fall through to the memory-address fallback, not be used as-is.
-            instance_key = str(unique_id) if unique_id and str(unique_id).strip() else str(id(self))
+            # BUG-FIX: unique_id alone is only unique WITHIN one graph. The cache
+            # is a process-global, so two workflows that each happen to have a
+            # viewer at node id 5 shared the key "5": running the second
+            # overwrote the first, and pressing Render in the first tab then
+            # exported the OTHER shot's plate, versioned under this shot's
+            # filename, with no error and an HTTP 200 "success". Prefixing with
+            # the prompt id scopes the key to one execution of one graph. The
+            # key round-trips through the UI payload below and comes back on
+            # /radiance/deliver, so the JS needs no change -- it just echoes it.
+            _node_part = str(unique_id).strip() if unique_id and str(unique_id).strip() else str(id(self))
+            _graph_part = ""
+            try:
+                if isinstance(prompt, dict):
+                    _graph_part = str(prompt.get("prompt_id") or prompt.get("client_id") or "")
+                if not _graph_part and isinstance(extra_pnginfo, dict):
+                    _wf = extra_pnginfo.get("workflow") or {}
+                    if isinstance(_wf, dict):
+                        _graph_part = str(_wf.get("id") or "")
+            except Exception:
+                _graph_part = ""
+            instance_key = f"{_graph_part}:{_node_part}" if _graph_part else _node_part
             _viewer_cache_set(instance_key, image)
 
             # ── v6.2: Flicker Heatmap & Cut Markers ─────────────────
@@ -341,8 +666,23 @@ class RadianceViewer:
                 else:
                     flicker_data = [0.0]
 
+            # 3.5.0: every frame says what it is, so the viewer never guesses.
+            cmp_enc, cmp_cs = (resolve_viewer_input_space(input_space, compare_image)
+                               if compare_image is not None else (source_encoding, source_colorspace))
+            for _entry in images_list:
+                if not isinstance(_entry, dict) or _entry.get("is_zdepth"):
+                    continue
+                if _entry.get("is_compare"):
+                    _entry["source_encoding"], _entry["source_colorspace"] = cmp_enc, cmp_cs
+                else:
+                    _entry["source_encoding"] = source_encoding
+                    _entry["source_colorspace"] = source_colorspace
+
             ui_payload = {
                 "radiance_images": images_list,
+                "source_encoding": [source_encoding],
+                "source_colorspace": [source_colorspace],
+                "fps": [play_fps],
                 "instance_id": [instance_key],
                 "batch_size": [batch_size],
                 "bit_depth": [depth_label],
@@ -399,9 +739,16 @@ class RadianceViewer:
         use_32bit: bool = False,
         save_hdr_sidecar: bool = False,
         prefix: str = "◎ Radiance_viewer",
+        preview_only: bool = False,
+        view_space: Tuple[str, str] = ("srgb", SRGB_COLORSPACE),
     ) -> Optional[Dict[str, Any]]:
         """
         Process a single frame: grade → LUT → save at selected bit depth.
+
+        preview_only writes the 8-bit PNG and nothing else. Used by the
+        exposure-bracket passes, whose only consumer on the JS side is
+        imgData.filename: the bracket .rhdr / .exr / .rpick were written for
+        every frame and fetched by nothing.
         """
         # Safe tensor → numpy
         if image.dim() == 4:
@@ -470,12 +817,14 @@ class RadianceViewer:
         rhdr_filename = f"{prefix}_{unique_id}_{frame_idx}.rhdr"
         rhdr_saved = False
 
-        if use_32bit:
+        if preview_only:
+            pass  # bracket pass: PNG only, nothing reads the float sidecar
+        elif use_32bit:
             # ── 32-bit Float path: full IEEE 754 fp32, flags=1 ────────────────
             try:
                 rhdr_filepath = safe_join(output_dir, rhdr_filename)
                 fp32_bytes = frame_to_save.astype(np.float32).tobytes()
-                compressed = zlib.compress(fp32_bytes, level=6)
+                compressed = zlib.compress(fp32_bytes, level=1)  # level 1: float data barely compresses
                 # flags=1 signals fp32 to the viewer parser
                 header = struct.pack("<4sHHHH", b"RHDR", w_frame, h_frame, c_frame, 1)
                 with open(rhdr_filepath, "wb") as rhdr_f:
@@ -495,8 +844,9 @@ class RadianceViewer:
             # ── 16-bit Float path: fp16, flags=0 (existing behaviour) ─────────
             try:
                 rhdr_filepath = safe_join(output_dir, rhdr_filename)
-                fp16_data = frame_to_save.astype(np.float16).tobytes()
-                compressed = zlib.compress(fp16_data, level=6)
+                # Clamp to the fp16 range: 1e5 used to become +inf.
+                fp16_data = np.clip(frame_to_save, -65504.0, 65504.0).astype(np.float16).tobytes()
+                compressed = zlib.compress(fp16_data, level=1)  # level 1: float data barely compresses
                 header = struct.pack("<4sHHHH", b"RHDR", w_frame, h_frame, c_frame, 0)
                 with open(rhdr_filepath, "wb") as rhdr_f:
                     rhdr_f.write(header)
@@ -516,7 +866,7 @@ class RadianceViewer:
         exr_filename = f"{prefix}_{unique_id}_{frame_idx}.exr"
         exr_saved = False
         
-        if write_exr_robust:
+        if write_exr_robust and not preview_only:
             try:
                 exr_filepath = safe_join(output_dir, exr_filename)
                 # B-10 FIX: Convert to 3-channel RGB array safely regardless of input dimensions (2D vs 3D, grayscale vs RGBA) to prevent indexing crashes
@@ -548,11 +898,27 @@ class RadianceViewer:
         # 2048px covers up to ~2K content; for 4K+ the RHDR path handles display.
         FALLBACK_MAX_DIM = 2048
 
-        if has_hdr and d_max > 1.05:
-            preview_safe = np.maximum(frame, 0.0)
-            preview_image = (preview_safe / (1.0 + preview_safe)).astype(np.float32)
-        else:
-            preview_image = frame
+        # 3.5.0: the PNG is display-referred through the same view the float
+        # path shows by default. It used to be x/(1+x) with no display
+        # encoding for HDR frames (far too dark) and untouched otherwise, so a
+        # linear frame that stayed under 1.05 was written as if it were sRGB.
+        _enc, _cs = view_space
+        preview_image = frame
+        _preview_display = False
+        if _enc == "linear":
+            th0, tw0 = frame.shape[:2]
+            if max(th0, tw0) > 2048 and HAS_CV2:
+                # Transform after the downscale: ACES 2.0 on the CPU is the
+                # expensive step and it only needs the preview's pixels.
+                _sc = 2048 / max(th0, tw0)
+                frame_small = cv2.resize(frame.astype(np.float32),
+                                         (int(tw0 * _sc), int(th0 * _sc)),
+                                         interpolation=cv2.INTER_AREA)
+            else:
+                frame_small = frame
+            from radiance.color.display_preview import display_preview
+            preview_image = display_preview(frame_small, "linear", _cs)
+            _preview_display = True
 
         # Downsample to thumbnail
         th, tw = preview_image.shape[:2]
@@ -609,10 +975,25 @@ class RadianceViewer:
             ],
         }
 
+        # What the PNG fallback actually is, so the viewer's status bar can say
+        # so instead of claiming FP32 over it. The viewer reaches the PNG from
+        # three paths (no DecompressionStream, RHDR integrity mismatch, texture
+        # creation failure) and used to report "FP32 · RGBA32F" regardless,
+        # which let a colourist grade a 4K plate against a 2048px tonemapped
+        # 8-bit proxy and then press RENDER.
+        preview_h, preview_w = preview_thumb.shape[:2]
         result: Dict[str, Any] = {
             "filename": png_filename,
             "subfolder": "",
             "type": "temp",
+            "source_width": int(w_frame),
+            "source_height": int(h_frame),
+            "preview_width": int(preview_w),
+            "preview_height": int(preview_h),
+            # The PNG is display-referred (ACES 2.0 SDR for linear sources,
+            # untouched for sRGB): the viewer must not transform it again.
+            "preview_tonemapped": bool(_preview_display),
+            "preview_encoding": "display",
             "data_range": [d_min, d_max],
             "hdr_stats": hdr_stats,
             "has_hdr": has_hdr,
@@ -635,6 +1016,8 @@ class RadianceViewer:
 
         # v3.0 Feature #5: fp32 picking buffer — true scene-linear HDR color picker
         pick_filename = f"{prefix}_{unique_id}_{frame_idx}.rpick"
+        if preview_only:
+            return result
         try:
             pick_filepath = safe_join(output_dir, pick_filename)
             if _save_pick_buffer(frame, pick_filepath):
@@ -679,6 +1062,7 @@ class RadianceViewer:
         use_16bit: bool = True,
         use_32bit: bool = False,          # BUG-FIX (BUG-2): was missing — compare always saved fp16
         save_hdr_sidecar: bool = False,
+        view_space: Tuple[str, str] = ("srgb", SRGB_COLORSPACE),
     ) -> List[Dict[str, Any]]:
         """Process comparison image. Returns list of image metadata."""
         result: List[Dict[str, Any]] = []
@@ -701,6 +1085,7 @@ class RadianceViewer:
                     use_32bit=use_32bit,          # BUG-FIX (BUG-2)
                     save_hdr_sidecar=save_hdr_sidecar,
                     prefix="◎ Radiance_compare",
+                    view_space=view_space,
                 )
                 if frame_result is not None:
                     frame_result["is_compare"] = True
@@ -826,7 +1211,7 @@ class RadianceViewer:
                         else:
                             payload = depth_np.astype(np.float16).tobytes()
                             rhdr_flags = 0  # fp16 marker — viewer uses HALF_FLOAT texture
-                        compressed = zlib.compress(payload, level=6)
+                        compressed = zlib.compress(payload, level=1)  # level 1: float data barely compresses
                         header = struct.pack("<4sHHHH", b"RHDR", dw, dh, dc, rhdr_flags)
                         with open(npy_filepath, "wb") as rhdr_f:
                             rhdr_f.write(header)
@@ -869,7 +1254,8 @@ class RadianceViewer:
     def _convert_to_8bit(self, img_np: np.ndarray) -> np.ndarray:
         """Convert float32 image to uint8."""
         if img_np.dtype in (np.float32, np.float64, np.float16):
-            return (np.clip(img_np.astype(np.float32), 0.0, 1.0) * BIT_8_MAX).astype(
+            # Round, not truncate: truncation darkened every code by half a step.
+            return (np.clip(img_np.astype(np.float32), 0.0, 1.0) * BIT_8_MAX + 0.5).astype(
                 np.uint8
             )
         elif img_np.dtype == np.uint16:
@@ -1004,12 +1390,55 @@ import radiance.delivery.handler as _delivery_handler
 
 
 
-@PromptServer.instance.routes.get('/radiance/progress')
+def _radiance_route_once(method, path):
+    """Idempotent route decorator — prevents double-registration of this module's
+    routes when it is imported under two names (avoids the ComfyUI startup crash
+    'method HEAD is already registered').
+
+    BUG-FIX: this used to swallow every exception and silently return an
+    identity decorator. If PromptServer.instance was not available at import
+    time the /radiance/progress route was simply dropped with no trace, the JS
+    poll loop clearInterval'd on its first fetch error, and the export progress
+    bar sat at 0% for the whole run with nothing anywhere saying why. The
+    fallback still has to be non-fatal, importing this module must not require
+    a running ComfyUI, but it now says what it did.
+    """
+    if PromptServer is None or getattr(PromptServer, "instance", None) is None:
+        logger.warning(
+            "[Radiance] PromptServer unavailable at import, route %s %s not registered. "
+            "Endpoints served from this module (progress polling) will 404.",
+            method.upper(), path,
+        )
+        return lambda fn: fn
+    try:
+        _reg = getattr(PromptServer.instance, "_radiance_registered_routes", None)
+        if _reg is None:
+            _reg = set()
+            setattr(PromptServer.instance, "_radiance_registered_routes", _reg)
+        _key = (method.lower(), path)
+        if _key in _reg:
+            return lambda fn: fn
+        _reg.add(_key)
+        return getattr(PromptServer.instance.routes, method)(path)
+    except Exception as exc:
+        logger.error(
+            "[Radiance] Could not register route %s %s: %s. "
+            "Progress polling will fail and the progress bar will stay at 0%%.",
+            method.upper(), path, exc,
+        )
+        return lambda fn: fn
+
+
+@_radiance_route_once('get', '/radiance/progress')
 async def radiance_progress_endpoint(request):
     """Returns active delivery progress for a node instance."""
     instance_id = request.query.get('id')
     if not instance_id:
-        return web.json_response({"error": "Missing ID", "status": "error"})
+        # status=400: returning 200 made the JS compute
+        # (prog.current / prog.total) * 100 on a body with neither key -> NaN,
+        # rendering `width: NaN%` and a label of "undefined [NaN%]".
+        return web.json_response({"error": "Missing ID", "status": "error",
+                                  "current": 0, "total": 100}, status=400)
     
     progress = _progress_get(instance_id)
     return web.json_response(progress)

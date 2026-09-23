@@ -33,6 +33,8 @@ from typing import Any
 import numpy as np
 import torch
 
+from radiance.path_utils import strip_path_quotes
+
 log = logging.getLogger("radiance.aces2")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -142,7 +144,7 @@ class _DanieleEvoParams:
     # Default ACES 2.0 parameters (per Academy reference design)
     G          = 1.15    # contrast exponent
     SCENE_GREY = 0.18    # 18% grey in scene-linear
-    GREY_TGT   = 0.10    # display grey as fraction of peak (10 nits out of 100)
+    GREY_TGT   = None    # resolved per peak from the published ACES 2.0 table
     TOE_SCENE  = 0.04    # linear toe threshold
 
     def __init__(
@@ -150,9 +152,18 @@ class _DanieleEvoParams:
         peak_nits: float  = 100.0,
         g:         float  = G,
         scene_grey: float = SCENE_GREY,
-        grey_target: float = GREY_TGT,
+        grey_target: float = None,
         toe_scene:  float = TOE_SCENE,
     ):
+        # grey_target used to default to a flat 0.10 — 10% of peak, whatever
+        # the peak was — so 18% grey rendered at 10 nits on SDR but 400 nits on
+        # a 4000-nit master, nearly 24x the ACES 2.0 reference. The published
+        # table has grey rising gently (10.0 / 14.5 / 16.8 nits at 100 / 1000 /
+        # 4000), not tracking the display.
+        if grey_target is None:
+            from radiance.hdr.tonescale import aces2_midgrey_fraction
+            grey_target = aces2_midgrey_fraction(peak_nits)
+
         self.n          = peak_nits / 100.0   # normalised peak
         self.g          = g
         self.scene_grey = scene_grey
@@ -304,8 +315,13 @@ def _reach_gamut_compress(
 # § 3  EOTF ENCODERS
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _pq_encode(linear: np.ndarray, peak_nits: float = 1000.0) -> np.ndarray:
-    """ST.2084 PQ OETF.  Input: display-linear [0, peak_nits/100]."""
+def _pq_encode(linear: np.ndarray) -> np.ndarray:
+    """ST.2084 PQ OETF.  Input: display-linear, 1.0 = 100 cd/m².
+
+    No ``peak_nits``: ST.2084 normalises by a fixed 10 000 cd/m² and the
+    mastering peak is applied by the caller as a pre-scale.  The parameter used
+    to be accepted here and ignored, which read as though it did something.
+    """
     L = np.clip(linear * 100.0 / 10000.0, 0, 1)
     m1, m2 = 0.1593017578125, 78.84375
     c1, c2, c3 = 0.8359375, 18.8515625, 18.6875
@@ -332,6 +348,93 @@ def _srgb_encode(linear: np.ndarray) -> np.ndarray:
         linear <= 0.0031308,
         12.92 * np.maximum(linear, 0.0),
         1.055 * np.power(np.maximum(linear, 1e-10), 1.0 / 2.4) - 0.055,
+    )
+
+
+def _as_torch_matrix(values: np.ndarray, image: torch.Tensor) -> torch.Tensor:
+    return torch.as_tensor(values, device=image.device, dtype=image.dtype)
+
+
+def _torch_apply_matrix(rgb: torch.Tensor, matrix: np.ndarray) -> torch.Tensor:
+    return rgb @ _as_torch_matrix(matrix, rgb).T
+
+
+def _torch_daniele_evo_fwd(x: torch.Tensor, params: _DanieleEvoParams) -> torch.Tensor:
+    xp = x.clamp(min=0.0)
+    u = (xp / params.K).clamp(min=0.0) ** params.g
+    y_main = params.n * u / (u + 1.0)
+    y_toe = (params.toe_y + params.toe_dy * (xp - params.toe_scene)).clamp(min=0.0)
+    return torch.where(xp < params.toe_scene, y_toe, y_main)
+
+
+def _torch_daniele_evo_luma_preserving(rgb: torch.Tensor, params: _DanieleEvoParams) -> torch.Tensor:
+    luma_w = _as_torch_matrix(LUMA_AP1, rgb)
+    luma = (rgb * luma_w).sum(dim=-1, keepdim=True)
+    mapped = _torch_daniele_evo_fwd(luma, params)
+    scale = torch.where(luma > 1e-10, mapped / luma.clamp(min=1e-10), torch.zeros_like(luma))
+    return rgb * scale
+
+
+def _torch_reach_compress_channel(
+    dist: torch.Tensor,
+    threshold: torch.Tensor,
+    limit: torch.Tensor,
+    power: float = _REACH_POWER,
+) -> torch.Tensor:
+    above = dist > threshold
+    xm = (dist - threshold).clamp(min=0.0)
+    scale = (limit - threshold).clamp(min=1e-8)
+    compressed = threshold + xm / (1.0 + (xm / scale).pow(power)).pow(1.0 / power)
+    return torch.where(above, compressed, dist)
+
+
+def _torch_reach_gamut_compress(
+    rgb: torch.Tensor,
+    strength: float = 1.0,
+    limits: torch.Tensor | None = None,
+    thresholds: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if strength <= 0.0:
+        return rgb
+    if limits is None:
+        limits = _as_torch_matrix(_REACH_LIMIT, rgb)
+    if thresholds is None:
+        thresholds = _as_torch_matrix(_REACH_THRESH, rgb)
+
+    eff_limits = 1.0 + (limits - 1.0) * strength
+    eff_thresh = thresholds * (1.0 - (1.0 - strength) * 0.3)
+    ach = rgb.max(dim=-1, keepdim=True).values.clamp(min=1e-10)
+    dist = (ach - rgb) / ach
+    dist_c = _torch_reach_compress_channel(dist, eff_thresh.view(1, 1, 1, 3), eff_limits.view(1, 1, 1, 3))
+    return ach - dist_c * ach
+
+
+def _torch_pq_encode(linear: torch.Tensor) -> torch.Tensor:
+    """ST.2084 PQ OETF.  Input: display-linear, 1.0 = 100 cd/m².
+
+    See :func:`_pq_encode` for why there is no ``peak_nits`` parameter.
+    """
+    L = (linear * 100.0 / 10000.0).clamp(0.0, 1.0)
+    m1, m2 = 0.1593017578125, 78.84375
+    c1, c2, c3 = 0.8359375, 18.8515625, 18.6875
+    Lm1 = L.clamp(min=0.0).pow(m1)
+    return ((c1 + c2 * Lm1) / (1.0 + c3 * Lm1)).pow(m2)
+
+
+def _torch_hlg_encode(linear: torch.Tensor) -> torch.Tensor:
+    a, b, c = 0.17883277, 0.28466892, 0.55991073
+    return torch.where(
+        linear <= 1.0 / 12.0,
+        torch.sqrt((3.0 * linear).clamp(min=0.0)),
+        a * torch.log((12.0 * linear - b).clamp(min=1e-10)) + c,
+    ).clamp(0.0, 1.0)
+
+
+def _torch_srgb_encode(linear: torch.Tensor) -> torch.Tensor:
+    return torch.where(
+        linear <= 0.0031308,
+        12.92 * linear.clamp(min=0.0),
+        1.055 * linear.clamp(min=1e-10).pow(1.0 / 2.4) - 0.055,
     )
 
 
@@ -578,8 +681,6 @@ class RadianceACES2Tonescale:
         grey_target: float = 0.10,
         toe_scene: float = 0.04,
     ):
-        frames = image.detach().cpu().float().numpy()   # (B, H, W, 3)
-
         params = _DanieleEvoParams(
             peak_nits  = peak_nits,
             g          = contrast_g,
@@ -587,18 +688,12 @@ class RadianceACES2Tonescale:
             toe_scene  = toe_scene,
         )
 
-        out = np.zeros_like(frames)
-        for b in range(frames.shape[0]):
-            rgb = frames[b]  # (H, W, 3)
-
-            if mode == "luminance_preserving":
-                mapped = _daniele_evo_luma_preserving(rgb, params)
-            else:
-                # Per-channel — apply curve to each channel independently
-                mapped = _daniele_evo_fwd(rgb, params)
-
-            # Normalise back to [0, 1] by dividing by peak scale
-            out[b] = np.clip(mapped / params.n, 0.0, 1.0)
+        rgb = image.float()
+        if mode == "luminance_preserving":
+            mapped = _torch_daniele_evo_luma_preserving(rgb, params)
+        else:
+            mapped = _torch_daniele_evo_fwd(rgb, params)
+        out = (mapped / params.n).clamp(0.0, 1.0)
 
         info = (
             f"Daniele Evo · peak {peak_nits} nits · g={contrast_g:.2f} · "
@@ -607,8 +702,7 @@ class RadianceACES2Tonescale:
         )
         log.info("ACES2Tonescale: %s", info)
 
-        tensor_out = torch.from_numpy(out).float()
-        return (tensor_out, info)
+        return (out, info)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -690,20 +784,24 @@ class RadianceACES2ReachGamutCompress:
         threshold_magenta: float = 0.803,
         threshold_yellow:  float = 0.880,
     ):
-        frames = image.detach().cpu().float().numpy()
-
-        limits     = np.array([limit_cyan,     limit_magenta,     limit_yellow],     dtype=np.float32)
-        thresholds = np.array([threshold_cyan, threshold_magenta, threshold_yellow], dtype=np.float32)
-
-        out = np.zeros_like(frames)
-        for b in range(frames.shape[0]):
-            out[b] = _reach_gamut_compress(frames[b], strength, limits, thresholds)
+        frames = image.float()
+        limits = torch.tensor(
+            [limit_cyan, limit_magenta, limit_yellow],
+            device=frames.device,
+            dtype=frames.dtype,
+        )
+        thresholds = torch.tensor(
+            [threshold_cyan, threshold_magenta, threshold_yellow],
+            device=frames.device,
+            dtype=frames.dtype,
+        )
+        out = _torch_reach_gamut_compress(frames, strength, limits, thresholds)
 
         # Count pixels brought in-gamut
-        before_oog = int(((frames < 0) | (frames > 1)).sum())
-        after_oog  = int(((out    < 0) | (out    > 1)).sum())
-        pct_before = before_oog / max(frames.size, 1) * 100
-        pct_after  = after_oog  / max(out.size, 1)   * 100
+        before_oog = int(((frames < 0) | (frames > 1)).sum().item())
+        after_oog  = int(((out    < 0) | (out    > 1)).sum().item())
+        pct_before = before_oog / max(frames.numel(), 1) * 100
+        pct_after  = after_oog  / max(out.numel(), 1)   * 100
 
         info = (
             f"ACES 2.0 reach gamut compress · strength {strength:.2f} | "
@@ -711,7 +809,7 @@ class RadianceACES2ReachGamutCompress:
         )
         log.info("ACES2ReachGamutCompress: %s", info)
 
-        return (torch.from_numpy(out).float(), info)
+        return (out, info)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -811,70 +909,53 @@ class RadianceACES2OutputTransformFull:
         creative_white_scale:     float = 1.0,
         gamut_compress_strength:  float = 1.0,
     ):
-        frames = image.detach().cpu().float().numpy()
+        rgb = image.float()
 
-        out = np.zeros_like(frames)
-        for b in range(frames.shape[0]):
-            rgb = frames[b].astype(np.float32)
+        if exposure_adjust != 0.0:
+            rgb = rgb * (2.0 ** exposure_adjust)
 
-            # ── 1. Exposure
-            if exposure_adjust != 0.0:
-                rgb = rgb * (2.0 ** exposure_adjust)
+        if input_colorspace == "ACES2065-1":
+            rgb = _torch_apply_matrix(rgb, AP0_TO_AP1)
+        elif input_colorspace == "Linear_sRGB":
+            rgb = _torch_apply_matrix(rgb, sRGB_TO_AP1)
+        elif input_colorspace == "Linear_Rec2020":
+            rgb = _torch_apply_matrix(rgb, Rec2020_TO_AP1)
 
-            # ── 2. Convert to ACEScg
-            if input_colorspace == "ACES2065-1":
-                rgb = rgb @ AP0_TO_AP1.T
-            elif input_colorspace == "Linear_sRGB":
-                rgb = rgb @ sRGB_TO_AP1.T
-            elif input_colorspace == "Linear_Rec2020":
-                rgb = rgb @ Rec2020_TO_AP1.T
+        rgb = rgb * creative_white_scale
+        rgb = _torch_reach_gamut_compress(rgb, gamut_compress_strength)
 
-            # ── 3. Creative white scale
-            rgb = rgb * creative_white_scale
+        peak_nits = self._peak_nits(output_transform, peak_luminance)
+        is_hdr = "HDR" in output_transform
+        g = self._surround_g(surround)
+        evo_params = _DanieleEvoParams(peak_nits=peak_nits, g=g)
+        rgb = _torch_daniele_evo_luma_preserving(rgb, evo_params)
 
-            # ── 4. Reach gamut compression (ACES 2.0 official)
-            rgb = _reach_gamut_compress(rgb, gamut_compress_strength)
+        peak_scale = peak_nits / 100.0
+        rgb = rgb / peak_scale
 
-            # ── 5. Daniele Evo tonescale
-            peak_nits = self._peak_nits(output_transform, peak_luminance)
-            is_hdr    = "HDR" in output_transform
-            g         = self._surround_g(surround)
+        is_p3 = "P3" in output_transform
+        is_rec2020 = "2100" in output_transform or "Rec.2020" in output_transform
+        if is_rec2020:
+            rgb = _torch_apply_matrix(rgb, AP1_TO_Rec2020)
+        elif is_p3:
+            rgb = _torch_apply_matrix(rgb, AP1_TO_P3D65)
+        else:
+            rgb = _torch_apply_matrix(rgb, AP1_TO_sRGB)
 
-            evo_params = _DanieleEvoParams(peak_nits=peak_nits, g=g)
-            rgb = _daniele_evo_luma_preserving(rgb, evo_params)
+        rgb = rgb.clamp(min=0.0)
 
-            # Normalise to [0, 1] (or [0, peak_scale] for HDR before OETF)
-            peak_scale = peak_nits / 100.0
-            rgb = rgb / peak_scale   # → [0, 1] display-referred
+        is_pq = "PQ" in output_transform
+        is_hlg = "HLG" in output_transform
+        if is_pq:
+            rgb = _torch_pq_encode(rgb * peak_scale)
+        elif is_hlg:
+            rgb = _torch_hlg_encode(rgb)
+        elif "Cinema" in output_transform:
+            rgb = rgb.clamp(0.0, 1.0).pow(1.0 / 2.6)
+        else:
+            rgb = _torch_srgb_encode(rgb)
 
-            # ── 6. Output gamut matrix
-            is_p3     = "P3" in output_transform
-            is_rec2020 = "2100" in output_transform or "Rec.2020" in output_transform
-
-            if is_rec2020:
-                rgb = rgb @ AP1_TO_Rec2020.T
-            elif is_p3:
-                rgb = rgb @ AP1_TO_P3D65.T
-            else:
-                rgb = rgb @ AP1_TO_sRGB.T
-
-            rgb = np.maximum(rgb, 0.0)
-
-            # ── 7. OETF
-            is_pq  = "PQ"  in output_transform
-            is_hlg = "HLG" in output_transform
-
-            if is_pq:
-                # Re-scale to nits range for PQ encoder
-                rgb = _pq_encode(rgb * peak_scale, peak_nits)
-            elif is_hlg:
-                rgb = _hlg_encode(rgb)
-            elif "Cinema" in output_transform:
-                rgb = np.power(np.clip(rgb, 0, 1), 1.0 / 2.6)
-            else:
-                rgb = _srgb_encode(rgb)
-
-            out[b] = np.clip(rgb, 0.0, 1.0)
+        out = rgb.clamp(0.0, 1.0)
 
         info_parts = [
             f"ACES 2.0 Full OT",
@@ -887,7 +968,7 @@ class RadianceACES2OutputTransformFull:
         info = " | ".join(info_parts)
         log.info("ACES2FullOT: %s", info)
 
-        return (torch.from_numpy(out).float(), info)
+        return (out, info)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -971,6 +1052,7 @@ class RadianceACESMetadataFile:
         save_path:        str   = "",
         amf_xml_in:       str   = "",
     ):
+        save_path = strip_path_quotes(save_path)
         if mode == "write":
             xml = _build_amf(
                 clip_name        = clip_name,
@@ -981,8 +1063,8 @@ class RadianceACESMetadataFile:
                 description      = description,
             )
 
-            if save_path.strip():
-                path = save_path.strip()
+            if save_path:
+                path = save_path
                 if not path.lower().endswith(".amf"):
                     path += ".amf"
                 os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -1000,8 +1082,8 @@ class RadianceACESMetadataFile:
 
         else:  # read
             src = amf_xml_in.strip()
-            if not src and save_path.strip():
-                with open(save_path.strip(), encoding="utf-8") as fh:
+            if not src and save_path:
+                with open(save_path, encoding="utf-8") as fh:
                     src = fh.read()
 
             if not src:

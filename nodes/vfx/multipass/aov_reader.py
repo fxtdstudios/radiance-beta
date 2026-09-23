@@ -20,10 +20,13 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+
+from .core import _flow_to_hsv_image
+from ....core.system.path_utils import strip_path_quotes
 
 logger = logging.getLogger("radiance.vfx_multipass.aov_reader")
 
@@ -64,7 +67,156 @@ def _norm_layer_name(name: str) -> str:
     return name.strip().lower().replace(".", "_").replace(" ", "_").replace("-", "_")
 
 
-def _read_multilayer_exr(path: str) -> Tuple[Dict[str, np.ndarray], int, int]:
+def _suffix_rank(suf: str) -> Tuple[int, str]:
+    order = {
+        "R": 0, "G": 1, "B": 2, "A": 3,
+        "X": 0, "Y": 1, "Z": 2,
+        "NX": 0, "NY": 1, "NZ": 2,
+    }
+    s = suf.upper()
+    return (order.get(s, 99), suf)
+
+
+def _layer_key_for_channel(channel_name: str, default_layer: str = "") -> Tuple[str, str]:
+    if "." in channel_name:
+        return channel_name.rsplit(".", 1)
+    if channel_name.upper() == "Z":
+        return "depth", "Z"
+    return default_layer, channel_name
+
+
+def _layers_from_channel_groups(
+    groups: Dict[str, Dict[str, np.ndarray]],
+    h: int,
+    w: int,
+) -> Dict[str, np.ndarray]:
+    layers: Dict[str, np.ndarray] = {}
+    for layer, suffices in groups.items():
+        ordered = sorted(suffices.items(), key=lambda kv: _suffix_rank(kv[0]))
+        planes = [np.asarray(plane, dtype=np.float32).reshape(h, w) for _suf, plane in ordered]
+        if planes:
+            layers[layer] = np.stack(planes, axis=-1)
+    return layers
+
+
+def _window_bounds(window) -> Tuple[int, int, int, int]:
+    return (window.min.x, window.min.y, window.max.x, window.max.y)
+
+
+def _canvas_bounds(data_windows, display_window) -> Tuple[int, int, int, int]:
+    bounds = [_window_bounds(display_window)] + [_window_bounds(window) for window in data_windows]
+    return (
+        min(item[0] for item in bounds), min(item[1] for item in bounds),
+        max(item[2] for item in bounds), max(item[3] for item in bounds),
+    )
+
+
+def _place_in_canvas(plane: np.ndarray, data_window, canvas_bounds) -> np.ndarray:
+    dx0, dy0, dx1, dy1 = canvas_bounds
+    x0, y0, x1, y1 = _window_bounds(data_window)
+    canvas = np.zeros((dy1 - dy0 + 1, dx1 - dx0 + 1), dtype=np.float32)
+    canvas[y0 - dy0:y1 - dy0 + 1, x0 - dx0:x1 - dx0 + 1] = plane
+    return canvas
+
+
+def _read_multipart_exr(OpenEXR, Imath, path: str) -> Tuple[Dict[str, np.ndarray], int, int, Dict[str, Any]]:
+    if not hasattr(OpenEXR, "MultiPartInputFile"):
+        raise RuntimeError("OpenEXR binding does not expose MultiPartInputFile")
+
+    f = OpenEXR.MultiPartInputFile(path)
+    try:
+        part_count = None
+        for attr in ("parts", "numParts", "num_parts"):
+            value = getattr(f, attr, None)
+            if value is None:
+                continue
+            part_count = int(value() if callable(value) else value)
+            break
+        if part_count is None:
+            raise RuntimeError("OpenEXR MultiPartInputFile did not expose a part count")
+
+        pt = Imath.PixelType(Imath.PixelType.FLOAT)
+        groups: Dict[str, Dict[str, np.ndarray]] = {}
+        headers = [f.header(part_index) for part_index in range(part_count)]
+        first_display = _window_bounds(headers[0].get("displayWindow", headers[0]["dataWindow"]))
+        for hdr in headers[1:]:
+            if _window_bounds(hdr.get("displayWindow", hdr["dataWindow"])) != first_display:
+                raise RuntimeError("Multipart EXR parts have different displayWindow bounds")
+        data_windows = [hdr["dataWindow"] for hdr in headers]
+        canvas = _canvas_bounds(data_windows, headers[0].get("displayWindow", data_windows[0]))
+        first_w = canvas[2] - canvas[0] + 1
+        first_h = canvas[3] - canvas[1] + 1
+
+        for part_index, hdr in enumerate(headers):
+            dw = hdr["dataWindow"]
+            w = dw.max.x - dw.min.x + 1
+            h = dw.max.y - dw.min.y + 1
+
+            part_name = str(hdr.get("name", f"part{part_index}"))
+            for chname in list(hdr["channels"].keys()):
+                buf = None
+                last_error: Optional[Exception] = None
+                for args in (
+                    (part_index, chname, pt),
+                    (part_index, chname),
+                    (chname, pt, part_index),
+                    (chname, pt),
+                ):
+                    try:
+                        buf = f.channel(*args)
+                        break
+                    except Exception as exc:
+                        last_error = exc
+                        continue
+                if buf is None:
+                    raise RuntimeError(f"Could not read channel '{chname}' from part '{part_name}': {last_error}")
+
+                layer, suffix = _layer_key_for_channel(chname, default_layer=part_name)
+                plane = np.frombuffer(buf, dtype=np.float32).reshape(h, w)
+                groups.setdefault(layer, {})[suffix] = _place_in_canvas(plane, dw, canvas)
+
+        metadata = {
+            "data_windows": [_window_bounds(window) for window in data_windows],
+            "display_window": first_display,
+            "canvas_window": canvas,
+        }
+        return _layers_from_channel_groups(groups, first_h, first_w), first_h, first_w, metadata
+    finally:
+        close = getattr(f, "close", None)
+        if callable(close):
+            close()
+
+
+def _read_singlepart_exr(OpenEXR, Imath, path: str) -> Tuple[Dict[str, np.ndarray], int, int, Dict[str, Any]]:
+    f = OpenEXR.InputFile(path)
+    try:
+        hdr = f.header()
+        dw = hdr["dataWindow"]
+        display = hdr.get("displayWindow", dw)
+        w = dw.max.x - dw.min.x + 1
+        h = dw.max.y - dw.min.y + 1
+        canvas = _canvas_bounds([dw], display)
+        display_w = canvas[2] - canvas[0] + 1
+        display_h = canvas[3] - canvas[1] + 1
+        pt = Imath.PixelType(Imath.PixelType.FLOAT)
+
+        groups: Dict[str, Dict[str, np.ndarray]] = {}
+        for chname in list(hdr["channels"].keys()):
+            layer, suffix = _layer_key_for_channel(chname)
+            buf = f.channel(chname, pt)
+            plane = np.frombuffer(buf, dtype=np.float32).reshape(h, w)
+            groups.setdefault(layer, {})[suffix] = _place_in_canvas(plane, dw, canvas)
+        metadata = {
+            "data_window": _window_bounds(dw),
+            "display_window": _window_bounds(display),
+            "canvas_window": canvas,
+        }
+        return _layers_from_channel_groups(groups, display_h, display_w), display_h, display_w, metadata
+    finally:
+        f.close()
+
+
+def _read_multilayer_exr(path: str) -> Tuple[Dict[str, np.ndarray], int, int, Dict[str, Any]]:
     """Return ({layer_name: (H,W,C) float32}, H, W) for a multilayer EXR.
 
     Channels are grouped by the text before the final '.'; the default layer
@@ -84,41 +236,13 @@ def _read_multilayer_exr(path: str) -> Tuple[Dict[str, np.ndarray], int, int]:
     if not os.path.isfile(path):
         raise RuntimeError(f"EXR not found: {path}")
 
-    f = OpenEXR.InputFile(path)
-    try:
-        hdr = f.header()
-        dw = hdr["dataWindow"]
-        w = dw.max.x - dw.min.x + 1
-        h = dw.max.y - dw.min.y + 1
-        pt = Imath.PixelType(Imath.PixelType.FLOAT)
-        channels = list(hdr["channels"].keys())
+    if hasattr(OpenEXR, "MultiPartInputFile"):
+        try:
+            return _read_multipart_exr(OpenEXR, Imath, path)
+        except Exception as exc:
+            logger.debug("[Radiance AOV Reader] Multipart read path skipped: %s", exc)
 
-        # Group channels by layer prefix.
-        groups: Dict[str, Dict[str, str]] = {}
-        for ch in channels:
-            if "." in ch:
-                layer, suffix = ch.rsplit(".", 1)
-            else:
-                layer, suffix = "", ch
-            groups.setdefault(layer, {})[suffix] = ch
-
-        def _suffix_rank(suf: str) -> Tuple[int, str]:
-            order = {"R": 0, "G": 1, "B": 2, "A": 3, "X": 0, "Y": 1, "Z": 2}
-            s = suf.upper()
-            return (order.get(s, 99), suf)
-
-        layers: Dict[str, np.ndarray] = {}
-        for layer, suffices in groups.items():
-            ordered = sorted(suffices.items(), key=lambda kv: _suffix_rank(kv[0]))
-            planes = []
-            for _suf, chname in ordered:
-                buf = f.channel(chname, pt)
-                planes.append(np.frombuffer(buf, dtype=np.float32).reshape(h, w))
-            arr = np.stack(planes, axis=-1)  # (H, W, C)
-            layers[layer] = arr
-        return layers, h, w
-    finally:
-        f.close()
+    return _read_singlepart_exr(OpenEXR, Imath, path)
 
 
 def _to_image_tensor(arr: Optional[np.ndarray], h: int, w: int) -> torch.Tensor:
@@ -138,10 +262,17 @@ def _to_image_tensor(arr: Optional[np.ndarray], h: int, w: int) -> torch.Tensor:
     return torch.from_numpy(a).unsqueeze(0)
 
 
+def _motion_visualization(arr: Optional[np.ndarray], h: int, w: int) -> torch.Tensor:
+    if arr is None or arr.ndim < 3 or arr.shape[2] < 2:
+        return torch.zeros(1, h, w, 3, dtype=torch.float32)
+    vectors = torch.from_numpy(np.ascontiguousarray(arr[..., :2], dtype=np.float32))
+    return _flow_to_hsv_image(vectors[..., 0].unsqueeze(0), vectors[..., 1].unsqueeze(0))
+
+
 class RadianceMultipassAOVReader:
     """◎ Multipass: AOV Reader — split a real multilayer EXR into Radiance passes."""
 
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
+    CATEGORY = "FXTD STUDIOS/Radiance/VFX"
     DESCRIPTION = (
         "Read a real multilayer/AOV OpenEXR and split its named layers into the "
         "same passes as the Master extractor. Ground-truth renderer passes — not "
@@ -173,13 +304,13 @@ class RadianceMultipassAOVReader:
     RETURN_TYPES = (
         "RADIANCE_PASSES", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE",
         "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE",
-        "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE",
+        "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE",
     )
     RETURN_NAMES = (
         "passes", "beauty", "albedo", "normal_map", "depth", "roughness", "specular",
         "metallic", "ao", "emission", "transmission", "highpass", "world_position",
         "curvature", "shadow_mask", "midtone_mask", "highlight_mask", "reflection_mask",
-        "motion_vector", "segmentation_id",
+        "motion_vector", "segmentation_id", "motion_visualization", "alpha",
     )
     FUNCTION = "read_passes"
 
@@ -191,7 +322,8 @@ class RadianceMultipassAOVReader:
         normal_layer: str = "auto",
         depth_layer: str = "auto",
     ) -> Tuple:
-        layers, h, w = _read_multilayer_exr(exr_path.strip())
+        exr_path = strip_path_quotes(exr_path)
+        layers, h, w, window_metadata = _read_multilayer_exr(exr_path)
 
         # Normalized lookup of available layers.
         norm_to_raw = {_norm_layer_name(k): k for k in layers}
@@ -213,6 +345,8 @@ class RadianceMultipassAOVReader:
             if ov and ov.strip().lower() not in ("", "auto"):
                 key = _norm_layer_name(ov)
                 chosen_raw = norm_to_raw.get(key) or (ov if ov in layers else None)
+                if chosen_raw is None:
+                    raise ValueError(f"[Radiance AOV Reader] Layer override '{ov}' for {slot} was not found.")
 
             # 2. alias auto-match: exact first, then prefix for multi-char aliases
             #    so 'crypto' matches 'crypto00'/'crypto01', 'diffuse' matches
@@ -237,14 +371,12 @@ class RadianceMultipassAOVReader:
                 resolved[slot] = None
                 report.append(f"{slot} <- (none, black)")
 
-        # Beauty fallback: if no beauty layer matched, use the first colour layer.
         if resolved["beauty"] is None:
-            for raw, arr in layers.items():
-                if arr.shape[-1] >= 3:
-                    resolved["beauty"] = arr
-                    used_layers.add(raw)
-                    report[0] = f"beauty <- '{raw or 'RGBA'}' (fallback)"
-                    break
+            logger.warning(
+                "[Radiance AOV Reader] No beauty/RGBA layer matched in %s; beauty output is black. "
+                "Set beauty_layer explicitly if your renderer uses a custom name.",
+                os.path.basename(exr_path),
+            )
 
         unmapped = sorted(set(layers) - used_layers)
         logger.info(
@@ -254,14 +386,27 @@ class RadianceMultipassAOVReader:
         )
 
         images = {slot: _to_image_tensor(resolved[slot], h, w) for slot in _OUTPUT_ORDER}
+        beauty_arr = resolved["beauty"]
+        alpha = (
+            _to_image_tensor(beauty_arr[..., 3:4], h, w)
+            if beauty_arr is not None and beauty_arr.shape[-1] >= 4
+            else torch.ones(1, h, w, 3, dtype=torch.float32)
+        )
+        motion_visualization = _motion_visualization(resolved["motion_vector"], h, w)
 
         passes_dict = dict(images)
         # Keep the internal dict key as object_id for compatibility with the
         # EXR-passes writer / relight nodes, while the socket label reads
         # 'segmentation_id' to avoid implying real Cryptomatte support.
         passes_dict["object_id"] = images["object_id"]
+        passes_dict["motion_visualization"] = motion_visualization
+        passes_dict["alpha"] = alpha
+        passes_dict["_present"] = [slot for slot in _OUTPUT_ORDER if resolved[slot] is not None]
+        if beauty_arr is not None and beauty_arr.shape[-1] >= 4:
+            passes_dict["_present"].append("alpha")
+        passes_dict.update({f"_{key}": value for key, value in window_metadata.items()})
 
-        return (passes_dict,) + tuple(images[slot] for slot in _OUTPUT_ORDER)
+        return (passes_dict,) + tuple(images[slot] for slot in _OUTPUT_ORDER) + (motion_visualization, alpha)
 
 
 NODE_CLASS_MAPPINGS = {
@@ -269,5 +414,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceMultipassAOVReader": "◎ Multipass: AOV Reader (real EXR layers)",
+    "RadianceMultipassAOVReader": "Multipass AOV Reader",
 }

@@ -9,73 +9,26 @@ from typing import Tuple, Optional
 import torch
 import numpy as np
 
-from radiance.config.env import ENV, get_env_bool
-from radiance.nodes_io import _save_exr, _save_video_ffmpeg, _load_video_to_numpy, _read_sequence
+from radiance.nodes.io.write import _save_exr, _save_video_ffmpeg, _load_video_to_numpy, _read_sequence
+from radiance.path_utils import strip_path_quotes
 
 logger = logging.getLogger("radiance.mcp")
 
 # ── Bridge Protocol ───────────────────────────────────────────────────────────
 MCP_EOM = "\n__MCP_EOM__\n"
 
-_SAFE_BUILTINS = {
-    "True": True, "False": False, "None": None,
-    "print": print, "len": len, "range": range,
-    "int": int, "float": float, "str": str, "bool": bool,
-    "list": list, "dict": dict, "tuple": tuple,
-    "isinstance": isinstance, "hasattr": hasattr,
-    "abs": abs, "round": round, "min": min, "max": max,
-    "sum": sum, "sorted": sorted, "reversed": reversed,
-    "enumerate": enumerate, "zip": zip, "map": map, "filter": filter,
-}
-
-_BLOCKED_PATTERNS = [
-    "import os", "import sys", "import subprocess", "__import__",
-    "os.system", "os.popen", "open(", "eval(", "exec(",
-    "__builtins__", "__class__", "__subclasses__",
-]
-
 _SERVER: Optional[socket.socket] = None
 _SERVER_THREAD: Optional[threading.Thread] = None
 _SERVER_RUNNING = False
+_BOUND_LOOPBACK = True  # set at bind time; recorded for diagnostics
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+def _remote_bridge_allowed() -> bool:
+    return os.environ.get("RADIANCE_ALLOW_REMOTE_BRIDGE", "").strip().lower() in {"1", "true", "yes"}
 
 
-def _validate(code: str) -> Tuple[bool, str]:
-    for p in _BLOCKED_PATTERNS:
-        if p in code.lower():
-            return False, f"blocked: {p}"
-    return True, "ok"
-
-
-def _dynamic_exec_enabled() -> bool:
-    return get_env_bool(ENV.RADIANCE_DEV, False)
-
-
-def _exec_sandbox(code: str) -> str:
-    import ast
-    g = {"__builtins__": _SAFE_BUILTINS, "json": json}
-    try:
-        v = ast.literal_eval(code)
-        return json.dumps({"ok": True, "result": str(v)})
-    except Exception:
-        pass
-    if not _dynamic_exec_enabled():
-        return json.dumps({
-            "ok": False,
-            "error": "Dynamic bridge execution is disabled. Set RADIANCE_DEV=1 to enable local developer automation.",
-        })
-    try:
-        v = eval(code, g)
-        return json.dumps({"ok": True, "result": str(v)})
-    except SyntaxError:
-        pass
-    try:
-        exec(code, g)
-        return json.dumps({"ok": True, "result": "ok"})
-    except Exception as e:
-        return json.dumps({"ok": False, "error": str(e)})
-
-
-def _handle(conn):
+def _handle(conn, addr=None):
     try:
         conn.settimeout(15.0)
         buf = b""
@@ -99,13 +52,18 @@ def _handle(conn):
                 elif cmd == "status":
                     conn.sendall((json.dumps({"ok": True, "result": {"mode": "bridge", "running": True}}) + "\n").encode())
                 elif cmd == "exec":
-                    code = msg.get("code", "")
-                    safe, reason = _validate(code)
-                    if not safe:
-                        conn.sendall((json.dumps({"ok": False, "error": reason}) + "\n").encode())
-                    else:
-                        result = _exec_sandbox(code)
-                        conn.sendall((result + "\n").encode())
+                    # Removed. This accepted arbitrary Python behind an AST
+                    # allowlist that permitted `ast.Assign` and attribute access
+                    # on the name `json`. Rebinding that name walked out of the
+                    # sandbox to the real `builtins` module in two statements,
+                    # giving full RCE. A blocklist over attacker-supplied source
+                    # is not a defensible boundary, so the command is gone
+                    # rather than patched. Use `queue` for automation.
+                    conn.sendall((json.dumps({
+                        "ok": False,
+                        "error": "The 'exec' command has been removed for security reasons. "
+                                 "Use 'queue' to submit a workflow prompt instead.",
+                    }) + "\n").encode())
                 elif cmd == "queue":
                     payload = msg.get("prompt", {})
                     try:
@@ -127,8 +85,11 @@ def _handle(conn):
                     conn.sendall((json.dumps({"ok": False, "error": f"unknown cmd: {cmd}"}) + "\n").encode())
             else:
                 buf += c
-    except Exception:
-        pass
+    except Exception as _exc:
+        logger.debug(
+            "[Radiance] _handle(): ignoring %s from `conn.settimeout(15.0)`: %s",
+            type(_exc).__name__, _exc,
+        )
     finally:
         conn.close()
 
@@ -143,19 +104,29 @@ def start_server(port: int = None, host: str = None) -> str:
     _SERVER_RUNNING = True
 
     def _run():
-        global _SERVER
+        global _SERVER, _BOUND_LOOPBACK
+        bind_host = host
+        loopback = bind_host in _LOOPBACK_HOSTS
+        if not loopback and not _remote_bridge_allowed():
+            logger.warning(
+                "MCP Bridge: refusing non-loopback bind %r without RADIANCE_ALLOW_REMOTE_BRIDGE=1; "
+                "falling back to 127.0.0.1", bind_host,
+            )
+            bind_host = "127.0.0.1"
+            loopback = True
+        _BOUND_LOOPBACK = loopback
         _SERVER = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         _SERVER.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         _SERVER.settimeout(0.5)
         try:
-            _SERVER.bind((host, port))
+            _SERVER.bind((bind_host, port))
             _SERVER.listen(5)
-            logger.info(f"MCP Bridge listening on {host}:{port}")
+            logger.info(f"MCP Bridge listening on {bind_host}:{port}")
             while _SERVER_RUNNING:
                 try:
                     conn, addr = _SERVER.accept()
                     logger.debug(f"MCP connection from {addr}")
-                    threading.Thread(target=_handle, args=(conn,), daemon=True).start()
+                    threading.Thread(target=_handle, args=(conn, addr), daemon=True).start()
                 except socket.timeout:
                     continue
                 except Exception as e:
@@ -166,8 +137,11 @@ def start_server(port: int = None, host: str = None) -> str:
         finally:
             try:
                 _SERVER.close()
-            except Exception:
-                pass
+            except Exception as _exc:
+                logger.debug(
+                    "[Radiance] _run(): ignoring %s from `_SERVER.close()`: %s",
+                    type(_exc).__name__, _exc,
+                )
             _SERVER = None
 
     _SERVER_THREAD = threading.Thread(target=_run, daemon=True)
@@ -181,8 +155,11 @@ def stop_server() -> str:
     if _SERVER:
         try:
             _SERVER.close()
-        except Exception:
-            pass
+        except Exception as _exc:
+            logger.debug(
+                "[Radiance] stop_server(): ignoring %s from `_SERVER.close()`: %s",
+                type(_exc).__name__, _exc,
+            )
         _SERVER = None
     if _SERVER_THREAD:
         _SERVER_THREAD.join(timeout=2.0)
@@ -340,6 +317,10 @@ class RadianceMCP:
         bridge_port:      int   = 1987,
         bridge_host:      str   = "127.0.0.1",
     ) -> Tuple[str, str]:
+        output_path = strip_path_quotes(output_path)
+        video_path = strip_path_quotes(video_path)
+        sequence_path = strip_path_quotes(sequence_path)
+
         from radiance.config.env import get_mcp_port, get_mcp_host
         if bridge_port == 1987:
             bridge_port = get_mcp_port()
@@ -389,7 +370,7 @@ class RadianceMCP:
                 return ("Error: sequence_path is required when source=Sequence.", "")
             end = frame_end if frame_end > 0 else 0
             try:
-                batch, w, h, n, seq_fps, _ = _read_sequence(
+                batch, _alpha, w, h, n, seq_fps, _ = _read_sequence(
                     sequence_path, frame_start, end, 1, "Linear (none)", "Skip"
                 )
                 frames = batch.detach().cpu().float().numpy()

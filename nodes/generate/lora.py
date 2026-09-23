@@ -40,6 +40,9 @@ from typing import Any
 
 import torch
 
+from radiance.core.errors import RadianceError
+from radiance.path_utils import strip_path_quotes
+
 logger = logging.getLogger("radiance.hdr_lora")
 diag_logger = logging.getLogger("radiance.diagnostics")
 
@@ -103,107 +106,267 @@ def _parse_lora_metadata(raw_meta: dict) -> dict:
         if key in ("radiance_compression_ratio", "radiance_alpha"):
             try:
                 out[key] = float(val)
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as _exc:
+                logger.debug(
+                    "[Radiance] _parse_lora_metadata(): ignoring %s from `out[key] = float(val)`: %s",
+                    type(_exc).__name__, _exc,
+                )
         elif key in ("radiance_rank",):
             try:
                 out[key] = int(val)
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as _exc:
+                logger.debug(
+                    "[Radiance] _parse_lora_metadata(): ignoring %s from `out[key] = int(val)`: %s",
+                    type(_exc).__name__, _exc,
+                )
         else:
             out[key] = str(val)
     return out
 
 
-def _apply_lora_to_model(model, lora_tensors: dict, strength: float) -> None:
-    """Apply lora_down/up weight pairs to matching Linear layers in *model*.
+# (down suffix, up suffix) for every LoRA key layout we accept.  Order matters:
+# the first suffix that matches a key wins, so longer/more specific forms are
+# listed before the bare ones.
+_LORA_KEY_SUFFIXES: tuple[tuple[str, str], ...] = (
+    (".lora_down.weight",         ".lora_up.weight"),           # kohya_ss
+    (".lora_A.default.weight",    ".lora_B.default.weight"),    # PEFT named adapter
+    (".lora_A.weight",            ".lora_B.weight"),            # PEFT / diffusers
+    (".lora.down.weight",         ".lora.up.weight"),           # diffusers (dotted)
+    ("_lora.down.weight",         "_lora.up.weight"),           # diffusers (legacy)
+    (".lora_linear_layer.down.weight", ".lora_linear_layer.up.weight"),
+    (".lora_A",                   ".lora_B"),                   # mochi
+)
 
-    Key format (kohya_ss compatible):
-        lora_unet_<dotted.path>.lora_down.weight  → A  (rank × in_features)
-        lora_unet_<dotted.path>.lora_up.weight    → B  (out_features × rank)
-        lora_unet_<dotted.path>.alpha             → scalar alpha (optional)
+# Namespace prefixes that wrap the real module path in a LoRA export.  Stripping
+# them leaves a name that can be matched against the model's own state-dict keys.
+_LORA_NAME_PREFIXES: tuple[str, ...] = (
+    "lora_unet_",
+    "lora_te1_",
+    "lora_te2_",
+    "lora_te_",
+    "lora_transformer_",
+    "base_model.model.",
+    "diffusion_model.",
+    "transformer.",
+    "unet.",
+)
 
-    The update is:   W += (strength * alpha / rank) * B @ A
 
-    Works on raw state-dicts (plain nn.Module) as well as ComfyUI model
-    wrappers that expose .model or .unet.
+def _strip_lora_name_prefix(name: str) -> str:
+    """Drop the LoRA namespace prefix from a module name, if it carries one."""
+    for prefix in _LORA_NAME_PREFIXES:
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
+
+def _iter_lora_pairs(lora_tensors: dict):
+    """Yield ``(module_name, down, up, alpha)`` for every LoRA pair present.
+
+    *module_name* keeps its namespace prefix; _lookup_weight_key tries it both
+    with and without, because some architectures genuinely contain a submodule
+    called ``transformer`` and stripping unconditionally would lose it.
+
+    DEFECT GUARD: this used to slice ``k[len("lora_unet_"):]`` with no
+    ``startswith`` check and to recognise only ``.lora_down.weight`` /
+    ``.lora_up.weight``.  A PEFT/diffusers export (``diffusion_model.*`` or
+    ``transformer.*`` with ``lora_A``/``lora_B``) produced zero pairs, so the
+    node applied nothing and reported success, and a text-encoder key
+    (``lora_te_*``) was mangled into a nonsense module path by the blind slice.
     """
-    # Unwrap ComfyUI ModelPatcher → diffusion_model
+    for key in sorted(lora_tensors):
+        for down_suffix, up_suffix in _LORA_KEY_SUFFIXES:
+            if not key.endswith(down_suffix):
+                continue
+            base = key[: -len(down_suffix)]
+            up = lora_tensors.get(base + up_suffix)
+            if up is not None:
+                yield (
+                    base,
+                    lora_tensors[key],
+                    up,
+                    lora_tensors.get(base + ".alpha"),
+                )
+            break
+
+
+def _build_weight_key_index(weight_keys) -> dict[str, str]:
+    """Index ``*.weight`` state-dict keys by every name a LoRA might use.
+
+    kohya_ss flattens '.' to '_' in module paths and diffusers keeps them
+    dotted, and ComfyUI's own state dict carries a ``diffusion_model.`` wrapper
+    that LoRA exports usually omit.  Exact matches always win over the
+    normalised variants so an ambiguous ``_`` vs ``.`` name cannot shadow a
+    real key.
+    """
+    exact: dict[str, str] = {}
+    fuzzy: dict[str, str] = {}
+    for key in weight_keys:
+        if not key.endswith(".weight"):
+            continue
+        base = key[: -len(".weight")]
+        exact.setdefault(base, key)
+
+        variants = {base.replace(".", "_")}
+        for wrapper in ("model.diffusion_model.", "diffusion_model.", "model."):
+            if base.startswith(wrapper):
+                short = base[len(wrapper):]
+                variants.add(short)
+                variants.add(short.replace(".", "_"))
+                break
+        for variant in variants:
+            fuzzy.setdefault(variant, key)
+
+    index = dict(fuzzy)
+    index.update(exact)
+    return index
+
+
+def _lookup_weight_key(index: dict, name: str):
+    """Resolve a LoRA module name to a state-dict weight key, or None.
+
+    Tried in order: the name as exported, its '_'-flattened form, then the same
+    two with the LoRA namespace prefix removed.  The prefixed forms go first so
+    a model that really does have a ``transformer`` submodule wins over the
+    ``transformer.`` namespace reading of the same string.
+    """
+    stripped = _strip_lora_name_prefix(name)
+    for candidate in (name, name.replace(".", "_"), stripped, stripped.replace(".", "_")):
+        key = index.get(candidate)
+        if key is not None:
+            return key
+    return None
+
+
+def _lora_delta(down, up, alpha, weight_shape):
+    """Return ``(alpha / rank) * up @ down`` reshaped to *weight_shape*, float32.
+
+    DEFECT GUARD: the delta is computed and handed to the caller, never written
+    into a live weight here.  ``Tensor.add_`` has no ``torch.float8_e4m3fn``
+    kernel, so an fp8_e4m3fn UNET used to raise partway through the key loop and
+    leave the shared module half patched.
+    """
+    if down.ndim < 1 or up.ndim < 1:
+        return None
+    rank = int(down.shape[0])
+    if rank == 0:
+        return None
+
+    alpha_val = float(alpha) if alpha is not None else float(rank)
+    scale = alpha_val / rank
+
+    mat_down = down.to(dtype=torch.float32).flatten(start_dim=1)
+    mat_up = up.to(dtype=torch.float32).flatten(start_dim=1)
+    if mat_up.shape[1] != mat_down.shape[0]:
+        return None
+
+    expected = 1
+    for dim in weight_shape:
+        expected *= int(dim)
+
+    delta = torch.mm(mat_up, mat_down)
+    if delta.numel() != expected:
+        return None
+    return (scale * delta).reshape(tuple(int(d) for d in weight_shape))
+
+
+def _apply_lora_via_patcher(patcher, lora_tensors: dict, strength: float) -> int:
+    """Record LoRA deltas on a ComfyUI ModelPatcher clone via ``add_patches``.
+
+    DEFECT GUARD: ``ModelPatcher.clone()`` shares the underlying nn.Module and
+    its nn.Parameter storage (``get_clone_model_override()`` returns
+    ``self.model`` itself), so writing deltas into ``module.weight`` corrupted
+    the loader's cached model permanently and accumulated another delta on every
+    queue.  ``add_patches`` records the diff on the clone's own patch table and
+    ComfyUI applies it at weight-load time, which also keeps quantised (fp8)
+    weights out of the arithmetic.
+    """
+    model_sd = patcher.model.state_dict()
+    index = _build_weight_key_index(model_sd.keys())
+
+    patches: dict = {}
+    unmatched: list[str] = []
+    for name, down, up, alpha in _iter_lora_pairs(lora_tensors):
+        key = _lookup_weight_key(index, name)
+        if key is None:
+            unmatched.append(name)
+            continue
+        delta = _lora_delta(down, up, alpha, model_sd[key].shape)
+        if delta is None:
+            unmatched.append(name)
+            continue
+        patches[key] = ("diff", (delta,))
+
+    if unmatched:
+        logger.debug(
+            "RadianceHDRLoRAApply: %d LoRA key(s) had no matching model weight: %s",
+            len(unmatched), ", ".join(unmatched[:8]),
+        )
+
+    # add_patches() silently drops keys that are not in the model state dict, so
+    # trust its return value rather than len(patches) for the applied count.
+    return len(patcher.add_patches(patches, strength))
+
+
+def _apply_lora_in_place(model, lora_tensors: dict, strength: float) -> int:
+    """Write LoRA deltas into a plain module tree.
+
+    Only reached for objects that are not a ComfyUI ModelPatcher (raw
+    nn.Module pipelines and tests).  RadianceHDRLoRAApply deep-copies those
+    before calling in, so the caller's module is still left untouched.
+    """
     target = model
     for attr in ("model", "unet", "diffusion_model"):
         if hasattr(target, attr):
             target = getattr(target, attr)
 
-    named_modules = dict(target.named_modules())
+    modules_by_key: dict[str, Any] = {}
+    for name, module in target.named_modules():
+        weight = getattr(module, "weight", None)
+        if isinstance(weight, torch.Tensor):
+            modules_by_key[f"{name}.weight"] = module
 
-    # Group keys by dotted path prefix
-    prefixes: set[str] = set()
-    for k in lora_tensors:
-        if k.endswith(".lora_down.weight"):
-            # strip "lora_unet_" prefix and ".lora_down.weight" suffix
-            inner = k[len("lora_unet_"):-len(".lora_down.weight")]
-            prefixes.add(inner)
+    index = _build_weight_key_index(modules_by_key.keys())
 
     applied = 0
-    for prefix in prefixes:
-        down_key = f"lora_unet_{prefix}.lora_down.weight"
-        up_key   = f"lora_unet_{prefix}.lora_up.weight"
-        alpha_key = f"lora_unet_{prefix}.alpha"
-
-        A = lora_tensors.get(down_key)
-        B = lora_tensors.get(up_key)
-        if A is None or B is None:
+    for name, down, up, alpha in _iter_lora_pairs(lora_tensors):
+        key = _lookup_weight_key(index, name)
+        if key is None:
+            logger.debug("LoRA module not found in model: %s", name)
             continue
-
-        alpha_val = float(lora_tensors[alpha_key]) if alpha_key in lora_tensors else float(A.shape[0])
-        rank = A.shape[0]
-        scale = strength * alpha_val / rank
-
-        # Convert dotted path "down_blocks_0_attentions_0_…" back to Python attr chain
-        attr_path = prefix.replace("_", ".")
-        # Walk the module tree — handle both _ and . separations
-        module = _find_module_by_dotted_path(target, named_modules, prefix)
-        if module is None:
-            logger.debug("LoRA prefix not found in model: %s", prefix)
+        module = modules_by_key[key]
+        weight = module.weight
+        delta = _lora_delta(down, up, alpha, weight.shape)
+        if delta is None:
             continue
-
-        if not hasattr(module, "weight"):
-            continue
-
-        device = module.weight.device
-        dtype  = module.weight.dtype
-
-        delta = scale * (B.to(device=device, dtype=torch.float32) @
-                         A.to(device=device, dtype=torch.float32))
         with torch.no_grad():
-            module.weight.add_(delta.to(dtype))
+            merged = weight.to(dtype=torch.float32) + (
+                strength * delta.to(device=weight.device)
+            )
+            weight.copy_(merged.to(dtype=weight.dtype))
         applied += 1
+    return applied
+
+
+def _apply_lora_to_model(model, lora_tensors: dict, strength: float) -> int:
+    """Apply lora down/up weight pairs to *model*, returning the number applied.
+
+    The update is ``W += strength * (alpha / rank) * up @ down``.  On a ComfyUI
+    ModelPatcher it is recorded as a patch rather than merged eagerly; see
+    ``_apply_lora_via_patcher`` for why.
+    """
+    add_patches = getattr(model, "add_patches", None)
+    if callable(add_patches) and getattr(model, "model", None) is not None:
+        applied = _apply_lora_via_patcher(model, lora_tensors, strength)
+    else:
+        applied = _apply_lora_in_place(model, lora_tensors, strength)
 
     logger.info("RadianceHDRLoRAApply: applied %d LoRA delta(s) at strength=%.3f", applied, strength)
     diag_logger.info(
         "HDR_LORA_APPLY applied=%d strength=%.3f",
         applied, strength
     )
-
-
-def _find_module_by_dotted_path(root, named_modules: dict, kohya_path: str):
-    """Resolve a kohya_ss '_'-joined path to an nn.Module.
-
-    kohya_ss replaces '.' with '_' in module paths, so we must try both
-    forms.  We prefer the longest matching key in named_modules to handle
-    ambiguous _ vs . cases (e.g. 'ff_net_0_proj' vs 'ff.net.0.proj').
-    """
-    # Try direct dotted replacement
-    dotted = kohya_path.replace("_", ".")
-    if dotted in named_modules:
-        return named_modules[dotted]
-
-    # Brute-force: try all keys where replacing '.' with '_' matches
-    for name, mod in named_modules.items():
-        if name.replace(".", "_") == kohya_path:
-            return mod
-
-    return None
+    return applied
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -262,7 +425,7 @@ class RadianceHDRLoRALoader:
     ):
         load_file = _require_safetensors()
 
-        lora_path = lora_path.strip()
+        lora_path = strip_path_quotes(lora_path)
         if not lora_path:
             raise ValueError("RadianceHDRLoRALoader: lora_path must not be empty.")
         if not os.path.isfile(lora_path):
@@ -324,8 +487,10 @@ class RadianceHDRLoRAApply:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     """Apply a Radiance HDR LoRA to a diffusion MODEL.
 
-    This node modifies the MODEL weights in-place by adding the low-rank
-    delta (strength × alpha/rank × B@A) to each matching Linear projection.
+    The low-rank delta (strength × alpha/rank × B@A) is recorded on a clone of
+    the incoming MODEL through ComfyUI's own ModelPatcher.add_patches(), so the
+    upstream loader's cached model is never touched and the same graph can be
+    re-queued without deltas piling up.
 
     It is safe to chain multiple LoRA applies — each one accumulates deltas.
 
@@ -413,15 +578,32 @@ class RadianceHDRLoRAApply:
             logger.info("RadianceHDRLoRAApply: strength=0, skipping apply.")
             return (model, compression_ratio)
 
-        # ── Clone the ComfyUI model wrapper so we don't mutate the original ──
+        # ── Clone the ComfyUI model wrapper ───────────────────────────────
+        # The clone shares the underlying nn.Module with the original by
+        # design; it is the patch table that is per-clone.  _apply_lora_to_model
+        # therefore records deltas instead of writing them into the weights.
         try:
             patched_model = model.clone()
         except AttributeError:
-            # Fallback for non-ComfyUI model objects (tests, custom pipelines)
+            # Fallback for non-ComfyUI model objects (tests, custom pipelines).
+            # Those have no patch table, so they get a real copy to merge into.
             patched_model = copy.deepcopy(model)
 
         # ── Apply LoRA deltas ──────────────────────────────────────────────
-        _apply_lora_to_model(patched_model, tensors, strength)
+        applied = _apply_lora_to_model(patched_model, tensors, strength)
+
+        if applied == 0:
+            # A LoRA that matched nothing is a failed run, not a quiet no-op:
+            # the strength widget is ignored and the output MODEL is the input
+            # MODEL. This used to be logged at INFO as "applied 0 LoRA delta(s)"
+            # and read as success.
+            raise RadianceError(
+                f"no LoRA delta matched this model, 0 of {len(tensors)} tensor(s) "
+                f"from {lora_dict.get('path', 'the supplied LORA_DICT')!r} could be "
+                "paired with a model weight. The LoRA key layout or the model "
+                "family is wrong; strength was ignored and the MODEL is unpatched.",
+                node_name="RadianceHDRLoRAApply",
+            )
 
         diag_logger.info(
             "HDR_LORA_APPLY_DONE lora_model=%s hint=%s strength=%.3f compression_ratio=%.3f",

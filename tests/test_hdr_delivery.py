@@ -34,9 +34,9 @@ for mod in ["folder_paths", "comfy", "comfy.utils"]:
 
 def _import_delivery():
     if "nodes_hdr_delivery" in sys.modules:
-        return sys.modules["nodes_hdr_delivery"]
+        return sys.modules["radiance.nodes.hdr.delivery"]
     sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
-    return importlib.import_module("nodes_hdr_delivery")
+    return importlib.import_module("radiance.nodes.hdr.delivery")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -70,6 +70,83 @@ class TestLinearToPQ:
         pq_val = out[0, 0, 0, 0].item()
         # PQ(203/10000) ≈ 0.5807 per ST.2084
         assert pq_val == pytest.approx(0.5807, abs=0.01)
+
+    @pytest.mark.parametrize("peak_nits", [500.0, 1000.0, 2000.0, 4000.0, 10000.0])
+    def test_reference_white_is_peak_independent(self, peak_nits):
+        """Diffuse white sits at 203 nits whatever the mastering peak is.
+
+        ST.2084 normalises by a fixed 10 000 cd/m²; the mastering peak clips
+        luminance, it does not scale it.  The older implementation divided by
+        ``peak_nits`` instead, which is correct only at 10 000 and is where the
+        previous single-value test happened to sit, so the defect was invisible:
+        at the shipped default of 1000 it encoded diffuse white at PQ 0.8290,
+        which a conforming display shows at 2030 nits rather than 203.
+        """
+        x = torch.ones(1, 1, 1, 3)
+        out = self.fn(x, peak_nits=peak_nits)
+        assert out[0, 0, 0, 0].item() == pytest.approx(0.58069, abs=1e-4)
+
+    def test_absolute_luminance_ladder(self):
+        """Known ST.2084 code values for known absolute luminances.
+
+        Checked against the curve itself rather than against this module, so a
+        change to the normaliser fails here whichever direction it moves.
+        """
+        # (nits, PQ code) from ST.2084 with the 10 000 cd/m² ceiling, computed
+        # from the rational constants (m1 = 2610/16384, m2 = 2523/4096*128,
+        # c1 = 3424/4096, c2 = 2413/4096*32, c3 = 2392/4096*32) rather than
+        # read back out of this module.
+        ladder = [(1.0, 0.149946), (10.0, 0.299699), (100.0, 0.508078),
+                  (203.0, 0.580689), (1000.0, 0.751827), (4000.0, 0.902572),
+                  (10000.0, 1.0)]
+        for nits, expected in ladder:
+            scene_linear = nits / 203.0
+            x = torch.full((1, 1, 1, 3), scene_linear)
+            out = self.fn(x, peak_nits=10000.0)
+            assert out[0, 0, 0, 0].item() == pytest.approx(expected, abs=2e-4), (
+                f"{nits} nits should encode to PQ {expected}"
+            )
+
+    def test_peak_nits_clips_rather_than_scales(self):
+        """Above the mastering peak the signal clips, and below it is untouched.
+
+        This is the assertion that separates "peak clips" from "peak scales":
+        under the old implementation a 1000-nit master and a 4000-nit master
+        disagreed about every value, including diffuse white.  Under the correct
+        one they agree everywhere below 1000 nits and differ only above it.
+        """
+        # 500 nits: under both masters, identical.
+        x = torch.full((1, 1, 1, 3), 500.0 / 203.0)
+        assert self.fn(x, peak_nits=1000.0)[0, 0, 0, 0].item() == pytest.approx(
+            self.fn(x, peak_nits=4000.0)[0, 0, 0, 0].item(), abs=1e-6
+        )
+        # 4000 nits: the 1000-nit master clips it to its own peak.
+        y = torch.full((1, 1, 1, 3), 4000.0 / 203.0)
+        clipped = self.fn(y, peak_nits=1000.0)[0, 0, 0, 0].item()
+        at_peak = self.fn(torch.full((1, 1, 1, 3), 1000.0 / 203.0),
+                          peak_nits=1000.0)[0, 0, 0, 0].item()
+        assert clipped == pytest.approx(at_peak, abs=1e-6)
+        assert self.fn(y, peak_nits=4000.0)[0, 0, 0, 0].item() > clipped
+
+    def test_agrees_with_the_aces2_encoder(self):
+        """The package's two PQ encoders must not disagree by a factor of ten.
+
+        ``nodes/hdr/aces2.py`` normalises by 10 000 on an ACES 1.0 = 100 nits
+        scale.  Fed the same absolute luminance, both must produce the same
+        code value.  They differed by 10x until the normaliser was fixed here.
+        """
+        from radiance.nodes.hdr.aces2 import _torch_pq_encode
+        for nits in (1.0, 100.0, 203.0, 1000.0, 4000.0):
+            # This module's scale is 1.0 = 203 nits; aces2's is 1.0 = 100 nits.
+            mine = self.fn(
+                torch.full((1, 1, 1, 3), nits / 203.0), peak_nits=10000.0
+            )[0, 0, 0, 0].item()
+            theirs = _torch_pq_encode(
+                torch.full((1, 1, 1, 3), nits / 100.0)
+            )[0, 0, 0, 0].item()
+            assert mine == pytest.approx(theirs, abs=1e-4), (
+                f"the two PQ encoders disagree at {nits} nits"
+            )
 
     def test_monotonic(self):
         """PQ encoding must be strictly monotonically increasing."""

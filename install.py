@@ -1,0 +1,38 @@
+"""ComfyUI-Manager runs this after installing Radiance.
+
+It makes sure the two libraries Radiance's colour pipeline is built on are
+present: OpenEXR (EXR read/write) and OpenColorIO (colour management). Once
+they are, there is nothing to configure: at startup Radiance uses your $OCIO
+if you have one, otherwise OpenColorIO's built-in ACES studio config, and
+OpenCV's EXR codec is switched on (OPENCV_IO_ENABLE_OPENEXR=1).
+"""
+import importlib.util
+import subprocess
+import sys
+
+REQUIRED = [
+    # (import name, pip requirement)
+    ("OpenEXR", "OpenEXR>=3.2.0,<4.0.0"),
+    ("PyOpenColorIO", "opencolorio>=2.3.0,<3.0.0"),
+]
+
+
+def _missing():
+    return [pip for mod, pip in REQUIRED if importlib.util.find_spec(mod) is None]
+
+
+def main() -> int:
+    todo = _missing()
+    if not todo:
+        print("[Radiance] OpenEXR and OpenColorIO present; OCIO is configured automatically at startup.")
+        return 0
+    print(f"[Radiance] installing {', '.join(todo)} ...")
+    rc = subprocess.call([sys.executable, "-m", "pip", "install", *todo])
+    if rc != 0:
+        print(f"[Radiance] pip failed ({rc}). Install manually: {sys.executable} -m pip install "
+              + " ".join(f'"{t}"' for t in todo))
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

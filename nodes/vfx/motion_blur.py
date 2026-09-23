@@ -11,8 +11,9 @@ class RadianceMotionBlur:
     A professional vector-based motion blur engine. 
     Uses motion vectors to perform sub-frame integration in 32-bit linear space.
     
-    Includes Shutter Angle control (180° = standard cinema) and 
-    energy conservation for realistic highlight streaks.
+    Includes Shutter Angle control (180° = standard cinema). The blur is a
+    plain average of the samples, which conserves energy: a streak from a
+    highlight is dimmer than its source, as on a real shutter.
     """
     
     @classmethod
@@ -26,7 +27,9 @@ class RadianceMotionBlur:
                 "samples": ("INT", {"default": 8, "min": 2, "max": 32, "step": 1,
                     "tooltip": "Number of sub-frame integration samples. Higher = smoother streaks."}),
                 "energy_conservation": ("BOOLEAN", {"default": True,
-                    "tooltip": "Ensures that bright highlights maintain their intensity over the blur area."}),
+                    "tooltip": "On: plain average, total light conserved. Off: legacy look, the whole "
+                               "frame is scaled so its brightest value matches the source peak "
+                               "(brightens everything, not only streaks)."}),
             }
         }
 
@@ -64,8 +67,9 @@ class RadianceMotionBlur:
         
         # Normalized vectors for grid_sample
         # Vectors are in pixels. Normalized = pixels / (dim / 2)
-        dx_norm = (vectors[..., 0] * shutter_scale) / (W / 2.0)
-        dy_norm = (vectors[..., 1] * shutter_scale) / (H / 2.0)
+        # align_corners=True maps [-1, 1] onto W-1 pixel steps.
+        dx_norm = (vectors[..., 0] * shutter_scale) / (max(W - 1, 1) / 2.0)
+        dy_norm = (vectors[..., 1] * shutter_scale) / (max(H - 1, 1) / 2.0)
         uv_norm = torch.stack([dx_norm, dy_norm], dim=-1)
         
         accum = torch.zeros_like(img_bchw)
@@ -84,11 +88,11 @@ class RadianceMotionBlur:
             
         result = accum / samples
         
-        # 3. Energy Conservation Logic
-        # In linear space, the integrated energy should sum to the original
-        # However, for HDR highlights, we sometimes want to "boost" the streaks
-        # if the user requested energy conservation.
-        if energy_conservation:
+        # 3. The average above already conserves energy. The global peak
+        # rescale used to run when energy_conservation was ON, which is the
+        # opposite of conserving it: one smeared highlight brightened the
+        # whole frame. It is now the opt-out legacy look.
+        if not energy_conservation:
             orig_max = torch.max(img_bchw.view(B, C, -1), dim=-1)[0].view(B, C, 1, 1)
             res_max = torch.max(result.view(B, C, -1), dim=-1)[0].view(B, C, 1, 1)
             scale = (orig_max / (res_max + 1e-6)).clamp(min=1.0)
