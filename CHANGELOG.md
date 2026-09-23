@@ -96,6 +96,23 @@ All notable changes to FXTD Radiance will be documented in this file.
   - *Lite Viewer.* Readout, clip check and diff read an fp16 float proxy, so they show source values at source coordinates. The canvas is in device pixels, so 1:1 is exact on scaled displays; it was sized from a bordered box, 0.3 % off. B is scaled to A, diff has a gain, and play/loop run at the source fps. Frames load progressively.
   - Tests: `tests/test_viewer_phase1.py` (11), and `js/tests/viewer_color.test.mjs` and `js/tests/lite_viewer.test.mjs`, which read real pixels back from Chromium.
 
+- **The RUDRA pixel model downloads itself.** SDR → HDR Universal and
+  SDR → HDR Recover used to need `sdr2hdr_pixel_image.pt` installed by hand;
+  without it Universal quietly fell back to plain expansion. Radiance now
+  fetches it on first use (~5 MB, Apache-2.0) from
+  `huggingface.co/fxtdstudios/RUDRA`, pinned to a commit and verified by size
+  and SHA-256 before it is moved into `models/radiance` (new
+  `model/pixel_download.py`). Because it is small and first-party it is on by
+  default, unlike the large third-party weights, which still ask first. Off
+  with `RADIANCE_ALLOW_DOWNLOADS=0`, `HF_HUB_OFFLINE=1` or
+  `TRANSFORMERS_OFFLINE=1`; `core/consent.downloads_allowed` gained a
+  `default` argument and honours the two offline flags. One attempt per
+  session, one "downloads are off" message per session, and the test suite
+  runs with downloads off. `tests/test_pixel_download.py` covers the pin, the
+  opt-outs, verification failures and network errors.
+- **README: model and workflow links.** Direct download link for the RUDRA
+  model, the auto-download and opt-out, and a table for both shipped
+  workflows with a link to every model file each one needs.
 - **Final release review (3.5.0).** Run against a real ComfyUI 0.32 / frontend 1.48.
   - *The shipped start graph did not queue.* The frontend restores widgets by position, and `workflows/start.json` predated inputs added since (`audio_cfg` on the Sampler, `crop_to_broadcast_resolution` on Resolution, the viewers' `input_space` / `fps`, the encoder's `negative_mode`). Everything after each new input moved one slot: the Sampler's `audio_cfg` received "euler", its extension threw `samplerMode.includes is not a function`, and ComfyUI rejected the prompt. HDR VAE Decode also had no VAE connected, and the Flux loader had no `clip_l`. The file is re-saved from the frontend itself, the VAE is wired, `clip_l` is set, and Resolution uses the Flux 16-channel latent. It now passes ComfyUI's prompt validation.
   - *README said 131 nodes.* The log prints 156, so the install check told users a correct install had failed.

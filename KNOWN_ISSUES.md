@@ -112,15 +112,16 @@ clear backlog.
 
 ## Minor
 
-- **`RadianceSDRToHDRUniversal`'s learned modes need a checkpoint you must
-  install yourself.** `Recover` and `Hybrid` are the reason the node is called
-  Universal, and with no `sdr2hdr_pixel_image.pt` in `models/radiance` and no
-  `RADIANCE_SDR2HDR_PIXEL`, they produce output bit-identical to `Expand`.
-  That is a safe fallback rather than a failure, and the node's `report`
-  output names the path that ran and, when the learned path did not, why and
-  what to install; a WARNING is also logged. The dedicated `Recover` node
-  raises instead. *Planned fix:* auto-fetch the default checkpoint, gated by
-  `RADIANCE_ALLOW_DOWNLOADS` like every other downloader.
+- **`RadianceSDRToHDRUniversal`'s learned modes need the RUDRA checkpoint,
+  which now downloads itself (3.5.0).** On first use, with no
+  `sdr2hdr_pixel_image.pt` installed, Radiance fetches it (~5 MB, pinned
+  commit, SHA-256 checked) into `models/radiance`. What remains: on a machine
+  with `RADIANCE_ALLOW_DOWNLOADS=0`, `HF_HUB_OFFLINE=1`, no network, or no
+  writable models folder, `Recover` and `Hybrid` still produce output
+  bit-identical to `Expand`. That is a safe fallback; the node's `report`
+  output says which path ran and why, the console logs the manual download
+  link, and the dedicated `Recover` node raises instead. A failed download is
+  tried once per ComfyUI session; restart to try again.
 
 
 - **Naming overlap:** `Grade` / `Grade Apply` / `Apply Grade Info` read similarly;

@@ -287,12 +287,22 @@ def resolve_pixel_checkpoint(checkpoint_path: str = "") -> Path | None:
     Order: the explicit path, ``RADIANCE_SDR2HDR_PIXEL``, then every
     ``models/radiance`` folder ComfyUI knows about (see
     :mod:`radiance.model.paths`).
+
+    When none of those finds a file, the default checkpoint is downloaded
+    into ``models/radiance`` on first use (see
+    :mod:`radiance.model.pixel_download`; off with ``RADIANCE_ALLOW_DOWNLOADS=0``).
+    A missing explicit path already falls back to the default search with a
+    warning, so it falls back to the default download the same way.
     """
     from radiance.model.paths import find_radiance_checkpoint
-    return find_radiance_checkpoint(
+    found = find_radiance_checkpoint(
         PIXEL_CHECKPOINT_PATTERNS, explicit_path=checkpoint_path or "",
         env_var=PIXEL_CHECKPOINT_ENV,
     )
+    if found is not None:
+        return found
+    from radiance.model.pixel_download import download_pixel_checkpoint
+    return download_pixel_checkpoint()
 
 
 def describe_pixel_checkpoint_search() -> str:

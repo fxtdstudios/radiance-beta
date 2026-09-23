@@ -18,6 +18,10 @@ from unittest.mock import MagicMock
 import pytest
 import numpy as np
 
+# Tests never touch the network. The pixel SDR-to-HDR checkpoint downloads by
+# default on first use; this keeps the suite offline unless a test opts in.
+os.environ.setdefault("RADIANCE_ALLOW_DOWNLOADS", "0")
+
 RADIANCE_ROOT = Path(__file__).resolve().parent.parent
 RADIANCE_PARENT = RADIANCE_ROOT.parent
 if str(RADIANCE_PARENT) not in sys.path:

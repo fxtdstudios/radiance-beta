@@ -425,7 +425,7 @@ class RadianceSDRToHDRRecover(_RudraRecoveryCore):
                 "batch_mode": (["Independent Images", "Video Frames"], {"default": "Independent Images",
                     "tooltip": "Video Frames treats the batch as an ordered clip and prefers the temporal model."}),
                 "pixel_checkpoint": ("STRING", {"default": "",
-                    "tooltip": "Direct-pixel .pt checkpoint. Empty searches models/radiance and RADIANCE_SDR2HDR_PIXEL."}),
+                    "tooltip": "Direct-pixel .pt checkpoint. Empty searches models/radiance and RADIANCE_SDR2HDR_PIXEL, and downloads the default RUDRA model (~5 MB) on first use unless RADIANCE_ALLOW_DOWNLOADS=0."}),
                 "pixel_tile_size": ("INT", {"default": 512, "min": 128, "max": 2048, "step": 64}),
                 "pixel_tile_overlap": ("INT", {"default": 64, "min": 0, "max": 512, "step": 16}),
                 "temporal_window": ([5, 7, 9], {"default": 5,
@@ -602,7 +602,7 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
                     "tooltip": "Auto: temporal model on ordered video when installed, else the direct-pixel model. "
                                "Direct Pixel: pixel model per frame. Temporal: temporal model only (video, 5+ frames)."}),
                 "pixel_checkpoint": ("STRING", {"default": "",
-                    "tooltip": "Direct-pixel .pt checkpoint. Empty searches models/radiance and RADIANCE_SDR2HDR_PIXEL."}),
+                    "tooltip": "Direct-pixel .pt checkpoint. Empty searches models/radiance and RADIANCE_SDR2HDR_PIXEL, and downloads the default RUDRA model (~5 MB) on first use unless RADIANCE_ALLOW_DOWNLOADS=0."}),
                 "pixel_tile_size": ("INT", {"default": 512, "min": 128, "max": 2048, "step": 64}),
                 "pixel_tile_overlap": ("INT", {"default": 64, "min": 0, "max": 512, "step": 16}),
                 "pixel_recovery_mode": (["highlights", "all", "shadows", "off"], {"default": "highlights",
