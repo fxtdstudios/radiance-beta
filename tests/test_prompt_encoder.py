@@ -130,25 +130,11 @@ class TestMiniMaxArch:
         assert result["ui"]["weak_neg_arch"] == [False]
 
     @pytest.mark.real_torch
-    def test_minimax_does_not_truncate_a_long_prompt_that_flux_would(self):
-        # 500 words needs 7 of FakeClip's 77-token chunks. flux's 256-token
-        # limit truncates to 4 chunks (308); minimax's 2048-token limit (27
-        # chunks) leaves all 7 untouched. Chunk-granular truncation means a
-        # shorter prompt (e.g. 300 words, 4 chunks) would round up to fit
-        # flux's limit too and not actually exercise this.
+    def test_no_arch_truncates_a_long_prompt(self):
+        # 3.5.0: flux used to be cut to 256 tokens (4 FakeClip chunks). ComfyUI's
+        # T5 / LLM tokenizers take any length, so nothing is cut for any arch.
         long_prompt = "detail " * 500
-
-        minimax_clip = FakeClip(("qwen3vl_32b",))
-        minimax_result = RadianceCinematicPromptEncoder().encode_cinematic(
-            minimax_clip, base_prompt=long_prompt,
-        )
-        _, _, _, _, _, minimax_token_count = minimax_result["result"]
-
-        flux_clip = FakeClip(("t5xxl", "l"))
-        flux_result = RadianceCinematicPromptEncoder().encode_cinematic(
-            flux_clip, base_prompt=long_prompt,
-        )
-        _, _, _, _, _, flux_token_count = flux_result["result"]
-
-        assert minimax_token_count > 400
-        assert flux_token_count <= 308
+        for keys in (("qwen3vl_32b",), ("t5xxl", "l")):
+            result = RadianceCinematicPromptEncoder().encode_cinematic(
+                FakeClip(keys), base_prompt=long_prompt)
+            assert result["result"][5] > 400, keys
