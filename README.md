@@ -384,14 +384,14 @@ the gap is recorded under Open rather than quietly corrected.
       real-dependency lane from ever running was fixed in 3.4.0, so the suite
       itself is honest, but honest about CPU.
 - [ ] **The public repo is behind, and it is not a fast-forward.**
-      `fxtdstudios/radiance` `main` is still at `64fee41` (2026-06-04, 40
-      commits). `fxtdstudios/radiance-beta` `main` is 409 commits ahead, and
-      409 files differ. Public `main` also carries 3 commits beta never took
-      (PR #18, an outside contributor: ComfyUI compatibility fixes and a
-      movable viewer controls panel), and they touch the flat `nodes_*.py`
-      layout that no longer exists here. Beta has its own movable controls
-      panel; the compatibility fixes need checking one by one before public
-      is replaced, or that contributor's work is silently dropped.
+      `fxtdstudios/radiance` `main` (`16e885f`) is 5 commits the beta line
+      never took. They were reviewed hunk by hunk on 2026-09-23: PR #18's
+      two real fixes are ported (Write reports its files to ComfyUI history;
+      no upper version caps in the platform requirements or `pyproject.toml`),
+      the rest are already fixed here, patch files that no longer exist, or
+      are features (movable controls panel, extra Save nodes) left for later.
+      PR #20 edits a README section that no longer exists. What remains is
+      the publishing decision: replace public `main` with this line.
 
 **Needs a GPU to confirm**
 
