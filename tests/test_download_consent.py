@@ -87,7 +87,7 @@ class TestTheRefusalIsActionable:
 
 
 class TestBothDownloadersAreGated:
-    """One helper, used by both — not two mechanisms with one missing."""
+    """One helper, used by every downloader — not several mechanisms with one missing."""
 
     def test_upscale_downloader_refuses_by_default(self, monkeypatch, tmp_path):
         pytest.importorskip("torch")
@@ -130,3 +130,49 @@ class TestBothDownloadersAreGated:
 
         monkeypatch.setenv(ALLOW_ENV, "1")
         assert up._offline_mode() is False
+
+
+class TestTheAIUpscaleDownloaderIsGated:
+    """3.5: RadianceAIUpscale downloaded unconditionally (up to ~6 GB for
+    SUPIR), ignoring its own auto_download widget and RADIANCE_ALLOW_DOWNLOADS.
+    Found by the 3.5 release audit."""
+
+    def _node(self, monkeypatch, tmp_path):
+        pytest.importorskip("torch")
+        import types
+        from radiance.image import upscale as ai
+
+        fp = types.ModuleType("folder_paths")
+        fp.get_full_path = lambda *a, **k: None
+        fp.get_folder_paths = lambda *a, **k: [str(tmp_path)]
+        cu = types.ModuleType("comfy.utils")
+        monkeypatch.setitem(sys.modules, "folder_paths", fp)
+        monkeypatch.setitem(sys.modules, "comfy.utils", cu)
+        comfy = sys.modules.get("comfy") or types.ModuleType("comfy")
+        comfy.utils = cu
+        monkeypatch.setitem(sys.modules, "comfy", comfy)
+        node = ai.RadianceAIUpscale()
+        calls = []
+        monkeypatch.setattr(node, "_download_model", lambda *a, **k: calls.append(a) or False)
+        ai._MODEL_CACHE.clear() if hasattr(ai._MODEL_CACHE, "clear") else None
+        return node, calls
+
+    def test_refuses_without_consent(self, monkeypatch, tmp_path):
+        monkeypatch.delenv(ALLOW_ENV, raising=False)
+        node, calls = self._node(monkeypatch, tmp_path)
+        model, info = node._load_model("RealESRGAN_x4plus", auto_download=True)
+        assert model is None and calls == []
+        assert "RADIANCE_ALLOW_DOWNLOADS" in info
+
+    def test_auto_download_off_is_honoured_even_with_consent(self, monkeypatch, tmp_path):
+        monkeypatch.setenv(ALLOW_ENV, "1")
+        node, calls = self._node(monkeypatch, tmp_path)
+        model, info = node._load_model("RealESRGAN_x4plus", auto_download=False)
+        assert model is None and calls == []
+        assert "auto_download is off" in info
+
+    def test_downloads_with_consent_and_auto_download(self, monkeypatch, tmp_path):
+        monkeypatch.setenv(ALLOW_ENV, "1")
+        node, calls = self._node(monkeypatch, tmp_path)
+        node._load_model("RealESRGAN_x4plus", auto_download=True)
+        assert len(calls) == 1

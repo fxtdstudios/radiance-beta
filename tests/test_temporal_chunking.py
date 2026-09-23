@@ -96,6 +96,37 @@ class TestComputeTilesTemporal(unittest.TestCase):
         chunks = self.TileEngine.compute_tiles(3, 5, 1)
         self.assertEqual(chunks, [(0, 3)])
 
+    def test_overlap_at_or_above_tile_size_raises_instead_of_hanging(self):
+        """A non-positive stride must raise, not loop forever.
+
+        stride = tile_size - overlap.  At overlap >= tile_size the stride is
+        zero or negative, pos never advances past the exit condition, and the
+        loop appends tiles until memory is exhausted: ComfyUI hangs with no
+        error and nothing in the log.  This was reachable from shipped widget
+        defaults on RadianceVAE4KDecode (temporal_size "2" with the default
+        temporal_overlap of 2), so it is guarded at the source as well as at
+        that call site.
+        """
+        for tile_size, overlap in ((2, 2), (2, 32), (8, 8), (16, 20)):
+            with self.subTest(tile_size=tile_size, overlap=overlap):
+                with self.assertRaises(ValueError):
+                    self.TileEngine.compute_tiles(100, tile_size, overlap)
+
+    def test_largest_legal_overlap_still_terminates(self):
+        """overlap == tile_size - 1 is the boundary and must still work."""
+        chunks = self.TileEngine.compute_tiles(10, 4, 3)
+        self.assertEqual(chunks[0][0], 0)
+        self.assertEqual(chunks[-1][1], 10)
+        self.assertLessEqual(len(chunks), 10)
+        for t1, t2 in chunks:
+            self.assertEqual(t2 - t1, 4)
+
+    def test_degenerate_sizes_raise(self):
+        for tile_size, overlap in ((0, 0), (-4, 0), (8, -1)):
+            with self.subTest(tile_size=tile_size, overlap=overlap):
+                with self.assertRaises(ValueError):
+                    self.TileEngine.compute_tiles(100, tile_size, overlap)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Overlap trimming — per-chunk pix_per_lat (ALBABIT-FIX)
@@ -188,7 +219,7 @@ class TestTemporalChunkingSmoke(unittest.TestCase):
         """Mock VAE: vae.decode(5D_latent) → (1, F_out, H, W, 3) tensor.
         F_out = frames_per_lat_frame * T_lat (simple linear ratio for testing).
 
-        ALBABIT-FIX: decode() now routes turbo_decoder=None + 5D latents
+        ALBABIT-FIX: decode() now routes 5D latents
         through vae.decode_tiled() instead of Radiance's old recursive
         per-chunk vae.decode() loop, so decode_tiled needs the same
         linear-ratio stand-in applied to the whole latent's T (it receives

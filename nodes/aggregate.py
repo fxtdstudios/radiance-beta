@@ -43,7 +43,21 @@ WITHHELD_ATTR = "WITHHELD_NODES"
 
 
 def _leaf_modules(package_name: str) -> Iterable[str]:
-    """Import-able module names directly inside *package_name*, excluding itself."""
+    """Import-able module names directly inside *package_name*, excluding itself.
+
+    Deliberately one level deep, and deliberately confined to the package it is
+    given. The sweep publishes whatever a group's own leaf modules declare; it
+    is not a discovery mechanism for the rest of the distribution.
+
+    That boundary is why the implementation packages (`radiance.image`,
+    `radiance.hdr`, `radiance.film`, `radiance.color`) were invisible here, and
+    it still earns its keep: `radiance.film` declares RadianceFilmGrain and
+    RadianceMotionBlur pointing at different classes from the ones
+    radiance.nodes.vfx ships under those keys. A recursive sweep would decide
+    that collision by import order rather than by anyone choosing. Cross-package
+    publication goes through a group's ``__init__.py``, one named key at a time
+    -- see nodes/catalog.py and nodes/color/__init__.py.
+    """
     package = sys.modules.get(package_name)
     if package is None or not hasattr(package, "__path__"):
         return ()

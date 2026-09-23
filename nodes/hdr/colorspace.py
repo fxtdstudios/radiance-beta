@@ -27,7 +27,7 @@ import torch.nn.functional as F
 # Previously these constants and helpers were copy-pasted from (or imported via
 # private symbols of) nodes_hdr_delivery and nodes_hdr_uplift.
 from radiance.color.ops import (
-    PQ_M1, PQ_M2, PQ_C1, PQ_C2, PQ_C3, PQ_REF_WHITE_NITS,
+    PQ_M1, PQ_M2, PQ_C1, PQ_C2, PQ_C3, PQ_REF_WHITE_NITS, PQ_MAX_NITS,
     apply_matrix_3x3,
     soft_knee_compress as _soft_knee_compress,
 )
@@ -199,25 +199,36 @@ def _eotf_bt1886(v: torch.Tensor) -> torch.Tensor:
     """
     return v.clamp(min=0.0) ** 2.4
 
-def _eotf_pq(v: torch.Tensor, peak_nits: float = 1000.0) -> torch.Tensor:
+def _eotf_pq(v: torch.Tensor) -> torch.Tensor:
     """ST.2084 PQ EOTF: signal [0, 1] → scene-linear (ref white = 1.0 at 203 nits).
 
     Uses the module-level PQ constants imported from radiance.color.ops.
+
+    PQ carries ABSOLUTE luminance normalised by a fixed 10 000 cd/m² ceiling,
+    so nothing about the mastering display enters the decode.  The former
+    ``peak_nits`` parameter scaled by ``peak_nits / 203`` instead of
+    ``10000 / 203``, decoding a real HDR10 file 10x dark at the shipped
+    default.  It is removed rather than corrected in place so that a stale
+    caller raises instead of quietly changing exposure.
     """
     Vm2 = v.clamp(0.0, 1.0) ** (1.0 / PQ_M2)
     L   = (
         (Vm2 - PQ_C1).clamp(min=0.0)
         / (PQ_C2 - PQ_C3 * Vm2).clamp(min=1e-7)
     ) ** (1.0 / PQ_M1)
-    # L is normalised to [0, 1] relative to peak_nits; convert to scene-linear ref 203 nits.
-    return L * (peak_nits / PQ_REF_WHITE_NITS)
+    # L is the [0,1] fraction of 10 000 cd/m²; rescale so 203 cd/m² reads 1.0.
+    return L * (PQ_MAX_NITS / PQ_REF_WHITE_NITS)
 
 def _eotf_hlg(v: torch.Tensor) -> torch.Tensor:
     """HLG OETF inverse: signal [0,1] → scene-linear (ref white ≈ 1.0)."""
     a = 0.17883277
     b = 0.28466892
     c = 0.55991073
-    linear_region = (v / 3.0) ** 2 * 12.0   # for v ≤ 0.5
+    # The linear segment is (v ** 2) / 3.0, written inline in the torch.where
+    # below.  A second, wrong expression for it used to sit here unused
+    # ((v/3)**2 * 12, which is 0.333 at v=0.5 where the correct form is 0.083);
+    # anyone reconciling the two by "fixing" the where-branch would have broken
+    # the HLG EOTF.  Removed rather than left as a trap.
     log_region    = (torch.exp((v - c) / a) + b) / 12.0
     return torch.where(v <= 0.5, (v ** 2) / 3.0, log_region).clamp(min=0.0)
 

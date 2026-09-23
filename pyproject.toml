@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "radiance"
 description = "Professional VFX, HDR color science, review, and DCC handoff nodes for ComfyUI."
-version = "3.4.0"
+version = "3.5.0"
 readme = "README.md"
 license = "GPL-3.0-only"
 license-files = ["LICENSE"]
@@ -203,8 +203,20 @@ branch   = true
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
-# Raise fail_under once a coverage baseline is established (e.g. 60)
-fail_under   = 40
+# The ONE coverage floor. There used to be three disagreeing numbers: this one,
+# a --cov-fail-under=15 on the ci.yml command line (which overrides this one, so
+# this one never applied), and 53% advertised in the README. CI therefore passed
+# at 22% against a floor of 15 while the README claimed 53.
+#
+# 54 sits just under the 55.96% measured on the full dependency lane (16689 of
+# 28018 statements, with branch=true above, so this figure folds branches in).
+# Close enough that dropping a module's tests trips it, far enough that
+# ordinary work does not. It is enforced in the one place the real number can
+# be measured: the test-full job, which installs torch,
+# OpenEXR, OpenColorIO and the rest. The lightweight matrix cannot execute half
+# the suite, so it measures nothing worth gating on and no longer runs coverage.
+# Re-measure before raising this.
+fail_under   = 54
 exclude_lines = [
     "pragma: no cover",
     "raise NotImplementedError",

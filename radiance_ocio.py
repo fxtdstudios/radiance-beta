@@ -34,6 +34,8 @@ except ImportError:
 _OCIO_SEARCH_PATHS = [
     # Environment variable (highest priority, industry standard)
     lambda: os.environ.get("OCIO"),
+    # The config Radiance set up automatically (ocio_setup)
+    lambda: os.path.join(os.path.dirname(os.path.realpath(__file__)), "ACES", "studio-config.ocio"),
     # ACES configs in common locations
     lambda: _find_file("/usr/share/ocio", "config.ocio"),
     lambda: _find_file(os.path.expanduser("~/.config/ocio"), "config.ocio"),
@@ -69,33 +71,19 @@ def _find_file(directory: str, filename: str) -> Optional[str]:
 
 
 def _download_default_config() -> Optional[str]:
-    """Download the official ACES 2.0 CG Config if none is found."""
-    import urllib.request
+    """The config used when none is found. Name kept for callers.
+
+    It used to download the ACES CG config from GitHub at startup, without
+    download consent. OpenColorIO ships the ACES studio config built in, so
+    nothing is fetched: radiance.color.ocio_setup writes it to
+    ACES/studio-config.ocio (or falls back to the bundled CG config).
+    """
     try:
-        # Modern stable URL for ACES 2.0 CG Config (OCIO v2.5)
-        url = "https://raw.githubusercontent.com/AcademySoftwareFoundation/OpenColorIO-Config-ACES/main/src/opencolorio_config_aces/config/aces/2.0/cg-config-v4.0.0_aces-v2.0_ocio-v2.5.ocio"
-        
-        current_dir = os.path.dirname(os.path.realpath(__file__))
-        aces_dir = os.path.join(current_dir, "ACES")
-        
-        if not os.path.exists(aces_dir):
-            os.makedirs(aces_dir)
-            
-        target_path = os.path.join(aces_dir, "config.ocio")
-        
-        if os.path.isfile(target_path):
-            return target_path
-            
-        logger.info("[Radiance OCIO] No config detected. Auto-downloading standard ACES 2.0 CG config...")
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req) as response:
-            with open(target_path, 'wb') as f:
-                f.write(response.read())
-                
-        logger.info(f"[Radiance OCIO] Successfully downloaded and auto-configured to: {target_path}")
-        return os.path.abspath(target_path)
-    except Exception as e:
-        logger.error(f"[Radiance OCIO] Failed to auto-download standard OCIO config: {e}")
+        from radiance.color.ocio_setup import configure_ocio
+        state = configure_ocio()
+        return state["path"] if state.get("configured") else None
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"[Radiance OCIO] automatic config setup failed: {e}")
         return None
 
 
@@ -106,7 +94,7 @@ def discover_ocio_config() -> Optional[str]:
     Search order:
       1. $OCIO environment variable (industry standard)
       2. Common system paths (/usr/share/ocio, ~/ocio, etc.)
-      3. Auto-download ACES CG config if none found
+      3. The ACES studio config Radiance sets up automatically (no download)
 
     Returns:
         Absolute path to config.ocio, or None if not found.

@@ -32,6 +32,10 @@ from radiance.color.matrices import (
     apply_matrix_transform,
     linear_srgb_to_acescg,
     acescg_to_linear_srgb,
+    SRGB_TO_REC2020,
+    REC2020_TO_SRGB,
+    linear_srgb_to_rec2020,
+    rec2020_to_linear_srgb,
 )
 
 # ── Transfer functions (numpy) ──────────────────────────────────────────────
@@ -58,6 +62,10 @@ from radiance.color.transfer import (
     pq_to_linear,
     linear_to_hlg,
     hlg_to_linear,
+    linear_to_rec709,
+    rec709_to_linear,
+    linear_to_rec2020,
+    rec2020_to_linear,
 )
 
 # ── Transfer functions (torch) ──────────────────────────────────────────────
@@ -84,6 +92,10 @@ from radiance.color.transfer import (
     tensor_pq_to_linear,
     tensor_linear_to_hlg,
     tensor_hlg_to_linear,
+    tensor_linear_to_rec709,
+    tensor_rec709_to_linear,
+    tensor_linear_to_rec2020,
+    tensor_rec2020_to_linear,
 )
 
 # ── Gamut ops ───────────────────────────────────────────────────────────────

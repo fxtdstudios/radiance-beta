@@ -32,6 +32,36 @@ writer a tensor. Given a path and no reader, the error says so.
 That is the whole of the layering. There is no lazy upward import hiding in a
 function body here; `radiance.io.writer` depends on nothing above it, which is
 checkable rather than promised — see tests/test_writer_layering.py.
+
+## The other thing this file is: one frame at a time
+
+Nothing here used to stream, and the cost was that the longest shot Radiance
+could write was a property of how much RAM the machine had. Per 1920x1080
+float32 RGB frame (24.9 MB) a video write held the source batch, `out_frames`,
+the `np.stack` of it, and the raw byte string handed to ffmpeg, all at once:
+measured, about 2000 frames at 1080p and 500 at 4K. `out_frames` was the
+nastiest of the four, because under "Linear (pass-through)" it held views and
+looked free, and under any active transform it held a second full copy, so
+turning on a colour transform halved the maximum sequence length with nothing
+in the UI to say so.
+
+The shape now is:
+
+    frames (any iterable)
+      -> transform_stream()     a generator: colour, clamp, alpha, one frame
+      -> dispatch_write()       consumes it, writes, releases, next
+
+`dispatch_write` takes an iterable rather than a list, and the video branch
+feeds ffmpeg's stdin as frames arrive rather than stacking the clip and handing
+over one buffer. `write_frames` still accepts a tensor, because that is what a
+ComfyUI node has; the ceiling there is that tensor plus one working frame. A
+caller that does not already hold the shot -- a read-transform-write pipeline
+over `reader.iter_sequence_frames` -- holds only the working window, and the
+sequence length is then bounded by the disk.
+
+This is measured, not asserted: tests/test_write_streaming.py reports peak
+resident set for a 32-frame write and a 512-frame write and requires the
+difference to be flat.
 """
 
 from __future__ import annotations
@@ -41,8 +71,9 @@ import logging
 import os
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -78,7 +109,24 @@ except ImportError:
         def strip_path_quotes(path):  # type: ignore[misc]
             return path.strip().strip('"').strip("'")
 
+# The containment helper, not os.path.abspath. `resolve_output_path` below used
+# to do a bare `Path(base)`, so a relative `output_path` resolved against the
+# process working directory -- for ComfyUI that is the install root, and a
+# render scattered its output through the installation. `core/system/path_utils
+# .resolve_output_path` was written for exactly this class of bug and is what
+# RadianceFlipbookGIF and RadianceCDLExport already route through; the flagship
+# writer did not. Absolute paths still pass through untouched.
+try:
+    from ..core.system.path_utils import resolve_output_path as _anchor_output_dir
+except ImportError:  # pragma: no cover - only outside the package
+    def _anchor_output_dir(path: str) -> str:  # type: ignore[misc]
+        return path
+
 log = logging.getLogger("radiance.io.writer")
+
+#: How much of ffmpeg's stderr to quote when an encode fails. Enough for the
+#: real reason, not so much that a log line becomes a wall.
+_STDERR_TAIL = 2000
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -125,19 +173,58 @@ def _fmt_stem(fmt: str) -> str:
 # ── Output color spaces ────────────────────────────────────────────────────
 OUTPUT_COLOR_SPACES = [
     "Linear (pass-through)",
+    # display / delivery
     "sRGB",
-    "Rec.709",
-    "Rec.2020",
+    "Rec.709 (BT.1886)",
+    "Rec.709",                       # camera OETF, pre-3.5 name, kept
+    "Rec.2020",                      # BT.2020 primaries + OETF, pre-3.5 name, kept
+    "P3-D65 (Gamma 2.6)",
+    "PQ (HDR10 / ST.2084)",
+    "HLG (Hybrid Log-Gamma)",
+    # scene-linear
+    "Linear Rec.709 (sRGB)",
+    "Linear Rec.2020",
+    "Linear P3-D65",
     "ACEScg",
+    "ACES2065-1",
+    "ACEScct",
+    # camera log (transfer + native gamut)
     "ARRI LogC4",
     "ARRI LogC3",
     "Sony S-Log3",
-    "PQ (HDR10 / ST.2084)",
-    "HLG (Hybrid Log-Gamma)",
+    "Sony S-Log3 S-Gamut3",
+    "Panasonic V-Log",
+    "Canon Log 3",
+    "RED Log3G10",
+    "DaVinci Intermediate",
 ]
 
+from ..color.encodings import WORKING_SPACES as WRITE_WORKING_SPACES  # noqa: E402
+
 # ── EXR compressions ───────────────────────────────────────────────────────
-EXR_COMPRESSIONS = ["ZIP", "ZIPS", "PIZ", "RLE", "Uncompressed", "DWAA", "DWAB"]
+EXR_COMPRESSIONS = ["ZIP", "ZIPS", "PIZ", "RLE", "Uncompressed", "PXR24", "B44", "B44A", "DWAA", "DWAB"]
+
+#: Widget label → OpenEXR compression constant name.
+#:
+#: ALBABIT-FIX: `exr_compression` was threaded through four call layers
+#: (write_frames → dispatch_write → the EXR branches) and then never referenced
+#: again -- `_save_exr` hardcoded ZIP_COMPRESSION. Choosing DWAA for a
+#: 2000-frame dailies sequence silently got ZIP, roughly 5x the size and time,
+#: with the node reporting success. Names rather than values because the
+#: constants are resolved off the installed OpenEXR module at write time.
+_EXR_COMPRESSION_ATTRS = {
+    "ZIP":          "ZIP_COMPRESSION",
+    "ZIPS":         "ZIPS_COMPRESSION",
+    "PIZ":          "PIZ_COMPRESSION",
+    "RLE":          "RLE_COMPRESSION",
+    "Uncompressed": "NO_COMPRESSION",
+    "NONE":         "NO_COMPRESSION",
+    "PXR24":        "PXR24_COMPRESSION",
+    "B44":          "B44_COMPRESSION",
+    "B44A":         "B44A_COMPRESSION",
+    "DWAA":         "DWAA_COMPRESSION",
+    "DWAB":         "DWAB_COMPRESSION",
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -164,33 +251,121 @@ def _ffmpeg_ok() -> bool:
     return ffmpeg_available()
 
 
+class OutputColour:
+    """What the file is encoded as, and how it was reached (for metadata)."""
+
+    def __init__(self, color_space: str = "Linear (pass-through)",
+                 working_space: str = "Linear Rec.709 (sRGB)",
+                 ocio_colorspace: str = "", ocio_config: str = "",
+                 reference_white_nits: float = 203.0):
+        from ..color import encodings as _enc
+        if working_space not in _enc.WORKING_SPACES:
+            raise ValueError(f"Unknown working_space {working_space!r}. "
+                             f"Known: {', '.join(_enc.WORKING_SPACES)}")
+        self.color_space = color_space
+        self.working = working_space
+        self.ocio_colorspace = (ocio_colorspace or "").strip()
+        self.ocio_config = (ocio_config or "").strip()
+        self.ref_nits = float(reference_white_nits or 203.0)
+        self.how = ""
+        if self.ocio_colorspace:
+            cfg = _enc.ocio_config(self.ocio_config)
+            if cfg is None:
+                raise RuntimeError("ocio_colorspace is set but OpenColorIO is not installed")
+            if cfg.getColorSpace(self.ocio_colorspace) is None:
+                raise ValueError(f"OCIO colorspace {self.ocio_colorspace!r} is not in "
+                                 f"config {cfg.getName()!r}")
+            self.label = self.ocio_colorspace
+            self.gamut = None
+            self.encoding = None
+        elif color_space == "Linear (pass-through)":
+            self.label = working_space
+            self.encoding = _enc.ENCODINGS[working_space]
+            self.gamut = self.encoding.gamut
+        else:
+            try:
+                self.encoding = _enc.resolve(color_space)
+            except ValueError:
+                raise ValueError(
+                    f"Unknown output color space {color_space!r}. Known values: "
+                    f"{', '.join(OUTPUT_COLOR_SPACES)}") from None
+            self.label = self.encoding.name
+            self.gamut = self.encoding.gamut
+
+    @property
+    def is_linear(self) -> bool:
+        return self.encoding is not None and self.encoding.name in (
+            "Linear Rec.709 (sRGB)", "Linear Rec.2020", "Linear P3-D65", "ACEScg", "ACES2065-1")
+
+    def apply(self, arr: np.ndarray) -> np.ndarray:
+        from ..color import encodings as _enc
+        arr = np.asarray(arr, np.float32)
+        if arr.ndim == 2:
+            return arr
+        extra = arr[..., 3:] if arr.shape[-1] > 3 else None
+        rgb = arr[..., :3]
+        if self.ocio_colorspace:
+            cfg = _enc.ocio_config(self.ocio_config)
+            src = _enc.ENCODINGS[self.working].ocio
+            if cfg.getColorSpace(src) is None:
+                src = cfg.getRoleColorSpace("scene_linear")
+            out = _enc.ocio_apply(rgb, src, self.ocio_colorspace, self.ocio_config)
+            self.how = f"OCIO [{cfg.getName()}] {src} -> {self.ocio_colorspace}"
+        elif self.color_space == "Linear (pass-through)":
+            out, self.how = rgb, f"pass-through ({self.working})"
+        else:
+            out, self.how = _enc.encode(rgb, self.color_space, self.working, self.ref_nits)
+        out = np.asarray(out, np.float32)
+        return np.concatenate([out, extra], axis=-1) if extra is not None else out
+
+    def exr_attributes(self) -> Dict[str, Any]:
+        from ..color import encodings as _enc
+        attrs: Dict[str, Any] = {"radiance:colorspace": self.label,
+                                 "oiio:ColorSpace": self.label}
+        if self.gamut:
+            attrs["chromaticities"] = tuple(float(v) for v in _enc.chromaticities(self.gamut))
+        if self.gamut == "AP0" and self.label == "ACES2065-1":
+            attrs["acesImageContainerFlag"] = 1
+        return attrs
+
+    def ffmpeg_tags(self) -> List[str]:
+        """Colour tags and the RGB->YUV matrix for a video encode."""
+        name = (self.encoding.name if self.encoding else "")
+        prim = {"Rec.709": "bt709", "Rec.2020": "bt2020", "P3-D65": "smpte432"}.get(self.gamut or "", "")
+        trc = {"sRGB": "iec61966-2-1", "Rec.709 (BT.1886)": "bt709",
+               "Rec.709 (camera OETF)": "bt709", "Rec.2020 (BT.2020 OETF)": "bt2020-10",
+               "PQ (ST.2084)": "smpte2084", "HLG (BT.2100)": "arib-std-b67",
+               "Linear Rec.709 (sRGB)": "linear", "Linear Rec.2020": "linear"}.get(name, "")
+        matrix = "bt2020nc" if self.gamut == "Rec.2020" else "bt709"
+        tags = ["-colorspace", matrix, "-color_range", "tv"]
+        if prim:
+            tags += ["-color_primaries", prim]
+        if trc:
+            tags += ["-color_trc", trc]
+        return tags
+
+    def yuv_matrix(self) -> str:
+        return "bt2020" if self.gamut == "Rec.2020" else "bt709"
+
+    def dpx_attributes(self) -> Dict[str, Any]:
+        name = self.encoding.name if self.encoding else ""
+        transfer = ("ITU-R 709-4" if name.startswith("Rec.709") else
+                    "Linear" if self.is_linear else
+                    "Logarithmic" if name in ("ARRI LogC4", "ARRI LogC3", "Sony S-Log3",
+                                              "Sony S-Log3 S-Gamut3", "Panasonic V-Log",
+                                              "Canon Log 3", "RED Log3G10", "DaVinci Intermediate",
+                                              "ACEScct") else
+                    "User defined")
+        colorimetric = "ITU-R 709-4" if self.gamut == "Rec.709" else "User defined"
+        return {"dpx:Transfer": transfer, "dpx:Colorimetric": colorimetric,
+                "oiio:ColorSpace": self.label}
+
+
 def _apply_output_colorspace(arr: np.ndarray, cs: str) -> np.ndarray:
-    """Apply output color space conversion to a float32 (H, W, 3) array."""
-    if cs == "Linear (pass-through)":
-        return arr
-    try:
-        if cs == "sRGB":
-            return color_utils.linear_to_srgb(arr)
-        if cs == "Rec.709":
-            return color_utils.linear_to_rec709(arr)
-        if cs in ("Rec.2020",):
-            # Use PQ gamma as a proxy for Rec.2020 container
-            return np.clip(arr ** (1/2.4), 0, 1).astype(np.float32)
-        if cs == "ACEScg":
-            return color_utils.linear_srgb_to_acescg(arr) if hasattr(color_utils, "linear_srgb_to_acescg") else arr
-        if cs == "ARRI LogC4":
-            return color_utils.linear_to_logc4(arr)
-        if cs == "ARRI LogC3":
-            return color_utils.linear_to_logc3(arr)
-        if cs == "Sony S-Log3":
-            return color_utils.linear_to_slog3(arr)
-        if cs == "PQ (HDR10 / ST.2084)":
-            return color_utils.linear_to_pq(arr)
-        if cs == "HLG (Hybrid Log-Gamma)":
-            return color_utils.linear_to_hlg(arr)
-    except Exception as e:
-        log.warning("Output color space conversion '%s' failed: %s", cs, e)
-    return arr
+    """Encode Linear Rec.709 working values as ``cs`` (kept for callers that
+    have no working space; the node uses OutputColour). Raises on failure:
+    a write that cannot honour the requested encoding is a failed write."""
+    return OutputColour(cs).apply(arr)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -251,11 +426,17 @@ def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str, quality: int = 18
     # round-trip check) -- already used elsewhere in this module for HDR/DPX.
     if fmt == "PNG (16-bit)":
         import cv2  # type: ignore
-        arr_u16 = (np.clip(arr_f32, 0, 1) * 65535).astype(np.uint16)
-        if arr_u16.shape[-1] == 4:
-            cv2.imwrite(str(path), cv2.cvtColor(arr_u16, cv2.COLOR_RGBA2BGRA))
+        # Rounded, not truncated: truncation biased every sample down by up
+        # to one code value.
+        arr_u16 = np.rint(np.clip(arr_f32, 0, 1) * 65535).astype(np.uint16)
+        if arr_u16.ndim == 3 and arr_u16.shape[-1] == 4:
+            ok = cv2.imwrite(str(path), cv2.cvtColor(arr_u16, cv2.COLOR_RGBA2BGRA))
+        elif arr_u16.ndim == 3:
+            ok = cv2.imwrite(str(path), cv2.cvtColor(arr_u16, cv2.COLOR_RGB2BGR))
         else:
-            cv2.imwrite(str(path), cv2.cvtColor(arr_u16, cv2.COLOR_RGB2BGR))
+            ok = cv2.imwrite(str(path), arr_u16)
+        if not ok:
+            raise RuntimeError(f"Failed to write 16-bit PNG {path}")
         return
 
     # ALBABIT-FIX: was `"16-bit" in fmt or "TIFF" in fmt`, which also matched
@@ -264,7 +445,7 @@ def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str, quality: int = 18
     # its own dedicated `"32-bit" in fmt` branch below was never reached.
     # "SEQ │ TIFF" (bare, no depth suffix) is still meant to land here.
     if "16-bit" in fmt or ("TIFF" in fmt and "32-bit" not in fmt):
-        arr_u16 = (np.clip(arr_f32, 0, 1) * 65535).astype(np.uint16)
+        arr_u16 = np.rint(np.clip(arr_f32, 0, 1) * 65535).astype(np.uint16)
         # ALBABIT-FIX: this used to also do
         # `_PIL.fromarray(arr_u16, mode="I;16" if arr_f32.ndim == 2 else "RGB")`
         # here, whose result was never used (the real write is via tifffile
@@ -283,7 +464,10 @@ def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str, quality: int = 18
                 f"Writing {fmt!r} requires tifffile (pip install tifffile). "
                 "Refusing to silently downgrade a 16-bit write to 8-bit."
             ) from _exc
-        tifffile.imwrite(str(path), arr_u16)
+        tifffile.imwrite(str(path), arr_u16,
+                         photometric="rgb" if arr_u16.ndim == 3 and arr_u16.shape[-1] >= 3 else "minisblack",
+                         extrasamples=["unassalpha"] if arr_u16.ndim == 3 and arr_u16.shape[-1] == 4 else None,
+                         compression="zlib")
         return
     if "32-bit" in fmt:
         try:
@@ -298,10 +482,16 @@ def _save_pil_image(arr_f32: np.ndarray, path: Path, fmt: str, quality: int = 18
                 f"Writing {fmt!r} requires tifffile (pip install tifffile). "
                 "Refusing to silently downgrade a 32-bit float write to 8-bit."
             ) from _exc
-        tifffile.imwrite(str(path), arr_f32.astype(np.float32))
+        a32 = np.asarray(arr_f32, np.float32)
+        tifffile.imwrite(str(path), a32,
+                         photometric="rgb" if a32.ndim == 3 and a32.shape[-1] >= 3 else "minisblack",
+                         extrasamples=["unassalpha"] if a32.ndim == 3 and a32.shape[-1] == 4 else None,
+                         compression="zlib")
         return
 
-    arr_u8 = (np.clip(arr_f32, 0, 1) * 255).astype(np.uint8)
+    arr_u8 = np.rint(np.clip(arr_f32, 0, 1) * 255).astype(np.uint8)
+    if ("JPEG" in fmt) and arr_u8.ndim == 3 and arr_u8.shape[-1] == 4:
+        arr_u8 = arr_u8[..., :3]          # JPEG has no alpha
     pil = _PIL.fromarray(arr_u8)
     pnginfo = None
     if metadata and str(path).lower().endswith(".png"):
@@ -354,14 +544,39 @@ def _exr_channels(arr_f32: np.ndarray) -> "list[tuple[str, np.ndarray]]":
     raise ValueError(f"Unsupported EXR channel count {c}; expected 1, 3, or 4.")
 
 
+def _resolve_exr_compression(name: str, openexr_module) -> Tuple[Any, str]:
+    """Map a widget compression label onto the installed OpenEXR constant.
+
+    An unknown or unavailable label falls back to ZIP and says so, rather than
+    raising: a compression the build does not carry is a reason to write the
+    frame losslessly, not a reason to lose the render.
+    """
+    label = (name or "ZIP").strip()
+    attr = _EXR_COMPRESSION_ATTRS.get(label) or _EXR_COMPRESSION_ATTRS.get(label.upper())
+    if attr is None:
+        log.warning("RadianceWrite: unknown EXR compression %r; writing ZIP. "
+                    "Known values: %s", name, ", ".join(EXR_COMPRESSIONS))
+        return openexr_module.ZIP_COMPRESSION, "ZIP"
+    value = getattr(openexr_module, attr, None)
+    if value is None:
+        log.warning("RadianceWrite: this OpenEXR build has no %s; writing ZIP.", attr)
+        return openexr_module.ZIP_COMPRESSION, "ZIP"
+    return value, label
+
+
 def _save_exr(arr_f32: np.ndarray, path: Path, half: bool,
-              metadata: dict | None = None) -> None:
+              metadata: dict | None = None,
+              compression: str = "ZIP") -> None:
     """Write a float array to OpenEXR, preserving channel count and alpha.
 
     Accepts (H,W), (H,W,1), (H,W,3) or (H,W,4) float data. Scene-linear
     values above 1.0 are preserved. On unrecoverable failure this raises a
     clear error rather than writing a 0-byte placeholder — silent empty/
     downgraded deliveries are never acceptable in a VFX pipeline.
+
+    `compression` is the widget label (see EXR_COMPRESSIONS). It used to be
+    accepted three call layers up and dropped on the floor here; see
+    `_EXR_COMPRESSION_ATTRS`.
     """
     arr_f32 = np.asarray(arr_f32, dtype=np.float32)
     channels = _exr_channels(arr_f32)
@@ -383,8 +598,10 @@ def _save_exr(arr_f32: np.ndarray, path: Path, half: bool,
         # version) persists arbitrary string/int/float attributes correctly,
         # and infers HALF vs FLOAT per channel from the numpy dtype directly
         # -- no Imath.Channel/PixelType wiring needed.
+        _compression_value, _compression_label = _resolve_exr_compression(
+            compression, OpenEXR)
         header: Dict[str, Any] = {
-            "compression": OpenEXR.ZIP_COMPRESSION,
+            "compression": _compression_value,
             "type": OpenEXR.scanlineimage,
             "rad_version": _RADIANCE_VERSION,
             "software": f"Radiance v{_RADIANCE_VERSION}",
@@ -414,6 +631,16 @@ def _save_exr(arr_f32: np.ndarray, path: Path, half: bool,
     # ── Fallback: OpenCV with EXR support (loses alpha for >3 channels) ────
     try:
         import cv2  # type: ignore
+        if (compression or "ZIP").strip().upper() != "ZIP":
+            # cv2's EXR encoder exposes no compression control, so the file
+            # will not be the compression that was asked for. Say so: a DWAA
+            # dailies sequence that silently came out ZIP is the defect this
+            # parameter was wired up to fix.
+            log.warning(
+                "RadianceWrite: OpenEXR is unavailable, so %r is being written "
+                "through OpenCV, which cannot honour %s compression.",
+                str(path), compression,
+            )
         # cv2 expects BGR(A); reverse only the colour channels.
         if arr_f32.ndim == 2 or arr_f32.shape[2] == 1:
             cv_arr = arr_f32 if arr_f32.ndim == 3 else arr_f32[..., None]
@@ -444,7 +671,7 @@ def _save_exr(arr_f32: np.ndarray, path: Path, half: bool,
     )
 
 
-def _save_dpx(arr_f32: np.ndarray, path: Path) -> None:
+def _save_dpx(arr_f32: np.ndarray, path: Path, attributes: Optional[Dict[str, Any]] = None) -> None:
     """Write a float32 (H, W, 3) array to 10-bit DPX via OpenImageIO.
 
     ALBABIT-FIX: DPX has no Pillow plugin at all -- "DPX" was offered in the
@@ -464,6 +691,8 @@ def _save_dpx(arr_f32: np.ndarray, path: Path) -> None:
 
     spec = _oiio.ImageSpec(w, h, c, _oiio.UINT16)
     spec.attribute("oiio:BitsPerSample", 10)
+    for _k, _v in (attributes or {}).items():
+        spec.attribute(_k, str(_v))
     out = _oiio.ImageOutput.create(str(path))
     if out is None:
         raise RuntimeError(f"No DPX writer available for '{path}': {_oiio.geterror()}")
@@ -484,9 +713,10 @@ def _save_hdr(arr_f32: np.ndarray, path: Path) -> None:
     ~1 stop of range); cv2's native HDR codec (already used to read .hdr)
     is accurate instead.
     """
-    arr = np.ascontiguousarray(arr_f32[..., :3], dtype=np.float32)
+    arr = np.ascontiguousarray(np.maximum(arr_f32[..., :3], 0.0), dtype=np.float32)
     import cv2  # type: ignore
-    cv2.imwrite(str(path), cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
+    if not cv2.imwrite(str(path), cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)):
+        raise RuntimeError(f"Failed to write Radiance HDR {path}")
 
 
 def _coerce_mask_to_alpha(mask: Any, n: int, h: int, w: int) -> Optional[np.ndarray]:
@@ -533,50 +763,132 @@ def _coerce_mask_to_alpha(mask: Any, n: int, h: int, w: int) -> Optional[np.ndar
     return np.concatenate([arr, pad], axis=0)
 
 
+def _drain(stream, sink: List[bytes]) -> None:
+    """Read a pipe to exhaustion on a thread, so ffmpeg never blocks on a full
+    stderr buffer while we are busy feeding its stdin. Same shape, and the same
+    reason, as `core/video.py`'s drain on the decode side."""
+    try:
+        for chunk in iter(lambda: stream.read(65536), b""):
+            sink.append(chunk)
+    except (OSError, ValueError):  # pragma: no cover - pipe torn down early
+        pass
+
+
+def _frame_to_raw(fr: np.ndarray, src_pix_fmt: str) -> bytes:
+    """One frame, as the raw bytes the ffmpeg pipe expects."""
+    arr = np.asarray(fr, dtype=np.float32)
+    if arr.ndim == 2:
+        arr = arr[..., None]
+    if arr.shape[-1] == 1:
+        arr = np.repeat(arr, 3, axis=-1)
+    want = 4 if src_pix_fmt in ("rgba64le", "rgba") else 3
+    if arr.shape[-1] > want:
+        arr = arr[..., :want]
+    elif arr.shape[-1] < want:
+        arr = np.concatenate([arr, np.ones(arr.shape[:-1] + (1,), np.float32)], axis=-1)
+    if src_pix_fmt in ("rgb48le", "rgba64le"):
+        return np.ascontiguousarray(
+            np.rint(np.clip(arr, 0, 1) * 65535).astype("<u2")).tobytes()
+    return np.ascontiguousarray(
+        np.rint(np.clip(arr, 0, 1) * 255).astype(np.uint8)).tobytes()
+
+
 def _save_video_ffmpeg(
-    frames: np.ndarray,       # (N, H, W, 3) float32, range [0, 1]
+    frames: Iterable[np.ndarray],   # (H, W, C) float32 frames in [0, 1]
     output_path: str,
     fmt: str,
     fps: float,
     crf: int,
     audio_source: str,
-) -> None:
-    """Encode a frame batch to video via ffmpeg, piping raw frames directly
-    (no intermediate 8-bit PNG per frame).
+    overwrite: bool = True,
+    timeout: Optional[float] = None,
+    on_frame: Optional[Callable[[int], None]] = None,
+    colour: Optional["OutputColour"] = None,
+    has_alpha: bool = False,
+) -> str:
+    """Encode frames to video via ffmpeg, streaming them into its stdin.
+
+    3.5: every codec is fed 16-bit RGB (10-bit codecs got 8-bit before), the
+    RGB -> YUV conversion uses the BT.709 / BT.2020 matrix instead of
+    swscale's BT.601 default (which shifted every hue on a Rec.709 delivery),
+    the file carries primaries / transfer / matrix tags, and ProRes 4444
+    carries the mask as alpha.
 
     ALBABIT-FIX: frames used to go through an 8-bit PNG intermediate, so no
     "10-bit" format ever carried more than 8 bits of real precision. Now
     piped raw via stdin: ProRes 422 HQ/4444 get a genuine 16-bit source (the
     formats that benefit); H.264/H.265/DNxHR HQ stay 8-bit, since their
     "10-bit" is a codec/container property, not source precision.
+
+    ALBABIT-FIX: `frames` used to be one (N,H,W,3) array that the caller built
+    with `np.stack`, and the whole clip was then converted to raw bytes in one
+    `.tobytes()` -- three simultaneous full copies of the sequence (the source
+    batch, the stack, the byte string) before a single frame reached ffmpeg.
+    Measured ceiling was about 2000 frames at 1080p. `frames` is now any
+    iterable and each frame is converted and written on its own, so peak memory
+    is the source frame plus one raw buffer regardless of length. That is what
+    a pipe is for.
+
+    ALBABIT-FIX: the encode ran under a hardcoded `timeout=600`, which killed
+    long masters mid-file and, because `-y` had already truncated the previous
+    version, left neither the old master nor a complete new one. `timeout` now
+    defaults to None (no limit), matching the decode side, which made the same
+    change for the same reason -- see `core/video.py:decode`. When a caller
+    does set a cap and it fires, the partial file is removed rather than left
+    looking like a delivery.
+
+    ALBABIT-FIX: stderr was captured by `subprocess.run(capture_output=True)`
+    and then discarded, so every encode failure surfaced as a bare exit status
+    with no reason. It is drained on a thread and quoted in the exception.
     """
     if not _ffmpeg_ok():
         raise RuntimeError("ffmpeg not found.")
 
     # (codec, src_pix_fmt, dst_pix_fmt, ext, extra ffmpeg args)
     fmt_map = {
-        "MP4 (H.264)":        ("libx264",  "rgb24",   "yuv420p",     ".mp4", ["-crf", str(crf), "-preset", "medium"]),
-        "MP4 (H.265 10-bit)": ("libx265",  "rgb24",   "yuv420p10le", ".mp4", ["-crf", str(crf), "-preset", "medium", "-tag:v", "hvc1"]),
-        "MOV (ProRes 422 HQ)":("prores_ks","rgb48le", "yuv422p10le", ".mov", ["-profile:v", "3", "-qscale:v", "9"]),
-        "MOV (ProRes 4444)":  ("prores_ks","rgb48le", "yuva444p10le",".mov", ["-profile:v", "4", "-qscale:v", "9"]),
-        "MOV (DNxHR HQ)":     ("dnxhd",    "rgb24",   "yuv422p",     ".mxf", ["-profile:v", "dnxhr_hq"]),
+        "MP4 (H.264)":        ("libx264",  "rgb48le", "yuv420p",     ".mp4", ["-crf", str(crf), "-preset", "medium"]),
+        "MP4 (H.265 10-bit)": ("libx265",  "rgb48le", "yuv420p10le", ".mp4", ["-crf", str(crf), "-preset", "medium", "-tag:v", "hvc1"]),
+        "MOV (ProRes 422 HQ)":("prores_ks","rgb48le", "yuv422p10le", ".mov", ["-profile:v", "3", "-qscale:v", "9", "-vendor", "apl0"]),
+        "MOV (ProRes 4444)":  ("prores_ks","rgba64le" if has_alpha else "rgb48le",
+                               "yuva444p10le" if has_alpha else "yuv444p10le", ".mov",
+                               ["-profile:v", "4", "-qscale:v", "9", "-vendor", "apl0"]
+                               + (["-alpha_bits", "16"] if has_alpha else [])),
+        "MOV (DNxHR HQ)":     ("dnxhd",    "rgb48le", "yuv422p",     ".mov", ["-profile:v", "dnxhr_hq"]),
     }
     codec, src_pix_fmt, dst_pix_fmt, ext, extra = fmt_map.get(
-        fmt, ("libx264", "rgb24", "yuv420p", ".mp4", ["-crf", str(crf)])
+        fmt, ("libx264", "rgb48le", "yuv420p", ".mp4", ["-crf", str(crf)])
     )
+    colour = colour or OutputColour()
+    matrix = colour.yuv_matrix()
+    # swscale converts RGB -> YUV with BT.601 unless told otherwise.
+    extra = ["-vf", f"scale=out_color_matrix={matrix}:out_range=tv:flags=accurate_rnd+full_chroma_int"] \
+        + extra + colour.ffmpeg_tags()
 
-    out_path = str(output_path)
-    if not out_path.lower().endswith(ext):
-        out_path += ext
+    # ALBABIT-FIX: the video branch used to build its own output path by string
+    # concatenation and never call `resolve_output_path`, so `overwrite=False`
+    # was honoured for IMG and SEQ and ignored for video only. Re-queueing a
+    # graph handed ffmpeg `-y` and destroyed an approved master. The promised
+    # parent-directory creation did not happen for video either. One resolver
+    # for all three branches.
+    out_path = resolve_output_path(output_path, ext, overwrite)
 
-    n, h, w = frames.shape[:3]
-    if src_pix_fmt == "rgb48le":
-        raw = (np.clip(frames, 0, 1) * 65535).astype("<u2").tobytes()
+    iterator = iter(frames)
+    try:
+        first = np.asarray(next(iterator), dtype=np.float32)
+    except StopIteration:
+        raise ValueError(
+            "RadianceWrite: no frames to encode; nothing was written."
+        ) from None
+    if first.ndim == 2:
+        h, w = first.shape
     else:
-        raw = (np.clip(frames, 0, 1) * 255).astype(np.uint8).tobytes()
+        h, w = first.shape[:2]
 
     cmd = [
-        _ffmpeg_bin(), "-v", "error", "-y",
+        # `-n` rather than `-y` when the operator asked not to overwrite.
+        # `out_path` is already collision-free by then, so this is a second
+        # lock on the door rather than the lock.
+        _ffmpeg_bin(), "-v", "error", "-y" if overwrite else "-n",
         "-f", "rawvideo", "-vcodec", "rawvideo",
         "-s", f"{w}x{h}", "-pix_fmt", src_pix_fmt,
         "-r", str(fps),
@@ -584,10 +896,67 @@ def _save_video_ffmpeg(
     ]
     if audio_source and os.path.isfile(audio_source):
         cmd += ["-i", audio_source, "-c:a", "aac", "-shortest"]
-    cmd += ["-c:v", codec, "-pix_fmt", dst_pix_fmt] + extra + [out_path]
-    subprocess.run(cmd, input=raw, check=True, capture_output=True, timeout=600)
+    cmd += ["-c:v", codec, "-pix_fmt", dst_pix_fmt] + extra + [str(out_path)]
 
-    return out_path
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    errors: List[bytes] = []
+    pump = threading.Thread(target=_drain, args=(proc.stderr, errors), daemon=True)
+    pump.start()
+
+    written = 0
+    timed_out = False
+    frame: Optional[np.ndarray] = first
+    try:
+        while frame is not None:
+            proc.stdin.write(_frame_to_raw(frame, src_pix_fmt))
+            written += 1
+            if on_frame is not None:
+                on_frame(written)
+            frame = next(iterator, None)
+    except (BrokenPipeError, OSError):
+        # ffmpeg exited early. Its stderr says why, and the exit-status check
+        # below is where that gets reported -- swallowing the write error here
+        # is what lets the real message through instead of "Broken pipe".
+        pass
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:  # pragma: no cover - already torn down
+            pass
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:  # pragma: no cover - only with a cap
+            timed_out = True
+            proc.kill()
+            proc.wait()
+        pump.join(timeout=5)
+
+    tail = b"".join(errors).decode("utf-8", "replace").strip()[-_STDERR_TAIL:]
+
+    if timed_out:
+        # Never leave a half-written master behind: it is indistinguishable
+        # from a short delivery, and with `-y` it has already replaced the
+        # version that was approved.
+        try:
+            Path(out_path).unlink(missing_ok=True)
+        except OSError as _exc:  # pragma: no cover
+            log.debug("could not remove the truncated encode %s: %s", out_path, _exc)
+        raise RuntimeError(
+            f"ffmpeg did not finish encoding {Path(out_path).name} within "
+            f"{timeout:g}s after {written} frame(s); the partial file was removed."
+            + (f"\nffmpeg said: {tail}" if tail else "")
+        )
+
+    if proc.returncode not in (0, None):
+        raise RuntimeError(
+            f"ffmpeg failed to encode {Path(out_path).name} (exit "
+            f"{proc.returncode}) after {written} frame(s)."
+            + (f"\nffmpeg said: {tail}" if tail else
+               "\nffmpeg printed nothing on stderr.")
+        )
+
+    return str(out_path)
 
 
 def _write_audio_temp_wav(audio: Any) -> Optional[str]:
@@ -676,13 +1045,24 @@ def coerce_to_frames(
                 [t.detach().cpu().float().numpy() for t in data], axis=0
             )
             return arr, detected_fps
-        # Otherwise, recurse on first element that looks like frames
+        # Otherwise, recurse on first element that looks like frames.
+        #
+        # ALBABIT-FIX: this loop used to `except Exception: continue`, throwing
+        # away the real reason each element failed -- a missing file, a corrupt
+        # MOV, a LATENT that needed a VAE Decode -- and ending on the generic
+        # "Cannot extract frames from list", which names nothing anyone can act
+        # on. The reasons are collected and reported.
+        reasons: List[str] = []
         for item in data:
             try:
                 return coerce_to_frames(item, read_media=read_media)
-            except Exception:
-                continue
-        raise ValueError(f"Cannot extract frames from list: {type(data[0]).__name__ if data else 'empty'}")
+            except Exception as exc:  # noqa: BLE001 - re-raised below, with the reason
+                reasons.append(f"{type(item).__name__}: {type(exc).__name__}: {exc}")
+        raise ValueError(
+            "RadianceWrite: cannot extract frames from list of "
+            f"{type(data[0]).__name__ if data else 'empty'}. "
+            "Tried each element: " + " | ".join(reasons)
+        )
 
     # ── 3. Dict (VHS, AnimateDiff, custom video nodes …) ─────────────
     if isinstance(data, dict):
@@ -747,8 +1127,16 @@ def resolve_output_path(base: str, ext: str, overwrite: bool) -> Path:
     An empty `base` was worse: Path("") is Path("."), whose name is "", and
     with_suffix raised `ValueError: PosixPath('.') has an empty name` --
     an opaque crash for the ordinary case of leaving `filename` blank.
+
+    ALBABIT-FIX: `base` used to go straight into `Path(base)` with no
+    anchoring, so a relative `output_path` resolved against the process working
+    directory -- the ComfyUI install root -- and scattered render directories
+    through the installation. `core/system/path_utils.resolve_output_path` was
+    written for that class of bug and is what RadianceFlipbookGIF and
+    RadianceCDLExport already use; the flagship writer did not. Absolute paths
+    are honoured untouched, and `..` traversal is rejected there.
     """
-    p = Path(base)
+    p = Path(_anchor_output_dir(str(base)) if str(base).strip() else base)
     stem = p.name
     if not stem or stem in (".", ".."):
         raise ValueError(
@@ -762,6 +1150,40 @@ def resolve_output_path(base: str, ext: str, overwrite: bool) -> Path:
         p = _unique_path(p)
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def transform_stream(
+    frames: Iterable[np.ndarray],
+    *,
+    color_space: str = "Linear (pass-through)",
+    apply_legal_range: bool = False,
+    alpha: Optional[np.ndarray] = None,
+    colour: Optional["OutputColour"] = None,
+) -> Iterator[np.ndarray]:
+    """Yield frames with the output transform applied, one at a time.
+
+    ALBABIT-FIX: `write_frames` used to build `out_frames`, a list holding a
+    second full-length copy of the sequence, and only then start writing. With
+    ``color_space="Linear (pass-through)"`` and no mask or clamp the list held
+    views, so it looked free; the moment any transform was active every frame
+    became a fresh allocation and the maximum sequence length halved, silently
+    and unpredictably -- enabling a colour transform changed how long a shot
+    could be. Nothing now holds frame N while frame N+1 is being written: the
+    transform is a generator and the writers below consume it.
+
+    `alpha` is the (N,H,W) array from `_coerce_mask_to_alpha`, indexed by
+    position, so this is the one thing here that is still O(sequence). It is a
+    single-channel mask the caller already had in hand, not a second copy of
+    the frames.
+    """
+    colour = colour or OutputColour(color_space)
+    for i, fr in enumerate(frames):
+        fr = colour.apply(fr)
+        if apply_legal_range:
+            fr = np.clip(fr, 16 / 255.0, 235 / 255.0)
+        if alpha is not None and i < len(alpha) and fr.ndim == 3 and fr.shape[-1] == 3:
+            fr = np.concatenate([fr, alpha[i][..., None]], axis=-1)   # RGB -> RGBA
+        yield fr
 
 
 def write_frames(
@@ -778,15 +1200,28 @@ def write_frames(
     frame_padding:  int   = 4,
     audio_source:   str   = "",
     broadcast_safe: bool  = False,
-    overwrite:      bool  = True,
+    # ALBABIT-FIX: this defaulted to True while RadianceWrite's INPUT_TYPES
+    # declares False. ComfyUI supplies the widget value, so graphs were
+    # safe, but every programmatic caller -- the Digital Cinema shim,
+    # delivery/handler.py -- silently got destructive overwrite from a
+    # signature that disagreed with the UI it belongs to.
+    overwrite:      bool  = False,
     proxy_scale:    float = 0.0,
     audio:          Any   = None,
     mask:           Any   = None,
     prompt:         Any   = None,
     extra_pnginfo:  Any   = None,
+    working_space:  str   = "Linear Rec.709 (sRGB)",
+    ocio_colorspace: str  = "",
+    ocio_config:    str   = "",
+    hdr_reference_nits: float = 203.0,
     read_media:     Optional[Callable[[Any], Optional[np.ndarray]]] = None,
 ):
     output_path = strip_path_quotes(output_path)
+    # Built before any frame is touched, so a bad colour setting fails before
+    # a file is created.
+    colour = OutputColour(color_space, working_space, ocio_colorspace, ocio_config,
+                          hdr_reference_nits)
     frames, detected_fps = coerce_to_frames(image, read_media=read_media)   # (N, H, W, C)
     # ALBABIT-FIX: fps==24.0 used to mean "auto-detect", indistinguishable
     # from a user explicitly choosing 24 -- an explicit 24 on a 23.976
@@ -812,7 +1247,10 @@ def write_frames(
     # alpha for PNG (8-bit via Pillow RGBA, 16-bit via cv2 BGRA) -- both
     # paths already accept a 4-channel array transparently, so only this
     # gating condition needed to change.
-    alpha = _coerce_mask_to_alpha(mask, n, h, w) if mask is not None and ("EXR" in format or "PNG" in format) else None
+    # Alpha travels in every format that can hold it: EXR, PNG, TIFF, DPX,
+    # WEBP and ProRes 4444 (was EXR and PNG only).
+    _alpha_ok = any(k in format for k in ("EXR", "PNG", "TIFF", "DPX", "WEBP", "ProRes 4444"))
+    alpha = _coerce_mask_to_alpha(mask, n, h, w) if mask is not None and _alpha_ok else None
 
     # Apply color space + broadcast-safe clamp.
     #
@@ -825,19 +1263,17 @@ def write_frames(
     # concept and must never touch a float or DPX deliverable.
     _is_float_format = ("EXR" in format or "HDR" in format
                         or "32-bit float" in format or "DPX" in format)
-    apply_legal_range = bool(broadcast_safe) and not _is_float_format
+    # Video is always encoded to legal (TV) range by the RGB -> YUV step, so
+    # clamping RGB to 16-235 first squeezed the range twice.
+    apply_legal_range = bool(broadcast_safe) and not _is_float_format and format not in _FMT_VIDEO
     if broadcast_safe and _is_float_format:
         log.info("RadianceWrite: broadcast_safe ignored for %s "
                  "(legal-range limiting does not apply to float formats)", format)
 
-    out_frames: List[np.ndarray] = []
-    for i, fr in enumerate(frames):
-        fr = _apply_output_colorspace(fr, color_space)
-        if apply_legal_range:
-            fr = np.clip(fr, 16/255.0, 235/255.0)
-        if alpha is not None and fr.ndim == 3 and fr.shape[-1] == 3:
-            fr = np.concatenate([fr, alpha[i][..., None]], axis=-1)   # RGB -> RGBA
-        out_frames.append(fr)
+    out_frames = transform_stream(
+        frames, color_space=color_space,
+        apply_legal_range=apply_legal_range, alpha=alpha, colour=colour,
+    )
 
     # ALBABIT-FIX: "audio" (AUDIO-type input) was accepted but never used --
     # only "audio_source" (a STRING path to an existing file) actually muxed
@@ -859,8 +1295,9 @@ def write_frames(
             start_frame, frame_padding,
             effective_audio_source, overwrite,
             prompt, extra_pnginfo,
+            frame_count=n, colour=colour, has_alpha=alpha is not None,
         )
-        log.info("RadianceWrite: saved %d frame(s) → %s", count, saved)
+        log.info("RadianceWrite: saved %d frame(s) → %s  [%s]", count, saved, colour.how or colour.label)
         # Return the saved path so programmatic callers (delivery/handler.py)
         # can report it. ComfyUI ignores extra tuple entries for a node whose
         # RETURN_TYPES is empty, so this is safe for graph use.
@@ -883,8 +1320,36 @@ def write_frames(
                 )
 
 
+def _sequence_stem(out_dir: Path, seq_stem: str, ext: str, pad_fmt: str,
+                   start_frame: int, count: int, overwrite: bool) -> str:
+    """Pick the sequence's filename stem once, for the whole sequence.
+
+    ALBABIT-FIX: `overwrite=False` used to apply `_unique_path` PER FRAME, so a
+    partial re-render produced `shot_1001_001.exr` for the frames that already
+    existed and `shot_1005.exr` for the ones that did not: neither the old
+    sequence nor the new one, and the `%04d` glob matched neither. A collision
+    is a property of the sequence, so it is decided once, here, and every frame
+    then lands under the same stem -- which is what keeps the glob valid.
+    """
+    if overwrite:
+        return seq_stem
+
+    def collides(stem: str) -> bool:
+        return any(
+            (out_dir / f"{stem}_{pad_fmt % (start_frame + i)}{ext}").exists()
+            for i in range(max(1, count))
+        )
+
+    if not collides(seq_stem):
+        return seq_stem
+    i = 1
+    while collides(f"{seq_stem}_{i:03d}"):
+        i += 1
+    return f"{seq_stem}_{i:03d}"
+
+
 def dispatch_write(
-    frames:         List[np.ndarray],
+    frames:         Iterable[np.ndarray],
     output_path:    str,
     format:         str,
     fps:            float,
@@ -896,9 +1361,25 @@ def dispatch_write(
     overwrite:      bool,
     prompt:         Any = None,
     extra_pnginfo:  Any = None,
+    frame_count:    Optional[int] = None,
+    encode_timeout: Optional[float] = None,
+    colour:         Optional["OutputColour"] = None,
+    has_alpha:      bool = False,
 ) -> Tuple[str, int]:
+    """Write `frames` in `format` and return (path, frames written).
 
-    n = len(frames)
+    `frames` is any iterable of (H,W,C) float32 frames -- a list, an ndarray,
+    or a generator that produces one frame at a time and never holds the
+    sequence. It used to be typed `List[np.ndarray]` and the video branch
+    stacked it, so the sequence length was bounded by RAM rather than by disk.
+    Pass `frame_count` when the length is known and `frames` cannot report it;
+    it is only used to size the sequence-collision check and the returned
+    count, never to allocate.
+    """
+    n = frame_count
+    if n is None:
+        n = len(frames) if hasattr(frames, "__len__") else None  # type: ignore[arg-type]
+    colour = colour or OutputColour()
 
     # ── Single image / EXR (first frame only) ──────────────────────────
     if format in _FMT_IMAGE:
@@ -916,34 +1397,58 @@ def dispatch_write(
             "Radiance HDR (.hdr)": ".hdr",
         }
         ext  = ext_map[stem]
+        # Only the first frame is wanted, and `frames` may be a generator, so
+        # take it by iteration rather than by subscript. The rest is never
+        # produced: a single-image write of a 2000-frame batch costs one frame.
+        first = next(iter(frames), None)
+        if first is None:
+            raise ValueError("RadianceWrite: no frames to write.")
         path = resolve_output_path(output_path, ext, overwrite)
         meta = _workflow_metadata(prompt, extra_pnginfo)
         if "EXR" in stem:
-            _save_exr(frames[0], path, half="16-bit" in stem, metadata=meta)
+            _save_exr(first, path, half="16-bit" in stem, metadata={**meta, **colour.exr_attributes()},
+                      compression=exr_compression)
         elif "DPX" in stem:
-            _save_dpx(frames[0], path)
+            _save_dpx(first, path, colour.dpx_attributes())
         elif "HDR" in stem:
-            _save_hdr(frames[0], path)
+            _save_hdr(first, path)
         else:
-            _save_pil_image(frames[0], path, stem, quality, metadata=meta)
+            _save_pil_image(first, path, stem, quality, metadata=meta)
         return str(path), 1
 
     # ── Video ─────────────────────────────────────────────────────────
     if format in _FMT_VIDEO:
+        # Streamed into ffmpeg's stdin frame by frame. This used to be
+        # `np.stack(frames, axis=0)`, a full second copy of the sequence, on
+        # top of the raw byte string `_save_video_ffmpeg` then built from it.
+        encoded = [0]
+
+        def _count(i: int) -> None:
+            encoded[0] = i
+
         out = _save_video_ffmpeg(
-            np.stack(frames, axis=0),
+            frames,
             output_path,
             _fmt_stem(format),
             fps,
             quality,
             audio_source,
+            overwrite=overwrite,
+            timeout=encode_timeout,
+            on_frame=_count,
+            colour=colour,
+            has_alpha=has_alpha,
         )
-        return str(out), n
+        return str(out), encoded[0]
 
     # ── Sequences ─────────────────────────────────────────────────────
     if format in _FMT_SEQ:
         stem = _fmt_stem(format)
-        out_dir  = Path(output_path)
+        # Anchored, for the same reason resolve_output_path is: a relative
+        # sequence directory used to be created wherever ComfyUI happened to
+        # be started from.
+        out_dir  = Path(_anchor_output_dir(str(output_path))
+                        if str(output_path).strip() else output_path)
         out_dir.mkdir(parents=True, exist_ok=True)
         seq_stem = out_dir.name
         pad_fmt  = f"%0{frame_padding}d"
@@ -965,23 +1470,32 @@ def dispatch_write(
         else:
             ext = ".png"
 
-        saved_paths = []
-        seq_meta = _workflow_metadata(prompt, extra_pnginfo)
+        seq_png_meta = _workflow_metadata(prompt, extra_pnginfo)
+        seq_meta = {**seq_png_meta, **colour.exr_attributes()}
+        seq_stem = _sequence_stem(out_dir, seq_stem, ext, pad_fmt,
+                                  start_frame, n if n is not None else 1,
+                                  overwrite)
+
+        # One frame at a time: transform, write, release. `frames` is a
+        # generator in the normal path, so the frame that has just been written
+        # is the only one alive, and the sequence length is bounded by the disk
+        # rather than by RAM. The old loop also collected every written path
+        # into `saved_paths`, which was never read.
+        written = 0
         for i, fr in enumerate(frames):
-            fn   = f"{seq_stem}_{(pad_fmt % (start_frame + i))}{ext}"
-            path = out_dir / fn
-            if not overwrite:
-                path = _unique_path(path)
+            path = out_dir / f"{seq_stem}_{(pad_fmt % (start_frame + i))}{ext}"
             if is_exr:
-                _save_exr(fr, path, half=half_exr, metadata=seq_meta)
+                _save_exr(fr, path, half=half_exr, metadata=seq_meta,
+                          compression=exr_compression)
             elif is_dpx:
-                _save_dpx(fr, path)
+                _save_dpx(fr, path, colour.dpx_attributes())
             elif is_hdr:
                 _save_hdr(fr, path)
             else:
-                _save_pil_image(fr, path, stem, quality, metadata=seq_meta)
-            saved_paths.append(str(path))
+                _save_pil_image(fr, path, stem, quality, metadata=seq_png_meta)
+            written += 1
+            del fr
 
-        return str(out_dir), n
+        return str(out_dir), written
 
     raise ValueError(f"Unknown format: {format!r}")

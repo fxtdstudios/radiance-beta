@@ -59,6 +59,22 @@ def _hdr_soft_compress(img: torch.Tensor, compression_ratio: float) -> torch.Ten
     return clamped * (1.0 - compression_ratio) + reinhard * compression_ratio
 
 
+#: Ceiling for the inverse of the soft-compress curve, in the module's
+#: convention where 1.0 == 100 nits.
+#:
+#: DECOMPRESS-POLE FIX: the maths below is right -- Reinhard's inverse IS
+#: unbounded as y -> 1 -- but the input clamp of ``1.0 - 1e-7`` chose to
+#: evaluate it one ten-millionth from the pole. At r=0.5 that returns ~2.5e6
+#: and on the r>=1 branch ~1e7, so any VAE-decoded pixel landing on code 1.0,
+#: which is every specular and every practical light source, decoded to a
+#: quarter of a billion nits. Both figures also overflow fp16 (max 65504), so
+#: an f16 .rhdr or EXR written from them stores Inf, not a big number.
+#: 10,000.0 linear is 1,000,000 nits: two orders above the brightest HDR
+#: mastering target anyone grades to, so no legitimate highlight is touched,
+#: and it still round-trips through fp16 as a finite value.
+_DECOMPRESS_MAX_LINEAR = 10_000.0
+
+
 def _hdr_soft_decompress(img: torch.Tensor, compression_ratio: float) -> torch.Tensor:
     """
     Inverse of _hdr_soft_compress — recovers scene-linear HDR from VAE-decoded output.
@@ -91,7 +107,7 @@ def _hdr_soft_decompress(img: torch.Tensor, compression_ratio: float) -> torch.T
 
     if r >= 1.0:
         # Pure Reinhard inverse
-        return y / (1.0 - y + eps)
+        return (y / (1.0 - y + eps)).clamp(max=_DECOMPRESS_MAX_LINEAR)
 
     # Breakpoint: values above this came from x > 1 (HDR side of clamp)
     y_break = 1.0 - r * 0.5
@@ -105,7 +121,7 @@ def _hdr_soft_decompress(img: torch.Tensor, compression_ratio: float) -> torch.T
     disc   = one_minus_y ** 2 + 4.0 * one_minus_r * y
     x_sdr  = (-one_minus_y + torch.sqrt(disc.clamp(min=0.0))) / (2.0 * one_minus_r + eps)
 
-    return torch.where(y > y_break, x_hdr, x_sdr)
+    return torch.where(y > y_break, x_hdr, x_sdr).clamp(max=_DECOMPRESS_MAX_LINEAR)
 
 
 def _compute_channel_stats(image: torch.Tensor):
@@ -343,8 +359,8 @@ class RadianceHDRPerChannelDenorm:
 # CONSOLIDATED: RadianceHDRTurboDecoder removed (Consolidate 1 — 2026-04-26)
 #
 # The simple vae.decode() + soft-knee-decompress path is superseded by
-# ◎ Radiance HDR VAE Decode with rudra_decoder="Enabled", which uses the
-# trained CNN (RadianceTurboDecoder) for full HDR reconstruction.
+# ◎ Radiance HDR VAE Decode in Direct HDR mode; learned SDR→HDR recovery
+# lives in ◎ Radiance SDR → HDR Universal / Recover (RUDRA pixel model).
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────

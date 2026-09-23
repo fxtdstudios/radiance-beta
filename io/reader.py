@@ -44,7 +44,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -87,20 +87,34 @@ log = logging.getLogger("radiance.io_unified")
 # all three inverses in color/transfer.py; only the menu was missing them.
 INPUT_COLOR_SPACES = [
     "Auto / Linear (pass-through)",
-    "Rec.709 (BT.1886)",
+    # display / delivery
     "sRGB",
+    "Rec.709 (BT.1886)",
+    "Rec.709 (camera OETF)",
+    "Rec.2020 (BT.2020 OETF)",
+    "P3-D65 (Gamma 2.6)",
+    "PQ (ST.2084)",
+    "HLG (BT.2100)",
+    # scene-linear
+    "Linear Rec.709 (sRGB)",
+    "Linear Rec.2020",
+    "Linear P3-D65",
+    "ACEScg",
+    "ACES2065-1",
+    "ACEScct",
+    # camera log (transfer + native gamut)
     "ARRI LogC4",
     "ARRI LogC3",
     "Sony S-Log3",
+    "Sony S-Log3 S-Gamut3",
     "Panasonic V-Log",
     "Canon Log 3",
     "RED Log3G10",
     "DaVinci Intermediate",
-    "PQ (ST.2084)",
-    "HLG (BT.2100)",
-    "ACEScg",
-    "ACEScct",
 ]
+
+#: What the IMAGE output is in. Every decode lands here (colour.encodings).
+from ..color.encodings import WORKING_SPACES as READ_WORKING_SPACES  # noqa: E402
 
 
 # ── Image file extensions ──────────────────────────────────────────────────
@@ -177,18 +191,71 @@ _INPUT_DECODERS = {
 }
 
 
+import contextvars as _contextvars  # noqa: E402
+
+#: Colour settings for the read in progress (working space, OCIO override,
+#: HDR reference white, the gamut an EXR declared, and a log of what ran).
+#: A context variable so the per-frame helpers below keep their signatures.
+_COLOUR: "_contextvars.ContextVar[Optional[dict]]" = _contextvars.ContextVar(
+    "radiance_read_colour", default=None)
+
+
+def _colour_ctx() -> dict:
+    ctx = _COLOUR.get()
+    if ctx is None:
+        ctx = {"working": "Linear Rec.709 (sRGB)", "reference_white_nits": 203.0,
+               "ocio_colorspace": "", "ocio_config": "", "file_gamut": None, "applied": []}
+    return ctx
+
+
+def _note(ctx: dict, text: str) -> None:
+    if text not in ctx["applied"]:
+        ctx["applied"].append(text)
+
+
 def _apply_input_colorspace(arr: np.ndarray, cs: str) -> np.ndarray:
-    """Decode an input color space to scene-linear float32."""
-    if cs in ("Auto / Linear (pass-through)", "ACEScg"):
-        return arr
-    fn = _INPUT_DECODERS.get(cs)
-    if fn is None:
-        return arr
-    try:
-        return fn(arr)
-    except Exception as e:
-        log.warning("Input color space decode '%s' failed: %s", cs, e)
-    return arr
+    """Decode file values to scene-linear in the working space.
+
+    Transfer AND primaries: before 3.5 only the transfer was undone, so a
+    camera-log plate came out in the camera's own gamut. Conversion runs
+    through OpenColorIO when available (the same result Nuke or Resolve give
+    for these names) and the analytic path otherwise; see color/encodings.py.
+    A decode that cannot run raises; it used to log and return the file
+    values, which then flowed on as if they were linear.
+    """
+    from ..color import encodings as _enc
+
+    ctx = _colour_ctx()
+    working = ctx["working"]
+    rgb = np.asarray(arr[..., :3], np.float32)
+    extra = arr[..., 3:] if arr.shape[-1] > 3 else None
+
+    ocio_cs = (ctx.get("ocio_colorspace") or "").strip()
+    if ocio_cs:
+        cfg = _enc.ocio_config(ctx.get("ocio_config", ""))
+        if cfg is None:
+            raise RuntimeError("ocio_colorspace is set but OpenColorIO is not installed "
+                               "(pip install opencolorio)")
+        dst = _enc.ENCODINGS[working].ocio
+        if cfg.getColorSpace(dst) is None:
+            dst = cfg.getRoleColorSpace("scene_linear") if hasattr(cfg, "getRoleColorSpace") else "scene_linear"
+            _note(ctx, f"working space {working!r} not in OCIO config {cfg.getName()!r}; "
+                       f"used its scene_linear role ({dst})")
+        out = _enc.ocio_apply(rgb, ocio_cs, dst, ctx.get("ocio_config", ""))
+        _note(ctx, f"OCIO [{cfg.getName()}] {ocio_cs} -> {dst}")
+    elif cs == "Auto / Linear (pass-through)":
+        gamut = ctx.get("file_gamut")
+        if gamut and _enc.LINEAR_FOR_GAMUT.get(gamut) and _enc.LINEAR_FOR_GAMUT[gamut] != working:
+            out, how = _enc.decode(rgb, _enc.LINEAR_FOR_GAMUT[gamut], working)
+            _note(ctx, f"EXR chromaticities say {gamut}: {how}")
+        else:
+            out = rgb
+            _note(ctx, "pass-through (no transform)")
+    else:
+        out, how = _enc.decode(rgb, cs, working, ctx["reference_white_nits"])
+        _note(ctx, how)
+    out = np.asarray(out, np.float32)
+    return np.concatenate([out, extra], axis=-1) if extra is not None else out
 
 
 # ── Path type detection ────────────────────────────────────────────────────
@@ -224,12 +291,15 @@ def _is_16bit_rgb_source(path: str, ext: str) -> bool:
             if len(header) < 26 or header[:8] != b"\x89PNG\r\n\x1a\n":
                 return False
             bit_depth, color_type = header[24], header[25]
-            return bit_depth == 16 and color_type in (2, 6)
+            # 0 grey, 2 RGB, 4 grey+alpha, 6 RGBA. Grey was excluded, and
+            # Pillow's I;16 -> RGB convert saturates at 255, so a 16-bit
+            # depth map or matte read back almost entirely white.
+            return bit_depth == 16 and color_type in (0, 2, 4, 6)
         if ext in (".tif", ".tiff"):
             import tifffile  # type: ignore
             with tifffile.TiffFile(path) as tf:
                 page = tf.pages[0]
-                return page.dtype == np.uint16 and page.samplesperpixel in (3, 4)
+                return page.dtype == np.uint16 and page.samplesperpixel in (1, 2, 3, 4)
     except ImportError:
         # AUDIT-FIX (2026-08): without tifffile a deep TIFF silently fell
         # through to Pillow's 8-bit path -- a 16-bit plate read back crushed
@@ -253,7 +323,9 @@ def _is_float32_tiff(path: str) -> bool:
     try:
         import tifffile  # type: ignore
         with tifffile.TiffFile(path) as tf:
-            return tf.pages[0].dtype == np.float32
+            # Half, single and double float (half is what Nuke and Photoshop
+            # write by default; only 32-bit was recognised).
+            return np.dtype(tf.pages[0].dtype).kind == "f"
     except ImportError:
         # AUDIT-FIX (2026-08): see _is_16bit_rgb_source -- a float TIFF read
         # without tifffile ends up in Pillow, which either fails or reads it
@@ -297,8 +369,9 @@ def _read_image(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
             inp.close()
         # read_image() auto-normalises integer DPX samples (e.g. 10-bit) to [0, 1] float.
         arr = np.array(pixels, dtype=np.float32).reshape(spec.height, spec.width, spec.nchannels)
+        alpha = arr[..., 3] if spec.nchannels >= 4 else None     # was dropped
         arr = arr[..., :3] if spec.nchannels >= 3 else np.repeat(arr[..., :1], 3, axis=-1)
-        return _np_to_tensor(arr), None
+        return _np_to_tensor(arr), (_np_to_tensor(alpha) if alpha is not None else None)
 
     # ALBABIT-FIX: a genuine 16-bit-per-channel RGB(A) PNG/TIFF is silently
     # collapsed to 8-bit by Pillow's .convert("RGB"/"RGBA") below -- Pillow has
@@ -308,17 +381,22 @@ def _read_image(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     if ext in (".png", ".tif", ".tiff") and _is_16bit_rgb_source(path, ext):
         import cv2  # type: ignore
         arr16 = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-        if arr16 is not None and arr16.dtype == np.uint16 and arr16.ndim == 3 and arr16.shape[-1] in (3, 4):
-            has_alpha16 = arr16.shape[-1] == 4
-            arr16 = cv2.cvtColor(arr16, cv2.COLOR_BGRA2RGBA if has_alpha16 else cv2.COLOR_BGR2RGB)
-            arr16 = arr16.astype(np.float32)
-            rgb16  = arr16[..., :3] / 65535.0
-            mask16 = arr16[..., 3:4] / 65535.0 if has_alpha16 else None
-            img_t16  = _np_to_tensor(rgb16)
-            mask_t16 = _np_to_tensor(mask16[..., 0]) if mask16 is not None else None
-            return img_t16, mask_t16
+        if arr16 is not None and arr16.dtype == np.uint16:
+            if arr16.ndim == 2:
+                arr16 = arr16[..., None]
+            ch = arr16.shape[-1]
+            if ch in (3, 4):
+                arr16 = cv2.cvtColor(arr16, cv2.COLOR_BGRA2RGBA if ch == 4 else cv2.COLOR_BGR2RGB)
+            a16 = arr16.astype(np.float32) / 65535.0
+            if ch in (1, 2):                       # grey, grey + alpha
+                rgb16 = np.repeat(a16[..., :1], 3, axis=-1)
+                mask16 = a16[..., 1] if ch == 2 else None
+            else:
+                rgb16 = a16[..., :3]
+                mask16 = a16[..., 3] if ch == 4 else None
+            return _np_to_tensor(rgb16), (_np_to_tensor(mask16) if mask16 is not None else None)
         # else: fall through to Pillow below -- defensive, shouldn't normally
-        # happen since _is_16bit_rgb_source() already confirmed 16-bit RGB(A).
+        # happen since _is_16bit_rgb_source() already confirmed 16-bit.
 
     # ALBABIT-FIX: a 32-bit float TIFF (RadianceWrite's own "TIFF (32-bit
     # float)" output) can't be opened by Pillow at all -- caught by
@@ -329,10 +407,12 @@ def _read_image(path: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         arr = tifffile.imread(path).astype(np.float32)
         if arr.ndim == 2:
             arr = arr[..., np.newaxis]
-        if arr.shape[-1] == 1:
-            arr = np.repeat(arr, 3, axis=-1)
+        if arr.shape[-1] in (1, 2):
+            mask32 = arr[..., 1] if arr.shape[-1] == 2 else None
+            arr = np.repeat(arr[..., :1], 3, axis=-1)
+        else:
+            mask32 = arr[..., 3] if arr.shape[-1] == 4 else None
         rgb32 = arr[..., :3]
-        mask32 = arr[..., 3] if arr.shape[-1] == 4 else None
         return _np_to_tensor(rgb32), (_np_to_tensor(mask32) if mask32 is not None else None)
 
     if not _HAS_PIL:
@@ -375,6 +455,14 @@ def _read_exr_single(
     rgb, alpha, _info, _name = _exr.read_layer(path, layer, raw=raw)
     mask = _np_to_tensor(alpha) if alpha is not None else None
     return _np_to_tensor(rgb), mask
+
+
+def _set_file_gamut(attributes) -> None:
+    """Record the gamut an EXR's `chromaticities` attribute declares."""
+    from ..color.encodings import gamut_from_chromaticities
+    ctx = _COLOUR.get()
+    if ctx is not None:
+        ctx["file_gamut"] = gamut_from_chromaticities((attributes or {}).get("chromaticities"))
 
 
 def _read_exr_with_info(path: str, layer: Optional[str] = None, raw: bool = False):
@@ -508,6 +596,58 @@ def _resolve_sequence_paths(
     return paths
 
 
+def _read_one_sequence_frame(
+    path: str,
+    input_cs: str,
+    layer: Optional[str],
+    raw: bool,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """One frame of a sequence as (1,H,W,C) IMAGE and its alpha, or None."""
+    if os.path.splitext(path)[1].lower() in _EXR_EXT:
+        img_t, mask_t, _info, _name = _read_exr_with_info(path, layer, raw)
+        _set_file_gamut(_info.attributes)
+    else:
+        img_t, mask_t = _read_image(path)
+    arr = _tensor_to_np(img_t)
+    if not raw:
+        arr = _apply_input_colorspace(arr, input_cs)
+    return torch.from_numpy(arr).unsqueeze(0), mask_t
+
+
+def iter_sequence_frames(
+    pattern: str,
+    start: int,
+    end: int,
+    step: int = 1,
+    input_cs: str = "Auto / Linear (pass-through)",
+    missing_frames: str = "Skip",
+    layer: Optional[str] = None,
+    raw: bool = False,
+) -> Iterator[Tuple[str, torch.Tensor, Optional[torch.Tensor]]]:
+    """Yield ``(path, image, alpha)`` one frame at a time, in frame order.
+
+    The batch-returning `_read_sequence` below is built on this and is what the
+    node layer calls, because a ComfyUI node genuinely does hand the graph a
+    batch. A read-transform-write pipeline does not: it wants a frame, a
+    transform and a write, and then the next frame. Consuming this generator
+    means the pipeline holds a working window rather than the whole shot, which
+    is the difference between a sequence bounded by RAM and one bounded by
+    disk.
+
+    A frame that is not on disk yields ``image=None`` so the caller can decide
+    what a hole means; `_read_sequence` fills it with black, as it always did.
+    """
+    paths = _resolve_sequence_paths(pattern, start, end, step, missing_frames)
+    if not paths:
+        raise FileNotFoundError(f"No frames found for pattern: {pattern}")
+    for p in paths:
+        if os.path.isfile(p):
+            img_t, mask_t = _read_one_sequence_frame(p, input_cs, layer, raw)
+            yield p, img_t, mask_t
+        else:
+            yield p, None, None
+
+
 def _read_sequence(
     pattern: str,
     start: int,
@@ -524,6 +664,10 @@ def _read_sequence(
     sequence of RGBA PNGs or EXRs came back with an empty mask, exactly like the
     ProRes 4444 case. A sequence with a matte is the other half of how plates
     arrive.
+
+    This returns the whole batch on purpose: it is what the node hands ComfyUI.
+    Anything that does not need the whole shot at once should consume
+    `iter_sequence_frames` instead of this.
     """
     paths = _resolve_sequence_paths(pattern, start, end, step, missing_frames)
     if not paths:
@@ -535,14 +679,8 @@ def _read_sequence(
     missing_paths: List[str] = []
     for p in paths:
         if os.path.isfile(p):
-            if os.path.splitext(p)[1].lower() in _EXR_EXT:
-                img_t, mask_t = _read_exr_single(p, layer, raw)
-            else:
-                img_t, mask_t = _read_image(p)
-            arr = _tensor_to_np(img_t)
-            if not raw:
-                arr = _apply_input_colorspace(arr, input_cs)
-            frames.append(torch.from_numpy(arr).unsqueeze(0))
+            img_t, mask_t = _read_one_sequence_frame(p, input_cs, layer, raw)
+            frames.append(img_t)
             masks.append(mask_t)
         else:
             # Placeholder for a missing frame. Size it from a real frame below
@@ -842,8 +980,19 @@ def _sequence_frame_range(detected, start_frame: int, end_frame: int):
     for everything else. A start outside the range that exists is treated as
     "not set" -- otherwise a sequence numbered from 1 reads nothing, which is
     the documented directory-pattern trap in a new costume.
+
+    ALBABIT-FIX: when the start was corrected, the end was left where it was,
+    which threw away the LENGTH the caller asked for. `RadianceDigitalCinemaRead`
+    hits this every time: its own `start_frame` defaults to 1, so a 10-frame
+    read arrives as start=1, end=10, the start is rewritten to 1001 for a
+    sequence numbered from 1001, `end < start`, and `_resolve_sequence_paths`
+    falls through to reading the entire sequence. Measured: start_frame=1,
+    frame_limit=10 on a 100-frame sequence read all 100 frames into RAM. A
+    window is a start and a length; correcting the start has to carry the
+    length with it.
     """
     start = start_frame
+    span = (end_frame - start_frame + 1) if end_frame >= start_frame > 0 else 0
     if not (detected.first <= start <= detected.last):
         if start not in (0, 1001):
             log.warning(
@@ -852,6 +1001,8 @@ def _sequence_frame_range(detected, start_frame: int, end_frame: int):
                 start, detected.first, detected.last, detected.first,
             )
         start = detected.first
+        if span > 0:
+            end_frame = start + span - 1
     end = end_frame
     if end <= 0 or end > detected.last:
         end = detected.last
@@ -957,6 +1108,10 @@ def read_frames(
     on_error: str = "Error",
     raw: bool = False,
     premultiplied: bool = False,
+    working_space: str = "Linear Rec.709 (sRGB)",
+    ocio_colorspace: str = "",
+    ocio_config: str = "",
+    hdr_reference_nits: float = 203.0,
 ):
     # Keyword-only. The parameter order below is the node's widget order,
     # which is a contract saved workflows are matched against -- so it cannot
@@ -975,6 +1130,13 @@ def read_frames(
         blank = torch.zeros(1, 8, 8, 3)
         return (blank, blank[..., 0], {"kind": "empty"})
 
+    from ..color.encodings import WORKING_SPACES as _WS
+    if working_space not in _WS:
+        raise ValueError(f"RadianceRead: unknown working_space {working_space!r}. Known: {', '.join(_WS)}")
+    ctx = {"working": working_space, "reference_white_nits": float(hdr_reference_nits or 203.0),
+           "ocio_colorspace": (ocio_colorspace or "").strip(), "ocio_config": (ocio_config or "").strip(),
+           "file_gamut": None, "applied": []}
+    token = _COLOUR.set(ctx)
     try:
         image, mask, info = _read_resolved(
             path, media_type, color_space, start_frame, end_frame,
@@ -997,6 +1159,8 @@ def read_frames(
         blank = torch.zeros(1, 8, 8, 3)
         return (blank, blank[..., 0],
                 {"kind": "error", "path": path, "error": str(exc)})
+    finally:
+        _COLOUR.reset(token)
 
     # ── Shared post-processing ────────────────────────────────────────
     if premultiplied and mask is not None and float(mask.abs().max()) > 0:
@@ -1016,7 +1180,11 @@ def read_frames(
     n, h, w, _ = image.shape
     info.update({"frames": n, "width": w, "height": h,
                  "alpha": mask is not None,
-                 "color_space": "raw (untransformed)" if raw else color_space})
+                 "color_space": "raw (untransformed)" if raw else color_space,
+                 "working_space": "file values (raw)" if raw else working_space,
+                 "colour_transform": [] if raw else ctx["applied"]})
+    if ctx.get("ocio_colorspace") and not raw:
+        info["ocio_colorspace"] = ctx["ocio_colorspace"]
     if mask is None:
         mask = torch.zeros(n, h, w)
 
@@ -1045,6 +1213,9 @@ def _read_resolved(
             start_frame, end_frame = _sequence_frame_range(
                 detected, start_frame, end_frame)
 
+    if kind == "image" and os.path.splitext(path)[1].lower() in _EXR_EXT:
+        kind = "exr"     # media_type Image on an EXR: keep layers + chromaticities
+
     if kind == "image":
         image, mask = _read_image(path)
         if not raw:
@@ -1054,6 +1225,7 @@ def _read_resolved(
 
     if kind == "exr":
         image, mask, exr_info, chosen = _read_exr_with_info(path, layer, raw)
+        _set_file_gamut(exr_info.attributes)
         if not raw:
             image = _np_to_tensor(
                 _apply_input_colorspace(_tensor_to_np(image), color_space))

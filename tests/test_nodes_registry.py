@@ -266,6 +266,34 @@ _KNOWN_CROSS_MODULE_DUPLICATES: dict = {
     "RadianceFrameStamp": frozenset(["nodes", "nodes_realtime_preview"]),
     "RadiancePreviewServer": frozenset(["nodes", "nodes_realtime_preview"]),
     "RadianceViewer": frozenset(["nodes", "nodes_radiance_viewer"]),
+    # 2026-09-18: the implementation packages declare NODE_CLASS_MAPPINGS that
+    # nothing in the load chain ever read, so twenty-three finished nodes never
+    # reached ComfyUI. `radiance/nodes/<group>/__init__.py` is the registration
+    # layer and now names them, which is the same arrangement that already
+    # covers RadianceLUTApply above: the key is declared in both namespaces and
+    # points at one class object in both. See nodes/catalog.py.
+    "RadianceProUpscale": frozenset(["image", "nodes"]),
+    "RadianceUpscaleBySize": frozenset(["image", "nodes"]),
+    "RadianceDownscale32bit": frozenset(["image", "nodes"]),
+    "RadianceBitDepthConvert": frozenset(["image", "nodes"]),
+    "RadianceAIUpscale": frozenset(["image", "nodes"]),
+    "RadianceFloat32Convert": frozenset(["hdr", "nodes"]),
+    "RadianceFloat32ColorCorrect": frozenset(["hdr", "nodes"]),
+    "RadianceHDRColorConvert": frozenset(["hdr", "nodes"]),
+    "RadianceDaVinciWideGamut": frozenset(["hdr", "nodes"]),
+    "RadianceARRIWideGamut4": frozenset(["hdr", "nodes"]),
+    "RadianceACES2OutputTransform": frozenset(["hdr", "nodes"]),
+    "RadianceHDRExposureBlend": frozenset(["hdr", "nodes"]),
+    "RadianceHDRShadowHighlight": frozenset(["hdr", "nodes"]),
+    "RadianceGPUTensorOps": frozenset(["hdr", "nodes"]),
+    "RadianceHDR360Generate": frozenset(["hdr", "nodes"]),
+    "RadianceHighlightSynthesis": frozenset(["hdr", "nodes"]),
+    "RadianceACESConfigManager": frozenset(["hdr", "nodes"]),
+    "RadianceHDROCIOTransform": frozenset(["hdr", "nodes"]),
+    "RadianceOCIOListColorspaces": frozenset(["hdr", "nodes"]),
+    "RadianceDepthOfField": frozenset(["film", "nodes"]),
+    "RadianceRollingShutter": frozenset(["film", "nodes"]),
+    "RadianceCompressionArtifacts": frozenset(["film", "nodes"]),
 }
 
 

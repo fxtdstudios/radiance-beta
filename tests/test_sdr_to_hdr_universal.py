@@ -48,9 +48,13 @@ class TestContract(unittest.TestCase):
 
     def test_optional_rudra_inputs(self):
         opt = self.mod.RadianceSDRToHDRUniversal.INPUT_TYPES()["optional"]
-        self.assertEqual(opt["vae"][0], "VAE")
-        self.assertIn("rudra_turbo", opt["rudra_size"][0])
-        self.assertIn("rudra_full", opt["rudra_size"][0])
+        # 3.5: the latent decoders are gone, so there is no VAE socket and no
+        # decoder size; the learned path is the pixel model or the temporal one.
+        self.assertNotIn("vae", opt)
+        self.assertNotIn("rudra_size", opt)
+        self.assertNotIn("model_meta", opt)
+        self.assertEqual(opt["learned_backend"][0], ["Auto", "Direct Pixel", "Temporal"])
+        self.assertIn("pixel_checkpoint", opt)
         self.assertIn("rudra_blend", opt)
         self.assertIn("batch_mode", opt)
         self.assertIn("shadow_threshold", opt)
@@ -76,7 +80,9 @@ class TestContract(unittest.TestCase):
     def test_recover_node_contract(self):
         cls = self.mod.RadianceSDRToHDRRecover
         req = cls.INPUT_TYPES()["required"]
-        self.assertEqual(cls.INPUT_TYPES()["optional"]["vae"][0], "VAE")
+        self.assertNotIn("vae", cls.INPUT_TYPES()["optional"])
+        self.assertNotIn("rudra_size", req)
+        self.assertIn("pixel_checkpoint", cls.INPUT_TYPES()["optional"])
         for key in ("highlight_threshold", "shadow_threshold",
                     "highlight_strength", "shadow_strength"):
             self.assertIn(key, req)
@@ -111,7 +117,9 @@ class TestMath(unittest.TestCase):
                                       0.0, "Linear")
         luma_in = img[..., 0]
         below = luma_in <= 0.74
-        self.assertTrue(self.torch.allclose(out[..., 0][below],
+        # 3.5.0: Linear is BT.2408-normalised (1.0 = 203 nits); below the knee
+        # the SDR display level (1.0 = 100 nits) is preserved.
+        self.assertTrue(self.torch.allclose(out[..., 0][below] * 2.03,
                                             luma_in[below], atol=1e-4))
 
     def test_sdr_white_reaches_reference_white_not_the_display_peak(self):
@@ -127,12 +135,13 @@ class TestMath(unittest.TestCase):
 
         out, _, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.75, 1.6,
                                             0.0, "Linear")
-        self.assertAlmostEqual(float(out.max()), 2.03, places=3)   # 203 nits
+        # 3.5.0: Linear 1.0 == reference white, so SDR white is exactly 1.0.
+        self.assertAlmostEqual(float(out.max()), 1.0, places=3)    # 203 nits
 
         out, _, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.75, 1.6,
                                             0.0, "Linear",
                                             reference_white_nits=1000.0)
-        self.assertAlmostEqual(float(out.max()), 10.0, places=3)   # 1000 nits
+        self.assertAlmostEqual(float(out.max()), 1.0, places=3)    # 1000 nits = ref
 
     def test_monotonic(self):
         img = self._gradient()
@@ -209,8 +218,11 @@ class TestMath(unittest.TestCase):
         img = self.torch.tensor([[[[1.0, 0.0, 0.0]]]])
         out, _, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.99, 1.6,
                                       0.0, "PQ (HDR10)")
+        from radiance.color.ops import linear_to_pq_bt2408
         rec2020 = apply_matrix_3x3(img, M_REC709_TO_BT2020).clamp(min=0.0)
-        expected = self.mod._torch_pq_encode(rec2020)
+        # red stays below the knee: 1.0 == 100 nits in, 1/2.03 of reference white out
+        expected = linear_to_pq_bt2408(rec2020 / 2.03, peak_nits=1000.0,
+                                       reference_white_nits=203.0)
         self.assertTrue(self.torch.allclose(out, expected, atol=1e-6))
         self.assertGreater(float(out[..., 1]), 1e-3)
         self.assertGreater(float(out[..., 2]), 1e-3)
@@ -222,7 +234,7 @@ class TestMath(unittest.TestCase):
             img, "None", 1000.0, "manual", 0.99, 1.6, 0.0,
             "Linear ACES2065-1 (AP0)",
         )
-        expected = apply_matrix_3x3(img, M_REC709_TO_ACES2065_1)
+        expected = apply_matrix_3x3(img, M_REC709_TO_ACES2065_1) / 2.03
         self.assertTrue(self.torch.allclose(out, expected, atol=1e-6))
 
     def test_independent_batch_is_order_independent(self):
@@ -290,65 +302,70 @@ class TestMath(unittest.TestCase):
 
 @skip_no_torch
 class TestRudraPath(unittest.TestCase):
-    """RUDRA integration — VAE/decoder mocked, real torch math."""
+    """Learned-path integration: the pixel model is mocked, the blend math is real."""
 
     def setUp(self):
+        import pathlib
         import torch
-        import radiance.fast_vae as fv
+        import radiance.pixel_sdr2hdr as px
         self.torch = torch
-        self.fv = fv
+        self.px = px
+        self.pathlib = pathlib
         self.mod = importlib.import_module("radiance.nodes.hdr.uplift_universal")
         self.node = self.mod.RadianceSDRToHDRUniversal()
-        self._orig = (fv.load_radiance_decoder_weights,
-                      fv.decode_to_linear_realtime,
-                      fv.detect_rudra_model_type)
+        self._orig = (px.resolve_pixel_checkpoint, px.predict_pixel_sdr2hdr)
 
     def tearDown(self):
-        (self.fv.load_radiance_decoder_weights,
-         self.fv.decode_to_linear_realtime,
-         self.fv.detect_rudra_model_type) = self._orig
+        (self.px.resolve_pixel_checkpoint, self.px.predict_pixel_sdr2hdr) = self._orig
 
-    class _FakeVAE:
-        scale_factor = 0.18215
-        def encode(self, pixels):
-            import torch
-            b, h, w, _ = pixels.shape
-            return torch.randn(b, 16, max(h // 8, 1), max(w // 8, 1))
+    def _install_pixel(self, rec_value, counter=None):
+        """Fake model returning a flat radiance. rec_value is in the node's
+        working space (1.0 == 100 nits); the model contract is 1.0 == 10,000."""
+        self.px.resolve_pixel_checkpoint = lambda p="": self.pathlib.Path("/tmp/fake.pt")
+
+        def predict(srgb, **kw):
+            if counter is not None:
+                counter["n"] += 1
+            return self.torch.full_like(srgb[..., :3], rec_value / 100.0)
+        self.px.predict_pixel_sdr2hdr = predict
+
+    def _no_pixel(self, counter=None):
+        self.px.resolve_pixel_checkpoint = lambda p="": None
+
+        def predict(srgb, **kw):
+            if counter is not None:
+                counter["n"] += 1
+            raise RuntimeError("no direct-pixel checkpoint")
+        self.px.predict_pixel_sdr2hdr = predict
 
     def _img(self):
         t = self.torch.linspace(0.0, 1.0, 64).reshape(1, 8, 8, 1)
         return t.expand(1, 8, 8, 3).contiguous()
 
     def test_fallback_when_no_checkpoint(self):
-        """loader returns None → identical to pure-math output, no exception."""
-        self.fv.load_radiance_decoder_weights = lambda **kw: None
-        self.fv.detect_rudra_model_type = lambda *a, **kw: "flux"
+        """No checkpoint → identical to pure-math output, no exception, and the
+        report says why."""
+        self._no_pixel()
         img = self._img()
         base, _, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
-                                       0.0, "Linear")
-        out, _, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
-                                      0.0, "Linear", vae=self._FakeVAE())
+                                       0.0, "Linear", processing_mode="Expand")
+        out, _, _, _, _, report = self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
+                                      0.0, "Linear", processing_mode="Hybrid")
         self.assertTrue(self.torch.allclose(out, base))
+        self.assertIn("NOT APPLIED", report)
+        self.assertIn("sdr2hdr_pixel_image.pt", report)
 
     def test_rudra_blended_only_into_recovery_regions(self):
         """Hybrid changes clipped highlights/shadows, not clean midtones."""
         torch = self.torch
-        rec_value = 7.0
-        self.fv.detect_rudra_model_type = lambda *a, **kw: "flux"
-        self.fv.load_radiance_decoder_weights = (
-            lambda **kw: torch.nn.Identity())
-        def fake_decode(latent, decoder, **kw):
-            b = latent.shape[0]
-            h, w = latent.shape[-2] * 8, latent.shape[-1] * 8
-            return torch.full((b, h, w, 3), rec_value)
-        self.fv.decode_to_linear_realtime = fake_decode
-
+        self._install_pixel(7.0)
         img = self._img()
         base, mask, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
-                                          0.0, "Linear")
-        out, _, _, _, _, _ = self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
-                                      0.0, "Linear", vae=self._FakeVAE(),
-                                      rudra_blend=1.0)
+                                          0.0, "Linear", processing_mode="Expand")
+        out, _, _, _, _, report = self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
+                                      0.0, "Linear", rudra_blend=1.0,
+                                      pixel_recovery_mode="all")
+        self.assertIn("learned recovery: applied", report)
         clean_midtones = (img[..., 0] > 0.2) & (img[..., 0] < 0.8)
         recovery_regions = (img[..., 0] < 0.05) | (img[..., 0] > 0.98)
         self.assertTrue(torch.allclose(out[..., 0][clean_midtones],
@@ -358,127 +375,96 @@ class TestRudraPath(unittest.TestCase):
 
     def test_expand_mode_never_loads_rudra(self):
         called = {"n": 0}
-        def loader(**kw):
-            called["n"] += 1
-            return self.torch.nn.Identity()
-        self.fv.load_radiance_decoder_weights = loader
+        self._install_pixel(2.0, called)
         self.node.convert(
             self._img(), "None", 1000.0, "manual", 0.5, 1.6, 0.0,
-            "Linear", vae=self._FakeVAE(), processing_mode="Expand",
+            "Linear", processing_mode="Expand",
         )
         self.assertEqual(called["n"], 0)
 
     def test_universal_modes_have_distinct_products(self):
         torch = self.torch
-        self.fv.detect_rudra_model_type = lambda *a, **kw: "flux"
-        self.fv.load_radiance_decoder_weights = lambda **kw: torch.nn.Identity()
-
-        def fake_decode(latent, decoder, **kw):
-            b = latent.shape[0]
-            h, w = latent.shape[-2] * 8, latent.shape[-1] * 8
-            return torch.full((b, h, w, 3), 2.0)
-
-        self.fv.decode_to_linear_realtime = fake_decode
+        self._install_pixel(2.0)
         args = (self._img(), "None", 1000.0, "manual", 0.5, 1.6, 0.0, "Linear")
-        expand, _, _, _, _, _ = self.node.convert(
-            *args, vae=self._FakeVAE(), processing_mode="Expand",
-        )
-        recover, _, _, _, _, _ = self.node.convert(
-            *args, vae=self._FakeVAE(), processing_mode="Recover",
-        )
-        hybrid, _, _, _, _, _ = self.node.convert(
-            *args, vae=self._FakeVAE(), processing_mode="Hybrid",
-        )
+        expand, _, _, _, _, _ = self.node.convert(*args, processing_mode="Expand")
+        recover, _, _, _, _, _ = self.node.convert(*args, processing_mode="Recover",
+                                                   pixel_recovery_mode="all")
+        hybrid, _, _, _, _, _ = self.node.convert(*args, processing_mode="Hybrid",
+                                                  pixel_recovery_mode="all")
         self.assertFalse(torch.allclose(expand, recover))
         self.assertFalse(torch.allclose(recover, hybrid))
 
     def test_recover_node_reconstructs_highlights_and_shadows(self):
         torch = self.torch
-        self.fv.detect_rudra_model_type = lambda *a, **kw: "flux"
-        self.fv.load_radiance_decoder_weights = lambda **kw: torch.nn.Identity()
-
-        def fake_decode(latent, decoder, **kw):
-            b = latent.shape[0]
-            h, w = latent.shape[-2] * 8, latent.shape[-1] * 8
-            return torch.full((b, h, w, 3), 2.0)
-
-        self.fv.decode_to_linear_realtime = fake_decode
+        self._install_pixel(2.0)
         recover = self.mod.RadianceSDRToHDRRecover()
         img = self._img()
         out, highlights, shadows, h_conf, s_conf = recover.recover(
-            img, "None", 1000.0, 0.98, 0.05,
-            1.0, 1.0, "Linear", "rudra_turbo", vae=self._FakeVAE(),
+            img, "None", 1000.0, 0.98, 0.05, 1.0, 1.0, "Linear",
         )
         clean = (highlights < 1e-6) & (shadows < 1e-6)
         affected = (highlights > 0.0) | (shadows > 0.0)
-        self.assertTrue(torch.allclose(out[..., 0][clean], img[..., 0][clean], atol=1e-4))
+        # 3.5.0: output is BT.2408-normalised; unclipped pixels keep their
+        # SDR display level (1.0 = 100 nits) = img / 2.03.
+        self.assertTrue(torch.allclose(out[..., 0][clean] * 2.03, img[..., 0][clean], atol=1e-4))
         self.assertTrue(bool((out[..., 0][affected] != img[..., 0][affected]).any()))
         self.assertTrue(self.torch.allclose(h_conf, highlights))
         self.assertTrue(self.torch.allclose(s_conf, shadows))
 
     def test_recover_node_requires_checkpoint(self):
-        self.fv.load_radiance_decoder_weights = lambda **kw: None
+        """Recover does not fall back: no checkpoint is an error, not Expand."""
+        self._no_pixel()
         recover = self.mod.RadianceSDRToHDRRecover()
-        with self.assertRaisesRegex(RuntimeError, "compatible trained RUDRA checkpoint"):
+        with self.assertRaisesRegex(RuntimeError, "could not run the learned path"):
             recover.recover(
-                self._img(), "None", 1000.0, 0.98,
-                0.05, 1.0, 1.0, "Linear", "rudra_turbo", vae=self._FakeVAE(),
+                self._img(), "None", 1000.0, 0.98, 0.05, 1.0, 1.0, "Linear",
             )
 
-    def test_recover_video_requires_temporal_checkpoint(self):
+    def test_recover_video_falls_back_to_pixel_model_without_temporal_checkpoint(self):
+        """Ordered video with no temporal checkpoint still runs the pixel model
+        per frame rather than failing."""
+        called = {"n": 0}
+        self._install_pixel(2.0, called)
         recover = self.mod.RadianceSDRToHDRRecover()
-        with self.assertRaisesRegex(RuntimeError, "Phase 3 temporal checkpoint"):
+        out, *_ = recover.recover(
+            self._img().expand(5, 8, 8, 3).contiguous(), "None",
+            1000.0, 0.98, 0.05, 1.0, 1.0, "Linear", batch_mode="Video Frames",
+            temporal_checkpoint="/nonexistent/temporal.safetensors",
+        )
+        self.assertEqual(called["n"], 1)
+        self.assertEqual(out.shape[0], 5)
+
+    def test_recover_video_without_any_checkpoint_raises_with_both_reasons(self):
+        self._no_pixel()
+        recover = self.mod.RadianceSDRToHDRRecover()
+        with self.assertRaisesRegex(RuntimeError, "temporal model.*pixel model"):
             recover.recover(
-                self._img().expand(5, 8, 8, 3), "None",
-                1000.0, 0.98, 0.05, 1.0, 1.0, "Linear", "rudra_turbo",
+                self._img().expand(5, 8, 8, 3).contiguous(), "None",
+                1000.0, 0.98, 0.05, 1.0, 1.0, "Linear", batch_mode="Video Frames",
+                temporal_checkpoint="/nonexistent/temporal.safetensors",
             )
 
     def test_rudra_output_respects_peak_nits(self):
         """Extreme learned radiance is soft-limited to the mastering peak."""
-        torch = self.torch
-        self.fv.detect_rudra_model_type = lambda *a, **kw: "flux"
-        self.fv.load_radiance_decoder_weights = lambda **kw: torch.nn.Identity()
-
-        def fake_decode(latent, decoder, **kw):
-            b = latent.shape[0]
-            h, w = latent.shape[-2] * 8, latent.shape[-1] * 8
-            return torch.full((b, h, w, 3), 1000.0)
-
-        self.fv.decode_to_linear_realtime = fake_decode
+        self._install_pixel(1000.0)
         out, _, _, _, _, _ = self.node.convert(
             self._img(), "None", 200.0, "manual", 0.5, 1.0, 0.0,
-            "Linear", vae=self._FakeVAE(), rudra_blend=1.0,
+            "Linear", rudra_blend=1.0, pixel_recovery_mode="all",
         )
         self.assertLessEqual(float(self.mod._luma(out).max()), 2.0 + 1e-5)
 
-    def test_multiframe_input_skips_rudra_before_any_compute(self):
-        """Video (B>1) + VAE → no encode, no loader call, math output returned.
-        Regression: WAN's video VAE compresses 81 frames → 21; the old code ran
-        the full encode+decode before discovering the mismatch."""
-        encode_calls = {"n": 0}
-        loader_calls = {"n": 0}
-
-        class _CountingVAE:
-            scale_factor = 0.18215
-            def encode(self, pixels):
-                encode_calls["n"] += 1
-                import torch
-                b, h, w, _ = pixels.shape
-                return torch.randn(b, 16, max(h // 8, 1), max(w // 8, 1))
-
-        def loader(**kw):
-            loader_calls["n"] += 1
-            return None
-        self.fv.load_radiance_decoder_weights = loader
-
-        video = self._img().expand(5, 8, 8, 3).contiguous()   # 5 frames
-        base, _, _, _, _, _ = self.node.convert(video, "None", 1000.0, "manual", 0.5, 1.6,
-                                       0.0, "Linear")
-        out, _, _, _, _, _ = self.node.convert(video, "None", 1000.0, "manual", 0.5, 1.6,
-                                      0.0, "Linear", vae=_CountingVAE())
-        self.assertEqual(encode_calls["n"], 0)
-        self.assertEqual(loader_calls["n"], 0)
-        self.assertTrue(self.torch.allclose(out, base))
+    def test_legacy_vae_and_backend_values_are_accepted(self):
+        """Graphs saved before 3.5 pass vae / rudra_size / model_meta and the
+        backend value "Legacy RUDRA"; they must run, on the pixel model."""
+        called = {"n": 0}
+        self._install_pixel(2.0, called)
+        out, _, _, _, _, report = self.node.convert(
+            self._img(), "None", 1000.0, "manual", 0.5, 1.6, 0.0, "Linear",
+            vae=object(), rudra_size="rudra_turbo", model_meta="{}",
+            learned_backend="Legacy RUDRA", rudra_blend=1.0,
+        )
+        self.assertEqual(called["n"], 1)
+        self.assertIn("direct-pixel", report)
 
     def test_video_mode_dispatches_temporal_recovery_without_vae(self):
         called = {"n": 0}
@@ -502,15 +488,20 @@ class TestRudraPath(unittest.TestCase):
         self.assertGreater(float(h_conf.max()), 0.0)
         self.assertGreater(float(s_conf.max()), 0.0)
 
+    def test_temporal_backend_on_a_still_reports_why(self):
+        self._install_pixel(2.0)
+        _, _, _, _, _, report = self.node.convert(
+            self._img(), "None", 1000.0, "manual", 0.5, 1.6, 0.0,
+            "Linear", learned_backend="Temporal",
+        )
+        self.assertIn("NOT APPLIED", report)
+        self.assertIn("Video Frames", report)
+
     def test_blend_zero_disables_rudra(self):
         called = {"n": 0}
-        def loader(**kw):
-            called["n"] += 1
-            return None
-        self.fv.load_radiance_decoder_weights = loader
-        img = self._img()
-        self.node.convert(img, "None", 1000.0, "manual", 0.5, 1.6,
-                          0.0, "Linear", vae=self._FakeVAE(), rudra_blend=0.0)
+        self._install_pixel(2.0, called)
+        self.node.convert(self._img(), "None", 1000.0, "manual", 0.5, 1.6,
+                          0.0, "Linear", rudra_blend=0.0)
         self.assertEqual(called["n"], 0)
 
     def test_direct_pixel_backend_runs_without_vae(self):

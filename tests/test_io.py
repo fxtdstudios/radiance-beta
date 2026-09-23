@@ -157,6 +157,25 @@ class TestRadianceDigitalCinemaReadAPI:
     def test_function_is_read(self):
         assert self.cls.FUNCTION == "read"
 
+    @pytest.mark.parametrize("path", ["", "   ", '""'])
+    def test_empty_source_path_raises_instead_of_a_black_frame(self, path):
+        """Live 3.5 run: an empty path executed as an 8x8 black shot."""
+        with pytest.raises(ValueError, match="source_path is empty"):
+            self.cls().read(path, "Auto", 1, 0, "sRGB (Standard)")
+
+    def test_shot_metadata_carries_colorspace_and_fps(self, tmp_path):
+        """Audit 3.5: Linear Check always saw "Unknown"; fps_override was unused."""
+        from PIL import Image
+        import numpy as np
+        p = tmp_path / "plate.png"
+        Image.fromarray((np.ones((8, 8, 3)) * 128).astype("uint8")).save(p)
+        img, _, meta = self.cls().read(str(p), "Auto", 1, 0, "sRGB (Standard)", fps_override=23.976)
+        assert meta["colorspace"] == "Linear (decoded from sRGB)"
+        assert meta["fps"] == 23.976 and meta["fps_source"] == "override"
+        assert 0.2 < float(img.mean()) < 0.23   # sRGB 128 decoded to linear
+        from radiance.nodes.pipeline.metadata import RadianceLinearCheck
+        RadianceLinearCheck().check(img, meta, "Strict Error")
+
     def test_read_mode_choices_non_empty(self):
         it = self.cls.INPUT_TYPES()
         read_mode_entry = it["required"]["read_mode"]

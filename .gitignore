@@ -156,3 +156,11 @@ preview/
 # A test that stubs folder_paths with a bare MagicMock once made models_dir a
 # truthy Mock; joining it produced a literal directory of that name.
 MagicMock/
+# Written at startup by radiance.color.ocio_setup from OpenColorIO's built-in
+# ACES studio config (generated per installed OCIO version, not shipped).
+ACES/studio-config.ocio
+ACES/studio-config.ocio.tmp
+
+# Workspace saves land beside nodes/pipeline/workspace.py (WORKFLOW_DIR); runtime data, never shipped
+nodes/pipeline/workflows/
+nodes/gizmos/

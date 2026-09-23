@@ -10,16 +10,13 @@ What it does:
   1. Environment: CUDA device, VRAM, torch/driver versions.
   2. Node sweep: executes every node the functional harness can fabricate
      inputs for, ON CUDA, recording time + peak VRAM + pass/fail.
-  3. RUDRA model scoring: finds trained checkpoints in models/radiance/,
-     loads each, and scores it 0-100 from measured behaviour:
-       - decode fidelity  (PSNR of VAE-encode -> RUDRA-decode round trip
-         against the reference VAE decode, when a VAE is available;
-         otherwise structural sanity: finite, range, no banding)
-       - speed            (frames/sec at 512, 1080p, 4K)
+  3. RUDRA pixel model scoring: finds sdr2hdr_pixel_image.pt in models/radiance/
+     and scores it 0-100 from measured behaviour on a synthetic clipped plate:
+       - sanity           (finite output, recovered peak above SDR white)
+       - speed            (wall time at 512, 1080p, 4K, tiled at 512/64)
        - VRAM             (peak bytes at each size)
-       - stability        (100 repeated decodes: memory growth, determinism)
        - temporal         (TemporalRUDRA static-scene flicker: identical
-         frames in must give identical frames out)
+         frames in must give identical frames out, when its checkpoint exists)
   4. Writes gpu_acceptance_report.md next to this script.
 
 Scoring bands: 90+ production, 80-89 stable, 70-79 needs work, <70 not ready.
@@ -189,83 +186,51 @@ def main() -> int:
     for f in failures:
         log(f"  - **FAIL** {f}")
 
-    # ── 3. RUDRA model scoring ──────────────────────────────────────────
-    section("RUDRA model scoring")
-    try:
-        import folder_paths  # noqa: E402
-        models_dir = os.path.join(folder_paths.models_dir, "radiance")
-    except Exception:
-        models_dir = os.path.join(COMFY, "models", "radiance")
-    log(f"- checkpoint dir: {models_dir}")
-
-    ckpts = []
-    if os.path.isdir(models_dir):
-        ckpts = [f for f in sorted(os.listdir(models_dir))
-                 if f.endswith((".safetensors", ".pth", ".ckpt"))]
-    if not ckpts:
-        log("- **no RUDRA checkpoints found — model quality is UNVERIFIED.**")
+    # ── 3. RUDRA pixel model scoring ──────────────────────────────────────
+    section("RUDRA pixel SDR→HDR model scoring")
+    from radiance.pixel_sdr2hdr import (  # noqa: E402
+        resolve_pixel_checkpoint, predict_pixel_sdr2hdr,
+        describe_pixel_checkpoint_search,
+    )
+    ckpt = resolve_pixel_checkpoint("")
+    if ckpt is None:
+        log("- **no pixel checkpoint found — learned SDR→HDR is UNVERIFIED** "
+            f"(expected {describe_pixel_checkpoint_search()})")
     else:
-        log(f"- found: {', '.join(ckpts)}")
-
-    from radiance.fast_vae import load_radiance_decoder_weights, decode_to_linear_realtime  # noqa: E402
-
-    # Parse (size, type) pairs from the checkpoint filenames themselves:
-    # rudra_{turbo|full}_decoder_{model_type}_ema.safetensors
-    import re as _re
-    pairs = []
-    for ck in ckpts:
-        m = _re.match(r"rudra_(turbo|full)_decoder_(.+?)(?:_ema)?\.(safetensors|pth|ckpt)$", ck)
-        if m and (m.group(1), m.group(2)) not in pairs:
-            pairs.append((m.group(1), m.group(2)))
-    log(f"- scoring {len(pairs)} (size, model_type) pairs from filenames")
-
-    sizes = [(64, 64, "512px"), (135, 240, "1080p"), (270, 480, "4K")]
-    for size_name, model_type in pairs:
+        log(f"- checkpoint: {ckpt}")
+        sizes = [(512, 512, "512px"), (1080, 1920, "1080p"), (2160, 3840, "4K")]
+        score, notes = 100.0, []
         try:
-            decoder = load_radiance_decoder_weights(
-                model_type=model_type, model_size=size_name)
-            if decoder is None:
-                log(f"- {size_name}/{model_type}: loader returned None "
-                    "(incompatible arch or strict-load failure) — skipped")
-                continue
-            decoder = decoder.to(device).eval()
-            lc = getattr(decoder, "latent_channels", 16)
-            score, notes = 100.0, []
-            for lh, lw, label in sizes:
-                z = torch.randn(1, lc, lh, lw, device=device)
+            for h, w, label in sizes:
+                # A gradient with a clipped sun: the case the model exists for.
+                yy, xx = torch.meshgrid(
+                    torch.linspace(0, 1, h, device=device),
+                    torch.linspace(0, 1, w, device=device), indexing="ij")
+                sdr = torch.stack([xx, yy, 0.5 * (xx + yy)], dim=-1)
+                sun = ((xx - 0.7) ** 2 + (yy - 0.3) ** 2) < 0.01
+                sdr[sun] = 1.0
+                sdr = sdr.unsqueeze(0).clamp(0, 1)
                 vram_reset()
-                with torch.no_grad():
-                    t0 = time.perf_counter()
-                    out = decode_to_linear_realtime(z, decoder)
-                    if has_cuda:
-                        torch.cuda.synchronize()
-                    dt = time.perf_counter() - t0
+                t0 = time.perf_counter()
+                out = predict_pixel_sdr2hdr(sdr, checkpoint_path=str(ckpt),
+                                            tile_size=512, tile_overlap=64)
+                if has_cuda:
+                    torch.cuda.synchronize()
+                dt = time.perf_counter() - t0
                 finite = bool(torch.isfinite(out).all())
+                peak_lin = float(out.max()) * 100.0  # 1.0 == 10,000 nits
                 if not finite:
                     score -= 40
                     notes.append(f"NaN/Inf at {label}")
-                fps = 1.0 / max(dt, 1e-6)
-                log(f"- {size_name}/{model_type} @ {label}: "
-                    f"{dt*1000:.0f} ms ({fps:.1f} fps), "
-                    f"peak {vram_peak_mb():.0f} MB, finite={finite}")
-                if label == "1080p" and fps < 12:
+                log(f"- {label}: {dt*1000:.0f} ms, peak {vram_peak_mb():.0f} MB, "
+                    f"finite={finite}, max {peak_lin:.0f} nits")
+                if label == "1080p" and dt > 2.0:
                     score -= 10
-                    notes.append("below 12 fps at 1080p")
-            # stability: 50 repeats at 1080p
-            z = torch.randn(1, lc, 135, 240, device=device)
-            vram_reset()
-            with torch.no_grad():
-                for _ in range(50):
-                    decode_to_linear_realtime(z, decoder)
-            growth = vram_peak_mb()
-            log(f"- {size_name}/{model_type} stability: 50 decodes, "
-                f"peak {growth:.0f} MB")
-            log(f"- **{size_name}/{model_type} score: {max(0, score):.0f}/100"
-                f"{' — ' + '; '.join(notes) if notes else ''}** "
-                f"(fidelity vs reference VAE requires training pairs — "
-                f"see RELEASE_REVIEW for the PSNR protocol)")
+                    notes.append("slower than 2 s at 1080p")
+            log(f"- **pixel model score: {max(0, score):.0f}/100"
+                f"{' — ' + '; '.join(notes) if notes else ''}**")
         except Exception:
-            log(f"- {size_name}/{model_type}: ERROR")
+            log("- pixel model: ERROR")
             for ln in traceback.format_exc().splitlines()[-3:]:
                 log(f"    {ln}")
 

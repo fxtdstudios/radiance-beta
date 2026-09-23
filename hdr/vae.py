@@ -247,6 +247,28 @@ LOG_PROFILE_HDR_PARAMS: Dict[str, Tuple[float, float, float, float]] = {
 LOG_PROFILE_HDR_DEFAULT = (0.96, 1.08, 0.80, 0.55)
 
 
+def _intermediate_device() -> torch.device:
+    """Where clip-length accumulators live: ComfyUI's intermediate device.
+
+    STREAM-FIX: the encode and decode frame loops used to accumulate the whole
+    clip in VRAM, which made duration a VRAM budget rather than a disk one.
+    comfy.sd.VAE already returns encode/decode results on
+    ``model_management.intermediate_device()`` (CPU unless the user launched
+    with --gpu-only), so accumulating there matches ComfyUI's own contract
+    instead of inventing a second one. Falls back to CPU for VAE-like objects
+    and test stubs that do not expose the helper.
+    """
+    fn = getattr(comfy.model_management, "intermediate_device", None)
+    if callable(fn):
+        try:
+            dev = fn()
+            if isinstance(dev, torch.device):
+                return dev
+        except Exception:  # nosec B110 - third-party model_management shims
+            pass
+    return torch.device("cpu")
+
+
 def _restore_alpha_channel(img: torch.Tensor, alpha: Optional[torch.Tensor]) -> torch.Tensor:
     if alpha is None:
         return img
@@ -325,11 +347,14 @@ _AP1_TO_REC709 = torch.tensor([
     [-0.0240033, -0.1289690, 1.1529723],
 ], dtype=torch.float32).T
 
-_AP0_TO_REC709 = torch.tensor([
-    [ 2.5216494, -1.1368885, -0.3847609],
-    [-0.2752136,  1.3697052, -0.0944916],
-    [-0.0159027, -0.1478148,  1.1637175],
-], dtype=torch.float32).T
+# 3.5.0: the two AP0 matrices were not inverses of each other and the
+# Rec.709 -> AP0 one was off by 1.2 %. Both now come from color/ops, which
+# matches OpenColorIO's ACES studio config to 1e-7.
+from radiance.color.ops import (  # noqa: E402
+    M_ACES2065_1_TO_REC709 as _M_AP0_709,
+    M_REC709_TO_ACES2065_1 as _M_709_AP0,
+)
+_AP0_TO_REC709 = _M_AP0_709.clone().T
 
 _REC2020_TO_REC709 = torch.tensor([
     [ 1.6604910, -0.5876411, -0.0728499],
@@ -344,17 +369,25 @@ _REC709_TO_AP1 = torch.tensor([
     [0.020616, 0.109570, 0.869815],
 ], dtype=torch.float32).T
 
-_REC709_TO_AP0 = torch.tensor([
-    [0.4339316, 0.3762584, 0.1898100],
-    [0.0886227, 0.8131989, 0.0981784],
-    [0.0177087, 0.1095613, 0.8727300],
-], dtype=torch.float32).T
+_REC709_TO_AP0 = _M_709_AP0.clone().T
 
 _REC709_TO_REC2020 = torch.tensor([
     [0.6274039, 0.3292830, 0.0433131],
     [0.0690973, 0.9195404, 0.0113623],
     [0.0163914, 0.0880132, 0.8955954],
 ], dtype=torch.float32).T
+
+
+from radiance.hdr.decode_meta import (  # noqa: E402  (3.5.0 contract helpers)
+    LOG_SPACE_GAMUT,
+    TARGET_SPACE_GAMUT,
+    _encode_working_gamut,
+    _gamut_mat_t,
+    latent_fingerprint,
+    radiance_meta_is_live,
+    strip_hdr_meta,
+    verify_radiance_meta,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -455,8 +488,7 @@ def _soft_log_shoulder(img: torch.Tensor, knee: float = 0.96, ceiling: float = 1
         rng = ceiling - knee
         # v2.3.1 FIX (V-B1): guard against caller-supplied tuples where
         # ceiling <= knee (misconfigured profile). Without the +1e-8 the
-        # division becomes NaN/Inf and contaminates the whole tensor —
-        # matches the same guard in fast_vae._apply_soft_shoulder.
+        # division becomes NaN/Inf and contaminates the whole tensor.
         excess = (img[above] - knee) / (rng + 1e-8)
         # tanh: maps [0, ∞) → [0, 1), so result → [knee, ceiling)
         result[above] = knee + rng * torch.tanh(excess)
@@ -554,7 +586,10 @@ def detect_vae_factor(vae: Any) -> int:
             val = compression_decode()
         except Exception:
             val = None
-        if isinstance(val, (int, float)) and val > 0:
+        # `>= 1` rather than `> 0`: a wrapper answering with a sub-1 constant
+        # would truncate to a factor of 0 and divide by it downstream. See the
+        # SCALE-FACTOR FIX note on latent_format below.
+        if isinstance(val, (int, float)) and int(val) >= 1:
             return int(val)
 
     for attr in ("downscale_ratio", "latent_downscale_factor"):
@@ -563,12 +598,20 @@ def detect_vae_factor(vae: Any) -> int:
             return val
 
     # Check through latent_format object
+    #
+    # SCALE-FACTOR FIX: `latent_format.scale_factor` used to be consulted here
+    # as a spatial factor. It is not one -- it is the value-normalisation
+    # constant applied to latents (0.18215 for SD, 0.3611 for Flux), so
+    # int(val) returned 0 and the caller went on to compute pix_h = lat_h * 0,
+    # then divided by it. Unreachable through stock comfy.sd.VAE, which answers
+    # spacial_compression_decode() above, but reachable through any
+    # third-party VAE wrapper that exposes latent_format and nothing else.
+    # Only a genuine spatial factor (>= 1) is accepted now.
     lf = getattr(vae, "latent_format", None)
     if lf is not None:
-        for attr in ("downscale_factor", "scale_factor"):
-            val = getattr(lf, attr, None)
-            if isinstance(val, (int, float)) and val > 0:
-                return int(val)
+        val = getattr(lf, "downscale_factor", None)
+        if isinstance(val, (int, float)) and int(val) >= 1:
+            return int(val)
 
     # Fallback: check class name against known architectures
     cls_name = type(getattr(vae, "first_stage_model", vae)).__name__
@@ -625,12 +668,11 @@ def _resolve_temporal_frames(temporal_size: Any, ts_px: Optional[int], temporal_
     Resolve the temporal_size widget value to a count of LATENT frames.
 
     Accepts "Auto", a numeric preset string (from the widget), or a raw int.
-    The turbo_decoder/RUDRA recursive chunking path passes 0 internally to
-    stop further recursion; that is not a value the widget itself offers.
+    Recursive chunking call sites pass 0 internally to stop further
+    recursion; that is not a value the widget itself offers.
 
-    ts_px=None disables Auto-sizing (resolves to 0 / "no chunking" instead):
-    used for the turbo_decoder path, which has no VRAM calibration data of
-    its own. See RadianceVAE4KDecode.decode().
+    ts_px=None disables Auto-sizing (resolves to 0 / "no chunking" instead)
+    for callers that have no VRAM calibration data of their own.
     """
     if temporal_size in (0, "0", None):
         return 0
@@ -906,7 +948,24 @@ class TileEngine:
             vram_budget_gb * (1024**3) / (bytes_per_pixel_frame * tile_size_px * tile_size_px)
         )
         compression = max(1, temporal_compression or 8)
-        frames = max(min_frames, min(max_pixel_frames // compression, max_frames))
+        budget_frames = max_pixel_frames // compression
+        frames = max(min_frames, min(budget_frames, max_frames))
+
+        if budget_frames < min_frames:
+            # BUDGET-FLOOR FIX: the max(min_frames, ...) floor means a budget
+            # that fits ZERO frames still returns min_frames, and this used to
+            # be logged as an ordinary budget-derived decision. That is an OOM
+            # about to happen, reported as an "optimal" size. Say so, so the
+            # operator lowers tile_size or frees VRAM instead of reading the
+            # log as confirmation that the chunk size was chosen for them.
+            logger.warning(
+                f"[Radiance Temporal] VRAM budget {vram_budget_gb:.1f}GB at "
+                f"tile={tile_size_px}px fits {budget_frames} latent frames, "
+                f"below the {min_frames}-frame floor. Returning {frames} anyway "
+                f"and this decode is expected to run out of memory. Lower "
+                f"tile_size, lower temporal_size, or free VRAM."
+            )
+            return frames
 
         logger.info(
             f"[Radiance Temporal] VRAM budget: {vram_budget_gb:.1f}GB, tile={tile_size_px}px -> "
@@ -920,7 +979,26 @@ class TileEngine:
         Compute tile start positions along one axis.
         Returns list of (start, end) tuples.
         Ensures full coverage with consistent overlap.
+
+        ``overlap`` must leave a positive stride.  It used not to be checked:
+        with ``overlap >= tile_size`` the stride was zero or negative, ``pos``
+        never advanced, and the loop appended tiles until the process ran out of
+        memory, with ComfyUI hanging on no error and nothing in the log.  That was
+        reachable from shipped widget defaults (temporal_size 2, temporal
+        overlap 2), so this raises rather than silently clamping: a caller that
+        gets here with a bad overlap has a bug the operator needs to see.
         """
+        if tile_size <= 0:
+            raise ValueError(f"tile_size must be positive, got {tile_size}")
+        if overlap < 0:
+            raise ValueError(f"overlap must not be negative, got {overlap}")
+        if overlap >= tile_size:
+            raise ValueError(
+                f"overlap ({overlap}) must be smaller than tile_size "
+                f"({tile_size}); an overlap at or above the tile size leaves no "
+                f"stride and cannot tile."
+            )
+
         if total <= tile_size:
             return [(0, total)]
 
@@ -1180,6 +1258,14 @@ class RadianceVAE4KEncode:
         if source_space in self.LOG_SPACES:
             if _HAS_LOG_CURVES:
                 img = self._get_log_to_linear()[source_space](img)
+                # 3.5.0: the curve alone leaves camera-gamut linear. Compress
+                # (Log) keeps it (the round trip back to the same log space is
+                # then exact, no gamut clip) and records it as the latent's
+                # working gamut. Every other mode feeds a diffusion VAE, which
+                # expects Rec.709 imagery, so convert to Rec.709 here.
+                if hdr_mode != "Compress (Log)":
+                    _m = _gamut_mat_t(LOG_SPACE_GAMUT[source_space], "Rec.709")
+                    img = _safe_matrix_transform(img, _m.to(img.device))
             else:
                 logger.warning(
                     f"[Radiance 4K Encode] Log curves unavailable — {source_space} "
@@ -1503,17 +1589,52 @@ class RadianceVAE4KEncode:
             logger.info(
                 f"[Radiance 4K Encode v2.3] Video: {B}×{num_frames}×{W}×{H}, space={source_space}"
             )
-            # Encode frame by frame, stack temporal dim
-            frame_latents = []
+            # STREAM-FIX: encode frame by frame into ONE pre-allocated CPU
+            # buffer instead of a list of GPU latents plus a torch.stack.
+            # The list held every frame's latent on the GPU for the whole clip
+            # and stack() then allocated a second full-clip copy, so a 500-frame
+            # 4K clip at 16 channels needed ~4.1 GB resident plus ~4.1 GB for the
+            # stack. Writing each frame into its slice and dropping the frame
+            # reference makes the returned latent the only clip-sized tensor
+            # alive; peak above it is one frame, whatever the clip length.
+            all_frames = None
+            frame_pad_h, frame_pad_w = 0, 0
             for fi in range(num_frames):
                 frame = pixels[:, fi, ...]  # (B, H, W, C)
                 latent_frame, _, _, _, _ = self.encode(
                     frame, vae, source_space, tile_size, overlap, exposure,
                     alpha_handling, hdr_mode, latent_sampling, processing_mode
                 )
-                frame_latents.append(latent_frame["samples"])
-            # Stack: (B, C, F, latH, latW)
-            all_frames = torch.stack(frame_latents, dim=2)
+                lat = latent_frame["samples"]
+                if all_frames is None:
+                    # (B, C, F, latH, latW), shaped from the first frame so the
+                    # channel count comes from the VAE, never assumed. The clip
+                    # buffer lives on ComfyUI's intermediate device (CPU unless
+                    # --gpu-only), which is where comfy.sd.VAE.encode already
+                    # puts its own output; keeping it in VRAM is what made clip
+                    # length a VRAM budget.
+                    _accum_dev = _intermediate_device()
+                    all_frames = torch.empty(
+                        (lat.shape[0], lat.shape[1], num_frames) + tuple(lat.shape[2:]),
+                        dtype=lat.dtype, device=_accum_dev,
+                    )
+                    # STREAM-FIX / PAD-FIX: the per-frame call pads to a multiple
+                    # of vae_factor and reports the real pad in its own meta.
+                    # This branch used to hardcode pad_h/pad_w to 0 on the video
+                    # radiance_meta and keep only `samples`, so decode read zeros
+                    # and skipped the crop: a 1920x1080 clip through a factor-32
+                    # VAE decoded to 1088 tall, the last 8 rows being reflect-pad
+                    # of row 1079. Every frame pads identically (same H, W, same
+                    # factor), so the first frame's pad is the clip's pad.
+                    _fm = latent_frame.get("radiance_meta") or {}
+                    frame_pad_h = int(_fm.get("pad_h", 0))
+                    frame_pad_w = int(_fm.get("pad_w", 0))
+                all_frames[:, :, fi] = lat.to(all_frames.device)
+                del lat, latent_frame, frame
+            if all_frames is None:                      # num_frames == 0
+                all_frames = torch.empty(
+                    (B, 0, 0, 0, 0), dtype=torch.float32,
+                    device=_intermediate_device())
             # v2.3.1 FIX (V-B23): include radiance_meta on the video latent
             # dict so decode() can auto-recover hdr_mode / source_space /
             # vae_factor on the other side. Previously the key was missing,
@@ -1523,20 +1644,37 @@ class RadianceVAE4KEncode:
                 "samples": all_frames,
                 "latent_format": latent_fmt,
                 "radiance_meta": {
-                    "pad_h": 0, "pad_w": 0,
+                    "pad_h": frame_pad_h, "pad_w": frame_pad_w,
                     "vae_factor": vae_factor,
                     "latent_format": latent_fmt,
                     "source_space": source_space,
                     "hdr_mode": hdr_mode,
+                    "working_gamut": _encode_working_gamut(source_space, hdr_mode),
+                    "latent_fingerprint": latent_fingerprint(all_frames),
                 },
             }
             # Build a minimal quality/meta output for video
             total_time_ms = int((_time.time() - t_start) * 1000)
+            # ALPHA-FIX: the still path extracts pixels[..., 3:4] under
+            # alpha_handling="Preserve"; this branch used to return
+            # torch.ones unconditionally, so decode composited solid white
+            # over a real matte on every RGBA clip. Shape is (B*F, H, W, 1),
+            # which is the layout decode()'s frame_alphas chunking expects.
             # Match device of input pixels so downstream nodes don't hit a device
             # mismatch when alpha is moved to GPU alongside the image tensor.
-            alpha_out = torch.ones((B, H, W, 1), dtype=torch.float32, device=pixels.device)
+            if C == 4 and alpha_handling == "Preserve":
+                alpha_out = (
+                    pixels[..., 3:4].reshape(B * num_frames, H, W, 1)
+                    .clone().float()
+                )
+            else:
+                alpha_out = torch.ones(
+                    (B * num_frames, H, W, 1),
+                    dtype=torch.float32, device=pixels.device,
+                )
             meta = json.dumps({"node": "RadianceVAE4KEncode", "video": True,
-                               "frames": num_frames, "latent_format": latent_fmt})
+                               "frames": num_frames, "latent_format": latent_fmt,
+                               "pad_h": frame_pad_h, "pad_w": frame_pad_w})
             qr = json.dumps({"version": "3.0", "video": True, "frames": num_frames,
                              "latent_format": latent_fmt, "encode_time_ms": total_time_ms})
             return (video_latent, alpha_out, meta, latent_fmt, qr)
@@ -1617,6 +1755,10 @@ class RadianceVAE4KEncode:
             "pad_h": pad_h, "pad_w": pad_w,
             "vae_factor": vae_factor, "latent_format": latent_fmt,
             "source_space": source_space, "hdr_mode": hdr_mode,
+            "working_gamut": _encode_working_gamut(source_space, hdr_mode),
+            # 3.5.0: lets decode tell this latent from a sampled copy that
+            # still carries the dict (see verify_radiance_meta).
+            "latent_fingerprint": latent_fingerprint(latent["samples"]),
         }
         latent["radiance_meta"] = radiance_meta
         # v2.3.1 FIX (V-B11): mirror the top-level "latent_format" key that the
@@ -1688,7 +1830,10 @@ class RadianceVAE4KDecode:
                             "with hdr_output=False the image is re-encoded to sRGB for "
                             "ComfyUI compatibility. "
                             "Log/ACEScg/Rec.2020 spaces are scene-referred — connect to a "
-                            "tonemap node before SaveImage."
+                            "tonemap node before SaveImage. Camera log targets carry their "
+                            "own gamut (LogC4 = AWG4, LogC3 = AWG3, S-Log3 = S-Gamut3.Cine, "
+                            "V-Log = V-Gamut, DaVinci Intermediate = DWG, Log3G10 = "
+                            "REDWideGamutRGB). 'Raw' is linear Rec.709 with no transfer."
                         ),
                     },
                 ),
@@ -1953,7 +2098,6 @@ class RadianceVAE4KDecode:
         overlap_px: int,
         pbar: Any = None,
         vae_factor: int = 8,
-        turbo_decoder: torch.nn.Module = None,
     ) -> torch.Tensor:
         """
         Decode full latent in overlapping spatial tiles with cosine blend.
@@ -2012,22 +2156,6 @@ class RadianceVAE4KDecode:
         tile_idx = 0
         _tile_video_frames = None  # Populated on first tile if 3D VAE detected
 
-        # A conditioned RUDRA decoder infers its dynamic-range vector from
-        # whatever tensor it is given. Handed a tile, it conditions on that
-        # tile, so neighbouring tiles of one frame get different exposure
-        # treatment. Resolve it once here from the whole latent and pass it
-        # down, so every tile shares one grade.
-        _rudra_cond = None
-        if turbo_decoder is not None:
-            from radiance.fast_vae import rudra_condition_for
-            _cond_lat = latent
-            _cond_frames = None
-            if _cond_lat.ndim == 5:
-                _cB, _cC, _cF, _cH, _cW = _cond_lat.shape
-                _cond_lat = _cond_lat.permute(0, 2, 1, 3, 4).reshape(
-                    _cB * _cF, _cC, _cH, _cW).contiguous()
-                _cond_frames = _cF
-            _rudra_cond = rudra_condition_for(turbo_decoder, _cond_lat, _cond_frames)
         for yi, (ly1, ly2) in enumerate(tiles_y):
             for xi, (lx1, lx2) in enumerate(tiles_x):
                 # Extract latent tile
@@ -2037,33 +2165,7 @@ class RadianceVAE4KDecode:
                 # Decode on GPU — defensive no_grad: idempotent if caller has it,
                 # protective if _tiled_decode is ever invoked standalone.
                 with torch.no_grad():
-                    if turbo_decoder is not None:
-                        if next(turbo_decoder.parameters()).device != tile_lat.device:
-                            turbo_decoder.to(tile_lat.device)
-
-                        _tlat = tile_lat
-                        if _tlat.ndim == 5:
-                            _B, _C, _F, _H, _W = _tlat.shape
-                            _tlat = _tlat.permute(0, 2, 1, 3, 4).reshape(_B * _F, _C, _H, _W).contiguous()
-                            if _tile_video_frames is None:
-                                _tile_video_frames = _F
-
-                        # Process in chunks to prevent cuDNN/VRAM hard-crashes on large batches
-                        _chunk_size = 4
-                        _tile_outputs = []
-                        for i in range(0, _tlat.shape[0], _chunk_size):
-                            _chunk = _tlat[i:i+_chunk_size]
-                            # Only pass the condition when there is one --
-                            # turbo_decoder is any nn.Module, and decoders
-                            # without conditioning take a single argument.
-                            _dec = (turbo_decoder(_chunk) if _rudra_cond is None
-                                    else turbo_decoder(
-                                        _chunk,
-                                        _rudra_cond[i:i + _chunk.shape[0]]))
-                            _tile_outputs.append(_dec.float().cpu())
-                        tile_decoded = torch.cat(_tile_outputs, dim=0)
-                    else:
-                        tile_decoded = vae.decode(tile_lat).float().cpu()
+                    tile_decoded = vae.decode(tile_lat).float().cpu()
 
                 # FIX-4: 3D (temporal) VAEs return (B, F, H, W, C) — a 5D tensor.
                 # Reshape to (B*F, H, W, C) so all downstream accumulation logic
@@ -2074,19 +2176,6 @@ class RadianceVAE4KDecode:
                         _tile_video_frames = _F5
                     tile_decoded = tile_decoded.reshape(_B5 * _F5, _H5, _W5, _C5)
                     # Also update b so the accumulator is sized for all frames
-                    b = tile_decoded.shape[0]
-
-                # Special case: Turbo decoder output is (B, C, H, W).
-                # Main VAE output is (B, H, W, C).
-                # Radiance tiling engine expects (B, H, W, C).
-                if turbo_decoder is not None and tile_decoded.shape[1] == 3:
-                   tile_decoded = tile_decoded.permute(0, 2, 3, 1)
-
-                # ALBABIT-FIX: For 3D-native video VAEs (LTX), RUDRA's 5D→4D
-                # reshape (lines 1886-1888) makes tile_decoded 4D — the FIX-4
-                # ndim==5 branch never fires, leaving b=1 instead of B*F.
-                # Update b here so the lazy accumulator is correctly sized.
-                if _tile_video_frames is not None and turbo_decoder is not None:
                     b = tile_decoded.shape[0]
 
                 # Pixel coordinates
@@ -2135,8 +2224,12 @@ class RadianceVAE4KDecode:
             torch.cuda.empty_cache()
 
         # Normalize by accumulated weight (guard against near-zero at tile edges)
-        weight_acc = torch.clamp(weight_acc, min=1e-3)
-        output = output / weight_acc
+        # STREAM-FIX: divide in place. `output` is the full (b, pixH, pixW, C)
+        # result, so `output = output / weight_acc` allocated a second copy of
+        # the entire decode before freeing the first -- a 2x spike on the one
+        # buffer in this method that is already as large as the answer.
+        weight_acc.clamp_(min=1e-3)
+        output.div_(weight_acc)
         return output.to(device), _tile_video_frames
 
     def _vae_output_to_target(
@@ -2150,6 +2243,7 @@ class RadianceVAE4KDecode:
         source_space: str = "Linear",
         hdr_output: bool = False,
         display_tonemap: str = "ACES Filmic",
+        working_gamut: str = "Rec.709",
     ) -> torch.Tensor:
         """Convert VAE output to target color space.
 
@@ -2457,7 +2551,7 @@ class RadianceVAE4KDecode:
         # Capturing here (after log decompress + exposure, before tonemap+target_space)
         # gives the correct scene-linear Rec.709 tensor for the RHDR sidecar.
         # This is stored on self so decode() can retrieve it after this call.
-        if hdr_mode == "Compress (Log)":
+        if hdr_mode == "Compress (Log)" and getattr(self, "_want_scene_linear", True):
             self._scene_linear_for_rhdr = img.detach().clone()
 
         # Part A: apply display_tonemap (independent of hdr_output)
@@ -2507,20 +2601,19 @@ class RadianceVAE4KDecode:
         # the target-space conversion. "Linear" still gets sRGB re-encode first
         # (v2.3.5 behaviour). For HDR delivery set hdr_output=True — that path
         # intentionally skips the clamp to preserve values > 1.0 for VFX tools.
+        # 3.5.0: one gamut step for every target, from the latent's working
+        # gamut to the target's own (camera gamut for the log targets), then
+        # the transfer. Identity when they already agree, so a Compress(Log)
+        # round trip back to its source log space stays exact.
+        _dst_gamut = TARGET_SPACE_GAMUT.get(target_space, "Rec.709")
+        _gm = _gamut_mat_t(working_gamut, _dst_gamut)
+        if _gm is not None:
+            img = _safe_matrix_transform(img, _gm.to(img.device))
         if target_space == "Linear":
             if not hdr_output:
                 img = tensor_linear_to_srgb(img)
         elif target_space == "sRGB":
             img = tensor_linear_to_srgb(img)
-        elif target_space == "ACEScg":
-            mat = _REC709_TO_AP1.to(img.device)
-            img = _safe_matrix_transform(img, mat)
-        elif target_space == "ACES 2065-1":
-            mat = _REC709_TO_AP0.to(img.device)
-            img = _safe_matrix_transform(img, mat)
-        elif target_space == "Rec.2020 Linear":
-            mat = _REC709_TO_REC2020.to(img.device)
-            img = _safe_matrix_transform(img, mat)
         elif target_space in self.LOG_SPACES and _HAS_LOG_CURVES:
             converters = RadianceVAE4KEncode._get_linear_to_log()
             img = converters[target_space](img)
@@ -2529,8 +2622,8 @@ class RadianceVAE4KDecode:
                 f"[Radiance 4K Decode] Target space '{target_space}' is a log format "
                 f"but color_utils is not installed — outputting LINEAR data instead."
             )
-        elif target_space == "Raw":
-            pass
+        # ACEScg / ACES 2065-1 / Rec.2020 Linear: the gamut step above is all.
+        # Raw: linear light in Rec.709, no transfer.
 
         # Final clamp — hdr_output=False only.
         # Clamps every target space to [0,1] so ComfyUI nodes (PreviewImage,
@@ -2631,7 +2724,6 @@ class RadianceVAE4KDecode:
         processing_mode: str = "sequential",
         force_hdr_decode: bool = False,
         hdr_output: bool = False,
-        turbo_decoder: torch.nn.Module = None,
         decode_noise_scale: float = 0.0,
         temporal_size: str = "Auto",
         temporal_overlap: int = 2,
@@ -2680,6 +2772,24 @@ class RadianceVAE4KDecode:
         # frame — so they would otherwise print once for the outer video call and
         # again for every frame. `_quiet_diag` suppresses the per-frame repeats.
         _quiet_diag = getattr(self, "_frame_decode_active", False)
+
+        # STALE-RHDR FIX: `_scene_linear_for_rhdr` is per-instance mutable state
+        # and ComfyUI reuses node instances across executions. It used to be
+        # cleared only inside the `if export_rhdr:` block, so a run that set it
+        # and then exited without exporting left it populated, and the next
+        # run's first video frame harvested the previous run's tensor. The
+        # shape guard further down catches a resolution change but not a
+        # same-resolution stale frame, which is the case that ships wrong
+        # pixels. Clear it at the top of every top-level decode; recursive
+        # per-frame calls must not clear it, because the outer loop reads what
+        # they set.
+        if not _quiet_diag:
+            self._scene_linear_for_rhdr = None
+            # 3.5.0: drop HDR coding keys a sampler carried through unchanged.
+            samples, _meta_live = verify_radiance_meta(samples)
+            # 3.5.0: the pre-tonemap scene-linear copy is only read by the
+            # RHDR export; it used to be cloned on every Compress(Log) decode.
+            self._want_scene_linear = bool(export_rhdr) and display_tonemap != "None"
 
         # v2.0 Feature 6: Read radiance_meta embedded by encode() if present
         radiance_meta = samples.get("radiance_meta", {})
@@ -2757,6 +2867,15 @@ class RadianceVAE4KDecode:
                     f"use hdr_mode='Clip (SDR)' or 'Soft Clip' instead."
                 )
 
+        # 3.5.0: gamut of the linear light inside the latent. Compress(Log)
+        # keeps a log source's camera gamut (exact round trip); everything
+        # else is Rec.709.
+        if hdr_mode == "Compress (Log)":
+            working_gamut = ((radiance_meta or {}).get("working_gamut")
+                             or LOG_SPACE_GAMUT.get(source_space, "Rec.709"))
+        else:
+            working_gamut = "Rec.709"
+
         # v2.1 Video Support: Check for 5D video latent (B, C, F, H, W)
         is_video = latent.ndim == 5
 
@@ -2777,16 +2896,32 @@ class RadianceVAE4KDecode:
                 f"[Radiance 4K Decode v2.3] Video Latent: {W}×{H} "
                 f"({B} batches, {num_frames} frames), format={latent_fmt}"
             )
-            decoded_frames = []
-            # BUG 1 FIX (video path): collect scene-linear per frame for RHDR.
+            # STREAM-FIX: one pre-allocated clip buffer written frame by frame,
+            # replacing a list of decoded frames plus a closing torch.cat. At
+            # 4K fp32 RGB a frame is ~106 MB, so the old pair cost ~53 GB of
+            # list plus ~53 GB for the cat on a 500-frame clip, and with
+            # Compress(Log) + export_rhdr the scene-linear list doubled it
+            # again. Now the returned batch is the only clip-sized tensor alive
+            # and the RHDR sidecars are written as each frame lands, so peak is
+            # (returned batch + one frame) and clip length is bounded by disk.
+            all_frames = None
+            _frame_cursor = 0
+            meta_str = None
+            # BUG 1 FIX (video path): use scene-linear per frame for RHDR.
             # Each recursive self.decode() sets self._scene_linear_for_rhdr BEFORE
             # its tonemap fires. Harvest it immediately after each frame completes,
             # before the next frame overwrites it.
-            _scene_linear_frames = []
+            _rhdr_dir = folder_paths.get_temp_directory() if export_rhdr else None
+            rhdr_filenames = []
+            _rhdr_used_scene_linear = 0
             frame_alphas = None
             if alpha is not None:
                 if alpha.shape[0] == B * num_frames:
-                    frame_alphas = alpha.chunk(num_frames, dim=0)
+                    # Encode lays alpha out batch-major (b0f0, b0f1, ...);
+                    # frame fi needs every batch item's frame fi. chunk()
+                    # took consecutive rows, which is only right for B == 1.
+                    _a = alpha.reshape(B, num_frames, *alpha.shape[1:])
+                    frame_alphas = [_a[:, fi] for fi in range(num_frames)]
                 else:
                     frame_alphas = [alpha] * num_frames
 
@@ -2821,19 +2956,78 @@ class RadianceVAE4KDecode:
                         processing_mode=processing_mode,
                         force_hdr_decode=force_hdr_decode,
                         hdr_output=hdr_output,
-                        turbo_decoder=turbo_decoder,
                         decode_noise_scale=decode_noise_scale,
                     )
-                    decoded_frames.append(decoded_frame)
                     # Collect scene-linear for this frame (set by _vae_output_to_target)
-                    _sl = getattr(self, '_scene_linear_for_rhdr', None)
-                    if _sl is not None:
-                        _scene_linear_frames.append(_sl)
-                        self._scene_linear_for_rhdr = None  # clear immediately
+                    _sl = getattr(self, "_scene_linear_for_rhdr", None)
+                    self._scene_linear_for_rhdr = None  # clear immediately
+
+                    if all_frames is None:
+                        # Clip buffer shaped from the first decoded frame so the
+                        # channel count comes from the VAE, never assumed. Lives
+                        # on the intermediate device for the same reason encode's
+                        # does: clip length must not be a VRAM budget.
+                        _per = decoded_frame.shape[0]
+                        all_frames = torch.empty(
+                            (_per * num_frames,) + tuple(decoded_frame.shape[1:]),
+                            dtype=decoded_frame.dtype,
+                            device=_intermediate_device(),
+                        )
+                    _n = decoded_frame.shape[0]
+                    all_frames[_frame_cursor:_frame_cursor + _n] = decoded_frame.to(
+                        all_frames.device)
+
+                    # v2.1 FIX (BUG-46) + BUG 1 FIX (video): RHDR sidecars are
+                    # written here, as the frame lands, rather than from a
+                    # second full-clip list after the loop. The source choice is
+                    # the same one the post-loop block used to make in bulk:
+                    # Compress(Log) with an active tonemap wants the pre-tonemap
+                    # scene-linear capture, everything else wants the decoded
+                    # frame. Deciding per frame rather than per clip is what
+                    # removes the clip-length scene-linear accumulator.
+                    if export_rhdr:
+                        _use_sl = (
+                            hdr_mode == "Compress (Log)"
+                            and display_tonemap != "None"
+                            and _sl is not None
+                        )
+                        _rhdr_frame = _sl if _use_sl else decoded_frame
+                        if _use_sl:
+                            _rhdr_used_scene_linear += 1
+                        for _sub in range(_rhdr_frame.shape[0]):
+                            frame_np = _rhdr_frame[_sub, ..., :3].cpu().numpy()
+                            while frame_np.ndim > 3:
+                                frame_np = frame_np[0]
+                            fname = self._save_rhdr(
+                                frame_np, _rhdr_dir,
+                                prefix=f"radiance_4k_f{_frame_cursor + _sub:04d}",
+                                precision=rhdr_precision,
+                            )
+                            if fname:
+                                rhdr_filenames.append(fname)
+                        del _rhdr_frame
+
+                    _frame_cursor += _n
+                    # Drop this frame's references before the next decode runs,
+                    # so only one frame's worth of working memory is alive.
+                    del decoded_frame, _sl, frame_latent, frame_samples
             finally:
                 self._frame_decode_active = False
 
-            all_frames = torch.cat(decoded_frames, dim=0)
+            if all_frames is None:
+                # NUM-FRAMES-0 FIX: `meta_str` is bound inside the loop, so a
+                # zero-frame latent used to raise NameError below (after
+                # torch.cat([]) raised first). Return an empty batch shaped
+                # from the latent instead.
+                all_frames = torch.empty(
+                    (0, H * vae_factor, W * vae_factor, 3),
+                    dtype=torch.float32, device=_intermediate_device(),
+                )
+            elif _frame_cursor != all_frames.shape[0]:
+                # Every frame_latent has identical shape, so this cannot happen
+                # with a well-behaved VAE; narrow rather than return a tail of
+                # uninitialised memory if one ever returns a ragged batch.
+                all_frames = all_frames[:_frame_cursor]
 
             try:
                 meta_json = json.loads(meta_str)
@@ -2841,37 +3035,11 @@ class RadianceVAE4KDecode:
                 meta_json = {}
             meta_json["video"] = True
             meta_json["frames"] = num_frames
-
-            # v2.1 FIX (BUG-46) + BUG 1 FIX (video):
-            # RHDR sidecars for video. For Compress(Log) + active tonemap,
-            # use the collected scene-linear frames (pre-tonemap) for RHDR.
-            # For all other modes, all_frames (post-processed) is correct.
-            rhdr_filenames = []
             if export_rhdr:
-                output_dir = folder_paths.get_temp_directory()
-                _use_scene_linear = (
-                    hdr_mode == "Compress (Log)"
-                    and display_tonemap != "None"
-                    and len(_scene_linear_frames) == num_frames
-                )
-                _rhdr_src = (
-                    torch.cat(_scene_linear_frames, dim=0)
-                    if _use_scene_linear else all_frames
-                )
-                for fi in range(_rhdr_src.shape[0]):
-                    frame_np = _rhdr_src[fi, ..., :3].cpu().numpy()
-                    while frame_np.ndim > 3:
-                        frame_np = frame_np[0]
-                    fname = self._save_rhdr(
-                        frame_np, output_dir,
-                        prefix=f"radiance_4k_f{fi:04d}",
-                        precision=rhdr_precision,
-                    )
-                    if fname:
-                        rhdr_filenames.append(fname)
-                if rhdr_filenames:
-                    meta_json["rhdr_export"] = rhdr_filenames
-                    meta_json["rhdr_precision"] = rhdr_precision
+                meta_json["rhdr_scene_linear_frames"] = _rhdr_used_scene_linear
+            if rhdr_filenames:
+                meta_json["rhdr_export"] = rhdr_filenames
+                meta_json["rhdr_precision"] = rhdr_precision
 
             return (all_frames, json.dumps(meta_json, indent=2), latent_fmt)
 
@@ -2905,114 +3073,6 @@ class RadianceVAE4KDecode:
             except Exception:
                 _temporal_compression = None
         _temporal_compression = _temporal_compression or 8
-
-        # ALBABIT-FIX: RUDRA (turbo_decoder) is a raw nn.Module, not a
-        # comfy.sd.VAE, so vae.decode_tiled() below can't handle it; this
-        # keeps its original recursive-chunking path unchanged. ts_px=None
-        # makes "Auto" resolve to 0 (disabled) here: no VRAM calibration
-        # data exists for RUDRA. A manual preset still applies normally.
-        _rudra_temporal_lat = _resolve_temporal_frames(temporal_size, None, _temporal_compression)
-        if latent.ndim == 5 and turbo_decoder is not None and _rudra_temporal_lat > 0:
-            temporal_size = _rudra_temporal_lat
-            _T = latent.shape[2]
-            if _T > temporal_size:
-                t_ov = max(0, temporal_overlap)
-                t_chunks = (
-                    TileEngine.compute_tiles(_T, temporal_size, t_ov)
-                    if t_ov > 0
-                    else [(t, min(t + temporal_size, _T)) for t in range(0, _T, temporal_size)]
-                )
-                logger.info(
-                    f"[Radiance Temporal Decode] {_T} latent frames -> "
-                    f"{len(t_chunks)} chunks (chunk_size={temporal_size}, overlap={t_ov})"
-                )
-                chunk_imgs = []
-                _quiet_prev = getattr(self, "_frame_decode_active", False)
-                self._frame_decode_active = True
-                try:
-                    for t1, t2 in t_chunks:
-                        # ALBABIT-FIX: nudge ComfyUI's memory manager to offload idle
-                        # models before each chunk so the VAE conv activations fit.
-                        comfy.model_management.soft_empty_cache()
-                        chunk_samples = dict(samples)
-                        chunk_samples["samples"] = latent[:, :, t1:t2, :, :].contiguous()
-                        chunk_img, _, _ = self.decode(
-                            chunk_samples,
-                            vae=vae,
-                            target_space=target_space,
-                            tile_size=tile_size,
-                            overlap=overlap,
-                            exposure_adjust=exposure_adjust,
-                            alpha=None,
-                            hdr_mode=hdr_mode,
-                            display_tonemap=display_tonemap,
-                            inverse_tonemap=inverse_tonemap,
-                            target_stops=target_stops,
-                            crop_padding="",
-                            export_rhdr=False,
-                            rhdr_precision=rhdr_precision,
-                            source_space=source_space,
-                            processing_mode=processing_mode,
-                            force_hdr_decode=force_hdr_decode,
-                            hdr_output=hdr_output,
-                            turbo_decoder=turbo_decoder,
-                            decode_noise_scale=decode_noise_scale,
-                            temporal_size=0,
-                            temporal_overlap=0,
-                        )
-                        chunk_imgs.append((t1, t2, chunk_img))
-                finally:
-                    self._frame_decode_active = _quiet_prev
-
-                if t_ov > 0 and len(chunk_imgs) > 1:
-                    prev_t2 = chunk_imgs[0][1]
-                    img_out = chunk_imgs[0][2]
-                    for t1, t2, chunk_img in chunk_imgs[1:]:
-                        overlap_lat = max(0, prev_t2 - t1)
-                        pix_per_lat = chunk_img.shape[0] / max(1, t2 - t1)
-                        overlap_frames = min(
-                            img_out.shape[0], chunk_img.shape[0],
-                            max(0, round(overlap_lat * pix_per_lat)),
-                        )
-                        if overlap_frames > 0:
-                            weights = torch.linspace(
-                                0.0, 1.0, overlap_frames + 2,
-                                device=chunk_img.device, dtype=chunk_img.dtype,
-                            )[1:-1].view(-1, 1, 1, 1)
-                            blended = img_out[-overlap_frames:] * (1.0 - weights) + chunk_img[:overlap_frames] * weights
-                            img_out = torch.cat([img_out[:-overlap_frames], blended, chunk_img[overlap_frames:]], dim=0)
-                        else:
-                            img_out = torch.cat([img_out, chunk_img], dim=0)
-                        prev_t2 = max(prev_t2, t2)
-                else:
-                    img_out = torch.cat([ch for _, _, ch in chunk_imgs], dim=0)
-
-                img_out = _restore_alpha_channel(img_out, alpha)
-                temporal_meta = {
-                    "temporal_chunks": len(t_chunks),
-                    "frames": img_out.shape[0],
-                    "alpha_restored": alpha is not None,
-                }
-                if export_rhdr:
-                    output_dir = folder_paths.get_temp_directory()
-                    rhdr_filenames = []
-                    for frame_index in range(img_out.shape[0]):
-                        filename = self._save_rhdr(
-                            img_out[frame_index, ..., :3].float().cpu().numpy(),
-                            output_dir,
-                            prefix=f"radiance_4k_f{frame_index:04d}",
-                            precision=rhdr_precision,
-                        )
-                        if filename:
-                            rhdr_filenames.append(filename)
-                    if rhdr_filenames:
-                        temporal_meta["rhdr_export"] = rhdr_filenames
-                        temporal_meta["rhdr_precision"] = rhdr_precision
-                return (
-                    img_out,
-                    json.dumps(temporal_meta),
-                    latent_fmt,
-                )
 
         logger.info(
             f"[Radiance 4K Decode v2.3] Latent: {lat_w}x{lat_h} -> "
@@ -3054,7 +3114,7 @@ class RadianceVAE4KDecode:
         decoded_video_frames = None  # Set when 3D VAE returns 5D output
         _temporal_metadata = None  # Set when the decode_tiled() path resolves a temporal decision
         with torch.no_grad():
-            if latent.ndim == 5 and turbo_decoder is None:
+            if latent.ndim == 5:
                 # ALBABIT-FIX: integrated spatial+temporal tiling via comfy's
                 # vae.decode_tiled(), replacing the old stacked tiler that
                 # re-decoded a full spatial tile per temporal chunk. This is
@@ -3098,38 +3158,7 @@ class RadianceVAE4KDecode:
                     img = img.reshape(_B5 * _F5, _H5, _W5, _C5)
                 pbar.update_absolute(100, 100)
             elif pix_h <= ts_px and pix_w <= ts_px:
-                if turbo_decoder is not None:
-                    if next(turbo_decoder.parameters()).device != latent.device:
-                        turbo_decoder.to(latent.device)
-
-                    _lat = latent
-                    if _lat.ndim == 5:
-                        _B, _C, _F, _H, _W = _lat.shape
-                        _lat = _lat.permute(0, 2, 1, 3, 4).reshape(_B * _F, _C, _H, _W).contiguous()
-                        decoded_video_frames = _F
-
-                    # One dynamic-range condition for the whole latent, so a
-                    # clip does not re-grade itself every four frames.
-                    from radiance.fast_vae import rudra_condition_for
-                    _rudra_cond = rudra_condition_for(
-                        turbo_decoder, _lat, decoded_video_frames)
-
-                    # Process in chunks to prevent cuDNN/VRAM hard-crashes on large batches
-                    _chunk_size = 4
-                    _outputs = []
-                    for i in range(0, _lat.shape[0], _chunk_size):
-                        _chunk = _lat[i:i+_chunk_size]
-                        _dec = (turbo_decoder(_chunk) if _rudra_cond is None
-                                else turbo_decoder(
-                                    _chunk,
-                                    _rudra_cond[i:i + _chunk.shape[0]]))
-                        _outputs.append(_dec.float())
-                    img = torch.cat(_outputs, dim=0)
-
-                    if img.shape[1] == 3:
-                        img = img.permute(0, 2, 3, 1)
-                else:
-                    img = vae.decode(latent).float()
+                img = vae.decode(latent).float()
                 # FIX-4: 3D (temporal) VAEs return (B, F, H, W, C) — reshape to
                 # (B*F, H, W, C) so downstream code handles it as a frame batch.
                 if img.ndim == 5:
@@ -3140,7 +3169,7 @@ class RadianceVAE4KDecode:
             else:
                 img, _tiled_video_frames = self._tiled_decode(
                     samples, vae, ts_px, overlap, pbar,
-                    vae_factor=vae_factor, turbo_decoder=turbo_decoder,
+                    vae_factor=vae_factor,
                 )
                 if _tiled_video_frames is not None:
                     decoded_video_frames = _tiled_video_frames
@@ -3195,6 +3224,7 @@ class RadianceVAE4KDecode:
             source_space=source_space,
             hdr_output=hdr_output,
             display_tonemap=display_tonemap,
+            working_gamut=working_gamut,
         )
 
         # v2.3 FIX (BUG-B enhanced): Guard for NaN/Inf *introduced by* the color
@@ -3327,7 +3357,7 @@ class RadianceVAE4KDecode:
             metadata["rhdr_precision"] = rhdr_precision
 
         # ComfyUI and most downstream nodes expect image tensors on CPU.
-        # VAE.decode usually handles this, but our turbo_decoder path stays on GPU.
+        # VAE.decode usually handles this; keep it explicit for every path.
         return (img.cpu(), json.dumps(metadata, indent=2), latent_fmt)
 
 

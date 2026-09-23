@@ -266,6 +266,7 @@ class RadianceDepthOfField:
         }
 
     RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
     FUNCTION = "apply_dof"
     CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
     DESCRIPTION = "Apply cinematic depth of field blur with optional depth map input."
@@ -625,6 +626,7 @@ class RadianceRollingShutter:
         }
 
     RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
     FUNCTION = "apply_rolling_shutter"
     CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
     DESCRIPTION = "Simulate rolling shutter artifacts (skew, wobble, flash banding)."
@@ -812,6 +814,7 @@ class RadianceCompressionArtifacts:
         }
 
     RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
     FUNCTION = "apply_artifacts"
     CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
     DESCRIPTION = "Add compression artifacts (JPEG blocking, color banding)."

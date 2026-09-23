@@ -6,19 +6,29 @@ import json
 
 logger = logging.getLogger("radiance.vfx.masking")
 
+_SAM_NOT_SHIPPED = (
+    "Radiance does not ship a SAM runtime in 3.5.0. The SAM Loader and SAM "
+    "Mask Generator are placeholders kept only so saved graphs still open; "
+    "they never ran a segmentation model. Use a SAM2 node pack (for example "
+    "ComfyUI-segment-anything-2) and feed its MASK into Radiance."
+)
+
+
 class RadianceSAMModelLoader:
     """
-    ◎ Radiance SAM Model Loader
-    
-    Loads Segment Anything Model (SAM) 2.1 / SAM 3 weights into GPU memory
-    with half-precision optimizations and offloading configuration.
+    ◎ Radiance SAM Model Loader (not shipped in 3.5.0)
+
+    Hidden from the node menu. Saved graphs load; executing raises a clear
+    error because no SAM runtime is bundled. See KNOWN_ISSUES.md.
     """
+
+    DEPRECATED = True
     
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model_name": (["sam2.1_hiera_large.pt", "sam3_hiera_large.pt", "sam2.1_hiera_base.pt"],),
+                "model_name": ("STRING", {"default": "", "tooltip": "Not used: no SAM runtime ships with Radiance 3.5.0."}),
                 "device": (["cuda", "cpu", "mps"], {"default": "cuda"}),
                 "offload_to_cpu": ("BOOLEAN", {"default": False}),
                 "dtype": (["float16", "bfloat16", "float32"], {"default": "float16"}),
@@ -30,26 +40,20 @@ class RadianceSAMModelLoader:
     FUNCTION = "load"
     CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX/Masking"
 
-    def load(self, model_name: str, device: str, offload_to_cpu: bool, dtype: str):
-        # Package weights info in structured metadata
-        sam_model = {
-            "model_name": model_name,
-            "device": device,
-            "offload_to_cpu": offload_to_cpu,
-            "dtype": dtype,
-            "weights_path": f"ComfyUI/models/sams/{model_name}"
-        }
-        logger.info(f"[SAM Loader] Configured {model_name} on {device} (Offload: {offload_to_cpu}, Dtype: {dtype})")
-        return (sam_model,)
+    def load(self, model_name: str = "", device: str = "cuda", offload_to_cpu: bool = False, dtype: str = "float16"):
+        raise RuntimeError(f"[SAM Loader] {_SAM_NOT_SHIPPED}")
 
 
 class RadianceSAMGenerator:
     """
-    ◎ Radiance SAM Mask Generator
-    
-    Generates high-precision binary masks from SAM models using coordinate points,
-    bounding boxes, or text prompts directly in color-space aware workflows.
+    ◎ Radiance SAM Mask Generator (not shipped in 3.5.0)
+
+    Hidden from the node menu. The previous body drew fixed-radius discs
+    around the points and thresholded colour words; it was not SAM.
+    Executing now raises a clear error. See KNOWN_ISSUES.md.
     """
+
+    DEPRECATED = True
     
     @classmethod
     def INPUT_TYPES(cls):
@@ -71,63 +75,8 @@ class RadianceSAMGenerator:
     FUNCTION = "generate"
     CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX/Masking"
 
-    def generate(self, image: torch.Tensor, sam_model: dict, points: str, point_labels: str, text_prompt: str = "", bbox: str = ""):
-        # B, H, W, C
-        B, H, W, C = image.shape
-        device = image.device
-        
-        try:
-            pt_list = json.loads(points)
-            lbl_list = json.loads(point_labels)
-        except Exception:
-            pt_list = [[W // 2, H // 2]]
-            lbl_list = [1]
-            logger.warning("[SAM Generator] Invalid points JSON string. Defaulting to center coordinates.")
-
-        # Real SAM model inference would be routed here if dependencies exist.
-        # As a robust scene-linear aware custom node, we provide a mathematically sound 
-        # color-thresholding fall-through mask + center segmenter when running headless
-        # or when checkpoints are not loaded.
-        
-        # Build coordinates grid
-        y, x = torch.meshgrid(
-            torch.linspace(0, H - 1, H, device=device),
-            torch.linspace(0, W - 1, W, device=device),
-            indexing="ij"
-        )
-        
-        mask_accum = torch.zeros((B, H, W), dtype=torch.float32, device=device)
-        
-        for batch_idx in range(B):
-            mask = torch.zeros((H, W), dtype=torch.float32, device=device)
-            # Add positive prompts
-            for pt, lbl in zip(pt_list, lbl_list):
-                px, py = pt[0], pt[1]
-                dist = torch.sqrt((x - px)**2 + (y - py)**2)
-                r = min(H, W) * 0.15  # 15% of frame radius
-                influence = (dist < r).float()
-                if lbl == 1:
-                    mask = torch.max(mask, influence)
-                else:
-                    mask = mask * (1.0 - influence)
-                    
-            # Text prompt fallback (simulate semantic color channel masking for red/green/blue objects)
-            if text_prompt:
-                q = text_prompt.lower()
-                if "red" in q:
-                    mask = torch.max(mask, (image[batch_idx, ..., 0] > image[batch_idx, ..., 1] * 1.5).float())
-                elif "green" in q:
-                    mask = torch.max(mask, (image[batch_idx, ..., 1] > image[batch_idx, ..., 0] * 1.5).float())
-                elif "blue" in q:
-                    mask = torch.max(mask, (image[batch_idx, ..., 2] > image[batch_idx, ..., 0] * 1.5).float())
-            
-            mask_accum[batch_idx] = mask.clamp(0.0, 1.0)
-            
-        # Apply pre-multiplied masking to image in scene-linear space
-        masked_img = image * mask_accum.unsqueeze(-1)
-        
-        logger.info(f"[SAM Generator] Successfully generated mask from {len(pt_list)} prompts.")
-        return (mask_accum, masked_img)
+    def generate(self, image=None, sam_model=None, points="", point_labels="", text_prompt: str = "", bbox: str = ""):
+        raise RuntimeError(f"[SAM Generator] {_SAM_NOT_SHIPPED}")
 
 
 class RadianceMultiMaskVisualPicker:
@@ -175,8 +124,9 @@ class RadianceLinearMatting:
     """
     ◎ Radiance Linear Alpha Matting
     
-    Extracts sub-pixel details (hair, smoke, glass) using advanced matting backends
-    (ViTMatte / RVM / GuidedFilter) natively in ACEScg scene-linear space.
+    Refines a rough mask into a soft alpha with a guided filter run on the
+    scene-linear image (no learned matting model). Earlier builds listed
+    ViTMatte and RVM; neither was ever implemented, both ran this filter.
     """
     
     @classmethod
@@ -185,7 +135,7 @@ class RadianceLinearMatting:
             "required": {
                 "image": ("IMAGE",),
                 "mask": ("MASK",),
-                "method": (["GuidedFilter", "ViTMatte", "RVM"], {"default": "GuidedFilter"}),
+                "method": (["GuidedFilter"], {"default": "GuidedFilter", "tooltip": "Guided filter on the scene-linear image. The only method implemented."}),
                 "trimap_dilation": ("INT", {"default": 12, "min": 0, "max": 128, "step": 1}),
                 "eps": ("FLOAT", {"default": 1e-4, "min": 1e-6, "max": 1e-1, "step": 1e-6}),
             }
@@ -247,5 +197,5 @@ class RadianceLinearMatting:
         alpha = q.squeeze(1)
         foreground = image * q.permute(0, 2, 3, 1)
         
-        logger.info(f"[Linear Matting] Applied sub-pixel edge refinement via {method} (eps: {eps})")
+        logger.info(f"[Linear Matting] Guided filter, radius {r // 2}, eps {eps}")
         return (alpha, foreground)

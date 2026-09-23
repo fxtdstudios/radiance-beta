@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -311,20 +312,40 @@ def test_an_unresolvable_default_output_dir_is_500(h, monkeypatch):
     assert "default output directory" in h.body(resp)["error"]
 
 
-def test_a_format_with_no_writer_is_refused_by_name_with_500(h):
+def test_a_format_with_no_writer_is_refused_by_name_with_400(h):
+    """400, and before any pixels are touched.
+
+    The delivery panel offers eleven formats and colour spaces the writer does
+    not implement. Resolving them used to happen inside the `write_frames(...)`
+    call at the END of the export closure, so picking one cost a full per-frame
+    grade, an FX bake and a 2x model upscale over the whole batch and THEN
+    raised, surfacing as a 500. Naming a format that does not exist is a bad
+    request, and it is answered before the work.
+    """
     h.put(flat(0.5))
     resp = h.run({"format": "Video — AVI (Cinepak)"})
-    assert resp.status == 500
+    assert resp.status == 400
     err = h.body(resp)["error"]
     assert "Cinepak" in err and "Supported" in err
     assert not h.exrs()
 
 
-def test_a_colour_space_with_no_writer_is_refused_by_name_with_500(h):
+def test_a_colour_space_with_no_writer_is_refused_by_name_with_400(h):
     h.put(flat(0.5))
     resp = h.run({"colorSpace": "Rec.2020 PQ"})
-    assert resp.status == 500
+    assert resp.status == 400
     assert "Rec.2020 PQ" in h.body(resp)["error"]
+
+
+def test_an_unsupported_format_is_refused_before_the_grade_runs(h, monkeypatch):
+    """The refusal must cost nothing. `apply_grading` is the long pole and it
+    used to run over every frame before the format was ever looked at."""
+    called = []
+    monkeypatch.setattr(handler, "apply_grading",
+                        lambda **kw: called.append(1) or kw["img"])
+    h.put(flat(0.5))
+    assert h.run({"format": "GIF (Animated)"}).status == 400
+    assert not called, "the batch was graded before the format was validated"
 
 
 def test_a_failed_delivery_marks_progress_error_so_the_client_stops_polling(h):
@@ -961,9 +982,15 @@ def test_a_failing_file_manager_does_not_fail_the_delivery(h, monkeypatch):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def test_bake_grade_linearises_an_srgb_encoded_plate_into_the_exr(h):
-    """0.5 sRGB is 0.2140 linear. Without the bake it stays 0.5."""
+    """0.5 sRGB is 0.2140 linear. Without the bake it stays 0.5.
+
+    The colour space has to be `sRGB (Standard)` for this to be the right
+    thing to do. These two tests used to run on the harness default,
+    `Linear (sRGB)`, which is the case that must NOT be linearised -- see
+    `test_bake_grade_leaves_an_already_linear_master_alone` below.
+    """
     h.put(flat(0.5))
-    body = h.body(h.run({"bake_grade": True}))
+    body = h.body(h.run({"bake_grade": True, "colorSpace": "sRGB (Standard)"}))
     assert h.pixel(h.exrs()[0])[0] == pytest.approx(0.21404, abs=1e-4)
     meta = json.loads(open(os.path.splitext(body["path"])[0] + "_meta.json",
                            encoding="utf-8").read())
@@ -973,8 +1000,22 @@ def test_bake_grade_linearises_an_srgb_encoded_plate_into_the_exr(h):
 def test_bake_grade_uses_the_low_slope_below_the_srgb_knee(h):
     """0.02 is under 0.04045, so it divides by 12.92 rather than powing."""
     h.put(flat(0.02))
-    h.run({"bake_grade": True})
+    h.run({"bake_grade": True, "colorSpace": "sRGB (Standard)"})
     assert h.pixel(h.exrs()[0])[0] == pytest.approx(0.02 / 12.92, abs=1e-6)
+
+
+def test_bake_grade_leaves_an_already_linear_master_alone(h):
+    """`Linear (sRGB)` is linear. It used to be linearised a SECOND time.
+
+    The bake applied the sRGB EOTF for `color_space in ('sRGB (Standard)',
+    'Linear (sRGB)')`, so a master that was already scene-linear came out about
+    2.2 gamma down in the midtones -- 0.5 delivered as 0.214 -- and the log line
+    said "sRGB to linear applied". The else branch's own comment says "already
+    linear", which is the whole argument.
+    """
+    h.put(flat(0.5))
+    h.run({"bake_grade": True, "colorSpace": "Linear (sRGB)"})
+    assert h.pixel(h.exrs()[0])[0] == pytest.approx(0.5, abs=1e-5)
 
 
 def test_without_bake_grade_the_exr_keeps_the_graded_values(h):
@@ -992,8 +1033,9 @@ def test_bake_grade_is_ignored_for_a_non_exr_delivery(h):
                            encoding="utf-8").read())
     assert meta["bake_grade_exr"] is False
     from PIL import Image
-    # 0.5 → 127. Had the sRGB decode run it would be 0.2140 → 54.
-    assert Image.open(h.pngs()[0]).getpixel((0, 0))[0] == 127
+    # 0.5 → 128 (rounded; 3.5 stopped truncating to 127). Had the sRGB
+    # decode run it would be 0.2140 → 55.
+    assert Image.open(h.pngs()[0]).getpixel((0, 0))[0] == 128
 
 
 def test_an_already_linear_colour_space_skips_the_srgb_decode(h):
@@ -1177,3 +1219,113 @@ def test_no_server_means_no_registration_and_no_crash(monkeypatch):
     monkeypatch.setattr(handler, "_RADIANCE_DELIVER_ROUTE_REGISTERED", False)
     sentinel = object()
     assert handler._register_deliver_route(sentinel) is sentinel
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  § 15  The delivery that reported success for work it did not do
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_a_failed_upscale_is_reported_rather_than_delivered_as_success(h, monkeypatch):
+    """A master delivered at 1x because the ESRGAN model was missing is not a
+    successful delivery.
+
+    Seven user-requested transforms in `_run_export` -- the AI upscale, aspect
+    blanking, the FX bake, denoise, halation, bloom and diffusion -- each
+    caught their own failure, logged it and carried on, while the response
+    still said status "success" and the HUD still showed "EXPORT COMPLETE".
+
+    The upscaler is made to raise rather than left to fail on its own: whether
+    it raises depends on what else is installed, and a test whose colour
+    depends on the environment proves nothing either way.
+    """
+    from radiance.image.upscale import RadianceAIUpscale
+
+    def _no_model(self, **kwargs):
+        raise RuntimeError("RealESRGAN_x2plus.pth not found in models/upscale_models")
+
+    monkeypatch.setattr(RadianceAIUpscale, "upscale", _no_model)
+
+    h.put(flat(0.5))
+    resp = h.run({"upscale_2x": True})
+
+    body = h.body(resp)
+    assert resp.status == 200, body
+    assert body["status"] == "partial", body
+    assert body["warnings"], body
+    assert any("upscale" in w.lower() for w in body["warnings"]), body["warnings"]
+    assert "1x" in " ".join(body["warnings"])
+    assert "WITHOUT" in body["message"]
+
+
+def test_a_failed_aspect_blank_is_reported(h):
+    """An unparseable ratio silently delivered an unblanked master."""
+    h.put(flat(0.5))
+    body = h.body(h.run({"aspect_ratio": "not a ratio"}))
+    assert body["status"] == "partial", body
+    assert any("aspect" in w.lower() for w in body["warnings"]), body["warnings"]
+
+
+def test_a_clean_delivery_still_says_success(h):
+    h.put(flat(0.5))
+    body = h.body(h.run())
+    assert body["status"] == "success"
+    assert body["warnings"] == []
+
+
+def test_a_sequence_export_of_a_trimmed_range_is_numbered_from_where_it_starts(h):
+    """`start_frame` was never passed, so a sequence export of frames 21-25 was
+    numbered 1001-1005 exactly like an export of frames 1-5, and nothing in the
+    filenames said which range it was."""
+    h.put(flat(0.5, n=40))
+    body = h.body(h.run({"format": "Image Sequence — PNG (8-bit)",
+                         "range_in": 21, "range_out": 25}))
+    assert body["status"] == "success", body
+
+    written = sorted(p.name for p in Path(body["path"]).glob("*.png"))
+    numbers = sorted(int(n.rsplit("_", 1)[1].split(".")[0]) for n in written)
+    assert numbers == [1021, 1022, 1023, 1024, 1025], written
+
+
+def test_an_untrimmed_sequence_export_still_starts_at_1001(h):
+    h.put(flat(0.5, n=3))
+    body = h.body(h.run({"format": "Image Sequence — PNG (8-bit)"}))
+    written = sorted(p.name for p in Path(body["path"]).glob("*.png"))
+    numbers = sorted(int(n.rsplit("_", 1)[1].split(".")[0]) for n in written)
+    assert numbers == [1001, 1002, 1003], written
+
+
+def test_the_export_never_stacks_the_whole_sequence(h, monkeypatch):
+    """The delivery held five full copies of the clip at its peak.
+
+    The grade built `out_batch`, a list of N graded frames, and `torch.stack`ed
+    it; the FX bake then built `fx_batch` and `np.stack`ed that. On top of the
+    viewer cache entry and the writer's own copies the measured ceiling was
+    about 1000 frames at 1080p. Both stacks are gone: the graded batch is
+    allocated once and written into, and the filters write back in place.
+
+    Measured as "nothing ever stacked as many things as there are frames",
+    which is the property, rather than as a source-text check.
+    """
+    seen = []
+
+    def _spy(fn):
+        def wrapper(seq, *a, **k):
+            try:
+                seen.append(len(seq))
+            except TypeError:
+                pass
+            return fn(seq, *a, **k)
+        return wrapper
+
+    monkeypatch.setattr(handler.torch, "stack", _spy(torch.stack))
+    monkeypatch.setattr(handler.np, "stack", _spy(np.stack))
+
+    n = 24
+    h.put(flat(0.5, n=n))
+    body = h.body(h.run({"grain": 0.0}, grading={"bloom": 0.5, "grain": 0.3}))
+    assert body["status"] == "success", body
+    assert len(h.exrs()) == n
+
+    assert max(seen, default=0) < n, (
+        f"something stacked {max(seen)} items during a {n}-frame delivery; "
+        "the sequence is being materialised again")

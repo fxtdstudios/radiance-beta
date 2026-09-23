@@ -10,7 +10,6 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-import radiance.fast_vae as fv  # noqa: E402
 import radiance.pixel_sdr2hdr as px  # noqa: E402
 from radiance.nodes.hdr import uplift_universal as mod  # noqa: E402
 
@@ -26,23 +25,19 @@ BASE_KW = dict(
 )
 
 
-class _FakeVAE:
-    scale_factor = 0.18215
-
-    def encode(self, pixels):
-        b, h, w, _ = pixels.shape
-        return torch.randn(b, 16, max(h // 8, 1), max(w // 8, 1))
-
-
 @pytest.fixture
 def fake_rudra(monkeypatch):
-    """Mock the RUDRA decoder chain so the blend path runs with real math."""
+    """Mock the pixel model so the blend path runs with real math.
+
+    `rec_value` is in Radiance's working space (scene-linear Rec.709, 1.0 ==
+    100 nits); the model contract is Rec.2020 with 1.0 == 10,000 nits, so the
+    fake returns rec_value / 100 and the node's own conversion brings it back.
+    """
     def _install(rec_value=3.0):
-        monkeypatch.setattr(fv, "resolve_rudra_model_type", lambda *a, **k: "flux", raising=False)
-        monkeypatch.setattr(fv, "detect_rudra_model_type", lambda *a, **k: "flux", raising=False)
-        monkeypatch.setattr(fv, "load_radiance_decoder_weights", lambda **k: torch.nn.Identity())
-        monkeypatch.setattr(fv, "decode_to_linear_realtime", lambda latent, decoder, **k: torch.full(
-            (latent.shape[0], latent.shape[-2] * 8, latent.shape[-1] * 8, 3), rec_value))
+        monkeypatch.setattr(px, "resolve_pixel_checkpoint", lambda p="": pathlib.Path("/tmp/x.pt"))
+        # Grey in Rec.2020 is grey in Rec.709, so the matrix is an identity here.
+        monkeypatch.setattr(px, "predict_pixel_sdr2hdr",
+                            lambda srgb, **k: torch.full_like(srgb[..., :3], rec_value / 100.0))
     return _install
 
 
@@ -153,8 +148,8 @@ def test_pixels_outside_recovery_mask_are_bit_exact(node, fake_rudra):
     img = vals.view(1, 1, -1, 1).expand(1, 1, 6, 3).contiguous()
     kw = dict(BASE_KW, highlight_threshold=0.98, shadow_threshold=0.001)
 
-    base, _, _, _, _, _ = node.convert(image=img, **kw)
-    out, _, _, _, _, _ = node.convert(image=img, vae=_FakeVAE(), rudra_blend=1.0, **kw)
+    base, _, _, _, _, _ = node.convert(image=img, rudra_blend=0.0, **kw)
+    out, _, _, _, _, _ = node.convert(image=img, rudra_blend=1.0, pixel_recovery_mode="all", **kw)
 
     torch.testing.assert_close(out, base, atol=0.0, rtol=0.0)
 
@@ -163,9 +158,10 @@ def test_peak_is_still_enforced_after_removing_the_second_limiter(node, fake_rud
     """Dropping the outer limiter must not let learned radiance exceed peak."""
     fake_rudra(rec_value=1000.0)
     img = torch.linspace(0, 1, 64).reshape(1, 8, 8, 1).expand(1, 8, 8, 3).contiguous()
-    out, _, _, _, _, _ = node.convert(
-        image=img, vae=_FakeVAE(), rudra_blend=1.0,
+    out, _, _, _, _, report = node.convert(
+        image=img, rudra_blend=1.0, pixel_recovery_mode="all",
         **dict(BASE_KW, peak_nits=200.0, shoulder_gamma=1.0))
+    assert "learned recovery: applied" in report
     assert float(mod._luma(out).max()) <= 2.0 + 1e-5
 
 
@@ -195,7 +191,7 @@ def test_recover_empty_batch_returns_empty():
     out, *masks = rec.recover(
         image=torch.zeros(0, 4, 4, 3), inverse_oetf="None", peak_nits=1000.0,
         highlight_threshold=0.98, shadow_threshold=0.05, highlight_strength=1.0,
-        shadow_strength=1.0, output_encoding="Linear", rudra_size="rudra_turbo")
+        shadow_strength=1.0, output_encoding="Linear")
     assert out.shape[0] == 0
 
 
@@ -213,7 +209,8 @@ def test_expand_is_monotonic_and_hits_reference_white(node):
     out, _, _, _, _, _ = node.convert(image=ramp, processing_mode="Expand", **BASE_KW)
     y = mod._luma(out)[0, 0]
     assert bool((torch.diff(y) >= -1e-6).all()), "expansion is not monotonic"
-    assert abs(float(y.max()) - 2.03) < 1e-4, "reference white not reached"
+    # 3.5.0: Linear is BT.2408-normalised, so reference white is exactly 1.0.
+    assert abs(float(y.max()) - 1.0) < 1e-4, "reference white not reached"
     assert float(y[0]) == pytest.approx(0.0, abs=1e-7)
 
 
@@ -228,9 +225,11 @@ def test_peak_nits_is_the_ceiling_not_the_target(node, peak):
     """
     out, _, _, _, _, _ = node.convert(image=torch.ones(1, 4, 4, 3),
                                    **dict(BASE_KW, peak_nits=peak))
-    y = float(mod._luma(out).max())
-    assert y == pytest.approx(min(2.03, peak / 100.0), rel=1e-4)
-    assert y <= peak / 100.0 + 1e-6, "output exceeded the mastering peak"
+    # 3.5.0: output unit is the effective reference white (capped at peak).
+    ref = min(203.0, peak)
+    y_nits = float(mod._luma(out).max()) * ref
+    assert y_nits == pytest.approx(min(203.0, peak), rel=1e-4)
+    assert y_nits <= peak + 1e-3, "output exceeded the mastering peak"
 
 
 @pytest.mark.parametrize("peak", [1000.0, 4000.0, 10000.0])
@@ -238,7 +237,8 @@ def test_the_old_behaviour_is_still_reachable(node, peak):
     out, _, _, _, _, _ = node.convert(image=torch.ones(1, 4, 4, 3),
                                    **dict(BASE_KW, peak_nits=peak,
                                           reference_white_nits=peak))
-    assert float(mod._luma(out).max()) == pytest.approx(peak / 100.0, rel=1e-4)
+    # reference white == peak: SDR white at the peak, which is linear 1.0.
+    assert float(mod._luma(out).max()) == pytest.approx(1.0, rel=1e-4)
 
 
 def test_alpha_survives_every_output_encoding(node):

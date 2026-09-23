@@ -173,14 +173,19 @@ class RadianceDenoise:
         return cls._box_blur(a, radius) * guide + cls._box_blur(b, radius)
 
     @classmethod
-    def _bilateral_filter_t(cls, src: torch.Tensor, radius: int, sigma_color: float, sigma_space: float) -> torch.Tensor:
+    def _bilateral_filter_t(cls, src: torch.Tensor, radius: int, sigma_color: float, sigma_space: float,
+                            guide: torch.Tensor | None = None) -> torch.Tensor:
+        """Bilateral filter; with ``guide``, a joint (cross) bilateral whose
+        range weights come from the guide, so chroma edges follow luma edges."""
         radius = max(1, min(int(radius), 8))
         sigma_color = max(float(sigma_color), 1e-6)
         sigma_space = max(float(sigma_space), 1e-6)
         padded = F.pad(src, (radius, radius, radius, radius), mode="reflect")
+        g = guide if guide is not None else src
+        gpad = F.pad(g, (radius, radius, radius, radius), mode="reflect") if guide is not None else padded
         acc = torch.zeros_like(src)
         wsum = torch.zeros_like(src)
-        center = src
+        center = g
         for dy in range(-radius, radius + 1):
             for dx in range(-radius, radius + 1):
                 shifted = padded[
@@ -189,8 +194,14 @@ class RadianceDenoise:
                     radius + dy : radius + dy + src.shape[-2],
                     radius + dx : radius + dx + src.shape[-1],
                 ]
+                gshift = gpad[
+                    :,
+                    :,
+                    radius + dy : radius + dy + src.shape[-2],
+                    radius + dx : radius + dx + src.shape[-1],
+                ]
                 spatial = math.exp(-float(dx * dx + dy * dy) / (2.0 * sigma_space * sigma_space))
-                range_w = torch.exp(-((shifted - center) ** 2) / (2.0 * sigma_color * sigma_color))
+                range_w = torch.exp(-((gshift - center) ** 2) / (2.0 * sigma_color * sigma_color))
                 weight = range_w * spatial
                 acc = acc + shifted * weight
                 wsum = wsum + weight
@@ -213,7 +224,10 @@ class RadianceDenoise:
             guide = guidance_bchw if guidance_bchw is not None else band_bchw
             filtered = cls._guided_filter_t(guide, band_bchw, max(1, radius), max(1e-6, sigma_color * sigma_color))
         else:
-            filtered = cls._bilateral_filter_t(band_bchw, max(1, radius), sigma_color, sigma_space)
+            # The luma guide used to reach only the Guided filter, so with the
+            # default Bilateral joint_chroma_guidance did nothing.
+            filtered = cls._bilateral_filter_t(band_bchw, max(1, radius), sigma_color, sigma_space,
+                                               guidance_bchw)
         return band_bchw + float(strength) * (filtered - band_bchw)
 
     @staticmethod

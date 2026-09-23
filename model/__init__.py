@@ -1,11 +1,10 @@
 """Model loading, caching, and architecture detection."""
-from radiance.model.vae import (
-    RadianceTurboDecoder,
-    RadianceFullDecoder,
-    load_radiance_decoder_weights,
-    decode_to_linear_realtime,
-)
 from radiance.model.cache import LRUCache, get_model_cache, clear_model_caches
+from radiance.model.paths import (
+    radiance_model_dirs,
+    find_radiance_checkpoint,
+    describe_search,
+)
 from radiance.model.detect import (
     detect_model_type,
     LATENT_CHANNELS,
@@ -17,10 +16,9 @@ from radiance.model.detect import (
 )
 
 __all__ = [
-    "RadianceTurboDecoder",
-    "RadianceFullDecoder",
-    "load_radiance_decoder_weights",
-    "decode_to_linear_realtime",
+    "radiance_model_dirs",
+    "find_radiance_checkpoint",
+    "describe_search",
     "LRUCache",
     "get_model_cache",
     "clear_model_caches",

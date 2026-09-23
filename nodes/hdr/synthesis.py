@@ -33,13 +33,21 @@ class RadianceSDRtoHDRExpand:
     def apply(self, image: torch.Tensor, inverse_oetf: str, threshold: float, 
               expansion_gain: float, expansion_gamma: float, smoothness: float):
         img = image.clone()
-        
-        if inverse_oetf == "sRGB":
-            img = torch.where(img <= 0.04045, img / 12.92, ((img + 0.055) / 1.055) ** 2.4)
-        elif inverse_oetf == "Rec.709":
-            img = torch.where(img < 0.0812, img / 4.5, ((img + 0.099) / 1.099) ** (1.0 / 0.45))
-            
+
+        # ALPHA-OETF FIX: the inverse OETF ran over the WHOLE tensor before the
+        # RGB slice was taken, so a 4-channel input had its alpha gamma-decoded
+        # as if it were a colour channel and the decoded matte was concatenated
+        # back below: alpha 0.5 came out 0.2140. Alpha is linear coverage and
+        # carries no transfer function. Split first, decode colour only.
+        # uplift_universal._inverse_oetf is called this way for the same reason.
         RGB = img[..., :3]
+        extra = img[..., 3:]
+
+        if inverse_oetf == "sRGB":
+            RGB = torch.where(RGB <= 0.04045, RGB / 12.92, ((RGB + 0.055) / 1.055) ** 2.4)
+        elif inverse_oetf == "Rec.709":
+            RGB = torch.where(RGB < 0.0812, RGB / 4.5, ((RGB + 0.099) / 1.099) ** (1.0 / 0.45))
+
         luma = 0.2126 * RGB[..., 0] + 0.7152 * RGB[..., 1] + 0.0722 * RGB[..., 2]
         
         diff = luma - threshold
@@ -57,8 +65,8 @@ class RadianceSDRtoHDRExpand:
         
         expanded_RGB = RGB + (ratio * expansion.unsqueeze(-1))
         
-        if img.shape[-1] > 3:
-            result = torch.cat([expanded_RGB, img[..., 3:]], dim=-1)
+        if extra.shape[-1] > 0:
+            result = torch.cat([expanded_RGB, extra], dim=-1)
         else:
             result = expanded_RGB
 
@@ -69,9 +77,12 @@ class RadianceHDRSynthesisEngine:
     """
     ◎ Radiance HDR Synthesis Engine
     
-    Advanced Physically-Based HDR reconstruction.
-    Uses Laplacian Pyramid decomposition to recover detail in clipped highlights
-    and projects luminance into the 16-bit range using optical energy models.
+    Heuristic highlight expansion. The image is split into a Laplacian
+    pyramid; only the low-pass base is lifted (a luma-weighted power curve
+    toward energy_target, gated to highlights), then the detail bands are
+    added back unchanged. Clipped detail is not invented: a flat clipped
+    area stays flat, only brighter. For learned recovery use SDR to HDR
+    Universal with Recover.
     """
     CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = "Synthesise HDR imagery from SDR input and optional guidance signals."
@@ -87,7 +98,9 @@ class RadianceHDRSynthesisEngine:
                 "energy_target": ("FLOAT", {"default": 10.0, "min": 1.0, "max": 100.0, "step": 1.0,
                     "tooltip": "Target peak luminance multiplier (e.g. 10.0 = 10 stops above SDR white)."}),
                 "recovery_iters": ("INT", {"default": 3, "min": 0, "max": 8, "step": 1,
-                    "tooltip": "Number of Laplacian iterations to recover clipped detail."}),
+                    "tooltip": "Pyramid depth. The lift is applied to the 1/2^N low-pass, so detail "
+                               "finer than about 2^N px keeps its original contrast. 0 lifts the whole "
+                               "image. It does not reconstruct clipped detail."}),
                 "chroma_preservation": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.05,
                     "tooltip": "Prevents expanded highlights from losing saturation or shifting hue."}),
             },
@@ -183,11 +196,14 @@ class RadianceRelightEngine:
     """
     ◎ Radiance Relight Engine
     
-    True 32-bit float geometric re-lighting using input Normal maps.
-    Calculates physically plausible Lambertian fill and Blinn-Phong specular passes.
+    Adds one directional light to an image from a normal map: a Lambert
+    diffuse plus Blinn-Phong specular pass, in float. The pass is added to
+    the image, not multiplied by an albedo, so it brightens rather than
+    re-renders. No environment map. A RADIANCE_CAMERA sets the view point
+    for the specular term.
     """
     CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
-    DESCRIPTION = "Relight an HDR or SDR image using environment map or directional light."
+    DESCRIPTION = "Add a directional light (Lambert + Blinn-Phong) to an image from its normal map."
     FUNCTION = "apply"
     RETURN_TYPES = ("IMAGE", "IMAGE")
     RETURN_NAMES = ("image", "lighting_pass_only")

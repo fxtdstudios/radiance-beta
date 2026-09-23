@@ -1011,65 +1011,37 @@ def download_target(monkeypatch, tmp_path):
     return tmp_path / "ACES" / "config.ocio"
 
 
-def test_the_auto_download_writes_the_config_it_fetched(monkeypatch, download_target):
-    """A first-run install with no $OCIO gets its config from the network. What
-    comes back has to land on disk and be the path that is returned."""
-    import urllib.request
-
-    payload = b"ocio_profile_version: 2\n"
-    requested = []
-
-    class _Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def read(self):
-            return payload
-
-    def _fake_urlopen(req):
-        requested.append(req.full_url)
-        return _Response()
-
-    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
-
-    path = ocio_module._download_default_config()
-
-    assert path == str(download_target)
-    assert download_target.read_bytes() == payload
-    assert requested and requested[0].endswith(".ocio"), requested
-    assert "OpenColorIO-Config-ACES" in requested[0]
-
-
-def test_an_already_downloaded_config_is_not_fetched_again(monkeypatch,
-                                                           download_target):
-    download_target.parent.mkdir(parents=True)
-    download_target.write_text("ocio_profile_version: 2", encoding="utf-8")
+def test_the_default_config_is_set_up_without_the_network(monkeypatch, download_target):
+    """3.5: nothing is downloaded. The fallback used to fetch a config from
+    GitHub at import time, without download consent; OpenColorIO ships the
+    ACES studio config built in, and ocio_setup writes and activates it."""
     import urllib.request
 
     def _boom(req):        # pragma: no cover - reaching it is the failure
-        raise AssertionError("re-downloaded a config that was already on disk")
+        raise AssertionError("the OCIO fallback touched the network")
 
     monkeypatch.setattr(urllib.request, "urlopen", _boom)
-    assert ocio_module._download_default_config() == str(download_target)
+    from radiance.color import ocio_setup
+    monkeypatch.setattr(ocio_setup, "ACES_DIR", str(download_target.parent))
+    monkeypatch.setattr(ocio_setup, "STUDIO_FILE", str(download_target.parent / "studio-config.ocio"))
+    monkeypatch.delenv("OCIO", raising=False)
+    path = ocio_module._download_default_config()
+    assert path == str(download_target.parent / "studio-config.ocio")
+    assert "studio-config" in open(path, encoding="utf-8").read(4000)
 
 
-def test_a_failed_download_is_none_rather_than_an_exception(monkeypatch,
-                                                            download_target):
-    """This runs during `import radiance`. An exception here takes ComfyUI's
-    whole node load down over a missing network."""
-    import urllib.request
+def test_the_default_config_never_raises(monkeypatch, download_target):
+    """This runs during `import radiance`; an exception here would take the
+    whole node load down."""
+    from radiance.color import ocio_setup
 
-    def _fail(req):
-        raise OSError("no route to host")
+    def _fail(*a, **k):
+        raise OSError("disk full")
 
-    monkeypatch.setattr(urllib.request, "urlopen", _fail)
+    monkeypatch.setattr(ocio_setup, "configure_ocio", _fail)
     with _capture_logs(logging.ERROR) as records:
         assert ocio_module._download_default_config() is None
-    assert any("no route to host" in r.getMessage() for r in records)
-    assert not download_target.exists() or download_target.stat().st_size == 0
+    assert any("disk full" in r.getMessage() for r in records)
 
 
 # ── PyOpenColorIO not installed at all ──────────────────────────────────────

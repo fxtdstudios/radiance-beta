@@ -26,6 +26,7 @@ from __future__ import annotations
 import copy
 import pathlib
 import sys
+import types
 
 import pytest
 
@@ -152,39 +153,277 @@ def _assert_unmutated(before, kwargs):
         )
 
 
-# ── The reasons a call is allowed to fail without failing the test ──────────
+# ── The reasons a call is allowed not to run ────────────────────────────────
 #
-# Each entry is a substring of the exception message plus what it means. Kept
-# narrow on purpose: "needs a model file" is a legitimate environment gap,
-# "index out of range" is a bug.
-_ENVIRONMENTAL = (
-    ("No module named", "an optional dependency is not installed here"),
-    ("library required", "an optional dependency is not installed here"),
-    ("is required for", "an optional dependency is not installed here"),
-    ("pip install", "an optional dependency is not installed here"),
-    ("not found", "needs a file or model that does not exist in the test env"),
-    ("No such file", "needs a file that does not exist in the test env"),
-    ("does not exist", "needs a path that does not exist in the test env"),
-    ("CUDA", "needs a GPU"),
-    ("folder_paths", "needs the ComfyUI runtime"),
-    ("ffmpeg", "needs ffmpeg"),
-    ("OpenEXR", "needs the OpenEXR bindings"),
-    ("OpenImageIO", "needs the OpenImageIO bindings"),
-    ("PyOpenColorIO", "needs OCIO"),
-    ("Please install", "an optional dependency is not installed here"),
-    ("network access is blocked", "needs a model download; blocked in tests"),
-    ("requires", "a declared prerequisite is absent in the test env"),
-    # A loader that rejects the harness's fabricated empty path with a clear
-    # message is failing GRACEFULLY -- that is the behaviour we want.
-    ("must not be empty", "requires a real file path the harness cannot fabricate"),
-)
+# AUDIT-FIX (2026-09): this used to be a list of substrings matched against
+# str(exc), and it swallowed real bugs. Free text cannot separate "this machine
+# lacks a model file" from "this node has an argument-contract bug", and no
+# wording change makes it able to. Four fabricated bug messages, four skips:
+#
+#   ValueError("mask requires the same batch size as image")  -> "requires"
+#   KeyError("colour space 'ACEScg' not found in the LUT table") -> "not found"
+#   RuntimeError("tile size does not exist for this resolution") -> "does not exist"
+#   ValueError("peak_luminance is required for HDR output")   -> "is required for"
+#
+# Nothing below reads an exception message. A call is excused only when the
+# environment is CHECKED to be short of something, by one of two routes:
+#
+#   1. _absence_signal() -- the exception, or a link in its cause chain, IS a
+#      structural absence: RadianceDependencyError (the package's own signal),
+#      an ImportError for a module that genuinely will not import, a
+#      FileNotFoundError, or an AttributeError against one of conftest's stub
+#      modules. A node computing a wrong tile size raises none of these.
+#   2. _ENVIRONMENT_GATED -- an explicit, per-node predicate that interrogates
+#      this environment and returns a reason, or None to let the failure stand.
+#      Four entries, each one a named function you can read.
+#
+# Anything else fails the test, whatever it says.
+
+try:
+    from radiance.core.errors import RadianceDependencyError as _DependencyError
+except Exception:  # pragma: no cover - import failure is reported elsewhere
+    class _DependencyError(Exception):
+        pass
+
+try:
+    from radiance.config.dependencies import module_available as _module_available
+except Exception:  # pragma: no cover - import failure is reported elsewhere
+    def _module_available(name):
+        import importlib.util
+
+        if name in sys.modules:
+            return True
+        try:
+            return importlib.util.find_spec(name) is not None
+        except (ImportError, ValueError):
+            return False
 
 
-def _environmental(exc):
-    text = f"{type(exc).__name__}: {exc}"
-    for needle, reason in _ENVIRONMENTAL:
-        if needle.lower() in text.lower():
-            return reason
+# conftest.py tags every module it fabricates with this attribute so callers can
+# check rather than guess; see conftest.STUB_MARKER.
+_STUB_MARKER = "__radiance_test_stub__"
+
+
+def _cause_chain(exc):
+    """The exception and everything it was raised from, outermost first.
+
+    `__cause__` (an explicit `raise ... from ...`) is followed first, and
+    `__context__` only where Python itself would print it. A node that wraps a
+    real absence keeps that absence reachable; a node with a bug does not
+    acquire one.
+    """
+    seen, chain, cur = set(), [], exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        chain.append(cur)
+        if cur.__cause__ is not None:
+            cur = cur.__cause__
+        elif not cur.__suppress_context__:
+            cur = cur.__context__
+        else:
+            cur = None
+    return chain
+
+
+class _NoNetwork(OSError):
+    """Raised only by the _no_network fixture below.
+
+    A node that reaches for the network is reaching for a model file that is
+    not on this machine, which is a gap. The harness raises its OWN type for it
+    so the classifier recognises the situation structurally: a node cannot
+    produce this exception by wording an error like the fixture's.
+    """
+
+
+def _absence_signal(exc):
+    """Reason this exception structurally means "absent", or None."""
+    for link in _cause_chain(exc):
+        if isinstance(link, _NoNetwork):
+            return "the node tried to download a model; no network in tests"
+
+        if isinstance(link, _DependencyError):
+            return ("the node raised RadianceDependencyError, the package's own "
+                    "missing-dependency signal")
+
+        if isinstance(link, ImportError):
+            # ImportError comes from the import machinery, not from argument
+            # validation. Where it names the module (`.name`), confirm the
+            # module really is unimportable -- a fabricated
+            # ModuleNotFoundError("No module named 'torch'") on a machine that
+            # has torch is a bug, not a gap.
+            name = getattr(link, "name", None)
+            if name and _module_available(name):
+                continue
+            return (f"an import failed for {name or 'an optional dependency'}, "
+                    "which is not importable in this environment")
+
+        if isinstance(link, FileNotFoundError):
+            # The type exists to say "this path is not here". The harness
+            # fabricates no real files, so it cannot supply one.
+            return "a file the node needs is not present in this environment"
+
+        if isinstance(link, AttributeError):
+            # Python 3.10+ records the object the lookup failed on. When that
+            # object is one of conftest's stand-ins, the node reached for a
+            # piece of the host runtime that is not installed here.
+            obj = getattr(link, "obj", None)
+            if isinstance(obj, types.ModuleType) and getattr(obj, _STUB_MARKER, False):
+                return (f"the node needs the real {obj.__name__}; conftest's "
+                        "stand-in does not implement it")
+    return None
+
+
+def _declared_input(cls, section, arg):
+    """The (type, config) a node declares for one input, or (None, {})."""
+    try:
+        entry = (cls.INPUT_TYPES().get(section) or {}).get(arg)
+    except Exception:  # pragma: no cover - INPUT_TYPES is covered by test_node_smoke
+        return None, {}
+    if not isinstance(entry, (list, tuple)) or not entry:
+        return None, {}
+    config = entry[1] if len(entry) > 1 else {}
+    return entry[0], (config if isinstance(config, dict) else {})
+
+
+def _unfabricable_path(arg):
+    """Gate: a required STRING path input the harness had no file to fill.
+
+    Checked twice over: the node declares `arg` as a required STRING with no
+    usable default, AND the value this call actually passed was empty. A real
+    path would close the gate, so the day the harness can supply one the node
+    is executed and any failure is reported as one.
+    """
+
+    def predicate(cls, kwargs):
+        kind, config = _declared_input(cls, "required", arg)
+        if kind != "STRING" or str(config.get("default", "")) != "":
+            return None
+        if str(kwargs.get(arg, "")) != "":
+            return None
+        return f"{arg} is a required file path and this environment has no file to name"
+
+    return predicate
+
+
+def _unfabricable_opaque(arg):
+    """Gate: an optional input of a type this harness cannot build at all.
+
+    _build_args only records a skip for un-fabricable REQUIRED inputs, so a node
+    that declares e.g. an optional VAE and then needs it is called without one
+    and fails. Checked against _OPAQUE, the same list the required path uses,
+    and against the call actually made.
+    """
+
+    def predicate(cls, kwargs):
+        kind, _ = _declared_input(cls, "optional", arg)
+        if kind not in _OPAQUE or kwargs.get(arg) is not None:
+            return None
+        return f"needs the optional {arg} ({kind}), which the harness cannot build"
+
+    return predicate
+
+
+def _no_pixel_checkpoint(cls, kwargs):
+    """Gate: no SDR→HDR pixel checkpoint is resolvable on this machine.
+
+    Asked of the same resolver the node uses, so on a machine with
+    sdr2hdr_pixel_image.pt installed the gate closes and Recover runs for real.
+    """
+    try:
+        from radiance.pixel_sdr2hdr import resolve_pixel_checkpoint
+    except Exception:
+        return "radiance.pixel_sdr2hdr is not importable in this environment"
+    if resolve_pixel_checkpoint(str(kwargs.get("pixel_checkpoint", ""))) is None:
+        return "no SDR→HDR pixel checkpoint is installed in models/radiance"
+    return None
+
+
+def _ocio_config_lacks_colorspaces(cls, kwargs):
+    """Gate: the active OCIO config does not define the names this call used.
+
+    Asked of the config itself, through the same resolver the node uses. On a
+    machine whose config DOES define them the gate closes and the transform is
+    executed for real.
+    """
+    try:
+        from radiance.hdr.ocio import _iter_colorspaces, _resolve_config
+    except Exception:
+        return "radiance.hdr.ocio is not importable in this environment"
+
+    config = _resolve_config(str(kwargs.get("ocio_config_path", "")))
+    if config is None:
+        return "no OCIO config is resolvable in this environment"
+
+    known = {name for name, _ in _iter_colorspaces(config)}
+    wanted = [
+        str(kwargs.get(arg, ""))
+        for arg in ("source_colorspace", "target_colorspace")
+    ]
+    missing = [name for name in wanted if name and name not in known]
+    if missing:
+        return f"the active OCIO config defines none of {missing}"
+    return None
+
+
+def _missing_file(arg):
+    """Gate: a path input whose value (a placeholder default) names no file.
+
+    Like _unfabricable_path, for inputs that ship a placeholder default such
+    as "/path/to/audio.wav" instead of an empty string. The node now raises on
+    it (3.5); before, it returned an empty result that looked like a real one.
+    """
+
+    def predicate(cls, kwargs):
+        import os
+        value = str(kwargs.get(arg, ""))
+        if value and os.path.isfile(value):
+            return None
+        return f"{arg}={value!r} names no file in this environment"
+
+    return predicate
+
+
+def _not_shipped(cls, kwargs):
+    """Gate: a placeholder node kept only so saved graphs open (3.5 SAM)."""
+    if getattr(cls, "DEPRECATED", False) and "SAM" in cls.__name__:
+        return "no SAM runtime ships with Radiance 3.5; the node raises by design"
+    return None
+
+
+# The nodes that genuinely cannot run here, each with the check that says so.
+# Short on purpose: every entry costs a node's worth of execution coverage, so
+# a new one has to earn its place, and the predicate has to be something a
+# reader can verify.
+_ENVIRONMENT_GATED = {
+    # Needs a .safetensors LoRA on disk.
+    "RadianceHDRLoRALoader": _unfabricable_path("lora_path"),
+    # Needs a multi-layer EXR rendered by a 3D package; nothing here makes one.
+    "RadianceMultipassAOVReader": _unfabricable_path("exr_path"),
+    # Needs a real clip or sequence; an empty path now raises (3.5) instead of
+    # returning an 8x8 black shot.
+    "RadianceDigitalCinemaRead": _unfabricable_path("source_path"),
+    # Runs the RUDRA pixel model and, by design, raises rather than falling
+    # back when no checkpoint is installed.
+    "RadianceSDRToHDRRecover": _no_pixel_checkpoint,
+    # Placeholder default path; a missing file raises (3.5) instead of "[]".
+    "RadianceAudioCut": _missing_file("audio_filepath"),
+    # Hidden placeholders; see KNOWN_ISSUES.
+    "RadianceSAMModelLoader": _not_shipped,
+    "RadianceSAMGenerator": _not_shipped,
+    # Ships defaults that the ACES CG config bundled with the package does not
+    # define, so the harness cannot name a colorspace the config knows.
+    "RadianceHDROCIOTransform": _ocio_config_lacks_colorspaces,
+}
+
+
+def _environment_gap(key, cls, kwargs, exc):
+    """Why this call could not run here, or None if the failure is the node's."""
+    reason = _absence_signal(exc)
+    if reason:
+        return reason
+    gate = _ENVIRONMENT_GATED.get(key)
+    if gate is not None:
+        return gate(cls, kwargs)
     return None
 
 
@@ -217,8 +456,8 @@ def _no_network(monkeypatch):
     import urllib.request
 
     def _blocked(*args, **kwargs):
-        raise OSError("network access is blocked in tests; this node needs a "
-                      "model file that is not present")
+        raise _NoNetwork("network access is blocked in tests; this node needs a "
+                         "model file that is not present")
 
     monkeypatch.setattr(urllib.request, "urlopen", _blocked)
     monkeypatch.setattr(socket, "create_connection", _blocked)
@@ -244,7 +483,7 @@ def test_node_executes(key):
     try:
         result = fn(**copy.copy(kwargs))
     except Exception as exc:
-        reason = _environmental(exc)
+        reason = _environment_gap(key, cls, kwargs, exc)
         if reason:
             pytest.skip(f"{reason} ({type(exc).__name__}: {str(exc)[:120]})")
         raise
@@ -297,6 +536,66 @@ def test_node_executes(key):
             assert isinstance(value, dict) and "samples" in value, (
                 f"{key} LATENT output is not a dict with a 'samples' key"
             )
+
+
+# ── The classifier is itself under test ─────────────────────────────────────
+#
+# These are the four messages that defeated the old substring list, plus the
+# shapes that must still be excused. If anyone reintroduces text matching, the
+# first four of these go red.
+
+_BUG_MESSAGES = [
+    ValueError("mask requires the same batch size as image"),
+    KeyError("colour space 'ACEScg' not found in the LUT table"),
+    RuntimeError("tile size does not exist for this resolution"),
+    ValueError("peak_luminance is required for HDR output"),
+    RuntimeError("PyOpenColorIO returned a null processor"),
+    OSError("network access is blocked in tests"),
+    ImportError("No module named 'torch'", name="torch"),
+]
+
+
+@pytest.mark.parametrize("exc", _BUG_MESSAGES, ids=lambda e: type(e).__name__)
+def test_a_bug_is_not_an_environment_gap(exc):
+    """No wording makes a node bug look like a missing dependency.
+
+    The last entry matters most: a node that RAISES ModuleNotFoundError for a
+    module this interpreter can import is lying, and the classifier checks the
+    claim instead of believing the message.
+    """
+    assert _absence_signal(exc) is None, (
+        f"{type(exc).__name__}({exc}) was classified as an environment gap; "
+        "the classifier is reading the message again"
+    )
+
+
+def test_a_real_absence_is_still_excused():
+    """The structural signals have to keep working, or everything turns red."""
+    assert _absence_signal(ImportError("no gdal", name="radiance_no_such_module"))
+    assert _absence_signal(FileNotFoundError(2, "No such file", "/nope.cube"))
+    assert _absence_signal(_DependencyError("OpenImageIO is not installed"))
+
+    wrapped = None
+    try:
+        try:
+            raise ImportError("torchvision is missing", name="radiance_no_such_module")
+        except ImportError as inner:
+            raise RuntimeError("could not load the depth model") from inner
+    except RuntimeError as outer:
+        wrapped = outer
+    assert _absence_signal(wrapped), "a wrapped absence must stay reachable"
+
+
+def test_the_gated_node_list_stays_short_and_real():
+    """Every gate names a node that exists, and there are few enough to read."""
+    assert len(_ENVIRONMENT_GATED) <= 8, (
+        "the environment-gate list is growing into the substring list it "
+        "replaced; each entry costs a node's worth of execution coverage"
+    )
+    if not _NODES:
+        pytest.skip("radiance did not import; test_node_smoke reports that")
+    unknown = sorted(set(_ENVIRONMENT_GATED) - set(_NODES))
+    assert not unknown, f"gates named for nodes that no longer exist: {unknown}"
 
 
 def test_the_harness_actually_covered_the_catalog():

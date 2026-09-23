@@ -302,17 +302,29 @@ class RadianceColorSpaceConvert:
                         "[Radiance] _resolve_name(): ignoring %s from `if config.getColorSpace(n):`: %s",
                         type(_exc).__name__, _exc,
                     )
+                # Names in the ACES studio config Radiance configures at
+                # startup (color/ocio_setup.py). The old targets ("Linear",
+                # "Output - Rec.709", ...) existed in no shipped config, so
+                # every lookup missed and OCIO never ran.
                 _NAME_MAP = {
-                    "Linear sRGB (D65)": "Linear", "ACEScg": "acescg",
-                    "ACEScc": "acescc", "ACEScct": "acescct",
-                    "sRGB (OETF encoded)": "sRGB", "Rec.709 (OETF encoded)": "Rec.709",
-                    "Rec.709 / BT.1886": "Output - Rec.709",
-                    "LogC3 (ARRI EI800)": "ARRI LogC3", "LogC4 (ARRI Alexa 35)": "ARRI LogC4",
+                    "Linear sRGB (D65)": "Linear Rec.709 (sRGB)", "ACEScg": "ACEScg",
+                    "ACEScc": "ACEScc", "ACEScct": "ACEScct",
+                    "sRGB (OETF encoded)": "sRGB Encoded Rec.709 (sRGB)",
+                    "Rec.709 / BT.1886": "Gamma 2.4 Encoded Rec.709",
                 }
+                # Camera logs stay analytic on purpose: this node's documented
+                # convention is transfer-only against Rec.709 linear, and the
+                # OCIO camera spaces carry their native gamut, so OCIO and the
+                # fallback would give different pictures for the same setting.
+                # (Read / Write do full camera decodes, gamut included.)
+                if n not in _NAME_MAP and n not in ("Linear sRGB (D65)",):
+                    return None
                 return _NAME_MAP.get(n, n)
 
             ocio_src = _resolve_name(src)
             ocio_dst = _resolve_name(dst)
+            if not ocio_src or not ocio_dst:
+                return None
             processor = mgr.get_processor(ocio_src, ocio_dst)
             if not processor:
                 return None

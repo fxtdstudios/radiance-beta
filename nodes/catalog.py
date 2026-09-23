@@ -24,6 +24,26 @@ class NodeGroupSpec:
         return NodeModuleSpec(self.module_path)
 
 
+# Node GROUPS only, never implementation packages.
+#
+# `radiance.image`, `radiance.hdr`, `radiance.film` and `radiance.color` each
+# declare a full NODE_CLASS_MAPPINGS in their __init__.py, and for a long time
+# nothing in the load chain read any of them: they are not listed here, and
+# `fold_in_module_nodes` cannot reach them either, because its `_leaf_modules`
+# walks only the __path__ of a package already in this tuple and skips
+# sub-packages. Twenty-three finished nodes were invisible for that reason
+# until 2026-09-18.
+#
+# Adding them here is the obvious fix and it is the wrong one. `radiance.film`
+# declares RadianceFilmGrain and RadianceMotionBlur pointing at classes that
+# are NOT the ones radiance.nodes.vfx ships under those keys, so loading it as
+# a group would swap two shipping nodes for rival implementations with
+# different widgets, quietly breaking every saved workflow that uses them.
+#
+# The registration layer is `radiance/nodes/<group>/__init__.py`: it imports
+# the implementation classes it wants and names them, one key at a time. See
+# nodes/color/__init__.py, which has published radiance.color.lut that way
+# since 2026-08.
 NODE_GROUPS: Tuple[NodeGroupSpec, ...] = (
     NodeGroupSpec("radiance.nodes.color"),
     NodeGroupSpec("radiance.nodes.hdr"),

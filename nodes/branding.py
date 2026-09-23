@@ -224,6 +224,59 @@ NODE_SECTIONS = {
     "RadianceControlApply": "Generate",
     "RadianceImageLoader": "Generate",
     "RadianceWorkspace": "Core",
+    # ── Published by the registration layer, 2026-09-18 ────────────────────
+    # Twenty-six more finished nodes that ComfyUI never saw. Twenty-three of
+    # them sat in the top-level implementation packages (radiance.image,
+    # radiance.hdr, radiance.film), which declare a full NODE_CLASS_MAPPINGS
+    # that nothing in the load chain reads -- they are not node groups, and the
+    # aggregate sweep cannot cross a package boundary. Three more were missing
+    # from their own leaf module's mapping. See nodes/catalog.py.
+    #
+    # Sections are chosen from what each node does, not from the package it
+    # happens to live in, which is why several radiance.hdr nodes are filed
+    # under Color. Twenty-five of the twenty-six are here: RadianceHDRHistogram
+    # emits a 5-D IMAGE and is withheld until that is fixed, so declaring a
+    # section for it would only trip the "names a node that is gone" check.
+    #
+    # radiance.image.upscale, resampling and precision, the module's own
+    # declared CATEGORY for all of them.
+    "RadianceProUpscale": "Upscale",
+    "RadianceUpscaleBySize": "Upscale",
+    "RadianceDownscale32bit": "Upscale",
+    "RadianceBitDepthConvert": "Upscale",
+    "RadianceAIUpscale": "Upscale",
+    # nodes/upscale/upscale.py, analyses a frame and recommends the tier for
+    # the upscalers it sits in front of.
+    "RadianceUpscaleRouter": "Upscale",
+    # radiance.hdr, dynamic range, ACES and OCIO.
+    "RadianceFloat32Convert": "HDR",
+    "RadianceACES2OutputTransform": "HDR",
+    "RadianceHDRExposureBlend": "HDR",
+    "RadianceHDRShadowHighlight": "HDR",
+    "RadianceGPUTensorOps": "HDR",
+    # Builds equirectangular HDRI environment maps. Its module declares an
+    # Upscale category, which is where it was written, not what it does.
+    "RadianceHDR360Generate": "HDR",
+    "RadianceHighlightSynthesis": "HDR",
+    # The OCIO trio stays together: the config manager and the colorspace
+    # lister exist to feed the transform, and all three carry ACES config
+    # handling, which MENU_STRUCTURE files under HDR.
+    "RadianceACESConfigManager": "HDR",
+    "RadianceHDROCIOTransform": "HDR",
+    "RadianceOCIOListColorspaces": "HDR",
+    # radiance.hdr, but colour work: gamut and grading controls that belong
+    # beside the other colour nodes rather than behind an HDR tab.
+    "RadianceFloat32ColorCorrect": "Color",
+    "RadianceHDRColorConvert": "Color",
+    "RadianceDaVinciWideGamut": "Color",
+    "RadianceARRIWideGamut4": "Color",
+    # nodes/monitor/realtime.py, on-set exposure and A/B comparison scopes.
+    "RadianceFalseColorMonitor": "Review",
+    "RadianceSplitView": "Review",
+    # radiance.film.camera, in-camera artefacts.
+    "RadianceDepthOfField": "VFX",
+    "RadianceRollingShutter": "VFX",
+    "RadianceCompressionArtifacts": "VFX",
 }
 
 
@@ -275,7 +328,8 @@ TERM_OVERRIDES = {
     "RadianceMultipassMaster": "Multipass Extract",
     "RadianceMultipassComposite": "Multipass Composite",
     "RadianceMultipassRelight": "Multipass Relight",
-    "RadianceSAMGenerator": "Keyer (SAM)",
+    "RadianceSAMGenerator": "Keyer (SAM, not shipped)",
+    "RadianceSAMModelLoader": "SAM Loader (not shipped)",
     "RadianceLinearMatting": "Matte",
     # ── Load & Save ───────────────────────────────────────────────────────
     "RadianceImageLoader": "Read Image",

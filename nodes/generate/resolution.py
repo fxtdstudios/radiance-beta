@@ -67,7 +67,12 @@ PRESET_NAMES = ["Custom"] + list(PRESETS.keys())
 #    Audio (32ch stereo) out of scope for this node.
 
 # Model types that emit 5D latent (1, C, T, H, W)
-VIDEO_MODEL_TYPES = {"WAN (16ch)", "WAN TI2V (48ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)", "Cosmos World (16ch)", "CogVideoX (16ch)", "MiniMax H3 (24ch)"}
+VIDEO_MODEL_TYPES = {"WAN (16ch)", "WAN TI2V (48ch)", "LTXV (128ch)", "HunyuanVideo (16ch)", "Mochi (12ch)", "Cosmos World (16ch)", "CogVideoX (16ch)", "MiniMax H3 (24ch)",
+                     "HunyuanVideo 1.5 (32ch)", "Kandinsky 5 Video (16ch)"}
+
+#: Ceiling shared by the video_frames widget and the 'Auto (Seconds)' frame
+#: computation, so the two ways of asking for a clip length reach the same place.
+_MAX_VIDEO_FRAMES = 100000
 
 # Latent format string matching nodes_sampler.py latent_format input
 LATENT_FORMAT_MAP = {
@@ -112,6 +117,15 @@ LATENT_FORMAT_MAP = {
     # ("image_model": "minimax_h3"). RadianceSamplerPro doesn't recognize this
     # latent_format yet — Sampler-side support is a separate, later task.
     "MiniMax H3 (24ch)": "minimax_h3",
+    # 3.5: ComfyUI 0.32 families. Qwen-Image / Krea 2 ride the Wan 2.1 VAE
+    # (16ch, 8px, 2D); HiDream / OmniGen2 / LongCat / Kandinsky 5 image ride
+    # the Flux VAE; HunyuanImage 2.1 is 64ch at 32px; HunyuanVideo 1.5 is
+    # 32ch at 16px / 4 frames; Kandinsky 5 video uses the HunyuanVideo VAE.
+    "Qwen-Image / Krea 2 (16ch)": "qwen_image",
+    "HiDream / OmniGen2 / LongCat / Kandinsky 5 Image (16ch)": "flux",
+    "HunyuanImage 2.1 (64ch)": "hunyuan_image",
+    "HunyuanVideo 1.5 (32ch)": "hunyuan_video_15",
+    "Kandinsky 5 Video (16ch)": "kandinsky5",
 }
 
 # Common aspect ratios for megapixel target mode
@@ -150,6 +164,12 @@ MODEL_TYPES = [
     # the model's native audio stream (32ch stereo) isn't produced here — pair
     # with a separate audio latent + "Concat AV Latent" for the full AV pipeline.
     "MiniMax H3 (24ch)",
+    # 3.5: ComfyUI 0.32 families.
+    "Qwen-Image / Krea 2 (16ch)",
+    "HiDream / OmniGen2 / LongCat / Kandinsky 5 Image (16ch)",
+    "HunyuanImage 2.1 (64ch)",
+    "HunyuanVideo 1.5 (32ch)",
+    "Kandinsky 5 Video (16ch)",
 ]
 
 ORIENTATIONS = ["As Preset", "Landscape", "Portrait", "Square"]
@@ -176,6 +196,12 @@ LATENT_CHANNELS = {
     # ALBABIT-FIX: MiniMax H3's video stream is 24 latent channels (the 32ch
     # audio stream isn't produced by this node, see MODEL_TYPES comment above).
     "MiniMax H3 (24ch)": 24,
+    # 3.5 families (comfy/latent_formats.py).
+    "Qwen-Image / Krea 2 (16ch)": 16,
+    "HiDream / OmniGen2 / LongCat / Kandinsky 5 Image (16ch)": 16,
+    "HunyuanImage 2.1 (64ch)": 64,
+    "HunyuanVideo 1.5 (32ch)": 32,
+    "Kandinsky 5 Video (16ch)": 16,
 }
 
 # ── Per-model latent spatial downscale factor (VAE compression) ─────────────────
@@ -200,6 +226,11 @@ SPATIAL_SCALE = {
     # height//16, width//16 — the bespoke adapt_canvas() short-edge/area-cap
     # logic in that file is a recommended-range helper, not enforced here).
     "MiniMax H3 (24ch)": 16,
+    # 3.5: HunyuanImage 2.1's VAE is 32x (comfy.latent_formats.HunyuanImage21,
+    # 64ch); HunyuanVideo 1.5's is 16x spatial (HunyuanVideo15,
+    # spacial_downscale_ratio = 16). The other new families are 8x.
+    "HunyuanImage 2.1 (64ch)": 32,
+    "HunyuanVideo 1.5 (32ch)": 16,
     # ALBABIT-FIX: "Manual" uses scale=1 -> _align_up is a no-op, so width/height
     # are fully unconstrained (no rounding, +/- step of 1) for experimental models.
     "Manual": 1,
@@ -223,6 +254,10 @@ TEMPORAL_SCALE = {
     # explicitly for clarity even though it matches this table's own default.
     "WAN TI2V (48ch)": 4,
     "HunyuanVideo (16ch)": 4,
+    # 3.5: HunyuanVideo 1.5 (temporal_downscale_ratio = 4) and Kandinsky 5
+    # video, which decodes through the HunyuanVideo VAE.
+    "HunyuanVideo 1.5 (32ch)": 4,
+    "Kandinsky 5 Video (16ch)": 4,
     "CogVideoX (16ch)": 4,
     # ALBABIT-FIX: Mochi's VAE temporal compression is ×6 (nodes_mochi.py:
     # (length-1)//6+1), distinct from the 4x default used by WAN/Hunyuan/CogVideoX.
@@ -960,14 +995,26 @@ class RadianceResolution:
                 "duration_seconds": (
                     "FLOAT",
                     {
-                        "default": 5.0, "min": 0.1, "max": 120.0, "step": 0.1,
-                        "tooltip": "Target video duration in seconds (used when frame_computation = 'Auto (Seconds)').",
+                        # DEFECT: this was capped at 120.0 while video_frames
+                        # reaches 100000, so 'Auto (Seconds)' could not express
+                        # any clip the 'Manual (Frames)' path could. At 24fps
+                        # the two ceilings were 120s and ~69 minutes. The cap is
+                        # now the frame ceiling at the lowest frame rate the
+                        # frame_rate widget allows (100000 frames at 1fps), so
+                        # the two entry modes reach the same place.
+                        "default": 5.0, "min": 0.1, "max": 100000.0, "step": 0.1,
+                        "tooltip": (
+                            "Target video duration in seconds (used when "
+                            "frame_computation = 'Auto (Seconds)'). Combined with "
+                            "frame_rate this must stay within video_frames' 100000 "
+                            "ceiling; a longer request is clamped with a warning."
+                        ),
                     },
                 ),
                 "video_frames": (
                     "INT",
                     {
-                        "default": 81, "min": 1, "max": 100000, "step": 1,
+                        "default": 81, "min": 1, "max": _MAX_VIDEO_FRAMES, "step": 1,
                         "tooltip": (
                             "Total number of video frames. "
                             "5D-latent models require (stride*k+1) — e.g. 4k+1 for "
@@ -1129,6 +1176,20 @@ class RadianceResolution:
                 stride = TEMPORAL_SCALE.get(model_type, 4)
 
                 video_frames = max(1, int(round(raw_frames / stride)) * stride + 1)
+                # duration_seconds now reaches the same ceiling as video_frames,
+                # so the product can exceed it. Clamp down to the nearest valid
+                # stride*k+1 at or below the limit rather than emitting a frame
+                # count the video_frames widget itself could not hold.
+                if video_frames > _MAX_VIDEO_FRAMES:
+                    clamped = ((_MAX_VIDEO_FRAMES - 1) // stride) * stride + 1
+                    logger.warning(
+                        f"Auto-Seconds: {duration_seconds}s @ {frame_rate}fps needs "
+                        f"{video_frames} frames, above the {_MAX_VIDEO_FRAMES}-frame "
+                        f"ceiling. Clamped to {clamped} frames "
+                        f"({clamped / max(frame_rate, 1.0):.1f}s). Lower "
+                        f"duration_seconds or frame_rate to render the full length."
+                    )
+                    video_frames = clamped
                 logger.info(
                     f"Auto-Seconds: {duration_seconds}s @ {frame_rate}fps -> "
                     f"Aligned to {video_frames} frames (stride {stride})"
@@ -1180,6 +1241,37 @@ class RadianceResolution:
         # enables video with "Manual" selected, still compute a 5D latent — with
         # TEMPORAL_SCALE["Manual"]=1, i.e. no compression assumed.
         is_video_latent = enable_video and (model_type in VIDEO_MODEL_TYPES or model_type == "Manual")
+
+        # DEFECT: enable_video=True against an IMAGE model_type fell through to
+        # the 4D branch below, which builds `actual_batch` INDEPENDENT stills
+        # with no temporal relationship at all, while the info string and the
+        # preview card still read "VIDEO: 81f @ 24fps" with a duration. The
+        # frame-count stride validation above is also skipped entirely, because
+        # both of its branches require a video model_type. Nothing anywhere said
+        # the output was not video.
+        if enable_video and not is_video_latent:
+            logger.warning(
+                "[Radiance] enable_video=True with model_type='%s', which is an IMAGE "
+                "architecture. The output is %d UNRELATED STILL IMAGES in a batch, not "
+                "a video clip: there is no temporal axis, no frame-count stride check "
+                "and no temporal VAE. Set model_type to a video architecture (%s) or "
+                "'Manual', or turn enable_video off and use batch_size.",
+                model_type, video_frames,
+                ", ".join(sorted(VIDEO_MODEL_TYPES)),
+            )
+
+        # DEFECT: batch_size was the one ignored widget in this node with no
+        # warning attached. Every other ignored widget (width/height under a
+        # preset, frame_rate on MiniMax H3) already says so.
+        if enable_video and batch_size != 1:
+            logger.warning(
+                "[Radiance] batch_size=%d is ignored while enable_video=True. The "
+                "latent's batch axis is hard-coded to 1 for video and video_frames "
+                "drives the temporal axis instead. Turn enable_video off to batch "
+                "stills, or queue the prompt %d times to render %d clips.",
+                batch_size, batch_size, batch_size,
+            )
+
         actual_batch = video_frames if enable_video else batch_size
 
         # ── Create empty latent ──────────────────────────────────────────────────
@@ -1236,9 +1328,15 @@ class RadianceResolution:
         ar_str = _gcd_ratio(w, h)
         ch_src = "manual" if latent_channels > 0 else model_type.split("(")[0].strip()
 
-        if enable_video:
+        # Keyed off is_video_latent, not enable_video: a batch of unrelated
+        # stills produced by enable_video against an image model_type used to
+        # report itself as "VIDEO: 81f @ 24fps" with a duration.
+        if is_video_latent:
             batch_label = "VIDEO"
             batch_value = f"{video_frames}f @ {frame_rate}fps"
+        elif enable_video:
+            batch_label = "STILLS"
+            batch_value = f"{video_frames} unrelated frames (no temporal axis)"
         else:
             batch_label = "BATCH"
             batch_value = str(batch_size)
@@ -1308,7 +1406,9 @@ class RadianceResolution:
         if latent_channels > 0 and not is_video_latent:
             latent_fmt = "flux" if latent_c >= 16 else "sdxl"
 
-        duration_sec = video_frames / frame_rate if enable_video else 0.0
+        # is_video_latent, not enable_video: a batch of stills has no duration,
+        # and reporting one let a downstream muxer stamp a frame rate on it.
+        duration_sec = video_frames / frame_rate if is_video_latent else 0.0
 
         # ALBABIT-FIX: full_w/full_h re-align req_w/req_h on their own rather
         # than reusing w/h, for the same scale_factor reason as above. When

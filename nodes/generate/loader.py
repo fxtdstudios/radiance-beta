@@ -156,6 +156,9 @@ MODEL_TYPES = [
     "chroma", "flux2", "flux2-klein",
     # ALBABIT-FIX: MiniMax H3, a joint video+audio DiT, 24ch video latent.
     "minimax",
+    # 3.5: ComfyUI 0.32 families (see model/detect.py for the tables).
+    "qwen_image", "krea2", "hunyuan_image", "hunyuan_video_15",
+    "hidream", "omnigen2", "longcat_image", "kandinsky5", "kandinsky5_image",
 ]
 
 WEIGHT_DTYPES = ["default", "fp8_e4m3fn", "fp8_e5m2", "fp16", "bf16", "fp32"]

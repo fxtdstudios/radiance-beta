@@ -98,15 +98,41 @@ sys.modules["comfy.cldm"].control_types = sys.modules["comfy.cldm.control_types"
 
 # Make aiohttp and server unimportable even if the dev machine has them, so
 # this test measures the same thing on a laptop as it does in CI.
+#
+# AUDIT-FIX (2026-09): this was a `find_module`/`load_module` finder. That is
+# the pre-PEP-451 meta-path API and it was REMOVED in Python 3.12, which the CI
+# matrix runs: `sys.meta_path` skips a finder with no `find_spec`, so on 3.12
+# the blocker did nothing, aiohttp and server imported normally, and every test
+# in this file measured nothing while still reporting pass. `find_spec` is the
+# API that still exists. Raising straight out of it blocks the name for good,
+# submodules included, and names itself in the message so the self-check below
+# can tell "blocked" apart from "merely not installed".
 class _Blocker:
     BLOCKED = {"aiohttp", "server"}
-    def find_module(self, name, path=None):
-        return self if name.split(".")[0] in self.BLOCKED else None
-    def load_module(self, name):
-        raise ImportError(f"{name} is blocked by test_import_isolation")
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in self.BLOCKED:
+            raise ImportError(f"{name} is blocked by test_import_isolation")
+        return None
 sys.meta_path.insert(0, _Blocker())
 for _m in [m for m in sys.modules if m.split(".")[0] in {"aiohttp", "server"}]:
     del sys.modules[_m]
+
+# The blocker's own self-test, run in every subprocess this file spawns. A
+# blocker that silently stops blocking is the defect above returning, and it
+# turns all eleven group tests into green tests of nothing. The message check
+# matters as much as the raise: on CI's lightweight lane aiohttp is not
+# installed either, so a bare ModuleNotFoundError would prove nothing about
+# whether the blocker is live.
+for _blocked in sorted(_Blocker.BLOCKED):
+    try:
+        __import__(_blocked)
+    except ImportError as _exc:
+        if "blocked by test_import_isolation" not in str(_exc):
+            print(f"HARNESS-BROKEN: {_blocked} is not blocked, only absent: {_exc!r}")
+            raise SystemExit(2)
+    else:
+        print(f"HARNESS-BROKEN: the import blocker is inert, {_blocked} imported anyway")
+        raise SystemExit(2)
 
 sys.path.insert(0, %(parent)r)
 
@@ -171,6 +197,54 @@ def test_the_harness_can_import_the_package_at_all():
         "the isolation harness cannot import the package:\n"
         + (result.stderr or result.stdout).strip()[-1500:]
     )
+
+
+def test_the_import_blocker_actually_blocks():
+    """Import something the harness blocks, and require the blocker's refusal.
+
+    Every other test in this file is worth exactly what the blocker is worth. It
+    was a `find_module`/`load_module` finder, an API Python 3.12 removed, so on
+    3.12 the harness quietly stopped blocking anything: aiohttp and `server`
+    imported normally and eleven tests passed while measuring nothing.
+
+    Both halves are asserted. The import must fail, and it must fail with the
+    blocker's own message: on a lane where aiohttp is not installed a plain
+    ModuleNotFoundError looks identical from outside and says nothing about
+    whether the blocker is live.
+    """
+    for blocked in sorted(("aiohttp", "server")):
+        result = _import_in_clean_process(blocked)
+
+        assert "HARNESS-BROKEN" not in result.stdout, result.stdout.strip()
+        assert "IMPORT-OK" not in result.stdout, (
+            f"{blocked} imported inside the isolation harness, so the blocker "
+            "is inert and every other test in this file measures nothing"
+        )
+        assert "blocked by test_import_isolation" in (result.stderr or ""), (
+            f"{blocked} failed to import for some reason other than the "
+            "blocker, so this proves nothing:\n"
+            + (result.stderr or result.stdout).strip()[-800:]
+        )
+
+
+def test_the_blocker_uses_a_meta_path_api_that_still_exists():
+    """`find_module` and `load_module` were removed in Python 3.12.
+
+    The subprocess check above catches an inert blocker on the interpreter it
+    runs under. This catches the same defect on 3.11, where the removed API
+    still happens to work, so the CI matrix's 3.12 leg is not the only thing
+    standing between the blocker and silence.
+    """
+    assert "def find_spec(self, name" in _HARNESS, (
+        "the import blocker no longer implements find_spec, the only meta-path "
+        "API that exists on Python 3.12+"
+    )
+    for removed in ("def find_module", "def load_module"):
+        assert removed not in _HARNESS, (
+            f"the harness is back on `{removed[4:]}`, removed in Python 3.12: "
+            "sys.meta_path skips a finder without find_spec, so the blocker "
+            "would do nothing there and this whole file would pass vacuously"
+        )
 
 
 @pytest.mark.parametrize("group", GROUP_PATHS)

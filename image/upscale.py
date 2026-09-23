@@ -2194,7 +2194,7 @@ class RadianceAIUpscale:
         info = f"SUPIR upscale: {image.shape[0]} frame(s) via ComfyUI-SUPIR"
         return out_img, info
 
-    def _load_model(self, model_name: str, sdxl_model_name: str = ""):
+    def _load_model(self, model_name: str, sdxl_model_name: str = "", auto_download: bool = True):
         """Load an upscale model with caching."""
         with _CACHE_LOCK:
             # Check cache first
@@ -2222,12 +2222,27 @@ class RadianceAIUpscale:
                 ext = ".safetensors" if "SUPIR" in model_name else ".pth"
                 target_path = os.path.join(models_dir, f"{model_name}{ext}")
 
-                if self._download_model(model_name, target_path):
+                # 3.5: this downloaded unconditionally (up to ~6 GB for SUPIR),
+                # ignoring the node's own auto_download widget and the
+                # RADIANCE_ALLOW_DOWNLOADS consent gate every other Radiance
+                # downloader honours. Both are checked now.
+                allowed = False
+                if auto_download:
+                    from radiance.core.consent import require_consent
+                    allowed = require_consent(
+                        f"upscale model {model_name}",
+                        size_mb=6000 if "SUPIR" in model_name else 64,
+                        dest=target_path, url=self.MODEL_URLS.get(model_name),
+                    )
+                if allowed and self._download_model(model_name, target_path):
                     model_path = target_path
                 else:
+                    why = ("auto_download is off" if not auto_download
+                           else "downloads need consent (set RADIANCE_ALLOW_DOWNLOADS=1)")
                     return (
                         None,
-                        f"Model {model_name} not found. Place in models/upscale_models/",
+                        f"Model {model_name} not found and not downloaded: {why}. "
+                        f"Place it in models/upscale_models/",
                     )
 
             # ALBABIT-FIX: SUPIR models are diffusion-based and cannot be identified by
@@ -2418,7 +2433,8 @@ class RadianceAIUpscale:
         # Load model if needed
         if self.model is None or self.current_model_name != model_name:
             # ALBABIT-FIX: forward sdxl_model_name to _load_supir_model via _load_model routing
-            self.model, load_info = self._load_model(model_name, sdxl_model_name=sdxl_model_name)
+            self.model, load_info = self._load_model(model_name, sdxl_model_name=sdxl_model_name,
+                                                     auto_download=bool(auto_download))
             self.current_model_name = model_name
 
             if self.model is None:

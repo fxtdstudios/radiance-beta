@@ -38,6 +38,10 @@ CORE_DEPENDENCIES: Tuple[DependencySpec, ...] = (
     DependencySpec("PIL.Image", "Pillow", "image I/O", "pip install Pillow", True),
     DependencySpec("aiohttp", "aiohttp", "async HTTP server", "pip install aiohttp", True),
     DependencySpec("OpenEXR", "OpenEXR", "EXR file support", "pip install OpenEXR", True),
+    # Required since 3.5: Read / Write colour management and every OCIO node
+    # run through it, and it is configured automatically at startup.
+    DependencySpec("PyOpenColorIO", "opencolorio", "OCIO colour management (auto-configured)",
+                   "pip install opencolorio", True),
 )
 
 # Optional packages that gate a specific, user-visible feature.
@@ -56,7 +60,6 @@ OPTIONAL_DEPENDENCIES: Tuple[DependencySpec, ...] = (
     # was declared nowhere -- without it the 32-bit float TIFF write silently
     # produced an 8-bit file.
     DependencySpec("tifffile", "tifffile", "16/32-bit TIFF read & write", "pip install tifffile"),
-    DependencySpec("PyOpenColorIO", "opencolorio", "OCIO color transforms", "pip install opencolorio"),
     DependencySpec("imageio_ffmpeg", "imageio-ffmpeg", "bundled ffmpeg for video export",
                    "pip install imageio-ffmpeg"),
 )

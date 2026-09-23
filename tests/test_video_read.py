@@ -331,7 +331,10 @@ def test_an_untagged_file_suggests_nothing():
     """Guessing is worse than asking. An untagged file gets a warning, not a
     transform applied behind the user's back."""
     assert V.suggest_transfer(V.VideoInfo(path="x.mov")) is None
-    assert V.suggest_transfer(V.VideoInfo(path="x.mov", color_transfer="bt2020-10")) is None
+    # A tag with no Radiance inverse (SMPTE 428 is DCI X'Y'Z') is not guessed.
+    assert V.suggest_transfer(V.VideoInfo(path="x.mov", color_transfer="smpte428")) is None
+    # bt2020-10 now has one (3.5).
+    assert V.suggest_transfer(V.VideoInfo(path="x.mov", color_transfer="bt2020-10")) == "Rec.2020 (BT.2020 OETF)"
 
 
 def test_every_suggestion_is_a_colour_space_the_read_node_offers():
@@ -346,21 +349,21 @@ def test_every_suggestion_is_a_colour_space_the_read_node_offers():
 
 
 def test_every_offered_colour_space_can_actually_be_decoded():
-    """The menu listed nine entries; three of them had no inverse wired up."""
-    from radiance.nodes.io.write import INPUT_COLOR_SPACES, _INPUT_DECODERS
-
-    passthrough = {"Auto / Linear (pass-through)", "ACEScg"}
-    for name in INPUT_COLOR_SPACES:
-        if name in passthrough:
-            continue
-        assert name in _INPUT_DECODERS, f"{name!r} is offered but decodes to nothing"
+    """The menu listed nine entries; three of them had no inverse wired up.
+    Since 3.5 every entry resolves through radiance.color.encodings, transfer
+    and primaries, to the working space."""
+    from radiance.nodes.io.write import INPUT_COLOR_SPACES
+    from radiance.color import encodings as enc
 
     probe = np.linspace(0.01, 0.99, 32, dtype=np.float32).reshape(1, 1, 32, 1)
     probe = np.repeat(probe, 3, axis=-1)
-    for name, fn in _INPUT_DECODERS.items():
-        out = fn(probe.copy())
-        assert out.shape == probe.shape, f"{name} changed the array shape"
-        assert np.isfinite(out).all(), f"{name} produced non-finite values"
+    for name in INPUT_COLOR_SPACES:
+        if name == "Auto / Linear (pass-through)":
+            continue
+        for working in enc.WORKING_SPACES:
+            out, _how = enc.decode(probe.copy(), name, working)
+            assert out.shape == probe.shape, f"{name} changed the array shape"
+            assert np.isfinite(out).all(), f"{name} -> {working} produced non-finite values"
 
 
 # ── the Read node itself ───────────────────────────────────────────────────

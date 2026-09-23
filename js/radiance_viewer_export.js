@@ -314,11 +314,11 @@ function install(RV) {
 
             const url = URL.createObjectURL(blob);
             const link = document.createElement('a');
-            link.download = `radiance_graded_${Date.now()}.exr`;
+            link.download = `radiance_graded_linear_${Date.now()}.exr`;
             link.href = url;
             link.click();
             URL.revokeObjectURL(url);
-            this._termLog?.('success', `[Export] Saved 32-bit graded EXR: ${result.width}\u00D7${result.height}`);
+            this._termLog?.('success', `[Export] Saved 32-bit graded EXR (scene-linear, ${this.sourceTag?.colorspace || 'Linear Rec.709'} primaries): ${result.width}\u00D7${result.height}`);
             return;
         }
 
@@ -345,7 +345,19 @@ function install(RV) {
         link.click();
     };
 
-    RV.prototype._encodeEXR32 = function(pixels, width, height) {
+    // 3.5.0: primaries for the EXR "chromaticities" attribute, by the OCIO
+    // colour space the node tagged the source with. The graded EXR carried
+    // no colour metadata, so Nuke/Resolve could only guess its gamut.
+    const EXR_CHROMA = {
+        'Linear Rec.709 (sRGB)': [0.64, 0.33, 0.30, 0.60, 0.15, 0.06, 0.3127, 0.3290],
+        'sRGB Encoded Rec.709 (sRGB)': [0.64, 0.33, 0.30, 0.60, 0.15, 0.06, 0.3127, 0.3290],
+        'Linear Rec.2020': [0.708, 0.292, 0.170, 0.797, 0.131, 0.046, 0.3127, 0.3290],
+        'Linear P3-D65': [0.680, 0.320, 0.265, 0.690, 0.150, 0.060, 0.3127, 0.3290],
+        'ACEScg': [0.713, 0.293, 0.165, 0.830, 0.128, 0.044, 0.32168, 0.33767],
+        'ACES2065-1': [0.7347, 0.2653, 0.0, 1.0, 0.0001, -0.0770, 0.32168, 0.33767],
+    };
+
+    RV.prototype._encodeEXR32 = function(pixels, width, height, colorspace = null) {
         if (!pixels || pixels.length < width * height * 4) return null;
 
         const nCh = 4;
@@ -389,7 +401,12 @@ function install(RV) {
             headerParts.push(n, t, sizeBytes, valueBytes);
         };
 
+        const chroma = EXR_CHROMA[colorspace || this.sourceTag?.colorspace] || EXR_CHROMA['Linear Rec.709 (sRGB)'];
+        const chromaBytes = new Uint8Array(32);
+        const chromaView = new DataView(chromaBytes.buffer);
+        chroma.forEach((v, i) => chromaView.setFloat32(i * 4, v, true));
         writeAttr('channels', 'chlist', channelsValue);
+        writeAttr('chromaticities', 'chromaticities', chromaBytes);
         writeAttr('compression', 'compression', new Uint8Array([0]));
 
         const dwBytes = new Uint8Array(16);

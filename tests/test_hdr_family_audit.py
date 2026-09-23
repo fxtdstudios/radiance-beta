@@ -72,38 +72,3 @@ class TestPrepareFeatherAlignment:
         assert m.max() == 1.0 and m[0, 48, 48] == 1.0
 
 
-class TestFastVaeTiledBlend:
-    """Tiled decode butt-joined tile interiors; now cosine-blended. With a
-    decoder that is a pure crop-consistent function, tiled output must equal
-    untiled output — the blend weights normalise to 1 everywhere."""
-
-    def _run(self, tiled):
-        fast_vae = importlib.import_module("radiance.fast_vae")
-
-        class _IdentityDecoder(torch.nn.Module):
-            n_upsample = 0        # spatial_scale = 1: output size == input size
-            device = torch.device("cpu")
-
-            def forward(self, z):
-                # 3-channel deterministic function of position-independent input
-                return z[:, :3] * 0.5 + 0.25
-
-        latent = torch.arange(1 * 4 * 64 * 64, dtype=torch.float32)
-        latent = (latent.view(1, 4, 64, 64) / latent.max())
-        return fast_vae.decode_to_linear_realtime(
-            latent, _IdentityDecoder(),
-            precision="fp32",
-            tiled=tiled, tile_size=32, overlap=8,
-            return_log_coded=True,
-        )
-
-    def test_tiled_matches_untiled(self):
-        try:
-            whole = self._run(tiled=False)
-            tiled = self._run(tiled=True)
-        except TypeError as exc:
-            pytest.skip(f"decode_to_linear_realtime signature differs: {exc}")
-        err = (whole - tiled).abs().max().item()
-        assert err < 1e-3, (
-            f"tiled and untiled decode disagree by {err:.5f} — blend weights "
-            "do not normalise, seams will be visible")

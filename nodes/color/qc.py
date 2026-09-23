@@ -85,21 +85,26 @@ def _evaluate_policy(stats: Dict[str, float], policy: Dict[str, Any],
     def _viol(rule: str, actual: Any, limit: Any, severity: str = "error"):
         violations.append({"rule": rule, "actual": actual, "limit": limit, "severity": severity})
 
+    # Peak was only checked for policies under 200 nits, so an HDR policy's
+    # max_peak_nits was never enforced. 1.0 = 100 nits (BT.1886 reference).
     max_nits = float(policy.get("max_peak_nits", 1000.0))
     peak_nits_approx = stats["peak"] * 100.0
-    if max_nits < 200 and peak_nits_approx > max_nits:
+    if peak_nits_approx > max_nits:
         _viol("max_peak_nits", f"{peak_nits_approx:.1f} nits", f"{max_nits:.0f} nits")
 
-    if stats["clipping"] > float(policy.get("max_clipping", 0.01)):
-        _viol("max_clipping", f"{stats['clipping']:.2%}", f"{policy['max_clipping']:.2%}")
-    if stats["black_crush"] > float(policy.get("max_black_crush", 0.05)):
-        _viol("max_black_crush", f"{stats['black_crush']:.2%}", f"{policy['max_black_crush']:.2%}")
-    if stats["mean_luma"] < float(policy.get("min_luma", 0.0)):
-        _viol("min_luma", f"{stats['mean_luma']:.4f}", f"{policy['min_luma']:.4f}", "warning")
-    if stats["mean_luma"] > float(policy.get("max_luma", 1.0)):
-        _viol("max_luma", f"{stats['mean_luma']:.4f}", f"{policy['max_luma']:.4f}", "warning")
-    if stats["mean_sat"] > float(policy.get("max_saturation", 1.0)):
-        _viol("max_saturation", f"{stats['mean_sat']:.4f}", f"{policy['max_saturation']:.4f}")
+    lim = {k: float(policy.get(k, d)) for k, d in (
+        ("max_clipping", 0.01), ("max_black_crush", 0.05), ("min_luma", 0.0),
+        ("max_luma", 1.0), ("max_saturation", 1.0))}
+    if stats["clipping"] > lim["max_clipping"]:
+        _viol("max_clipping", f"{stats['clipping']:.2%}", f"{lim['max_clipping']:.2%}")
+    if stats["black_crush"] > lim["max_black_crush"]:
+        _viol("max_black_crush", f"{stats['black_crush']:.2%}", f"{lim['max_black_crush']:.2%}")
+    if stats["mean_luma"] < lim["min_luma"]:
+        _viol("min_luma", f"{stats['mean_luma']:.4f}", f"{lim['min_luma']:.4f}", "warning")
+    if stats["mean_luma"] > lim["max_luma"]:
+        _viol("max_luma", f"{stats['mean_luma']:.4f}", f"{lim['max_luma']:.4f}", "warning")
+    if stats["mean_sat"] > lim["max_saturation"]:
+        _viol("max_saturation", f"{stats['mean_sat']:.4f}", f"{lim['max_saturation']:.4f}")
     if policy.get("gamut_check") and stats["gamut_violation"] > 0.001:
         _viol("gamut_out_of_gamut", f"{stats['gamut_violation']:.2%}", "0%", "warning")
     for key in policy.get("require_metadata", []):
@@ -415,7 +420,9 @@ class RadiancePolicyGuard:
     RETURN_NAMES = ("image", "passed", "data1", "data2", "score")
     FUNCTION = "run"
     CATEGORY = "FXTD STUDIOS/Radiance/◎ QC & Debug"
-    DESCRIPTION = "Enforce delivery policy constraints (legal range, gamut, loudness)."
+    DESCRIPTION = ("Check every frame against a delivery policy (peak nits, clipping, black "
+                   "crush, luma, saturation, P3 gamut, required metadata). Reports the worst "
+                   "frame. Picture only: there is no audio input, so no loudness check.")
 
     def run(self, mode: str = "Guard", preset: str = "Broadcast SDR", policy_file: str = "",
             custom_max_peak_nits: float = 1000.0, custom_max_clipping: float = 0.01,
@@ -473,10 +480,18 @@ class RadiancePolicyGuard:
                 meta_keys.append(pair)
 
         arr = image.detach().cpu().float().numpy()
-        if arr.ndim == 4:
-            arr = arr[0]
-
-        stats = _policy_analyse(arr)
+        if arr.ndim == 3:
+            arr = arr[None]
+        # Every frame, worst case per metric. Only frame 0 used to be read, so
+        # a clip that clipped from frame 2 on passed.
+        per_frame = [_policy_analyse(f) for f in arr]
+        worst = {"peak": max, "min": min, "clipping": max, "black_crush": max,
+                 "mean_sat": max, "gamut_violation": max}
+        stats = {k: fn(p[k] for p in per_frame) for k, fn in worst.items()}
+        lumas = [p["mean_luma"] for p in per_frame]
+        stats["mean_luma"] = max(lumas) if max(lumas) > float(pol.get("max_luma", 1.0)) else min(lumas)
+        stats["frames_checked"] = len(per_frame)
+        stats["worst_clipping_frame"] = int(np.argmax([p["clipping"] for p in per_frame]))
         passed, violations, score = _evaluate_policy(stats, pol, meta_keys)
 
         report = {"passed": passed, "score": score, "policy": pol.get("description", "Custom"),

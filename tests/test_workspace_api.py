@@ -2007,7 +2007,16 @@ def test_render_thumb_png_tonemaps_float_input(ws):
     import numpy as np
     src = ws.inp / "hdr.exr"
     hdr = np.full((8, 8, 3), 100.0, dtype="float32")
-    if not cv2.imwrite(str(src), hdr):
+    # An OpenCV built without OPENEXR support does not return False here, it
+    # raises "could not find a writer for the specified extension".  The old
+    # guard only handled the falsy return, so on such a build this test failed
+    # for a reason that says nothing about Radiance.  Skip on both shapes, and
+    # name the build, so the reason is readable in the run output.
+    try:
+        wrote = cv2.imwrite(str(src), hdr)
+    except cv2.error as exc:
+        pytest.skip(f"this OpenCV build cannot write EXR: {exc.err or exc}")
+    if not wrote:
         pytest.skip("this OpenCV build cannot write EXR")
 
     png = ws.m._render_thumb_png(src)

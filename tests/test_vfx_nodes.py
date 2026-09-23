@@ -25,25 +25,29 @@ from radiance.nodes.vfx.roto import (
 )
 from radiance.core.param_memory import RadianceParamHistoryTracker
 
+def test_sam_nodes_are_hidden_and_refuse_to_pretend():
+    # 3.5.0 ships no SAM runtime. The two nodes stay registered so saved
+    # graphs open, are hidden from the menu, and fail loudly on execution
+    # instead of returning discs drawn around the click points.
+    for cls in (RadianceSAMModelLoader, RadianceSAMGenerator):
+        assert getattr(cls, "DEPRECATED", False) is True
+    with pytest.raises(RuntimeError, match="does not ship a SAM runtime"):
+        RadianceSAMModelLoader().load("sam2.1_hiera_large.pt", "cpu", False, "float32")
+    with pytest.raises(RuntimeError, match="does not ship a SAM runtime"):
+        RadianceSAMGenerator().generate(
+            image=torch.ones((1, 8, 8, 3)), sam_model={}, points="[[4, 4]]", point_labels="[1]")
+
+
+def test_linear_matting_lists_only_what_it_runs():
+    methods = RadianceLinearMatting.INPUT_TYPES()["required"]["method"][0]
+    assert methods == ["GuidedFilter"]
+
+
 def test_masking_suite():
-    # 1. Test SAM loader
-    loader = RadianceSAMModelLoader()
-    sam_model = loader.load("sam2.1_hiera_large.pt", "cpu", False, "float32")[0]
-    assert sam_model["model_name"] == "sam2.1_hiera_large.pt"
-    assert sam_model["device"] == "cpu"
-    
-    # 2. Test SAM generator
-    generator = RadianceSAMGenerator()
     image = torch.ones((2, 64, 64, 3), dtype=torch.float32)
-    mask, masked_img = generator.generate(
-        image=image,
-        sam_model=sam_model,
-        points="[[32, 32]]",
-        point_labels="[1]"
-    )
-    assert mask.shape == (2, 64, 64)
-    assert masked_img.shape == (2, 64, 64, 3)
-    
+    mask = torch.zeros((2, 64, 64), dtype=torch.float32)
+    mask[:, 16:48, 16:48] = 1.0
+
     # 3. Test Picker
     picker = RadianceMultiMaskVisualPicker()
     masks_batch = torch.ones((4, 2, 64, 64), dtype=torch.float32)
@@ -132,6 +136,23 @@ def test_inpainting_suite():
     assert smoothed_masks.shape == (2, 64, 64)
 
 
+@pytest.mark.parametrize("blend_mode", ["Linear_Laplacian", "Linear_Gaussian", "Standard"])
+def test_stitch_single_frame_every_blend_mode(blend_mode):
+    """A still is B == 1. The default Laplacian path squeezed the batch axis
+    away and then did a 4-D permute, so it raised on every single frame; the
+    suite only ever stitched a batch of two. Found by the live 3.5 run."""
+    image = torch.full((1, 64, 64, 3), 0.25)
+    mask = torch.zeros((1, 64, 64))
+    mask[:, 16:48, 16:48] = 1.0
+    crop_img, crop_mask, data = RadianceHDRCrop().apply(image, mask, 1.5, 16)
+    crop_img = crop_img * 0 + 4.0          # scene-linear, above 1.0
+    out, blend = RadianceHDRStitch().apply(image, crop_img, crop_mask, data, blend_mode, 4)
+    assert out.shape == (1, 64, 64, 3)
+    assert blend.shape == (1, 64, 64)
+    assert float(out[0, 32, 32, 0]) > 3.0, "the crop was not composited back"
+    assert float(out[0, 2, 2, 0]) == pytest.approx(0.25, abs=1e-3), "outside the mask changed"
+
+
 def test_param_history_tracker(tmp_path):
     tracker = RadianceParamHistoryTracker()
     # Override database path to temporary path for testing
@@ -185,3 +206,64 @@ def test_roto_suite():
     assert propagated.shape == (3, 64, 64)
     # Check that frame 1 received warped mask shifted by 2 pixels
     assert propagated[1, 15, 17].item() > 0.5
+
+
+def test_bezier_spline_is_not_the_polygon():
+    node = RadianceVectorMaskDraw()
+    pts = "[[16, 16], [112, 16], [112, 112], [16, 112]]"
+    poly = node.draw(128, 128, "Polygon", pts, 0.0)[0]
+    spline = node.draw(128, 128, "Bezier_Spline", pts, 0.0)[0]
+    # A closed spline through a square's corners bulges out between them:
+    # just outside the middle of the top edge is outside the polygon and
+    # inside the curve.
+    assert float(poly[0, 10, 64]) == 0.0 and float(spline[0, 10, 64]) == 1.0
+    assert float(spline[0, 64, 64]) == 1.0
+
+
+def test_mask_propagator_follows_the_motion():
+    from radiance.nodes.vfx.motion import RadianceOpticalFlow
+    H = W = 96
+    torch.manual_seed(0)
+    tex = torch.rand(24, 24)
+    imgs = torch.zeros(4, H, W, 3)
+    masks = torch.zeros(4, H, W)
+    for i in range(4):
+        x0 = 20 + 6 * i
+        imgs[i, 30:54, x0:x0 + 24, :] = tex[..., None] * 0.8 + 0.2
+        masks[i, 30:54, x0:x0 + 24] = 1
+    vec = RadianceOpticalFlow().analyze(imgs, "Medium", 1.0, False)[0]
+
+    def iou(a, b):
+        return float((a * b).sum() / (a + b - a * b).sum())
+    seed = masks.clone(); seed[1:] = 0
+    fwd = RadianceVideoMaskPropagator().propagate(seed, vec, "Forward")[0]
+    assert min(iou((fwd[i] > 0.5).float(), masks[i]) for i in range(4)) > 0.85
+    seed = masks.clone(); seed[:3] = 0
+    bwd = RadianceVideoMaskPropagator().propagate(seed, vec, "Backward")[0]
+    assert min(iou((bwd[i] > 0.5).float(), masks[i]) for i in range(4)) > 0.85
+
+
+def test_camera_sync_reads_shutter_alias_frames_and_refuses_abc(tmp_path):
+    from radiance.nodes.vfx.camera import RadianceCameraSync
+    node = RadianceCameraSync()
+    cam, fl, fs, sh = node.sync('{"focal_length": 50, "shutter": 90}', 0)
+    assert (fl, sh) == (50.0, 90) and cam["defaults_used"] == ["f_stop"]
+    anim = '{"frames": [{"focal_length": 24}, {"focal_length": 85}]}'
+    assert node.sync(anim, 1)[1] == 85.0 and node.sync(anim, 9)[1] == 85.0
+    with pytest.raises(ValueError, match="Alembic"):
+        node.sync("{}", 0, camera_file=str(tmp_path / "cam.abc"))
+    with pytest.raises(FileNotFoundError):
+        node.sync("{}", 0, camera_file=str(tmp_path / "missing.json"))
+    with pytest.raises(ValueError, match="not valid JSON"):
+        node.sync("{focal", 0)
+
+
+def test_motion_blur_conserves_energy_when_asked():
+    from radiance.nodes.vfx.motion_blur import RadianceMotionBlur
+    img = torch.full((1, 32, 32, 3), 0.1)
+    img[:, 16, 16, :] = 50.0
+    vec = torch.zeros(1, 32, 32, 3)
+    vec[..., 0] = 8.0
+    out = RadianceMotionBlur().apply(img, vec, 360.0, 9, True)[0]
+    assert abs(float(out.sum()) - float(img.sum())) / float(img.sum()) < 0.02
+    assert float(out[0, 5, 5, 0]) == pytest.approx(0.1, abs=1e-4)

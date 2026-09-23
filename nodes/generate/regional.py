@@ -45,8 +45,20 @@ def _make_area_cond(
         # c is (tensor, {dict})
         t, d = c
         new_d = dict(d)
-        # ComfyUI uses 'area' key: (height_frac, width_frac, y_frac, x_frac)
-        new_d["area"] = (h, w, y, x)
+        # ComfyUI's area tuple is only interpreted as fractions when the first
+        # element is the literal "percentage" marker: resolve_areas_and_cond_
+        # masks_multidim (comfy/samplers.py:768) checks `area[0] == "percentage"`
+        # and only then multiplies by the latent dims. ComfyUI's own
+        # ConditioningSetArea builds ("percentage", height, width, y, x)
+        # (nodes.py:224), and that is the form required here.
+        #
+        # DEFECT: this used to write a bare (h, w, y, x) of floats in [0,1].
+        # Without the marker the floats fell straight through to
+        # get_area_and_mult, where input_x.narrow(i + 2, 0.0, 0.5) raises
+        # "TypeError: narrow(): argument 'start' must be int, not float".
+        # Both RadianceRegionalPrompt and RadianceRegionalGrid were therefore
+        # non-functional at stock defaults, on ComfyUI 0.32.0 and 0.36.0 alike.
+        new_d["area"] = ("percentage", h, w, y, x)
         new_d["strength"] = strength
         new_d["set_area_to_bounds"] = False
         out.append((t, new_d))
@@ -120,10 +132,9 @@ class RadianceRegionalPrompt:
     RETURN_TYPES = ("CONDITIONING", "STRING")
     RETURN_NAMES = ("conditioning", "region_info")
 
-    # Importance: For IP-Adapter, we inject the image embedding into the region
-    # conditioning via the 'cross_attn_controlnet' key that ComfyUI's
-    # IPAdapterApply node uses. This is compatible with IPAdapterPlus and the
-    # built-in IP-Adapter hooks in ComfyUI >=0.2.0 via the 'ipadapter' key.
+    # ip_image / ip_weight are accepted for graph compatibility only and are
+    # ignored with a warning. See the note in apply(): IP-Adapter is a model
+    # patch, not a conditioning key, so no CONDITIONING node can enable it.
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -163,7 +174,8 @@ class RadianceRegionalPrompt:
                     "default": "Additive",
                     "tooltip": (
                         "Additive: region added on top of global (default, safe). "
-                        "Replace: region replaces global in its area."
+                        "Replace: region replaces global in its area; the global still "
+                        "applies outside it (masked)."
                     ),
                 }),
             },
@@ -173,10 +185,11 @@ class RadianceRegionalPrompt:
                 }),
                 "ip_image": ("IMAGE", {
                     "tooltip": (
-                        "Optional IP-Adapter reference image for this region. "
-                        "When connected, the image's visual features are injected into "
-                        "the region conditioning alongside the text prompt. "
-                        "Requires an IP-Adapter-enabled model hook to be active."
+                        "IGNORED. Kept so existing graphs still load. IP-Adapter is a "
+                        "model-side attention patch, not a conditioning key, so it "
+                        "cannot be enabled from this node. Apply an IPAdapter "
+                        "loader/apply node to the MODEL before the sampler instead. "
+                        "Connecting this logs a warning and changes nothing."
                     ),
                 }),
                 "ip_weight": ("FLOAT", {
@@ -185,8 +198,8 @@ class RadianceRegionalPrompt:
                     "max": 1.5,
                     "step": 0.05,
                     "tooltip": (
-                        "Strength of the IP-Adapter image influence for this region. "
-                        "0 = text-only, 1 = equal image+text, >1 = image-dominant."
+                        "IGNORED. See ip_image. Set the weight on the IPAdapter node "
+                        "that patches the MODEL."
                     ),
                 }),
             },
@@ -225,8 +238,26 @@ class RadianceRegionalPrompt:
 
         # Build conditionings
         if merge_mode == "Replace":
-            # Region replaces the global in its area — do not include global in output
-            result = _make_area_cond(region_cond, x, y, w, h, region_strength)
+            # Region replaces the global in its area only. The global is kept
+            # everywhere else through a cond mask with the region cut out; it
+            # used to be dropped from the whole frame, leaving everything
+            # outside the region with no positive conditioning at all.
+            import torch as _torch
+            res = 256
+            outside = _torch.ones((1, res, res), dtype=_torch.float32)
+            y0, y1 = int(round(y * res)), int(round((y + h) * res))
+            x0, x1 = int(round(x * res)), int(round((x + w) * res))
+            outside[:, y0:y1, x0:x1] = 0.0
+            global_out = []
+            for c in base_cond:
+                t, d = c
+                nd = dict(d)
+                nd["strength"] = global_strength
+                nd["mask"] = outside
+                nd["mask_strength"] = 1.0
+                nd["set_area_to_bounds"] = False
+                global_out.append((t, nd))
+            result = global_out + _make_area_cond(region_cond, x, y, w, h, region_strength)
         else:
             # Additive: keep global (optionally weight-adjusted) + add region on top
             global_out = []
@@ -239,64 +270,48 @@ class RadianceRegionalPrompt:
             result = global_out + region_out
 
         # ── IP-Adapter image conditioning for this region ──────────────────────
-        # The ip_image is encoded and injected into the conditioning metadata
-        # using the 'cross_attn_controlnet' key. This is the standard mechanism
-        # used by ComfyUI's IP-Adapter nodes and is compatible with IPAdapterPlus.
-        # If no ip_image is provided, nothing changes (fully backward-compatible).
+        # DEFECT: this used to crop/resize ip_image and write it into the
+        # conditioning dict under 'cross_attn_controlnet' as
+        # {"image": ..., "weight": ..., "type": "ip_adapter"}, then report
+        # "ip_adapter": {"enabled": true} and log ip=True.
+        #
+        # 'cross_attn_controlnet' is a real ComfyUI key, but it is not an
+        # IP-Adapter hook and it has never been one. BaseModel.extra_conds
+        # (comfy/model_base.py, identical on 0.32.0 and 0.36.0) reads it and
+        # wraps it in comfy.conds.CONDCrossAttn, i.e. it expects a TEXT
+        # EMBEDDING tensor for a ControlNet's own cross-attention. Its only
+        # writer in ComfyUI is ControlNetInpaintingAliMamaApply-style
+        # conditioning (comfy_extras/nodes_cond.py), which stores
+        # clip.encode_from_tokens output there. Handing CONDCrossAttn a dict
+        # is at best ignored and at worst breaks conditioning batching.
+        #
+        # IP-Adapter is a MODEL patch (attention adapters injected into the
+        # UNet), not a conditioning key, so there is no shape of dict this
+        # node could write that would make it run. Rather than fake it, this
+        # now refuses the input loudly and leaves the conditioning untouched.
         ip_applied = False
+        ip_reason = None
         if ip_image is not None:
-            try:
-                # Crop ip_image to the region bbox for spatial coherence
-                # ip_image: (B, H, W, C) or (H, W, C) from ComfyUI
-                ref = ip_image
-                if ref.dim() == 4:
-                    ref = ref[0]  # (H, W, C)
-
-                H_ip, W_ip, C_ip = ref.shape
-                crop_y0 = int(y * H_ip)
-                crop_y1 = int((y + h) * H_ip)
-                crop_x0 = int(x * W_ip)
-                crop_x1 = int((x + w) * W_ip)
-                crop_y0 = max(0, crop_y0)
-                crop_y1 = max(crop_y0 + 1, min(H_ip, crop_y1))
-                crop_x0 = max(0, crop_x0)
-                crop_x1 = max(crop_x0 + 1, min(W_ip, crop_x1))
-                region_crop = ref[crop_y0:crop_y1, crop_x0:crop_x1]  # (rH, rW, C)
-
-                # Resize to standard IP-Adapter resolution (224×224)
-                import torch.nn.functional as F
-                img_bchw = region_crop.permute(2, 0, 1).unsqueeze(0).float()  # (1,C,rH,rW)
-                img_224 = F.interpolate(
-                    img_bchw, size=(224, 224), mode="bilinear", align_corners=False
-                ).squeeze(0).permute(1, 2, 0)  # (224, 224, C)
-
-                # Inject into each result conditioning entry via 'cross_attn_controlnet'
-                # This key is recognized by ComfyUI's IPAdapter hooks:
-                # https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/conds.py
-                new_result = []
-                for cond_t, cond_d in result:
-                    nd = dict(cond_d)
-                    nd["cross_attn_controlnet"] = {
-                        "image":  img_224.unsqueeze(0),   # (1, 224, 224, C)
-                        "weight": ip_weight,
-                        "type":   "ip_adapter",
-                    }
-                    new_result.append((cond_t, nd))
-                result = new_result
-                ip_applied = True
-                logger.debug(
-                    f"[RegionalPrompt] IP-Adapter image injected for region '{region_label}' "
-                    f"(crop={crop_y0}:{crop_y1},{crop_x0}:{crop_x1}  weight={ip_weight})"
-                )
-            except Exception as e:
-                logger.warning(f"[RegionalPrompt] IP-Adapter injection failed: {e}. Continuing without image.")
+            ip_reason = (
+                "IP-Adapter cannot be driven from a CONDITIONING dict. It is a "
+                "model-side attention patch, so it has to be applied to the MODEL "
+                "with an IPAdapter loader/apply node before the sampler. "
+                "ip_image and ip_weight are ignored here."
+            )
+            logger.warning(
+                "[RegionalPrompt] '%s': %s", region_label, ip_reason,
+            )
 
         region_info = json.dumps({
             "node": "RadianceRegionalPrompt",
             "label": region_label,
             "bbox": {"x": round(x, 4), "y": round(y, 4), "w": round(w, 4), "h": round(h, 4)},
             "mask_provided": mask is not None,
-            "ip_adapter": {"enabled": ip_applied, "weight": ip_weight if ip_applied else None},
+            "ip_adapter": {
+                "enabled": ip_applied,
+                "weight": ip_weight if ip_applied else None,
+                "ignored_reason": ip_reason,
+            },
             "region_strength": region_strength,
             "global_strength": global_strength,
             "merge_mode": merge_mode,

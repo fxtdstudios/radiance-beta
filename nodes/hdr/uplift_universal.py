@@ -11,35 +11,44 @@ Pipeline
    inverse tone mapping    EMA-smoothed across frames so video doesn't flicker.
 3. Highlight expansion   — hue-preserving luminance expansion above the knee
                            up to peak_nits, hard shoulder controlled by gamma.
-4. Output transform      — scene-linear Rec.709, ACES2065-1/AP0 for EXR,
-                           or Rec.2020 PQ / HLG delivery encoding.
+4. Output transform      — linear Rec.709, ACES2065-1/AP0 for EXR, or
+                           Rec.2020 PQ / HLG delivery encoding. Every output
+                           follows BT.2408: linear 1.0 = reference white
+                           (203 nits default), the convention HDR Encode,
+                           Write and OpenColorIO's Rec.2100 displays share.
 
 Works on IMAGE tensors of shape [B,H,W,C]; a video is simply a batch of
 frames, so the same node handles stills, batches, and footage. B == 1
 automatically behaves as a still image (temporal smoothing is a no-op).
 
-Pure GPU math by default — no checkpoints required. The dedicated Recover
-node requires a VAE and trained RUDRA checkpoint. Universal exposes Expand,
-Recover, and Hybrid modes; its learned modes reconstruct only clipped
-highlights/crushed shadows and safely fall back to deterministic expansion.
-Still RUDRA applies to single frames. Ordered video batches use a separate
-Phase 3 motion-aligned residual checkpoint over 5/7/9 adjacent RGB frames;
-missing or incompatible temporal weights fall back to deterministic expansion.
+Pure GPU math by default — no checkpoints required. The learned path is
+RUDRA in its pixel form: a direct SDR-pixel → scene-linear network
+(``radiance.pixel_sdr2hdr``, checkpoint ``sdr2hdr_pixel_image.pt``) for stills
+and independent frames, and the motion-aligned temporal residual model
+(``radiance.temporal_rudra``) over 5/7/9 adjacent RGB frames for ordered
+video. Neither needs a VAE. Universal exposes Expand, Recover, and Hybrid
+modes; its learned modes reconstruct only clipped highlights/crushed shadows
+and fall back to deterministic expansion when no checkpoint is installed, and
+say so in the ``report`` output. The dedicated Recover node is the same
+learned path without the deterministic fallback: it raises when it cannot
+run. The latent-space RUDRA decoders (VAE + distilled decoder) were retired
+in 3.5.0.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import List, Optional
 
 import torch
 
-from radiance.nodes.hdr.aces2 import _torch_pq_encode, _torch_hlg_encode
 from radiance.color.ops import (
     M_BT2020_TO_REC709,
     M_REC709_TO_ACES2065_1,
     M_REC709_TO_BT2020,
     apply_matrix_3x3,
+    linear_to_hlg_bt2100,
+    linear_to_pq_bt2408,
 )
 
 logger = logging.getLogger("radiance.nodes.hdr.uplift_universal")
@@ -75,10 +84,19 @@ def _luma(rgb: torch.Tensor) -> torch.Tensor:
 #  Core expansion math (kept as free functions so they are unit-testable)
 # ─────────────────────────────────────────────────────────────────────────────
 
-#: torch.quantile refuses inputs above 2**24 elements along the reduced axis.
-#: A single 8K frame is 33.2M pixels, so the default adaptive knee mode raised
-#: "quantile() input tensor is too large" on anything past roughly 4K -- on the
-#: node whose entire purpose is film-resolution HDR work.
+#: torch.quantile's historic size cap is on the input tensor's TOTAL element
+#: count, not on the length of the reduced axis. A single 8K frame is 33.2M
+#: pixels, so the default adaptive knee mode raised "quantile() input tensor is
+#: too large" on anything past roughly 4K -- on the node whose entire purpose is
+#: film-resolution HDR work.
+#:
+#: QUANTILE-GUARD FIX: the guard used to compare the cap against `flat.shape[1]`
+#: alone, so a 16-frame 1080p batch passed it at n = 2,073,600 and then handed
+#: torch 33,177,600 elements, twice the cap, on the adaptive-knee path that is
+#: this node's default. Compare against numel. Newer torch (2.6+) lifted the cap
+#: on CPU, which is why this never showed up in a test run on a current build;
+#: the guard still has to be right for the versions that enforce it and for any
+#: backend that reinstates it.
 _QUANTILE_MAX_ELEMS = 2 ** 24
 
 
@@ -94,7 +112,7 @@ def _row_quantile(flat: torch.Tensor, percentile: float) -> torch.Tensor:
     n = flat.shape[1]
     if n == 0:
         return flat.new_zeros((flat.shape[0],))
-    if n <= _QUANTILE_MAX_ELEMS:
+    if flat.numel() <= _QUANTILE_MAX_ELEMS:
         return torch.quantile(flat, percentile, dim=1)
     k = max(1, min(n, int(round(float(percentile) * (n - 1))) + 1))
     return torch.kthvalue(flat, k, dim=1).values
@@ -247,17 +265,34 @@ def _pixel_checkpoint_available(checkpoint_path: str) -> bool:
 
 
 def _encode_output(hdr: torch.Tensor, output_encoding: str,
-                   peak_scale: float) -> torch.Tensor:
-    """Apply the Phase 1 standards-correct mastering output transform."""
+                   peak_scale: float, white_scale: float = 1.0) -> torch.Tensor:
+    """Mastering output transform.
+
+    ``hdr`` is the internal working signal: display-linear Rec.709 with
+    1.0 == 100 nits. Every output leaves in Radiance's one convention,
+    BT.2408: linear 1.0 == reference white (``white_scale * 100`` nits), the
+    same convention HDR Encode, Write's ``hdr_reference_nits``, HDR
+    Diagnostics and OpenColorIO's Rec.2100 displays use.
+
+    3.5.0: Linear and AP0 used to leave in the internal 1.0 == 100 nit
+    units, so SDR white sat at 2.03 and a Linear EXR re-encoded to PQ by
+    HDR Encode or Write (1.0 == 203 nits) came out twice as bright as this
+    node's own PQ output. HLG used to put the mastering peak at signal 1.0,
+    which placed reference white at 69.7 % instead of BT.2408's 75 %.
+    """
+    ws = max(float(white_scale), _EPS)
+    norm = hdr / ws
+    ref_nits = ws * 100.0
     if output_encoding.startswith("PQ"):
-        delivery = apply_matrix_3x3(hdr, M_REC709_TO_BT2020).clamp(min=0.0)
-        return _torch_pq_encode(delivery)
+        delivery = apply_matrix_3x3(norm, M_REC709_TO_BT2020).clamp(min=0.0)
+        return linear_to_pq_bt2408(delivery, peak_nits=float(peak_scale) * 100.0,
+                                   reference_white_nits=ref_nits)
     if output_encoding == "HLG":
-        delivery = apply_matrix_3x3(hdr, M_REC709_TO_BT2020).clamp(min=0.0)
-        return _torch_hlg_encode((delivery / peak_scale).clamp(0.0, 1.0))
+        delivery = apply_matrix_3x3(norm, M_REC709_TO_BT2020).clamp(min=0.0)
+        return linear_to_hlg_bt2100(delivery, reference_white_nits=ref_nits)
     if output_encoding == "Linear ACES2065-1 (AP0)":
-        return apply_matrix_3x3(hdr, M_REC709_TO_ACES2065_1)
-    return hdr
+        return apply_matrix_3x3(norm, M_REC709_TO_ACES2065_1)
+    return norm
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -265,90 +300,7 @@ def _encode_output(hdr: torch.Tensor, output_encoding: str,
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _RudraRecoveryCore:
-    """Shared RUDRA execution used by Recover and Universal."""
-
-    @staticmethod
-    def _rudra_reconstruct(sdr_pixels: torch.Tensor, base_hdr: torch.Tensor,
-                           mask: torch.Tensor, vae, rudra_size: str,
-                           blend: float, peak_scale: float,
-                           model_meta: str = "") -> torch.Tensor:
-        """
-        SDR pixels → VAE encode → RUDRA decode → scene-linear reconstruction,
-        gain-matched to `base_hdr` in well-exposed regions and blended into the
-        supplied recovery mask. Raises on any failure so the owning node can
-        apply its documented error/fallback policy.
-        """
-        if base_hdr.shape[0] > 1:
-            raise RuntimeError(
-                "RUDRA reconstruction supports single frames only — video VAEs "
-                "compress time (frame counts cannot be matched 1:1) and current "
-                "video checkpoints were trained on stills."
-            )
-        import torch.nn.functional as F
-        from radiance.fast_vae import (
-            decode_to_linear_realtime,
-            load_radiance_decoder_weights,
-            resolve_rudra_model_type,
-        )
-
-        latent = vae.encode(sdr_pixels[..., :3])
-        if isinstance(latent, dict):                       # some wrappers
-            latent = latent.get("samples", next(iter(latent.values())))
-
-        model_type = resolve_rudra_model_type(latent.shape[1], latent.ndim == 5, vae, model_meta=model_meta)
-        decoder = load_radiance_decoder_weights(model_type=model_type,
-                                                model_size=rudra_size)
-        if decoder is None:
-            raise RuntimeError(f"no RUDRA checkpoint for model_type={model_type!r}")
-        decoder = decoder.to(latent.device)
-
-        scale_factor = getattr(vae, "scale_factor", None)
-        if not isinstance(scale_factor, (int, float)) or scale_factor == 0:
-            scale_factor = None                            # resolve from config
-        rec = decode_to_linear_realtime(
-            latent=latent, decoder=decoder, model_type=model_type,
-            scale_factor=scale_factor, precision="bf16",
-        ).float().to(base_hdr.device)
-        rec = torch.nan_to_num(
-            rec, nan=0.0, posinf=float(peak_scale), neginf=0.0,
-        ).clamp(min=0.0)
-
-        # VAE rounding can shift resolution — match the base exactly.
-        if rec.shape[1:3] != base_hdr.shape[1:3]:
-            rec = F.interpolate(rec.permute(0, 3, 1, 2), size=base_hdr.shape[1:3],
-                                mode="bilinear", align_corners=False
-                                ).permute(0, 2, 3, 1)
-        if rec.shape[0] != base_hdr.shape[0]:
-            raise RuntimeError(f"RUDRA frame count {rec.shape[0]} != input {base_hdr.shape[0]}")
-
-        # Gain-match in well-exposed, non-highlight regions so the two paths
-        # agree on exposure before blending.
-        base_l, rec_l = _luma(base_hdr), _luma(rec)
-        ref = (mask < 0.05) & (base_l > 0.05) & (base_l < 0.8)
-        if ref.any():
-            gain = (base_l[ref].median() / rec_l[ref].median().clamp(min=_EPS)).clamp(0.1, 10.0)
-            rec = rec * gain
-
-        # Learned inverse-log reconstruction can contain extreme radiance
-        # values. Constrain it before blending so peak_nits remains a real
-        # mastering limit, not merely a hint used by the deterministic path.
-        rec = _soft_peak_limit(rec, peak_scale)
-        w = (mask * float(blend)).unsqueeze(-1)
-        # Limit the LEARNED signal only, then blend -- do not re-limit the
-        # result. Two reasons:
-        #   1. _soft_peak_limit is a tanh compressor, so it is not idempotent.
-        #      Applying it to `rec` and again to the blend compounded the
-        #      compression and pulled highlights below the peak they should sit
-        #      at.
-        #   2. Re-limiting the blend altered pixels where the mask is zero,
-        #      contradicting this node's documented contract that pixels
-        #      outside the recovery masks are preserved exactly.
-        # The peak guarantee still holds: luma is linear in RGB and the blend is
-        # convex, so a blend of two signals that each respect `peak_scale` also
-        # respects it. Callers must pass a `base_hdr` that already does -- every
-        # in-tree caller does (deterministic expansion tops out at peak_scale,
-        # and decoded SDR tops out at 1.0).
-        return base_hdr * (1.0 - w) + rec * w
+    """Shared learned-recovery execution used by Recover and Universal."""
 
     @staticmethod
     def _temporal_reconstruct(
@@ -370,9 +322,13 @@ class _RudraRecoveryCore:
             raise RuntimeError("temporal RUDRA requires at least five ordered frames")
         model = load_temporal_rudra_weights(checkpoint_path, source.device)
         if model is None:
+            from radiance.model.paths import describe_search
+            from radiance.temporal_rudra import (
+                TEMPORAL_CHECKPOINT_ENV, TEMPORAL_CHECKPOINT_PATTERNS,
+            )
             raise RuntimeError(
-                "no Phase 3 temporal checkpoint; set RADIANCE_TEMPORAL_RUDRA "
-                "or place temporal_rudra_residual_ema.safetensors in models/radiance"
+                "no temporal checkpoint installed; expected "
+                + describe_search(TEMPORAL_CHECKPOINT_PATTERNS[:1], TEMPORAL_CHECKPOINT_ENV)
             )
         out, h_conf, s_conf = recover_temporal_residual(
             source, deterministic, highlight_mask, shadow_mask, model,
@@ -412,9 +368,13 @@ class _RudraRecoveryCore:
         ).clamp(min=0.0)
         recovered_709 = _soft_peak_limit(recovered_709, peak_scale)
         weight = (mask * float(blend)).unsqueeze(-1)
-        # Limit the learned signal only — see the note in _rudra_reconstruct.
-        # Re-limiting the blend double-compressed highlights and modified
-        # pixels the mask had excluded.
+        # Limit the LEARNED signal only, then blend -- do not re-limit the
+        # result. _soft_peak_limit is a tanh compressor and not idempotent, so
+        # limiting twice pulled highlights below the peak; and re-limiting the
+        # blend altered pixels where the mask is zero, breaking the contract
+        # that pixels outside the recovery masks are preserved exactly. The
+        # peak guarantee still holds: the blend is convex and both inputs
+        # respect peak_scale.
         return base_hdr * (1.0 - weight) + recovered_709 * weight
 
 
@@ -423,19 +383,23 @@ class _RudraRecoveryCore:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RadianceSDRToHDRRecover(_RudraRecoveryCore):
-    """Recover clipped highlights and crushed shadows with a RUDRA decoder.
+    """Recover clipped highlights and crushed shadows with the RUDRA pixel model.
 
-    Unlike deterministic expansion, this node is explicitly reconstructive.
-    Still recovery requires a VAE/RUDRA checkpoint. Video recovery uses the
-    Phase 3 temporal residual checkpoint without a VAE. Both change pixels
-    only inside the returned recovery masks.
+    Unlike deterministic expansion, this node is explicitly reconstructive and
+    it does not fall back: with no checkpoint installed it raises, so a graph
+    that asks for learned recovery never silently ships expansion. Stills and
+    independent frames run the direct-pixel network; ordered video (5+
+    frames, batch_mode "Video Frames") runs the motion-aligned temporal
+    residual model when its checkpoint is installed and otherwise the pixel
+    model per frame. Pixels outside the recovery masks are preserved exactly.
     """
 
     CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = (
         "Learned SDR→HDR reconstruction for clipped highlights and crushed "
-        "shadows. Uses still RUDRA for images or motion-aligned temporal RUDRA "
-        "for video; pixels outside the recovery masks are preserved exactly."
+        "shadows (RUDRA pixel model, temporal residual model for video). No "
+        "VAE needed; raises instead of falling back when no checkpoint is "
+        "installed. Pixels outside the recovery masks are preserved exactly."
     )
     FUNCTION = "recover"
     RETURN_TYPES = ("IMAGE", "MASK", "MASK", "MASK", "MASK")
@@ -446,7 +410,7 @@ class RadianceSDRToHDRRecover(_RudraRecoveryCore):
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE", {"tooltip": "SDR image or ordered 5+ frame video batch."}),
+                "image": ("IMAGE", {"tooltip": "SDR still, image batch, or ordered video frames."}),
                 "inverse_oetf": (["sRGB", "Rec.709", "Gamma 2.2", "Gamma 2.4", "None"], {"default": "sRGB"}),
                 "peak_nits": ("FLOAT", {"default": 1000.0, "min": 200.0, "max": 10000.0, "step": 50.0}),
                 "highlight_threshold": ("FLOAT", {"default": 0.98, "min": 0.8, "max": 0.999, "step": 0.001,
@@ -456,30 +420,47 @@ class RadianceSDRToHDRRecover(_RudraRecoveryCore):
                 "highlight_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "shadow_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "output_encoding": (["Linear", "Linear ACES2065-1 (AP0)", "PQ (HDR10)", "HLG"], {"default": "Linear"}),
-                "rudra_size": (["rudra_turbo", "rudra_full"], {"default": "rudra_turbo"}),
             },
             "optional": {
-                "vae": ("VAE", {"tooltip": "Required only for single-frame RUDRA recovery."}),
-                "model_meta": ("STRING", {"default": "", "forceInput": True,
-                    "tooltip": "RadianceUnifiedLoader model_meta for exact model-family resolution."}),
+                "batch_mode": (["Independent Images", "Video Frames"], {"default": "Independent Images",
+                    "tooltip": "Video Frames treats the batch as an ordered clip and prefers the temporal model."}),
+                "pixel_checkpoint": ("STRING", {"default": "",
+                    "tooltip": "Direct-pixel .pt checkpoint. Empty searches models/radiance and RADIANCE_SDR2HDR_PIXEL."}),
+                "pixel_tile_size": ("INT", {"default": 512, "min": 128, "max": 2048, "step": 64}),
+                "pixel_tile_overlap": ("INT", {"default": 64, "min": 0, "max": 512, "step": 16}),
                 "temporal_window": ([5, 7, 9], {"default": 5,
-                    "tooltip": "Adjacent frames used by the Phase 3 temporal residual model."}),
+                    "tooltip": "Adjacent frames used by the temporal residual model."}),
                 "temporal_checkpoint": ("STRING", {"default": "",
-                    "tooltip": "Optional Phase 3 checkpoint path. Empty uses RADIANCE_TEMPORAL_RUDRA or models/radiance."}),
+                    "tooltip": "Optional temporal checkpoint path. Empty uses RADIANCE_TEMPORAL_RUDRA or models/radiance."}),
+                "reference_white_nits": ("FLOAT", {
+                    "default": 203.0, "min": 100.0, "max": 1000.0, "step": 1.0,
+                    "tooltip": (
+                        "Output convention: linear 1.0 = this many nits (BT.2408 reference "
+                        "white, 203). The same value HDR Encode and Write use, so Linear "
+                        "output re-encodes to the same PQ/HLG this node writes. Recover "
+                        "keeps unclipped pixels at their SDR display level (SDR 1.0 = 100 "
+                        "nits); only the recovered highlights and shadows change."
+                    ),
+                }),
             },
         }
 
-    # Runs VAE encode + a temporal model. Its sibling convert() has carried this guard
-    # all along; without it the whole encoder activation stack is retained as an
-    # autograd graph -- several GB of VRAM on a 4K frame.
     @torch.no_grad()
     def recover(self, image: torch.Tensor, inverse_oetf: str,
                 peak_nits: float, highlight_threshold: float,
                 shadow_threshold: float, highlight_strength: float,
                 shadow_strength: float, output_encoding: str,
-                rudra_size: str, vae=None, model_meta: str = "",
-                temporal_window: int = 5, temporal_checkpoint: str = ""):
-        img = torch.nan_to_num(image.clone().float(), nan=0.0, posinf=1.0, neginf=0.0)
+                batch_mode: str = "Independent Images",
+                pixel_checkpoint: str = "", pixel_tile_size: int = 512,
+                pixel_tile_overlap: int = 64,
+                temporal_window: int = 5, temporal_checkpoint: str = "",
+                reference_white_nits: float = 203.0,
+                **_legacy):
+        # `_legacy` swallows rudra_size / vae / model_meta from pre-3.5 graphs.
+        if _legacy.get("vae") is not None:
+            logger.info("[SDR → HDR Recover] a VAE is connected but no longer used; "
+                        "recovery runs on the pixel model.")
+        img = torch.nan_to_num(image.float(), nan=0.0, posinf=1.0, neginf=0.0)
         if img.dim() == 3:
             img = img.unsqueeze(0)
         if img.shape[0] == 0:                   # empty batch → empty result
@@ -490,12 +471,15 @@ class RadianceSDRToHDRRecover(_RudraRecoveryCore):
         lin = _inverse_oetf(rgb.clamp(0.0, 1.0), inverse_oetf)
         highlights = _clipped_highlight_mask(rgb.clamp(0.0, 1.0), highlight_threshold)
         shadows = _shadow_mask(_luma(lin).clamp(0.0, 1.0), shadow_threshold)
-        recovery_mask = torch.maximum(
-            highlights * float(highlight_strength),
-            shadows * float(shadow_strength),
-        )
-        try:
-            if img.shape[0] > 1:
+        h_weighted = highlights * float(highlight_strength)
+        s_weighted = shadows * float(shadow_strength)
+        recovery_mask = torch.maximum(h_weighted, s_weighted)
+
+        errors: List[str] = []
+        hdr = None
+        h_conf = s_conf = None
+        if img.shape[0] >= 5 and batch_mode == "Video Frames":
+            try:
                 knees = _adaptive_knees(_luma(lin).clamp(0.0, 1.0), 0.75, 0.85)
                 expanded_luma = _soft_knee_expand(
                     _luma(lin).clamp(0.0, 1.0), knees, peak_scale, 1.6,
@@ -504,27 +488,34 @@ class RadianceSDRToHDRRecover(_RudraRecoveryCore):
                     expanded_luma / _luma(lin).clamp(min=_EPS)
                 ).unsqueeze(-1)
                 hdr, h_conf, s_conf = self._temporal_reconstruct(
-                    lin, deterministic,
-                    highlights * float(highlight_strength),
-                    shadows * float(shadow_strength),
+                    lin, deterministic, h_weighted, s_weighted,
                     peak_scale, int(temporal_window), str(temporal_checkpoint), True,
                 )
-            else:
-                if vae is None:
-                    raise RuntimeError("single-frame recovery requires a VAE")
-                hdr = self._rudra_reconstruct(
-                    rgb, lin, recovery_mask, vae, str(rudra_size), 1.0,
-                    peak_scale, model_meta=model_meta,
+            except Exception as exc:  # noqa: BLE001 — try the pixel model next
+                errors.append(f"temporal model: {exc}")
+                hdr = None
+        if hdr is None:
+            try:
+                mode = ("all" if highlight_strength > 0 and shadow_strength > 0
+                        else "shadows" if shadow_strength > 0 else "highlights")
+                hdr = self._pixel_reconstruct(
+                    lin, lin, recovery_mask, str(pixel_checkpoint), 1.0,
+                    peak_scale, int(pixel_tile_size), int(pixel_tile_overlap),
+                    mode, 1.0,
                 )
-                h_conf = highlights * float(highlight_strength)
-                s_conf = shadows * float(shadow_strength)
-        except Exception as exc:  # noqa: BLE001 — convert to an actionable node error
-            raise RuntimeError(
-                "SDR → HDR Recover needs a compatible trained RUDRA checkpoint; "
-                f"recovery could not run: {exc}"
-            ) from exc
+                h_conf, s_conf = h_weighted, s_weighted
+            except Exception as exc:  # noqa: BLE001 — convert to an actionable node error
+                errors.append(f"pixel model: {exc}")
+                raise RuntimeError(
+                    "SDR → HDR Recover could not run the learned path: "
+                    + "; ".join(errors)
+                    + ". Install sdr2hdr_pixel_image.pt in models/radiance (or set "
+                    "RADIANCE_SDR2HDR_PIXEL), or use SDR → HDR Universal, which "
+                    "falls back to deterministic expansion."
+                ) from exc
 
-        out = _encode_output(hdr, output_encoding, peak_scale)
+        white_scale = min(max(float(reference_white_nits), 100.0) / 100.0, peak_scale)
+        out = _encode_output(hdr, output_encoding, peak_scale, white_scale)
         if extra.shape[-1] > 0:
             out = torch.cat([out, extra], dim=-1)
         return (out, highlights, shadows, h_conf, s_conf)
@@ -540,9 +531,10 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
     CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
     DESCRIPTION = (
         "SDR→HDR orchestrator: deterministic Expand, learned Recover, or "
-        "Hybrid. Recover and Hybrid need a learned checkpoint or a RUDRA VAE — "
-        "without one they fall back to Expand, and the report output says so. "
-        "Professional output transforms and separate highlight/shadow masks."
+        "Hybrid. Recover and Hybrid run the RUDRA pixel model (or the temporal "
+        "model on ordered video); with no checkpoint installed they fall back "
+        "to Expand, and the report output says so. Professional output "
+        "transforms and separate highlight/shadow masks. No VAE needed."
     )
     FUNCTION = "convert"
     RETURN_TYPES = ("IMAGE", "MASK", "MASK", "MASK", "MASK", "STRING")
@@ -571,7 +563,9 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
                         "shirt, a page, a cloud. Headroom above it belongs to "
                         "speculars. Raise it for a brighter grade; setting it to "
                         "peak_nits restores the pre-3.4 behaviour of slamming "
-                        "SDR white to the display peak."
+                        "SDR white to the display peak. Also the output unit: "
+                        "Linear/AP0 1.0 = this many nits, matching HDR Encode "
+                        "and Write's hdr_reference_nits."
                     ),
                 }),
                 "knee_mode": (["adaptive", "manual"], {"default": "adaptive"}),
@@ -589,12 +583,13 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
                 "output_encoding": (["Linear", "Linear ACES2065-1 (AP0)", "PQ (HDR10)", "HLG"], {"default": "Linear"}),
             },
             "optional": {
-                "vae": ("VAE", {"tooltip": "Optional RUDRA recovery VAE. Recover/Hybrid falls back to Expand when unavailable."}),
-                "rudra_size": (["rudra_turbo", "rudra_full"], {"default": "rudra_turbo"}),
-                "rudra_blend": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "model_meta": ("STRING", {"default": "", "forceInput": True}),
+                "rudra_blend": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "How much of the learned reconstruction is blended into the recovery masks. 0 disables it."}),
                 "batch_mode": (["Independent Images", "Video Frames"], {"default": "Independent Images"}),
-                "shadow_threshold": ("FLOAT", {"default": 0.05, "min": 0.001, "max": 0.5, "step": 0.005}),
+                "shadow_threshold": ("FLOAT", {"default": 0.05, "min": 0.001, "max": 0.5, "step": 0.005,
+                    "tooltip": "Linear-luma level below which shadows count as crushed. Shapes the "
+                               "shadow_mask output; changes the image only when pixel_recovery_mode "
+                               "is 'all' or 'shadows'."}),
                 "processing_mode": (["Expand", "Recover", "Hybrid"], {"default": "Hybrid",
                     "tooltip": "Expand: deterministic only. Recover: learned reconstruction only. Hybrid: expansion plus masked learned recovery."}),
                 "highlight_threshold": ("FLOAT", {"default": 0.98, "min": 0.8, "max": 0.999, "step": 0.001,
@@ -603,8 +598,9 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
                     "tooltip": "Adjacent video frames used by temporal RUDRA."}),
                 "temporal_checkpoint": ("STRING", {"default": "",
                     "tooltip": "Optional Phase 3 checkpoint path. Empty uses the configured default."}),
-                "learned_backend": (["Auto", "Direct Pixel", "Legacy RUDRA"], {"default": "Auto",
-                    "tooltip": "Auto prefers temporal video recovery, then the direct-pixel model, then legacy VAE RUDRA."}),
+                "learned_backend": (["Auto", "Direct Pixel", "Temporal"], {"default": "Auto",
+                    "tooltip": "Auto: temporal model on ordered video when installed, else the direct-pixel model. "
+                               "Direct Pixel: pixel model per frame. Temporal: temporal model only (video, 5+ frames)."}),
                 "pixel_checkpoint": ("STRING", {"default": "",
                     "tooltip": "Direct-pixel .pt checkpoint. Empty searches models/radiance and RADIANCE_SDR2HDR_PIXEL."}),
                 "pixel_tile_size": ("INT", {"default": 512, "min": 128, "max": 2048, "step": 64}),
@@ -625,8 +621,8 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
                 # caller — every existing test, and any script driving the node
                 # directly — binds by position.
                 reference_white_nits: float = 203.0,
-                vae=None, rudra_size: str = "rudra_turbo", rudra_blend: float = 1.0,
-                model_meta: str = "", batch_mode: str = "Independent Images",
+                rudra_blend: float = 1.0,
+                batch_mode: str = "Independent Images",
                 shadow_threshold: float = 0.05,
                 processing_mode: str = "Hybrid",
                 highlight_threshold: float = 0.98,
@@ -637,10 +633,19 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
                 pixel_tile_size: int = 512,
                 pixel_tile_overlap: int = 64,
                 pixel_recovery_mode: str = "highlights",
-                pixel_strength: float = 1.0):
-        img = torch.nan_to_num(
-            image.clone().float(), nan=0.0, posinf=1.0, neginf=0.0,
-        )
+                pixel_strength: float = 1.0,
+                **_legacy):
+        # `_legacy` swallows vae / rudra_size / model_meta from pre-3.5 graphs,
+        # and "Legacy RUDRA" as a learned_backend value maps to Auto below.
+        if _legacy.get("vae") is not None:
+            logger.info("[SDR→HDR Universal] a VAE is connected but no longer used; "
+                        "learned recovery runs on the pixel model.")
+        # RESIDENT-COPY FIX: the `.clone()` here was a whole extra full-size
+        # frame batch, and it bought nothing -- out-of-place nan_to_num already
+        # returns a new tensor, so the caller's IMAGE is never written through.
+        # On a 1080p frame that is 25 MB of the roughly 125 MB this node used to
+        # keep resident across five simultaneous copies.
+        img = torch.nan_to_num(image.float(), nan=0.0, posinf=1.0, neginf=0.0)
         if img.dim() == 3:                      # single HWC frame → batch of 1
             img = img.unsqueeze(0)
         if img.shape[0] == 0:                   # empty batch → empty result
@@ -658,12 +663,14 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
         # BT.2408 defines as HDR Reference White. Nearly five times reference,
         # on the value the eye uses to judge exposure for the whole image.
         #
-        # BT.2446 Method B, which is this node's method done to the standard,
-        # scales SDR by ~2 to reach 203 and then expands highlights above the
-        # breakpoint by 2.3x in display light. Separating the two numbers is
-        # what makes that possible: `peak_nits` is the ceiling and the encode
-        # target, `reference_white_nits` is where SDR white sits, and the range
-        # between them is headroom for speculars the learned path recovers.
+        # Below the knee the SDR signal keeps its SDR display level (1.0 ==
+        # 100 nits); from the knee up it is expanded so SDR code 1.0 lands on
+        # reference white. Unlike BT.2446 Method B this does not also lift the
+        # midtones by ~2x: shadows and skin stay where the SDR grade put them
+        # and only the top of the range opens up. `peak_nits` is the ceiling
+        # and the encode target, `reference_white_nits` is where SDR white
+        # sits, and the range between them is headroom for speculars the
+        # learned path recovers.
         white_scale = max(float(reference_white_nits), 100.0) / 100.0
         white_scale = min(white_scale, peak_scale)
 
@@ -685,6 +692,16 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
         expanded_hdr = lin * gain.unsqueeze(-1)
 
         mask = ((luma_exp - luma) / max(white_scale - 1.0, _EPS)).clamp(0.0, 1.0)
+
+        # RESIDENT-COPY FIX: `gain` and `luma_exp` are dead from here, and this
+        # is where they have to be released rather than at the end of the
+        # method: the measured peak of convert() is the line below, where
+        # _clipped_highlight_mask's full-size clamp copy is allocated while
+        # every intermediate above is still referenced. Releasing each
+        # intermediate at its last use is what makes the returned batch the
+        # only full-size tensor alive by the time the output is encoded.
+        del gain, luma_exp
+
         shadows = _shadow_mask(luma, float(shadow_threshold))
         clipped = _clipped_highlight_mask(rgb.clamp(0.0, 1.0), highlight_threshold)
 
@@ -714,15 +731,16 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
         attempts: List[str] = []
         path = "deterministic expansion"
 
-        # 3b ── direct-pixel, legacy VAE RUDRA, or temporal reconstruction.
+        # 3b ── temporal or direct-pixel reconstruction.
         wants_recovery = mode in {"Recover", "Hybrid"}
         if wants_recovery and rudra_blend > 0.0:
             backend = learned_backend if learned_backend in {
-                "Auto", "Direct Pixel", "Legacy RUDRA",
+                "Auto", "Direct Pixel", "Temporal",
             } else "Auto"
+            is_clip = img.shape[0] > 1 and batch_mode == "Video Frames"
 
-            # A trained temporal model remains the preferred video backend.
-            if img.shape[0] > 1 and batch_mode == "Video Frames" and backend != "Direct Pixel":
+            # A trained temporal model is the preferred video backend.
+            if is_clip and backend in {"Auto", "Temporal"}:
                 try:
                     hdr, h_conf, s_conf = self._temporal_reconstruct(
                         lin, expanded_hdr,
@@ -736,79 +754,82 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Temporal RUDRA unavailable (%s).", exc)
                     attempts.append(f"temporal RUDRA unavailable ({exc})")
+            elif backend == "Temporal":
+                attempts.append(
+                    "temporal backend needs batch_mode 'Video Frames' and at least five frames"
+                )
 
             # The direct-pixel checkpoint supports stills and frame batches.
-            # Until the temporal direct model is trained, video frames are
-            # independent and may need downstream deflicker/temporal QC.
-            # Ask the resolver, don't just look for a non-empty widget: an
-            # installed checkpoint in models/radiance (or RADIANCE_SDR2HDR_PIXEL)
-            # is discoverable with the path left blank, which is the default.
-            use_pixel = backend == "Direct Pixel" or (
-                backend == "Auto" and _pixel_checkpoint_available(pixel_checkpoint)
-            )
-            if not recovery_applied and use_pixel:
-                try:
-                    recovery_mask = torch.maximum(clipped, shadows)
-                    if pixel_recovery_mode == "highlights":
-                        recovery_mask = clipped
-                    elif pixel_recovery_mode == "shadows":
-                        recovery_mask = shadows
-                    elif pixel_recovery_mode == "off":
-                        recovery_mask = torch.zeros_like(clipped)
-                    hdr = self._pixel_reconstruct(
-                        lin, hdr, recovery_mask, str(pixel_checkpoint),
-                        float(rudra_blend), peak_scale, int(pixel_tile_size),
-                        int(pixel_tile_overlap), str(pixel_recovery_mode),
-                        float(pixel_strength),
+            # Frames are independent, so a clip may need downstream deflicker.
+            # Ask the resolver, not the widget: an installed checkpoint in
+            # models/radiance (or RADIANCE_SDR2HDR_PIXEL) is found with the
+            # path left blank, which is the default.
+            if not recovery_applied and backend in {"Auto", "Direct Pixel"}:
+                if backend == "Direct Pixel" or _pixel_checkpoint_available(pixel_checkpoint):
+                    try:
+                        recovery_mask = torch.maximum(clipped, shadows)
+                        if pixel_recovery_mode == "highlights":
+                            recovery_mask = clipped
+                        elif pixel_recovery_mode == "shadows":
+                            recovery_mask = shadows
+                        elif pixel_recovery_mode == "off":
+                            recovery_mask = torch.zeros_like(clipped)
+                        hdr = self._pixel_reconstruct(
+                            lin, hdr, recovery_mask, str(pixel_checkpoint),
+                            float(rudra_blend), peak_scale, int(pixel_tile_size),
+                            int(pixel_tile_overlap), str(pixel_recovery_mode),
+                            float(pixel_strength),
+                        )
+                        h_conf = clipped * float(rudra_blend) if pixel_recovery_mode in {"highlights", "all"} else torch.zeros_like(clipped)
+                        s_conf = shadows * float(rudra_blend) if pixel_recovery_mode in {"shadows", "all"} else torch.zeros_like(shadows)
+                        recovery_applied = True
+                        path = f"direct-pixel ({pixel_recovery_mode})"
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Direct-pixel recovery unavailable (%s).", exc)
+                        attempts.append(f"direct-pixel unavailable ({exc})")
+                else:
+                    from radiance.pixel_sdr2hdr import describe_pixel_checkpoint_search
+                    attempts.append(
+                        "no pixel checkpoint installed; expected "
+                        + describe_pixel_checkpoint_search()
                     )
-                    h_conf = clipped * float(rudra_blend) if pixel_recovery_mode in {"highlights", "all"} else torch.zeros_like(clipped)
-                    s_conf = shadows * float(rudra_blend) if pixel_recovery_mode in {"shadows", "all"} else torch.zeros_like(shadows)
-                    recovery_applied = True
-                    path = f"direct-pixel ({pixel_recovery_mode})"
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Direct-pixel recovery unavailable (%s).", exc)
-                    attempts.append(f"direct-pixel unavailable ({exc})")
-
-            if (not recovery_applied and backend in {"Auto", "Legacy RUDRA"}
-                    and img.shape[0] == 1 and vae is not None):
-                try:
-                    recovery_mask = torch.maximum(clipped, shadows)
-                    hdr = self._rudra_reconstruct(
-                        rgb, hdr, recovery_mask, vae, str(rudra_size),
-                        float(rudra_blend), peak_scale, model_meta=model_meta,
-                    )
-                    h_conf = clipped * float(rudra_blend)
-                    s_conf = shadows * float(rudra_blend)
-                    recovery_applied = True
-                    path = f"legacy RUDRA ({rudra_size})"
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Legacy RUDRA recovery unavailable (%s).", exc)
-                    attempts.append(f"legacy RUDRA unavailable ({exc})")
 
         # Universal always produces usable HDR. Recover mode therefore falls
         # back to deterministic expansion if the learned path cannot run.
         if mode == "Recover" and not recovery_applied:
             hdr = expanded_hdr
 
-        # 4 ── output encoding
-        out = _encode_output(hdr, output_encoding, peak_scale)
+        # RESIDENT-COPY FIX: from here only `hdr` and the extra channels are
+        # needed. `hdr` aliases one of `lin` / `expanded_hdr` unless a learned
+        # backend replaced it, so dropping these names frees whichever of the
+        # two is not the one in use, and both once `hdr` itself is consumed.
+        n_frames = int(img.shape[0])
+        has_extra = extra.shape[-1] > 0
+        del lin, expanded_hdr, luma, rgb
+        if not has_extra:
+            del extra, img
 
-        if extra.shape[-1] > 0:                 # pass alpha / extra channels through
+        # 4 ── output encoding (linear 1.0 == reference white, BT.2408)
+        out = _encode_output(hdr, output_encoding, peak_scale, white_scale)
+        del hdr
+
+        if has_extra:                           # pass alpha / extra channels through
             out = torch.cat([out, extra], dim=-1)
+            del extra, img
 
         report = self._build_report(
             mode=mode, path=path, recovery_applied=recovery_applied,
-            attempts=attempts, frames=int(img.shape[0]),
+            attempts=attempts, frames=n_frames,
             reference_white_nits=float(reference_white_nits),
             peak_nits=float(peak_nits), output_encoding=str(output_encoding),
-            rudra_blend=float(rudra_blend), vae_connected=vae is not None,
+            rudra_blend=float(rudra_blend),
         )
         return (out, mask, shadows, h_conf, s_conf, report)
 
     @staticmethod
     def _build_report(*, mode, path, recovery_applied, attempts, frames,
                       reference_white_nits, peak_nits, output_encoding,
-                      rudra_blend, vae_connected) -> str:
+                      rudra_blend) -> str:
         """One human-readable line per fact about what this run actually did.
 
         Recover and Hybrid are the reason this node is called Universal, and on
@@ -824,8 +845,12 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
             f"reference white: {reference_white_nits:.0f} nits "
             f"(BT.2408 reference is 203)",
             f"mastering peak: {peak_nits:.0f} nits",
-            f"output: {output_encoding}",
+            f"output: {output_encoding} (linear 1.0 = {reference_white_nits:.0f} nits, "
+            f"peak = {peak_nits / max(reference_white_nits, 1.0):.2f})",
         ]
+        if output_encoding == "HLG" and peak_nits > 1000.0:
+            lines.append("note: HLG is referenced to a 1000-nit display (BT.2100/BT.2408); "
+                         "highlights above 1000 nits clip in the HLG signal")
 
         if mode == "Expand":
             lines.append("learned recovery: not requested")
@@ -840,12 +865,10 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
             why = "rudra_blend is 0"
         elif attempts:
             why = "; ".join(attempts)
-        elif not vae_connected:
-            why = ("no learned checkpoint found and no VAE connected — install a "
-                   "RUDRA checkpoint in models/radiance, set "
-                   "RADIANCE_SDR2HDR_PIXEL, or connect a VAE")
         else:
-            why = "no backend was eligible for this input"
+            why = ("no learned checkpoint found — install "
+                   "sdr2hdr_pixel_image.pt in models/radiance or set "
+                   "RADIANCE_SDR2HDR_PIXEL")
 
         lines.append(f"learned recovery: NOT APPLIED — {why}")
         lines.append(

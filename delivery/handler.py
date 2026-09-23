@@ -155,6 +155,17 @@ def _resolve_write_colorspace(ui_cs: str) -> str:
     )
 
 
+def _note(warnings: list, message: str) -> None:
+    """Record something the operator asked for that did not happen.
+
+    Deduplicated, because the FX failures are raised inside the per-frame loop
+    and a 2000-frame export would otherwise hand the client the same sentence
+    2000 times. The first occurrence is the informative one.
+    """
+    if message not in warnings:
+        warnings.append(message)
+
+
 def get_next_version(directory: str, filename_base: str) -> str:
     """Scan directory for existing versions and returns the next one (e.g., v02)."""
     if not os.path.exists(directory):
@@ -371,13 +382,42 @@ async def radiance_deliver_endpoint(request):
         # Clamp numeric parameters to sane ranges
         fps = max(1.0, min(fps, 240.0))
         quality = max(0, min(quality, 51))
-        
+
         color_space = settings.get('colorSpace', 'sRGB (Standard)')
         broadcast_safe = settings.get('soft_clip', True)
         
         upscale_2x = settings.get('upscale_2x', False)
         smart_ver = settings.get('smart_versioning', True)
-        
+
+        # Resolve the output vocabulary BEFORE anything expensive runs.
+        #
+        # `_resolve_write_format` / `_resolve_write_colorspace` raise for the
+        # eleven entries the delivery panel offers and the writer does not
+        # implement, and they used to be evaluated inside the `write_frames(...)`
+        # call at the very END of `_run_export` -- after per-frame grading, the
+        # FX bake, the 2x model upscale and the QC pass had all run over the
+        # whole batch. Picking "ProRes 4444 XQ" therefore cost minutes of work
+        # and then a 500. The check is free; it belongs here.
+        try:
+            write_format = _resolve_write_format(output_format)
+            write_colorspace = _resolve_write_colorspace(color_space)
+        except ValueError as exc:
+            logger.warning("[Deliver] Rejected before grading: %s", exc)
+            # Terminal progress, at 100, exactly as the post-grading failure
+            # path reports it -- the JS clears its poll interval on status
+            # 'error' and the bar should not be left short of the end.
+            try:
+                _progress_set(instance_key, {"current": 100, "total": 100,
+                                             "status": "error",
+                                             "message": str(exc)[:200]})
+            except Exception as _exc:
+                logger.debug("[Radiance] could not set refusal progress: %s", _exc)
+            # 400, not 500: the request named a format or a colour space that
+            # does not exist. It used to surface as a 500 only because the
+            # ValueError escaped from the middle of the export closure.
+            return web.json_response({"error": str(exc), "status": "error"}, status=400)
+
+
         # Handle Versioning
         version_str = "v01"
         if smart_ver:
@@ -444,8 +484,28 @@ async def radiance_deliver_endpoint(request):
         # It is now a closure handed to run_in_executor, so it captures the
         # locals above unchanged while the loop stays free to serve /progress.
         def _run_export():
-            # Apply grading to whole batch
-            out_batch = []
+            # Every user-requested transform that did not happen.
+            #
+            # AUDIT-FIX: the AI upscale, the aspect blanking, the FX bake, the
+            # denoise, the halation, the bloom and the diffusion each caught
+            # their own failure, logged it and carried on, while the response
+            # still said status "success" and the HUD still showed "EXPORT
+            # COMPLETE". A master delivered at 1x because the ESRGAN model was
+            # missing is not a successful delivery. Anything appended here
+            # travels back to the client and turns the response into "partial".
+            warnings: list = []
+
+            # Grade into ONE preallocated batch, frame by frame.
+            #
+            # This used to build `out_batch`, a list of N graded frames, and
+            # then `torch.stack` it -- two more full copies of the sequence on
+            # top of the viewer cache entry, before the FX bake made two more.
+            # Measured ceiling for a delivery was about 1000 frames at 1080p.
+            # The destination is allocated once and each frame is written into
+            # its slot, so the grade costs the output batch plus one frame.
+            # Frame 0 is graded first purely to learn the output shape, rather
+            # than assuming the grade cannot change the channel count.
+            graded_tensor = None
             _n_frames = max(1, int(images.shape[0]))
             for i in range(images.shape[0]):
                 # Grading is the long pole; report it. Now that the work runs in
@@ -482,9 +542,13 @@ async def radiance_deliver_endpoint(request):
                     luma_mix=float(grading.get('lumaMix', 1.0)),
                     gamut_compression=gamut_compression
                 )
-                out_batch.append(torch.from_numpy(graded))
-
-            graded_tensor = torch.stack(out_batch)
+                if graded_tensor is None:
+                    graded_tensor = torch.empty(
+                        (images.shape[0],) + tuple(graded.shape),
+                        dtype=torch.float32)
+                graded_tensor[i] = torch.from_numpy(
+                    np.ascontiguousarray(graded, dtype=np.float32))
+                del graded
 
             # ─── FX Baking ────────────────────────────────────────────────
             _grain     = float(grading.get('grain', 0.0))
@@ -495,8 +559,11 @@ async def radiance_deliver_endpoint(request):
 
             if _grain > 0.01 or _bloom > 0.01 or _halation > 0.01 or _diffusion > 0.01 or _denoise > 0.01:
                 try:
+                    # A view of the graded batch, written back in place. The
+                    # filters used to collect every frame into `fx_batch` and
+                    # `np.stack` it into a new tensor, so the FX pass cost two
+                    # more full copies of the sequence on top of the grade's.
                     np_batch = graded_tensor.cpu().numpy()
-                    fx_batch = []
                     rng = np.random.default_rng(seed=42)
                     for i_frame in range(np_batch.shape[0]):
                         f = np_batch[i_frame].astype(np.float32)
@@ -519,12 +586,16 @@ async def radiance_deliver_endpoint(request):
                                     "not installed (%s); the master was written "
                                     "without it.", _exc,
                                 )
+                                _note(warnings,
+                                      f"Denoise skipped: OpenCV is not installed ({_exc})")
                             except Exception as _exc:
                                 logger.warning(
                                     "[Radiance] Denoise failed (%s: %s); the "
                                     "master was written without it.",
                                     type(_exc).__name__, _exc,
                                 )
+                                _note(warnings,
+                                      f"Denoise failed: {type(_exc).__name__}: {_exc}")
 
                         if _grain > 0.01:
                             noise = rng.standard_normal(f.shape).astype(np.float32)
@@ -538,6 +609,7 @@ async def radiance_deliver_endpoint(request):
                                 f[..., 0] = np.minimum(f[..., 0] + blurred * _halation * 2.0, 2.0)
                             except Exception as exc:
                                 logger.warning("[radiance.delivery.handler]: %s", exc)
+                                _note(warnings, f"Halation failed: {type(exc).__name__}: {exc}")
 
                         if _bloom > 0.01:
                             try:
@@ -548,6 +620,7 @@ async def radiance_deliver_endpoint(request):
                                 f = f + blurred * _bloom
                             except Exception as exc:
                                 logger.warning("[radiance.delivery.handler]: %s", exc)
+                                _note(warnings, f"Bloom failed: {type(exc).__name__}: {exc}")
 
                         if _diffusion > 0.01:
                             try:
@@ -556,12 +629,14 @@ async def radiance_deliver_endpoint(request):
                                 f = f * (1 - _diffusion * 0.5) + soft * _diffusion * 0.5
                             except Exception as exc:
                                 logger.warning("[radiance.delivery.handler]: %s", exc)
+                                _note(warnings, f"Diffusion failed: {type(exc).__name__}: {exc}")
 
-                        fx_batch.append(f)
-                    graded_tensor = torch.from_numpy(np.stack(fx_batch))
+                        np_batch[i_frame] = f
+                        del f
                     logger.info(f"[Deliver] FX baked: grain={_grain:.2f} bloom={_bloom:.2f} halation={_halation:.2f} diffusion={_diffusion:.2f}")
                 except Exception as e:
-                    logger.warning(f"[Deliver] FX baking failed (non-fatal): {e}")
+                    logger.warning(f"[Deliver] FX baking failed: {e}")
+                    _note(warnings, f"FX bake did not run: {type(e).__name__}: {e}")
 
             # ─── AI Upscale (2x) ──────────────────────────────────────────
             if upscale_2x:
@@ -587,6 +662,9 @@ async def radiance_deliver_endpoint(request):
                     )
                 except Exception as e:
                     logger.error(f"AI Upscale failed, continuing with original: {e}")
+                    _note(warnings,
+                          f"AI upscale did not run, the master is 1x: "
+                          f"{type(e).__name__}: {e}")
 
             # ─── Aspect Ratio Blanking ────────────────────────────────────
             aspect_ratio_str = settings.get('aspect_ratio', 'None')
@@ -620,6 +698,9 @@ async def radiance_deliver_endpoint(request):
                             graded_tensor[:, -pad:, :, :] = 0.0
                 except Exception as e:
                     logger.error(f"Aspect blanking failed: {e}")
+                    _note(warnings,
+                          f"Aspect blanking to {aspect_ratio_str} did not run: "
+                          f"{type(e).__name__}: {e}")
 
             # ─── Integrated QC Pass ───────────────────────────────────────
             qc_report = ""
@@ -680,7 +761,14 @@ async def radiance_deliver_endpoint(request):
             is_exr = 'EXR' in output_format or 'exr' in output_format.lower()
             bake_grade_exr = settings.get('bake_grade', False) and is_exr
             if bake_grade_exr:
-                if color_space in ('sRGB (Standard)', 'Linear (sRGB)'):
+                # AUDIT-FIX: this used to read
+                # `color_space in ('sRGB (Standard)', 'Linear (sRGB)')`, so a
+                # master that is already linear was linearised a SECOND time --
+                # about 2.2 gamma down in the midtones -- and logged as "sRGB to
+                # linear applied". The else branch's own comment says "already
+                # linear", which is exactly why 'Linear (sRGB)' does not belong
+                # in the list above it.
+                if color_space == 'sRGB (Standard)':
                     try:
                         gt_np = graded_tensor.cpu().numpy().astype(np.float32)
                         lo = gt_np <= 0.04045
@@ -690,8 +778,20 @@ async def radiance_deliver_endpoint(request):
                         logger.info('[Deliver v3.0.0] Grade baked into EXR — sRGB→linear applied')
                     except Exception as _e:
                         logger.warning(f'[Deliver v3.0.0] Grade bake linearize failed: {_e}')
+                        _note(warnings,
+                              f"Grade bake linearise failed, the EXR is still "
+                              f"{color_space}: {type(_e).__name__}: {_e}")
                 else:
                     logger.info(f'[Deliver v3.0.0] Grade baked into EXR — {color_space} (already linear)')
+                # Baking means the EXR holds scene-linear values, so the writer
+                # must not re-encode them. It used to be handed 'sRGB' anyway,
+                # which applied the forward EOTF straight back over the bake --
+                # a perfect round trip, so `bake_grade` was inert for the one
+                # colour space it was meant to handle, while the log line above
+                # said it had been applied.
+                write_colorspace_effective = 'Linear (pass-through)'
+            else:
+                write_colorspace_effective = write_colorspace
 
             # ─── Shot Continuity QC ───────────────────────────────────────
             continuity_report = []
@@ -725,15 +825,26 @@ async def radiance_deliver_endpoint(request):
             #
             # No read_media callback: the delivery path always hands the writer
             # a tensor, so the branch that needs a decoder is never reached.
+            #
+            # `format` and `color_space` were resolved before any of the work
+            # above ran; see the validation block in the endpoint.
+            #
+            # `start_frame` is passed because it was not, and a sequence export
+            # of a trimmed range was therefore always numbered from 1001 no
+            # matter where the range started -- frame 120 of the shot delivered
+            # as 1001, and no way to tell from the filenames. `range_in` is
+            # 1-based into the cached batch, so frame 1 maps to 1001, which is
+            # the numbering the rest of the pipeline assumes.
             path, _count = write_frames(
                 image=graded_tensor,
                 output_path=output_path,
-                format=_resolve_write_format(output_format),
+                format=write_format,
                 filename=filename_prefix,
-                color_space=_resolve_write_colorspace(color_space),
+                color_space=write_colorspace_effective,
                 fps=fps,
                 quality=quality,
                 broadcast_safe=broadcast_safe,
+                start_frame=1000 + range_in,
             )
 
             # ─── Post-Export: Thumbnails & Sidecars ────────────────────────
@@ -855,18 +966,32 @@ async def radiance_deliver_endpoint(request):
                 if len(continuity_report) > 3:
                     _cont_warn += f" (+{len(continuity_report)-3} more)"
 
-            return path, qc_report, _cont_warn, continuity_report
+            return path, qc_report, _cont_warn, continuity_report, warnings
 
         loop = asyncio.get_running_loop()
-        path, qc_report, _cont_warn, continuity_report = await loop.run_in_executor(
-            None, _run_export)
+        path, qc_report, _cont_warn, continuity_report, warnings = (
+            await loop.run_in_executor(None, _run_export))
 
+        # AUDIT-FIX: this returned status "success" unconditionally, so a
+        # master delivered at 1x because the ESRGAN model was missing, or
+        # without the FX the colourist baked in, or unblanked, read as a clean
+        # delivery to every client and put "EXPORT COMPLETE" on the HUD. The
+        # response now carries what did not happen, and says "partial" when
+        # anything did not.
+        _status = "partial" if warnings else "success"
+        _message = f"Export delivered successfully: {os.path.basename(path)} ({version_str})"
+        if warnings:
+            _message = (
+                f"Export delivered WITHOUT {len(warnings)} requested step(s): "
+                f"{os.path.basename(path)} ({version_str}). " + " ".join(warnings)
+            )
         return web.json_response({
-            "status": "success",
+            "status": _status,
             "path": path,
             "qc": qc_report + _cont_warn,
             "continuity": continuity_report,
-            "message": f"Export delivered successfully: {os.path.basename(path)} ({version_str})"
+            "warnings": warnings,
+            "message": _message,
         })
 
     except Exception as e:

@@ -536,7 +536,7 @@
         "sRGB",
         "Auto",
         128,
-        0,
+        "Auto",
         0,
         0,
         "Compress (Log)",
@@ -549,8 +549,7 @@
         true,
         0,
         1,
-        "Disabled",
-        "rudra_turbo"
+        "Direct HDR"
       ],
       "color": "#3c2020",
       "bgcolor": "#141419"

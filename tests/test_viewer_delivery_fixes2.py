@@ -57,7 +57,8 @@ def test_export_closure_has_exactly_one_return():
 
     visit(fn)
     assert len(own) == 1, f"_run_export has {len(own)} top-level returns"
-    assert ast.unparse(own[0]) == "return (path, qc_report, _cont_warn, continuity_report)"
+    assert ast.unparse(own[0]) == (
+        "return (path, qc_report, _cont_warn, continuity_report, warnings)")
 
 
 def test_progress_is_initialised_and_reset_on_failure():

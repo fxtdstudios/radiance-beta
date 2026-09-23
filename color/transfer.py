@@ -45,6 +45,102 @@ def tensor_linear_to_srgb(tensor: torch.Tensor) -> torch.Tensor:
     return torch.where(abs_t <= 0.0031308, low, high) * sign
 
 
+# ── BT.709 / BT.2020 camera OETF ──────────────────────────────────────────────
+#
+# ITU-R BT.709-6 §1.2 and ITU-R BT.2020-2 Table 4.  Same shape, different
+# constants: BT.2020 tightens alpha and beta for 10/12-bit precision.  BT.709
+# rounds them to 1.099 / 0.018.
+#
+# These were missing entirely.  ``io/writer.py`` called
+# ``color_utils.linear_to_rec709`` for every Rec.709 export, the AttributeError
+# was swallowed by a blanket except, and the file was written with untouched
+# scene-linear values, roughly 2.2 stops dark in the midtones, reported as a
+# success.  Rec.2020 fared no better: it applied a 1/2.4 power curve described
+# in its own comment as "PQ gamma as a proxy" and hard-clamped to [0,1],
+# destroying every highlight above 1.0 on an EXR export.
+#
+# Both curves here are sign-symmetric and extend the power segment above 1.0,
+# so scene-linear values outside [0,1] survive into float formats instead of
+# being crushed.  Integer formats quantise at the point of writing, which is
+# where clamping belongs.
+
+BT709_ALPHA: float = 1.099
+BT709_BETA: float = 0.018
+BT2020_ALPHA: float = 1.09929682680944
+BT2020_BETA: float = 0.018053968510807
+
+
+def _oetf_gamma(img: np.ndarray, alpha: float, beta: float) -> np.ndarray:
+    a = np.abs(img)
+    return (
+        np.sign(img)
+        * np.where(a < beta, 4.5 * a, alpha * np.power(np.maximum(a, 1e-10), 0.45) - (alpha - 1.0))
+    ).astype(np.float32)
+
+
+def _eotf_gamma(img: np.ndarray, alpha: float, beta: float) -> np.ndarray:
+    a = np.abs(img)
+    return (
+        np.sign(img)
+        * np.where(
+            a < 4.5 * beta,
+            a / 4.5,
+            np.power((np.maximum(a, 0.0) + (alpha - 1.0)) / alpha, 1.0 / 0.45),
+        )
+    ).astype(np.float32)
+
+
+def linear_to_rec709(img: np.ndarray) -> np.ndarray:
+    """Scene-linear → BT.709 OETF encoded (ITU-R BT.709-6 §1.2)."""
+    return _oetf_gamma(img, BT709_ALPHA, BT709_BETA)
+
+
+def rec709_to_linear(img: np.ndarray) -> np.ndarray:
+    """BT.709 OETF encoded → scene-linear."""
+    return _eotf_gamma(img, BT709_ALPHA, BT709_BETA)
+
+
+def linear_to_rec2020(img: np.ndarray) -> np.ndarray:
+    """Scene-linear → BT.2020 OETF encoded (ITU-R BT.2020-2 Table 4).
+
+    Transfer only.  ``linear_rec709_to_rec2020`` does the primaries.
+    """
+    return _oetf_gamma(img, BT2020_ALPHA, BT2020_BETA)
+
+
+def rec2020_to_linear(img: np.ndarray) -> np.ndarray:
+    """BT.2020 OETF encoded → scene-linear.  Transfer only."""
+    return _eotf_gamma(img, BT2020_ALPHA, BT2020_BETA)
+
+
+def tensor_linear_to_rec709(tensor: torch.Tensor) -> torch.Tensor:
+    a = tensor.abs()
+    low = 4.5 * a
+    high = BT709_ALPHA * torch.pow(a.clamp(min=1e-10), 0.45) - (BT709_ALPHA - 1.0)
+    return torch.where(a < BT709_BETA, low, high) * tensor.sign()
+
+
+def tensor_rec709_to_linear(tensor: torch.Tensor) -> torch.Tensor:
+    a = tensor.abs()
+    low = a / 4.5
+    high = torch.pow(((a + (BT709_ALPHA - 1.0)) / BT709_ALPHA).clamp(min=0.0), 1.0 / 0.45)
+    return torch.where(a < 4.5 * BT709_BETA, low, high) * tensor.sign()
+
+
+def tensor_linear_to_rec2020(tensor: torch.Tensor) -> torch.Tensor:
+    a = tensor.abs()
+    low = 4.5 * a
+    high = BT2020_ALPHA * torch.pow(a.clamp(min=1e-10), 0.45) - (BT2020_ALPHA - 1.0)
+    return torch.where(a < BT2020_BETA, low, high) * tensor.sign()
+
+
+def tensor_rec2020_to_linear(tensor: torch.Tensor) -> torch.Tensor:
+    a = tensor.abs()
+    low = a / 4.5
+    high = torch.pow(((a + (BT2020_ALPHA - 1.0)) / BT2020_ALPHA).clamp(min=0.0), 1.0 / 0.45)
+    return torch.where(a < 4.5 * BT2020_BETA, low, high) * tensor.sign()
+
+
 # ── ARRI LogC3 ────────────────────────────────────────────────────────────────
 
 LOGC3_EI_PARAMS = {

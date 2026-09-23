@@ -5,6 +5,12 @@ import logging
 import os
 import sys
 
+# OpenCV reads this once, the first time any code in the process touches an
+# EXR through cv2, and never again. Set to "1" before anything else so it is
+# on however Radiance is loaded; a "0" left in the environment would silently
+# disable every cv2 EXR fallback in the package.
+os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
+
 
 def _bootstrap_package_context() -> None:
     """Make relative imports reliable when ComfyUI loads this file directly."""
@@ -124,6 +130,19 @@ def report_node_load_health(
 
 configure_runtime_environment()
 validate_runtime_dependencies(logger)
+
+
+def _configure_ocio() -> None:
+    """Automatic OCIO: $OCIO if set, else the ACES studio config. No setup."""
+    try:
+        from .color.ocio_setup import configure_ocio, summary
+        state = configure_ocio()
+        (logger.info if state.get("configured") else logger.warning)("[Radiance OCIO] %s", summary())
+    except Exception as exc:  # noqa: BLE001 - never block node registration
+        logger.warning("[Radiance OCIO] automatic setup failed: %s", exc)
+
+
+_configure_ocio()
 
 _LOAD_RESULT = _load_comfyui_nodes()
 NODE_CLASS_MAPPINGS = _LOAD_RESULT.class_mappings
