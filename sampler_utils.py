@@ -71,9 +71,13 @@ MODEL_TYPES = [
     "cogvideox",
     "mochi",  # ALBABIT-FIX: Mochi-1 — match Resolution/Loader model types
     "minimax",  # ALBABIT-FIX: MiniMax H3, matches Resolution/Loader/Prompt model types
+    # 3.5: ComfyUI 0.32 families (see model/detect.py).
+    "qwen_image", "krea2", "hunyuan_image", "hunyuan_video_15",
+    "hidream", "omnigen2", "longcat_image", "kandinsky5", "kandinsky5_image",
 ]
 
-VIDEO_MODEL_TYPES = {"wan", "wan_ti2v", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "mochi", "minimax"}
+VIDEO_MODEL_TYPES = {"wan", "wan_ti2v", "ltxv", "ltxav", "hunyuan_video", "cosmos", "cogvideox", "mochi", "minimax",
+                     "hunyuan_video_15", "kandinsky5"}
 
 # ALBABIT-FIX: flux2/flux2-klein use guidance_embed like flux (not external CFG)
 # ALBABIT-FIX: lumina2 removed -- its official workflow uses a plain KSampler
@@ -82,7 +86,9 @@ VIDEO_MODEL_TYPES = {"wan", "wan_ti2v", "ltxv", "ltxav", "hunyuan_video", "cosmo
 # official workflow's KSampler uses cfg=4, no guidance-embed node either),
 # apparently missed when lumina2 got the same fix. Confirmed against
 # Comfy-Org's own bundled "image_z_image.json" template directly.
-GUIDANCE_EMBED_MODELS = {"flux", "flux2", "flux2-klein", "ltxv"}
+# 3.5: LongCat-Image is a Flux transformer and its official template drives it
+# through FluxGuidance (4.0) like Flux.1, with cfg held at 4 under CFGNorm.
+GUIDANCE_EMBED_MODELS = {"flux", "flux2", "flux2-klein", "ltxv", "longcat_image"}
 
 # ALBABIT-FIX: "sd35" renamed to "sd3.5" for consistency with Loader/detect.py
 # ALBABIT-FIX: lumina2 added -- classic external CFG, confirmed via its
@@ -90,7 +96,11 @@ GUIDANCE_EMBED_MODELS = {"flux", "flux2", "flux2-klein", "ltxv"}
 # ALBABIT-FIX: z_image added -- same evidence class as lumina2 above.
 # ALBABIT-FIX: wan_ti2v added -- same CFG-guided convention as "wan" (its
 # official workflow's KSampler uses a real cfg value, no guidance-embed node).
-CFG_GUIDED_MODELS = {"wan", "wan_ti2v", "hunyuan_video", "sdxl", "sd1.5", "sd3", "sd3.5", "ltxav", "cogvideox", "mochi", "lumina2", "z_image"}
+CFG_GUIDED_MODELS = {"wan", "wan_ti2v", "hunyuan_video", "sdxl", "sd1.5", "sd3", "sd3.5", "ltxav", "cogvideox", "mochi", "lumina2", "z_image",
+                     # 3.5: every one of these runs a plain KSampler / CFGGuider with
+                     # a real cfg in its official Comfy-Org template.
+                     "qwen_image", "krea2", "hunyuan_image", "hunyuan_video_15",
+                     "hidream", "omnigen2", "kandinsky5", "kandinsky5_image"}
 
 # ALBABIT-FIX: "minimax" belongs in neither set above on purpose. Its reference
 # pipeline uses BasicGuider, which has no cfg input and no guidance-embed
@@ -337,6 +347,108 @@ MODEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "shift": 1.0,
         "sampler": "res_multistep",
         "steps": 20,
+    },
+    # ── 3.5: ComfyUI 0.32 families ─────────────────────────────────────────
+    # Each entry is read off Comfy-Org's official workflow template for the
+    # model (templates/<name>.json in Comfy-Org/workflow_templates) unless
+    # stated otherwise.
+    # Qwen-Image: the current official template ships the 8-step Lightning
+    # LoRA (cfg 1, 8 steps); these are the base-model values from the same
+    # graph without the LoRA (ModelSamplingAuraFlow shift 3.1, cfg 2.5).
+    "qwen_image": {
+        "cfg": 2.5,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 3.1,
+        "sampler": "euler",
+        "steps": 20,
+        "guidance_type": "cfg",
+    },
+    # Krea 2 Turbo: image_krea2_turbo_t2i.json (KSampler 8 steps, cfg 1, euler/simple).
+    "krea2": {
+        "cfg": 1.0,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "euler",
+        "steps": 8,
+        "guidance_type": "cfg",
+    },
+    # HunyuanImage 2.1: no Comfy-Org template yet. shift 5.0 is the model's
+    # own sampling_settings in comfy/supported_models.py; cfg 3.5 / 50 steps
+    # are the Tencent reference defaults.
+    "hunyuan_image": {
+        "cfg": 3.5,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 5.0,
+        "sampler": "euler",
+        "steps": 50,
+        "guidance_type": "cfg",
+    },
+    # HunyuanVideo 1.5: video_hunyuan_video_1.5_720p_t2v.json (CFGGuider 6,
+    # ModelSamplingSD3 shift 7, euler/simple 20 steps).
+    "hunyuan_video_15": {
+        "cfg": 6.0,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 7.0,
+        "sampler": "euler",
+        "steps": 20,
+        "guidance_type": "cfg",
+    },
+    # HiDream-I1 Full: hidream_i1_full.json (KSampler 50 steps, cfg 5,
+    # uni_pc/simple, ModelSamplingSD3 shift 3).
+    "hidream": {
+        "cfg": 5.0,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 3.0,
+        "sampler": "uni_pc",
+        "steps": 50,
+        "guidance_type": "cfg",
+    },
+    # OmniGen2: image_omnigen2_t2i.json (DualCFGGuider 5 / 2, euler/simple 20 steps).
+    "omnigen2": {
+        "cfg": 5.0,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 1.0,
+        "sampler": "euler",
+        "steps": 20,
+        "guidance_type": "cfg",
+    },
+    # LongCat-Image: image_longcat_text_to_image.json (FluxGuidance 4,
+    # KSampler cfg 4 with CFGNorm, euler/simple 20 steps).
+    "longcat_image": {
+        "cfg": 4.0,
+        "scheduler": "simple",
+        "guidance": 4.0,
+        "shift": 1.0,
+        "sampler": "euler",
+        "steps": 20,
+    },
+    # Kandinsky 5 video: video_kandinsky5_t2v.json (KSampler 50 steps, cfg 5,
+    # euler_ancestral/beta, ModelSamplingSD3 shift 5).
+    "kandinsky5": {
+        "cfg": 5.0,
+        "scheduler": "beta",
+        "guidance": 0.0,
+        "shift": 5.0,
+        "sampler": "euler_ancestral",
+        "steps": 50,
+        "guidance_type": "cfg",
+    },
+    # Kandinsky 5 image: image_kandinsky5_t2i.json (KSampler 50 steps,
+    # cfg 3.5, euler/simple, ModelSamplingSD3 shift 3).
+    "kandinsky5_image": {
+        "cfg": 3.5,
+        "scheduler": "simple",
+        "guidance": 0.0,
+        "shift": 3.0,
+        "sampler": "euler",
+        "steps": 50,
+        "guidance_type": "cfg",
     },
     # ALBABIT-FIX: previously fell back to "sd1.5" (cfg=7.0/dpmpp_2m/normal) --
     # verified against AuraFlow's own official ComfyUI workflow, which
@@ -643,6 +755,10 @@ def gradual_sigma_blend(
     return result
 
 def log_tensor(name: str, tensor: Optional[torch.Tensor]) -> None:
+    # The stats below cost a full float copy and four GPU syncs; the f-string
+    # used to be built even when DEBUG was off, i.e. on every run.
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
 
     if tensor is None:
         logger.debug(f"{name}: None")
@@ -788,6 +904,12 @@ def compute_dynamic_cfg(
     RAMP = DYNAMIC_GUIDANCE_RAMP_WIDTH                               
     EARLY_T = DYNAMIC_CFG_EARLY_THRESHOLD
     LATE_T = DYNAMIC_CFG_LATE_THRESHOLD
+
+    # At cfg <= 1.0 there is no unconditional pass to shape. Boosting 1.0 to
+    # 1.2 switched that pass ON for the early steps, doubling their cost for
+    # a change the model was never tuned for.
+    if base_cfg <= 1.0:
+        return base_cfg
 
     cfg_early = base_cfg * DYNAMIC_CFG_EARLY_MULTIPLIER
     cfg_late = base_cfg * DYNAMIC_CFG_LATE_MULTIPLIER
@@ -984,9 +1106,27 @@ def validate_step_range(
 
     return start, end
 
-def apply_pag_to_model(model, pag_scale: float):
+def apply_pag_to_model(model, pag_scale: float, cfg: Optional[float] = None):
 
     if pag_scale <= 0:
+        return model
+
+    # DEFECT: the patch below only acts on the batch slices whose cond_or_uncond
+    # entry is 1, i.e. the uncond pass. ComfyUI skips the uncond pass entirely at
+    # cfg <= 1.0, and even when it is forced to run, the CFG combine at cfg == 1.0
+    # is `uncond + 1.0 * (cond - uncond)` == cond, so a perturbed uncond cannot
+    # reach the output. The "PAG applied at scale" log used to fire at
+    # registration regardless, and this sampler's own cfg default is 1.0 (Flux),
+    # so the common case was a log line claiming PAG ran while nothing happened.
+    # Say so at registration, where the user can still act on it.
+    if cfg is not None and cfg <= 1.0:
+        logger.warning(
+            "[Radiance] pag_scale=%.2f has no effect at cfg=%.2f. PAG here perturbs "
+            "the unconditional pass, which ComfyUI does not run at cfg <= 1.0 (and "
+            "which cancels out of the CFG combine at exactly 1.0). Raise cfg above "
+            "1.0 to use PAG, or set pag_scale to 0 to silence this.",
+            pag_scale, cfg,
+        )
         return model
 
     try:
@@ -1039,7 +1179,15 @@ def apply_pag_to_model(model, pag_scale: float):
                     # pass combined as eps_u + s(eps_c - eps_u) + s_pag(eps_c -
                     # eps_p), which ComfyUI's patch API cannot express here. The
                     # tooltip says so.
-                    w = float(min(max(pag_scale, 0.0), 1.0))
+                    #
+                    # DEFECT: this used to clamp to 1.0 while the widget is
+                    # min 0.0 / max 5.0, so every value from 1.0 to 5.0 produced
+                    # a bit-identical render and four fifths of the slider was
+                    # dead. The blend is a lerp toward q; past w=1 it keeps
+                    # going in the same direction, which is what a scale above
+                    # full substitution should mean. Values <= 1.0 are
+                    # unchanged, so existing graphs render identically.
+                    w = max(float(pag_scale), 0.0)
                     k_out[start:end] = k[start:end] * (1.0 - w) + q[start:end] * w
                     v_out[start:end] = v[start:end] * (1.0 - w) + q[start:end] * w
 
@@ -1235,6 +1383,82 @@ def build_sigma_report(
 
     return "\n".join(lines)
 
+# ── Per-frame seeding ────────────────────────────────────────────────────────
+#
+# Two defects lived in every `torch.manual_seed(seed + f)` in this file.
+#
+#   1. Overflow. The sampler's `seed` widget is min 0, max 0xFFFFFFFFFFFFFFFF.
+#      `seed + f` on a 5D latent with T >= 2 therefore exceeds the 64-bit range
+#      torch.manual_seed accepts and raises
+#      "RuntimeError: Overflow when unpacking long". The Uniform/Gaussian
+#      branch in generate_noise sits above that function's try/except, so it
+#      was not even caught: seed=2**64-1 with any of Uniform, Perlin, Spectral,
+#      Brownian, Simplex, Voronoi or Curl hard-failed the node.
+#
+#   2. Correlation between neighbouring seeds. `seed + f` makes run S frame f
+#      bit-identical to run S+1 frame f-1, so incrementing the seed produced a
+#      one-frame temporal SHIFT of the same noise rather than an independent
+#      draw. Anyone stepping the seed to explore variations was re-rendering
+#      the same noise field.
+#
+# derive_frame_seed mixes seed and frame through splitmix64's finalizer, which
+# decorrelates adjacent inputs and stays inside [0, 2**64-1] by construction.
+_SEED_MASK_64 = 0xFFFFFFFFFFFFFFFF
+_SPLITMIX_GAMMA = 0x9E3779B97F4A7C15
+
+#: Uniform noise is scaled to unit variance: Var(U[-s, s]) = s^2/3, so s = sqrt(3).
+_UNIFORM_HALF_RANGE = 3.0 ** 0.5
+
+
+def _mix64(x: int) -> int:
+    """splitmix64 finalizer. Avalanches every input bit across all 64 outputs."""
+    x &= _SEED_MASK_64
+    x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & _SEED_MASK_64
+    x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & _SEED_MASK_64
+    return (x ^ (x >> 31)) & _SEED_MASK_64
+
+
+def derive_frame_seed(seed: Optional[int], frame: int, stream: int = 0) -> int:
+    """A per-frame seed in [0, 2**64-1], independent across both seed and frame.
+
+    *stream* separates independent noise sequences that share a frame index
+    (e.g. the two draws per step in a temporally correlated walk).
+    """
+    base = int(seed if seed is not None else 0) & _SEED_MASK_64
+    offset = ((int(frame) + 1) * _SPLITMIX_GAMMA + int(stream)) & _SEED_MASK_64
+    return _mix64(base ^ _mix64(offset))
+
+
+def _fill_frame_(dst: torch.Tensor, kind: str, generator) -> torch.Tensor:
+    """Fill *dst* in place with one frame of noise, allocating nothing.
+
+    Writing straight into a slice of the output buffer is what keeps peak
+    memory at one frame instead of T frames; see generate_noise.
+    """
+    try:
+        if kind == "Gaussian":
+            return dst.normal_(generator=generator)
+        return dst.uniform_(-_UNIFORM_HALF_RANGE, _UNIFORM_HALF_RANGE, generator=generator)
+    except RuntimeError:
+        # Narrow dtypes (fp8) have no in-place normal_/uniform_ kernel. One
+        # frame-sized float32 temporary is still O(1/T) of the old list.
+        if kind == "Gaussian":
+            src = torch.randn(tuple(dst.shape), device=dst.device, generator=generator)
+        else:
+            src = (
+                torch.rand(tuple(dst.shape), device=dst.device, generator=generator) * 2 - 1
+            ) * _UNIFORM_HALF_RANGE
+        return dst.copy_(src)
+
+
+def _frame_generator(device) -> torch.Generator:
+    """A torch.Generator bound to *device*, falling back to CPU if unsupported."""
+    try:
+        return torch.Generator(device=device)
+    except (RuntimeError, TypeError):
+        return torch.Generator()
+
+
 def _temporally_correlate(
     noise_fn, shape: tuple, device: torch.device, alpha: float = 0.6,
     seed: Optional[int] = None,
@@ -1243,23 +1467,31 @@ def _temporally_correlate(
     B, C, T, H, W = shape
     frame_shape = (B, C, H, W)
 
-    frames = []
+    # MEMORY: this used to append T tensors of (B, C, H, W) to a Python list and
+    # then torch.stack them, so the list and the stacked copy were alive
+    # together, i.e. 2x the sequence at the moment of the stack on top of
+    # whatever the sampler already held. Write each frame straight into a
+    # pre-allocated buffer instead: peak is the buffer plus two working frames,
+    # independent of T.
+    result = torch.empty(shape, device=device)
+
     if seed is not None:
-        torch.manual_seed(seed)
+        torch.manual_seed(derive_frame_seed(seed, -1, stream=1))
     prev = noise_fn(frame_shape, device)
+    scale = math.sqrt(1 - alpha ** 2)
     for f in range(T):
         if seed is not None:
-            torch.manual_seed(seed + f + 1)                                   
+            torch.manual_seed(derive_frame_seed(seed, f))
         curr = noise_fn(frame_shape, device)
-        blended = alpha * prev + math.sqrt(1 - alpha ** 2) * curr
-        frames.append(blended)
-        prev = blended
+        # prev is carried into the next iteration, so it has to stay a tensor
+        # of its own rather than an alias of the output slice.
+        prev = alpha * prev + scale * curr
+        result[:, :, f].copy_(prev)
+    del prev, curr
 
-    result = torch.stack(frames, dim=2)                     
-
-    result = result - result.mean()
+    result -= result.mean()
     std = result.std().clamp(min=1e-6)
-    return result / std
+    return result.div_(std)
 
 def _perlin_noise(shape: tuple, device: torch.device, seed: Optional[int] = None) -> torch.Tensor:
 
@@ -1361,23 +1593,27 @@ def _brownian_noise(
     seed: Optional[int] = None,
 ) -> torch.Tensor:
 
+    # MEMORY: both walks below used to build a Python list of T frames and then
+    # torch.stack it, holding the list and the stacked copy at once. They now
+    # write each step into a pre-allocated buffer, so peak is the buffer plus
+    # the single carried frame. Seeds go through derive_frame_seed; see the
+    # note above it for the overflow and adjacent-seed defects that fixes.
     if len(shape) == 5 and shape[2] > 1:
         B, C, T, H, W = shape
-        alpha = 0.7                                          
+        alpha = 0.7
 
         frame_shape = (B, C, H, W)
-        noises = []
+        out = torch.empty(shape, device=device)
         if seed is not None:
-            torch.manual_seed(seed)
+            torch.manual_seed(derive_frame_seed(seed, -1, stream=1))
         prev = torch.randn(frame_shape, device=device)
+        scale = math.sqrt(1 - alpha ** 2)
         for f in range(T):
             if seed is not None:
-                torch.manual_seed(seed + f + 1)
-            curr = alpha * prev + math.sqrt(1 - alpha ** 2) * torch.randn(frame_shape, device=device)
-            noises.append(curr)
-            prev = curr
-
-        return torch.stack(noises, dim=2)
+                torch.manual_seed(derive_frame_seed(seed, f))
+            prev = alpha * prev + scale * torch.randn(frame_shape, device=device)
+            out[:, :, f].copy_(prev)
+        return out
 
     if frames is None or (len(shape) == 4 and shape[0] == 1):
         return _spectral_noise(shape, device, seed=seed)
@@ -1386,17 +1622,17 @@ def _brownian_noise(
     # old code used the global torch RNG state unmodified, so the same
     # seed could produce different output depending on upstream calls.
     alpha = 0.7
-    noises = []
+    out = torch.empty(shape, device=device)
     if seed is not None:
-        torch.manual_seed(seed)
+        torch.manual_seed(derive_frame_seed(seed, -1, stream=1))
     prev = torch.randn(shape[1:], device=device)
+    scale = math.sqrt(1 - alpha ** 2)
     for f in range(shape[0]):
         if seed is not None:
-            torch.manual_seed(seed + f + 1)
-        curr = alpha * prev + math.sqrt(1 - alpha ** 2) * torch.randn(shape[1:], device=device)
-        noises.append(curr)
-        prev = curr
-    return torch.stack(noises, dim=0)
+            torch.manual_seed(derive_frame_seed(seed, f))
+        prev = alpha * prev + scale * torch.randn(shape[1:], device=device)
+        out[f].copy_(prev)
+    return out
 
 
 # ── v2.4 Phase 4: New noise generators (pure PyTorch, no native deps) ─────────
@@ -1413,13 +1649,17 @@ def _simplex_noise(shape: tuple, device: torch.device,
 
     if len(shape) == 5:
         B, C, T, H, W = shape
-        # PERF-SIMPLEX-LOOP FIX: pre-generate all frames then stack — avoids
-        # repeated Python-level dispatch overhead across T iterations.
-        frames = [
-            _simplex_noise((B, C, H, W), device, seed=(seed or 0) + t)
-            for t in range(T)
-        ]
-        return torch.stack(frames, dim=2)
+        # MEMORY: the list comprehension here held all T frames alive at once
+        # and then torch.stack doubled that. Write each frame into the output
+        # buffer as it is produced. Seed via derive_frame_seed: `(seed or 0) + t`
+        # overflowed at seed=2**64-1 and shifted rather than changed the field
+        # between adjacent seeds.
+        out = torch.empty(shape, device=device)
+        for t in range(T):
+            out[:, :, t].copy_(
+                _simplex_noise((B, C, H, W), device, seed=derive_frame_seed(seed, t))
+            )
+        return out
 
     # Work on last 2 dims (spatial)
     out_shape = shape
@@ -1499,12 +1739,14 @@ def _voronoi_noise(shape: tuple, device: torch.device,
     """
     if len(shape) == 5:
         B, C, T, H, W = shape
-        # PERF-VORONOI-LOOP FIX: pre-generate all frames then stack.
-        frames = [
-            _voronoi_noise((B, C, H, W), device, seed=(seed or 0) + t)
-            for t in range(T)
-        ]
-        return torch.stack(frames, dim=2)
+        # MEMORY + SEED: same list-plus-stack and `(seed or 0) + t` defects as
+        # the simplex path above. See derive_frame_seed.
+        out = torch.empty(shape, device=device)
+        for t in range(T):
+            out[:, :, t].copy_(
+                _voronoi_noise((B, C, H, W), device, seed=derive_frame_seed(seed, t))
+            )
+        return out
 
     if len(shape) == 4:
         B, C, H, W = shape
@@ -1564,9 +1806,12 @@ def _curl_noise(shape: tuple, device: torch.device,
 
     if len(shape) == 5:
         B, C, T, H, W = shape
-        result = torch.zeros(shape, device=device)
+        # Already writes into a pre-allocated buffer. The seed derivation is the
+        # fix here: `(seed or 0) + t` overflowed torch.manual_seed at
+        # seed=2**64-1 and made adjacent seeds a one-frame shift of each other.
+        result = torch.empty(shape, device=device)
         for t in range(T):
-            result[:, :, t] = _curl_noise((B, C, H, W), device, seed=(seed or 0) + t)
+            result[:, :, t] = _curl_noise((B, C, H, W), device, seed=derive_frame_seed(seed, t))
         return result
 
     if len(shape) == 4:
@@ -1614,19 +1859,26 @@ def generate_noise(
     is_video = len(shape) == 5 and shape[2] > 1
     if is_video and noise_type in ("Gaussian", "Uniform"):
         B, C, T, H, W = shape
-        frame_shape = (B, C, H, W)
-        frame_noises = []
+        # MEMORY: this branch built a Python list of T (B, C, H, W) tensors and
+        # then torch.stack'd it, so the list and the stacked result were alive
+        # simultaneously -- two full copies of the whole sequence at the peak,
+        # before the sampler's own latent/work/noise/stage buffers are counted.
+        # Allocate the output once and fill each frame in place. Peak is now one
+        # copy of the sequence, flat in T.
+        #
+        # SEED: `torch.manual_seed(seed + f)` lived ABOVE the try/except below,
+        # so the overflow at seed=2**64-1 was not even caught. It also made
+        # adjacent seeds a one-frame shift of one another. derive_frame_seed
+        # fixes both; a dedicated Generator additionally stops this from
+        # stomping the global RNG state that the rest of the graph shares.
+        out = torch.empty(shape, device=device, dtype=dtype)
+        gen = _frame_generator(out.device)
         for f in range(T):
-            torch.manual_seed(seed + f)
-            if noise_type == "Gaussian":
-                frame_noises.append(torch.randn(frame_shape, device=device, dtype=dtype))
-            else:
-                frame_noises.append(
-                    (torch.rand(frame_shape, device=device, dtype=dtype) * 2 - 1) * (3 ** 0.5)
-                )
-        return torch.stack(frame_noises, dim=2)
+            gen.manual_seed(derive_frame_seed(seed, f))
+            _fill_frame_(out[:, :, f], noise_type, gen)
+        return out
 
-    torch.manual_seed(seed)
+    torch.manual_seed(int(seed) & _SEED_MASK_64)
 
     try:
         if noise_type == "Gaussian":
@@ -1723,15 +1975,189 @@ def merge_conditionings(
     return cond_a
 
 def route_conditioning(cond: List, target_key: str) -> List:
+    """No-op. Kept so existing graphs and imports keep working.
 
+    DEFECT: this used to write ``new_entry[1]["encoder_target"] = target_key``
+    and the sampler logged "Conditioning routed to clip_g". Nothing reads
+    ``encoder_target``: not ComfyUI 0.32.0, not 0.36.0, and nothing in Radiance.
+    The widget reported success and did nothing.
+
+    It cannot be made to work from here either. Which text encoder produced an
+    embedding is decided at ENCODE time; by the time a CONDITIONING list reaches
+    a sampler it is a finished tensor with no encoder identity left to change.
+    Routing to a specific slot means encoding with that slot's CLIP up front
+    (a separate CLIPTextEncode per encoder, e.g. ComfyUI's CLIPTextEncodeSDXL),
+    which is a graph change, not a sampler flag.
+
+    Returns *cond* unchanged and warns, rather than returning a copy carrying a
+    key that only makes the no-op harder to notice.
+    """
     if not target_key or target_key == "Auto":
         return cond
-    routed = []
-    for entry in cond:
-        new_entry = [entry[0], dict(entry[1]) if len(entry) > 1 else {}]
-        new_entry[1]["encoder_target"] = target_key
-        routed.append(new_entry)
-    return routed
+
+    logger.warning(
+        "[Radiance] conditioning_clip_target='%s' is ignored. Which text encoder "
+        "produced a CONDITIONING is fixed when it is encoded, so a sampler cannot "
+        "re-route it. Encode per-encoder instead (e.g. CLIPTextEncodeSDXL for "
+        "clip_l/clip_g, or a dedicated T5 encode for t5xxl) and feed that in. "
+        "Set this back to 'Auto' to silence this warning.",
+        target_key,
+    )
+    return cond
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Overlapping temporal windows, long-video sampling
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# A video model attends across the temporal axis, so slicing a long latent into
+# independent chunks and denoising each on its own produces visible seams and
+# content that drifts between chunks. The established fix is overlapping
+# windows with per-step blending: the clip is covered by windows that share
+# some latent frames, EVERY denoising step is evaluated per window, and the
+# overlapping frames are blended at that step before the next one begins.
+#
+# The per-step part is the whole point. Blending windows that have each been
+# denoised to completion re-creates exactly the seams the technique exists to
+# remove, because by then the two windows have committed to different content.
+#
+# The weighting below is the temporal form of what RadianceUpscaleVideo already
+# does for pixels (nodes/upscale/upscale.py), including its half-sample ramp
+# offset, which fixed a real black-frame bug: a ramp of the literal form
+# sin(pi * i / (2 * half)) is 0 at i == 0, so with overlap=1 the single shared
+# frame received a zero weight from both neighbours and normalised to black.
+# Offsetting by half a sample keeps the shape and makes every weight strictly
+# positive. The squaring is taken from core/tiling.py's spatial ramp: sin^2 and
+# cos^2 sum to exactly 1, so two overlapping ramps are a partition of unity
+# before any normalisation, not merely after it.
+
+
+def plan_temporal_windows(
+    total_frames: int, window_size: int, overlap: int
+) -> List[Tuple[int, int]]:
+    """Window bounds ``[(f0, f1), ...]`` covering ``range(total_frames)``.
+
+    The first window starts at frame 0 and the last ends at *total_frames*, so
+    every frame is covered. Windows are returned in ascending order and no
+    window is contained in another. A clip that fits in one window returns a
+    single full-length window, which is what makes windowing a no-op below the
+    threshold.
+
+    Pure function of its three arguments, so the same clip and settings always
+    produce the same plan, on any machine and on any rerun.
+    """
+    total_frames = int(total_frames)
+    window_size = int(window_size)
+    if total_frames <= 0:
+        return []
+    if window_size <= 0 or total_frames <= window_size:
+        return [(0, total_frames)]
+
+    # Shared with the spatial tilers: an overlap >= window collapses the stride
+    # to 1 and turns the run into total_frames windows.
+    overlap = clamp_overlap(window_size, overlap)
+    stride = max(1, window_size - overlap)
+
+    last_start = total_frames - window_size
+    starts: List[int] = []
+    cursor = 0
+    while True:
+        start = min(cursor, last_start)
+        if not starts or start > starts[-1]:
+            starts.append(start)
+        if start + window_size >= total_frames:
+            break
+        cursor += stride
+
+    # The final window is pulled back to end on the last frame, so it can sit
+    # closer to its predecessor than the stride. When that gap is smaller than
+    # the overlap, THREE windows cover the frames around the join, and three
+    # overlapping ramps cannot sum to one however they are shaped. The middle
+    # window is redundant there: dropping it leaves a gap of
+    # (last_start - starts[-3]) + stride < overlap + stride == window_size, so
+    # coverage stays continuous and every frame is shared by at most two
+    # windows. One drop always suffices, because the new gap is at least
+    # `stride`, and stride >= overlap once the overlap is clamped to half.
+    if len(starts) >= 3 and starts[-1] - starts[-2] < overlap:
+        del starts[-2]
+
+    return [(s, s + window_size) for s in starts]
+
+
+def temporal_window_weights(
+    windows: List[Tuple[int, int]], index: int, device=None, dtype=None
+) -> torch.Tensor:
+    """Blend weight per frame for ``windows[index]``, shaped (1, 1, L, 1, 1).
+
+    Ramp lengths come from the ACTUAL overlap with each neighbour rather than
+    from the requested overlap, because the last window is pulled back to end
+    on the final frame and can therefore share more frames with its predecessor
+    than the setting asks for. Using the real overlap keeps sin^2 + cos^2 == 1
+    across the shared region in that case too.
+
+    Every weight is strictly positive, so dividing by the accumulated weight is
+    safe and no frame can normalise to zero.
+    """
+    f0, f1 = windows[index]
+    length = f1 - f0
+    weight = torch.ones(length, device=device, dtype=dtype or torch.float32)
+    if length <= 1:
+        return weight.view(1, 1, length, 1, 1)
+
+    lead = windows[index - 1][1] - f0 if index > 0 else 0
+    trail = f1 - windows[index + 1][0] if index < len(windows) - 1 else 0
+
+    lead = max(lead, 0)
+    trail = max(trail, 0)
+
+    # A ramp must span the WHOLE shared region. Clamping it to half the window,
+    # as the spatial tiler does, would leave the frames beyond the ramp at full
+    # weight in both windows, and those frames would sum to 2 instead of 1. The
+    # real constraint is only that the two ramps inside one window must not
+    # touch, because where they overlap they multiply into a dip. The planner
+    # guarantees lead + trail <= length, so this is defensive; if it is ever
+    # violated, fall back to splitting the window between the two ramps rather
+    # than letting them cross.
+    if lead + trail > length:
+        half = max(0, length // 2)
+        lead = min(lead, half)
+        trail = min(trail, length - half)
+
+    if lead > 0:
+        i = torch.arange(lead, device=device, dtype=weight.dtype)
+        weight[:lead] = torch.sin(math.pi * (i + 0.5) / (2 * lead)) ** 2
+    if trail > 0:
+        # Counted from the last frame inward, then flipped into place, so the
+        # window fades out exactly as its successor fades in.
+        i = torch.arange(trail, device=device, dtype=weight.dtype)
+        weight[length - trail:] = (torch.sin(math.pi * (i + 0.5) / (2 * trail)) ** 2).flip(0)
+
+    return weight.view(1, 1, length, 1, 1)
+
+
+def slice_conds_temporally(c: Dict[str, Any], f0: int, f1: int, total_frames: int) -> Dict[str, Any]:
+    """Copy of the model kwargs *c* with temporal entries cut to ``[f0, f1)``.
+
+    Text embeddings carry no temporal axis and are shared by every window
+    untouched. Entries that DO carry one -- an image-to-video model's
+    ``c_concat`` conditioning frames, for instance -- have to follow the window
+    or the model is told about frames it is not being shown.
+
+    Anything that is not a 5D tensor whose temporal dim matches the clip is
+    passed through unchanged, which is the safe default: a wrong slice is worse
+    than no slice.
+    """
+    out = {}
+    for key, value in c.items():
+        if (
+            isinstance(value, torch.Tensor)
+            and value.ndim == 5
+            and value.shape[2] == total_frames
+        ):
+            out[key] = value[:, :, f0:f1]
+        else:
+            out[key] = value
+    return out
+
 
 def tile_sample(
     model,
@@ -1798,8 +2224,22 @@ def tile_sample(
                 seed=seed + idx,
             )
         except Exception as e:
-            logger.warning(f"[TileSample] Tile ({y1},{y2},{x1},{x2}) failed: {e} — using input")
-            t_out = t_latent
+            # DEFECT: this used to set `t_out = t_latent`, the UN-DENOISED input
+            # slice, feather it into the output and let the run report success.
+            # The condition that makes a tile fail is almost always OOM at high
+            # resolution, which is the exact condition tiling exists to avoid,
+            # so the failure mode was a finished plate with a rectangle of raw
+            # latent noise in it and nothing above INFO to say so. A delivery
+            # pipeline has to fail the node instead.
+            raise RuntimeError(
+                f"[Radiance] Tiled sampling failed on tile {idx + 1}/{len(tile_coords)} "
+                f"at latent rows {y1}:{y2}, cols {x1}:{x2} (tile_size={tile_size}, "
+                f"tile_overlap={tile_overlap}).\n\n"
+                f"The node fails rather than substituting the un-denoised input for "
+                f"this tile, which would have left raw latent noise in the output.\n\n"
+                f"If this is an out-of-memory error, lower tile_size or tile_overlap.\n\n"
+                f"Original error: {e}"
+            ) from e
 
         if t_out.device != device or t_out.dtype != latent_samples.dtype:
             t_out = t_out.to(device=device, dtype=latent_samples.dtype)

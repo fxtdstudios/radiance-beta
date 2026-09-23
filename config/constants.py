@@ -2,7 +2,7 @@
 
 PACKAGE_NAME = "radiance"
 PACKAGE_DISPLAY_NAME = "Radiance"
-VERSION = "3.4.0"
+VERSION = "3.5.0"
 AUTHOR = "Radiance"
 WEB_DIRECTORY = "./js"
 
@@ -17,4 +17,16 @@ WEB_DIRECTORY = "./js"
 #:
 #: Raise it when the catalog grows; a drop below it means something failed to
 #: import, not that the catalog shrank.
-EXPECTED_MIN_NODE_COUNT = 129
+#:
+#: This is the ONLY floor. It used to read 129 against 131 actually
+#: registering, while tests/test_package_cleanup.py asserted >= 129 of its own
+#: and tests/test_node_smoke.py asserted >= 85 -- three numbers, none of them
+#: the truth, and a two-node slack in which a node could stop registering with
+#: every count test still green. Both tests read this constant now, so the
+#: floor moves in one place and nothing hides underneath it.
+#:
+#: 2026-09-18: 131 -> 156. Twenty-six nodes the implementation packages
+#: declared and no group registered; twenty-five of them ship, and
+#: RadianceHDRHistogram is withheld for a 5-D IMAGE output. See
+#: nodes/catalog.py and tests/test_node_publication_completeness.py.
+EXPECTED_MIN_NODE_COUNT = 156

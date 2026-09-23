@@ -264,9 +264,17 @@ def resolve_architecture(
 def setup_offload_mode(offload_mode: str, info_lines: list[str]) -> torch.device | None:
     """Apply the offload_mode setting, returning the CLIP load_device override (if any)."""
     if offload_mode == "sequential":
+        # ComfyUI has never shipped set_lowvram_mode(); the call raised
+        # AttributeError inside this try and logged "Could not enable
+        # sequential offload" on every run. The supported switch is the
+        # module-level vram_state, which load_models_gpu() reads on every
+        # load: LOW_VRAM streams weights to the GPU per layer, the same thing
+        # the --lowvram flag selects.
         try:
-            comfy.model_management.set_lowvram_mode(True)
-            logger.info("Sequential CPU offload enabled")
+            mm = comfy.model_management
+            if mm.vram_state not in (mm.VRAMState.LOW_VRAM, mm.VRAMState.NO_VRAM):
+                mm.vram_state = mm.VRAMState.LOW_VRAM
+            logger.info("Sequential CPU offload enabled (ComfyUI LOW_VRAM state)")
             info_lines.append("Offload: sequential")
         except Exception as e:
             logger.warning(f"Could not enable sequential offload: {e}")
@@ -495,7 +503,33 @@ def load_unet_and_baked_vae(
         except Exception as e:
             raise RuntimeError(f"❌ Failed to load UNET '{unet_name}': {e}")
 
+    _warn_if_weights_exceed_vram(model, unet_name, weight_dtype, info_lines)
     return model, vae, audio_vae, unet_time, unet_cache_hit, vae_time, vae_cache_hit
+
+
+def _warn_if_weights_exceed_vram(model, unet_name: str, weight_dtype: str, info_lines: list) -> None:
+    """Say, with real numbers, when the UNET cannot stay resident in VRAM.
+
+    The table estimate said 16.5 GB for Flux dev at bf16; the model is 22.7 GB
+    (3.5 live log). When the weights exceed the card, ComfyUI streams them from
+    system RAM on every step, which is the dominant cost of the whole run. fp8
+    halves the weights (Flux dev: ~11.9 GB) and keeps them resident.
+    """
+    try:
+        size_gb = float(model.model_size()) / (1024 ** 3)
+        total_gb = float(_get_total_vram()) / (1024 ** 3)
+    except Exception:  # noqa: BLE001 - diagnostics only
+        return
+    if total_gb <= 0 or size_gb <= total_gb * 0.85:
+        return
+    fp8_gb = size_gb / 2.0 if weight_dtype in ("default", "bf16", "fp16") else size_gb
+    msg = (f"{unet_name}: {size_gb:.1f} GB of weights [{weight_dtype}] on a {total_gb:.0f} GB GPU. "
+           f"They cannot stay in VRAM, so ComfyUI streams them from system RAM every step "
+           f"(typically several times slower per step).")
+    if fp8_gb < size_gb:
+        msg += f" weight_dtype fp8_e4m3fn brings them to ~{fp8_gb:.1f} GB and keeps them resident."
+    logger.warning(msg)
+    info_lines.append("⚠ " + msg)
 
 
 def load_clip_stack(
@@ -519,6 +553,26 @@ def load_clip_stack(
     Returns ``(clip, clip_slot_used, clip_time, clip_cache_hit)``.
     """
     t0 = time.time()
+
+    # A missing required slot silently selects a different text encoder
+    # (Flux with only t5xxl became Mochi's T5). Fill it when exactly one file
+    # on disk matches, otherwise stop with the slot named.
+    from radiance.model.detect import autofill_required_clip_slots
+    _slots, _filled, _missing = autofill_required_clip_slots(
+        resolved_type, folder_paths.get_filename_list("text_encoders"),
+        clip_l=clip_l, clip_g=clip_g, t5xxl=t5xxl, llm_encoder=llm_encoder,
+        text_projection=text_projection)
+    for _slot, _file in _filled.items():
+        logger.warning("[Radiance] %s needs %s; it was empty, using %s.", resolved_type, _slot, _file)
+        info_lines.append(f"CLIP {_slot}: auto -> {_file}")
+    if _missing:
+        raise ValueError(
+            f"❌ {resolved_type} needs text encoder slot(s) {', '.join(_missing)}, which are "
+            f"empty. Without them ComfyUI picks a different encoder for the files it "
+            f"is given (e.g. Flux with only t5xxl loads Mochi's T5) and the prompt is "
+            f"encoded wrongly. Select the file(s) in the Loader.")
+    clip_l, clip_g, t5xxl = _slots["clip_l"], _slots["clip_g"], _slots["t5xxl"]
+    llm_encoder, text_projection = _slots["llm_encoder"], _slots["text_projection"]
 
     # Ensure all selected CLIPs exist/downloaded
     for slot, val in [("clip_l", clip_l), ("clip_g", clip_g),

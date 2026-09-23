@@ -126,3 +126,32 @@ def linear_srgb_to_acescg(img: np.ndarray) -> np.ndarray:
 def acescg_to_linear_srgb(img: np.ndarray) -> np.ndarray:
     """Convert ACEScg (AP1) to linear sRGB (Rec.709)."""
     return np.dot(img, ACESCG_TO_SRGB.T)
+
+
+# Rec.709 (D65) ↔ BT.2020 (D65).  Numpy twins of M_REC709_TO_BT2020 and
+# M_BT2020_TO_REC709 in color/ops.py; the values are identical on purpose, and
+# tests/test_color_matrices.py pins that they stay that way.  The writer needs
+# the numpy form because it works on float32 arrays, not tensors.
+SRGB_TO_REC2020 = np.array(
+    [[0.6274040, 0.3292820, 0.0433136],
+     [0.0690970, 0.9195400, 0.0113612],
+     [0.0163916, 0.0880132, 0.8955950]],
+    dtype=np.float32,
+)
+
+REC2020_TO_SRGB = np.array(
+    [[1.6604910, -0.5876411, -0.0728499],
+     [-0.1245505, 1.1328999, -0.0083494],
+     [-0.0181508, -0.1005789, 1.1187297]],
+    dtype=np.float32,
+)
+
+
+def linear_srgb_to_rec2020(img: np.ndarray) -> np.ndarray:
+    """Convert linear Rec.709/sRGB primaries to linear BT.2020 primaries."""
+    return np.dot(img, SRGB_TO_REC2020.T).astype(np.float32)
+
+
+def rec2020_to_linear_srgb(img: np.ndarray) -> np.ndarray:
+    """Convert linear BT.2020 primaries to linear Rec.709/sRGB primaries."""
+    return np.dot(img, REC2020_TO_SRGB.T).astype(np.float32)

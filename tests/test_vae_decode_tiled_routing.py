@@ -4,11 +4,10 @@ tests/test_vae_decode_tiled_routing.py
 Tests that RadianceVAE4KDecode.decode() routes video latents to the right
 place under the VAE tiling integration:
 
-  - turbo_decoder=None: spatial+temporal tiling both go through the single
-    vae.decode_tiled() call (comfy.sd.VAE's own integrated tiler), falling
-    back to plain vae.decode() when neither is actually needed.
-  - turbo_decoder set (RUDRA): vae.decode_tiled() is never touched. RUDRA
-    keeps its original recursive-decode chunking, unchanged by this fix.
+  - spatial+temporal tiling both go through the single vae.decode_tiled()
+    call (comfy.sd.VAE's own integrated tiler), falling back to plain
+    vae.decode() when neither is actually needed. (3.5: the latent RUDRA
+    decoders and their separate recursive chunking path are gone.)
 
 See project_radiance_vae_tiling_seams memory for the investigation this
 integration replaced (Radiance's own stacked spatial-tile-per-temporal-chunk
@@ -99,25 +98,6 @@ class _FakeVideoVAE:
         return torch.zeros(1, T * self._frames_per_lat_frame, 4, 4, 3)
 
 
-if HAS_TORCH:
-    class _FakeTurboDecoder(torch.nn.Module):
-        """Minimal real nn.Module: decode()'s turbo_decoder branch calls
-        next(turbo_decoder.parameters()) and .to(device), both real
-        nn.Module machinery that a plain callable/MagicMock can't satisfy
-        without extra wiring."""
-
-        def __init__(self, frames_per_lat_frame=2):
-            super().__init__()
-            self._frames_per_lat_frame = frames_per_lat_frame
-            self.dummy_param = torch.nn.Parameter(torch.zeros(1))
-            self.call_count = 0
-
-        def forward(self, x):
-            self.call_count += 1
-            return torch.zeros(x.shape[0], 3, 4, 4)
-
-
-@skip_no_torch
 class TestUnifiedPathFastCase(unittest.TestCase):
     """Small resolution + short clip: neither spatial nor temporal tiling
     is needed, so decode() must skip decode_tiled() and call vae.decode()
@@ -192,59 +172,6 @@ class TestUnifiedPathTemporalOnly(unittest.TestCase):
         call = vae.decode_tiled_calls[0]
         self.assertEqual(call["tile_t"], 8)
         self.assertEqual(call["overlap_t"], 2)
-
-
-@skip_no_torch
-class TestTurboDecoderNeverUsesDecodeTiled(unittest.TestCase):
-    """RUDRA (turbo_decoder set) must never reach vae.decode_tiled().
-    It keeps its own pre-existing recursive-chunking + direct forward-pass
-    path, since it's a raw nn.Module, not a comfy.sd.VAE."""
-
-    def test_rudra_with_temporal_chunking_skips_decode_tiled(self):
-        decoder = _make_decoder()
-        vae = _FakeVideoVAE()
-        turbo = _FakeTurboDecoder()
-        latent = torch.zeros(1, 4, 20, 4, 4)  # long clip, small frame
-
-        _, meta, _ = decoder.decode(
-            {"samples": latent}, vae=vae,
-            tile_size="Auto", overlap=64,
-            hdr_mode="Clip (SDR)", source_space="sRGB",
-            display_tonemap="None", hdr_output=False,
-            temporal_size="8", temporal_overlap=2,
-            turbo_decoder=turbo,
-        )
-
-        self.assertEqual(len(vae.decode_tiled_calls), 0)
-        self.assertGreater(turbo.call_count, 0)
-        # Confirms the recursive-chunking block (not just "not decode_tiled")
-        # is what actually ran.
-        self.assertIn("temporal_chunks", json.loads(meta))
-
-    def test_rudra_auto_temporal_size_keeps_pre_fix_default_of_no_chunking(self):
-        """RUDRA has no VRAM calibration data of its own, so "Auto" must
-        resolve to "disabled" for it (matching the pre-fix default), not
-        silently start chunking RUDRA decodes with an untested formula."""
-        decoder = _make_decoder()
-        vae = _FakeVideoVAE()
-        turbo = _FakeTurboDecoder()
-        latent = torch.zeros(1, 4, 20, 4, 4)
-
-        _, meta, _ = decoder.decode(
-            {"samples": latent}, vae=vae,
-            tile_size="Auto", overlap=64,
-            hdr_mode="Clip (SDR)", source_space="sRGB",
-            display_tonemap="None", hdr_output=False,
-            temporal_size="Auto", temporal_overlap=2,
-            turbo_decoder=turbo,
-        )
-
-        self.assertEqual(len(vae.decode_tiled_calls), 0)
-        self.assertGreater(turbo.call_count, 0)
-        # "temporal_chunks" only appears in the recursive-chunking block's
-        # own metadata dict, so its absence confirms that block never fired:
-        # Auto did not invent a chunk size for RUDRA's uncalibrated path.
-        self.assertNotIn("temporal_chunks", json.loads(meta))
 
 
 @skip_no_torch

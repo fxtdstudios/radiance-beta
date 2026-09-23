@@ -385,12 +385,12 @@ class TestEOTFEncoders:
 
     def test_pq_range(self):
         x = np.linspace(0, 10, 50, dtype=np.float32)
-        y = _pq_encode(x, 1000.0)
+        y = _pq_encode(x)
         assert y.min() >= 0.0
         assert y.max() <= 1.0 + 1e-5
 
     def test_pq_zero_in_zero_out(self):
-        assert _pq_encode(np.array([0.0]), 1000.0)[0] == pytest.approx(0.0, abs=0.01)
+        assert _pq_encode(np.array([0.0]))[0] == pytest.approx(0.0, abs=0.01)
 
     def test_hlg_range(self):
         x = np.linspace(0, 1, 50, dtype=np.float32)

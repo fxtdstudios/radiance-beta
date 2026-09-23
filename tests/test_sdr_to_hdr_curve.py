@@ -66,7 +66,14 @@ def _convert(image, **kw):
         processing_mode="Expand",
     )
     args.update(kw)
-    return RadianceSDRToHDRUniversal().convert(image, **args)
+    out, *rest = RadianceSDRToHDRUniversal().convert(image, **args)
+    # 3.5.0: Linear output is BT.2408-normalised (1.0 = reference white, the
+    # effective one: capped at the peak). Convert back to 1.0 = 100 nits so
+    # _nits() reads absolute luminance.
+    ref = min(max(float(args["reference_white_nits"]), 100.0),
+              max(float(args["peak_nits"]), 100.0))
+    out = torch.cat([out[..., :3] * (ref / 100.0), out[..., 3:]], dim=-1)
+    return (out, *rest)
 
 
 def _nits(out, index=0):

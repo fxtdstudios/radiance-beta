@@ -2,9 +2,9 @@
 ◎ Radiance AI Upscaler  v1.0
 ════════════════════════════════════════════════════════════════════════════════
 
-Industry-grade AI upscaling for images and video.  Four model tiers, temporal
-coherence for video, anti-seam tiling, per-scene routing, and a per-pixel
-confidence map that integrates with the VFX Multipass pipeline.
+AI upscaling for images and video. Three model tiers, windowed video
+processing with seam blending, anti-seam tiling, a content heuristic for
+tier routing, and a tile-geometry weight map.
 
 NODES
 ─────
@@ -18,13 +18,13 @@ TIER OVERVIEW
   Tier 1 · Fast      Real-ESRGAN+         GAN-based, ms/frame,  ~2 GB VRAM
   Tier 2 · Quality   HAT-L / SwinIR       Transformer SOTA PSNR, ~6 GB VRAM
   Tier 3 · Creative  SD x4 / SeedVR2      Diffusion hallucination, 12+ GB VRAM
-  Tier 4 · Video     VideoGigaGAN-style   Flow-guided temporal, 8 GB VRAM
+  When a tier cannot load, the next one down runs and pass_info says so.
 
-TEMPORAL COHERENCE (video)
-  Frames processed in overlapping windows.  The optical-flow warp from the
-  VFX Multipass Lucas-Kanade engine is reused to compensate camera motion
-  between adjacent windows.  Laplacian pyramid blending removes any remaining
-  intensity seam at window boundaries.
+VIDEO WINDOWS
+  Frames are processed in overlapping windows. Tier 1/2 models are
+  single-image, so each frame is upscaled on its own; overlap frames are
+  upscaled twice, aligned with Lucas-Kanade flow and blended. This removes
+  window seams; it is not a temporal model and does not stop GAN flicker.
 
 TILING ENGINE
   All upscale backends route through RadianceUpscaleTiler for large images:
@@ -33,14 +33,14 @@ TILING ENGINE
     • Cosine feathering mask      fallback for unsupported backends
 
 MODEL AUTO-DOWNLOAD
-  Real-ESRGAN and HAT weights are fetched via huggingface_hub on first use
-  (urllib fallback) into ComfyUI models/upscale_models/.
+  Real-ESRGAN and HAT weights are fetched on first use into ComfyUI
+  models/upscale_models/, only with download consent
+  (RADIANCE_ALLOW_DOWNLOADS=1 or the consent file).
 
-CONFIDENCE MAP
-  Every upscale pass emits a float32 [0,1] confidence IMAGE:
-    1.0  = pixel reproduced faithfully (minimal model uncertainty)
-    0.0  = heavily hallucinated / extrapolated region
-  Plug this into the VFX Multipass pass_confidence port for downstream QC.
+CONFIDENCE MAP (tile weight, not model confidence)
+  The confidence output is geometric: 1.0 at tile centres, falling toward
+  tile edges, averaged where tiles overlap. It shows where seams were
+  blended. It does not measure hallucination; no backend reports that.
 
 ════════════════════════════════════════════════════════════════════════════════
 """
@@ -585,7 +585,8 @@ def tiled_upscale(
     Returns
     -------
     upscaled   : (B, H*scale, W*scale, C)
-    confidence : (B, H*scale, W*scale, 1)  per-pixel hallucination confidence
+    confidence : (B, H*scale, W*scale, 1)  tile-geometry weight (1 at tile
+                 centres, lower toward tile edges); not a model confidence
     """
     B, H, W, C   = images.shape
     oH, oW       = H * scale, W * scale
@@ -1291,10 +1292,13 @@ def _build_upscale_fn(
         return _fn_ext, "external UPSCALE_MODEL"
 
     tier = model_tier.lower()
+    fallback_note = ""
 
     # ── Tier 3: diffusion creative ───────────────────────────────────────────
     if "tier3" in tier:
         use_seedvr2 = prefer_seedvr2 or "seedvr2" in tier
+
+        stats = {"diffusion": 0, "Real-ESRGAN": 0, "bicubic": 0}
 
         def _fn_diff(tile: torch.Tensor) -> torch.Tensor:
             result = _diffusion_upscale_infer(
@@ -1306,18 +1310,24 @@ def _build_upscale_fn(
                 prefer_seedvr2=use_seedvr2,
             )
             if result is not None:
+                stats["diffusion"] += 1
                 # The diffusion backends are fixed 4x; the node may have been
                 # asked for 2x. Conform before tiled_upscale crops.
                 return _conform_to_scale(tile, result, scale_int)
-            # Fallback: Real-ESRGAN
+            # Fallback: Real-ESRGAN. Counted, and reported by _backend_report,
+            # so a run that never touched the diffusion model is not labelled
+            # as a diffusion upscale.
             logger.warning("[Radiance/Upscale] Diffusion unavailable, falling back to Tier 1")
             mk = "realesrgan_x4plus" if scale_int == 4 else "realesrgan_x2plus"
             try:
                 net = _load_realesrgan(mk, scale_int, device)
+                stats["Real-ESRGAN"] += 1
                 return _realesrgan_infer(net, tile, device)
             except Exception:
+                stats["bicubic"] += 1
                 return _bicubic_upscale(tile, scale_int)
 
+        _fn_diff.backend_stats = stats
         label = "SeedVR2 (diffusion)" if use_seedvr2 else "SD x4 upscaler (diffusion)"
         return _fn_diff, label
 
@@ -1345,8 +1355,10 @@ def _build_upscale_fn(
             return _fn_t2, label2
         except RuntimeError as e:
             logger.warning(f"[Radiance/Upscale] Tier 2 unavailable ({e}), falling back to Tier 1")
+            fallback_note = f"Tier 2 unavailable ({str(e)[:80]}), "
 
     # ── Tier 1 / auto: Real-ESRGAN (fast GAN) ───────────────────────────────
+    note = fallback_note
     mk1 = "realesrgan_x4plus" if scale_int >= 4 else "realesrgan_x2plus"
     try:
         net1 = _load_realesrgan(mk1, scale_int, device)
@@ -1354,15 +1366,31 @@ def _build_upscale_fn(
         def _fn_t1(tile: torch.Tensor) -> torch.Tensor:
             return _realesrgan_infer(net1, tile, device)
 
-        return _fn_t1, f"Real-ESRGAN x{scale_int}+ (Tier 1)"
+        label1 = f"Real-ESRGAN x{scale_int}+ (Tier 1)"
+        return _fn_t1, (f"{label1}  [{note}used Tier 1]" if note else label1)
     except Exception as e:
         logger.warning(f"[Radiance/Upscale] Real-ESRGAN load failed ({e}), using bicubic")
+        note += f"Real-ESRGAN unavailable ({str(e)[:80]}), "
 
     # ── Final fallback: bicubic ──────────────────────────────────────────────
     def _fn_bc(tile: torch.Tensor) -> torch.Tensor:
         return _bicubic_upscale(tile, scale_int)
 
-    return _fn_bc, "bicubic (fallback)"
+    return _fn_bc, f"bicubic, NOT an AI upscale  [{note.rstrip(', ')}]"
+
+
+def _backend_report(fn, label: str) -> str:
+    """The label, corrected by what the backend actually ran per tile."""
+    stats = getattr(fn, "backend_stats", None)
+    if not stats:
+        return label
+    total = sum(stats.values())
+    if total == 0 or stats.get("diffusion", 0) == total:
+        return label
+    parts = ", ".join(f"{k} {v}/{total}" for k, v in stats.items() if v)
+    if stats.get("diffusion", 0) == 0:
+        return f"{label} requested, NOT used: diffusion unavailable, tiles ran {parts}"
+    return f"{label} on some tiles only: {parts}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1407,7 +1435,7 @@ class RadianceUpscaleTiler:
 
     Outputs:
       upscaled    — (B, H×scale, W×scale, C) float32
-      confidence  — (B, H×scale, W×scale, 1) per-pixel confidence [0,1]
+      confidence  — (B, H×scale, W×scale, 1) tile-geometry weight [0,1], not a model confidence
       info        — STRING report
     """
 
@@ -1567,7 +1595,7 @@ class RadianceUpscaleTiler:
             f"  Input    : {B}×{H}×{W}×{C}\n"
             f"  Output   : {B}×{oH}×{oW}×{C}  ({eff_scale}×)\n"
             f"  Tile     : {tile_size}px  overlap={overlap}px  blend={blend_mode}\n"
-            f"  Model    : {model_label}\n"
+            f"  Model    : {_backend_report(_fn, model_label)}\n"
             f"  Time     : {elapsed:.2f}s\n"
         )
 
@@ -1596,7 +1624,7 @@ class RadianceUpscaleImage:
     Outputs
     -------
     upscaled        — (B, H×scale, W×scale, C)  float32 [0,1]
-    confidence_map  — (B, H×scale, W×scale, 3)  per-pixel confidence
+    confidence_map  — (B, H×scale, W×scale, 3)  tile-geometry weight, not a model confidence
     pass_info       — STRING  diagnostic report
     """
 
@@ -1841,8 +1869,16 @@ class RadianceUpscaleImage:
         do_double  = scale == "8× (tile cascade)"
         device     = _compute_device(images)
 
-        # Mode → tier mapping: creative forces Tier 3, precise/balanced use selected tier
+        # Mode -> tier: creative forces Tier 3. "auto" follows the content
+        # analysis (it used to fall straight through to Tier 1); precise and
+        # balanced never auto-select diffusion, which invents detail.
         effective_tier = model_tier if upscale_model is None else "auto"
+        tier_note = ""
+        if upscale_model is None and effective_tier == "auto" and mode != "creative":
+            effective_tier = _recommend_tier(stats)
+            if "tier3" in effective_tier:
+                effective_tier = "tier1_fast    (Real-ESRGAN — GAN, ms/frame)"
+            tier_note = f"auto -> {effective_tier.split('(')[0].strip()} (content analysis)"
         if mode == "creative" and "tier3" not in effective_tier.lower():
             effective_tier = "tier3_creative (SD x4 — diffusion hallucination)"
 
@@ -1878,6 +1914,10 @@ class RadianceUpscaleImage:
             ).permute(0, 2, 3, 1)) / 2.0
 
         # ── Post-processing ───────────────────────────────────────────────────
+        # balanced = GAN upscale + light sharpening: 0.25 unsharp unless the
+        # user set their own. It used to behave exactly like precise.
+        if mode == "balanced" and sharpness_boost <= 1e-4:
+            sharpness_boost = 0.25
         if sharpness_boost > 1e-4:
             upscaled = self._unsharp_mask(upscaled, sharpness_boost)
 
@@ -1891,7 +1931,8 @@ class RadianceUpscaleImage:
             + (f"  prompt='{enhancement_prompt[:40]}'" if enhancement_prompt else "") + "\n"
             f"  Input         : {B}×{H}×{W}×{C}\n"
             f"  Output        : {B}×{oH}×{oW}×{C}  ({eff_sc}×)\n"
-            f"  Model         : {model_label}\n"
+            f"  Model         : {_backend_report(_fn, model_label)}\n"
+            + (f"  Tier          : {tier_note}\n" if tier_note else "") +
             f"  Denoise pre   : {denoise_pre:.2f}  sharpness boost: {sharpness_boost:.2f}\n"
             f"  Tile/overlap  : {tile_size}px / {overlap}px\n"
             f"  Time          : {elapsed:.2f}s  ({elapsed/B:.2f}s per frame)\n"
@@ -1919,19 +1960,19 @@ class RadianceUpscaleVideo:
     """
     ◎ Radiance Upscale Video
 
-    Temporal-coherent AI upscaling for video frame batches.
+    Windowed AI upscaling for video frame batches.
 
     Key features:
-      • Overlapping temporal windows (SeedVR2-style 4n+1 overlap) prevent
-        inter-batch flickering.
-      • Optical flow warping compensates camera motion between windows.
+      • Overlapping windows hide seams between processing batches. Frames
+        are upscaled independently (Tier 1/2), so GAN flicker is not removed.
+      • Overlap frames upscaled twice are flow-aligned and blended at window seams.
       • Laplacian pyramid blending at window seams removes intensity jumps.
-      • Per-frame confidence map — lower at temporal boundaries.
+      • Tile-geometry weight map (not a model confidence).
 
     Outputs
     -------
-    upscaled        — (B, H×scale, W×scale, C)  temporally coherent batch
-    confidence_map  — (B, H×scale, W×scale, 3)  per-pixel confidence
+    upscaled        — (B, H×scale, W×scale, C)  upscaled batch
+    confidence_map  — (B, H×scale, W×scale, 3)  tile-geometry weight, not a model confidence
     pass_info       — STRING  timing and coherence report
     """
 
@@ -1965,8 +2006,8 @@ class RadianceUpscaleVideo:
                 "window_size": (
                     "INT",
                     {"default": 16, "min": 4, "max": 64, "step": 4,
-                     "tooltip": "Temporal window (frames processed together). "
-                                "Larger = better consistency but more VRAM."},
+                     "tooltip": "Frames per processing batch (VRAM). Tier 1/2 models are "
+                                "single-image: each frame is still upscaled on its own."},
                 ),
                 "overlap_temporal": (
                     "INT",
@@ -1977,8 +2018,9 @@ class RadianceUpscaleVideo:
                 "flow_compensation": (
                     "BOOLEAN",
                     {"default": True,
-                     "tooltip": "Use Lucas-Kanade optical flow to warp reference frames "
-                                "before blending temporal window seams."},
+                     "tooltip": "At window seams each overlap frame is upscaled twice; "
+                                "Lucas-Kanade flow aligns the two results before they are "
+                                "blended. It does not compensate camera motion between frames."},
                 ),
                 "sharpness_boost": (
                     "FLOAT",
@@ -2245,9 +2287,9 @@ class RadianceUpscaleVideo:
 
         # Post sharpening
         if sharpness_boost > 1e-4:
-            out_acc = RadianceUpscaleImage._unsharp_mask(
-                RadianceUpscaleImage(), out_acc, sharpness_boost,
-            )
+            # _unsharp_mask is a staticmethod; the old call passed an instance
+            # as the image and crashed whenever sharpness_boost > 0.
+            out_acc = RadianceUpscaleImage._unsharp_mask(out_acc, sharpness_boost)
 
         elapsed = time.time() - t0
         fpf     = elapsed / B if B > 0 else 0
@@ -2256,7 +2298,7 @@ class RadianceUpscaleVideo:
             f"RadianceUpscaleVideo  v1.0\n"
             f"  Frames        : {B}  ({B}fr → {B}fr upscaled)\n"
             f"  Resolution    : {H}×{W} → {oH}×{oW}  ({scale_int}×)\n"
-            f"  Model         : {model_label}\n"
+            f"  Model         : {_backend_report(_fn, model_label)}\n"
             f"  Windows       : {n_windows}  size={window_size}  overlap={overlap_temporal}\n"
             f"  Flow warp     : {'on' if flow_compensation else 'off'}\n"
             f"  Tile/overlap  : {tile_size}px / {overlap_spatial}px\n"
@@ -2291,8 +2333,12 @@ class RadianceUpscaleRouter:
     Outputs
     -------
     recommended_tier  — STRING  (matches model_tier dropdown values)
-    content_class     — STRING  (face | landscape | text | stylised | generic)
-    stats_json        — STRING  JSON with noise_level, sharpness, saturation, ai_likelihood
+    content_class     — STRING  (ai_generated | degraded | greyscale | high_detail | generic),
+                        from four image statistics; there is no face, text or
+                        scene classifier
+    stats_json        — STRING  JSON with noise_level, sharpness, saturation and
+                        ai_likelihood (a weighted blend of the other three, not
+                        a detector)
     images            — IMAGE   pass-through (unchanged)
     """
 
@@ -2570,6 +2616,7 @@ def _restore_face_crop(
     x_512 = F.interpolate(x, size=(S, S), mode="bilinear", align_corners=False)
 
     result_512: Optional[torch.Tensor] = None
+    errors: List[str] = []
 
     # ── spandrel path ─────────────────────────────────────────────────────────
     is_spandrel = not isinstance(model, nn.Module)
@@ -2577,12 +2624,20 @@ def _restore_face_crop(
         try:
             inner = getattr(model, "model", model)
             with torch.no_grad():
-                y = inner(x_512.to(device))
+                if "codeformer" in model_key:
+                    # spandrel's CodeFormer takes the fidelity as `weight`;
+                    # without it the widget did nothing on this path.
+                    try:
+                        y = inner(x_512.to(device), weight=fidelity_weight)
+                    except TypeError:
+                        y = inner(x_512.to(device))
+                else:
+                    y = inner(x_512.to(device))
                 if isinstance(y, (list, tuple)):
                     y = y[0]
                 result_512 = y.clamp(0, 1).cpu()
         except Exception as e:
-            logger.debug(f"[Radiance/FaceRestore] spandrel infer failed: {e}")
+            errors.append(f"spandrel: {e}")
 
     # ── CodeFormer via basicsr (nn.Module with fidelity_weight param) ─────────
     if result_512 is None and hasattr(model, "forward") and "codeformer" in model_key:
@@ -2593,7 +2648,7 @@ def _restore_face_crop(
                     output = output[0]
                 result_512 = output.clamp(0, 1).cpu()
         except Exception as e:
-            logger.debug(f"[Radiance/FaceRestore] CodeFormer basicsr infer: {e}")
+            errors.append(f"CodeFormer: {e}")
 
     # ── GFPGAN via gfpgan package ─────────────────────────────────────────────
     if result_512 is None and hasattr(model, "enhance"):
@@ -2611,11 +2666,12 @@ def _restore_face_crop(
                 ).float() / 255.0        # RGB back
                 result_512 = rf.unsqueeze(0).permute(0, 3, 1, 2)
         except Exception as e:
-            logger.debug(f"[Radiance/FaceRestore] gfpgan enhance: {e}")
+            errors.append(f"GFPGAN: {e}")
 
-    # ── Identity fallback ─────────────────────────────────────────────────────
+    # No silent identity: the caller counts a crop as restored only when a
+    # model produced it. It used to paste the input back and count it.
     if result_512 is None:
-        result_512 = x_512.cpu()
+        raise RuntimeError("; ".join(errors) or f"{model_key}: no inference path for this model")
 
     # Resize restored face back to original crop dimensions
     restored = F.interpolate(result_512, size=(H_orig, W_orig),
@@ -2915,9 +2971,13 @@ class RadianceUpscaleFaceRestore:
         result = images.clone()
 
         # ── Resolve model key ─────────────────────────────────────────────────
-        skip_restore = "skip" in face_model.lower()
+        # startswith, not "in": the default "auto (CodeFormer → GFPGAN → skip)"
+        # contains the word skip, so auto used to restore nothing.
+        skip_restore = face_model.lower().startswith("skip")
         model_key    = None
         fr_model     = None
+        load_errors: List[str] = []
+        crop_errors: List[str] = []
 
         if not skip_restore:
             candidates = (["codeformer", "gfpgan_v1.4"]
@@ -2930,6 +2990,7 @@ class RadianceUpscaleFaceRestore:
                     logger.info(f"[Radiance/FaceRestore] Using model: {ck}")
                     break
                 except RuntimeError as e:
+                    load_errors.append(f"{ck}: {str(e)[:120]}")
                     logger.warning(f"[Radiance/FaceRestore] {ck} unavailable: {e}")
 
         # ── Process each frame ────────────────────────────────────────────────
@@ -2957,6 +3018,7 @@ class RadianceUpscaleFaceRestore:
                         restored_faces += 1
                     except Exception as e:
                         logger.warning(f"[Radiance/FaceRestore] Crop restore failed: {e}")
+                        crop_errors.append(str(e)[:160])
                         restored_crop = crop
                 else:
                     restored_crop = crop
@@ -2984,7 +3046,9 @@ class RadianceUpscaleFaceRestore:
             f"  Frames processed  : {B}\n"
             f"  Faces detected    : {total_faces}\n"
             f"  Faces restored    : {restored_faces}\n"
-            f"  Model             : {model_key or 'none (skip)'}\n"
+            f"  Model             : {model_key or ('none (skip)' if skip_restore else 'NONE LOADED, faces left as they were')}\n"
+            + ("".join(f"  Load failed       : {e}\n" for e in load_errors) if model_key is None else "")
+            + (f"  Crops failed      : {len(crop_errors)} ({crop_errors[0]})\n" if crop_errors else "") +
             f"  Fidelity weight   : {fidelity_weight:.2f}  "
             f"(0=creative, 1=faithful)\n"
             f"  Blend radius      : {blend_radius}px\n"
@@ -3012,6 +3076,12 @@ NODE_CLASS_MAPPINGS = {
     "RadianceUpscaleImage":       RadianceUpscaleImage,       # Upscale | Route
     "RadianceUpscaleVideo":       RadianceUpscaleVideo,
     "RadianceUpscaleFaceRestore": RadianceUpscaleFaceRestore,
+    # Written, documented and covered by tests/test_upscale.py, and never
+    # listed here, so ComfyUI never saw it -- the same defect that hid
+    # seventeen nodes in the v3 reorganisation (see nodes/aggregate.py). The
+    # module mapping is what `fold_in_module_nodes` sweeps, so a node added to
+    # this file only ships once it appears in this dict.
+    "RadianceUpscaleRouter":      RadianceUpscaleRouter,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -3019,4 +3089,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceUpscaleImage":       "◎ Radiance Upscale Image / Router",
     "RadianceUpscaleVideo":       "◎ Radiance Upscale Video",
     "RadianceUpscaleFaceRestore": "◎ Radiance Upscale Face Restore",
+    "RadianceUpscaleRouter":      "◎ Radiance Upscale Router",
 }

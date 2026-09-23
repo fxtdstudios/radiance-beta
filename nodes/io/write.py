@@ -98,6 +98,7 @@ from ...io.writer import (  # noqa: F401  (re-exported for this module's other u
     _fmt_stem,
     WRITE_FORMATS,
     OUTPUT_COLOR_SPACES,
+    WRITE_WORKING_SPACES,
     EXR_COMPRESSIONS,
     _ffmpeg_bin,
     _ffprobe_bin,
@@ -133,6 +134,7 @@ from ...io.writer import (  # noqa: F401  (re-exported for this module's other u
 # caller change and not part of this one.
 from ...io.reader import (  # noqa: F401  (re-exported for this module's other users)
     INPUT_COLOR_SPACES,
+    READ_WORKING_SPACES,
     _INPUT_DECODERS,
     _IMG_EXT,
     _VID_EXT,
@@ -404,6 +406,42 @@ class RadianceRead:
                 "tooltip": "Bump to force a re-read of the file, for when the "
                            "contents changed but the timestamp did not.",
             }),
+            # ── Colour management (3.5) ─────────────────────────────────
+            "working_space": (READ_WORKING_SPACES, {
+                "default": "Linear Rec.709 (sRGB)",
+                "tooltip": (
+                    "Scene-linear space the IMAGE is delivered in. color_space "
+                    "is decoded all the way here: transfer AND primaries. "
+                    "Linear Rec.709 matches ComfyUI; ACEScg for an ACES pipeline."
+                ),
+            }),
+            "ocio_colorspace": ("STRING", {
+                "default": "",
+                "placeholder": "e.g. ARRI LogC4 · S-Log3 S-Gamut3.Cine · lin_ap0",
+                "tooltip": (
+                    "Any colorspace name or alias from the OCIO config. When set "
+                    "it overrides color_space and OpenColorIO converts it to the "
+                    "working space. Empty = use color_space."
+                ),
+            }),
+            "ocio_config": ("STRING", {
+                "default": "",
+                "placeholder": "empty = $OCIO, else OCIO's ACES studio config",
+                "tooltip": (
+                    "Path to a config.ocio, or an ocio:// built-in URI. Empty uses "
+                    "$OCIO, and without it OpenColorIO's built-in ACES 2.0 studio "
+                    "config (every major camera log). Used by ocio_colorspace and, "
+                    "when OCIO is installed, by the named color_space entries."
+                ),
+            }),
+            "hdr_reference_nits": ("FLOAT", {
+                "default": 203.0, "min": 48.0, "max": 1000.0, "step": 1.0,
+                "tooltip": (
+                    "PQ and HLG only: the luminance that scene-linear 1.0 "
+                    "(diffuse white) sits at. 203 is BT.2408 and what "
+                    "Radiance's HDR nodes use; 100 matches OCIO/ACES conventions."
+                ),
+            }),
         }}
 
     @classmethod
@@ -441,6 +479,10 @@ class RadianceRead:
         raw: bool = False,
         premultiplied: bool = False,
         reload: int = 0,
+        working_space: str = "Linear Rec.709 (sRGB)",
+        ocio_colorspace: str = "",
+        ocio_config: str = "",
+        hdr_reference_nits: float = 203.0,
     ):
         # The read itself is radiance/io/reader.py. Two things stay here
         # because the engine cannot have them: `browse` names a file in
@@ -461,6 +503,10 @@ class RadianceRead:
             on_error=on_error,
             raw=raw,
             premultiplied=premultiplied,
+            working_space=working_space,
+            ocio_colorspace=strip_path_quotes(ocio_colorspace or "") if ocio_colorspace else "",
+            ocio_config=strip_path_quotes(ocio_config or "") if ocio_config else "",
+            hdr_reference_nits=hdr_reference_nits,
         )
         return (image, mask, json.dumps(info, default=str))
 
@@ -562,7 +608,10 @@ class RadianceWrite:
             }),
             "color_space": (OUTPUT_COLOR_SPACES, {
                 "default": "Linear (pass-through)",
-                "tooltip": "Apply this color space transform before saving.",
+                "tooltip": ("File encoding: transfer AND primaries, from working_space. "
+                            "Linear (pass-through) writes the working values unchanged. "
+                            "EXR and DPX record it in their headers (chromaticities, "
+                            "oiio:ColorSpace); video gets primaries/transfer/matrix tags."),
             }),
             "fps": ("FLOAT", {
                 "default": 0.0, "min": 0.0, "max": 240.0, "step": 0.001,
@@ -592,7 +641,8 @@ class RadianceWrite:
             }),
             "broadcast_safe": ("BOOLEAN", {
                 "default": False,
-                "tooltip": "Clamp output to broadcast-legal range (16–235 luma) before saving.",
+                "tooltip": "8/16-bit stills: clamp to legal range (16–235). Video is always "
+                           "encoded legal-range by the RGB→YUV step; float formats are never clamped.",
             }),
             "overwrite": ("BOOLEAN", {
                 # AUDIT-UX (2026-08): default was True. Destroying an existing
@@ -610,8 +660,41 @@ class RadianceWrite:
             }),
             "mask": ("MASK", {
                 "tooltip": (
-                    "Optional alpha/matte. When connected and the format is EXR or PNG, it is "
-                    "written as the alpha channel (RGBA). Ignored for other formats."
+                    "Optional alpha/matte, written as the alpha channel of EXR, PNG, "
+                    "TIFF, DPX, WEBP and ProRes 4444. Ignored by JPEG, HDR, H.264, "
+                    "H.265, ProRes 422 and DNxHR, which have no alpha."
+                ),
+            }),
+            # ── Colour management (3.5) ─────────────────────────────────
+            "working_space": (WRITE_WORKING_SPACES, {
+                "default": "Linear Rec.709 (sRGB)",
+                "tooltip": (
+                    "Scene-linear space the incoming IMAGE is in. color_space is "
+                    "encoded from here, primaries AND transfer. Match the Read "
+                    "node's working_space."
+                ),
+            }),
+            "ocio_colorspace": ("STRING", {
+                "default": "",
+                "placeholder": "e.g. ACEScct · S-Log3 S-Gamut3.Cine · Rec.1886 Rec.709 - Display",
+                "tooltip": (
+                    "Any colorspace name or alias from the OCIO config. When set it "
+                    "overrides color_space and OpenColorIO encodes the working space "
+                    "into it. Empty = use color_space."
+                ),
+            }),
+            "ocio_config": ("STRING", {
+                "default": "",
+                "placeholder": "empty = $OCIO, else OCIO's ACES studio config",
+                "tooltip": "Path to a config.ocio or an ocio:// URI. Empty = $OCIO, else OCIO's built-in ACES 2.0 studio config.",
+            }),
+            "hdr_reference_nits": ("FLOAT", {
+                "default": 203.0, "min": 48.0, "max": 1000.0, "step": 1.0,
+                "tooltip": (
+                    "PQ and HLG only: the luminance scene-linear 1.0 (diffuse white) "
+                    "is written at. 203 is BT.2408 and Radiance's HDR convention; "
+                    "100 matches OCIO/ACES. PQ clips at 10,000 nits, HLG at about "
+                    "3.8x diffuse white."
                 ),
             }),
         }, "hidden": {
@@ -670,12 +753,20 @@ class RadianceWrite:
         frame_padding:  int   = 4,
         audio_source:   str   = "",
         broadcast_safe: bool  = False,
-        overwrite:      bool  = True,
+        # Matches INPUT_TYPES, which declares False. It used to default to
+        # True here, so any caller that did not pass the widget value (the
+        # Digital Cinema shim, the delivery path) got destructive
+        # overwrite from a signature that contradicted its own UI.
+        overwrite:      bool  = False,
         proxy_scale:    float = 0.0,
         audio:          Any   = None,
         mask:           Any   = None,
         prompt:         Any   = None,
         extra_pnginfo:  Any   = None,
+        working_space:  str   = "Linear Rec.709 (sRGB)",
+        ocio_colorspace: str  = "",
+        ocio_config:    str   = "",
+        hdr_reference_nits: float = 203.0,
     ):
         """The node surface. The maths and the file writing are in
         radiance/io/writer.py; this signature is the widget contract and must
@@ -703,6 +794,10 @@ class RadianceWrite:
             prompt=prompt,
             extra_pnginfo=extra_pnginfo,
             read_media=self._read_media,
+            working_space=working_space,
+            ocio_colorspace=ocio_colorspace,
+            ocio_config=strip_path_quotes(ocio_config or "") if ocio_config else "",
+            hdr_reference_nits=hdr_reference_nits,
         )
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -885,8 +980,12 @@ class RadianceDigitalCinemaRead:
                 "read_mode": (["Auto", "Video", "Sequence", "EXR"], {"default": "Auto"}),
                 "start_frame": ("INT", {"default": 1, "min": 1}),
                 "frame_limit": ("INT", {"default": 0, "min": 0}),
-                "input_colorspace": (["sRGB (Standard)"], {"default": "sRGB (Standard)"}),
-                "fps_override": ("FLOAT", {"default": 0.0, "min": 0.0}),
+                "input_colorspace": (["sRGB (Standard)"] + [c for c in INPUT_COLOR_SPACES if c != "sRGB"],
+                                     {"default": "sRGB (Standard)",
+                                      "tooltip": "Transfer the source was encoded with. It is decoded "
+                                                 "to scene-linear; shot_metadata.colorspace records the result."}),
+                "fps_override": ("FLOAT", {"default": 0.0, "min": 0.0,
+                                           "tooltip": "0 = the source's own rate. Written to shot_metadata.fps."}),
             }
         }
 
@@ -896,25 +995,43 @@ class RadianceDigitalCinemaRead:
     CATEGORY = "FXTD Studios/Radiance/IO"
 
     def read(self, source_path, read_mode, start_frame, frame_limit, input_colorspace, fps_override=0.0):
+        # An executed read with no source is a mistake, not a placeholder. The
+        # shared reader returns an 8x8 black frame for an empty path so a node
+        # dropped on the canvas can preview; reached from a queued graph, that
+        # frame went downstream as the shot, with RADIANCE_SHOT metadata
+        # saying kind "empty" and nothing on screen to say why. Found by the
+        # live 3.5 run.
+        if not str(source_path or "").strip().strip('"').strip("'"):
+            raise ValueError(
+                "RadianceDigitalCinemaRead: source_path is empty. Set it to a "
+                "video file, an image, or a frame sequence (e.g. shot.####.exr)."
+            )
         media_type = "Auto"
         if read_mode == "Video":
             media_type = "Video"
         elif read_mode in ("Sequence", "EXR"):
             media_type = "Sequence"
 
+        cs_in = "sRGB" if input_colorspace == "sRGB (Standard)" else input_colorspace
         reader = RadianceRead()
+        # `end_frame` is a frame NUMBER, and `start_frame` here defaults to 1
+        # while VFX sequences number from 1001. A `frame_limit` of 10 therefore
+        # arrives at the reader as start=1, end=10; `_sequence_frame_range`
+        # corrects the start to 1001, and end<start used to send
+        # `_resolve_sequence_paths` down its "read everything" fallback --
+        # measured: start_frame=1, frame_limit=10 on a 100-frame sequence
+        # numbered 1001-1100 read all 100 frames into RAM. The reader now
+        # carries the window's LENGTH across that correction (see
+        # `_sequence_frame_range`), so the span expressed here is what is read.
         img, mask, read_info = reader.read(
             path=source_path,
             media_type=media_type,
-            color_space="sRGB" if "sRGB" in input_colorspace else "Auto / Linear (pass-through)",
+            color_space=cs_in,
             start_frame=start_frame,
             end_frame=(start_frame + frame_limit - 1) if frame_limit > 0 else 0,
+            max_video_frames=frame_limit if frame_limit > 0 else 0,
         )
 
-        # RECOVERY STUB: the working-tree file was truncated mid-edit at exactly
-        # this point (the module would not import). This minimal body restores
-        # import-ability and honors the declared (IMAGE, MASK, RADIANCE_SHOT)
-        # contract. Review/replace with the intended Digital Cinema metadata logic.
         shot_metadata = {
             "source_path": source_path,
             "read_mode": read_mode,
@@ -930,6 +1047,25 @@ class RadianceDigitalCinemaRead:
             shot_metadata["source"] = json.loads(read_info)
         except (TypeError, ValueError) as _exc:
             log.debug("[Radiance] DigitalCinemaRead: unreadable info payload: %s", _exc)
+        src = shot_metadata.get("source") or {}
+
+        # What the pixels are now, the key RadianceLinearCheck reads. It was
+        # never written, so Linear Check reported "Unknown" for every shot.
+        if cs_in == "ACEScg":
+            colorspace = "ACEScg"
+        elif cs_in == "Auto / Linear (pass-through)":
+            float_src = src.get("kind") == "exr" or str(source_path).lower().endswith((".exr", ".hdr"))
+            colorspace = "Linear" if float_src else "Unknown (pass-through, not decoded)"
+        else:
+            colorspace = f"Linear (decoded from {cs_in})"
+        shot_metadata["colorspace"] = colorspace
+
+        # fps_override used to be stored and nothing else.
+        src_fps = src.get("fps")
+        shot_metadata["fps"] = float(fps_override) if fps_override > 0 else (
+            float(src_fps) if src_fps else None)
+        shot_metadata["fps_source"] = "override" if fps_override > 0 else (
+            "source" if src_fps else "unknown")
         return (img, mask, shot_metadata)
 
 

@@ -172,40 +172,113 @@ if "torch.nn.functional" not in sys.modules:
         setattr(_nn_functional, _fn, MagicMock())
     sys.modules["torch.nn.functional"] = _nn_functional
 
+# Every module conftest fabricates carries this attribute. A test that needs to
+# know "is this the host package or our stand-in?" reads the marker instead of
+# inferring it from behaviour: a MagicMock answers hasattr for anything, and a
+# types.ModuleType is not distinguishable from a real module by isinstance, so
+# every behavioural guess in this suite has been wrong at least once. See the
+# real-torch gate below, which is the same idea for torch.
+STUB_MARKER = "__radiance_test_stub__"
+
+
+def _mark_stub(module):
+    """Tag a fabricated module so callers can check, not guess."""
+    setattr(module, STUB_MARKER, True)
+    return module
+
+
+def is_test_stub(module) -> bool:
+    """True when `module` is one conftest fabricated rather than the real thing."""
+    return bool(getattr(module, STUB_MARKER, False))
+
+
 if "node_helpers" not in sys.modules:
-    _node_helpers = types.ModuleType("node_helpers")
+    _node_helpers = _mark_stub(types.ModuleType("node_helpers"))
     _node_helpers.conditioning_set_values = MagicMock(side_effect=lambda conditioning, values: conditioning)
     sys.modules["node_helpers"] = _node_helpers
 
 if "aiohttp" not in sys.modules:
-    _aiohttp = types.ModuleType("aiohttp")
-    _aiohttp_web = types.ModuleType("aiohttp.web")
+    _aiohttp = _mark_stub(types.ModuleType("aiohttp"))
+    _aiohttp_web = _mark_stub(types.ModuleType("aiohttp.web"))
     _aiohttp.web = _aiohttp_web
     sys.modules["aiohttp"] = _aiohttp
     sys.modules["aiohttp.web"] = _aiohttp_web
 
 if "server" not in sys.modules:
-    _server = types.ModuleType("server")
+    _server = _mark_stub(types.ModuleType("server"))
+
     class _FakeRoutes:
-        def get(self, path): return lambda fn: fn
-        def post(self, path): return lambda fn: fn
+        """A routes object that remembers what was registered on it.
+
+        AUDIT-FIX (2026-09): `get`/`post` used to return a bare identity
+        decorator and keep no state at all, so a test could drive a whole
+        register_*_routes() call and then have nothing to assert against --
+        registration tests either passed vacuously or had to ship their own
+        recording double (test_ocio_endpoints.py::_RecordingRoutes documents
+        exactly that). Recording here lets the shared fake answer the two
+        questions those tests actually ask: which paths were registered, and
+        were any of them registered twice.
+        """
+
+        def __init__(self):
+            self.registered = []  # [(method, path, handler)] in registration order
+
+        def _record(self, method, path):
+            def deco(fn):
+                self.registered.append((method, path, fn))
+                return fn
+            return deco
+
+        def get(self, path):
+            return self._record("GET", path)
+
+        def post(self, path):
+            return self._record("POST", path)
+
+        # ── readers, so assertions do not have to unpack tuples themselves ──
+        def paths(self, method=None):
+            return [p for m, p, _ in self.registered if method in (None, m)]
+
+        def handler(self, path, method=None):
+            for m, p, fn in self.registered:
+                if p == path and method in (None, m):
+                    return fn
+            return None
+
+        def clear(self):
+            self.registered.clear()
+
     class _FakePromptServer:
         instance = type("PromptServerInstance", (), {"routes": _FakeRoutes()})()
     _server.PromptServer = _FakePromptServer
     sys.modules["server"] = _server
 
-_radiance_ocio_stub = types.ModuleType("radiance.radiance_ocio")
-# AUDIT-FIX (2026-08): the manager mock must report is_loaded=False. A bare
-# MagicMock() is truthy for every attribute, so RadianceColorSpaceConvert's
-# _try_ocio() saw is_loaded=True, got a MagicMock "processor" whose applyRGB
-# was a no-op, and returned the INPUT UNCHANGED -- every colour-space test
-# through the node was silently validating an identity transform. With
-# is_loaded=False the nodes exercise their real analytical fallback in tests.
-_ocio_mgr_mock = MagicMock()
-_ocio_mgr_mock.is_loaded = False
-_radiance_ocio_stub.get_ocio_manager = MagicMock(return_value=_ocio_mgr_mock)
-_radiance_ocio_stub.HAS_OCIO = False
-sys.modules.setdefault("radiance.radiance_ocio", _radiance_ocio_stub)
+# AUDIT-FIX (2026-09): this stub used to be installed unconditionally, which
+# meant the real radiance_ocio.py (370 statements) was never imported by the
+# suite even on the lane where PyOpenColorIO IS installed: 0% coverage on the
+# module that owns every OCIO transform, and no test touching the real manager.
+# Stub it only when OCIO is genuinely absent; when it is present the real module
+# loads and the OCIO paths run for real.
+try:
+    import PyOpenColorIO as _PyOCIO  # noqa: F401
+
+    HAS_REAL_OCIO = True
+except ImportError:
+    HAS_REAL_OCIO = False
+
+if not HAS_REAL_OCIO:
+    _radiance_ocio_stub = _mark_stub(types.ModuleType("radiance.radiance_ocio"))
+    # AUDIT-FIX (2026-08): the manager mock must report is_loaded=False. A bare
+    # MagicMock() is truthy for every attribute, so RadianceColorSpaceConvert's
+    # _try_ocio() saw is_loaded=True, got a MagicMock "processor" whose applyRGB
+    # was a no-op, and returned the INPUT UNCHANGED -- every colour-space test
+    # through the node was silently validating an identity transform. With
+    # is_loaded=False the nodes exercise their real analytical fallback in tests.
+    _ocio_mgr_mock = MagicMock()
+    _ocio_mgr_mock.is_loaded = False
+    _radiance_ocio_stub.get_ocio_manager = MagicMock(return_value=_ocio_mgr_mock)
+    _radiance_ocio_stub.HAS_OCIO = False
+    sys.modules.setdefault("radiance.radiance_ocio", _radiance_ocio_stub)
 
 # `radiance.nodes_hdr_colorspace` used to be stubbed here. That module was
 # retired with the rest of the flat nodes_*.py layer, so the stub stood in for
@@ -311,6 +384,43 @@ def pytest_configure(config):
     )
 
 
+def pytest_report_header(config):
+    """Say up front which lane this is, and what it cannot test.
+
+    A gate that skips quietly is only half a gate: the CI log for the
+    lightweight lane showed `1483 passed` and nothing about the 1577 tests that
+    never ran or why. These two lines appear above every run, so a lane that is
+    short a dependency announces it before the first test rather than only in a
+    -rs summary nobody passes.
+    """
+    missing = []
+    try:
+        from radiance.config.dependencies import (
+            CORE_DEPENDENCIES,
+            OPTIONAL_DEPENDENCIES,
+            missing_dependencies,
+        )
+
+        missing = [
+            spec.display_name
+            for spec in missing_dependencies(
+                tuple(CORE_DEPENDENCIES) + tuple(OPTIONAL_DEPENDENCIES)
+            )
+        ]
+    except Exception:  # pragma: no cover - reported by the import tests
+        missing = ["<could not query radiance.config.dependencies>"]
+
+    return [
+        "radiance lane: real torch={}, real OCIO={}".format(
+            "yes" if HAS_REAL_TORCH else "NO (conftest MagicMock stub is active)",
+            "yes" if HAS_REAL_OCIO else "NO (radiance.radiance_ocio is stubbed)",
+        ),
+        "radiance declared dependencies absent here: {}".format(
+            ", ".join(missing) if missing else "none"
+        ),
+    ]
+
+
 def pytest_collection_modifyitems(config, items):
     if HAS_REAL_TORCH or os.environ.get("RADIANCE_DISABLE_TORCH_GATE"):
         return
@@ -337,8 +447,8 @@ def pytest_collection_modifyitems(config, items):
 
 
 # ── radiance.image subpackage (used by nodes_qc via `from .image import defects`) ─
-_image_pkg = types.ModuleType("radiance.image")
-_defects_stub = types.ModuleType("radiance.image.defects")
+_image_pkg = _mark_stub(types.ModuleType("radiance.image"))
+_defects_stub = _mark_stub(types.ModuleType("radiance.image.defects"))
 _defects_stub.analyze_levels         = MagicMock(return_value={"crushed": 0.0, "clipped": 0.0})
 _defects_stub.check_gamut            = MagicMock(return_value={"out_of_gamut_pct": 0.0})
 _defects_stub.detect_banding         = MagicMock(return_value={"risk_pct": 0.0, "detected": False})
@@ -489,6 +599,8 @@ def _make_comfy_stubs():
         "comfy.cldm.control_types": control_types,
         "folder_paths": folder_paths,
     }
+    for _mod in stubs.values():
+        _mark_stub(_mod)
     return stubs
 
 

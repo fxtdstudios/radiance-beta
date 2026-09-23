@@ -6,7 +6,9 @@ import logging
 from radiance.nodes.monitor.lite_viewer import RadianceLiteViewer
 from radiance.nodes.monitor.viewer import RadianceGradeApply, RadianceViewer
 from radiance.nodes.monitor.realtime import (
+    RadianceFalseColorMonitor,
     RadianceFocusPeaking,
+    RadianceSplitView,
     RadianceContactSheet,
     RadianceFrameStamp,
     RadianceFlipbookGIF,
@@ -32,10 +34,18 @@ NODE_CLASS_MAPPINGS = {
     # SECTION_OVERRIDES entry classifying it — but this dict never listed it,
     # so it was invisible. Complete node: 16 documented inputs, valid contract.
     "RadianceGradeApply": RadianceGradeApply,
+    # Third time, found 2026-09-18: realtime.py implements seven nodes and its
+    # own NODE_CLASS_MAPPINGS named five. These two were complete -- full
+    # INPUT_TYPES with tooltips, and tests/test_realtime_preview.py exercises
+    # both -- and no mapping anywhere mentioned them, so they were invisible.
+    "RadianceFalseColorMonitor": RadianceFalseColorMonitor,
+    "RadianceSplitView": RadianceSplitView,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceGradeApply": "◎ Radiance Bake Viewer Grade",
+    "RadianceFalseColorMonitor": "◎ False Color Monitor",
+    "RadianceSplitView": "◎ Split View",
     "RadianceLiteViewer": "◎ Radiance Lite Viewer",
     "RadianceViewer": "◎ Radiance Viewer",
     "RadianceFocusPeaking": "◎ Focus Peaking",

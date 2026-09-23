@@ -34,6 +34,23 @@
  */
 
 export class RadianceRenderer {
+    // ── 3.5.0: what the current texture holds ─────────────────────────────
+    // "isLinearTexture" drives u_isLinear (skip the sRGB decode) and every
+    // scope / bloom choice. Float frames used to be linear unconditionally, so
+    // an sRGB-encoded ComfyUI IMAGE sent as floats was decoded as linear and
+    // gamma-encoded a second time on the way out (washed out). The node now
+    // tags each frame; "sourceDisplayEncoded" carries that tag, and the
+    // accessor folds it in so every existing reader sees the effective value.
+    get isLinearTexture() { return !!this._texIsLinear && !this.sourceDisplayEncoded; }
+    set isLinearTexture(v) { this._texIsLinear = !!v; }
+
+    /** An 8-bit (or display-encoded) texture: a finished display image, e.g.
+     *  the node's PNG preview, which is already through the view transform. */
+    get displayReferredTexture() { return !this._texIsLinear && !this.sourceDisplayEncoded; }
+
+    /** 'srgb' for a display-encoded float source, anything else for linear. */
+    setSourceEncoding(encoding) { this.sourceDisplayEncoded = encoding === 'srgb'; }
+
     constructor(canvas) {
         if (new.target === RadianceRenderer) {
             throw new TypeError('RadianceRenderer is abstract — instantiate a subclass');

@@ -131,24 +131,29 @@ class TemporalRUDRAResidual(nn.Module):
         return residual, highlight_confidence, shadow_confidence
 
 
+TEMPORAL_CHECKPOINT_ENV = "RADIANCE_TEMPORAL_RUDRA"
+TEMPORAL_CHECKPOINT_PATTERNS = (
+    "temporal_rudra_residual_ema.safetensors",
+    "temporal_rudra_residual_ema.pth",
+    "temporal_rudra_residual*.safetensors",
+    "temporal_rudra_residual*.pth",
+    "temporal_rudra*.pt",
+)
+
+
+def resolve_temporal_checkpoint(checkpoint_path: str = "") -> Path | None:
+    """Explicit path, then ``RADIANCE_TEMPORAL_RUDRA``, then models/radiance."""
+    from radiance.model.paths import find_radiance_checkpoint
+    return find_radiance_checkpoint(
+        TEMPORAL_CHECKPOINT_PATTERNS, explicit_path=checkpoint_path or "",
+        env_var=TEMPORAL_CHECKPOINT_ENV,
+    )
+
+
 def _checkpoint_candidates(checkpoint_path: str = "") -> list[Path]:
-    if checkpoint_path:
-        return [Path(checkpoint_path).expanduser()]
-    env_path = os.environ.get("RADIANCE_TEMPORAL_RUDRA", "")
-    if env_path:
-        return [Path(env_path).expanduser()]
-    try:
-        import folder_paths
-        _models_dir = getattr(folder_paths, "models_dir", None)
-        if not isinstance(_models_dir, str) or not _models_dir:
-            raise ImportError("folder_paths.models_dir is not a usable path")
-        root = Path(_models_dir) / "radiance"
-    except (ImportError, TypeError):
-        root = Path(__file__).resolve().parent / "models" / "radiance"
-    return [
-        root / "temporal_rudra_residual_ema.safetensors",
-        root / "temporal_rudra_residual_ema.pth",
-    ]
+    """Kept for callers/tests that enumerate candidates; one entry or none."""
+    resolved = resolve_temporal_checkpoint(checkpoint_path)
+    return [resolved] if resolved is not None else []
 
 
 def load_temporal_rudra_weights(
@@ -225,23 +230,30 @@ def recover_temporal_residual(
     if window % 2 == 0:
         window += 1
     radius = window // 2
-    residuals = []
-    highlight_confidences = []
-    shadow_confidences = []
+    # STREAM-FIX: write each window's centre frame straight into three
+    # pre-allocated clip buffers. The three Python lists plus the closing
+    # torch.stack held two full-resolution copies of every accumulator for the
+    # whole clip, so peak grew with clip length on top of the window forward
+    # that is inherently per frame. Peak above the three results is now one
+    # window.
+    residual = source.new_empty((t_count,) + tuple(source.shape[1:]))
+    h_conf = highlight_mask.new_empty((t_count,) + tuple(highlight_mask.shape[1:]))
+    s_conf = shadow_mask.new_empty((t_count,) + tuple(shadow_mask.shape[1:]))
     for index in range(t_count):
         indices = [min(max(i, 0), t_count - 1)
                    for i in range(index - radius, index + radius + 1)]
         frames = source[indices].unsqueeze(0)
         highlights = highlight_mask[indices].unsqueeze(0)
         shadows = shadow_mask[indices].unsqueeze(0)
-        residual, h_conf, s_conf = model(frames, highlights, shadows)
-        residuals.append(residual[0, radius])
-        highlight_confidences.append(h_conf[0, radius])
-        shadow_confidences.append(s_conf[0, radius])
+        window_residual, window_h, window_s = model(frames, highlights, shadows)
+        residual[index] = window_residual[0, radius]
+        h_conf[index] = window_h[0, radius]
+        s_conf[index] = window_s[0, radius]
+        del frames, highlights, shadows, window_residual, window_h, window_s
 
-    residual = torch.stack(residuals) * float(peak_scale)
-    h_conf = torch.stack(highlight_confidences) * highlight_mask
-    s_conf = torch.stack(shadow_confidences) * shadow_mask
+    residual.mul_(float(peak_scale))
+    h_conf.mul_(highlight_mask)
+    s_conf.mul_(shadow_mask)
     confidence = torch.maximum(h_conf, s_conf).clamp(0.0, 1.0)
     region = torch.maximum(highlight_mask, shadow_mask).clamp(0.0, 1.0)
     learned = (source + residual * region.unsqueeze(-1)).clamp(min=0.0)

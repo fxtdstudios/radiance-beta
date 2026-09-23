@@ -4,10 +4,13 @@
  *
  * WHAT THIS FIXES:
  *
- *   decode_mode owns the color contract. Sampler mode hides log-only controls
- *   and RHDR export. Direct HDR / RUDRA exposes the log profile, decode noise,
- *   HDR scale, and opt-in RHDR precision while the backend fixes output to
- *   scene-linear Linear with no display tonemap.
+ *   decode_mode owns the color contract. Sampler mode hides the HDR-only
+ *   controls (RHDR export, decode noise, HDR scale, peak). Direct HDR hides
+ *   inverse_tonemap. Auto can take either path at run time, so it shows both
+ *   sets. target_space is honoured in every mode. hdr_mode, hdr_output,
+ *   display_tonemap and source_space are always hidden and never read: the
+ *   mode and the latent's HDR Encode metadata decide them. Workflows saved
+ *   before 3.5 carry "Direct HDR / RUDRA"; it is migrated on load.
  *
  *   temporal_overlap is always visible: temporal_size is now an Auto/preset
  *   combo (hdr/vae.py's decode_tiled() integration) where no value statically
@@ -16,10 +19,6 @@
  *
  *   Post-execution (read from engine.py's "ui" channel via onExecuted, since
  *   only knowable once decode actually runs):
- *     - rudra_decoder gets a warning when RUDRA fell all the way back to the
- *       standard VAE (no compatible checkpoint at all), or a shorter note
- *       when a cross-architecture checkpoint was silently substituted (e.g.
- *       wan -> flux, fast_vae.py's _DECODER_TYPE_FALLBACKS).
  *     - hdr_output gets a warning when Compress(Log) ran with no
  *       radiance_meta on the latent (no genuine HDR-encoded source upstream,
  *       stripped by a sampler in between): the log-decompression curve then
@@ -67,13 +66,12 @@ const W_EXPORT_RHDR      = "export_rhdr";
 const W_INVERSE_TONEMAP  = "inverse_tonemap";
 const W_TARGET_STOPS     = "target_stops";
 const W_RHDR_PRECISION   = "rhdr_precision";
-const W_RUDRA_DECODER    = "rudra_decoder";
-const W_DECODER_SIZE     = "decoder_size";
 const W_TARGET_SPACE     = "target_space";
 const W_SOURCE_SPACE     = "source_space";
 const W_DECODE_NOISE_SCALE = "decode_noise_scale";
 const W_HDR_SCALE_FACTOR   = "hdr_scale_factor";
 const W_TEMPORAL_OVERLAP   = "temporal_overlap";
+const W_HDR_PEAK_NITS      = "hdr_peak_nits";
 
 // ALBABIT-FIX: mirrors nodes/generate/engine.py's _SCENE_REFERRED complement --
 // only these 2 of the 12 target_space options are display-ready [0,1] sRGB;
@@ -87,10 +85,11 @@ const DISPLAY_READY_SPACES = new Set(["sRGB", "Raw"]);
 // already explains the Compress(Log) dependency on hover.
 const BLOWOUT_MARKER = " ⚠ overexp risk";
 
-// ALBABIT-FIX: post-execution only -- set from onExecuted's "ui.rudra_fallback"
-// (engine.py), since whether a compatible RUDRA checkpoint exists is only
-// known once decode actually runs, not from any widget's static value.
-const RUDRA_FALLBACK_MARKER = " ⚠ VAE fallback";
+// 3.5: the pre-3.5 name of the direct mode. Migrated to "Direct HDR" on load
+// so a saved graph does not land on an invalid combo value.
+const LEGACY_DIRECT_MODE = "Direct HDR / RUDRA";
+const DIRECT_MODE = "Direct HDR";
+const AUTO_MODE = "Auto (Recommended)";
 
 /** Return widget by name from a node, or null. */
 // Same convention as radiance_resolution.js's _setLabelMarker: cache the
@@ -127,21 +126,18 @@ function syncWidgets(node) {
     const inverseTmW      = getWidget(node, W_INVERSE_TONEMAP);
     const targetStopsW    = getWidget(node, W_TARGET_STOPS);
     const rhdrPrecisionW  = getWidget(node, W_RHDR_PRECISION);
-    const rudraDecoderW   = getWidget(node, W_RUDRA_DECODER);
-    const decoderSizeW    = getWidget(node, W_DECODER_SIZE);
     const targetSpaceW    = getWidget(node, W_TARGET_SPACE);
     const sourceSpaceW    = getWidget(node, W_SOURCE_SPACE);
     const decodeNoiseW    = getWidget(node, W_DECODE_NOISE_SCALE);
     const hdrScaleW       = getWidget(node, W_HDR_SCALE_FACTOR);
     const temporalOverlapW = getWidget(node, W_TEMPORAL_OVERLAP);
+    const hdrPeakW        = getWidget(node, W_HDR_PEAK_NITS);
 
     if (!decodeModeW) return;
 
     const hdrMode = hdrModeW?.value ?? "";
-    if (rudraDecoderW?.value === "Enabled" && decodeModeW.value !== "Direct HDR / RUDRA") {
-        decodeModeW.value = "Direct HDR / RUDRA";
-    }
-    const directHDR = decodeModeW.value === "Direct HDR / RUDRA";
+    if (decodeModeW.value === LEGACY_DIRECT_MODE) decodeModeW.value = DIRECT_MODE;
+    const directHDR = decodeModeW.value === DIRECT_MODE;
     const isCompressLog = directHDR || hdrMode === "Compress (Log)";
     // Overexposure-risk marking happens post-execution in onExecuted below
     // (merged from beta/main): risk depends on radiance_meta, only known once
@@ -153,21 +149,27 @@ function syncWidgets(node) {
     // direct mode is Compress(Log)/Linear with no display tonemap.
     // MERGE-PORT (beta/main 9a5ac88): gate the node resize on actual
     // visibility transitions so the 250 ms poll stays a no-op at rest.
+    // 3.5.0: visibility follows what each mode actually reads. Auto can run
+    // either path (Direct HDR only when HDR Encode metadata is live), so it
+    // shows the controls of both. Nothing hidden is read by the backend:
+    // hdr_mode / hdr_output / display_tonemap / source_space are decided by
+    // decode_mode and the latent's own metadata.
+    const autoMode = decodeModeW.value === AUTO_MODE;
+    const samplerMode = !directHDR && !autoMode;
     let changed = false;
     if (setWidgetVisible(hdrModeW, false, node)) changed = true;
     if (setWidgetVisible(hdrOutputW, false, node)) changed = true;
     if (setWidgetVisible(displayTmW, false, node)) changed = true;
-    if (setWidgetVisible(targetSpaceW, !directHDR, node)) changed = true;
-    if (setWidgetVisible(exportRhdrW, directHDR, node)) changed = true;
-    if (!directHDR && exportRhdrW?.value) exportRhdrW.value = false;
-
-    if (setWidgetVisible(targetStopsW, !!inverseTmW?.value && !directHDR, node)) changed = true;
-    if (setWidgetVisible(rhdrPrecisionW, !!exportRhdrW?.value, node)) changed = true;
-    if (setWidgetVisible(decoderSizeW, rudraDecoderW?.value === "Enabled", node)) changed = true;
-    if (setWidgetVisible(sourceSpaceW, directHDR, node)) changed = true;
-    if (setWidgetVisible(decodeNoiseW, directHDR, node)) changed = true;
+    if (setWidgetVisible(sourceSpaceW, false, node)) changed = true;
+    if (setWidgetVisible(targetSpaceW, true, node)) changed = true;
+    if (setWidgetVisible(exportRhdrW, !samplerMode, node)) changed = true;
+    if (samplerMode && exportRhdrW?.value) exportRhdrW.value = false;
+    if (setWidgetVisible(rhdrPrecisionW, !samplerMode && !!exportRhdrW?.value, node)) changed = true;
     if (setWidgetVisible(inverseTmW, !directHDR, node)) changed = true;
-    if (setWidgetVisible(hdrScaleW, directHDR, node)) changed = true;
+    if (setWidgetVisible(targetStopsW, !directHDR && !!inverseTmW?.value, node)) changed = true;
+    if (setWidgetVisible(decodeNoiseW, !samplerMode, node)) changed = true;
+    if (setWidgetVisible(hdrScaleW, !samplerMode, node)) changed = true;
+    if (setWidgetVisible(hdrPeakW, !samplerMode, node)) changed = true;
 
     // ALBABIT-FIX (VAE tiling integration): temporal_size is now an
     // Auto/preset combo. Auto's chunk size is VRAM-dependent and every
@@ -201,8 +203,6 @@ app.registerExtension({
                 getWidget(this, W_DISPLAY_TONEMAP),
                 getWidget(this, W_INVERSE_TONEMAP),
                 getWidget(this, W_EXPORT_RHDR),
-                getWidget(this, W_RUDRA_DECODER),
-                getWidget(this, W_DECODER_SIZE),
                 getWidget(this, W_TARGET_SPACE),
             ]
                 .forEach(w => {
@@ -211,12 +211,6 @@ app.registerExtension({
                     w.callback = function (...args) {
                         const res = origCallback ? origCallback.apply(this, args) : undefined;
                         syncWidgets(self);
-                        // ALBABIT-FIX: the RUDRA fallback marker only reflects
-                        // the last completed execution -- stale as soon as
-                        // either setting that affects checkpoint lookup changes.
-                        if (w.name === W_RUDRA_DECODER || w.name === W_DECODER_SIZE) {
-                            _setLabelMarker(getWidget(self, W_RUDRA_DECODER), null);
-                        }
                         return res;
                     };
                 });
@@ -248,25 +242,12 @@ app.registerExtension({
             setTimeout(() => syncWidgets(self), 600);
         };
 
-        // ALBABIT-FIX: flag a silent RUDRA→standard-VAE fallback, or a
-        // cross-architecture checkpoint substitution (fast_vae.py's
-        // _DECODER_TYPE_FALLBACKS, e.g. wan -> flux when no wan-specific
-        // checkpoint exists), post-execution. Both are only knowable once
-        // decode actually runs (engine.py's "ui.rudra_fallback"/
-        // "ui.rudra_substituted_type", same "ui" side-channel convention as
-        // resolution.js's computed_width) -- a console-only log is easy to
-        // miss, this puts it on the node itself.
         const onExecuted = nodeType.prototype.onExecuted;
         nodeType.prototype.onExecuted = function (message) {
             if (onExecuted) onExecuted.apply(this, arguments);
-            const fellBack = !!message?.rudra_fallback?.[0];
-            const substitutedType = message?.rudra_substituted_type?.[0] || "";
-            let marker = null;
-            if (fellBack) marker = RUDRA_FALLBACK_MARKER;
-            else if (substitutedType) marker = ` ⚠ ${substitutedType} ckpt`;
-            _setLabelMarker(getWidget(this, W_RUDRA_DECODER), marker);
 
-            // ALBABIT-FIX: same "ui" side-channel convention, for hdr_output.
+            // "ui" side-channel convention (same as resolution.js's
+            // computed_width), for hdr_output.
             // engine.py computes log_overexposure_risk from radiance_meta
             // (only known at decode time), so this only reflects the run that
             // just finished, not the current widget values.

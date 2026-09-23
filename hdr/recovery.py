@@ -208,10 +208,31 @@ class RadianceHighlightSynthesis:
                 # Soft Light: standard W3C formula
                 # We treat noise_layer (centered at 0) as an offset around 0.5
                 n = np.clip(noise_layer + 0.5, 0, 1)
+
+                # SOFT-LIGHT-HDR FIX: the W3C formula
+                # ``(1 - 2n)·a² + 2n·a`` is only defined on a in [0,1]. Above
+                # 1.0 the quadratic term dominates and goes hard negative: this
+                # node expands highlights, so a=5.0 at the shipped threshold
+                # 0.95 / expansion 1.5 with n=0.7 evaluated to -219.7, which the
+                # np.maximum(0.0, ...) below then clamped to PURE BLACK. With
+                # detail_amount=1.0 every pixel above roughly 2.0 linear blacked
+                # out, on the node whose only job is to put detail into
+                # highlights.
+                #
+                # Normalising by the frame peak puts the curve back on the
+                # domain it is defined for, keeps the result non-negative
+                # (the formula maps [0,1] -> [0,1] for any n in [0,1]) and is
+                # bit-identical to the old behaviour on SDR frames, where the
+                # peak is 1.0 and the divide/multiply cancel. The peak is taken
+                # over the whole frame rather than per channel so the blend
+                # cannot shift hue.
+                peak = max(1.0, float(np.max(final_frame)))
                 for ch in range(c):
-                    a = final_frame[..., ch]
+                    a = final_frame[..., ch] / peak
                     # Soft Light formula (Pegtop / W3C)
-                    final_frame[..., ch] = (1.0 - 2.0 * n) * (a**2) + 2.0 * n * a
+                    final_frame[..., ch] = (
+                        (1.0 - 2.0 * n) * (a**2) + 2.0 * n * a
+                    ) * peak
 
             # Ensure we strictly expanded range (don't clip back to 1.0)
             # But ensure we don't go below 0

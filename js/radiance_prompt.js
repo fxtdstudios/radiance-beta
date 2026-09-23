@@ -2,7 +2,7 @@ import { app } from "../../scripts/app.js";
 import { setWidgetVisible } from "./radiance_widget_utils.js";
 
 // ALBABIT-FIX: only known post-execution (resolved_arch depends on the real
-// CLIP/model_meta), same convention as radiance_vae_widgets.js's RUDRA/
+// CLIP/model_meta), same convention as radiance_vae_widgets.js's
 // overexposure markers (engine.py's "ui" channel via onExecuted).
 const WEAK_NEG_MARKER = " ⚠ no CFG, ignored";
 

@@ -422,6 +422,11 @@ def _pick_layer(info: EXRInfo, requested: Optional[str]) -> LayerInfo:
     for candidate in info.layers:
         if candidate.name.lower() == normalised:
             return candidate
+    # Nuke names a layer by its prefix: "depth" for a single "depth.Z"
+    # channel, which the File API reports whole.
+    for candidate in info.layers:
+        if candidate.name.rpartition(".")[0].lower() == normalised:
+            return candidate
     raise EXRReadError(
         f"{os.path.basename(info.path)} has no layer named {requested!r}. "
         f"It has: {', '.join(info.layer_names)}"

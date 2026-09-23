@@ -53,7 +53,7 @@ test('readPixelsFloat32 returns the same shape in both backends', () => {
     for (const [name, src] of [['webgl', gl], ['webgpu', gpu]]) {
         assert.match(src, /readPixelsFloat32\s*\(/, `${name} has no readPixelsFloat32`);
         assert.match(
-            src, /return \{ data: \w+, width: \w+, height: \w+, graded: (true|false) \}/,
+            src, /return \{ data: \w+, width: \w+, height: \w+, graded: (true|false)(, sceneLinear: (true|false))? \}/,
             `${name}'s readPixelsFloat32 must return {data,width,height,graded}`,
         );
     }
@@ -104,18 +104,80 @@ test('the WebGPU shader path guards gamma', () => {
         + 'radiance_webgl.js:2609 uses max(0.01, gamma). Match it.');
 });
 
-// `todo`, not a failure. The gap is real and this test proves it every run, but
-// a red suite trains people to ignore red. Node reports todo tests separately,
-// so it stays visible in the output until someone implements the WGSL or
-// disables the two tabs on WebGPU. Do not delete it to make the output tidy.
-test('mask and qualifier exist in the WebGPU backend', { todo: 'WGSL implementation missing — Masks and Qualifiers tabs are inert on WebGPU' }, () => {
-    // The base class implements setMask/setQualifier and stores the state, so
-    // the viewer's calls succeed on WebGPU and change nothing on screen: the
-    // Masks and Qualifiers tabs are fully interactive and completely inert on
-    // the preferred backend.
+// ── the WGSL feature gaps ───────────────────────────────────────────────────
+//
+// AUDIT-FIX (2026-09): this was one test carrying
+// `{ todo: 'WGSL implementation missing ...' }`. `node --test` exits 0 with a
+// todo present, so a shipped functional gap, two Viewer tabs that are fully
+// interactive and completely inert on the *preferred* backend, could not turn
+// CI red, and nothing made anyone look at it again.
+//
+// Making it fail was not the fix. The gap is real, known and not scheduled, and
+// a suite that is permanently red is a suite people stop reading, which is the
+// same outcome as a todo by a slower route. What replaces it is a ratchet. The
+// gap is declared here and written up in KNOWN_ISSUES.md, and the three tests
+// below fail if the source and that entry stop agreeing: implementing the WGSL
+// without updating the docs fails, removing the tabs instead fails, and
+// deleting the KNOWN_ISSUES entry to tidy up fails. The limitation cannot
+// quietly become either fixed or forgotten.
+
+/**
+ * What the WebGPU backend does not implement, and what a person sees because of
+ * it. `present` is how an implementation would show up in the source: an
+ * override of the base class's state setter, a read of the state it stores, or
+ * a shader uniform named for it. It is deliberately not /mask/i, because a WebGPU
+ * pipeline descriptor's `colorWriteMask` would match that and turn this red for
+ * nothing, and a ratchet nobody trusts is a ratchet nobody reads.
+ */
+const WGSL_GAPS = [
+    { feature: 'mask', tab: 'Masks', present: /setMask\s*\(|\bmaskEnabled\b|\bu_mask|\bgMask/ },
+    { feature: 'qualifier', tab: 'Qualifiers', present: /setQualifier\s*\(|\bqualifierEnabled\b|\bu_qualifier|\bgQualifier/ },
+];
+
+test('the WebGPU backend still lacks exactly the features documented as missing', () => {
     const gpu = read('radiance_webgpu.js');
-    assert.match(gpu, /mask/i,
-        'no mask implementation in the WebGPU backend — the Masks tab is inert there');
-    assert.match(gpu, /qualifier/i,
-        'no qualifier implementation in the WebGPU backend — the Qualifiers tab is inert there');
+    const landed = WGSL_GAPS.filter(({ present }) => present.test(gpu)).map((g) => g.tab);
+
+    assert.deepEqual(landed, [],
+        `${landed.join(' and ')} now appear in the WebGPU backend. If the WGSL `
+        + 'landed, delete the entry from WGSL_GAPS here and from KNOWN_ISSUES.md. '
+        + 'This is not a complaint about the implementation, it is the ratchet: '
+        + 'the documented gap and the shipped source have to agree.');
+});
+
+test('each WebGPU gap is a parity gap, not a feature nobody has', () => {
+    // Without this the list above could be satisfied by deleting the feature
+    // everywhere, which is a different product and would leave KNOWN_ISSUES.md
+    // describing a tab that no longer exists.
+    const gl = read('radiance_webgl.js');
+    const base = read('radiance_renderer.js');
+
+    for (const { feature, tab, present } of WGSL_GAPS) {
+        assert.match(gl, present,
+            `the WebGL backend no longer implements ${feature} either, so the `
+            + `${tab} tab is not a WebGPU gap any more. Update KNOWN_ISSUES.md.`);
+        const setter = new RegExp(`set${feature[0].toUpperCase()}${feature.slice(1)}\\s*\\(`);
+        assert.match(base, setter,
+            `radiance_renderer.js no longer implements set${feature}, and that base `
+            + `class is what makes the ${tab} tab *silently* inert on WebGPU `
+            + 'rather than an error the user can see.');
+    }
+});
+
+test('every WebGPU gap is written down where a person will read it', () => {
+    const known = readFileSync(join(JS, '..', 'KNOWN_ISSUES.md'), 'utf8');
+    const bullets = known.split(/\n(?=- \*\*)/).filter((b) => /WebGPU/.test(b));
+
+    assert.equal(bullets.length, 1,
+        'KNOWN_ISSUES.md should carry exactly one WebGPU bullet; found '
+        + `${bullets.length}. The gap list in this file points at it by name.`);
+
+    for (const { tab } of WGSL_GAPS) {
+        assert.match(bullets[0], new RegExp(tab),
+            `KNOWN_ISSUES.md does not name the ${tab} tab. A gap that is only `
+            + 'recorded in a test file is a gap nobody reads.');
+    }
+    assert.match(bullets[0], /WGSL/,
+        'the KNOWN_ISSUES.md entry should say what is missing, not just that '
+        + 'something is');
 });

@@ -29,7 +29,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -897,11 +897,21 @@ def _make_handler(name_filter: str):
     return _Handler
 
 
-def _ensure_server(port: int, stream_name: str):
-    """Start an HTTP server on `port` if one isn't already running."""
+def _ensure_server(port: int, stream_name: str) -> Optional[str]:
+    """Start an HTTP server on `port` if one isn't already running.
+
+    Returns None on success, or the bind error as a string.
+
+    BUG-FIX: this used to catch OSError, log it, and return None either way,
+    and `serve()` then unconditionally returned "http://localhost:<port>/" on
+    its server_url output. A port already in use therefore handed the user a
+    working-looking URL for a server that was never listening, or, worse,
+    for somebody else's server on that port. The caller now gets the failure
+    and says so on the output socket.
+    """
     with _SERVER_LOCK:
         if port in _SERVERS:
-            return
+            return None
         try:
             handler  = _make_handler(stream_name)
             server   = HTTPServer(("127.0.0.1", port), handler)
@@ -909,8 +919,35 @@ def _ensure_server(port: int, stream_name: str):
             thread.start()
             _SERVERS[port] = server
             log.info("PreviewServer started on http://127.0.0.1:%d", port)
+            return None
         except OSError as exc:
             log.error("PreviewServer: cannot bind port %d — %s", port, exc)
+            return f"cannot bind port {port}: {exc}"
+
+
+def _shutdown_servers(keep_port: Optional[int] = None) -> int:
+    """Stop and drop every preview server except `keep_port`.
+
+    BUG-FIX: _SERVERS was never pruned and nothing ever called shutdown(), so
+    changing the port widget started a second HTTPServer and leaked the first
+    one, its serve_forever thread and its listening socket, for the lifetime of
+    the ComfyUI process. Re-queueing after a few port edits left a handful of
+    stale servers still answering on old ports with stale frames.
+    """
+    stopped = 0
+    with _SERVER_LOCK:
+        for old_port in [p for p in _SERVERS if p != keep_port]:
+            server = _SERVERS.pop(old_port, None)
+            if server is None:
+                continue
+            try:
+                server.shutdown()
+                server.server_close()
+                stopped += 1
+                log.info("PreviewServer on port %d stopped", old_port)
+            except Exception as exc:
+                log.warning("PreviewServer: could not stop port %d, %s", old_port, exc)
+    return stopped
 
 
 def _frame_to_jpeg(arr: np.ndarray, quality: int = 85) -> bytes:
@@ -989,7 +1026,15 @@ class RadiancePreviewServer:
         if not HAS_PIL:
             return (images, "ERROR: Pillow not installed — cannot serve JPEG")
 
-        _ensure_server(port, stream_name)
+        # Stop any server this node left running on a different port before
+        # binding the new one, so editing the port widget does not leak the
+        # previous HTTPServer and its thread.
+        _shutdown_servers(keep_port=port)
+
+        bind_error = _ensure_server(port, stream_name)
+        if bind_error:
+            # Do not hand back a URL for a server that is not listening.
+            return (images, f"ERROR: PreviewServer not started, {bind_error}")
 
         frames = _to_batch_numpy(images)
         # Serve only the last frame of the batch (most recently processed)
@@ -1020,7 +1065,15 @@ class RadiancePreviewServer:
 # ─────────────────────────────────────────────────────────────────────────────
 
 NODE_CLASS_MAPPINGS = {
+    # Nodes 1 and 3 of this file were finished, documented and covered by
+    # tests/test_realtime_preview.py, and this dict never named them, so
+    # ComfyUI never saw them -- the same defect that hid seventeen nodes in the
+    # v3 reorganisation (see nodes/aggregate.py). The module mapping is what
+    # `fold_in_module_nodes` sweeps, so a node added to this file only ships
+    # once it appears here.
+    "RadianceFalseColorMonitor": RadianceFalseColorMonitor,
     "RadianceFocusPeaking":  RadianceFocusPeaking,
+    "RadianceSplitView":     RadianceSplitView,
     "RadianceContactSheet":  RadianceContactSheet,
     "RadianceFlipbookGIF":   RadianceFlipbookGIF,
     "RadianceFrameStamp":    RadianceFrameStamp,
@@ -1028,7 +1081,9 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "RadianceFalseColorMonitor": "◎ Radiance False Color Monitor",
     "RadianceFocusPeaking":  "◎ Radiance Focus Peaking",
+    "RadianceSplitView":     "◎ Radiance Split View",
     "RadianceContactSheet":  "◎ Radiance Contact Sheet",
     "RadianceFlipbookGIF":   "◎ Radiance Flipbook GIF",
     "RadianceFrameStamp":    "◎ Radiance Frame Stamp",

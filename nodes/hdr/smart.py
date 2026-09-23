@@ -436,8 +436,23 @@ class RadianceHDRDiagnostics:
         coherence_map: torch.Tensor | None = None,
         colorspace: str = "Linear (sRGB)",
     ):
+        # ── Colour space ──────────────────────────────────────────────────────
+        # The widget was read by nothing: an sRGB-encoded image was measured
+        # as if its code values were light, and luma always used BT.2020
+        # weights. Display-encoded input is decoded first, and luma uses the
+        # weights of the input's primaries.
+        image = image[..., :3].float()
+        if colorspace in ("sRGB", "Rec.709"):
+            x = image.clamp(0.0, 1.0)
+            if colorspace == "sRGB":
+                image = torch.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
+            else:  # BT.1886 display, gamma 2.4
+                image = x ** 2.4
+        luma_w = [0.2722287, 0.6740818, 0.0536895] if colorspace == "ACEScg" \
+            else [0.2126, 0.7152, 0.0722]
+
         # ── Luma stats ────────────────────────────────────────────────────────
-        w   = image.new_tensor([0.2627, 0.6780, 0.0593])
+        w   = image.new_tensor(luma_w)
         Y   = (image * w).sum(dim=-1)          # (B, H, W)
         eps = 1e-7
 
@@ -486,6 +501,7 @@ class RadianceHDRDiagnostics:
         report = {
             "radiance_diagnostics": {
                 "image_shape":        list(image.shape),
+                "colorspace":         colorspace,
                 "peak_linear":        round(peak_linear,  4),
                 "peak95_luma":        round(peak95_luma,  4),
                 "peak_stops_above_18pct_grey": round(peak_stops, 2),
@@ -516,7 +532,7 @@ class RadianceHDRDiagnostics:
         # ── HDRAnalysis-equivalent metrics (BT.2408: 203 nit = linear 1.0) ──────
         _NIT_ANCHOR = 203.0
         _img_lin  = image[..., :3].clamp(min=0.0).float()
-        _w        = _img_lin.new_tensor([0.2126, 0.7152, 0.0722])
+        _w        = _img_lin.new_tensor(luma_w)
         _Y_flat   = (_img_lin * _w).sum(dim=-1).reshape(-1)
         _n        = _Y_flat.numel()
         _p01      = float(_Y_flat.kthvalue(max(1, int(0.01 * _n))).values)

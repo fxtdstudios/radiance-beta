@@ -13,10 +13,12 @@ from typing import MutableMapping, Optional
 class ENV:
     """Well-known environment variable names used across Radiance.
 
-    Usage:  value = os.environ.get(ENV.RADIANCE_TURBO_DECODER, "")
+    Usage:  value = os.environ.get(ENV.RADIANCE_SDR2HDR_PIXEL, "")
     """
 
-    RADIANCE_TURBO_DECODER = "RADIANCE_TURBO_DECODER"
+    # Learned SDR→HDR (RUDRA pixel model and temporal residual model)
+    RADIANCE_SDR2HDR_PIXEL = "RADIANCE_SDR2HDR_PIXEL"
+    RADIANCE_TEMPORAL_RUDRA = "RADIANCE_TEMPORAL_RUDRA"
     RADIANCE_CACHE_SIZE = "RADIANCE_CACHE_SIZE"
     RADIANCE_LICENSE_KEY = "RADIANCE_LICENSE_KEY"
     OCIO = "OCIO"
@@ -62,12 +64,21 @@ RUNTIME_ENV_DEFAULTS: dict[str, str] = {
 os.environ.setdefault(ENV.RADIANCE_LOG_THEME, DEFAULT_LOG_THEME)
 
 
+#: Forced, not defaulted: a "0" inherited from the shell would disable every
+#: cv2 EXR path, and OpenCV caches the value at first use.
+RUNTIME_ENV_FORCED: dict[str, str] = {
+    ENV.OPENCV_IO_ENABLE_OPENEXR: "1",
+}
+
+
 def configure_runtime_environment(
     environ: Optional[MutableMapping[str, str]] = None,
 ) -> MutableMapping[str, str]:
     target = os.environ if environ is None else environ
     for key, value in RUNTIME_ENV_DEFAULTS.items():
         target.setdefault(key, value)
+    for key, value in RUNTIME_ENV_FORCED.items():
+        target[key] = value
     return target
 
 

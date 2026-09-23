@@ -245,12 +245,13 @@ def _detect_ffmpeg(filepath: str, fps: float,
         "-af", f"silencedetect=noise={noise_db}dB:duration=0.1",
         "-f", "null", "-",
     ]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        output = proc.stderr
-    except Exception as exc:
-        logger.warning("[nodes_audio_cut] _detect_ffmpeg: %s", exc)
-        return []
+    # A failed ffmpeg run raises: it used to return [], which is exactly what
+    # a track with no detectable onsets returns.
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    output = proc.stderr
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg silencedetect failed (exit {proc.returncode}): "
+                           f"{output.strip().splitlines()[-1] if output.strip() else 'no output'}")
 
     # Parse "silence_end: X.XX" lines as onset times
     import re
@@ -301,7 +302,9 @@ class RadianceAudioCut:
                     "default": 24.0, "min": 1.0, "max": 240.0, "step": 0.001,
                     "tooltip": "Frame rate of the target video sequence",
                 }),
-                "method": (cls.METHODS, {"default": "beats"}),
+                "method": (cls.METHODS, {"default": "beats",
+                    "tooltip": "Honoured by the librosa backend. scipy always finds energy "
+                               "onsets and ffmpeg always finds silence ends; the report says so."}),
                 "sensitivity": ("FLOAT", {
                     "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01,
                     "tooltip": "0 = only strong peaks, 1 = detect all micro-variations",
@@ -319,7 +322,8 @@ class RadianceAudioCut:
                 }),
                 "max_cuts": ("INT", {
                     "default": 0,
-                    "tooltip": "If > 0, keep only the strongest N cut points",
+                    "tooltip": "If > 0, keep N cut points evenly spaced through the detected "
+                               "list (the backends do not return per-cut strength).",
                 }),
             },
         }
@@ -351,11 +355,12 @@ class RadianceAudioCut:
         ]
 
         # Security: validate and resolve path before any file operation.
+        # A bad path raises. Zero cuts is a legitimate result, so returning
+        # "[]" for a missing file made the two indistinguishable downstream.
         try:
             audio_filepath = _validate_audio_path(audio_filepath)
         except ValueError as exc:
-            report.append(f"ERROR: {exc}")
-            return ("[]", "[]", 0, "\n".join(report))
+            raise ValueError(f"Radiance Audio Cut: {exc}") from exc
 
         frames: List[int] = []
         used_backend = backend
@@ -380,13 +385,21 @@ class RadianceAudioCut:
                                          sensitivity, min_interval_frames)
 
         except Exception as exc:
-            report.append(f"ERROR in {used_backend} backend: {exc}")
-            traceback.print_exc()
+            # Raise: an empty cut list is a valid answer for a quiet track, so
+            # returning [] here made a failed analysis look like one.
+            raise RuntimeError(f"Radiance Audio Cut: {used_backend} backend failed on "
+                               f"{audio_filepath}: {exc}") from exc
+
+        if used_backend == "scipy" and method != "onsets":
+            report.append(f"NOTE: scipy backend has no {method} detector; ran energy onsets")
+        elif used_backend == "ffmpeg":
+            report.append(f"NOTE: ffmpeg backend ignores method ({method}); cut points are "
+                          f"silence ends from silencedetect")
 
         # Apply offset
         frames = [f + frame_offset for f in frames]
 
-        # Limit to max_cuts strongest (we keep them evenly spaced here; could sort by strength)
+        # Evenly spaced subset: no backend reports per-cut strength.
         if max_cuts > 0 and len(frames) > max_cuts:
             step = len(frames) / max_cuts
             frames = [frames[int(i * step)] for i in range(max_cuts)]

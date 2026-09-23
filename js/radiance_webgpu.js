@@ -1885,7 +1885,14 @@ class RadianceWebGPURenderer extends RadianceRenderer {
     // ── Feature parity check ──────────────────────────────────────────────────
     // Returns true only when ALL viewer features have matching WebGPU shader
     // implementations. Until then, the viewer stays on WebGL for safety.
-    static FEATURE_PARITY = true;
+    // 3.5.0: false, and it was never true. Known gaps (KNOWN_ISSUES.md, the
+    // one WebGPU entry): 8-bit input is not sRGB-decoded, the 3D LUT path
+    // reads .cube data with the wrong stride, curves use the red curve for
+    // every channel, the hue matrix is transposed, bloom samples outside its
+    // target, and OCIO, masks, qualifiers, heatmap, gamut/clip warnings, the
+    // scope signal, viewer f-stop and the scene-linear EXR export are absent.
+    // WebGL is the default and the tested backend.
+    static FEATURE_PARITY = false;
     isFeatureComplete() {
         return RadianceWebGPURenderer.FEATURE_PARITY;
     }

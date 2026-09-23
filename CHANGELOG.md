@@ -4,7 +4,748 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ## [Unreleased]
 
+## [3.5.0] - 2026-09-23
+
+### Upgrade note
+
+1. **The latent-space RUDRA decoders are gone.** `◎ Radiance HDR VAE Decode`
+   no longer has `rudra_decoder`, `decoder_size` or `model_meta`; it decodes
+   through the model's VAE in every mode, and the decode mode formerly named
+   "Direct HDR / RUDRA" is now "Direct HDR" (the old value is migrated on
+   load). `SDR → HDR Universal` loses its `vae`, `rudra_size` and
+   `model_meta` inputs and its "Legacy RUDRA" backend; `SDR → HDR Recover`
+   loses `vae`, `rudra_size` and `model_meta` and gains the pixel controls.
+   `NDI Sender` loses `turbo_mode`, `latent_in`, `vae` and `model_meta`. A
+   saved graph still loads (the frontend drops the missing widgets and the
+   nodes accept the stale keyword arguments), but check widget values on those
+   three nodes once, since ComfyUI stores them by position. The per-model
+   `rudra_turbo_decoder_*` / `rudra_full_decoder_*` files in `models/radiance`
+   are no longer read and can be deleted. `fast_vae.py`, `model/vae.py`, the
+   latent training scripts and the `rudra` dataset tools moved to
+   `_to_delete/legacy-latent-rudra-20260923/`.
+2. **Learned SDR → HDR is one pixel model.** `SDR → HDR Universal` and
+   `Recover` run `sdr2hdr_pixel_image.pt` (RUDRA's pixel-space network) on any
+   image or frame batch, with the temporal residual model preferred on ordered
+   video when its checkpoint exists. Backends are `Auto` / `Direct Pixel` /
+   `Temporal`. Checkpoints are found in every `models/radiance` folder
+   ComfyUI knows about, including `extra_model_paths.yaml`, or through
+   `RADIANCE_SDR2HDR_PIXEL` / `RADIANCE_TEMPORAL_RUDRA`; the `report` output
+   names the path that ran.
+
+3. **HDR VAE Decode's Direct HDR mode runs the pixel model after the VAE.**
+   On a plain latent (anything that did not come from HDR Encode, i.e. every
+   sampler output) Direct HDR now decodes sampler-safe sRGB through the
+   model's VAE and hands it to the RUDRA pixel SDR → HDR model, returning
+   scene-linear HDR (1.0 = 203 nit reference white) with highlights up to the
+   new `hdr_peak_nits` input (default 1000). The log inversion is used only on latents that carry HDR Encode's
+   `radiance_meta`, the one case where it is correct. `metadata` names the
+   path (`hdr_path`) and carries the SDR → HDR report.
+4. **SAM Loader and SAM Mask Generator are hidden.** No SAM runtime ships;
+   the generator drew discs around the click points. Both stay registered so
+   saved graphs open, and raise a clear error when executed. Use a SAM2 node
+   pack and feed its MASK into Radiance.
+5. **Behaviour changes from the honest release pass** (below): Motion Blur's
+   `energy_conservation` default now conserves energy instead of brightening
+   the frame; Regional Prompt `Replace` keeps the global prompt outside the
+   region; Upscale Face Restore `auto` now restores faces; Audio Cut and
+   Camera Sync raise on a bad path instead of returning defaults; Video
+   Export raises when an EXR cannot be written.
+6. **One reference-white convention for HDR linear (BT.2408).** Linear light
+   is 1.0 = reference white (203 nits by default) everywhere: HDR Encode,
+   Write's `hdr_reference_nits`, HDR Diagnostics, and now `SDR → HDR
+   Universal`, `SDR → HDR Recover` and HDR VAE Decode's Direct HDR. Universal
+   and Recover `Linear` / `AP0` output used 1.0 = 100 nits (SDR white at
+   2.03); the same image is now 2.03x smaller in value and identical in nits,
+   and its PQ / HLG match HDR Encode exactly. Recover gains
+   `reference_white_nits`. **HLG** everywhere (HDR Encode, HDR Monitor, Read,
+   Write, Universal, Recover) is the BT.2100 transcode for the 1000-nit
+   reference display that OpenColorIO's Rec.2100-HLG display uses: reference
+   white at 75 %, 18 % grey at 43.6 %; HDR Encode used to put reference white
+   at 100 % and clip everything above it. **Camera log targets** of the VAE
+   Decode nodes now carry their camera gamut (LogC4 = AWG4, S-Log3 =
+   S-Gamut3.Cine, ...), so their colours change in any colour-managed host.
+
+7. **The Viewers show what the node says the pixels are.** `◎ Radiance Viewer` gains `input_space` (Auto / sRGB / Linear Rec.709 / ACEScg / Linear Rec.2020 / Linear P3-D65 / ACES2065-1), `float_precision` (Half by default; the old hidden default was 32-bit) and `fps`. `◎ Radiance Lite Viewer` gains `input_space` and `fps`.
+   - **Auto.** A ComfyUI IMAGE in 0-1 is sRGB and is shown untouched; anything above 1.0 or below 0 is linear and is shown through OpenColorIO ACES 2.0 SDR (the Viewer's WebAssembly OCIO, loaded on demand).
+   - **Brightness change.** Ordinary images now look like ComfyUI's own preview, darker and with more contrast than before. Linear material now looks like ACES 2.0 rather than the Narkowicz fit (18 % grey at 0.349 instead of 0.556).
+   - **View menu.** It is now Auto / ACES 2.0 / ACES 1.3 / sRGB / Rec.709 (BT.1886) / Filmic (approx.). The PQ and HLG entries, which did nothing, are gone until the HDR canvas lands.
+   - **Browser storage.** Input space and output LUT are no longer remembered in browser storage.
+
+8. **Viewer keys changed (phase 2).** Keys now reach only the viewer under the pointer, and follow the RV / Nuke / NLE layout.
+   - `A` toggles alpha, `X` cycles compare (`Alt+X` clears in/out), `Y` shows luma.
+   - `J` / `K` / `L` shuttle, `I` / `[` set in, `O` / `]` set out, Home / End jump to in / out.
+   - `-` / `=` change the viewer-only f-stop and `0` resets viewer f-stop and gamma. `0` no longer resets the grade.
+   - `Shift+K` toggles focus peaking; the sequence dock's tools moved to Shift+letter.
+   - Zoom above 1:1 is nearest-neighbour by default (it was always smoothed).
+
 ### Fixed
+
+- **Viewer and Lite Viewer, phase 1 (3.5.0).**
+  - *Standard images washed out.* Float frames were always read as linear, so an sRGB IMAGE was encoded twice. The renderer now folds the node's tag into `isLinearTexture`, so the shader, scopes and bloom all see it.
+  - *Input colour space guessed from brightness.* The "midgrey fingerprint" decoded ordinary photos as camera log, and the guess was saved to browser storage. `_userSetIDT` was never set, so a manual choice was overwritten. LogC4 metadata was read as LogC3.
+  - *Encoded twice.* Rec.709 (the camera OETF) and every log view had the sRGB OETF applied on top. Rec.709 is now the inverse of BT.1886, applied once.
+  - *DaVinci Intermediate.* The shader's "BUG-1 FIX" had put 18 % grey at 0.447. The Blackmagic spec, OCIO and Radiance's Python all give 0.336, and the shader now does too.
+  - *Nits.* The heatmap used 1.0 = 100 nits and the PQ waveform plotted 1.0 at 10,000 nits. Both now use 203, like the probe and the nodes.
+  - *Frames black on replay.* Each upload deleted the previous frame's cached texture. `setFrame` also bypassed the cache.
+  - *Compare.* WebGL had no `loadCompareTexture`, so the base-class stub threw on compare_image and Pin Frame. Compare frames now follow the playhead.
+  - *Playback.* The fps and loop controls sat after an unconditional return. They are now in the viewer bar, the source fps comes from the node, and the three fps values are one. Timecode is SMPTE with an integer timebase (29.97 used to print frame 30) and drop-frame at 29.97 / 59.94.
+  - *Graded EXR.* It carried the display transform, overlays and wipe, alpha 1, and no colour metadata. It is now the grade in scene-linear, with source alpha and `chromaticities`.
+  - *OCIO default.* The one-click start button loaded ACES 1.3 CG and now loads the ACES 2.0 studio config.
+  - *PNG previews.* Linear frames got x/(1+x) with no display encoding (dark), and 8-bit conversion truncated. Both viewers now bake the OCIO ACES 2.0 view (exact, threaded) and round. The bake also no longer overwrites the IMAGE passed downstream.
+  - *Always dirty.* `IS_CHANGED` returned NaN on every queue, re-running every node downstream of a viewer. It now fingerprints the inputs, and is NaN only while the delivery cache has no frames for the node.
+  - *Lite Viewer.* Readout, clip check and diff read an fp16 float proxy, so they show source values at source coordinates. The canvas is in device pixels, so 1:1 is exact on scaled displays; it was sized from a bordered box, 0.3 % off. B is scaled to A, diff has a gain, and play/loop run at the source fps. Frames load progressively.
+  - Tests: `tests/test_viewer_phase1.py` (11), and `js/tests/viewer_color.test.mjs` and `js/tests/lite_viewer.test.mjs`, which read real pixels back from Chromium.
+
+- **Viewer phase 2 (3.5.0).**
+  - *Scopes measured the wrong thing.* Waveform, vectorscope, histogram and the reference scopes read the ungraded source texture or the 8-bit canvas (with overlays in it). They now read a display-signal render: graded, through the active view, with no overlays, false colour or viewer exposure. Checked: a 0.5 grey reads 128 on the scope with false colour on.
+  - *Vectorscope.* Targets sat at the wrong angles. It is BT.709 Cb/Cr of the encoded signal now (100 % red at 102.9°), with 75 % and 100 % boxes and the skin line, on the CPU and GPU scopes alike.
+  - *Warnings never fired.* Clip and gamut ran after the display clamp. Clip now flags the pre-clamp display value (≥ 0.999, red) and all-black (blue); gamut flags negative scene-linear (magenta). The grade functions no longer clamp negatives away first.
+  - *False colour.* Custom bands replaced by ARRI's, on the Rec.709 signal of scene luma (18 % grey = 40.9 %, green).
+  - *Viewer exposure and gamma were grade state.* They are viewer-only now, like Nuke: checked at screen 175, scope 128, export 0.214 for +1 stop on 0.214.
+  - *Zoom and sharpness.* Nearest-neighbour did nothing above 1:1 and the main Viewer's canvas was CSS-pixel sized. The canvas is device-pixel sized and zoom is crisp by default.
+  - *Banding.* 8-bit output is TPDF-dithered.
+  - *P3.* The `colorSpace` attribute WebGL ignores is gone. On a P3 monitor a Display menu offers Display P3, which uses the OCIO P3 view and a `display-p3` drawing buffer and canvas.
+  - *Keys hit every viewer.* The viewer and dock handlers listened on the whole page and fired inside text fields. They now act only for the active viewer, skip inputs and Ctrl/Cmd combinations.
+  - *Transport.* In/out points, J/K/L shuttle, ping-pong and play-once, play every frame (waits for each frame) or realtime with a dropped-frame count.
+  - *WebGPU.* `FEATURE_PARITY` is false and the gaps are listed in KNOWN_ISSUES; WebGL stays the default.
+  - Tests: `js/tests/viewer_color.test.mjs` grows to 16 browser checks (shader compile, ARRI green, gamut, scope signal, viewer f-stop, DPR 2 crisp zoom, key scoping, ping-pong, P3).
+
+- **HDR VAE Decode and SDR → HDR audit (3.5.0).**
+  - *Auto log-inverted sampled latents.* Samplers copy the latent dict, so HDR
+    Encode's `radiance_meta` survived KSampler and Auto (and even Sampler
+    mode, through the engine's metadata override) ran the log decompression
+    over a diffused latent: blown-out frames on every img2img graph started
+    from HDR Encode. Encode now stamps a latent fingerprint; decode trusts the
+    HDR coding keys only when it still matches, keeps the padding keys, and
+    reports `radiance_meta_live`.
+  - *Rec.709 → ACES2065-1 was off by 1.2 %* in `hdr/vae.py` and
+    `color/ops.py` (Universal's AP0 output), and the two AP0 matrices were not
+    inverses. Both now match OpenColorIO to 1e-7; P3-D65 → Rec.2020 corrected
+    too.
+  - *Hidden widgets that still steered the decode.* `hdr_output`,
+    `hdr_scale_factor` and `inverse_tonemap` kept acting while the frontend
+    hid them. Every mode now decides them itself: Sampler mode honours the
+    visible `target_space` (Linear really is linear) and keeps the range
+    `inverse_tonemap` creates; Direct HDR honours scene-referred targets
+    (ACEScg, ACES 2065-1, Rec.2020, camera logs). `source_space` is read from
+    the latent. Auto shows the controls of both paths.
+  - *Direct HDR details.* `exposure_adjust` is applied in scene-linear after
+    the pixel model instead of clipping highlights before it;
+    `hdr_scale_factor` no longer scales alpha; RHDR is written after scale and
+    crop, from the image the node returns, and Auto can export it;
+    `crop_bbox` is clamped to the image; a batch of stills is no longer
+    treated as a clip by the pixel model (the latent decides).
+  - *Log targets were transfer-only* and log sources fed camera-gamut linear
+    to SDR modes; see upgrade note 6. A Compress (Log) round trip back to its
+    own log space stays exact.
+  - Video alpha was assigned to the wrong frames when the batch was > 1, and
+    the pre-tonemap scene-linear copy was cloned on every Compress (Log)
+    decode even with no RHDR export.
+  - HDR Encode / HDR Monitor HLG reference white (upgrade note 6).
+  - Measured on the shipped pixel checkpoint: every Universal and Recover
+    control changes the output, clipped highlights reach the mastering peak
+    and never exceed it, pixels outside the recovery mask equal Expand.
+    `tests/test_hdr_vae_sdr2hdr_audit.py` pins all of it against OCIO.
+
+- **Sampler speed (from the 3.5 live logs).**
+  - *A second model load per stage.* Every stage called `load_model_gpu()`
+    and then `sample_custom`, which loads the model again with inference
+    memory reserved; the log shows each model "prepared for dynamic VRAM
+    loading" twice, and a Z-Image run spent ~4.5 s outside its 8-step loop
+    against ~1.9 s for ComfyUI's own path. Removed.
+  - *cfg 1.0 silently became the base CFG.* In the Auto preset a cfg of 1.0
+    was replaced by the architecture's base value (Z-Image 4.0, Wan 6.0, ...)
+    whenever model_meta was not connected, so turbo / distilled checkpoints
+    ran an unconditional pass on every step: twice the compute and the wrong
+    look. It is now applied only when model_meta names the checkpoint, and
+    suggested in the log otherwise. Dynamic CFG no longer lifts 1.0 to 1.2.
+  - *~0.5 s before the first step.* `gc.collect()` plus two
+    `torch.cuda.empty_cache()` calls ran on every sample; removed (ComfyUI
+    manages the cache between prompts). `log_tensor` built its statistics
+    (a float copy and four GPU syncs per tensor) with DEBUG off; it returns
+    early now.
+  - *Flux ran on the wrong text encoder.* With `clip_l` empty, ComfyUI's
+    loader picks Mochi's T5 encoder for a lone `t5xxl` (the log shows
+    `MochiTEModel_` and `target_arch='wan'` for a Flux graph). The Loader
+    now fills a required slot from the one matching file on disk
+    (`clip_l.safetensors`) or stops naming the slot (Flux, SDXL,
+    HunyuanVideo, HiDream, Kandinsky 5).
+  - *VRAM warning with the real size.* The table estimated Flux dev bf16 at
+    16.5 GB; its weights are 22.7 GB. The Loader now reads the model's own
+    size and, when it exceeds the GPU, says the weights will be streamed
+    from system RAM every step and what fp8 would bring them to.
+
+- **OCIO sets itself up; OpenEXR is always on.** Nothing to configure after
+  install. OpenColorIO moves to required dependencies (and `install.py`
+  installs OpenEXR and OpenColorIO if ComfyUI-Manager did not). At startup
+  `radiance.color.ocio_setup` keeps a valid `$OCIO`, otherwise activates
+  OpenColorIO's built-in ACES 2.0 studio config: written once to
+  `ACES/studio-config.ocio`, exported as `$OCIO` for the process, and set as
+  OCIO's current config so every node agrees. A broken `$OCIO` is reported
+  and bypassed, never overwritten. OCIO < 2.2 falls back to the bundled CG
+  config. The startup download of a config from GitHub (no consent) is
+  removed. `OPENCV_IO_ENABLE_OPENEXR` is forced to `1` at the top of the
+  package (a `0` in the shell used to win, and OpenCV caches it at first
+  use). `RadianceColorSpaceConvert`'s OCIO name map pointed at names no
+  config had, so OCIO never ran; it now targets the studio config's names
+  (camera logs stay analytic, per that node's transfer-only convention).
+
+- **Read / Write colour management and precision.** Checked parameter by
+  parameter and format by format; `tests/test_io_release_matrix.py` (65
+  tests) writes through the Write node and reads back through the Read node.
+  - *Camera logs decoded to the wrong gamut.* Read undid the transfer only, so
+    LogC4, S-Log3, V-Log, Canon Log 3, Log3G10 and DaVinci Intermediate
+    plates stayed in the camera's own primaries (AWG4 red read as a
+    different red in a Rec.709 or ACEScg graph). Every encoding now goes to
+    the working space, transfer and primaries, through OpenColorIO's ACES
+    studio config when OCIO is installed and an analytic path otherwise; the
+    two agree within 2e-6 on every encoding (`tests/test_color_encodings.py`).
+  - *New inputs on both nodes:* `working_space` (Linear Rec.709, ACEScg,
+    Linear Rec.2020, Linear P3-D65, ACES2065-1), `ocio_colorspace` (any
+    name or alias from the config), `ocio_config` (path or `ocio://`, else
+    `$OCIO`, else the built-in studio config) and `hdr_reference_nits`.
+    New encodings: Linear Rec.709 / Rec.2020 / P3-D65, ACES2065-1, P3-D65
+    gamma 2.6, Rec.709 camera OETF, Rec.2020 OETF, Sony S-Log3 S-Gamut3;
+    Write gains V-Log, Canon Log 3, Log3G10, DaVinci Intermediate and ACEScct.
+  - *PQ and HLG were 5x off Radiance's own HDR scale.* Write encoded PQ with
+    1.0 = 1000 nits and HLG with 1.0 = peak; both now place scene-linear 1.0
+    at `hdr_reference_nits` (203, BT.2408, as the SDR → HDR nodes do), and
+    both convert to Rec.2020 primaries first (they wrote Rec.709 primaries
+    into an HDR10 file).
+  - *Video was encoded with the BT.601 matrix and no tags.* ffmpeg's RGB →
+    YUV defaulted to BT.601, so a pure red came back (255, 24, 0) in any
+    BT.709-aware player; nothing was tagged. Every codec now uses the BT.709
+    or BT.2020 matrix, is tagged with primaries, transfer and matrix (HDR10
+    as bt2020 / smpte2084 / bt2020nc), and is fed 16-bit RGB (H.265 10-bit
+    got 8-bit before). ProRes 4444 carries the mask as alpha. DNxHR HQ is
+    written as `.mov` as its label says (was `.mxf`). `broadcast_safe` no
+    longer squeezes video to legal range twice.
+  - *EXR / DPX carry their colour.* EXR gets `chromaticities`,
+    `oiio:ColorSpace` and (for ACES2065-1) `acesImageContainerFlag`; DPX
+    gets transfer / colorimetric. Read on `Auto` honours an EXR's
+    chromaticities, so an ACES2065-1 EXR lands in the working space.
+  - *Precision.* 16-bit grey PNG/TIFF (depth maps, mattes) read almost
+    entirely white through Pillow's 8-bit convert; half-float TIFF did not
+    read at all; DPX and grey+alpha files dropped their alpha; 8- and 16-bit
+    writes truncated instead of rounding. All fixed. Alpha now writes to
+    TIFF, DPX and WEBP as well as EXR and PNG. EXR compression gains PXR24,
+    B44 and B44A. `.hdr` and 16-bit PNG writes check their result. A decode
+    that fails raises (it logged and passed file values on as linear).
+  - `layer: depth` finds a `depth.Z` channel, as in Nuke.
+
+- **Honest release pass.** Every control, option and output was checked
+  against the code that consumes it; the ones that did nothing, did
+  something else, or reported success after falling back were fixed, and the
+  few that cannot be made real in this release are labelled as what they
+  are.
+  - *Video.* I2V `concat_channels` concatenated image channels onto the noise
+    (no model accepts that) and `clip_vision_inject` wrote a key nothing
+    reads; both now write what ComfyUI's WanImageToVideo writes
+    (`concat_latent_image` + `concat_mask`, `clip_vision_output` from a new
+    input), `auto` picks from the model's actual inputs, and a strategy that
+    cannot work raises. The T2V/I2V pipelines built LTX-shaped latents (128
+    ch, /32) for every model because the DiT spec import always failed; the
+    real table is used and the latent shape follows the connected model and
+    VAE (Wan 2.2 TI2V 5B and HunyuanVideo 1.5 added). `hdr_strength` is now
+    the prompt weight of the HDR descriptors. Video HDR Conditioner appended
+    words to a key encoded conditioning never has; with `clip` connected it
+    now encodes and concatenates them, and says when it could not. Video HDR
+    Decode converts Rec.709 to the metadata gamut before PQ/HLG (it printed
+    the gamut and never converted). Batch Decode `output_linear` linearises.
+    Video Export's EXR fallback wrote PNGs that failed on RGB and still
+    reported EXR; it writes EXR or raises.
+  - *Upscale.* A diffusion run with no diffusion model was labelled a
+    diffusion upscale; `pass_info` now says what ran on how many tiles, and a
+    bicubic fallback says it is not an AI upscale. `model_tier auto` uses the
+    content analysis and `mode balanced` sharpens, as their tooltips said.
+    Face Restore `auto` never restored (the default label contains "skip"),
+    counted crops pasted back unchanged as restored, and ignored fidelity on
+    the spandrel path. Upscale Video crashed whenever `sharpness_boost` > 0.
+    The confidence output is documented as the tile-geometry weight it is.
+  - *VFX.* Video Mask Propagator read the wrong frame's flow with the wrong
+    sign (IoU 0.6 after one frame, 0.0 after three; now > 0.92). Vector Mask
+    `Bezier_Spline` drew the polygon; it draws a closed spline. Motion Blur's
+    `energy_conservation` rescaled the whole frame by one highlight. Camera
+    Sync ignored the `shutter` key its tooltip documents and returned a
+    default camera for a missing file or an `.abc`. Linear Matting listed
+    ViTMatte and RVM, which never existed. DSINE loaded any checkpoint with
+    `strict=False` and fetched code through torch.hub without download
+    consent; both fixed, and the passes record which normals were used.
+  - *QC / IO / audio.* Policy Guard checked only frame 0 and enforced
+    `max_peak_nits` only below 200 nits. HDR Diagnostics ignored its
+    `colorspace` input. Digital Cinema Read never wrote the `colorspace` key
+    Linear Check reads, never used `fps_override`, and offered one input
+    colorspace. Audio Cut returned `[]` for a missing file or a failed
+    backend, which is also its answer for a quiet track.
+  - *Generate.* Denoise `joint_chroma_guidance` reached only the Guided
+    filter; Bilateral (the default) is now a joint bilateral. Regional Prompt
+    `Replace` dropped the global prompt from the whole frame. NDI Sender
+    streamed only the first frame of a batch.
+- **Found by the live 3.5 run on ComfyUI 0.32.** HDR Stitch collapsed a
+  one-frame batch (`squeeze(0)`) before the Laplacian blend and failed on
+  every single image. T2V / I2V handed an image model a 5-D latent and died
+  inside the model's forward; they now refuse it by name. Digital Cinema
+  Read executed an empty path as an 8x8 black shot. `RadianceAIUpscale`
+  downloaded weights without download consent.
+
+- **The Viewer rendered black on the default (WebGL) backend.**
+  `RadianceWebGLRenderer.setMask()` and the mask uniform upload wrote and read
+  `this.mask.type` etc., but the v3.1 refactor (`19a440c`) moved the mask into
+  the shared base class as flat fields and no constructor created `this.mask`
+  any more. Every `render()` after a frame loaded threw
+  `TypeError: Cannot set properties of undefined (setting 'type')` inside
+  `setMask`, before the draw call, so the canvas stayed black. It went
+  unnoticed for three months because WebGPU auto-upgraded on every machine
+  with `navigator.gpu`; 3.4.0 made WebGL the default and the Viewer went
+  black for everyone. The WebGL renderer now delegates to the base class.
+  `js/tests/sequence_load.test.mjs` builds a real Viewer in Chromium, feeds it
+  a PNG plus fp32 RHDR sidecar through `onExecuted`, and asserts the canvas is
+  not black on the first frame and after a scrub; it failed before the fix.
+- **The Viewer framed its image off-screen.** The second half of the black
+  viewer, found live on ComfyUI 0.32 / frontend 1.48 once the render path was
+  fixed. The sidebar and inspector reported their full content height
+  (2019 px) with `min-height: auto`; the Vue node frontend sizes a node to
+  its DOM widget's content, so a 1180x760 Viewer node became 1480x2286 and
+  the canvas column stretched to 1637 px. `fitToView()` centred the frame on
+  that canvas, below the visible part of the node, and `resize()` changed the
+  canvas size without touching pan or zoom, so the view never recovered. The
+  container now carries `contain: size` (the node's size drives the viewer,
+  never the reverse; panels scroll inside it), and `resize()` refits a view
+  that is still auto-fitted and keeps the centre point of one the user has
+  zoomed or panned. The browser test hosts a second viewer in an auto-height
+  parent and fails at 1954 px without the containment.
+- **Sequential offload never engaged.** `setup_offload_mode("sequential")`
+  called `comfy.model_management.set_lowvram_mode`, which ComfyUI has never
+  shipped, so it logged "Could not enable sequential offload" and did nothing
+  on every run. It now sets ComfyUI's module-level `vram_state` to
+  `LOW_VRAM`, which `load_models_gpu()` reads, and leaves a stricter
+  `NO_VRAM` alone.
+- **The pixel checkpoint was only found under one name.** The resolver looked
+  for `sdr2hdr_pixel_image.pt` and `sdr2hdr_image_50k.pt`; the training
+  scripts emit `sdr2hdr_pixel_image_v1_50k.pt` and friends. Any
+  `sdr2hdr_pixel*.pt` is found now, the preferred name first.
+- **The Recover node reported only the last failure.** With no temporal
+  checkpoint and no pixel checkpoint it now names both reasons, and it falls
+  back from the temporal model to the pixel model per frame rather than
+  failing a clip outright.
+
+### Added
+
+- **ComfyUI 0.32 model families.** Qwen-Image, Krea 2, HiDream-I1, OmniGen2,
+  LongCat-Image, Kandinsky 5 (video and image), HunyuanImage 2.1 (64ch, 32px)
+  and HunyuanVideo 1.5 (32ch, 16px / 4 frames) are detected from their
+  checkpoint keys, carry latent, VAE-factor, text-encoder-slot, VRAM and
+  sampler defaults (each read off the model's official Comfy-Org workflow
+  template, or its `sampling_settings` in `comfy/supported_models.py` where no
+  template exists), and appear in the Loader's model list and the
+  Resolution presets.
+- **ComfyUI-native detection fallback.** When none of Radiance's key
+  heuristics match, `detect_model_type` hands a shape-only view of the
+  checkpoint to `comfy.model_detection.model_config_from_unet` and maps the
+  answer back, so a checkpoint the running ComfyUI can load is never reported
+  as unknown; families without a Radiance table are named in the log.
+- **`radiance.model.paths`.** One resolver for Radiance's own checkpoints:
+  registers `models/radiance` with `folder_paths` (so `extra_model_paths.yaml`
+  works), searches every registered folder, and describes where it looked
+  when nothing is found.
+
+### Removed
+
+- `fast_vae.py` (latent RUDRA decoders and their loader), `model/vae.py`,
+  `tools/build_rudra_cache.py`, `tools/validate_rudra_dataset.py`,
+  `tools/compute_descriptor_stats.py` (all imported a `rudra` package that
+  was never in the tree), `scripts/training/train_turbo_decoder.py`,
+  `dataset_hdr.py`, `verify_unified_config.py`, `train_all_models.bat`,
+  `train_pipeline.bat`, and the tests that covered them. The
+  `RADIANCE_TURBO_DECODER` environment variable is no longer read.
+
+## [3.4.x unreleased work, folded into 3.5.0]
+
+### Upgrade note
+
+Four changes alter what an unchanged graph produces. Read these before updating
+a project in flight.
+
+1. **PQ output moves by a factor of ten at any mastering peak below 10 000
+   nits.** `RadianceHDREncode` in PQ (HDR10) normalised scene-linear by
+   `peak_nits` where ST.2084 requires the fixed 10 000 cd/m² ceiling. At the
+   shipped default of 1000 nits, diffuse white encoded at PQ 0.8290, which a
+   conforming display renders at 2030 cd/m² instead of the 203 the widget
+   promises. The error cancelled at `peak_nits = 10000`, which is the single
+   value the old test used, and it cancelled again on a round trip through
+   Radiance, so it was invisible except against another tool. Any PQ master
+   graded before this release was delivered ten times too bright and needs
+   re-rendering. Decoding moves the same way in the opposite direction:
+   `RadianceColorSpaceConvert` reading a real HDR10 file was ten times dark.
+2. **Rec.709 and Rec.2020 output actually converts now.** `Rec.709` previously
+   wrote untouched scene-linear, roughly 2.2 stops dark in the midtones,
+   because the function it called did not exist and a blanket except returned
+   the array unchanged. `Rec.2020` applied a 1/2.4 power curve with a hard clip
+   to [0,1], which is neither BT.2020 primaries nor a BT.2020 transfer function
+   and destroyed all highlight headroom on float formats. Both are now the real
+   OETFs, and Rec.2020 applies the primaries matrix. A colour space that cannot
+   be applied now fails the write instead of silently writing linear.
+3. **Twenty-five nodes appear in the menu that were not there before**, taking
+   the registered count from 131 to 156. Nothing was renamed or removed; these
+   are finished classes that four implementation packages declared and the
+   catalog never loaded.
+4. **`pq_bt2408_to_linear` and `_eotf_pq` lost their `peak_nits` parameter**,
+   and `_pq_encode` / `_torch_pq_encode` in `nodes/hdr/aces2.py` lost theirs.
+   In every case the parameter was either applying the wrong normaliser or
+   accepted and ignored. Removing rather than correcting them means a stale
+   keyword call raises instead of quietly changing exposure.
+
+### Added
+
+- **Long-video sampling in overlapping latent windows.** `RadianceSamplerPro`
+  gains `temporal_window` and `temporal_overlap`. Above zero, a 5D video latent
+  longer than the window is denoised window by window with the overlaps
+  cross-faded **at every denoising step** rather than after each window is
+  finished, which is the difference between a seam you cannot see and one you
+  can. Peak VRAM then follows the window size instead of the clip length. The
+  default is 0, off, so no existing graph changes. The weighting follows the
+  pattern `RadianceUpscaleVideo` already uses for pixels, including its
+  half-sample ramp offset. CPU tests pin the schedule, the partition of unity,
+  the step accounting, seed stability and that a single window reproduces the
+  unwindowed result exactly; whether the output is temporally coherent on a real
+  DiT needs a GPU and is recorded as open in the README.
+
+- **The viewer pages frames instead of holding them.** A bounded frame window,
+  16 frames or 768 MB by default, fetches on demand as the playhead moves and
+  evicts what falls outside, with bounded fetch concurrency.
+
+### Changed
+
+- **The write path streams.** Sequence and video writes transform and write one
+  frame at a time, and video frames are piped into ffmpeg's stdin as they are
+  produced rather than stacked into one buffer first. Measured peak for 32
+  frames against 512 frames differs by 0.1 MB where it used to differ by 360 MB,
+  and enabling a colour transform now costs 1.6 MB rather than a second copy of
+  the whole shot, so a colour space no longer halves the longest shot you can
+  write. A streaming read path sits beside the batch one, so a read, transform
+  and write pipeline never holds the sequence; the batch entry points are
+  unchanged because the node layer genuinely does hand ComfyUI a batch.
+
+- **The HDR VAE encode and decode stream.** Both wrote every frame into a list
+  and then concatenated, so peak was two copies of the clip. They now write into
+  one pre-allocated buffer and release as they go: decode overhead measured flat
+  at 5.7 MB from 4 frames to 32, where it previously grew by a whole extra clip,
+  and the RHDR sidecar accumulator is gone entirely because sidecars are written
+  as each frame lands. Video encode and decode buffers now live on
+  `comfy.model_management.intermediate_device()`, which is where `comfy.sd.VAE`
+  already puts its own, so this is a device change for the video paths. The
+  still paths are untouched.
+
+- **Noise generation writes into a pre-allocated buffer.** Every 5D noise type
+  built a Python list of per-frame tensors and then stacked it, so the list and
+  the stack were alive together, and `stage_noise` allocated a fresh full-size
+  zero tensor per stage.
+
+### Fixed
+
+- **Two regional-conditioning nodes were non-functional at their own defaults.**
+  `RadianceRegionalPrompt` and `RadianceRegionalGrid` wrote a fractional `area`
+  tuple without the `"percentage"` marker ComfyUI requires, so the floats
+  reached `get_area_and_mult` and raised `TypeError: narrow(): argument 'start'
+  must be int, not float` on any sampler.
+
+- **The sampler returned the un-sampled input latent and logged success.** When
+  `start_step >= end_step` the stage split collapsed to one element and the
+  sampling loop never ran, so an empty-latent run decoded to flat grey while the
+  node reported "Sampling complete". Reachable at `start_step=10, end_step=10`,
+  at `start_step=20, end_step=5`, and at `start_step=50` with `steps=20`.
+  `validate_step_range` existed for this and was imported but never called.
+
+- **A maximum seed crashed video noise generation.** The 5D branch looped
+  `torch.manual_seed(seed + f)` against a widget whose max is 2**64 - 1, so the
+  top of the range raised `RuntimeError: Overflow when unpacking long` on every
+  non-Gaussian noise type, outside the surrounding try. Adjacent seeds also
+  produced shifted rather than independent sequences, since run S frame f was
+  bit-identical to run S+1 frame f-1.
+
+- **`tile_mode` silently discarded six settings**, breaking out of the stage
+  loop so phase shift, refiner, dynamic guidance, start and end step and
+  `add_noise` never applied, and a failed tile was replaced with the
+  **un-denoised input slice**, feathered into the output and reported as a
+  success. An OOM on one tile, the condition tiling exists to avoid, put raw
+  latent noise into a finished plate.
+
+- **The viewer showed an 8-bit tonemapped 2048px proxy labelled `FP32`.** When
+  the RHDR path failed, and it had three silent ways to fail, the badge still
+  read FP32 while a colourist graded against the fallback PNG. The badge now
+  says what is actually on screen.
+
+- **The viewer wrote roughly 67 GB per 500-frame shot**, two thirds of it for a
+  status label: exposure bracketing was hardcoded on with no widget, writing a
+  full 32-bit EXR, an fp32 RHDR and an rpick for each of three exposures per
+  frame, of which the frontend fetched only the 8-bit PNG.
+
+- **Temp files leaked.** The zdepth RHDR sidecar was stored under a key the
+  purge loop did not collect, orphaning one file per depth frame forever, and
+  `RadianceLiteViewer` wrote a full-resolution PNG per frame with no purge path
+  at all despite a docstring promising compact previews.
+
+- **`RadiancePreviewServer` returned a working-looking URL after a failed bind**,
+  and leaked the previous `HTTPServer` whenever the port changed.
+
+- **Video encode dropped the crop and the alpha.** The 4D-VAE video path
+  hardcoded `pad_h`/`pad_w` to zero in the clip-level metadata, so decode skipped
+  the crop and returned frames padded to the VAE factor with reflect-padded
+  garbage at the bottom, and it discarded the alpha channel even with
+  `alpha_handling="Preserve"`, returning solid white that decode then
+  composited over the real matte.
+
+- **`RadianceHighlightSynthesis` blacked out highlights.** Its Soft Light blend
+  used the W3C formula, which is only valid on [0,1], so a 5.0 highlight went
+  negative and clamped to pure black. The node exists to expand highlights.
+
+- **`RadianceHDRExpansion` applied the inverse OETF to alpha**, returning 0.2140
+  for an alpha of 0.5, because the transfer ran over the full tensor before RGB
+  was sliced off.
+
+- **`RadianceHDRBlendValidator`'s SSIM returned exactly 1.0 on HDR content**
+  regardless of what it was comparing: it was a global statistic, not windowed,
+  and clamped luma to [0,1] first, so two images above 1.0 everywhere both
+  flattened to mean 1 and variance 0. Its "higher SSIM" winner branch also chose
+  `image_a` unconditionally without computing a second value.
+
+- **`_hdr_soft_decompress` mapped the top code value to 2.5 million linear.**
+  Reinhard's inverse is genuinely unbounded at 1.0; the missing bound was the
+  hazard, since any VAE-decoded specular landing at code 1.0 became 250 million
+  nits.
+
+- **OCIO could never reach the bundled ACES config.** `_resolve_config` returned
+  whatever `OCIO.GetCurrentConfig()` gave it, and in OCIO v2 that never returns
+  None and never raises: with `$OCIO` unset it hands back a built-in default, so
+  the shipped `radiance/ACES/config.ocio` and the one the Download ACES 2.0
+  button installs were both unreachable. Separately, `RadianceHDROCIOTransform`
+  raised at its own default colorspace names, which are absent from that config,
+  and its pre-validation read only colorspace names while OCIO resolves aliases,
+  so it rejected two of the three names its own tooltip recommends.
+
+- **An animated energy mask was collapsed to frame 0**, silently, because the
+  reshape folded the time axis into the batch axis and the batch-mismatch guard
+  then expanded frame 0 across the clip.
+
+- **`ensure_4d` flattened video into the batch axis at `debug` level**, which
+  ComfyUI's default INFO does not print, so a WAN latent reaching the sampler
+  with image-type detection became independent stills with no visible trace.
+
+- **The non-finite guard could not fire on the path that needed it most**:
+  `torch.isfinite` raises on a `NestedTensor`, and the exception was swallowed
+  into an invisible debug line, so an LTX-AV or MiniMax H3 run with a CFG blowup
+  shipped NaNs unchecked.
+
+- **`RadianceVideoExport`, delivery and several nodes reported success for work
+  they did not do.** Delivery now returns `status: "partial"` with the list of
+  transforms that failed, rather than "EXPORT COMPLETE" over a master delivered
+  at 1x because a model was missing, and it validates the format and colourspace
+  before grading rather than raising after the whole batch has been processed.
+
+- **`bake_grade` linearised an already-linear master**, applying the sRGB EOTF
+  when the colour space was `Linear (sRGB)` and logging it as correct. The other
+  half of the same defect made the bake inert for `sRGB (Standard)`, because the
+  writer re-encoded it straight back.
+
+- **A video write ignored `overwrite=False` and ran ffmpeg with `-y`**, so
+  re-queueing destroyed an approved master, and it never created its output
+  directory despite the docstring promising it. ffmpeg's stderr was captured and
+  discarded, so every failure surfaced as a bare exit status, and a hardcoded
+  600 second timeout killed long encodes and left a truncated file over the one
+  `-y` had already replaced.
+
+- **`exr_compression` was threaded through four layers and never used.** Every
+  EXR was ZIP, so choosing DWAA for a long dailies sequence silently cost
+  roughly five times the size and time.
+
+- **`overwrite=False` renamed sequence frames individually**, so a partial
+  re-render produced a mix of `shot_1001_001.exr` and `shot_1005.exr` that was
+  neither the old sequence nor the new one and no longer matched the `%04d`
+  glob. The collision is now decided once for the sequence.
+
+- **A relative output path resolved against the ComfyUI install directory**,
+  which the repo has a containment helper for that the flagship writer was not
+  using.
+
+- **`RadianceDigitalCinemaRead` ignored `frame_limit` at its own default.** A
+  VFX sequence numbered from 1001 against the shim's `start_frame` default of 1
+  produced `end < start`, and the resolver fell through to reading the entire
+  shot into RAM: asking for 10 frames of a 100-frame sequence read all 100.
+
+- **`enable_video` with an image model type produced unrelated stills** and
+  reported them as a video with a frame count and a duration, skipping stride
+  validation, and `batch_size` was ignored for video without the warning the
+  same node gives for every other ignored widget.
+
+- **Several controls did nothing.** `pag_scale` was clamped to 1.0 against a
+  widget max of 5.0, and PAG logged "applied" at registration even at
+  `cfg <= 1.0` where ComfyUI runs no uncond pass and the patch cannot act;
+  `noise_alpha_end` had no ramp anywhere in the file despite the tooltip
+  promising cosine interpolation; `conditioning_clip_target` wrote a key nothing
+  reads and logged a route; `sigmas_override` logged "bypassing internal sigma
+  computation" and then forced the terminal sigma to zero, silently fully
+  denoising a deliberate leftover-noise pass; `guidance_rescale_phi` was skipped
+  at `cfg <= 1.0`, which is the sampler's own default; and `ip_image` and
+  `ip_weight` wrote a conditioning key ComfyUI never promotes while the node
+  reported `ip_adapter: enabled`.
+
+- **`decode_to_linear_realtime` accepted two denoise parameters and discarded
+  them**, skipping the log-space highlight denoise that `hdr/vae.py`'s own
+  docstring calls the key to clean HDR.
+
+- **A cross-architecture RUDRA decoder substitution never reached the report**,
+  so a decoder for a different VAE could run while the node said "learned
+  recovery: applied".
+
+- **`_scene_linear_for_rhdr` was per-instance state on a node ComfyUI reuses**,
+  so a run that exited early left it populated for the next one.
+
+- **`detect_vae_factor` returned 0** for a VAE exposing only
+  `latent_format.scale_factor`, a value-normalisation constant rather than a
+  spatial factor, giving a zero-size buffer and a division by zero.
+
+- **The stale root-level `recovery.py`** was an unimported duplicate of
+  `hdr/recovery.py` whose docstring claimed fixes the shipped module does not
+  have, so anyone auditing "recovery.py" read the wrong file. Moved to
+  `_to_delete/`.
+
+- **PQ encode and decode used the mastering peak as ST.2084's normaliser.**
+  See the upgrade note. `color/ops.py` now clips absolute luminance at
+  `peak_nits` and normalises by `PQ_MAX_NITS`, a named constant, and the
+  behaviour is pinned at five mastering peaks, against an absolute-luminance
+  ladder computed from the recommendation's rational constants, and against
+  the package's other PQ encoder, which it had been disagreeing with by 10x.
+
+- **`RadianceVAE4KDecode` hung ComfyUI on a shipped default.**
+  `TileEngine.compute_tiles` computed `stride = tile_size - overlap` and looped
+  `pos += stride` with the only exit being full coverage, so any overlap at or
+  above the tile size never advanced and appended tiles until memory ran out,
+  with no error and nothing in the log. The temporal call site did not clamp its
+  overlap where the spatial ones did, and `temporal_size "2"` with the default
+  `temporal_overlap` of 2 was enough to reach it. `compute_tiles` now rejects a
+  non-positive stride and the call site clamps with a warning.
+
+- **`color_utils.linear_to_rec709` did not exist.** Written, along with
+  `linear_to_rec2020`, their inverses, the torch forms, and the Rec.709 to
+  BT.2020 primaries matrix in numpy. See the upgrade note.
+
+- **Applying a LoRA permanently modified the loader's cached model.**
+  `ModelPatcher.clone()` shares the underlying module and its parameter
+  storage, so the in-place `weight.add_(delta)` wrote through to the cache: the
+  delta accumulated on every queue, survived bypassing or deleting the node,
+  and only a ComfyUI restart cleared it. On fp8 weights it raised partway
+  through and left the shared model half-patched. The node now records patches
+  on the clone through ComfyUI's own `add_patches`, which also handles
+  quantised weights. Key parsing was rewritten at the same time: it assumed
+  `lora_unet_` prefixes and `lora_down`/`lora_up` naming, so a PEFT or
+  diffusers LoRA applied zero deltas and logged that as a success with the
+  strength widget silently ignored. Zero matched deltas is now an error.
+
+- **`preview_method` did nothing, and selecting it disabled ComfyUI's own
+  preview.** It imported `TAESDDecoder` from `comfy.taesd.taesd`, a name that
+  exists in no ComfyUI release, so TAESD always fell through to Latent2RGB, and
+  neither branch decoded anything. The callback then sent a raw latent where
+  ComfyUI expects a format/image/size triple, raising server-side on every step
+  that emitted a preview, while `disable_pbar` turned off the working progress
+  bar. Both methods now go through ComfyUI's `latent_preview`.
+
+- **`RadianceVideoBatchDecode` flattened 5D latents to 4D before decoding**,
+  which forced the 2D image path and threw away ComfyUI's native temporal
+  tiling, the mechanism that lets a long clip decode at all. The returned frame
+  count was wrong with it: a causal video VAE produces `(T-1)*k+1` pixel frames,
+  not `T`. Its two mitigation widgets were inert, probing for `set_tiling` and
+  `enable_tiling` methods that ComfyUI has never defined, and `tile_overlap` was
+  accepted and never read. 5D latents now reach `vae.decode` intact,
+  `tile_decode` routes to `decode_tiled(tile_t=...)`, and the report quotes the
+  count actually returned.
+
+- **A VAE decode failure became a 64x64 black frame batch reported as success.**
+  `_decode_preview` and `_vae_decode` caught every exception, including
+  `OutOfMemoryError`, and returned black; `_comfy_sample` returned the raw input
+  noise, which decodes to static, while the pipeline reported a successful
+  sample. All three now surface the failure.
+
+- **Twenty-six finished nodes never reached ComfyUI's menu.** `NODE_GROUPS`
+  lists only `radiance.nodes.*`, and the folding sweep walks only packages
+  already in the catalog, so four implementation packages declaring complete
+  mappings were never read: all of `image/upscale.py`, fifteen HDR nodes, three
+  film-look nodes, plus three classes missing from their own module's mapping.
+  Twenty-five are now registered. The twenty-sixth, `RadianceHDRHistogram`,
+  emits a 5D IMAGE that ComfyUI cannot render and is withheld with that reason
+  recorded rather than shipped broken.
+
+- **The HLG EOTF carried a second, wrong expression for its linear segment**,
+  computed and unused, that anyone reconciling the two would have "fixed" the
+  working branch to match.
+
+### Changed
+
+- **CI runs the tests it has.** `test-full`, the only job that installs real
+  torch, OpenEXR and OpenColorIO, was gated on `github.repository ==
+  'fxtdstudios/radiance'`; development happens on `radiance-beta`, so the lane
+  that executes every claim in the README's Verified table had never run. On the
+  lightweight lane the suite is 1483 passed and 1577 skipped at 22% coverage;
+  with real dependencies it is 3667 passed and 84 skipped at 59.6%. The gate now
+  keys on the fork status of the event rather than a repository name.
+
+- **One coverage floor instead of three.** CI passed `--cov-fail-under=15`,
+  `pyproject.toml` said 40, and the README claimed 53%. The CLI flag won, so CI
+  was gating at 15 against a measured 22. The floor now lives only in
+  `pyproject.toml`, is enforced only on the lane that can execute the code, and
+  is set just under the measured figure.
+
+- **The README's Verified table states what the suite reports**, not what it
+  would have reported had the lane run. Rows that overstated their coverage were
+  rewritten and the shortfall moved to Open.
+
+### Tests
+
+- **The ACES 2.0 grey test asserted a table against the interpolator that reads
+  it.** At an anchor the interpolation parameter is zero, so it returned the
+  table entry by construction: replacing the published values with fabricated
+  ones left the suite green. The published table is now transcribed into the
+  test as literal data from the ACES Output Transform, the shipped table is
+  compared against that transcription, and the interpolator is exercised between
+  anchors where interpolation actually happens.
+
+- **Eight of the sixteen colour spaces had no published-value pin**, only
+  round-trip and not-identity checks that a wrong but invertible curve passes.
+  All fifteen non-identity spaces are now pinned to six decimals at 1e-4 and
+  cross-checked against colour-science.
+
+- **The 1-to-100 frame-count claim had no test.** There was one fixed count of
+  8, ProRes only, and H.265 10-bit was never encoded. There is now a sweep
+  across all three codecs asserting frame identity and order as well as count,
+  with the exhaustive version under `-m slow`. The claim was true, it was simply
+  untested.
+
+- **The functional test converted real bugs into skips.** Any exception whose
+  message contained "requires", "not found", "does not exist", "is required for"
+  or "must not be empty" became a skip, which swallows a genuine argument
+  contract error as readily as a missing model file. Substring matching on free
+  text cannot tell those apart, so it was replaced with a structural classifier:
+  an absence has to be signalled by type, and the four nodes that need an
+  explicit gate have a predicate that interrogates the environment rather than a
+  sentence.
+
+- **The route-registration guard had no assertion**, and the shared test double
+  it ran against kept no state, so the ComfyUI startup crash it was written for
+  was unreachable. It now registers into a real aiohttp dispatcher and counts
+  routes.
+
+- **The import-isolation blocker was inert on Python 3.12**, which is in the CI
+  matrix: it used `find_module`, removed in that version, so the test passed
+  while blocking nothing. Ported to `find_spec`, and the harness now proves it
+  is blocking before reporting anything.
+
+- **A stub leaked across test modules.** `test_node_smoke.py` installed a stub
+  `colour` whenever the real package had not yet been imported, which is not the
+  same question as whether it is installed, and the stub then shadowed the real
+  one for every module collected afterwards. Stubs are now installed only for
+  packages that are genuinely absent.
+
+- Removed a constant-folding assertion that could not fail, and an early return
+  that made the withheld-node reason check vacuous.
 
 - **RUDRA graded each tile and each frame separately.** A decoder with
   dynamic-range conditioning (`dr_dim`) infers its conditioning vector from

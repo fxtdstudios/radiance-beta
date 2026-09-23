@@ -271,23 +271,33 @@ def temporal_consistency_loss(pred: torch.Tensor, target: torch.Tensor) -> torch
     return F.l1_loss(p[:, 1:] - p[:, :-1], t[:, 1:] - t[:, :-1])
 
 
+PIXEL_CHECKPOINT_ENV = "RADIANCE_SDR2HDR_PIXEL"
+#: Preferred name first, then any pixel checkpoint the training scripts emit.
+PIXEL_CHECKPOINT_PATTERNS = (
+    "sdr2hdr_pixel_image.pt",
+    "sdr2hdr_pixel_image_*.pt",
+    "sdr2hdr_image_*.pt",
+    "sdr2hdr_pixel*.pt",
+)
+
+
 def resolve_pixel_checkpoint(checkpoint_path: str = "") -> Path | None:
-    """Resolve an explicit or installed direct-pixel SDR-to-HDR checkpoint."""
-    candidates: list[Path] = []
-    if checkpoint_path.strip():
-        candidates.append(Path(checkpoint_path).expanduser())
-    env_path = os.environ.get("RADIANCE_SDR2HDR_PIXEL", "").strip()
-    if env_path:
-        candidates.append(Path(env_path).expanduser())
-    model_dir = Path(__file__).resolve().parents[2] / "models" / "radiance"
-    candidates.extend((
-        model_dir / "sdr2hdr_pixel_image.pt",
-        model_dir / "sdr2hdr_image_50k.pt",
-    ))
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate.resolve()
-    return None
+    """Resolve an explicit or installed direct-pixel SDR-to-HDR checkpoint.
+
+    Order: the explicit path, ``RADIANCE_SDR2HDR_PIXEL``, then every
+    ``models/radiance`` folder ComfyUI knows about (see
+    :mod:`radiance.model.paths`).
+    """
+    from radiance.model.paths import find_radiance_checkpoint
+    return find_radiance_checkpoint(
+        PIXEL_CHECKPOINT_PATTERNS, explicit_path=checkpoint_path or "",
+        env_var=PIXEL_CHECKPOINT_ENV,
+    )
+
+
+def describe_pixel_checkpoint_search() -> str:
+    from radiance.model.paths import describe_search
+    return describe_search(PIXEL_CHECKPOINT_PATTERNS[:1], PIXEL_CHECKPOINT_ENV)
 
 
 def load_pixel_sdr2hdr_weights(checkpoint_path: str, device: torch.device) -> SDR2HDRNet | None:
@@ -383,13 +393,22 @@ def predict_pixel_sdr2hdr(sdr_bhwc: torch.Tensor, checkpoint_path: str = "",
     model = load_pixel_sdr2hdr_weights(checkpoint_path, sdr_bhwc.device)
     if model is None:
         raise RuntimeError(
-            "no direct-pixel checkpoint; set pixel_checkpoint, "
-            "RADIANCE_SDR2HDR_PIXEL, or install models/radiance/sdr2hdr_pixel_image.pt"
+            "no direct-pixel checkpoint; set pixel_checkpoint, or install "
+            + describe_pixel_checkpoint_search()
         )
-    frames = sdr_bhwc[..., :3].float().clamp(0.0, 1.0).permute(0, 3, 1, 2)
-    outputs = [
-        _predict_frame(model, frame.unsqueeze(0), int(tile_size), int(tile_overlap),
-                       recovery_mode, float(strength))[0]
-        for frame in frames
-    ]
-    return torch.stack(outputs, dim=0).permute(0, 2, 3, 1)
+    # STREAM-FIX: one frame in flight, written straight into the returned
+    # batch. This used to list-comprehend every predicted frame onto the model
+    # device and then torch.stack them, so a clip cost the whole prediction
+    # twice, on top of a full-clip `frames` copy that only ever needed one
+    # frame at a time. Peak above the returned batch is now one frame.
+    batch, height, width = sdr_bhwc.shape[0], sdr_bhwc.shape[1], sdr_bhwc.shape[2]
+    out = torch.empty((batch, height, width, 3),
+                      dtype=torch.float32, device=sdr_bhwc.device)
+    for index in range(batch):
+        frame = (sdr_bhwc[index:index + 1, ..., :3]
+                 .float().clamp(0.0, 1.0).permute(0, 3, 1, 2))
+        prediction = _predict_frame(model, frame, int(tile_size), int(tile_overlap),
+                                    recovery_mode, float(strength))
+        out[index] = prediction[0].permute(1, 2, 0).to(out.device)
+        del frame, prediction
+    return out

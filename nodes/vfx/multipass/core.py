@@ -540,6 +540,15 @@ def _try_dsine_hub(img_bhwc: torch.Tensor, convention: str) -> "Optional[torch.T
     """
     try:
         if "model" not in _DSINE_HUB_CACHE:
+            # torch.hub fetches and runs code from GitHub; it went around the
+            # download consent every other Radiance download honours.
+            hub_repo = os.path.join(torch.hub.get_dir(), "hugoycj_DSINE-hub_main")
+            if not os.path.isdir(hub_repo):
+                from radiance.core.consent import require_consent
+                if not require_consent("DSINE normal model (torch.hub hugoycj/DSINE-hub)",
+                                       size_mb=280, dest=torch.hub.get_dir(),
+                                       url="https://github.com/hugoycj/DSINE-hub"):
+                    return None
             logger.info(
                 "[Radiance] Loading DSINE via torch.hub (hugoycj/DSINE-hub) — "
                 "first run downloads ~280 MB from GitHub Releases ..."
@@ -623,7 +632,13 @@ def _normal_from_dsine(img_bhwc, dsine_model_path, convention):
         if resolved not in _normal_from_dsine._cache:
             m = DSINE()
             st = torch.load(resolved, map_location="cpu", weights_only=True)
-            m.load_state_dict(st.get("model", st), strict=False)
+            # strict=False alone accepted any checkpoint, so a wrong or
+            # truncated file produced normals from random weights. Allow
+            # only the known-harmless extras; anything missing is a failure.
+            res = m.load_state_dict(st.get("model", st), strict=False)
+            if res.missing_keys:
+                raise RuntimeError(f"{len(res.missing_keys)} DSINE weights missing from {resolved} "
+                                   f"(e.g. {res.missing_keys[0]}); not a DSINE checkpoint")
             m.eval()
             _normal_from_dsine._cache[resolved] = m
             logger.info(f"[Radiance] DSINE loaded: {resolved}")

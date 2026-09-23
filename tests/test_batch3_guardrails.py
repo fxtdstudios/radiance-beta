@@ -12,7 +12,6 @@ import ast
 import logging
 import pathlib
 import re
-import textwrap
 
 import pytest
 
@@ -182,27 +181,67 @@ def test_known_unregistered_allowlist_is_a_ratchet():
     assert "fixed = self._KNOWN_UNREGISTERED - missing" in body
 
 
+#: Placeholders that read like a reason and are not one.
+_EMPTY_REASONS = re.compile(r"^\W*(todo|tbd|fixme|wip|n/?a|see above|later)\b", re.I)
+
+
 def test_every_withheld_node_carries_a_written_reason():
     """A node that exists in source but not in the menu needs a reason on file.
 
     This used to parse the literal `frozenset({...})` text and require exactly
-    three entries. The allowlist is empty now — those three alias keys ship as
-    DEPRECATED subclasses, and `nodes/aggregate.py` makes publishing the
-    default — so the assertion moved to the property that actually mattered:
-    whatever sits in there is explained on its own line.
+    three entries, then moved to the property that actually mattered: whatever
+    sits in an allowlist is explained.
+
+    AUDIT-FIX (2026-09): it opened with `if not allowlist: return`, reading only
+    `_KNOWN_UNREGISTERED`, which is empty, so the function returned before its
+    single assertion and could not fail for any reason at all. Two things fix
+    that. It now covers both withheld-node allowlists the suite keeps, and
+    `UNPUBLISHED_KEYS` is not empty; and an empty allowlist skips with a reason
+    instead of passing silently, so "nothing to check" is visible in the run
+    rather than indistinguishable from "checked and fine".
+
+    The two lists record the reason differently. `_KNOWN_UNREGISTERED` is a
+    frozenset of keys with the reason in a source comment on the entry; the
+    `UNPUBLISHED_KEYS` mapping carries the reason as the value.
     """
     from test_node_smoke import TestCoverageSummary
+    from test_node_publication_completeness import UNPUBLISHED_KEYS
 
-    allowlist = TestCoverageSummary._KNOWN_UNREGISTERED
-    if not allowlist:
-        return
+    checked = []
 
-    src = _src("tests/test_node_smoke.py")
-    block = src[src.index("_KNOWN_UNREGISTERED = frozenset("):]
-    block = block[:block.index("\n\n")]
-    for key in sorted(allowlist):
-        assert re.search(rf'"{key}"\s*,?\s*#\s*\S+', block), (
-            f"{key} is withheld from the catalog with no reason written down"
+    keyset = TestCoverageSummary._KNOWN_UNREGISTERED
+    if keyset:
+        src = _src("tests/test_node_smoke.py")
+        block = src[src.index("_KNOWN_UNREGISTERED = frozenset("):]
+        block = block[:block.index("\n\n")]
+        for key in sorted(keyset):
+            assert re.search(rf'"{key}"\s*,?\s*#\s*\S+', block), (
+                f"{key} is withheld from the catalog with no reason written down"
+            )
+            checked.append(key)
+
+    for key, reason in sorted(UNPUBLISHED_KEYS.items()):
+        assert isinstance(reason, str), (
+            f"{key} is withheld from the catalog and its reason is "
+            f"{type(reason).__name__}, not text someone can read"
+        )
+        assert not _EMPTY_REASONS.match(reason.strip()), (
+            f"{key} is withheld from the catalog behind a placeholder rather "
+            f"than a reason: {reason.strip()[:80]!r}"
+        )
+        assert len(reason.split()) >= 12, (
+            f"{key} is withheld from the catalog with {len(reason.split())} "
+            "words of explanation. Say what is wrong with it and what would "
+            f"have to be true to ship it: {reason.strip()!r}"
+        )
+        checked.append(key)
+
+    if not checked:
+        pytest.skip(
+            "no node is withheld from the catalog: _KNOWN_UNREGISTERED and "
+            "UNPUBLISHED_KEYS are both empty, so there is no reason to check. "
+            "This test asserts nothing in that state and says so rather than "
+            "reporting a pass it did not earn"
         )
 
 
@@ -328,6 +367,9 @@ def test_reporter_handles_a_zero_expectation_without_dividing_by_zero(caplog):
 
 def test_batch3_docstrings_stay_in_the_source(tmp_path):
     """Guard against a reformat silently dropping the 'why' comments."""
+    # AUDIT-FIX (2026-09): a third line, `assert textwrap.dedent("") == ""`,
+    # used to sit here. It is a constant the interpreter folds, so it asserted
+    # nothing about this repository and made the test look broader than the two
+    # checks above.
     assert "went stale" in _src(".github/workflows/ci.yml")
     assert "cannot go stale" in _src("tests/conftest.py")
-    assert textwrap.dedent("") == ""

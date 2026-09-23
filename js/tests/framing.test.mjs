@@ -185,25 +185,33 @@ test('a float texture without the linear extension falls back rather than sampli
 
 // ── time display ────────────────────────────────────────────────────────────
 
-test('timecode is HH:MM:SS:FF, zero-padded', () => {
+test('timecode is SMPTE: integer timebase, zero-padded, through one formatter', async () => {
+    // 3.5.0: every timecode in the viewer goes through radiance_timecode.js.
+    // The old per-site maths used the real rate as the frame modulus, so
+    // 29.97 printed frame 30 ("00:00:17:30" for frame 539).
     const body = code(methodBody(viewer, 'formatFramePosition'));
-    assert.match(body, /padStart\(2, '0'\)/, 'each field must be two digits');
-    assert.match(body, /\$\{p\(hh\)\}:\$\{p\(mm\)\}:\$\{p\(ss\)\}:\$\{p\(ff\)\}/,
-        'the 8-digit form is what a client note will be written in');
+    assert.match(body, /_smpteTC\(/, 'formatFramePosition must use the shared SMPTE formatter');
+    const { smpteTimecode } = await import('../radiance_timecode.js');
+    assert.equal(smpteTimecode(0, 24), '00:00:00:00');
+    assert.equal(smpteTimecode(86400, 24), '01:00:00:00');
+    assert.equal(smpteTimecode(47, 23.976), '00:00:01:23', '23.976 counts against 24');
+    for (let f = 0; f < 2000; f++) {
+        const ff = Number(smpteTimecode(f, 29.97).slice(-2));
+        assert.ok(ff < 30, `frame ${f} printed frames field ${ff} at 29.97`);
+    }
 });
 
-test('drop-frame is not faked', () => {
-    // Drop-frame at 29.97 renumbers frames rather than dropping them. Printing
-    // a ";" separator without implementing that renumbering would be a lie in
-    // the one place people copy figures from.
-    const body = methodBody(viewer, 'formatFramePosition');
-    assert.match(body, /[Nn]on-drop/, 'the timecode must state that it is non-drop');
-    // The separator, not the language's semicolons: drop-frame timecode is
-    // conventionally written HH:MM:SS;FF, and printing that form would claim a
-    // renumbering this does not do.
-    assert.doesNotMatch(code(body), /\}\s*;\s*\$\{/,
-        'a drop-frame separator implies renumbering that is not done');
-    assert.match(code(body), /\$\{p\(ss\)\}:\$\{p\(ff\)\}/, 'the last separator must be a colon');
+test('drop-frame at 29.97 / 59.94 renumbers, and says so with a semicolon', async () => {
+    const { smpteTimecode } = await import('../radiance_timecode.js');
+    // SMPTE ST 12: frame numbers 00 and 01 are skipped at each minute except
+    // every tenth, so 1800 frames in is 00:01:00;02 and 17982 is 00:10:00;00.
+    assert.equal(smpteTimecode(1799, 29.97), '00:00:59;29');
+    assert.equal(smpteTimecode(1800, 29.97), '00:01:00;02');
+    assert.equal(smpteTimecode(17982, 29.97), '00:10:00;00');
+    assert.equal(smpteTimecode(107892, 29.97), '01:00:00;00', 'one wall-clock hour');
+    assert.equal(smpteTimecode(3600, 59.94), '00:01:00;04');
+    assert.equal(smpteTimecode(1800, 29.97, { dropFrame: false }), '00:01:00:00', 'non-drop on request');
+    assert.equal(smpteTimecode(1800, 25), '00:01:12:00', 'PAL is never drop-frame');
 });
 
 test('the three display modes are all reachable', () => {

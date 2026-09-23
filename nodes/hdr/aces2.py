@@ -315,8 +315,13 @@ def _reach_gamut_compress(
 # § 3  EOTF ENCODERS
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _pq_encode(linear: np.ndarray, peak_nits: float = 1000.0) -> np.ndarray:
-    """ST.2084 PQ OETF.  Input: display-linear [0, peak_nits/100]."""
+def _pq_encode(linear: np.ndarray) -> np.ndarray:
+    """ST.2084 PQ OETF.  Input: display-linear, 1.0 = 100 cd/m².
+
+    No ``peak_nits``: ST.2084 normalises by a fixed 10 000 cd/m² and the
+    mastering peak is applied by the caller as a pre-scale.  The parameter used
+    to be accepted here and ignored, which read as though it did something.
+    """
     L = np.clip(linear * 100.0 / 10000.0, 0, 1)
     m1, m2 = 0.1593017578125, 78.84375
     c1, c2, c3 = 0.8359375, 18.8515625, 18.6875
@@ -404,7 +409,11 @@ def _torch_reach_gamut_compress(
     return ach - dist_c * ach
 
 
-def _torch_pq_encode(linear: torch.Tensor, peak_nits: float = 1000.0) -> torch.Tensor:
+def _torch_pq_encode(linear: torch.Tensor) -> torch.Tensor:
+    """ST.2084 PQ OETF.  Input: display-linear, 1.0 = 100 cd/m².
+
+    See :func:`_pq_encode` for why there is no ``peak_nits`` parameter.
+    """
     L = (linear * 100.0 / 10000.0).clamp(0.0, 1.0)
     m1, m2 = 0.1593017578125, 78.84375
     c1, c2, c3 = 0.8359375, 18.8515625, 18.6875
@@ -938,7 +947,7 @@ class RadianceACES2OutputTransformFull:
         is_pq = "PQ" in output_transform
         is_hlg = "HLG" in output_transform
         if is_pq:
-            rgb = _torch_pq_encode(rgb * peak_scale, peak_nits)
+            rgb = _torch_pq_encode(rgb * peak_scale)
         elif is_hlg:
             rgb = _torch_hlg_encode(rgb)
         elif "Cinema" in output_transform:

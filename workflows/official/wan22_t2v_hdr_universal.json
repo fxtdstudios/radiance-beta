@@ -440,11 +440,6 @@
           "name": "image",
           "type": "IMAGE",
           "link": 13
-        },
-        {
-          "name": "vae",
-          "type": "VAE",
-          "link": null
         }
       ],
       "outputs": [
@@ -488,19 +483,25 @@
       "widgets_values": [
         "sRGB",
         1000.0,
+        203.0,
         "adaptive",
         0.75,
         1.6,
         0.85,
         "Linear",
-        "rudra_turbo",
         1.0,
         "Video Frames",
         0.05,
         "Expand",
         0.98,
         5,
-        ""
+        "",
+        "Auto",
+        "",
+        512,
+        64,
+        "highlights",
+        1.0
       ],
       "title": "SDR → HDR Universal (math path for video)"
     },

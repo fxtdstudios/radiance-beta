@@ -162,7 +162,16 @@ def make_comfy(**overrides):
         VAE=None,
     )
     utils = types.SimpleNamespace(load_torch_file=None, state_dict_prefix_replace=None)
-    mm = types.SimpleNamespace(set_lowvram_mode=lambda *a, **k: None)
+    # The real API: a module-level vram_state read by load_models_gpu().
+    # (set_lowvram_mode never existed in ComfyUI; see setup_offload_mode.)
+    import enum
+
+    class _VRAMState(enum.Enum):
+        NORMAL_VRAM = 3
+        LOW_VRAM = 2
+        NO_VRAM = 1
+
+    mm = types.SimpleNamespace(VRAMState=_VRAMState, vram_state=_VRAMState.NORMAL_VRAM)
     comfy = types.SimpleNamespace(sd=sd, utils=utils, model_management=mm)
     for key, val in overrides.items():
         target, _, attr = key.partition("__")
@@ -579,42 +588,54 @@ class TestResolveArchitecture:
 
 class TestSetupOffloadMode:
     def test_cpu_offload_returns_cpu_device_without_lowvram(self, monkeypatch):
-        calls = []
-        comfy = make_comfy(model_management__set_lowvram_mode=lambda v: calls.append(v))
+        comfy = make_comfy()
         monkeypatch.setattr(L, "comfy", comfy)
         info: list[str] = []
         dev = L.setup_offload_mode("cpu_offload", info)
         assert isinstance(dev, torch.device) and dev.type == "cpu"
-        assert calls == []
+        mm = comfy.model_management
+        assert mm.vram_state is mm.VRAMState.NORMAL_VRAM
         assert info == []
 
     def test_sequential_enables_lowvram_and_returns_no_device(self, monkeypatch):
-        calls = []
-        comfy = make_comfy(model_management__set_lowvram_mode=lambda v: calls.append(v))
+        """3.5: the switch is ComfyUI's module-level vram_state. The old code
+        called a set_lowvram_mode() that ComfyUI never shipped, so sequential
+        offload logged a warning and did nothing on every run."""
+        comfy = make_comfy()
         monkeypatch.setattr(L, "comfy", comfy)
         info: list[str] = []
         assert L.setup_offload_mode("sequential", info) is None
-        assert calls == [True]
+        mm = comfy.model_management
+        assert mm.vram_state is mm.VRAMState.LOW_VRAM
+        assert info == ["Offload: sequential"]
+
+    def test_sequential_keeps_a_stricter_state(self, monkeypatch):
+        """--novram must not be relaxed to LOW_VRAM by the node."""
+        comfy = make_comfy()
+        comfy.model_management.vram_state = comfy.model_management.VRAMState.NO_VRAM
+        monkeypatch.setattr(L, "comfy", comfy)
+        info: list[str] = []
+        L.setup_offload_mode("sequential", info)
+        mm = comfy.model_management
+        assert mm.vram_state is mm.VRAMState.NO_VRAM
         assert info == ["Offload: sequential"]
 
     def test_sequential_survives_a_comfy_without_lowvram_support(self, monkeypatch, loader_logs):
-        def boom(_v):
-            raise AttributeError("old comfy build")
-
-        monkeypatch.setattr(L, "comfy",
-                            make_comfy(model_management__set_lowvram_mode=boom))
+        comfy = make_comfy()
+        del comfy.model_management.VRAMState   # old comfy build
+        monkeypatch.setattr(L, "comfy", comfy)
         info: list[str] = []
         assert L.setup_offload_mode("sequential", info) is None
         assert info == [], "a failed offload switch must not claim success"
-        assert any("old comfy build" in m for m in msgs(loader_logs))
+        assert any("Could not enable sequential offload" in m for m in msgs(loader_logs))
 
     def test_none_mode_touches_nothing(self, monkeypatch):
-        calls = []
-        monkeypatch.setattr(L, "comfy",
-                            make_comfy(model_management__set_lowvram_mode=lambda v: calls.append(v)))
+        comfy = make_comfy()
+        monkeypatch.setattr(L, "comfy", comfy)
         info: list[str] = []
         assert L.setup_offload_mode("none", info) is None
-        assert calls == []
+        mm = comfy.model_management
+        assert mm.vram_state is mm.VRAMState.NORMAL_VRAM
         assert info == []
 
 
@@ -1067,8 +1088,9 @@ class TestLoadClipStack:
         with pytest.raises(ValueError) as exc:
             call_clip(clip_env, arch="flux")
         text = str(exc.value)
-        assert "No CLIP encoders provided for architecture 'flux'" in text
-        assert "clip_l, t5xxl" in text
+        # 3.5: required slots are checked first; clip_l is auto-filled from
+        # the only matching file, t5xxl has no match and is named.
+        assert "flux needs text encoder slot(s) t5xxl" in text
 
     def test_unknown_architecture_falls_back_to_clip_l_in_the_message(self, clip_env):
         with pytest.raises(ValueError) as exc:
@@ -1126,13 +1148,18 @@ class TestLoadClipStack:
         assert clip_env.load_clip_calls[0]["model_options"] == {"load_device": dev}
 
     def test_second_load_hits_the_cache(self, clip_env):
-        call_clip(clip_env, clip_l="clip_l.safetensors", caching=True)
+        both = dict(clip_l="clip_l.safetensors", clip_g="clip_g.safetensors")
+        call_clip(clip_env, caching=True, **both)
         info: list[str] = []
-        clip, slots, elapsed, hit = call_clip(
-            clip_env, clip_l="clip_l.safetensors", caching=True, info=info)
-        assert hit is True and elapsed == 0.0 and clip == "CLIP<1>"
+        clip, slots, elapsed, hit = call_clip(clip_env, caching=True, info=info, **both)
+        assert hit is True and elapsed == 0.0 and clip == "CLIP<2>"
         assert len(clip_env.load_clip_calls) == 1
-        assert info == ["CLIP: clip_l (cached)"]
+        assert info == ["CLIP: clip_l+clip_g (cached)"]
+
+    def test_sdxl_missing_clip_g_is_filled_from_disk(self, clip_env):
+        info: list[str] = []
+        clip, slots, _, _ = call_clip(clip_env, clip_l="clip_l.safetensors", info=info)
+        assert clip == "CLIP<2>" and "CLIP clip_g: auto -> clip_g.safetensors" in info
 
     def test_offload_mode_is_part_of_the_clip_cache_key(self, clip_env):
         call_clip(clip_env, clip_l="clip_l.safetensors", caching=True, offload_mode="none")
@@ -1362,3 +1389,21 @@ class TestApplyLoraStack:
         text = str(exc.value)
         assert "Failed to apply LoRA 'good.safetensors'" in text
         assert "shape mismatch in lora_up" in text
+
+
+def test_flux_with_only_t5_gets_clip_l_filled_not_mochi():
+    """3.5 live log: a Flux Loader with clip_l empty loaded MochiTEModel_."""
+    from radiance.model.detect import autofill_required_clip_slots
+    files = ["clip_l.safetensors", "t5xxl_fp16.safetensors", "t5xxl_fp8_e4m3fn_scaled.safetensors",
+             "umt5_xxl_fp8_e4m3fn_scaled.safetensors"]
+    slots, filled, missing = autofill_required_clip_slots(
+        "flux", files, clip_l="None", clip_g="None", t5xxl="t5xxl_fp16.safetensors",
+        llm_encoder="None", text_projection="None")
+    assert filled == {"clip_l": "clip_l.safetensors"} and not missing
+    # Two t5xxl candidates: a choice for the user, not a guess.
+    slots, filled, missing = autofill_required_clip_slots(
+        "flux", files, clip_l="clip_l.safetensors", clip_g="None", t5xxl="None",
+        llm_encoder="None", text_projection="None")
+    assert missing == ["t5xxl"]
+    # Architectures without a requirement are untouched.
+    assert autofill_required_clip_slots("wan", files, t5xxl="None")[2] == []

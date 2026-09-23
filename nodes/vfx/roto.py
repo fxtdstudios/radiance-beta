@@ -11,10 +11,15 @@ class RadianceVectorMaskDraw:
     """
     ◎ Radiance Vector Mask Draw
     
-    Renders Bezier curves, polygons, and vector rotoscope shapes directly in PyTorch
-    using high-performance sub-pixel Winding Number and Signed Distance Field (SDF) anti-aliasing.
-    
-    Supports pasting raw Nuke Bezier curve schemas or standard JSON coordinates list.
+    Renders a closed polygon or a smooth closed spline through the given
+    points, with winding-number fill and distance-based edge anti-aliasing.
+
+    Bezier_Spline passes a closed Catmull-Rom curve through every point (each
+    span is the equivalent cubic Bezier with handles derived from the
+    neighbours). It used to be ignored: both options drew the polygon.
+
+    Points: a JSON list of [x, y], or pasted text with "x y" number pairs
+    (Nuke shapes paste this way; their tangent handles are read as points).
     """
     
     @classmethod
@@ -58,6 +63,21 @@ class RadianceVectorMaskDraw:
             
         return []
 
+    @staticmethod
+    def _catmull_rom_closed(p: torch.Tensor, samples: int = 12) -> torch.Tensor:
+        """Densify a closed point loop into a smooth centripetal-free (uniform)
+        Catmull-Rom curve, `samples` vertices per span."""
+        p0 = torch.roll(p, 1, 0)
+        p1 = p
+        p2 = torch.roll(p, -1, 0)
+        p3 = torch.roll(p, -2, 0)
+        t = torch.linspace(0, 1, samples + 1, device=p.device)[:-1].view(1, -1, 1)
+        t2, t3 = t * t, t * t * t
+        a, b, c, d = (x.unsqueeze(1) for x in (p0, p1, p2, p3))
+        out = 0.5 * ((2 * b) + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2
+                     + (-a + 3 * b - 3 * c + d) * t3)
+        return out.reshape(-1, 2)
+
     def draw(self, width: int, height: int, shape_type: str, points_data: str, anti_alias_width: float):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         pts = self._parse_points(points_data)
@@ -69,6 +89,8 @@ class RadianceVectorMaskDraw:
             
         # Convert points to Tensor [N, 2]
         pts_tensor = torch.tensor(pts, dtype=torch.float32, device=device)
+        if shape_type == "Bezier_Spline":
+            pts_tensor = self._catmull_rom_closed(pts_tensor, samples=12)
         N = pts_tensor.shape[0]
         
         # Grid coordinates
@@ -145,7 +167,7 @@ class RadianceVectorMaskDraw:
         else:
             final_mask = inside_mask
             
-        logger.info(f"[Vector Roto] Renders perfect subpixel vector shape with {N} control points.")
+        logger.info(f"[Vector Roto] {shape_type}: {len(pts)} points, {N} edges drawn.")
         return (final_mask.unsqueeze(0),)
 
 
@@ -190,41 +212,39 @@ class RadianceVideoMaskPropagator:
             indexing="ij"
         )
         
-        # Forward propagation pass
+        # Radiance Optical Flow convention (measured on a moving plate):
+        # flow_vectors[i] lives on frame i and points to where each pixel was
+        # in frame i-1, i.e. frame_i(p) ~ frame_{i-1}(p + flow_i(p));
+        # flow_vectors[0] is zero. The old code read flow_vectors[i-1] with
+        # the opposite sign and a half-pixel-off normalisation, so a mask
+        # drifted the wrong way (IoU 0.6 after one frame, 0.0 after three).
+        sx = 2.0 / max(W - 1, 1)
+        sy = 2.0 / max(H - 1, 1)
+
+        def _warp(src, gx, gy):
+            g = torch.stack([gx, gy], dim=-1).unsqueeze(0)
+            return F.grid_sample(src.unsqueeze(0).unsqueeze(0), g, mode="bilinear",
+                                 padding_mode="zeros", align_corners=True).squeeze(0).squeeze(0)
+
+        # Forward: frame i from frame i-1, sampled at p + flow_i(p).
         if propagation_mode in ("Forward", "Bidirectional"):
             for i in range(1, B):
-                # If current mask frame has no manual roto shape (fully empty)
-                # we warp from previous frame using the optical flow vectors
                 if torch.sum(masks[i]) < 1.0:
-                    # Get motion vectors from previous to current
-                    flow = flow_vectors[i-1] # flow vector maps t -> t+1
-                    dx = flow[..., 0] / (W / 2.0)
-                    dy = flow[..., 1] / (H / 2.0)
-                    
-                    warp_grid_x = grid_x - dx
-                    warp_grid_y = grid_y - dy
-                    warp_grid = torch.stack([warp_grid_x, warp_grid_y], dim=-1).unsqueeze(0)
-                    
-                    prev_mask = prop_masks[i-1].unsqueeze(0).unsqueeze(0) # 1, 1, H, W
-                    warped = F.grid_sample(prev_mask, warp_grid, mode="bilinear", padding_mode="border", align_corners=True)
-                    prop_masks[i] = warped.squeeze(0).squeeze(0)
-                    
-        # Backward propagation pass
+                    flow = flow_vectors[i].to(device)
+                    prop_masks[i] = _warp(prop_masks[i - 1],
+                                          grid_x + flow[..., 0] * sx,
+                                          grid_y + flow[..., 1] * sy)
+
+        # Backward: frame i from frame i+1, sampled at p - flow_{i+1}(p)
+        # (the forward field at i+1 stands in for the inverse field).
         if propagation_mode in ("Backward", "Bidirectional"):
             for i in reversed(range(B - 1)):
                 if torch.sum(masks[i]) < 1.0:
-                    # Backward warp uses negative forward flow or reverse vectors
-                    flow = flow_vectors[i] # flow vector maps t+1 -> t
-                    dx = flow[..., 0] / (W / 2.0)
-                    dy = flow[..., 1] / (H / 2.0)
-                    
-                    warp_grid_x = grid_x + dx
-                    warp_grid_y = grid_y + dy
-                    warp_grid = torch.stack([warp_grid_x, warp_grid_y], dim=-1).unsqueeze(0)
-                    
-                    next_mask = prop_masks[i+1].unsqueeze(0).unsqueeze(0) # 1, 1, H, W
-                    warped = F.grid_sample(next_mask, warp_grid, mode="bilinear", padding_mode="border", align_corners=True)
-                    prop_masks[i] = torch.max(prop_masks[i], warped.squeeze(0).squeeze(0))
-                    
+                    flow = flow_vectors[i + 1].to(device)
+                    warped = _warp(prop_masks[i + 1],
+                                   grid_x - flow[..., 0] * sx,
+                                   grid_y - flow[..., 1] * sy)
+                    prop_masks[i] = torch.max(prop_masks[i], warped)
+
         logger.info(f"[Video Mask Propagator] Propagated sequence ({propagation_mode} mode) along timeline.")
         return (prop_masks,)

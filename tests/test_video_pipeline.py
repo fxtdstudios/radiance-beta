@@ -235,3 +235,21 @@ class TestAllModulesRegistered:
             for key, name in mod.NODE_DISPLAY_NAME_MAPPINGS.items():
                 assert name.startswith("◎"), \
                     f"{mod_name}.{key} display name missing ◎ prefix: {name!r}"
+
+
+def test_pipelines_refuse_an_image_model_with_a_clear_message():
+    """Live 3.5 run: Z-Image into T2V failed inside the model's forward with
+    "too many values to unpack (expected 4)". It must name the cause instead."""
+    import types
+    import pytest
+    from radiance.nodes.video import t2v as T
+
+    image_model = types.SimpleNamespace(model=types.SimpleNamespace(
+        latent_format=type("Flux", (), {"latent_dimensions": 2})()))
+    with pytest.raises(ValueError, match="needs a video model.*image model"):
+        T._require_video_model(image_model, "RadianceT2VPipeline")
+
+    video_model = types.SimpleNamespace(model=types.SimpleNamespace(
+        latent_format=type("Wan21", (), {"latent_dimensions": 3})()))
+    T._require_video_model(video_model, "RadianceT2VPipeline")      # no raise
+    T._require_video_model(object(), "RadianceT2VPipeline")         # unknown: let through

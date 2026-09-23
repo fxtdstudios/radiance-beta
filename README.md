@@ -4,7 +4,7 @@
 
 **Professional VFX, HDR color science, review, and DCC handoff for ComfyUI.**
 
-[![Version](https://img.shields.io/badge/version-3.4.0-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
+[![Version](https://img.shields.io/badge/version-3.5.0-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
 [![Nodes](https://img.shields.io/badge/nodes-131-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
@@ -41,10 +41,10 @@ Artists get 32-bit, HDR, and ACES image tools, professional viewers, and VFX nod
 <img src="viewer.png" width="920" alt="Radiance Viewer: inspector, colour transform, tone and colour wheels, scopes, sequence timeline">
 </div>
 
-**A generation-to-review graph**: Loader → Prompt → Resolution → Sampler → VAE Decode (HDR) in Direct HDR / RUDRA mode → Viewer. The decode stays scene-linear the whole way; the Viewer applies the display transform, so what you grade is what the file actually contains.
+**A generation-to-review graph**: Loader → Prompt → Resolution → Sampler → VAE Decode (HDR) in Direct HDR mode → Viewer. The decode stays scene-linear the whole way; the Viewer applies the display transform, so what you grade is what the file actually contains.
 
 <div align="center">
-<img src="basic_workflow.png" width="920" alt="Radiance graph: Loader, Prompt, Resolution, Sampler, HDR VAE Decode with RUDRA, and the Viewer node">
+<img src="basic_workflow.png" width="920" alt="Radiance graph: Loader, Prompt, Resolution, Sampler, HDR VAE Decode, and the Viewer node">
 </div>
 
 ## Installation
@@ -111,7 +111,7 @@ A lower count means a node module failed to import, usually a missing optional
 dependency; the Environment Guard table printed at startup shows which.
 
 For a full machine-level check (every node executed on your GPU, VRAM peaks,
-RUDRA decoder benchmarks and scores), run:
+and the RUDRA SDR → HDR pixel model benchmarked and scored), run:
 
 ```bat
 cd ComfyUI
@@ -121,35 +121,38 @@ python custom_nodes\radiance\tools\gpu_acceptance.py
 It writes `gpu_acceptance_report.md` next to the script, and names any nodes
 missing on your install.
 
-### Models (RUDRA decoders)
+### Models (RUDRA SDR → HDR)
 
-The HDR VAE decoders (Turbo and Full) use trained **RUDRA** decoder weights, published on Hugging Face under Apache-2.0: [fxtdstudios/RUDRA](https://huggingface.co/fxtdstudios/RUDRA/tree/main).
+Learned SDR → HDR recovery uses the **RUDRA** pixel model: a compact network
+that takes decoded 8-bit SDR pixels and returns scene-linear HDR, recovering
+clipped highlights and crushed shadows. It works on any image or frame batch
+and needs no VAE, so it applies equally to generated frames and to footage.
+The weights are distributed with the RUDRA release on Hugging Face under
+Apache-2.0: [fxtdstudios/RUDRA](https://huggingface.co/fxtdstudios/RUDRA/tree/main).
 
-Download the `.safetensors` files and place them in your ComfyUI models folder under a `radiance` subfolder, creating it if it doesn't exist:
+Place the checkpoint in your ComfyUI models folder under a `radiance`
+subfolder, creating it if it doesn't exist:
 
 ```
-ComfyUI/models/radiance/
+ComfyUI/models/radiance/sdr2hdr_pixel_image.pt
 ```
 
-Radiance finds the checkpoints there automatically by filename, so keep the original names (for example `rudra_turbo_decoder_flux_ema.safetensors`). Download only the decoders for the models you use:
+Radiance registers `models/radiance` with ComfyUI, so a `radiance:` entry in
+`extra_model_paths.yaml` works too, and `RADIANCE_SDR2HDR_PIXEL` can point at
+a file anywhere. Any `sdr2hdr_pixel*.pt` in the folder is found; the
+preferred name above wins when several are present.
 
-| Model | Turbo | Full |
-| :--- | :---: | :---: |
-| Flux.1 | `rudra_turbo_decoder_flux_ema` | `rudra_full_decoder_flux_ema` |
-| Flux.2 | `rudra_turbo_decoder_flux2_ema` | n/a |
-| Flux.2 Klein | `rudra_turbo_decoder_flux2-klein_ema` | n/a |
-| SDXL | `rudra_turbo_decoder_sdxl_ema` | `rudra_full_decoder_sdxl_ema` |
-| Qwen-Image | `rudra_turbo_decoder_qwen_ema` | n/a |
-| Z-Image | `rudra_turbo_decoder_zimage_ema` | `rudra_full_decoder_zimage_ema` |
-| Wan | `rudra_turbo_decoder_wan_ema` | `rudra_full_decoder_wan_ema` |
-| LTX-Video | `rudra_turbo_decoder_ltx_ema` | `rudra_full_decoder_ltx-video_ema` |
+| File | Used by |
+| :--- | :--- |
+| `sdr2hdr_pixel_image.pt` | SDR → HDR Universal (Recover / Hybrid) and SDR → HDR Recover, stills and frame batches |
+| `temporal_rudra_residual_ema.safetensors` | the motion-aligned temporal model for ordered video (optional; not yet published) |
 
-To fetch everything at once with the Hugging Face CLI:
+Without a checkpoint, Universal falls back to deterministic expansion and says
+so in its `report` output; Recover raises rather than silently expanding.
 
-```bash
-pip install -U "huggingface_hub[cli]"
-huggingface-cli download fxtdstudios/RUDRA --local-dir "ComfyUI/models/radiance"
-```
+The latent-space RUDRA decoders that earlier releases loaded inside HDR VAE
+Decode (`rudra_turbo_decoder_*` / `rudra_full_decoder_*`) were retired in
+3.5.0; see the changelog. The files can be deleted from `models/radiance`.
 
 ### Example workflow
 
@@ -177,7 +180,7 @@ Both ACES 2.0 tone scales are implemented against the published Output Transform
 
 Log encoding happens before the VAE, not after it, and the Compress Log profiles are clamp-free from decode through to the file. Highlights above 1.0 reach disk. That is the claim the package is built on and there is a test that writes negatives and values up to 64.0 through EXR and TIFF and requires them back exactly.
 
-The HDR VAE Decode node has two decoders. Turbo is light enough to iterate with. Full is slower and reconstructs more. Both report the settings they used. Weights are the RUDRA models; see the install section for where they go.
+The HDR VAE Decode node decodes through the model's own VAE, in a sampler-safe mode or a Direct HDR mode that inverts the log encoding to scene-linear and keeps everything above 1.0. Learned recovery of clipped highlights and crushed shadows is the job of SDR → HDR Universal and SDR → HDR Recover, which run the RUDRA pixel model on any image or frame batch, no VAE required; see the install section for where the weights go.
 
 There is also HDR LoRA loading and application, a LoRA stack with per-LoRA model and CLIP strengths, tone mapping, HDR synthesis, and relighting.
 
@@ -316,8 +319,13 @@ is worse than one that says so. Full detail in the [changelog](CHANGELOG.md).
   with the level to buy depth was tried too, and measured worse for the same
   reason.
 
-- **Scene-cut detection normalises by the batch maximum**, so the threshold has
-  no absolute meaning and cut-free footage will still report cuts.
+- **No SAM runtime.** `SAM Loader` and `SAM Mask Generator` are hidden and
+  raise when executed; they never ran a segmentation model. Use a SAM2 node
+  pack and feed its MASK into Radiance's matting, roto and propagation nodes.
+- **Upscale `confidence` is a tile weight.** It is 1 at tile centres and lower
+  toward tile edges; no backend reports per-pixel hallucination.
+- **CFG schedules are static.** The video pipelines use the first value of
+  `cfg_schedule_json` as the CFG; it does not vary per step.
 
 ## Notes & Tips
 
@@ -343,17 +351,27 @@ Standing properties of the shipped package. Pinned by a test unless the row
 says otherwise. An audit number that no test holds is a number that can
 quietly stop being true.
 
+A note on what changed here in 3.4.0. Until this release the job that installs
+real torch, OpenEXR and OpenColorIO was gated on `github.repository ==
+'fxtdstudios/radiance'`, and development happens on `radiance-beta`, so the lane
+that executes every row below had never run against this code. The numbers in
+this table used to be what the suite *would* report. They are now what it does
+report, from a lane that runs. Where the two differed, the row was rewritten and
+the gap is recorded under Open rather than quietly corrected.
+
 | Area | What is verified |
 | :-- | :-- |
 | **EXR** | 32-bit float round-trips bit-exactly through EXR and TIFF, negatives and over-range highlights included, the clamp-free HDR claim, as a write-and-read rather than an assertion. 16-bit half holds to 1e-3. |
-| **Colour** | All 16 colour spaces land on published 18%-grey values. Both ACES 2.0 tone scales match the ACES Output Transform table exactly: 18% grey at 10.000 / 13.193 / 14.512 / 15.747 / 16.824 nits for peaks of 100 / 500 / 1000 / 2000 / 4000. HLG keeps its BT.2408 anchor. The OCIO bake is checked against OCIO's own CPU processor, exactly rather than approximately. |
-| **Video** | Frame counts are exact from 1 to 100 frames across H.264, H.265 10-bit and ProRes. Sequences read correctly by frame number for `####`, `%04d` and explicit ranges. |
+| **Colour** | All 16 colour spaces are pinned to a published 18%-grey value: 15 transfer curves plus the linear identity, each held to 1e-4 and cross-checked against colour-science's independent implementation of the same specification. Both ACES 2.0 tone scales place 18% scene grey where the ACES Output Transform publishes it: 10.000 / 13.193 / 14.512 / 15.747 / 16.824 nits for peaks of 100 / 500 / 1000 / 2000 / 4000, held to 1e-6, with intermediate peaks checked against the geometric-mean form of the log-log rule. The shipped table is compared against a transcription of the published one rather than against the interpolator that reads it, which is what made the old test unfalsifiable. HLG keeps its BT.2408 anchor. The OCIO bake is checked against OCIO's own CPU processor, exactly rather than approximately. |
+| **Transfer** | PQ encodes absolute luminance against ST.2084's fixed 10 000 cd/m² ceiling, pinned at five mastering peaks and against an absolute-luminance ladder, and cross-checked against the package's other PQ encoder. Rec.709 and Rec.2020 are the real BT.709-6 and BT.2020-2 OETFs with the BT.2020 primaries matrix, pinned by value, and every offered output colour space is asserted to change the data, so a missing conversion cannot pass as a successful write. |
+| **Video** | Frame counts are exact from 1 to 100 frames across H.264, H.265 10-bit and ProRes 422 HQ, by encoding and reading back real media. The default suite covers 17 lengths per codec, chosen around the 1/2/3 degenerate cases and both sides of every GOP boundary, and asserts the identity and order of each frame as well as the count, at `core.video` and again at the Read node. The exhaustive 1-to-100 sweep runs under `-m slow`. Sequences read correctly by frame number for `####`, `%04d` and explicit ranges. |
+| **Duration** | The write path, the HDR VAE encode and decode, the viewer and the sampler's noise generation all hold a working window rather than the clip. Measured, not asserted: writing 32 frames and writing 512 frames peak within 0.1 MB of each other, and enabling a colour transform costs 1.6 MB rather than a second copy of the shot. The VAE's decode overhead is flat at 5.7 MB from 4 frames to 32 where it used to grow by a whole extra clip. Sequence length is bounded by disk. Generation is the exception and has its own control, see below. |
 | **Memory** | Flat across 150 consecutive 1080p runs, an audit measurement rather than a standing test. |
 | **Security** | `weights_only` loads, sha256-pinned downloads, no `shell=True`, and no model weight downloads without `RADIANCE_ALLOW_DOWNLOADS=1` through a gate every downloader shares. Nodes never write into the ComfyUI install directory. |
-| **Catalog** | All 131 nodes declare their menu section explicitly; a test fails if a registered node is missing from the table. Withholding a node from the menu requires a named entry a test reads, so a finished node cannot go missing by omission. |
-| **Isolation** | Every one of the eleven node groups imports with `aiohttp` and `server` blocked, proven in a subprocess rather than for one hand-listed module. |
+| **Catalog** | All 156 nodes declare their menu section explicitly; a test fails if a registered node is missing from the table. Withholding a node from the menu requires a named entry with a written reason a test reads and checks the length of. Separately, an AST walk of every file in the distribution finds every `NODE_CLASS_MAPPINGS` and asserts each class in it is registered as the class that ships, so a node stranded in a package the catalog does not load turns the suite red. That is how 26 finished nodes stayed out of the menu until 3.4.0. |
+| **Isolation** | Every one of the eleven node groups imports with `aiohttp` and `server` blocked, proven in a subprocess rather than for one hand-listed module. The blocker uses `find_spec`; it previously used `find_module`, which Python 3.12 removed, so on the 3.12 leg of the matrix it silently blocked nothing and the test passed while measuring nothing. The harness now proves it is blocking before it reports anything. |
 | **Layering** | `radiance/io/writer.py` and `radiance/io/reader.py` import nothing above them, checked by AST walk *and* by running them in a bare interpreter with no ComfyUI present. |
-| **Suite** | 3199 Python tests and 258 JavaScript tests, at 53% statement coverage. The gaps are named under Open rather than left to be discovered. The JS side includes a GPU lane that compiles the real shaders in both GLSL and WGSL and compares them against the CPU implementations they were generated from, and a browser lane that builds all fourteen Viewer panels and operates their controls. Verified from a checkout named `radiance-beta` as well as `radiance`. |
+| **Suite** | 3755 Python tests and 260 JavaScript tests. On the full dependency lane: 3667 pass, 84 skip, 3 are `slow` and deselected by default; JS is 256 pass, 4 skip, 0 todo. Coverage is **59.6% of 28,018 statements** (56.0% counting branches, which is what the floor gates on). The old 53% was the figure the full lane would have produced had it run; CI's lightweight lane was really reporting 22% against a `--cov-fail-under=15` that overrode the project's own floor. There is one floor now, in `pyproject.toml`, enforced on the lane that can execute the code. The JS side includes a GPU lane that compiles the real shaders in both GLSL and WGSL and compares them against the CPU implementations they were generated from, and a browser lane that builds all fourteen Viewer panels and operates their controls. Verified from a checkout named `radiance-beta` as well as `radiance`. |
 
 ### Open
 
@@ -361,7 +379,10 @@ quietly stop being true.
 
 - [ ] **Nothing has ever run in live ComfyUI on a GPU.** Every number above is
       CPU and headless. Until a real graph renders a real frame, the verdict
-      stays *ready with conditions*.
+      stays *ready with conditions*. This is now the only thing in the way of
+      the numbers above being trustworthy end to end: the CI gate that kept the
+      real-dependency lane from ever running was fixed in 3.4.0, so the suite
+      itself is honest, but honest about CPU.
 - [ ] **The public repo is behind, and it is not a fast-forward.**
       `fxtdstudios/radiance` `main` is still at `64fee41` (2026-06-04, 40
       commits). `fxtdstudios/radiance-beta` `main` is 409 commits ahead, and
@@ -372,32 +393,125 @@ quietly stop being true.
       panel; the compatibility fixes need checking one by one before public
       is replaced, or that contributor's work is silently dropped.
 
+**Needs a GPU to confirm**
+
+- [ ] **Long-video windowing is unproven on a real model.** `temporal_window` on
+      the sampler denoises a long clip in overlapping latent windows, blended at
+      every step rather than after each window is finished, so peak VRAM follows
+      the window size instead of the clip length. CPU tests pin the parts that
+      are checkable without a model: the schedule covers every frame at full
+      weight, the blend weights form a partition of unity, step accounting and
+      seeding are stable across a rerun, and a single window reproduces the
+      unwindowed result. What CPU cannot show is whether the output is
+      temporally coherent on a real DiT. Default is 0, off, so nothing changes
+      until it is switched on deliberately. Treat it as ready to test, not ready
+      to deliver from, until a long clip has run on the 4080.
+
 **Correctness**
 
-- [ ] **RUDRA video decoders were trained on stills.** `wan` / `ltx-video` /
-      `hunyuanvideo` checkpoints never saw multi-frame latents; real video
-      falls back to math expansion. Needs retraining, not patching.
-- [ ] **`rudra_full_decoder_ltx-video_ema.safetensors` is truncated at source**
-      (23.0 MB against a declared ~36.0 MB). The loader detects it and
-      degrades; the file still needs re-exporting.
+- [x] **Legacy latent RUDRA decoders retired (3.5.0).** The video decoders
+      trained on stills, the truncated `ltx-video` full decoder and the
+      per-model checkpoint matrix are gone with them. Learned SDR → HDR is the
+      pixel model, one checkpoint for every model family, plus the temporal
+      residual model for video.
+- [x] **The Viewer rendered black (3.5.0), two causes, both verified live on
+      ComfyUI 0.32 / frontend 1.48.** (1) The WebGL renderer's `setMask` and
+      its mask uniforms addressed a `this.mask` object that the v3.1 refactor
+      had replaced with flat fields, so every `render()` threw before the draw
+      call; hidden while WebGPU auto-upgraded, exposed when 3.4.0 made WebGL
+      the default. (2) The Vue node frontend grew the node to the height of
+      the sidebar and inspector content (1180x760 became 1480x2286), the
+      canvas stretched with it, and `resize()` never refit, so the frame was
+      centred below the visible area. The container now has `contain: size`
+      and `resize()` refits an auto-fitted view. Pinned by browser tests that
+      load a real frame through `onExecuted`, read the canvas back, and host
+      the viewer in an auto-height parent.
+- [x] **Read / Write colour management and precision (3.5.0).** Every
+      encoding decodes and encodes transfer AND primaries to a selectable
+      working space (Linear Rec.709, ACEScg, Linear Rec.2020, Linear P3-D65,
+      ACES2065-1), through OpenColorIO's ACES studio config or any
+      `ocio_colorspace` / `ocio_config`, with an analytic fallback held to
+      OCIO in tests. Video uses the correct YUV matrix and is tagged; EXR and
+      DPX carry their colour metadata; 16-bit grey, half-float TIFF and
+      alpha read correctly. 65 write-and-read-back tests.
+- [x] **Honest release pass (3.5.0).** Every control, option and output was
+      checked against the code that reads it. Fixed: I2V strategies now write
+      the conditioning keys ComfyUI's Wan models read; T2V/I2V latents follow
+      the connected model instead of an LTX default; Video HDR Conditioner and
+      Decode reach the model and convert gamut; upscale reports what actually
+      ran and Face Restore `auto` restores; mask propagation follows motion;
+      Bezier roto, motion-blur energy, Policy Guard (all frames, HDR peak),
+      Diagnostics colorspace, Digital Cinema Read colorspace and fps, Audio
+      Cut and Camera Sync errors, Regional `Replace`, NDI batches, joint
+      bilateral chroma. SAM withheld; ViTMatte/RVM removed. Each has a test.
+- [x] **HDR VAE Decode and SDR → HDR (3.5.0).** Auto no longer log-inverts a
+      latent a sampler touched (HDR Encode now fingerprints its latent);
+      hidden widgets no longer steer the decode; Direct HDR honours
+      scene-referred targets, applies exposure after reconstruction and writes
+      RHDR from the returned image. One HDR convention everywhere: linear
+      1.0 = 203 nits (BT.2408), HLG the BT.2100 1000-nit transcode OCIO uses,
+      camera log targets in their camera gamut, AP0 matrix corrected. Checked
+      against OpenColorIO and the shipped pixel checkpoint.
+- [x] **Viewer and Lite Viewer, phase 1 (3.5.0).**
+  - **Colour.** The node tags every frame: a ComfyUI IMAGE is shown exactly as ComfyUI shows it, and a linear source goes through OpenColorIO ACES 2.0. A normal image used to be read as linear and sRGB-encoded twice, which washed it out, and its input colour space was guessed from brightness.
+  - **View menu.** Every entry is real (ACES 2.0 and 1.3 through OCIO, sRGB, Rec.709 BT.1886). The same view is baked into the PNG previews.
+  - **Units.** Everything reads 203 nits for 1.0, and the DaVinci Intermediate curve matches the spec again.
+  - **Compare and playback.** Compare works on WebGL and follows the playhead. Revisited frames no longer go black. Playback follows the source fps. Timecode is SMPTE, with drop-frame at 29.97 and 59.94.
+  - **Export and transport.** The graded EXR is scene-linear and tagged with its primaries. Frames travel as half-float by default, and an unchanged viewer no longer re-runs everything downstream.
+  - **Lite Viewer.** Readout, clip check and diff use float source values. 1:1 is exact on scaled displays. It has play/loop.
+- [x] **Viewer phase 2 (3.5.0).**
+  - **Scopes.** Waveform, vectorscope and histogram measure the picture as displayed (graded, through the active view), not the ungraded texture or the 8-bit canvas. The vectorscope is BT.709 Cb/Cr with 75 % and 100 % targets and a skin line.
+  - **Warnings.** False colour uses ARRI's bands on the Rec.709 signal. Clip and gamut warnings run before the display clamp, so they fire.
+  - **Viewer-only exposure and gamma.** `f/` and `γ` in the viewer bar (and `-` / `=`, `0` to reset) change only what you see, never scopes, readout or export.
+  - **Pixels.** The canvas is device-pixel sized; zoom above 1:1 is nearest-neighbour by default. Output is dithered, and a P3 monitor gets a Display P3 view and canvas.
+  - **Keys and transport.** Keys go to the viewer under the pointer only. In/out (`I` / `O`), J/K/L shuttle, ping-pong and play-once, play every frame with a dropped-frame count.
+- [x] **Sequential offload never engaged.** `setup_offload_mode("sequential")`
+      called a `comfy.model_management.set_lowvram_mode` that ComfyUI never
+      shipped, so it warned and did nothing on every run. It sets ComfyUI's
+      `vram_state` now.
 
 **Structural debt**
 
-- [ ] **Split the remaining monoliths.** Largest first: `hdr/vae.py` (3494
-      lines), `nodes/upscale/upscale.py` (3022), `image/upscale.py` (2741),
-      `nodes/generate/sampler.py` (2008), `nodes/pipeline/workspace.py` (1913),
+- [ ] **Split the remaining monoliths.** Largest first: `hdr/vae.py` (3527
+      lines), `nodes/upscale/upscale.py` (3029), `image/upscale.py` (2741),
+      `nodes/generate/sampler.py` (2111), `nodes/pipeline/workspace.py` (1913),
       `sampler_utils.py` (1897), `nodes/generate/prompt.py` (1830),
-      `nodes/monitor/viewer.py` (1233).
+      `nodes/io/write.py` (1261), `nodes/monitor/viewer.py` (1233).
 
 **Test coverage**
 
-53% of 27,782 statements. Every node has structural coverage (399 smoke tests
-over `RETURN_TYPES`, `INPUT_TYPES` and the execute method), so what is thin
-below is behaviour, not registration.
+59.6% of 28,018 statements, measured on the full dependency lane. Every node has
+structural coverage, though note what that does and does not mean: the smoke
+tests check that the method named by `FUNCTION` exists, they do not call it.
+Calling every registered node is `test_node_functional.py`'s job, and it now
+runs in CI.
 
 - [ ] **`image/upscale.py`, 1111 statements, 31%.** The one module that cannot
       be finished on CPU: what remains is `RadianceAIUpscale`, the SUPIR path,
-      and the tiling code, all of which need model weights or a GPU.
+      and the tiling code, all of which need model weights or a GPU. Newly
+      registered in 3.4.0, so this is the first release in which its coverage
+      counts for anything.
+
+**Colour management**
+
+- [x] **Sampler speed (3.5.0).** No second model load per stage, no silent
+      cfg 1.0 → base CFG (the extra unconditional pass that doubled turbo
+      runs), no cfg boost at 1.0 in Dynamic CFG, no gc / cache flush before
+      sampling, no debug statistics with DEBUG off. Flux with an empty
+      `clip_l` no longer falls back to Mochi's T5 encoder, and the Loader
+      reports when the weights cannot stay in VRAM.
+- [x] **OCIO is configured automatically (3.5.0).** OpenColorIO is a
+      required dependency (installed by ComfyUI-Manager via `requirements.txt`,
+      or by `install.py`). At startup Radiance uses `$OCIO` when you have one
+      and otherwise OpenColorIO's built-in ACES 2.0 studio config (55
+      colorspaces: every ACES space, the major camera logs, Rec.709 / Rec.2020
+      / P3 / PQ / HLG), written to `ACES/studio-config.ocio`, exported as
+      `$OCIO` for the process and made OCIO's current config, so every node
+      resolves the same names. Nothing is downloaded (the old startup fetch
+      from GitHub is gone). `RadianceColorSpaceConvert` now maps its names to
+      that config (the old targets existed in no config, so OCIO never ran)
+      and `RadianceHDROCIOTransform`'s defaults resolve. OpenCV's EXR codec is
+      forced on (`OPENCV_IO_ENABLE_OPENEXR=1`) before anything imports cv2.
 
 ## Documentation
 

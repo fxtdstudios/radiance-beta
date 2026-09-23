@@ -266,7 +266,15 @@ def test_expected_node_count_matches_what_is_published():
     if radiance._LOAD_RESULT.failures:
         pytest.skip("environment is short a runtime dependency")
     assert len(radiance.NODE_CLASS_MAPPINGS) >= EXPECTED_MIN_NODE_COUNT
-    assert EXPECTED_MIN_NODE_COUNT >= 129, "the floor was not raised with the catalog"
+    # No second number here. This assertion used to carry its own literal 129
+    # while the constant also read 129 and 131 nodes actually registered, so two
+    # could have stopped registering with this test still green. The floor is
+    # the constant; what this pins is that the floor is not slack.
+    assert len(radiance.NODE_CLASS_MAPPINGS) == EXPECTED_MIN_NODE_COUNT, (
+        "EXPECTED_MIN_NODE_COUNT in config/constants.py is not the real node "
+        f"count ({len(radiance.NODE_CLASS_MAPPINGS)}); slack here is room for a "
+        "node to stop registering unnoticed"
+    )
 
 
 def test_no_node_exists_in_source_without_reaching_the_menu():

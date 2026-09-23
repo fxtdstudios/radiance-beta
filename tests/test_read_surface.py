@@ -11,10 +11,15 @@ underneath handled it perfectly, which is what was actually happening.
 """
 from __future__ import annotations
 
+import collections
+import contextlib
+import importlib
 import json
 import os
 import pathlib
 import re
+import sys
+import types
 
 import numpy as np
 import pytest
@@ -614,10 +619,160 @@ def test_the_ui_probe_describes_each_media_type(exr_layers, png_sequence):
     assert "1001-1008" in seq["summary"], seq["summary"]
 
 
+# ── route registration ─────────────────────────────────────────────────────
+#
+# AUDIT-FIX (2026-09): the idempotency test below was the one test in the suite
+# with no assertion at all. It called `register_read_routes()` twice and passed
+# if nothing raised, against conftest.py's `_FakeRoutes`, whose `get`/`post`
+# return an identity decorator and keep no state. So the duplicate-registration
+# crash it names was doubly unreachable: nothing was asserted, and nothing the
+# fake was handed could ever raise. tests/test_ocio_endpoints.py:167 records the
+# same defect in the same fake; this file did not get the fix.
+#
+# The machinery below borrows the real aiohttp so the second pass meets the real
+# UrlDispatcher, which is the thing that raises "method HEAD is already
+# registered".
+
+
+def _aiohttp_names():
+    return [n for n in list(sys.modules) if n == "aiohttp" or n.startswith("aiohttp.")]
+
+
+@contextlib.contextmanager
+def _real_aiohttp_web():
+    """Hand back the real `aiohttp.web`, past conftest's stub.
+
+    conftest installs a bare `aiohttp` ModuleType when ComfyUI is absent. It has
+    no `UrlDispatcher`, no `json_response`, and no duplicate detection, which is
+    exactly why registering twice against it proved nothing.
+    """
+    saved = {n: sys.modules[n] for n in _aiohttp_names()}
+    for name in saved:
+        del sys.modules[name]
+    try:
+        web = importlib.import_module("aiohttp.web")
+    except ImportError:  # pragma: no cover - aiohttp is a ComfyUI dependency
+        for name in _aiohttp_names():
+            del sys.modules[name]
+        sys.modules.update(saved)
+        pytest.skip("this environment has no real aiohttp")
+    if not hasattr(web, "UrlDispatcher"):  # pragma: no cover - belt and braces
+        for name in _aiohttp_names():
+            del sys.modules[name]
+        sys.modules.update(saved)
+        pytest.fail("imported an aiohttp.web with no UrlDispatcher, so it is a stub")
+    try:
+        yield web
+    finally:
+        for name in _aiohttp_names():
+            del sys.modules[name]
+        sys.modules.update(saved)
+
+
+class _DispatcherRoutes:
+    """ComfyUI's `PromptServer.instance.routes`, backed by a real dispatcher.
+
+    ComfyUI hands out a `web.RouteTableDef`, which only appends; the duplicate
+    RuntimeError surfaces later, when the app adds that table to its
+    `UrlDispatcher`. Registering straight into a dispatcher raises from the same
+    code for the same reason, without needing a running Application.
+    """
+
+    def __init__(self, dispatcher):
+        self._dispatcher = dispatcher
+
+    def get(self, path):
+        def deco(fn):
+            self._dispatcher.add_get(path, fn)
+            return fn
+        return deco
+
+    def post(self, path):
+        def deco(fn):
+            self._dispatcher.add_post(path, fn)
+            return fn
+        return deco
+
+
+@contextlib.contextmanager
+def _prompt_server_on(dispatcher):
+    """Install a `server` module whose PromptServer routes into *dispatcher*.
+
+    conftest's own `server` stub is put back afterwards, so nothing leaks into
+    the rest of the suite. A fresh PromptServer instance also means a fresh
+    `_radiance_read_routes_registered` flag: the module already registered its
+    routes once at import time, against conftest's fake.
+    """
+    module = types.ModuleType("server")
+    module.PromptServer = types.SimpleNamespace(
+        instance=types.SimpleNamespace(routes=_DispatcherRoutes(dispatcher)))
+
+    saved = sys.modules.get("server")
+    sys.modules["server"] = module
+    try:
+        yield
+    finally:
+        if saved is not None:
+            sys.modules["server"] = saved
+        else:
+            sys.modules.pop("server", None)
+
+
+def _registered(dispatcher):
+    """Counter of (method, path) for everything currently in the dispatcher."""
+    return collections.Counter(
+        (r.method, r.resource.canonical) for r in dispatcher.routes())
+
+
 def test_route_registration_is_idempotent():
     """Registering twice used to crash ComfyUI at startup with
-    'method HEAD is already registered'."""
+    'method HEAD is already registered'.
+
+    ComfyUI puts `custom_nodes/` on `sys.path`, so a user script doing
+    `import viewer` produces a second copy of a module and a second registration
+    pass. `register_read_routes` survives that by flagging the PromptServer
+    singleton, and this asserts the flag does its job: the routes land once, the
+    second pass adds nothing, and it does not raise on the way through.
+    """
     from radiance.nodes.io.write import register_read_routes
 
-    register_read_routes()
-    register_read_routes()
+    with _real_aiohttp_web() as web:
+        dispatcher = web.UrlDispatcher()
+
+        # Harness check, not a claim about Radiance: this must be the real
+        # dispatcher, the one that refuses a duplicate. A stub that accepts
+        # everything is what made the old version of this test unfalsifiable.
+        async def _probe(request):  # pragma: no cover - never called
+            return None
+        dispatcher.add_get("/radiance/_duplicate_probe", _probe)
+        with pytest.raises(RuntimeError, match="already registered"):
+            dispatcher.add_get("/radiance/_duplicate_probe", _probe)
+
+        with _prompt_server_on(dispatcher):
+            register_read_routes()
+            first = _registered(dispatcher)
+            # Without this the whole test could pass on a dispatcher nothing
+            # ever reached, which is the defect it replaces.
+            assert first, (
+                "no route reached the dispatcher, so registering a second time "
+                "proves nothing"
+            )
+            assert first[("HEAD", "/radiance/media/info")] == 1, (
+                "aiohttp registers HEAD alongside GET, and HEAD is what the "
+                "startup crash named; without it this is not the code path "
+                f"that crashed ComfyUI: {sorted(first)}"
+            )
+
+            register_read_routes()          # the second import's pass
+            second = _registered(dispatcher)
+
+    repeated = {k: n for k, n in first.items() if n > 1}
+    assert not repeated, f"the first pass already registered something twice: {repeated}"
+
+    added = second - first
+    assert not added, (
+        "the second registration pass reached the dispatcher again: "
+        f"{sorted(added.elements())} landed a second time. Every one of those "
+        "shadows a live route, and an adjacent repeat is the aiohttp "
+        "RuntimeError that crashed ComfyUI at startup"
+    )

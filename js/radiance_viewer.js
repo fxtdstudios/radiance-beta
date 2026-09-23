@@ -8,6 +8,8 @@ import { RadianceNeuralMonitor } from "./radiance_neural.js";
 
 
 import { escapeHtml as _escapeHtml } from "./radiance_dom_utils.js";
+import { smpteTimecode as _smpteTC, FPS_CHOICES as _FPS_CHOICES } from "./radiance_timecode.js";
+import { cbcr as _vsCbCr, toCanvas as _vsToCanvas, drawGraticule as _vsGraticule } from "./radiance_vectorscope.js";
 import {
     sampleStats as _probeSampleStats,
     rectFromCorners as _probeRectFromCorners,
@@ -22,6 +24,14 @@ import {
     HDR_REFERENCE_WHITE_NITS as _PROBE_REF_WHITE,
 } from "./radiance_probe.js";
 import { gradePixel as _gradePixel } from "./radiance_grade.js";
+// The bounded paging window for sequence playback. Lives in its own module so
+// the memory bound can be measured in a test rather than reasoned about.
+import {
+    RadianceFrameWindow as _RadianceFrameWindow,
+    DEFAULT_FRAME_WINDOW as _DEFAULT_FRAME_WINDOW,
+    DEFAULT_FRAME_WINDOW_BYTES as _DEFAULT_FRAME_WINDOW_BYTES,
+    DEFAULT_FETCH_CONCURRENCY as _DEFAULT_FETCH_CONCURRENCY,
+} from "./radiance_frame_window.js";
 import {
     SCOPE_SCALES as _SCOPE_SCALES,
     LEVELS as _SCOPE_LEVELS,
@@ -42,6 +52,17 @@ import {
 } from "./radiance_ocio.js";
 
 class RadianceViewer {
+    /** 3.5.0 View menu: [value, label]. 'manual' = an Output Transform pick. */
+    static VIEW_MODES = [
+        ['auto', 'View: Auto'],
+        ['aces2', 'ACES 2.0 SDR (OCIO)'],
+        ['aces13', 'ACES 1.3 SDR (OCIO)'],
+        ['srgb', 'sRGB (no tone map)'],
+        ['rec709', 'Rec.709 (BT.1886)'],
+        ['filmic', 'Filmic (approx.)'],
+        ['manual', 'Custom (Output Transform)'],
+    ];
+
     static singletonHUD = null;
     static activeInstance = null;
     static allInstances = new Set();
@@ -841,6 +862,16 @@ class RadianceViewer {
         this.currentFrame = 0;
         this.totalFrames = 1;
         this.frameImages = [];
+        this.frameHDRData = [];
+        // The bounded pager that owns frameImages/frameHDRData for a sequence.
+        // Without it these two arrays grew to the length of the shot.
+        this._frameWindow = null;
+        // Bracket and depth descriptors, paged in with their frame.
+        this._bracketByFrame = new Map();
+        this._zdepthEntries = [];
+        // Per-frame reason the viewer is showing the 8-bit proxy, surfaced by
+        // the status-bar badge so it cannot claim FP32 over a tonemapped PNG.
+        this._hdrFallbackReasons = [];
         this.frameCompareImages = [];
         this.frameZdepthImages = [];  // Z-Depth frames
         this.frameBracketImages = { low: [], high: [] };
@@ -922,7 +953,8 @@ class RadianceViewer {
 
         // Nearest-neighbour vs linear magnification. RV binds this to 'n', and
         // pixel-level inspection is meaningless through a bilinear filter.
-        this.pixelFilter = localStorage.getItem('radiance_pixel_filter') || 'linear';
+        // 3.5.0: nearest from 1:1 up by default (Nuke / RV pixel inspection); N toggles.
+        this.pixelFilter = localStorage.getItem('radiance_pixel_filter') || 'nearest';
 
         // How the frame counter reads. Frames for a technical conversation,
         // timecode for a delivery one.
@@ -969,8 +1001,21 @@ class RadianceViewer {
         this.progressHistory = [];
 
         // Color Space / LUT
-        this.displayLut = localStorage.getItem('radiance_hud_display_lut') || 'None';
-        this.inputSpace = localStorage.getItem('radiance_hud_input_space') || 'None';
+        // 3.5.0: the view follows the source. The node tags every frame
+        // (sRGB-encoded ComfyUI IMAGE or linear + OCIO colour space); 'auto'
+        // shows sRGB sources untouched and linear sources through OpenColorIO
+        // ACES 2.0. Input space and output LUT are no longer persisted in
+        // browser storage: a stored camera-log guess used to follow the user
+        // into every later image and viewer.
+        this.displayLut = 'None';
+        this.inputSpace = 'None';
+        this._userSetIDT = false;
+        try { this.displayTarget = localStorage.getItem('radiance_display_target') || 'sRGB'; } catch { this.displayTarget = 'sRGB'; }
+        this.viewExposure = 0;    // 3.5.0: viewer f-stops, like Nuke's viewer gain
+        this.viewGamma = 1;       // 3.5.0: viewer gamma
+        this.sourceTag = { encoding: 'linear', colorspace: 'Linear Rec.709 (sRGB)' };
+        try { this.viewMode = localStorage.getItem('radiance_view_mode') || 'auto'; } catch { this.viewMode = 'auto'; }
+        if (this.viewMode === 'manual') this.viewMode = 'auto';
         this.lutOptions = [
             "None",
             "sRGB (Display)",
@@ -1354,54 +1399,83 @@ class RadianceViewer {
     /**
      * Update the status bar bit-depth badge with full pipeline chain info.
      * Format: "FP32 · RGBA32F" (matches Nuke / Flame / Baselight style)
+     *
+     * DEFECT this fixes, and it is the serious one: `inputLabel` was
+     * initialised to 'FP32' and the `else if (this.image)` branch set it to
+     * 'FP32' again, so the badge read FP32 whenever the viewer had ANY image
+     * at all. The viewer reaches frameHDRData[idx] = null from three places
+     * (no DecompressionStream, an RHDR integrity mismatch, and a failed
+     * texture creation), each of which used to only console.warn, and what is
+     * then on screen is the PNG fallback: 8-bit, capped at FALLBACK_MAX_DIM =
+     * 2048 by the node, and Reinhard tonemapped x/(1+x) whenever d_max > 1.05.
+     *
+     * So a colourist could grade a 4K HDR plate against a 2048px tonemapped
+     * 8-bit proxy while the status bar read "FP32 · RGBA32F", and then press
+     * RENDER. The badge now reports the source that is actually being
+     * displayed, says why when it is the proxy, and does not use the green
+     * full-float colour for it.
      */
     _updateBitDepthBadge() {
         if (!this.bitDepthInfo) return;
 
-        // Input precision derived from image type
-        let inputLabel = 'FP32';
-        let inputColor = '#4ade80';
+        // What is actually on screen, not what was asked for.
+        let inputLabel, inputDetail;
+        let isProxy = false;
+        const hdr = this.hdrData;
 
-        if (this.hdrData) {
-            if (this.hdrData.format === 'rhdr') {
+        if (hdr && hdr.data) {
+            if (hdr.format === 'rhdr') {
                 inputLabel = 'FP16';
-                inputColor = '#60a5fa'; // blue — half-float
-            } else if (this.hdrData.format === 'rhdr_f32') {
+                inputDetail = 'RHDR half-float sidecar';
+            } else if (hdr.format === 'rhdr_f32') {
                 inputLabel = 'FP32';
-                inputColor = '#4ade80'; // green — full float
+                inputDetail = 'RHDR IEEE 754 fp32 sidecar';
             } else {
                 inputLabel = 'FP32';
-                inputColor = '#4ade80'; // green — full float (EXR, npy, etc.)
+                inputDetail = `${(hdr.format || 'float').toUpperCase()} float source`;
             }
-        } else if (this.image) {
-            inputLabel = 'FP32';
-            inputColor = '#4ade80';
+        } else if (this.image || this.videoEl) {
+            isProxy = true;
+            inputLabel = 'PROXY 8-BIT';
+            const reason = this._currentFallbackReason?.();
+            const src = this.image || {};
+            const sw = src.source_width, sh = src.source_height;
+            const pw = src.naturalWidth || src.width, ph = src.naturalHeight || src.height;
+            const parts = ['8-bit PNG fallback, NOT the float source'];
+            if (src.preview_tonemapped) parts.push('tonemapped x/(1+x) by the node');
+            if (sw && sh && pw && ph && (sw !== pw || sh !== ph)) {
+                parts.push(`downscaled ${pw}x${ph} from ${sw}x${sh}`);
+            }
+            if (reason) parts.push(`reason: ${reason}`);
+            inputDetail = parts.join(' · ');
+        } else {
+            inputLabel = 'NO SOURCE';
+            inputDetail = 'nothing loaded';
         }
 
         // Pipeline precision from renderer
         let pipeLabel = '·  RGBA32F';
-        let pipeColor = '#4ade80';
         if (this.renderer) {
             const mode = this.renderer.pipelinePrecision;
-            if (mode === 'f32') {
-                pipeLabel = '·  RGBA32F'; pipeColor = '#4ade80';  // green
-            } else if (mode === 'f16') {
-                pipeLabel = '·  RGBA16F'; pipeColor = '#60a5fa';  // blue
-            } else {
-                pipeLabel = '·  RGBA8'; pipeColor = this.theme.textDim;
-            }
+            if (mode === 'f32') pipeLabel = '·  RGBA32F';
+            else if (mode === 'f16') pipeLabel = '·  RGBA16F';
+            else pipeLabel = '·  RGBA8';
         }
 
-        // Badge: "FP32 · RGBA32F"
-        const dominantColor = (inputLabel === 'FP32' || (this.renderer && this.renderer.pipelinePrecision === 'f32'))
-            ? '#4ade80' : (inputLabel === 'FP16' || (this.renderer && this.renderer.pipelinePrecision === 'f16'))
-                ? '#60a5fa' : this.theme.textDim;
+        // Amber wins over the pipeline colour on the proxy: a 32-bit pipeline
+        // over an 8-bit tonemapped input is not a 32-bit picture, and the badge
+        // must not be reassuring about it.
+        const dominantColor = isProxy
+            ? '#f59e0b'
+            : (inputLabel === 'FP32' || (this.renderer && this.renderer.pipelinePrecision === 'f32'))
+                ? '#4ade80' : (inputLabel === 'FP16' || (this.renderer && this.renderer.pipelinePrecision === 'f16'))
+                    ? '#60a5fa' : this.theme.textDim;
 
         this.bitDepthInfo.textContent = `${inputLabel}  ${pipeLabel}`;
         this.bitDepthInfo.style.color = dominantColor;
         this.bitDepthInfo.style.background = `${dominantColor}15`;
         this.bitDepthInfo.style.border = `1px solid ${dominantColor}35`;
-        this.bitDepthInfo.title = `Input: ${inputLabel} | Pipeline: ${this.renderer ? this._precisionLabel(this.renderer.pipelinePrecision) : '—'}\nClick to cycle precision (INT 8 / FLOAT 16 / FLOAT 32)\nShortcut: Alt+B`;
+        this.bitDepthInfo.title = `Displaying: ${inputLabel} · ${inputDetail}\nPipeline: ${this.renderer ? this._precisionLabel(this.renderer.pipelinePrecision) : '—'}\nClick to cycle precision (INT 8 / FLOAT 16 / FLOAT 32)\nShortcut: Alt+B`;
     }
 
     // ── v4.2: HDR Zone Statistics ────────────────────────────────────────────
@@ -1756,10 +1830,11 @@ class RadianceViewer {
         // ── Tier 1: EXR metadata ──────────────────────────────────────────────
         const meta = this.hdrData.metadata || {};
         const metaCS = (meta.colorSpace || meta.ColorSpace || '').toLowerCase();
-        if (metaCS.includes('logc3') || metaCS.includes('arri')) {
-            detected = 'IDT: LogC3 → Linear'; method = 'EXR metadata';
-        } else if (metaCS.includes('logc4')) {
+        // LogC4 first: "arri" matches both, and LogC4 metadata was read as LogC3.
+        if (metaCS.includes('logc4')) {
             detected = 'IDT: LogC4 → Linear'; method = 'EXR metadata';
+        } else if (metaCS.includes('logc3') || metaCS.includes('arri')) {
+            detected = 'IDT: LogC3 → Linear'; method = 'EXR metadata';
         } else if (metaCS.includes('s-log3') || metaCS.includes('slog3')) {
             detected = 'IDT: S-Log3 → Linear' ; method = 'EXR metadata'; // future IDT
         } else if (metaCS.includes('v-log') || metaCS.includes('vlog')) {
@@ -1781,24 +1856,15 @@ class RadianceViewer {
             }
         }
 
-        // ── Tier 3: Data midgrey fingerprint ──────────────────────────────────
-        if (!detected && this._hdrZoneStats) {
-            const p50 = this._hdrZoneStats.p50;
-            let bestDist = Infinity, bestKey = null;
-            for (const p of PROFILES) {
-                const dist = Math.abs(p50 - p.p50);
-                if (dist < p.band && dist < bestDist) {
-                    bestDist = dist; bestKey = p.key;
-                }
-            }
-            if (bestKey) { detected = bestKey; method = `midgrey fingerprint (p50=${p50.toFixed(3)})`; }
-        }
+        // 3.5.0: the "midgrey fingerprint" tier is gone. It decoded ordinary
+        // sRGB images as camera log whenever their median fell near a log
+        // curve's grey (0.25-0.45 covers most photographs). Metadata and file
+        // names are evidence; image statistics are not.
 
         if (!detected || detected === this.inputSpace) return;
 
         // Apply and notify
         this.inputSpace = detected;
-        localStorage.setItem('radiance_hud_input_space', detected);
         if (this.renderer) {
             const lutMap = {
                 'IDT: LogC3 → Linear': 29, 'IDT: LogC4 → Linear': 22,
@@ -2382,19 +2448,98 @@ class RadianceViewer {
         const left = document.createElement('div');
         left.style.cssText = 'display:flex;align-items:center;gap:8px;min-width:0;';
         const viewSelect = document.createElement('select');
-        ['ACES 1.3', 'ACES 2.0', 'sRGB', 'Rec.709', 'PQ HDR10', 'HLG'].forEach(label => {
+        viewSelect.title = 'View transform. Auto: sRGB sources untouched, linear sources '
+            + 'through OpenColorIO ACES 2.0 (SDR 100 nits, sRGB display).';
+        // 3.5.0: every entry does what it says. "ACES 1.3"/"ACES 2.0" were one
+        // Narkowicz curve under two names, and "PQ HDR10"/"HLG" did nothing.
+        RadianceViewer.VIEW_MODES.forEach(([value, label]) => {
             const opt = document.createElement('option');
             opt.textContent = label;
-            opt.value = label;
+            opt.value = value;
             viewSelect.appendChild(opt);
         });
-        viewSelect.onchange = () => {
-            this.displayLut = viewSelect.value.includes('sRGB') ? 'sRGB (Display)' :
-                viewSelect.value.includes('Rec.709') ? 'Rec.709 (Broadcast)' :
-                    viewSelect.value.includes('ACES') ? 'ACES Filmic' : this.displayLut;
-            this.render();
+        viewSelect.value = this.viewMode;
+        viewSelect.onchange = () => this.setViewMode(viewSelect.value);
+        this._viewSelect = viewSelect;
+
+        // 3.5.0: playback rate and loop, reachable. Both used to live in
+        // createHUD() after an unconditional return, so playback was fixed at
+        // 24 fps and always looped.
+        const fpsSelect = document.createElement('select');
+        fpsSelect.title = 'Playback rate (the node sends the source rate when it has one)';
+        _FPS_CHOICES.forEach((r) => {
+            const o = document.createElement('option');
+            o.value = String(r); o.textContent = `${r} fps`;
+            fpsSelect.appendChild(o);
+        });
+        this._fpsSelect = fpsSelect;
+        fpsSelect.onchange = () => this.setPlaybackFps(parseFloat(fpsSelect.value));
+        fpsSelect.value = String(this.playbackFps || 24);   // no render calls during construction
+        const loopSelect = document.createElement('select');
+        loopSelect.title = 'At the last frame: loop, or stop';
+        [['loop', 'Loop'], ['pingpong', 'Ping-pong'], ['once', 'Play once']].forEach(([v, l]) => {
+            const o = document.createElement('option'); o.value = v; o.textContent = l;
+            loopSelect.appendChild(o);
+        });
+        this.loopMode = this.loop ? 'loop' : 'once';
+        loopSelect.value = this.loopMode;
+        loopSelect.onchange = () => {
+            this.loopMode = loopSelect.value;
+            this.loop = this.loopMode !== 'once';
+            if (this.videoEl) this.videoEl.loop = this.loopMode === 'loop';
         };
+        const everySelect = document.createElement('select');
+        everySelect.title = 'Every frame: wait for each frame (review). Realtime: keep the clock, count drops.';
+        [['every', 'Every frame'], ['realtime', 'Realtime']].forEach(([v, l]) => {
+            const o = document.createElement('option'); o.value = v; o.textContent = l;
+            everySelect.appendChild(o);
+        });
+        this.playEveryFrame = true;
+        everySelect.value = 'every';
+        everySelect.onchange = () => { this.playEveryFrame = everySelect.value === 'every'; };
         left.appendChild(viewSelect);
+        left.appendChild(fpsSelect);
+        left.appendChild(loopSelect);
+        left.appendChild(everySelect);
+
+        // 3.5.0: viewer-only f-stop and gamma. Grade exposure goes into the
+        // render; these do not (Nuke's viewer gain / gamma). Double-click resets.
+        const mkNum = (label, title, min, max, step, get, set, fmt) => {
+            const wrap = document.createElement('label');
+            wrap.style.cssText = 'display:flex;align-items:center;gap:3px;font-size:10px;color:rgba(255,255,255,.55);';
+            wrap.textContent = label;
+            const inp = document.createElement('input');
+            inp.type = 'number'; inp.min = min; inp.max = max; inp.step = step;
+            inp.title = title;
+            inp.style.cssText = 'width:52px;background:rgba(255,255,255,.06);color:#ddd;border:1px solid rgba(255,255,255,.14);border-radius:4px;font-size:11px;padding:2px 4px;';
+            inp.value = fmt(get());
+            inp.oninput = () => { const v = parseFloat(inp.value); if (Number.isFinite(v)) { set(v); this.render(); } };
+            inp.ondblclick = () => { set(label === 'γ' ? 1 : 0); inp.value = fmt(get()); this.render(); };
+            wrap.appendChild(inp);
+            return [wrap, inp];
+        };
+        const [evWrap, evInp] = mkNum('f/', 'Viewer exposure in stops (not rendered out). Double-click resets.',
+            -16, 16, 0.5, () => this.viewExposure, (v) => { this.viewExposure = v; }, (v) => v.toFixed(1));
+        const [gWrap, gInp] = mkNum('γ', 'Viewer gamma (not rendered out). Double-click resets.',
+            0.2, 5, 0.1, () => this.viewGamma, (v) => { this.viewGamma = Math.max(0.2, v); }, (v) => v.toFixed(2));
+        this._viewEvInput = evInp; this._viewGammaInput = gInp;
+        left.appendChild(evWrap);
+        left.appendChild(gWrap);
+        if (this.displayP3Capable) {
+            const dispSel = document.createElement('select');
+            dispSel.title = 'Monitor the ACES view targets. Display P3 uses ACES 2.0 SDR (P3 D65) '
+                + 'and shows colours sRGB cannot.';
+            ['sRGB', 'Display P3'].forEach((v) => {
+                const o = document.createElement('option'); o.value = v; o.textContent = v; dispSel.appendChild(o);
+            });
+            dispSel.value = this.displayTarget;
+            dispSel.onchange = () => {
+                this.displayTarget = dispSel.value;
+                try { localStorage.setItem('radiance_display_target', this.displayTarget); } catch { /* private */ }
+                this._applyView();
+            };
+            left.appendChild(dispSel);
+        }
         const _vbBtn = (label, onClick) => {
             const btn = document.createElement('button');
             btn.textContent = label;
@@ -2600,7 +2745,12 @@ class RadianceViewer {
         // viewer, each mutating a dead instance and calling updateVisual() on
         // detached DOM. One more every time the node executed.
         this._seqDockKeyHandler = (e) => {
-            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+            // 3.5.0: Shift+letter and only for the active viewer. Bare A/B/S/D/F/V
+            // on the whole page collided with the viewer's own keys (F both
+            // fitted and switched the timeline tool).
+            if (!e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+            if (RadianceViewer._activeViewer && RadianceViewer._activeViewer !== this) return;
             if (e.code === 'KeyA') {
                 this.activeTimelineTool = 'select';
                 Object.values(toolButtons).forEach(b => b.updateVisual());
@@ -2641,18 +2791,16 @@ class RadianceViewer {
             this.sequenceFrameLabel.textContent = total > 0 ? `${current} / ${total}` : '— / —';
         }
         if (this.sequencePlayButton) this.sequencePlayButton.textContent = this.isPlaying ? 'Ⅱ' : '▶';
-        if (this.sequenceFpsLabel) this.sequenceFpsLabel.textContent = `${this.playbackFps || 24} FPS`;
+        if (this.sequenceFpsLabel) {
+            const drops = this.droppedFrames ? ` · ${this.droppedFrames} dropped` : '';
+            const io = (this.inPoint != null || this.outPoint != null)
+                ? ` · I/O ${(this.inPoint ?? 0) + 1}-${(this.outPoint ?? Math.max(0, total - 1)) + 1}` : '';
+            this.sequenceFpsLabel.textContent = `${+(this.playbackFps || 24).toFixed(3)} FPS${drops}${io}`;
+        }
 
         // 1. Timecode calculation
         if (this.sequenceTimecode) {
-            const fps = Math.max(1, Math.round(this.playbackFps || 24));
-            const frame = Math.max(0, this.currentFrame || 0);
-            const totalSec = frame / fps;
-            const h = Math.floor(totalSec / 3600);
-            const m = Math.floor((totalSec % 3600) / 60);
-            const s = Math.floor(totalSec % 60);
-            const f = frame % fps;
-            this.sequenceTimecode.textContent = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(f).padStart(2, '0')}`;
+            this.sequenceTimecode.textContent = _smpteTC(this.currentFrame || 0, this.playbackFps || 24);
         }
 
         // 2. Playhead range slider update
@@ -3054,13 +3202,7 @@ class RadianceViewer {
 
                 frameText.textContent = `FRAME ${String(hoverFrame + 1).padStart(4, '0')}`;
 
-                const fps = Math.max(1, Math.round(this.playbackFps || 24));
-                const totalSec = hoverFrame / fps;
-                const h = Math.floor(totalSec / 3600);
-                const m = Math.floor((totalSec % 3600) / 60);
-                const s = Math.floor(totalSec % 60);
-                const f = hoverFrame % fps;
-                timecodeText.textContent = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(f).padStart(2, '0')}`;
+                timecodeText.textContent = _smpteTC(hoverFrame, this.playbackFps || 24);
 
                 const src = this.frameImages?.[hoverFrame];
                 if (src && canvas) {
@@ -3117,11 +3259,20 @@ class RadianceViewer {
         const t = this.theme;
 
         this.container.classList.add('radiance-pro-container');
+        // contain: size -- BLACK-VIEWER FIX, layout half. Without it the
+        // sidebar and inspector report their full content height (measured:
+        // 2019 px), the Vue node frontend grows the node to fit (measured:
+        // 1180x760 became 1480x2286), and the canvas column stretches with
+        // it. The frame is then centred on a canvas taller than the screen and
+        // the part of the viewport the user can see is empty. Size containment
+        // makes the node's size drive the viewer, never the other way round;
+        // the panels scroll inside it.
         this.container.style.cssText = `
             position: relative;
             width: 100%;
             height: 100%;
             min-height: 300px;
+            contain: size;
             background: #070a0f;
             color-scheme: dark;
             border-radius: 6px;
@@ -3202,7 +3353,18 @@ class RadianceViewer {
         this.canvas = document.createElement('canvas');
         this.canvas.style.cssText = `position: absolute; top: 0; left: 0; width: 100%; height: 100%; cursor: crosshair;`;
         this.canvas.tabIndex = 0;
-        this.ctx = this.canvas.getContext('2d', { willReadFrequently: true, alpha: false });
+        // 3.5.0: on a P3 monitor the display surface is a Display P3 canvas, so
+        // the GL frame (sRGB or Display P3, per view) is composited without
+        // being squeezed into sRGB first. sRGB content converts exactly.
+        let _p3 = false;
+        try { _p3 = window.matchMedia('(color-gamut: p3)').matches; } catch { /* no matchMedia */ }
+        try {
+            this.ctx = this.canvas.getContext('2d', { willReadFrequently: true, alpha: false,
+                ...(_p3 ? { colorSpace: 'display-p3' } : {}) });
+        } catch {
+            this.ctx = this.canvas.getContext('2d', { willReadFrequently: true, alpha: false });
+        }
+        this.displayP3Capable = _p3;
         this.canvasWrapper.appendChild(this.canvas);
 
         // WebGL Canvas (Primary renderer - GPU accelerated)
@@ -3237,6 +3399,7 @@ class RadianceViewer {
                 if (this.renderer.init()) {
                     console.log('[Radiance] WebGL Renderer Initialized');
                     this._gpuBackend = 'webgl';
+                    this.renderer.setSourceEncoding?.(this.sourceTag?.encoding);
                     // A fresh texture resets the mag filter, so the stored
                     // choice has to be re-applied rather than assumed.
                     this.renderer?.setPixelFilter?.(this.pixelFilter);
@@ -3333,6 +3496,7 @@ class RadianceViewer {
             this.glCanvas = webgpuCanvas;
             this.renderer = wgpu;
             this._gpuBackend = 'webgpu';
+            this.renderer.setSourceEncoding?.(this.sourceTag?.encoding);
             this.useWebGL = true;
             if (this.image && oldRenderer) {
                 if (this.hdrData?.fp16data) {
@@ -5756,9 +5920,7 @@ else:
         });
         lutSel.value = this.displayLut;
         lutSel.onchange = (e) => {
-            this.displayLut = e.target.value;
-            localStorage.setItem('radiance_hud_display_lut', this.displayLut);
-            this.render();
+            this._setManualDisplayLut(e.target.value);
         };
         lutWrap.appendChild(lutSel);
         hud.appendChild(lutWrap);
@@ -5782,7 +5944,7 @@ else:
         inSel.value = this.inputSpace;
         inSel.onchange = (e) => {
             this.inputSpace = e.target.value;
-            localStorage.setItem('radiance_hud_input_space', this.inputSpace);
+            this._userSetIDT = true;   // an explicit choice is never overwritten by detection
             this.render();
         };
         inWrap.appendChild(inSel);
@@ -6109,13 +6271,306 @@ else:
         }
     }
 
-    // v2.2: Check if all frames in current batch have loaded
+    // v2.2: Check if the frames the viewer is holding have loaded.
+    //
+    // DEFECT this fixes: this used to walk all N frames and was called from
+    // every frame's img.onload, so a load cost O(N^2) on the main thread,
+    // interleaved with N zlib decompressions. 10,000 frames was 100M
+    // iterations. It is now a walk of the paging window, which is bounded by
+    // RadianceFrameWindow.windowSize and does not grow with the sequence.
+    //
+    // The meaning changed with it, and had to: the viewer no longer holds the
+    // whole sequence, so "all frames ready" is now "every frame in the window
+    // around the playhead is ready". Callers use it to decide when the
+    // filmstrip and sparklines are worth computing, and both already render a
+    // placeholder for a frame they do not have.
     _allFramesReady() {
         if (!this.totalFrames) return true;
-        for (let i = 0; i < this.totalFrames; i++) {
-            if (!this.frameImages[i] && !this.frameHDRData[i]) return false;
+        if (this._frameWindow) return this._frameWindow.isWindowReady();
+        return !!(this.frameImages[this.currentFrame] || this.frameHDRData[this.currentFrame]);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //              BOUNDED SEQUENCE PAGING  (see radiance_frame_window.js)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /** Decoded frames retained around the playhead. Overridable per workstation. */
+    static frameWindowSize() {
+        const stored = parseInt(localStorage.getItem('radiance_frame_window'), 10);
+        return Number.isFinite(stored) && stored > 0 ? stored : _DEFAULT_FRAME_WINDOW;
+    }
+
+    /** Retained decoded pixel bytes. The bound that matters at 4K. */
+    static frameWindowBytes() {
+        const stored = parseInt(localStorage.getItem('radiance_frame_window_bytes'), 10);
+        return Number.isFinite(stored) && stored > 0 ? stored : _DEFAULT_FRAME_WINDOW_BYTES;
+    }
+
+    /** Simultaneous sidecar fetches. The old loader opened one socket per frame. */
+    static frameWindowConcurrency() {
+        const stored = parseInt(localStorage.getItem('radiance_frame_concurrency'), 10);
+        return Number.isFinite(stored) && stored > 0 ? stored : _DEFAULT_FETCH_CONCURRENCY;
+    }
+
+    /**
+     * Point the viewer at a sequence and page it through a bounded window.
+     *
+     * frameImages[] and frameHDRData[] stay as sparse arrays because every
+     * reader in this file indexes them by frame number (filmstrip, sparklines,
+     * probe, compare). The window owns what goes in and what comes out: on
+     * eviction the slots are nulled, which is what actually releases the
+     * Float32Array and lets the tab survive a 10,000-frame shot.
+     */
+    _installFrameWindow(entries, generation, bracketByFrame = null, zdepthEntries = null) {
+        if (this._frameWindow) this._frameWindow.clear();
+        this._hdrFallbackReasons = [];
+        this._bracketByFrame = bracketByFrame || new Map();
+        this._zdepthEntries = Array.isArray(zdepthEntries) ? zdepthEntries : [];
+
+        this._frameWindow = new _RadianceFrameWindow({
+            windowSize: RadianceViewer.frameWindowSize(),
+            maxBytes: RadianceViewer.frameWindowBytes(),
+            concurrency: RadianceViewer.frameWindowConcurrency(),
+            load: (entry, idx) => this._loadSequenceFrame(entry, idx, generation),
+            onReady: (idx, payload) => {
+                if (this.generationID !== generation) return;
+                this.frameImages[idx] = payload.img || null;
+                this.frameHDRData[idx] = payload.hdr || null;
+                this.frameBracketImages.low[idx] = payload.bracketLow || null;
+                this.frameBracketImages.high[idx] = payload.bracketHigh || null;
+                this.frameZdepthImages[idx] = payload.zdepth || null;
+                this._hdrFallbackReasons[idx] = payload.fallbackReason || null;
+                if (idx === this.currentFrame) this._displaySequenceFrame(idx);
+                if ((payload.bracketLow || payload.bracketHigh) && this._referenceRightTab === 'analysis') {
+                    this._renderReferenceRightHUD?.();
+                }
+                if (this._allFramesReady()) this.updateFrameDisplay();
+            },
+            onEvict: (idx) => {
+                // The whole point of the window: drop the decoded pixels for a
+                // frame that has scrolled out of reach. Leaving these set was
+                // the 330 GB defect.
+                this.frameImages[idx] = null;
+                this.frameHDRData[idx] = null;
+                this.frameBracketImages.low[idx] = null;
+                this.frameBracketImages.high[idx] = null;
+                this.frameZdepthImages[idx] = null;
+            },
+            onError: (err, idx) => {
+                console.warn('[Radiance] Frame', idx, 'failed to load:', err);
+            },
+        });
+
+        this._frameWindow.setSequence(entries, this.currentFrame || 0);
+    }
+
+    /**
+     * Fetch and decode one frame: the PNG fallback and the .rhdr sidecar.
+     *
+     * Returns a payload the window retains, or null when neither arrived.
+     * `fallbackReason` records WHY a frame has no float data, because the
+     * three paths that drop to the 8-bit proxy used to only console.warn and
+     * the status bar went on claiming FP32 (see _updateBitDepthBadge).
+     */
+    _loadSequenceFrame(imgData, idx, generation) {
+        if (!imgData) return Promise.resolve(null);
+
+        const viewUrl = (filename, subfolder, type) => api.apiURL(
+            `/view?filename=${encodeURIComponent(filename)}`
+            + `&subfolder=${encodeURIComponent(subfolder || '')}`
+            + `&type=${type || 'temp'}`);
+
+        const payload = { img: null, hdr: null, fallbackReason: null, entry: imgData };
+
+        const imgPromise = new Promise((resolve) => {
+            if (!imgData.filename) { resolve(null); return; }
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            // Metadata the export and inspector paths read off the image.
+            img.exr_filename = imgData.exr_filename;
+            img.exr_subfolder = imgData.exr_subfolder ?? imgData.subfolder ?? '';
+            img.exr_type = imgData.exr_type ?? imgData.type ?? 'temp';
+            img.subfolder = imgData.subfolder;
+            img.type = imgData.type;
+            img.channel_names = imgData.channel_names;
+            img.metadata = imgData.metadata;
+            // What the proxy actually is, so the badge can say so rather than
+            // guess from the decoded bitmap.
+            img.source_width = imgData.source_width;
+            img.source_height = imgData.source_height;
+            img.preview_tonemapped = imgData.preview_tonemapped;
+            img.onload = () => resolve(img);
+            img.onerror = (e) => {
+                console.warn('[Radiance] Failed to load thumbnail:', imgData.filename, e);
+                resolve(null);
+            };
+            img.src = viewUrl(imgData.filename, imgData.subfolder, imgData.type);
+        });
+
+        let hdrPromise = Promise.resolve(null);
+        if (imgData.hdr_sidecar) {
+            const hdrUrl = viewUrl(imgData.hdr_sidecar, imgData.subfolder, imgData.type);
+            hdrPromise = fetch(hdrUrl)
+                .then((r) => r.arrayBuffer())
+                .then(async (buffer) => {
+                    const npy = await this._parseHDRBuffer(buffer);
+                    if (!npy) {
+                        // _parseRHDR returns null with no DecompressionStream
+                        // and on a payload-size integrity mismatch.
+                        payload.fallbackReason =
+                            'RHDR decode returned no data (missing DecompressionStream, or integrity mismatch)';
+                        return null;
+                    }
+                    npy.height = npy.shape[0];
+                    npy.width = npy.shape[1];
+                    npy.channels = npy.shape.length > 2 ? npy.shape[2] : 1;
+                    npy.exr_filename = imgData.exr_filename;
+                    npy.exr_subfolder = imgData.exr_subfolder ?? imgData.subfolder ?? '';
+                    npy.exr_type = imgData.exr_type ?? imgData.type ?? 'temp';
+                    npy.subfolder = imgData.subfolder;
+                    npy.type = imgData.type;
+                    if (imgData.metadata) {
+                        npy.metadata = { ...(npy.metadata || {}), ...imgData.metadata };
+                    }
+                    if (Array.isArray(imgData.channel_names)) {
+                        npy.channel_names = imgData.channel_names;
+                        if (!Array.isArray(npy.metadata?.channels)) {
+                            npy.metadata = {
+                                ...(npy.metadata || {}),
+                                channels: imgData.channel_names.map(name => ({
+                                    name, pixelType: imgData.hdr_fp32 ? 'FLOAT' : 'HALF',
+                                })),
+                            };
+                        }
+                    }
+                    // v4.2: backend scene stats (p1–p999, nit est, ev_range)
+                    if (imgData.hdr_stats) npy.hdrStats = imgData.hdr_stats;
+                    return npy;
+                })
+                .catch((e) => {
+                    payload.fallbackReason = `RHDR fetch failed (${e && e.message ? e.message : e})`;
+                    console.warn('[Radiance] Failed to load RHDR primary:', e);
+                    return null;
+                });
+        } else {
+            payload.fallbackReason = 'node wrote no HDR sidecar for this frame';
         }
-        return true;
+
+        // Exposure brackets ride with their frame so they are subject to the
+        // same window and the same concurrency bound, rather than being a
+        // second unbounded pass over the sequence.
+        const brackets = this._bracketByFrame ? this._bracketByFrame.get(idx) : null;
+        const loadBracket = (entry) => new Promise((resolve) => {
+            if (!entry || !entry.filename) { resolve(null); return; }
+            const b = new Image();
+            b.crossOrigin = 'anonymous';
+            b.onload = () => resolve(b);
+            b.onerror = () => {
+                console.warn('[Radiance] Failed to load exposure bracket:', entry.filename);
+                resolve(null);
+            };
+            b.src = viewUrl(entry.filename, entry.subfolder, entry.type);
+        });
+
+        const depthEntry = this._zdepthEntries ? this._zdepthEntries[idx] : null;
+
+        return Promise.all([
+            imgPromise,
+            hdrPromise,
+            loadBracket(brackets && brackets.low),
+            loadBracket(brackets && brackets.high),
+            loadBracket(depthEntry),
+        ]).then(([img, hdr, low, high, depth]) => {
+            if (this.generationID !== generation) return null;
+            if (!img && !hdr) return null;
+            payload.img = img;
+            payload.hdr = hdr;
+            payload.bracketLow = low;
+            payload.bracketHigh = high;
+            payload.zdepth = depth;
+            return payload;
+        });
+    }
+
+    /**
+     * Put a paged-in frame on screen. Split out of the old inline onload/then
+     * handlers so the scrub path and the arrival path agree.
+     */
+    _displaySequenceFrame(idx) {
+        const img = this.frameImages[idx] || null;
+        let hdr = this.frameHDRData[idx] || null;
+
+        if (hdr && this.renderer) {
+            let tex = null;
+            const frameId = `${this.generationID}:${idx}`;
+            try {
+                tex = hdr.fp16data
+                    ? this.renderer.loadFloat16TextureCached(
+                        frameId, hdr.fp16data, hdr.width, hdr.height, hdr.channels)
+                    : this.renderer.loadFloat32TextureCached(
+                        frameId, hdr.data, hdr.width, hdr.height, hdr.channels);
+            } catch (e) {
+                console.warn('[Radiance] HDR Texture creation error:', e);
+                tex = null;
+            }
+            if (!tex) {
+                // Third of the three paths that silently drop to the 8-bit
+                // proxy. Record it rather than only warning to the console.
+                this._noteHDRFallback(idx, 'GPU texture creation failed');
+                this.frameHDRData[idx] = null;
+                hdr = null;
+            }
+        }
+
+        if (hdr) {
+            this.hdrData = hdr;
+            this.imageWidth = hdr.width;
+            this.imageHeight = hdr.height;
+            // Replaces this.image with a sized canvas for the 2D paths, as the
+            // HDR arrival handler always did. The PNG stays in frameImages[idx]
+            // for the filmstrip and for the fallback below.
+            this.createPlaceholderImage(hdr.width, hdr.height);
+        } else {
+            this.hdrData = null;
+            this._hdrZoneStats = null;
+            this._updateHDRPeakBadge && this._updateHDRPeakBadge();
+            if (!img) return;
+            this.image = img;
+            this.imageWidth = img.width;
+            this.imageHeight = img.height;
+            if (this.renderer) this.renderer.loadImageTexture(img);
+        }
+
+        const depth = this.frameZdepthImages && this.frameZdepthImages[idx];
+        this.zdepthImage = depth || null;
+        if (depth && this.renderer) this.renderer.loadDepthTexture(depth);
+
+        this._probeInvalidate && this._probeInvalidate();
+
+        // Refit only when the resolution changed, so a scrub does not throw
+        // away the colourist's zoom and pan on every frame.
+        if (this._lastFrameW !== this.imageWidth || this._lastFrameH !== this.imageHeight) {
+            this.fitToView();
+        }
+        this._lastFrameW = this.imageWidth;
+        this._lastFrameH = this.imageHeight;
+
+        this.render();
+        this.updateInfo();
+        this.updateScopes();
+        if (hdr) this._computeHDRZoneStats();
+    }
+
+    /** Record why a frame has no float data, for the status-bar badge. */
+    _noteHDRFallback(idx, reason) {
+        if (!this._hdrFallbackReasons) this._hdrFallbackReasons = [];
+        this._hdrFallbackReasons[idx] = reason;
+        console.warn(`[Radiance] Frame ${idx} is displaying the 8-bit proxy: ${reason}`);
+    }
+
+    /** The reason the current frame is on the proxy, or null. */
+    _currentFallbackReason() {
+        return (this._hdrFallbackReasons && this._hdrFallbackReasons[this.currentFrame]) || null;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -6230,20 +6685,22 @@ else:
 
     setupKeyboardShortcuts() {
         // v2.5: Global document listener for standard pipeline reliability
+        // 3.5.0: keys belong to ONE viewer: the one last clicked or pointed at
+        // (or fullscreen). This used to fire for every visible viewer, so
+        // Space, 0 and [ ] hit all of them at once, and it took Ctrl/Cmd
+        // combinations away from ComfyUI.
+        const claim = () => { RadianceViewer._activeViewer = this; };
+        this.container.addEventListener('pointerdown', claim, true);
+        this.container.addEventListener('pointerenter', claim);
+        this.container.addEventListener('focusin', claim);
+        if (!RadianceViewer._activeViewer) RadianceViewer._activeViewer = this;
         this._docKeyHandler = (e) => {
-            // Ignore if in input fields
-            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-
-            // Only handle if viewer is the active component or in fullscreen
-            if (this.isFullscreen) {
-                this.handleKey(e);
-                return;
-            }
-
-            // Simple heuristic: if container is visible and not hidden behind other Comfy nodes
-            if (this.container.style.display !== 'none') {
-                this.handleKey(e);
-            }
+            const t = e.target;
+            if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+            if (e.ctrlKey || e.metaKey) return;
+            if (!this.isFullscreen && RadianceViewer._activeViewer !== this) return;
+            if (this.container.style.display === 'none' || !this.container.isConnected) return;
+            this.handleKey(e);
         };
         document.addEventListener('keydown', this._docKeyHandler);
     }
@@ -6351,11 +6808,22 @@ else:
             case '?': case '/': if (e.shiftKey) this.toggleHelp(); break;
             case 'f': this.fitToView(); break;
             case '1': this.setZoom(1.0); break;
-            case 'r': this.channel = 'r'; this.showZdepth = false; this.render(); break;
+            case 'r': if (e.shiftKey) break; this.channel = 'r'; this.showZdepth = false; this.render(); break;
             case 'g': if (e.shiftKey) { this.cycleGridMode(); } else if (!e.ctrlKey) { this.channel = 'g'; this.showZdepth = false; this.render(); } break;
-            case 'b': this.channel = 'b'; this.showZdepth = false; this.render(); break;
-            case 'l': this.channel = 'luma'; this.showZdepth = false; this.render(); break;
+            case 'b': if (e.shiftKey) break; this.channel = 'b'; this.showZdepth = false; this.render(); break;
+            // 3.5.0: Y = luma (L is Resolve/Avid "play forward" now, with J/K).
+            case 'y': this.channel = 'luma'; this.showZdepth = false; this.render(); break;
             case 'c': this.channel = 'rgb'; this.showZdepth = false; this.render(); break;
+            case 'j': if (!e.shiftKey) this.shuttle(-1); break;
+            case 'l': if (!e.shiftKey) this.shuttle(+1); break;
+            case 'i': this.setInPoint(); break;
+            case 'o': this.setOutPoint(); break;
+            case 'x':
+                if (e.altKey) { e.preventDefault(); this.clearInOut(); }
+                else this.cycleCompareMode();
+                break;
+            case 'home': e.preventDefault(); this.setFrame(this.inPoint ?? 0); break;
+            case 'end': e.preventDefault(); this.setFrame(this.outPoint ?? Math.max(0, (this.totalFrames || 1) - 1)); break;
             // RV binds nearest-neighbour to 'n'. Pixel-peeping through a
             // bilinear filter shows a blend of neighbours rather than pixels.
             case 'n': this.togglePixelFilter(); break;
@@ -6364,7 +6832,10 @@ else:
             case 'm': this.toggleParadeMode(); break;
             case 'v': this.toggleScope('vectorscope'); break;
             case 'e': this.falseColor = !this.falseColor; this.zebra = false; this.focusPeaking = false; this.showZdepth = false; this.render(); break;
-            case 'k': this.focusPeaking = !this.focusPeaking; this.falseColor = false; this.zebra = false; this.showZdepth = false; this.render(); break;
+            case 'k':
+                if (e.shiftKey) { this.focusPeaking = !this.focusPeaking; this.falseColor = false; this.zebra = false; this.showZdepth = false; this.render(); }
+                else this.shuttle(0);          // K: stop (J/K/L)
+                break;
             case 'z': this.toggleZdepth(); break;
             case 'q':
                 this.showLoupe = !this.showLoupe;
@@ -6375,10 +6846,11 @@ else:
                 this.renderOverlay();
                 break;
             case 'a':
-                if (e.shiftKey) { this.channel = 'a'; this.render(); }
-                else { this.cycleCompareMode(); }
+                // 3.5.0: A = alpha channel, as in RV (compare moved to X).
+                if (e.shiftKey) break;
+                this.channel = this.channel === 'a' ? 'rgb' : 'a'; this.render();
                 break;
-            case 's': if (!e.ctrlKey) this.cycleSafeAreas(); break;
+            case 's': if (!e.ctrlKey && !e.shiftKey) this.cycleSafeAreas(); break;
             case 'arrowleft':
                 if (this.activeTab === 'primaries') {
                     e.preventDefault();
@@ -6416,11 +6888,18 @@ else:
                 else if (this.isFullscreen) { this.exitFullscreen(); }
                 else if (this.showPromptPanel) { this.togglePromptPanel(); }
                 break;
-            case '=': case '+': this.adjustEV(0.5); break;
-            case '-': this.adjustEV(-0.5); break;
-            case '[': this.adjustEV(-0.5); break;   // v4.5: half-stop down (industry standard)
-            case ']': this.adjustEV(+0.5); break;   // v4.5: half-stop up
-            case '0': this.resetControls(); break;
+            // 3.5.0: -/= nudge the VIEWER f-stop (display only); the grade's
+            // exposure stays on Numpad +/-. [ ] set in/out (RV). 0 resets the
+            // viewer f-stop and gamma; it used to wipe the whole grade.
+            case '=': case '+': this.setViewExposure((this.viewExposure || 0) + 0.5); break;
+            case '-': this.setViewExposure((this.viewExposure || 0) - 0.5); break;
+            case '[': this.setInPoint(); break;
+            case ']': this.setOutPoint(); break;
+            case '0':
+                this.viewGamma = 1;
+                if (this._viewGammaInput) this._viewGammaInput.value = '1.00';
+                this.setViewExposure(0);
+                break;
             case 'p': if (!e.ctrlKey) this.togglePromptPanel(); break;
             case '`': case '~': this.toggleTerminal(); e.preventDefault(); break;
             case 'enter': if (e.shiftKey) this.runWorkflow(); break;
@@ -7038,18 +7517,25 @@ else:
                     ['1', '1:1 pixel zoom'],
                     ['Mouse Wheel', 'Zoom in/out'],
                     ['Shift+Drag', 'Pan image'],
-                    ['← →', 'Previous/Next frame']
+                    ['← →', 'Previous/Next frame'],
+                    ['Space', 'Play / pause'],
+                    ['J / K / L', 'Play reverse / stop / play forward'],
+                    ['I or [ / O or ]', 'Set in / out point'],
+                    ['Alt+X', 'Clear in/out'],
+                    ['Home / End', 'First / last frame (in / out)']
                 ]
             },
             {
                 category: 'Display', items: [
-                    ['R/G/B/L', 'View R/G/B/Luma channel'],
+                    ['R/G/B/Y', 'View R/G/B/Luma channel'],
                     ['C', 'RGB (color) view'],
-                    ['Shift+A', 'Alpha channel'],
-                    ['+/−', 'Adjust exposure'],
-                    ['0', 'Reset all controls'],
-                    ['E', 'False color'],
-                    ['K', 'Focus peaking (GPU)'],
+                    ['A', 'Alpha channel'],
+                    ['+/−', 'Viewer f-stop (display only)'],
+                    ['Numpad +/−', 'Grade exposure'],
+                    ['0', 'Reset viewer f-stop and gamma'],
+                    ['N', 'Nearest / linear magnification'],
+                    ['E', 'False color (ARRI)'],
+                    ['Shift+K', 'Focus peaking (GPU)'],
                     ['Q', 'Pixel loupe'],
                     ['Z', 'Z-Depth / Zebra']
                 ]
@@ -7063,7 +7549,7 @@ else:
                     ['Shift+G', 'Cycle grid modes'],
                     ['G', 'Green channel'],
                     ['S', 'Safe areas'],
-                    ['A', 'A/B compare'],
+                    ['X', 'A/B compare mode'],
                 ]
             },
             {
@@ -7215,7 +7701,8 @@ else:
         if (this.renderer && this.histogramCanvas && this.showHistogram) {
             // Use log scale for HDR images (data_range max > 1.0)
             const isHDR = this.hdrData && this.hdrData.data_range && this.hdrData.data_range[1] > 1.05;
-            this.renderer.renderHistogram(this.histogramCanvas, isHDR);
+            const _hs = this._scopeSource();
+            this.renderer.renderHistogram(this.histogramCanvas, isHDR, _hs.tex, _hs.isLinear);
         }
     }
 
@@ -7453,7 +7940,8 @@ else:
         if (!this.image || !this.renderer) return;
 
         // Use renderHistogram() which adds log-scale grid, HDR dotted line, and labels
-        this.renderer.renderHistogram(this.histogramCanvas, this.scopeLogView || false);
+        const _hs2 = this._scopeSource();
+        this.renderer.renderHistogram(this.histogramCanvas, this.scopeLogView || false, _hs2.tex, _hs2.isLinear);
     }
 
     toggleParadeMode() {
@@ -7463,13 +7951,63 @@ else:
         }
     }
 
+    /**
+     * 3.5.0: the float source resampled to w x h as 8-bit code values in its
+     * own encoding: sRGB-encoded data as is, linear data through the sRGB
+     * OETF (so 18 % grey plots at 46 %, and values above 1.0 at the top).
+     */
+    _scopeSourceBytes(w, h) {
+        const src = this.hdrData;
+        const sw = src.width, sh = src.height, c = src.channels || 4;
+        const data = src.data || null;
+        const half = src.fp16data || null;
+        const out = new Uint8ClampedArray(w * h * 4);
+        const lin = this.sourceTag?.encoding !== 'srgb';
+        let h2f = null;
+        if (!data && half) {
+            h2f = (u) => {
+                const s = (u & 0x8000) ? -1 : 1, e = (u >> 10) & 0x1f, m = u & 0x3ff;
+                return s * (e === 0 ? m * 2 ** -24 : e === 31 ? (m ? NaN : Infinity) : (1 + m / 1024) * 2 ** (e - 15));
+            };
+        }
+        const oetf = (x) => (x <= 0.0031308 ? x * 12.92 : 1.055 * Math.pow(x, 1 / 2.4) - 0.055);
+        for (let y = 0; y < h; y++) {
+            const sy = Math.min(sh - 1, Math.floor(y * sh / h));
+            for (let x = 0; x < w; x++) {
+                const sx = Math.min(sw - 1, Math.floor(x * sw / w));
+                const i = (sy * sw + sx) * c, o = (y * w + x) * 4;
+                for (let k = 0; k < 3; k++) {
+                    let v = data ? data[i + Math.min(k, c - 1)] : h2f(half[i + Math.min(k, c - 1)]);
+                    if (!Number.isFinite(v)) v = 0;
+                    if (lin) v = oetf(Math.max(v, 0));
+                    out[o + k] = Math.round(Math.min(1, Math.max(0, v)) * 255);
+                }
+                out[o + 3] = 255;
+            }
+        }
+        return out;
+    }
+
+    /**
+     * 3.5.0: what every scope measures: the displayed picture, graded and
+     * through the view, without overlays, at up to 512 px. The GPU scopes
+     * used to read the ungraded source texture, so grading never moved them.
+     */
+    _scopeSource() {
+        const r = this.renderer;
+        if (r?.readDisplaySignal && this.imageWidth && this.imageHeight) {
+            const s = Math.min(1, 512 / Math.max(this.imageWidth, this.imageHeight));
+            const res = r.readDisplaySignal(this.imageWidth * s, this.imageHeight * s, this.lutIntensity || 1.0, false);
+            if (res?.texture) return { tex: res.texture, isLinear: false };
+        }
+        return { tex: r?.textures?.image, isLinear: r?.isLinearTexture };
+    }
+
     updateWaveform() {
         if (!this.image || !this.renderer) return;
-
-        // v2.5: GPU-Accelerated Waveform (32-bit HDR)
-        const tex = this.renderer.textures.image;
+        const { tex, isLinear } = this._scopeSource();
         if (tex) {
-            this.renderer.renderScope('waveform', this.waveformCanvas, tex, this.renderer.isLinearTexture, this.waveformParadeMode);
+            this.renderer.renderScope('waveform', this.waveformCanvas, tex, isLinear, this.waveformParadeMode);
         }
     }
 
@@ -7477,38 +8015,12 @@ else:
     updateVectorscope() {
         if (!this.image || !this.renderer) return;
 
-        // v2.5: GPU-Accelerated Vectorscope
-        const tex = this.renderer.textures.image;
+        const { tex, isLinear } = this._scopeSource();
         if (tex) {
-            this.renderer.renderScope('vectorscope', this.vectorscopeCanvas, tex, this.renderer.isLinearTexture);
+            this.renderer.renderScope('vectorscope', this.vectorscopeCanvas, tex, isLinear);
 
-            // Draw Pro Overlays (Skin Tone Line, Targets) on top of GPU result
-            const vCtx = this.vectorscopeCtx;
-            const size = this.vectorscopeCanvas.width;
-            const cx = size / 2, cy = size / 2, rad = size / 2 - 10;
-
-            // Skin Tone Line (I-axis in YIQ, approx 123 deg)
-            vCtx.strokeStyle = 'rgba(255, 120, 80, 0.4)';
-            vCtx.lineWidth = 1.5;
-            vCtx.setLineDash([4, 4]);
-            const skinAng = (123 - 90) * Math.PI / 180;
-            vCtx.beginPath();
-            vCtx.moveTo(cx, cy);
-            vCtx.lineTo(cx + Math.cos(skinAng) * rad, cy + Math.sin(skinAng) * rad);
-            vCtx.stroke();
-            vCtx.setLineDash([]);
-
-            // Rec.709 Targets
-            const targets = [
-                { a: 103, c: '#f44', n: 'R' }, { a: 167, c: '#ff4', n: 'Y' },
-                { a: 241, c: '#4f4', n: 'G' }, { a: 283, c: '#4ff', n: 'C' },
-                { a: 347, c: '#44f', n: 'B' }, { a: 61, c: '#f4f', n: 'M' }
-            ];
-            targets.forEach(t => {
-                const ang = (t.a - 90) * Math.PI / 180;
-                vCtx.strokeStyle = t.c; vCtx.lineWidth = 1;
-                vCtx.strokeRect(cx + Math.cos(ang) * rad * 0.75 - 3, cy + Math.sin(ang) * rad * 0.75 - 3, 6, 6);
-            });
+            // BT.709 Cb/Cr graticule: targets from colour bars, same maths as the trace.
+            _vsGraticule(this.vectorscopeCtx, this.vectorscopeCanvas.width, this.vectorscopeCanvas.height, { labels: false });
         }
     }
 
@@ -7926,6 +8438,7 @@ else:
             this.panX = mx - (mx - this.panX) * (newZoom / this.zoom);
             this.panY = my - (my - this.panY) * (newZoom / this.zoom);
             this.zoom = newZoom;
+            this._viewIsFit = false;
             this.updateBottomBar();
             this.render();
         });
@@ -8073,6 +8586,7 @@ else:
                 // Panning strictly relies on clientX delta, scaling isn't necessary for delta-drag
                 this.panX += e.clientX - this.lastMouseX;
                 this.panY += e.clientY - this.lastMouseY;
+                this._viewIsFit = false;
                 this.lastMouseX = e.clientX;
                 this.lastMouseY = e.clientY;
                 this.render();
@@ -8233,10 +8747,34 @@ else:
         }
         const rect = this.canvasWrapper.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) return;
-        this.canvas.width = Math.floor(rect.width);
-        this.canvas.height = Math.floor(rect.height);
-        this.overlayCanvas.width = this.canvas.width;
-        this.overlayCanvas.height = this.canvas.height;
+        const oldW = this.canvas.width, oldH = this.canvas.height;
+        // 3.5.0: device pixels. The canvas was sized in CSS pixels, so on a
+        // scaled display (150 % Windows, Retina) every image pixel at "1:1"
+        // was stretched over 1.5-2 screen pixels and softened. Pan and zoom
+        // are in canvas pixels and the pointer maths already divides by the
+        // canvas/CSS ratio, so both stay correct.
+        this.dpr = window.devicePixelRatio || 1;
+        const newW = Math.floor(rect.width * this.dpr), newH = Math.floor(rect.height * this.dpr);
+        this.canvas.width = newW;
+        this.canvas.height = newH;
+        this.overlayCanvas.width = newW;
+        this.overlayCanvas.height = newH;
+
+        // BLACK-VIEWER FIX (2 of 2): the canvas changed size and the view did
+        // not follow. pan/zoom are in canvas pixels, so a frame fitted while
+        // the node was still laying out (measured live: canvas 1637 px tall,
+        // then 811) kept panY = 717 and was drawn off the bottom edge; the
+        // visible viewport stayed black with only the crosshair. A view that
+        // is still auto-fitted is refitted to the new size. A view the user
+        // has zoomed or panned keeps the same image point at the centre.
+        if (this.image && (oldW !== newW || oldH !== newH)) {
+            if (this._viewIsFit !== false) {
+                this.fitToView();
+                return;
+            }
+            this.panX += (newW - oldW) / 2;
+            this.panY += (newH - oldH) / 2;
+        }
         this.render();
     }
 
@@ -8945,13 +9483,34 @@ else:
         this._probeInvalidate();   // the probe measures this frame, not the last one
     }
 
+    /** 3.5.0: the compare sequence follows the playhead (it stayed on frame 0). */
+    _updateCompareForFrame(idx) {
+        const list = this.frameCompareImages;
+        if (!list || !list.length) return;
+        const img = list[Math.min(idx, list.length - 1)];
+        if (!img || img === this.compareImage) return;
+        this.compareImage = img;
+        this.diffCanvas = null;
+        if (this.renderer?.loadCompareTexture) {
+            try { this.renderer.loadCompareTexture(img); } catch (e) { /* backend without compare */ }
+        }
+    }
+
     setCompareImage(img) {
         this.compareImage = img;
         this.diffCanvas = null; // Clear difference cache
         if (this.renderer && this.renderer.loadCompareTexture && img) {
-            this.renderer.loadCompareTexture(img);
+            try {
+                this.renderer.loadCompareTexture(img);
+            } catch (e) {
+                this._termLog?.('warn', `[Compare] This renderer cannot show a compare image: ${e.message}`);
+            }
         }
-        if (this.compareMode === 'none') this.compareMode = 'wipe';
+        if (this.compareMode === 'none') {
+            this.compareMode = 'wipe';
+            this.wipeEnabled = true;
+            if (this.renderer?.setWipe) this.renderer.setWipe(this.wipePosition ?? 0.5, true);
+        }
         this.render();
     }
 
@@ -8977,6 +9536,7 @@ else:
                 this._seqRAF = null;
             }
             this.lastFrameTime = performance.now();
+            this.droppedFrames = 0;
             this._seqPlaybackLoop();
         } else {
             // Stop the RAF loop immediately
@@ -9004,11 +9564,25 @@ else:
         const interval = 1000 / (this.playbackFps || 24);
 
         if (now - this.lastFrameTime >= interval) {
-            this.nextFrame();
-            this.lastFrameTime = now - ((now - this.lastFrameTime) % interval);
+            // 3.5.0: the next frame may not be paged in yet. "Every frame"
+            // (default, what a review needs) waits for it; "realtime" keeps the
+            // clock and counts the frame as dropped. It used to move the
+            // counter on while the previous picture stayed up, silently.
+            const [a, b] = this._range();
+            const dir = this.playDirection || 1;
+            let next = this.currentFrame + dir;
+            if (next > b) next = a; if (next < a) next = b;
+            const ready = this._frameReady(next);
+            if (!ready && this.playEveryFrame !== false) {
+                this._stallCount = (this._stallCount || 0) + 1;
+            } else {
+                if (!ready) this.droppedFrames = (this.droppedFrames || 0) + 1;
+                this._advance();
+                this.lastFrameTime = now - ((now - this.lastFrameTime) % interval);
+            }
         }
 
-        this._seqRAF = requestAnimationFrame(() => this._seqPlaybackLoop());
+        if (this.isPlaying) this._seqRAF = requestAnimationFrame(() => this._seqPlaybackLoop());
     }
 
     // ── Video file playback ───────────────────────────────────────────────────
@@ -9201,6 +9775,101 @@ else:
         this.videoEl.currentTime = Math.max(0, Math.min(1, pct)) * this.videoEl.duration;
     }
 
+    // ── 3.5.0 transport: in/out, ping-pong, shuttle, dropped frames ─────────
+    _range() {
+        const last = Math.max(0, (this.totalFrames || 1) - 1);
+        const a = Math.max(0, Math.min(this.inPoint ?? 0, last));
+        const b = Math.max(a, Math.min(this.outPoint ?? last, last));
+        return [a, b];
+    }
+
+    setInPoint(f = this.currentFrame) {
+        this.inPoint = f;
+        if (this.outPoint != null && this.outPoint < f) this.outPoint = null;
+        this._termLog?.('info', `[Play] In: ${f + 1}`);
+        this._refreshSequenceDock?.(); this.renderOverlay?.();
+    }
+
+    setOutPoint(f = this.currentFrame) {
+        this.outPoint = f;
+        if (this.inPoint != null && this.inPoint > f) this.inPoint = null;
+        this._termLog?.('info', `[Play] Out: ${f + 1}`);
+        this._refreshSequenceDock?.(); this.renderOverlay?.();
+    }
+
+    clearInOut() {
+        this.inPoint = null; this.outPoint = null;
+        this._termLog?.('info', '[Play] In/out cleared');
+        this._refreshSequenceDock?.(); this.renderOverlay?.();
+    }
+
+    /** J/K/L: dir -1 play reverse, 0 stop, +1 play forward. */
+    shuttle(dir) {
+        if (this.videoMode && this.videoEl) {
+            if (dir === 0) this.videoEl.pause(); else if (dir > 0) this.videoEl.play();
+            return;
+        }
+        if (dir === 0) {
+            if (this.isPlaying) this.togglePlayback();
+            return;
+        }
+        this.playDirection = dir;
+        if (!this.isPlaying) this.togglePlayback();
+    }
+
+    /** One playback step inside [in, out], honouring direction and loop mode. */
+    _advance() {
+        const [a, b] = this._range();
+        const dir = this.playDirection || 1;
+        let n = this.currentFrame + dir;
+        if (n > b || n < a) {
+            const mode = this.loopMode || (this.loop ? 'loop' : 'once');
+            if (mode === 'pingpong') {
+                this.playDirection = -dir;
+                n = Math.max(a, Math.min(b, this.currentFrame - dir));
+            } else if (mode === 'loop') {
+                n = dir > 0 ? a : b;
+            } else {
+                this.isPlaying = false;
+                this._updatePlayBtn?.();
+                return false;
+            }
+        }
+        this.setFrame(n);
+        return true;
+    }
+
+    _frameReady(i) {
+        return !!(this.frameHDRData?.[i] || this.frameImages?.[i]);
+    }
+
+    /** 3.5.0: viewer-only f-stop (keys and the bar both land here). */
+    setViewExposure(stops) {
+        this.viewExposure = Math.max(-16, Math.min(16, Number(stops) || 0));
+        if (this._viewEvInput) this._viewEvInput.value = this.viewExposure.toFixed(1);
+        this.render();
+    }
+
+    /** 3.5.0: one playback rate for playback, dock, overlay and settings. */
+    setPlaybackFps(fps) {
+        const v = Number(fps);
+        if (!Number.isFinite(v) || v <= 0) return;
+        this.playbackFps = v;
+        this.frameRate = v;
+        if (this.videoEl) this._videoNativeFps = v;
+        if (this._fpsSelect) {
+            const key = String(v);
+            if (![...this._fpsSelect.options].some((o) => o.value === key)) {
+                const o = document.createElement('option');
+                o.value = key; o.textContent = `${+v.toFixed(3)} fps`;
+                this._fpsSelect.appendChild(o);
+            }
+            this._fpsSelect.value = key;
+        }
+        this._refreshSequenceDock?.();
+        this.renderOverlay?.();
+    }
+
     // playbackLoop stays as alias for the sequence version
     playbackLoop() { this._seqPlaybackLoop(); }
 
@@ -9240,6 +9909,19 @@ else:
         if (idx === this.currentFrame) return;
         this.currentFrame = idx;
 
+        // Move the paging window with the playhead. The viewer no longer holds
+        // the whole sequence, so a scrub outside the window has to page the
+        // frame in on demand; ensure() jumps it ahead of the read-ahead queue
+        // and _displaySequenceFrame() puts it up when it lands.
+        if (this._frameWindow) {
+            this._frameWindow.setPlayhead(idx);
+            if (!this._frameWindow.has(idx)) {
+                this._frameWindow.ensure(idx).then(() => {
+                    if (this.currentFrame === idx) this._displaySequenceFrame(idx);
+                });
+            }
+        }
+
         // Update Display
         if (this.frameHDRData[idx]) {
             // We have HDR data for this frame
@@ -9249,10 +9931,13 @@ else:
             this.imageHeight = npy.height;
 
             if (this.renderer) {
+                // 3.5.0: the cached loaders, like _displaySequenceFrame. The
+                // uncached ones re-uploaded the whole frame on every step.
+                const frameId = `${this.generationID}:${idx}`;
                 if (npy.fp16data) {
-                    this.renderer.loadFloat16Texture(npy.fp16data, npy.width, npy.height, npy.channels);
+                    this.renderer.loadFloat16TextureCached(frameId, npy.fp16data, npy.width, npy.height, npy.channels);
                 } else {
-                    this.renderer.loadFloat32Texture(npy.data, npy.width, npy.height, npy.channels);
+                    this.renderer.loadFloat32TextureCached(frameId, npy.data, npy.width, npy.height, npy.channels);
                 }
             }
         } else if (this.frameImages[idx]) {
@@ -9263,6 +9948,8 @@ else:
             this.image = this.frameImages[idx];
             if (this.renderer) this.renderer.loadImageTexture(this.image);
         }
+
+        this._updateCompareForFrame(idx);
 
         // Update Z-Depth for the new frame
         if (this.frameZdepthImages && this.frameZdepthImages[idx]) {
@@ -9308,25 +9995,11 @@ else:
 
         // Timecode in HH:MM:SS:FF format based on playbackFps
         if (this._videoTimecode && this.playbackFps) {
-            const fps = this.playbackFps;
-            const totalSec = this.currentFrame / fps;
-            const h = Math.floor(totalSec / 3600);
-            const m = Math.floor((totalSec % 3600) / 60);
-            const s = Math.floor(totalSec % 60);
-            const f = this.currentFrame % Math.round(fps);
-            this._videoTimecode.textContent =
-                `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(f).padStart(2, '0')}`;
+            this._videoTimecode.textContent = _smpteTC(this.currentFrame, this.playbackFps);
         }
 
         if (this._videoDuration && this.playbackFps && this.totalFrames > 1) {
-            const fps = this.playbackFps;
-            const totalSec = (this.totalFrames - 1) / fps;
-            const h = Math.floor(totalSec / 3600);
-            const m = Math.floor((totalSec % 3600) / 60);
-            const s = Math.floor(totalSec % 60);
-            const f = (this.totalFrames - 1) % Math.round(fps);
-            this._videoDuration.textContent =
-                `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(f).padStart(2, '0')}`;
+            this._videoDuration.textContent = _smpteTC(this.totalFrames - 1, this.playbackFps);
         }
 
         this._refreshSequenceDock?.();
@@ -9628,6 +10301,7 @@ else:
         this.zoom = z;
         this.panX = (w - this.imageWidth * this.zoom) / 2;
         this.panY = (h - this.imageHeight * this.zoom) / 2;
+        this._viewIsFit = true;   // resize() refits a fitted view
         this.updateBottomBar();
         this.render();
     }
@@ -9642,6 +10316,7 @@ else:
         const wy = (cy - this.panY) / oldZ;
 
         this.zoom = z;
+        this._viewIsFit = false;
         // Recalculate pan to keep world point at center
         this.panX = cx - wx * this.zoom;
         this.panY = cy - wy * this.zoom;
@@ -9808,6 +10483,9 @@ else:
             };
             this.renderer.setDisplayLutMode(lutMap[this.displayLut] || 0);
             this.renderer.setInputLutMode(lutMap[this.inputSpace] || 0);
+            // 3.5.0: viewer-only f-stop and gamma (never in exports or scopes).
+            this.renderer.viewExposure = this.viewExposure || 0;
+            this.renderer.viewGamma = this.viewGamma || 1;
 
             // v2.3: Denoise & Depth Eval
             this.renderer.setDenoise(this.denoise || 0.0);
@@ -9874,6 +10552,18 @@ else:
             ctx.translate(this.panX, this.panY);
             ctx.scale(this.zoom, this.zoom);
 
+            // 3.5.0: the zoom happens in this blit, so this is where the pixel
+            // filter has to act. Smoothing was always on here, which made the
+            // Nearest toggle (the renderer-side filter samples 1:1) do nothing.
+            // Below 1:1: high-quality smoothing. From 1:1 up: the user's
+            // choice, nearest by default, so each image pixel is a crisp block.
+            if (this.zoom < 1) {
+                ctx.imageSmoothingEnabled = true;
+                ctx.imageSmoothingQuality = 'high';
+            } else {
+                ctx.imageSmoothingEnabled = this.pixelFilter !== 'nearest';
+            }
+
             // Draw the GPU-rendered image
             ctx.drawImage(this.glCanvas, 0, 0);
 
@@ -9909,9 +10599,8 @@ else:
         }
 
         // Ensure high quality scaling
-        ctx.imageSmoothingEnabled = this.zoom < 1.0; // Smooth when downscaling, pixelated when upscaling?
-        if (this.zoom > 2.0) ctx.imageSmoothingEnabled = false; // Pixel art look for high zoom
-        else ctx.imageSmoothingQuality = 'high';
+        ctx.imageSmoothingEnabled = this.zoom < 1.0 || this.pixelFilter !== 'nearest';
+        ctx.imageSmoothingQuality = 'high';
 
         const cmpImg = this.compareImage || (this.frameImages && this.frameImages[this.currentFrame]) || this.videoEl || this.image;
 
@@ -9985,10 +10674,12 @@ else:
             `;
             this.canvasWrapper.appendChild(this._autoTonemapBadge);
         }
-        const isAutoACES = this.renderer && this.renderer.isLinearTexture &&
-            (this.displayLut === 'None' || !this.displayLut);
-        if (isAutoACES) {
-            this._autoTonemapBadge.textContent = 'ACES (Auto)';
+        // 3.5.0: say when the picture is the built-in approximation (OCIO not
+        // up yet, or unavailable) rather than calling it ACES.
+        const isApprox = this.renderer && this.renderer.isLinearTexture && !this.ocioActive &&
+            (this.displayLut === 'None' || !this.displayLut || this._viewApprox);
+        if (isApprox) {
+            this._autoTonemapBadge.textContent = 'Filmic approx. (OCIO off)';
             this._autoTonemapBadge.style.opacity = '1';
         } else {
             this._autoTonemapBadge.style.opacity = '0';
@@ -11446,7 +12137,7 @@ else:
             { label: 'S-Log3', value: 'IDT: S-Log3 → Linear' },
         ], inputSpaceValue, v => {
             this.inputSpace = v;
-            localStorage.setItem('radiance_hud_input_space', this.inputSpace);
+            this._userSetIDT = true;
             this.requestRender();
         });
         field('Output Transform', [
@@ -11457,9 +12148,7 @@ else:
             'Reinhard Tonemap',
             'ACES Filmic',
         ], ['ACES 1.3 (ODT)', 'ACES 2.0'].includes(this.displayLut) ? 'ACES Filmic' : (this.displayLut || 'None'), v => {
-            this.displayLut = v;
-            localStorage.setItem('radiance_hud_display_lut', this.displayLut);
-            this.requestRender();
+            this._setManualDisplayLut(v);
         });
 
         const slider = (parentEl, label, min, max, value, step, cb, cls = '') => {
@@ -11729,10 +12418,11 @@ else:
             return;
         }
         try {
-            if (canvases.histogram) this.renderer.renderHistogram(canvases.histogram, this.scopeLogView || false);
-            if (canvases.waveform) this.renderer.renderScope('waveform', canvases.waveform, tex, this.renderer.isLinearTexture, false);
-            if (canvases.parade) this.renderer.renderScope('waveform', canvases.parade, tex, this.renderer.isLinearTexture, true);
-            if (canvases.vectorscope) this.renderer.renderScope('vectorscope', canvases.vectorscope, tex, this.renderer.isLinearTexture, false);
+            const src = this._scopeSource();
+            if (canvases.histogram) this.renderer.renderHistogram(canvases.histogram, this.scopeLogView || false, src.tex, src.isLinear);
+            if (canvases.waveform) this.renderer.renderScope('waveform', canvases.waveform, src.tex, src.isLinear, false);
+            if (canvases.parade) this.renderer.renderScope('waveform', canvases.parade, src.tex, src.isLinear, true);
+            if (canvases.vectorscope) this.renderer.renderScope('vectorscope', canvases.vectorscope, src.tex, src.isLinear, false);
         } catch (err) {
             console.warn('[Radiance] Reference scopes failed:', err);
             Object.entries(canvases).forEach(([mode, canvas]) => this._drawReferenceScopeEmpty(canvas, mode.toUpperCase()));
@@ -15637,20 +16327,12 @@ else:
      * copy figures from.
      */
     formatFramePosition(frame = this.currentFrame, total = this.totalFrames) {
-        const fps = this.frameRate || 24;
+        const fps = this.playbackFps || this.frameRate || 24;
         const f = Math.max(0, Math.round(frame));
         if (this.timeDisplay === 'frames') return `${f + 1} / ${total}`;
         if (this.timeDisplay === 'seconds') return `${(f / fps).toFixed(2)}s`;
-        // Non-drop. Drop-frame at 29.97 renumbers frames rather than dropping
-        // them; emitting a ';' separator without that renumbering would be
-        // wrong in the one place people copy figures from.
-        const totalSec = f / fps;
-        const hh = Math.floor(totalSec / 3600);
-        const mm = Math.floor((totalSec % 3600) / 60);
-        const ss = Math.floor(totalSec % 60);
-        const ff = Math.round(f % fps);
-        const p = (n) => String(n).padStart(2, '0');
-        return `${p(hh)}:${p(mm)}:${p(ss)}:${p(ff)}`;
+        // 3.5.0: SMPTE, integer timebase, drop-frame (';') at 29.97 / 59.94.
+        return _smpteTC(f, fps);
     }
 
     /** Cycle frames → seconds → timecode. */
@@ -15660,6 +16342,125 @@ else:
         localStorage.setItem('radiance_time_display', this.timeDisplay);
         this._lastRenderContent?.();
         this.renderOverlay();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 3.5.0 VIEW MANAGEMENT
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /** Apply the node's tag for this result: what the pixels are. */
+    _applySourceTag(tag) {
+        const enc = tag?.encoding === 'srgb' ? 'srgb' : 'linear';
+        this.sourceTag = {
+            encoding: enc,
+            colorspace: tag?.colorspace || (enc === 'srgb' ? 'sRGB Encoded Rec.709 (sRGB)' : 'Linear Rec.709 (sRGB)'),
+        };
+        this.renderer?.setSourceEncoding?.(enc);
+        if (!this._userSetIDT) {
+            this.inputSpace = 'None';
+            this.renderer?.setInputLutMode?.(0);
+        }
+        this._applyView();
+    }
+
+    /** 'auto' resolved against the current source. */
+    _effectiveView() {
+        if (this.viewMode && this.viewMode !== 'auto') return this.viewMode;
+        return this.sourceTag?.encoding === 'srgb' ? 'srgb' : 'aces2';
+    }
+
+    setViewMode(mode) {
+        this.viewMode = mode;
+        if (mode !== 'manual') {
+            try { localStorage.setItem('radiance_view_mode', mode); } catch { /* private mode */ }
+            // Picking a view here is explicit: it takes the display back from
+            // a config loaded in the colour panel.
+            this._ocioUserConfig = false;
+        }
+        if (this._viewSelect && this._viewSelect.value !== mode) this._viewSelect.value = mode;
+        this._applyView();
+    }
+
+    /** An explicit pick from the Output Transform / LUT menus. */
+    _setManualDisplayLut(value) {
+        this.viewMode = 'manual';
+        if (this._viewSelect) this._viewSelect.value = 'manual';
+        this._ocioAutoOff();
+        this._viewApprox = false;
+        this.displayLut = value;
+        this.render?.();
+    }
+
+    _ocioAutoOff() {
+        this._ocioAutoToken = (this._ocioAutoToken || 0) + 1;   // cancel an in-flight auto load
+        if (this._ocioAutoActive) {
+            this._ocioAutoActive = false;
+            this.ocioActive = false;
+            this.renderer?.setOCIODisplay?.(null);
+        }
+    }
+
+    _applyView() {
+        if (this._ocioUserConfig) { this.render?.(); return; }    // the show's config decides
+        const v = this._effectiveView();
+        if (v === 'manual') { this.render?.(); return; }
+        if (v === 'aces2' || v === 'aces13') {
+            // The approximation holds the picture only until OCIO is up.
+            this.displayLut = 'ACES Filmic';
+            this._viewApprox = true;
+            const aces2 = v === 'aces2';
+            // Display P3 output (P3 monitor, chosen in the bar): ACES 2.0's own
+            // P3 D65 view, and the drawing buffer is tagged display-p3.
+            const p3 = aces2 && this.displayTarget === 'Display P3' && this.displayP3Capable;
+            const source = this.sourceTag?.encoding === 'srgb'
+                ? 'Linear Rec.709 (sRGB)'          // the shader has already decoded sRGB
+                : (this.sourceTag?.colorspace || 'Linear Rec.709 (sRGB)');
+            this._ocioAuto(
+                aces2 ? 'ocio://studio-config-v4.0.0_aces-v2.0_ocio-v2.5'
+                      : 'ocio://studio-config-v2.2.0_aces-v1.3_ocio-v2.4',
+                aces2 ? 'ACES 2.0 studio (auto)' : 'ACES 1.3 studio (auto)',
+                source, p3 ? 'Display P3 - Display' : 'sRGB - Display',
+                aces2 ? (p3 ? 'ACES 2.0 - SDR 100 nits (P3 D65)' : 'ACES 2.0 - SDR 100 nits (Rec.709)')
+                      : 'ACES 1.0 - SDR Video');
+        } else {
+            this._ocioAutoOff();
+            this._viewApprox = false;
+            this.renderer?.setDisplayColorSpace?.('srgb');
+            this.displayLut = v === 'srgb' ? 'sRGB (Display)'
+                : v === 'rec709' ? 'Rec.709 (Broadcast)' : 'ACES Filmic';
+        }
+        this.render?.();
+    }
+
+    /** Load one of the bundled configs (once) and show source through view. */
+    async _ocioAuto(builtin, label, source, display, view) {
+        const token = (this._ocioAutoToken = (this._ocioAutoToken || 0) + 1);
+        if (!this.ocio || this._ocioAutoConfigId !== builtin) {
+            const boot = await _ocioInit();
+            if (token !== this._ocioAutoToken) return;
+            if (!boot.ok) {
+                this._ocioSetStatus('error', `${boot.error} Showing the built-in filmic approximation.`);
+                this.render?.();
+                return;
+            }
+            const loaded = await _ocioLoadConfig({ builtin }, { name: label });
+            if (token !== this._ocioAutoToken) return;
+            if (loaded.error) {
+                this._ocioSetStatus('error', `${loaded.error} Showing the built-in filmic approximation.`);
+                this.render?.();
+                return;
+            }
+            this.ocio = loaded;
+            this._ocioAutoConfigId = builtin;
+        }
+        if (this._ocioUserConfig) return;
+        this.ocioSource = source;
+        this.ocioDisplay = display;
+        this.ocioView = view;
+        this._ocioAutoActive = true;
+        this._ocioApply();
+        if (this.ocioActive) this._viewApprox = false;
+        else this._ocioAutoActive = false;
     }
 
     _ocioSetStatus(level, text) {
@@ -15691,6 +16492,9 @@ else:
         }
 
         this.ocio = loaded;
+        this._ocioUserConfig = true;          // a config the user chose owns the display
+        this._ocioAutoConfigId = null;
+        this._ocioAutoActive = false;
         this.ocioDisplay = loaded.defaultDisplay;
         this.ocioView = loaded.defaultView;
         this.ocioSource = loaded.suggestedSource;
@@ -15725,6 +16529,10 @@ else:
             this._ocioDisable(res?.error || 'This renderer cannot apply an OCIO transform.');
             return;
         }
+        // 3.5.0: the values OCIO writes are encoded for this display; tell the
+        // browser. Only "Display P3" is the web's display-p3 (sRGB transfer);
+        // DCI-style "P3-D65" (gamma 2.6) is not.
+        this.renderer?.setDisplayColorSpace?.(/^Display P3/.test(this.ocioDisplay || '') ? 'display-p3' : 'srgb');
         this.ocioActive = true;
         this._ocioSetStatus(
             built.isNoOp ? 'warn' : 'ok',
@@ -15740,6 +16548,7 @@ else:
     _ocioDisable(reason = null) {
         this.ocioActive = false;
         this.renderer?.setOCIODisplay?.(null);
+        this.renderer?.setDisplayColorSpace?.('srgb');
         if (reason) this._ocioSetStatus('error', `${reason} Radiance's own display pipeline is in use.`);
         this._lastRenderContent?.();
         this.render();
@@ -15754,7 +16563,7 @@ else:
         head.innerHTML = `
             <div style="color:#888; font-size:10px; text-transform:uppercase; font-weight:bold; letter-spacing:0.6px;">Colour Management</div>
             <div style="font-size:9px; color:${this.ocioActive ? '#00ffcc' : 'rgba(255,255,255,0.25)'}; font-weight:700; letter-spacing:0.5px;">
-                ${this.ocioActive ? 'OCIO ACTIVE' : 'ACES 1.3 (built in)'}
+                ${this.ocioActive ? (this._ocioAutoActive ? 'OCIO AUTO' : 'OCIO ACTIVE') : 'BUILT-IN VIEW'}
             </div>`;
         group.appendChild(head);
 
@@ -15816,8 +16625,12 @@ else:
         if (this.ocio) {
             loadRow.appendChild(button('✕ USE BUILT-IN', () => {
                 this.ocio = null;
+                this._ocioUserConfig = false;
+                this._ocioAutoConfigId = null;
+                this._ocioAutoActive = false;
                 this._ocioDisable();
-                this._ocioSetStatus('ok', 'Using Radiance\'s own ACES 1.3 pipeline.');
+                this._ocioSetStatus('ok', 'Back to the viewer\'s own view (see the View menu).');
+                this._applyView();
                 this._lastRenderContent?.();
             }));
         }
@@ -15843,16 +16656,18 @@ else:
             box.appendChild(row('Bundled', bSel));
         } else if (!_ocioReady()) {
             box.appendChild(button('⚙ START OPENCOLORIO', () => this._ocioLoad(
-                { builtin: 'ocio://cg-config-v2.2.0_aces-v1.3_ocio-v2.4' }, 'ACES CG (bundled)')));
+                { builtin: 'ocio://studio-config-v4.0.0_aces-v2.0_ocio-v2.5' }, 'ACES 2.0 studio (bundled)')));
         }
 
         // ── Input / Display / View ──────────────────────────────────────────
         if (this.ocio) {
             const spaces = this.ocio.colorSpaces.map((c) => c.name);
             box.appendChild(row('Input', select(spaces, this.ocioSource, (v) => {
+                this._ocioUserConfig = true;
                 this.ocioSource = v; this._ocioApply();
             })));
             box.appendChild(row('Display', select(this.ocio.displays, this.ocioDisplay, (v) => {
+                this._ocioUserConfig = true;
                 this.ocioDisplay = v;
                 const views = this.ocio.viewsByDisplay[v] || [];
                 // The previous view may not exist on the new display. Keeping
@@ -15863,6 +16678,7 @@ else:
             })));
             box.appendChild(row('View', select(
                 this.ocio.viewsByDisplay[this.ocioDisplay] || [], this.ocioView, (v) => {
+                    this._ocioUserConfig = true;
                     this.ocioView = v; this._ocioApply();
                 })));
 
@@ -17337,11 +18153,25 @@ else:
         // transforms"; with it off the scope reads the source as loaded, with it
         // on it reads what the display receives. The scopes used to always take
         // the second and never say so.
+        // 3.5.0: "transformed" reads the displayed picture without overlays
+        // (it used to read the finished canvas, so false colour, zebra, the
+        // wipe and grids were measured as picture). "Source" reads the float
+        // source through its own encoding (it used to read the PNG preview,
+        // which for a linear source is a display image).
         const canUseGL = !!(this.glCanvas && this.glCanvas.width > 0);
-        const srcCanvas = (this.scopeTransformed && canUseGL) ? this.glCanvas : this.image;
         this._scopeMeasuredTransformed = this.scopeTransformed && canUseGL;
-        tctx.drawImage(srcCanvas, 0, 0, sampleW, sampleH);
-        const imgData = tctx.getImageData(0, 0, sampleW, sampleH);
+        let imgData = null;
+        if (this._scopeMeasuredTransformed && this.renderer?.readDisplaySignal) {
+            const sig = this.renderer.readDisplaySignal(sampleW, sampleH, this.lutIntensity || 1.0, true);
+            if (sig?.data) imgData = { data: sig.data };
+        } else if (!this.scopeTransformed && this.hdrData) {
+            imgData = { data: this._scopeSourceBytes(sampleW, sampleH) };
+        }
+        if (!imgData) {
+            const srcCanvas = this._scopeMeasuredTransformed ? this.glCanvas : this.image;
+            tctx.drawImage(srcCanvas, 0, 0, sampleW, sampleH);
+            imgData = tctx.getImageData(0, 0, sampleW, sampleH);
+        }
 
         // ─── Optional Log Transform ─────────────────────────
         // Applies a simplified LogC-style curve (log base ~300) to pixels so that
@@ -17636,61 +18466,17 @@ else:
     _drawScopeVectorscope(ctx, data, w, h) {
         ctx.fillStyle = '#050508';
         ctx.fillRect(0, 0, w, h);
-
-        const cx = w / 2, cy = h / 2;
-        const rad = Math.min(cx, cy) - 10;
-
-        // Graticule rings
-        ctx.strokeStyle = '#1a1a1a'; ctx.lineWidth = 2;
-        [0.25, 0.5, 0.75, 1.0].forEach(r => {
-            ctx.beginPath(); ctx.arc(cx, cy, rad * r, 0, Math.PI * 2); ctx.stroke();
-        });
-
-        // Crosshair
-        ctx.strokeStyle = '#1a1a1a';
-        ctx.beginPath(); ctx.moveTo(cx, cy - rad); ctx.lineTo(cx, cy + rad); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(cx - rad, cy); ctx.lineTo(cx + rad, cy); ctx.stroke();
-
-        // Rec.709 color targets
-        const targets = [
-            { a: 103, c: '#f33', l: 'R' },
-            { a: 167, c: '#ff0', l: 'Yl' },
-            { a: 241, c: '#0f0', l: 'G' },
-            { a: 283, c: '#0ff', l: 'Cy' },
-            { a: 347, c: '#33f', l: 'B' },
-            { a: 61, c: '#f0f', l: 'Mg' },
-        ];
-        targets.forEach(t => {
-            const ang = (t.a - 90) * Math.PI / 180;
-            const tx = cx + Math.cos(ang) * rad * 0.75;
-            const ty = cy + Math.sin(ang) * rad * 0.75;
-            ctx.fillStyle = t.c;
-            ctx.beginPath(); ctx.arc(tx, ty, 6, 0, Math.PI * 2); ctx.fill();
-            ctx.fillStyle = '#555'; ctx.font = '16px monospace';
-            ctx.fillText(t.l, tx + 10, ty + 6);
-        });
-
-        // Skin Tone Indicator (I-Line)
-        ctx.strokeStyle = 'rgba(255, 140, 100, 0.4)';
-        ctx.lineWidth = 3;
-        ctx.setLineDash([6, 6]);
-        const iLineAng = (123 - 90) * Math.PI / 180;
-        ctx.beginPath();
-        ctx.moveTo(cx, cy);
-        ctx.lineTo(cx + Math.cos(iLineAng) * rad * 0.9, cy + Math.sin(iLineAng) * rad * 0.9);
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        // Plot pixels
-        ctx.globalAlpha = 0.04;
-        const step = Math.max(1, Math.floor(data.length / 4 / 25000));
+        // 3.5.0: BT.709 Cb/Cr (see radiance_vectorscope.js). The trace used PAL
+        // U/V weights with a x2.2 gain, and the targets sat at angles rotated
+        // by the screen's y axis, so the two never lined up.
+        _vsGraticule(ctx, w, h, { labels: true, lineWidth: 2 });
+        ctx.globalAlpha = 0.05;
+        const step = Math.max(1, Math.floor(data.length / 4 / 40000));
         for (let i = 0; i < data.length; i += 4 * step) {
-            const r = data[i] / 255, g = data[i + 1] / 255, b = data[i + 2] / 255;
-            const y = r * 0.2126 + g * 0.7152 + b * 0.0722;
-            const u = (b - y) * 0.492;
-            const v = (r - y) * 0.877;
+            const [cb, cr] = _vsCbCr(data[i] / 255, data[i + 1] / 255, data[i + 2] / 255);
+            const [x, y] = _vsToCanvas(cb, cr, w, h);
             ctx.fillStyle = `rgb(${data[i]}, ${data[i + 1]}, ${data[i + 2]})`;
-            ctx.fillRect(cx + u * rad * 2.2, cy - v * rad * 2.2, 1, 1);
+            ctx.fillRect(x, y, 2, 2);
         }
         ctx.globalAlpha = 1.0;
     }
@@ -19972,6 +20758,7 @@ else:
         if (this._docMoveHandler) document.removeEventListener('mousemove', this._docMoveHandler);
         if (this._docUpHandler) document.removeEventListener('mouseup', this._docUpHandler);
         if (this._docKeyHandler) document.removeEventListener('keydown', this._docKeyHandler);
+        if (RadianceViewer._activeViewer === this) RadianceViewer._activeViewer = null;
         if (this._winUpHandler) window.removeEventListener('mouseup', this._winUpHandler);
         if (this._hudResizeListener) window.removeEventListener('resize', this._hudResizeListener);
         if (this._undoKeyListener) { document.removeEventListener('keydown', this._undoKeyListener); this._undoKeyListener = null; }
@@ -20027,6 +20814,8 @@ else:
         if (this.renderer) { this.renderer.destroy(); this.renderer = null; }
         // Release the big buffers explicitly rather than waiting for the
         // instance itself to become unreachable.
+        if (this._frameWindow) { this._frameWindow.clear(); this._frameWindow = null; }
+        this._hdrFallbackReasons = null;
         this.frameHDRData = null;
         this.frameImages = null;
         this.imageData = null;
@@ -20093,7 +20882,11 @@ app.registerExtension({
                 for (const row of nodeEl.querySelectorAll('.lg-node-widget')) {
                     const label = row.querySelector('.truncate, [aria-label]');
                     const name = (label?.textContent || label?.getAttribute?.('aria-label') || '').trim();
-                    if (name === 'bit_depth' || name === 'exposure_bracketing') {
+                    // exposure_bracketing is deliberately NOT hidden any
+                    // more. It is a real widget in INPUT_TYPES now, and it
+                    // controls tens of GB of temp writes per shot, so the user
+                    // has to be able to see it and switch it off.
+                    if (name === 'bit_depth') {
                         row.style.display = 'none';
                     }
                 }
@@ -20106,9 +20899,13 @@ app.registerExtension({
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
         if (!["RadianceViewer", "FXTD_RadianceViewer"].includes(nodeData.name)) return;
 
+        // exposure_bracketing was pinned here to true and hidden, while
+        // having no entry in INPUT_TYPES at all: a legacy hidden widget that
+        // forced every frame to be written three times over. It is a visible
+        // BOOLEAN widget on the node now and defaults to off, so it is no
+        // longer forced from the front end.
         const hiddenViewerDefaults = {
             bit_depth: '32-bit Float',
-            exposure_bracketing: true,
         };
         const isRadianceViewerNode = (node) => {
             const names = [node?.type, node?.comfyClass, node?.constructor?.type, node?.title].filter(Boolean);
@@ -20332,156 +21129,44 @@ app.registerExtension({
 
             // ── v2.2: HDR-PRIMARY architecture — .rhdr is the display source ──
             // Like DJV/RV loading EXR: GPU tonemaps float data in real-time.
-            mainImages.forEach((imgData, idx) => {
-                const hasHDRPrimary = imgData.hdr_sidecar && imgData.hdr_primary;
-                const hdrUrl = imgData.hdr_sidecar ?
-                    api.apiURL(`/view?filename=${encodeURIComponent(imgData.hdr_sidecar)}&subfolder=${encodeURIComponent(imgData.subfolder || '')}&type=${imgData.type || 'temp'}`) : null;
-                const pngUrl = api.apiURL(`/view?filename=${encodeURIComponent(imgData.filename)}&subfolder=${encodeURIComponent(imgData.subfolder || '')}&type=${imgData.type || 'temp'}`);
-
-                // Load tiny PNG thumbnail as placeholder (shows instantly while RHDR loads)
-                const img = new Image();
-                img.crossOrigin = 'anonymous';
-                // Store metadata on image object for fallback access
-                img.exr_filename = imgData.exr_filename;
-                img.exr_subfolder = imgData.exr_subfolder ?? imgData.subfolder ?? '';
-                img.exr_type = imgData.exr_type ?? imgData.type ?? 'temp';
-                img.subfolder = imgData.subfolder;
-                img.type = imgData.type;
-                img.channel_names = imgData.channel_names;
-                img.metadata = imgData.metadata;
-
-                img.onload = () => {
-                    // v3.1: Abort if a newer generation has started
-                    if (viewer.generationID !== currentGen) return;
-
-                    viewer.frameImages[idx] = img;
-                    // Only set as display if no HDR primary, or as placeholder while HDR loads
-                    // If HDR load eventually fails, this will remain as the display image
-                    if (idx === 0 && !viewer.frameHDRData[0]) {
-                        viewer.image = img;
-                        viewer.imageWidth = img.width;
-                        viewer.imageHeight = img.height;
-                        if (viewer.renderer) viewer.renderer.loadImageTexture(img);
-                        viewer.fitToView();
-                        viewer.render();
-                    }
-                    if (viewer._allFramesReady()) viewer.updateFrameDisplay();
-                };
-                img.onerror = (e) => {
-                    console.error("[Radiance] Failed to load thumbnail:", imgData.filename, e);
-                };
-                img.src = pngUrl;
-
-                // Load .rhdr as PRIMARY display source (like DJV loading EXR)
-                if (hdrUrl) {
-                    fetch(hdrUrl)
-                        .then(r => r.arrayBuffer())
-                        .then(async (buffer) => {
-                            // v3.1: Abort if a newer generation has started
-                            if (viewer.generationID !== currentGen) return;
-
-                            // If parse fails (e.g. no DecompressionStream), it returns null
-                            const npy = await viewer._parseHDRBuffer(buffer);
-
-                            if (npy) {
-                                npy.height = npy.shape[0];
-                                npy.width = npy.shape[1];
-                                npy.channels = npy.shape.length > 2 ? npy.shape[2] : 1;
-
-                                // Propagate metadata
-                                npy.exr_filename = imgData.exr_filename;
-                                npy.exr_subfolder = imgData.exr_subfolder ?? imgData.subfolder ?? '';
-                                npy.exr_type = imgData.exr_type ?? imgData.type ?? 'temp';
-                                npy.subfolder = imgData.subfolder;
-                                npy.type = imgData.type;
-                                if (imgData.metadata) {
-                                    npy.metadata = { ...(npy.metadata || {}), ...imgData.metadata };
-                                }
-                                if (Array.isArray(imgData.channel_names)) {
-                                    npy.channel_names = imgData.channel_names;
-                                    if (!Array.isArray(npy.metadata?.channels)) {
-                                        npy.metadata = {
-                                            ...(npy.metadata || {}),
-                                            channels: imgData.channel_names.map(name => ({ name, pixelType: imgData.hdr_fp32 ? 'FLOAT' : 'HALF' }))
-                                        };
-                                    }
-                                }
-                                // v4.2: Attach backend scene stats (p1–p999, nit est, ev_range)
-                                if (imgData.hdr_stats) npy.hdrStats = imgData.hdr_stats;
-
-                                viewer.frameHDRData[idx] = npy;
-
-                                // Set as PRIMARY display immediately
-                                if (idx === viewer.currentFrame) {
-                                    viewer.hdrData = npy;
-                                    viewer.imageWidth = npy.width;
-                                    viewer.imageHeight = npy.height;
-
-                                    if (viewer.renderer) {
-                                        let tex;
-                                        const frameId = `${imgData.hdr_sidecar}_${idx}`;
-                                        try {
-                                            if (npy.fp16data) {
-                                                // v3.0 #8: Use LRU cache — skip re-upload if already in GPU VRAM
-                                                tex = viewer.renderer.loadFloat16TextureCached(
-                                                    frameId,
-                                                    npy.fp16data, npy.width, npy.height, npy.channels
-                                                );
-                                            } else {
-                                                // B-6 FIX: Use LRU-cached fp32 loader (was loadFloat32Texture
-                                                // which bypassed the 8-frame cache, re-uploading every scrub)
-                                                tex = viewer.renderer.loadFloat32TextureCached(
-                                                    frameId,
-                                                    npy.data, npy.width, npy.height, npy.channels
-                                                );
-                                            }
-                                        } catch (e) {
-                                            console.warn("[Radiance] HDR Texture creation error:", e);
-                                            tex = null;
-                                        }
-
-                                        // v3.1: Robust fallback — reload full-res PNG as display source
-                                        // This handles case where texture creation fails (e.g. OOM or invalid dimensions)
-                                        if (!tex) {
-                                            console.warn("[Radiance] HDR texture load failed. Falling back to full-res PNG.");
-                                            viewer.hdrData = null;
-                                            viewer.frameHDRData[idx] = null;
-                                            throw new Error("Texture creation failed"); // Trigger catch block for consistency
-                                        }
-                                    }
-
-                                    viewer.createPlaceholderImage(npy.width, npy.height);
-                                    viewer.fitToView();
-                                    viewer.render();
-                                    viewer.updateScopes();
-                                    viewer.updateInfo();
-                                    viewer._computeHDRZoneStats(); // v4.2
-                                }
-                            } else {
-                                throw new Error("RHDR parsing failed (returned null)");
-                            }
-                        })
-                        .catch(e => {
-                            console.warn("[Radiance] Failed to load RHDR primary:", e);
-                            // v3.1: On RHDR fetch/parse failure, ensure PNG is loaded as fallback
-                            // FIX: Race condition handled by checking if frameImages[idx] is available.
-                            // If available, force-update display to use it if we are on that frame.
-                            // If not available yet, img.onload will handle it (since frameHDRData[idx] is unset).
-
-                            // If we already have the PNG and we are on this frame, ensure it's displayed
-                            if (idx === viewer.currentFrame && viewer.frameImages[idx]) {
-                                viewer.hdrData = null; // Explicitly clear any partial state
-                                viewer.image = viewer.frameImages[idx];
-                                viewer.imageWidth = viewer.image.width;
-                                viewer.imageHeight = viewer.image.height;
-                                if (viewer.renderer) viewer.renderer.loadImageTexture(viewer.image);
-                                viewer.fitToView();
-                                viewer.render();
-                                viewer.updateInfo();
-                            }
-                        });
-                }
+            //
+            // DEFECT this replaces: the sequence used to be loaded by a
+            // forEach over mainImages, which fired one new Image and one
+            // fetch of the sidecar per frame the moment the result arrived, with no
+            // concurrency limit, and stored every decoded buffer at
+            // frameHDRData[idx]/frameImages[idx] until the next generation
+            // replaced the arrays. Nothing evicted. A 300-frame 1080p shot
+            // therefore opened 300 sockets at once and retained 300 x 33 MB,
+            // roughly 10 GB of Float32Array, in one tab; 10,000 frames is
+            // roughly 330 GB, so the tab died during load. The GPU texture LRU
+            // in radiance_webgl.js was already bounded, which is exactly what
+            // masked it: the textures were capped, the source pixel arrays
+            // behind them were not.
+            //
+            // The frames are on disk already, written by the node, so the
+            // viewer pages them: see _installFrameWindow().
+            // Brackets, keyed by the frame they belong to, so the window can
+            // page them in and out alongside it.
+            const bracketByFrame = new Map();
+            bracketImages.forEach((imgData, idx) => {
+                const frameIndex = Number.isFinite(imgData.frame) ? imgData.frame : idx;
+                const slot = bracketByFrame.get(frameIndex) || {};
+                slot[imgData.bracket_label === 'high' ? 'high' : 'low'] = imgData;
+                bracketByFrame.set(frameIndex, slot);
             });
+
+            // 3.5.0: what the pixels are (set before any texture lands) and how
+            // fast they play. Older payloads carry neither: they keep the
+            // linear default and 24 fps.
+            const tagSrc = mainImages[0] || {};
+            viewer._applySourceTag({
+                encoding: tagSrc.source_encoding || message.source_encoding?.[0],
+                colorspace: tagSrc.source_colorspace || message.source_colorspace?.[0],
+            });
+            const srcFps = Number(message.fps?.[0]);
+            if (Number.isFinite(srcFps) && srcFps > 0) viewer.setPlaybackFps?.(srcFps);
+
+            viewer._installFrameWindow(mainImages, currentGen, bracketByFrame, zdepthImages);
 
             // Load compare images
             compareImages.forEach((imgData, idx) => {
@@ -20496,42 +21181,17 @@ app.registerExtension({
                 cmp.src = api.apiURL(`/view?filename=${encodeURIComponent(imgData.filename)}&subfolder=${encodeURIComponent(imgData.subfolder || '')}&type=${imgData.type || 'temp'}`);
             });
 
-            // Load hidden exposure bracket thumbnails for analysis/QC without
-            // polluting the primary sequence timeline.
-            bracketImages.forEach((imgData, idx) => {
-                const label = imgData.bracket_label === 'high' ? 'high' : 'low';
-                const frameIndex = Number.isFinite(imgData.frame) ? imgData.frame : idx;
-                const bImg = new Image();
-                bImg.crossOrigin = 'anonymous';
-                bImg.onload = () => {
-                    if (viewer.generationID !== currentGen) return;
-                    viewer.frameBracketImages[label][frameIndex] = bImg;
-                    if (viewer._referenceRightTab === 'analysis') viewer._renderReferenceRightHUD?.();
-                };
-                bImg.onerror = () => console.warn("[Radiance] Failed to load exposure bracket:", imgData.filename);
-                bImg.src = api.apiURL(`/view?filename=${encodeURIComponent(imgData.filename)}&subfolder=${encodeURIComponent(imgData.subfolder || '')}&type=${imgData.type || 'temp'}`);
-            });
+            // Exposure brackets are paged with their frame rather than loaded
+            // here. They used to be a second unbounded forEach over the whole
+            // sequence: two more decoded bitmaps per frame, retained for the
+            // life of the generation, with the same one-socket-per-frame
+            // problem as the main loop. _installFrameWindow() above loads them
+            // as part of each frame's payload and drops them on eviction.
 
-            // Load Z-depth images
-            zdepthImages.forEach((imgData, idx) => {
-                const zImg = new Image();
-                zImg.crossOrigin = 'anonymous';
-                zImg.onload = () => {
-                    if (viewer.generationID !== currentGen) return;
-                    viewer.frameZdepthImages[idx] = zImg;
-                    if (idx === viewer.currentFrame) {
-                        viewer.zdepthImage = zImg;
-                        if (viewer.renderer) viewer.renderer.loadDepthTexture(zImg);
-                        // Force re-render if we are already displaying this frame
-                        viewer.render();
-                        if (viewer._referenceRightTab === 'effects' || viewer._referenceRightTab === 'inspector') {
-                            viewer._renderReferenceRightHUD?.();
-                        }
-                    }
-                };
-                zImg.onerror = (e) => console.warn("[Radiance] Failed to load zdepth image:", imgData.filename);
-                zImg.src = api.apiURL(`/view?filename=${encodeURIComponent(imgData.filename)}&subfolder=${encodeURIComponent(imgData.subfolder || '')}&type=${imgData.type || 'temp'}`);
-            });
+            // Z-depth is per frame and was a third unbounded forEach: the node
+            // writes depth at FULL resolution with no thumbnail cap, so a
+            // 300-frame 4K shot decoded ~10 GB of depth bitmaps here on top of
+            // the colour. It pages with its frame now, like the brackets.
 
             // Phase 5: Capture Instance ID
             if (message.instance_id && message.instance_id.length > 0) {

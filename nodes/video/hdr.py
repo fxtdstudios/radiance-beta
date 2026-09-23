@@ -143,19 +143,38 @@ def _hlg_encode(x: "torch.Tensor") -> "torch.Tensor":
 # Node: RadianceVideoHDRConditioner
 # ===========================================================================
 
+def _rec709_to(gamut: str):
+    """Row-vector matrix from linear Rec.709 to ``gamut`` and a report line."""
+    import numpy as np
+    from radiance.color import matrices as M
+    if gamut == "BT.709":
+        return None, "Rec.709 (no conversion)"
+    if gamut == "BT.2020":
+        return M.SRGB_TO_REC2020, "Rec.709 -> BT.2020"
+    if gamut in ("P3-D65", "P3-DCI"):
+        note = "Rec.709 -> P3-D65"
+        if gamut == "P3-DCI":
+            note += " (P3-DCI treated as P3-D65 primaries, no DCI white adaptation)"
+        return M.ACESCG_TO_P3D65 @ M.SRGB_TO_ACESCG, note
+    if gamut == "ACEScg":
+        return M.SRGB_TO_ACESCG, "Rec.709 -> ACEScg (AP1)"
+    if gamut == "ACES2065-1":
+        return np.linalg.inv(M.ACES_AP0_TO_AP1) @ M.SRGB_TO_ACESCG, "Rec.709 -> ACES2065-1 (AP0)"
+    return None, f"{gamut}: unknown, left as Rec.709"
+
+
 class RadianceVideoHDRConditioner:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
     DESCRIPTION = "Condition a video model on HDR metadata for luminance-aware sampling."
     """
-    Inject HDR display metadata into a CLIP/text conditioning tensor.
+    Add HDR descriptors to an already-encoded conditioning.
 
-    Works by appending HDR-specific tokens to the positive prompt and
-    optionally injecting a structured metadata embedding into the
-    conditioning extra dict so video models that support it (e.g.
-    HunyuanVideo) can read nit levels and gamut at the model level.
-
-    Output: modified positive conditioning + a metadata JSON string
-    for downstream use by RadianceVideoHDRDecode.
+    A CONDITIONING is token embeddings; appending words to it needs the text
+    encoder. With ``clip`` connected, the descriptors are encoded and
+    concatenated onto every entry (ComfyUI's ConditioningConcat), scaled by
+    token_strength. Without ``clip`` the conditioning passes through
+    unchanged and hdr_metadata_json says so. No ComfyUI model reads the
+    metadata dict; it is carried for RadianceVideoHDRDecode.
     """
 
     @classmethod
@@ -168,6 +187,8 @@ class RadianceVideoHDRConditioner:
                 "eotf": (EOTF_OPTIONS, {"default": "PQ (ST.2084)"}),
             },
             "optional": {
+                "clip": ("CLIP", {"tooltip": "Text encoder used for positive. Required for the "
+                                             "descriptors to reach the model."}),
                 "camera_move": (list(_CAMERA_TOKENS.keys()), {"default": "None"}),
                 "mood": (list(_MOOD_TOKENS.keys()), {"default": "None"}),
                 "extra_hdr_prompt": ("STRING", {
@@ -177,11 +198,13 @@ class RadianceVideoHDRConditioner:
                 }),
                 "inject_metadata_embedding": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "Add HDR metadata dict to conditioning['extra'] for compatible models",
+                    "tooltip": "Store the HDR metadata in the conditioning for Radiance nodes. "
+                               "No ComfyUI model reads it.",
                 }),
                 "token_strength": ("FLOAT", {
                     "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05,
-                    "tooltip": "Scale the appended token embeddings (1.0 = normal weight)",
+                    "tooltip": "Scale of the concatenated descriptor embeddings (1.0 = as encoded). "
+                               "Needs clip.",
                 }),
             },
         }
@@ -197,6 +220,7 @@ class RadianceVideoHDRConditioner:
         peak_nits: str = "1000",
         target_gamut: str = "BT.2020",
         eotf: str = "PQ (ST.2084)",
+        clip=None,
         camera_move: str = "None",
         mood: str = "None",
         extra_hdr_prompt: str = "",
@@ -213,7 +237,6 @@ class RadianceVideoHDRConditioner:
             "token_strength": token_strength,
         }
 
-        # Build augmented prompt string
         token_parts = [
             _GAMUT_TOKENS.get(target_gamut, ""),
             _EOTF_TOKENS.get(eotf, ""),
@@ -223,27 +246,44 @@ class RadianceVideoHDRConditioner:
             extra_hdr_prompt.strip(),
         ]
         hdr_tokens = ", ".join(p for p in token_parts if p)
+        meta["hdr_tokens"] = hdr_tokens
 
-        # Modify conditioning — ComfyUI conditioning is a list of
-        # [tensor, dict] pairs.  We append HDR tokens to each pair's
-        # pooled embedding and store metadata in the extra dict.
+        extra_embed = None
+        if clip is not None and hdr_tokens and token_strength > 0 and HAS_TORCH:
+            with torch.no_grad():
+                extra_embed = clip.encode_from_tokens(clip.tokenize(hdr_tokens))
+            if isinstance(extra_embed, (tuple, list)):
+                extra_embed = extra_embed[0]
+            extra_embed = extra_embed * float(token_strength)
+
         out_cond = []
+        applied = False
         for cond_tensor, cond_dict in positive:
             new_dict = dict(cond_dict)
-
             if inject_metadata_embedding:
-                extra = dict(new_dict.get("extra", {}))
-                extra["radiance_hdr"] = meta
-                extra["hdr_tokens"]   = hdr_tokens
-                new_dict["extra"] = extra
+                new_dict["radiance_hdr"] = meta
+            tok = cond_tensor
+            if extra_embed is not None and extra_embed.shape[-1] == cond_tensor.shape[-1]:
+                e = extra_embed.to(cond_tensor.device, cond_tensor.dtype)
+                if e.shape[0] != tok.shape[0]:
+                    e = e[:1].expand(tok.shape[0], -1, -1)
+                tok = torch.cat((tok, e), dim=1)
+                applied = True
+            out_cond.append([tok, new_dict])
 
-            # If a text string is available for re-encoding (some custom
-            # nodes store it), append hdr_tokens.
-            if "text" in new_dict and hdr_tokens:
-                new_dict["text"] = new_dict["text"].rstrip(", ") + ", " + hdr_tokens
-
-            out_cond.append([cond_tensor, new_dict])
-
+        if applied:
+            meta["applied_to_model"] = True
+        elif clip is None:
+            meta["applied_to_model"] = False
+            meta["note"] = "clip not connected: conditioning unchanged, descriptors not encoded"
+        elif not hdr_tokens or token_strength <= 0:
+            meta["applied_to_model"] = False
+            meta["note"] = "nothing to add (no descriptors or token_strength 0)"
+        else:
+            meta["applied_to_model"] = False
+            meta["note"] = "clip width does not match the conditioning; descriptors not added"
+        if not applied:
+            logger.info("[VideoHDRConditioner] %s", meta["note"])
         return (out_cond, json.dumps(meta, indent=2))
 
 
@@ -298,7 +338,8 @@ class RadianceVideoHDRDecode:
                 }),
                 "gamut_clip": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "Hard-clip out-of-gamut values before EOTF encode",
+                    "tooltip": "Clamp to [0, 1] of the encode container after the primaries "
+                               "conversion (negatives from out-of-gamut colours, values above peak)",
                 }),
             },
         }
@@ -346,6 +387,15 @@ class RadianceVideoHDRDecode:
         # 2. Exposure compensation
         if exposure_compensation_ev != 0.0:
             x_lin = x_lin * (2.0 ** exposure_compensation_ev)
+
+        # 2b. Primaries: generator output is Rec.709. The metadata gamut was
+        #     only ever printed; an HDR10 signal needs BT.2020 primaries.
+        gamut = str(meta.get("gamut", "BT.2020"))
+        mat, gamut_note = _rec709_to(gamut)
+        if mat is not None:
+            m = torch.as_tensor(mat, dtype=x_lin.dtype, device=x_lin.device)
+            x_lin = torch.einsum("...c,dc->...d", x_lin[..., :3], m)
+        report.append(f"Gamut      : {gamut_note}")
 
         # 3. Scale to nit-normalised [0,1] where 1 = 10 000 nits
         #    Generator output is typically in [0,1] ≡ 100 nits SDR,

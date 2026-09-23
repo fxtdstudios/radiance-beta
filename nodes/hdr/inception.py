@@ -95,24 +95,74 @@ actually improves output quality over a baseline.
 
     # ── Metric helpers (static, torch-only) ──────────────────────────────────
 
+    #: SSIM window, in pixels. 11x11 is the size Wang et al. (2004) specify.
+    _SSIM_WINDOW = 11
+
+    #: Below this the blend has changed structure, not just range, so the
+    #: baseline is the safer pick. See validate()'s win_metric == "ssim".
+    _SSIM_SAFE = 0.95
+
     @staticmethod
     def _ssim(a: torch.Tensor, b: torch.Tensor) -> float:
-        """Simplified single-scale SSIM over luminance channel."""
-        # Use Rec.709 luma
+        """Windowed single-scale SSIM over the luminance channel.
+
+        SSIM-HDR FIX. Two defects, both of which made this function return a
+        number that says nothing about the HDR content the node exists to
+        validate:
+
+          1. It clamped luma to [0,1] first. Two HDR images whose luma exceeds
+             1.0 over most of the frame both clamp to a flat field of 1.0, so
+             mu = 1, sigma = 0, sigma_ab = 0, and the expression collapses to
+             (2+C1)(0+C2) / ((2+C1)(0+C2)) == EXACTLY 1.0, for any two images
+             whatever. The docstring's "values < 0.95 indicate significant
+             structural change" was unreachable. The luma is now scaled by the
+             larger of the two images' peaks, which puts both on [0,1] with
+             their structure intact and keeps C1/C2 meaningful (they are
+             defined for a dynamic range of 1.0).
+          2. It computed ONE global mean and variance over the whole frame.
+             That is not SSIM, it is a global correlation coefficient: it is
+             blind to local structure, which is the entire point of the metric.
+             Statistics are now computed over an 11x11 sliding window and the
+             SSIM map averaged, as Wang et al. specify.
+        """
         w = a.new_tensor([0.2126, 0.7152, 0.0722])
-        la = (a[..., :3] * w).sum(-1).clamp(0, 1)
-        lb = (b[..., :3] * w).sum(-1).clamp(0, 1)
+        la = (a[..., :3].float() * w).sum(-1).clamp(min=0.0)
+        lb = (b[..., :3].float() * w).sum(-1).clamp(min=0.0)
+
+        # Shared scale: normalises range without flattening HDR structure.
+        peak = max(float(la.max()), float(lb.max()), 1e-6)
+        la, lb = la / peak, lb / peak
+
+        if la.dim() == 2:                      # (H, W) -> (1, H, W)
+            la, lb = la.unsqueeze(0), lb.unsqueeze(0)
+        la = la.unsqueeze(1)                   # (B, 1, H, W)
+        lb = lb.unsqueeze(1)
 
         C1, C2 = 0.01 ** 2, 0.03 ** 2
-        mu_a   = la.mean()
-        mu_b   = lb.mean()
-        sigma_a2 = ((la - mu_a) ** 2).mean()
-        sigma_b2 = ((lb - mu_b) ** 2).mean()
-        sigma_ab = ((la - mu_a) * (lb - mu_b)).mean()
+        win = min(RadianceHDRBlendValidator._SSIM_WINDOW,
+                  la.shape[-2], la.shape[-1])
+        if win < 2:
+            # Too small to window; fall back to whole-frame statistics rather
+            # than raise. Still not clamped, so it is at least honest.
+            mu_a, mu_b = la.mean(), lb.mean()
+            sigma_a2 = ((la - mu_a) ** 2).mean()
+            sigma_b2 = ((lb - mu_b) ** 2).mean()
+            sigma_ab = ((la - mu_a) * (lb - mu_b)).mean()
+            num = (2 * mu_a * mu_b + C1) * (2 * sigma_ab + C2)
+            den = (mu_a ** 2 + mu_b ** 2 + C1) * (sigma_a2 + sigma_b2 + C2)
+            return float(num / den)
 
-        num = (2 * mu_a * mu_b + C1) * (2 * sigma_ab + C2)
-        den = (mu_a ** 2 + mu_b ** 2 + C1) * (sigma_a2 + sigma_b2 + C2)
-        return float(num / den)
+        pool = torch.nn.functional.avg_pool2d
+        mu_a = pool(la, win, stride=1)
+        mu_b = pool(lb, win, stride=1)
+        mu_a2, mu_b2, mu_ab = mu_a * mu_a, mu_b * mu_b, mu_a * mu_b
+        sigma_a2 = pool(la * la, win, stride=1) - mu_a2
+        sigma_b2 = pool(lb * lb, win, stride=1) - mu_b2
+        sigma_ab = pool(la * lb, win, stride=1) - mu_ab
+
+        num = (2 * mu_ab + C1) * (2 * sigma_ab + C2)
+        den = (mu_a2 + mu_b2 + C1) * (sigma_a2 + sigma_b2 + C2)
+        return float((num / den).mean())
 
     @staticmethod
     def _js_divergence(a: torch.Tensor, b: torch.Tensor, bins: int = 256) -> float:
@@ -175,9 +225,27 @@ actually improves output quality over a baseline.
             winner_img = image_b if dr_delta > 0 else image_a
             winner_lbl = "image_b (HDR blend)" if dr_delta > 0 else "image_a (baseline)"
         elif win_metric == "ssim":
-            # SSIM closer to 1.0 means less distortion
-            winner_img = image_a  # higher SSIM = baseline is "safer"
-            winner_lbl = "image_a (baseline, higher SSIM)"
+            # SSIM-WINNER FIX: this used to return image_a unconditionally and
+            # label it "higher SSIM", a comparison never made: SSIM is a single
+            # symmetric number between the two images, so there is no "higher"
+            # one to pick. The only decision one number supports is a
+            # threshold, so that is what it now is, and the label carries the
+            # measured value rather than an invented comparison. Above the
+            # threshold the blend left structure intact and its extra range is
+            # free, so it wins; below it the blend distorted structure and the
+            # baseline is the safer output.
+            if ssim_val >= self._SSIM_SAFE:
+                winner_img = image_b
+                winner_lbl = (
+                    f"image_b (HDR blend, SSIM {ssim_val:.4f} >= "
+                    f"{self._SSIM_SAFE}: structure preserved)"
+                )
+            else:
+                winner_img = image_a
+                winner_lbl = (
+                    f"image_a (baseline, SSIM {ssim_val:.4f} < "
+                    f"{self._SSIM_SAFE}: blend altered structure)"
+                )
         else:  # js_divergence — higher = more tonal variety
             winner_img = image_b if js_val > 0.01 else image_a
             winner_lbl = "image_b (larger tonal shift)" if js_val > 0.01 else "image_a (blend negligible)"

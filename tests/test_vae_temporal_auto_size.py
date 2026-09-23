@@ -13,7 +13,7 @@ Covers:
     min/max clamping, compression fallback
   - _resolve_temporal_frames: "Auto", numeric string, raw int, and the
     0/"0"/None "explicitly disabled" sentinel (used internally by the
-    turbo_decoder/RUDRA recursive chunking path to stop further recursion)
+    recursive chunking call sites to stop further recursion)
 """
 import sys
 import os
@@ -129,7 +129,7 @@ class TestResolveTemporalFrames:
         assert resolved == expected
 
     def test_auto_with_no_ts_px_means_disabled(self):
-        """Used by the turbo_decoder/RUDRA gate: there is no VRAM
+        """ts_px=None: there is no VRAM
         calibration data for RUDRA's memory profile, so "Auto" keeps that
         path's pre-existing default behavior (no chunking) instead of
         guessing."""
@@ -139,6 +139,6 @@ class TestResolveTemporalFrames:
         assert _resolve_temporal_frames("16", 1536, 8) == 16
 
     def test_raw_int_passthrough(self):
-        """Internal callers (e.g. the turbo_decoder recursive chunking
+        """Internal callers (e.g. recursive chunking
         block) may pass a plain int rather than a widget-style string."""
         assert _resolve_temporal_frames(3, None, 8) == 3

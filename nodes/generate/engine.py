@@ -44,8 +44,6 @@ CHANGELOG v3.0.0 vs v2.5:
              Was hardcoded "Linear" — silent mismatch with inherited INPUT_TYPES UI default.
     - BUG 4: NDI apply() guards image tensor shape before [0] indexing (IndexError).
     - BUG 5: NDI singleton tracks current stream_name and recreates sender on change.
-    - BUG 6: NDI fallback path (turbo failed) now correctly applies log encoding
-             since the turbo path did not encode it. Guard logic inverted correctly.
     - BUG 7: RadianceHDRVAEDecode adds metadata STRING output (decode settings).
     - BUG 8: **kwargs now forwarded to engine.decode() so new vae.py params are passed.
     - BUG 9: numpy duplicate import removed from NDI apply().
@@ -73,7 +71,13 @@ import torch
 import numpy as np
 
 from radiance.hdr.vae import RadianceVAE4KDecode
-from radiance.fast_vae import decode_to_linear_realtime, load_radiance_decoder_weights, resolve_rudra_model_type
+from radiance.hdr.decode_meta import (
+    LOG_SPACE_GAMUT,
+    TARGET_SPACE_GAMUT,
+    _gamut_mat_t,
+    strip_hdr_meta,
+    verify_radiance_meta,
+)
 from radiance.color.transfer import (
     tensor_linear_to_logc4,
     tensor_linear_to_slog3,
@@ -89,6 +93,37 @@ _SCENE_REFERRED = {
     "DaVinci Intermediate", "RED Log3G10",
 }
 
+_LOG_TARGETS = set(LOG_SPACE_GAMUT)
+
+
+def _scale_rgb(image: torch.Tensor, gain: float) -> torch.Tensor:
+    """Multiply RGB only; alpha and any extra channels pass through."""
+    if image.shape[-1] <= 3:
+        return image * gain
+    return torch.cat([image[..., :3] * gain, image[..., 3:]], dim=-1)
+
+
+def _linear709_to_target(image: torch.Tensor, target: str) -> torch.Tensor:
+    """Linear Rec.709 -> a scene-referred target (gamut, then log curve)."""
+    if target in ("Linear", "Raw"):
+        return image
+    rgb, extra = image[..., :3], image[..., 3:]
+    mat = _gamut_mat_t("Rec.709", TARGET_SPACE_GAMUT.get(target, "Rec.709"))
+    if mat is not None:
+        rgb = (rgb.reshape(-1, 3) @ mat.to(rgb.device, rgb.dtype)).reshape(rgb.shape)
+    if target in _LOG_TARGETS:
+        from radiance.color import transfer as _tr
+        curve = {
+            "ARRI LogC3": _tr.tensor_linear_to_logc3,
+            "ARRI LogC4": _tr.tensor_linear_to_logc4,
+            "Sony S-Log3": _tr.tensor_linear_to_slog3,
+            "Panasonic V-Log": _tr.tensor_linear_to_vlog,
+            "DaVinci Intermediate": _tr.tensor_linear_to_davinci_intermediate,
+            "RED Log3G10": _tr.tensor_linear_to_log3g10,
+        }[target]
+        rgb = curve(rgb)
+    return torch.cat([rgb, extra], dim=-1) if extra.shape[-1] else rgb
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #                    NODE 1: RADIANCE HDR VAE DECODE
@@ -103,7 +138,7 @@ class RadianceHDRVAEDecode:
       • display_tonemap   — exposed from vae.py v2.3.8 (required for Compress(Log))
       • metadata output   — decode settings as a JSON string for downstream nodes
       • All vae.py params passed through correctly, no silent drops
-      • explicit sampler-safe and direct-HDR/RUDRA decode contracts
+      • explicit sampler-safe and direct-HDR decode contracts
       • Alpha restoration verified from the actual output tensor
       • source_space, hdr_output, and all vae.py params explicitly declared
     """
@@ -131,6 +166,13 @@ class RadianceHDRVAEDecode:
         # BUG 3 FIX: explicitly set default to sRGB to match vae.py v2.3.8
         if "target_space" in types.get("required", {}):
             types["required"]["target_space"][1]["default"] = "sRGB"
+            types["required"]["target_space"][1]["tooltip"] = (
+                "Output colour space. Sampler-safe decodes deliver it as chosen: sRGB is "
+                "display-ready for Preview/Save; Linear, ACEScg, ACES 2065-1 and Rec.2020 "
+                "Linear are linear light in that gamut; a camera log target applies its "
+                "gamut and curve (ARRI LogC4 = AWG4 + LogC4, Sony S-Log3 = S-Gamut3.Cine). "
+                "Direct HDR output is scene-linear: sRGB and Raw become Linear there."
+            )
 
         # Decode mode owns the force_hdr_decode safety decision.
         types["optional"].pop("force_hdr_decode", None)
@@ -142,6 +184,10 @@ class RadianceHDRVAEDecode:
 
         if "source_space" in types.get("optional", {}):
             types["optional"]["source_space"][1]["default"] = "sRGB"
+            types["optional"]["source_space"][1]["tooltip"] = (
+                "Kept for saved workflows. The log curve and camera gamut are read from "
+                "the latent's HDR Encode metadata; this widget is not used."
+            )
         if "display_tonemap" in types.get("optional", {}):
             types["optional"]["display_tonemap"][1]["default"] = "None"
 
@@ -167,63 +213,41 @@ class RadianceHDRVAEDecode:
                 "max": 10.0,
                 "step": 0.05,
                 "tooltip": (
-                    "Linear multiplier applied after decode. Only active for "
-                    "scene-referred target spaces (Linear, ACEScg, Log). "
-                    "Ignored (with a warning) for sRGB/Raw display-referred output "
-                    "to prevent blown highlights."
-                ),
-            },
-        )
-        types["optional"]["rudra_decoder"] = (
-            ["Disabled", "Enabled"],
-            {
-                "default": "Disabled",
-                "tooltip": (
-                    "Enable to use the distilled RUDRA decoder weights "
-                    "instead of the standard VAE. Dramatically faster and handles "
-                    "high dynamic range without highlight noise or clamping."
-                ),
-            },
-        )
-        types["optional"]["decoder_size"] = (
-            ["rudra_turbo", "rudra_full"],
-            {
-                "default": "rudra_turbo",
-                "tooltip": (
-                    "'rudra_turbo': 2M param real-time dynamic range conditioned model. "
-                    "'rudra_full': 32M param production-grade dynamic range conditioned model."
-                ),
-            },
-        )
-        # ALBABIT-FIX: RUDRA model_type auto-detection can't tell apart models that
-        # share the same VAE (e.g. Flux.2 Dev vs Flux.2 Klein, both 128ch) -- connect
-        # RadianceUnifiedLoader's model_meta output here to resolve it exactly instead
-        # of guessing from latent shape. Only read when rudra_decoder="Enabled".
-        types["optional"]["model_meta"] = (
-            "STRING",
-            {
-                "default": "",
-                "forceInput": True,  # always a socket -- this is a wired value, never hand-typed
-                "tooltip": (
-                    "Optional: connect RadianceUnifiedLoader's model_meta output to "
-                    "resolve the exact model architecture for RUDRA, instead of guessing "
-                    "from the latent/VAE shape (which can't distinguish models that share "
-                    "the same VAE, e.g. Flux.2 Dev vs Flux.2 Klein). Only used when "
-                    "rudra_decoder='Enabled'."
+                    "Linear gain on the Direct HDR output (RGB only, alpha untouched). "
+                    "Not applied to sampler-safe SDR decodes or to log targets; the "
+                    "metadata output says when it was skipped."
                 ),
             },
         )
         # Append new widgets after the existing v3.0 controls so legacy
         # widgets_values arrays retain their original positional mapping.
         types["optional"]["decode_mode"] = (
-            ["Auto (Recommended)", "Sampler (SDR-safe)", "Direct HDR / RUDRA"],
+            ["Auto (Recommended)", "Sampler (SDR-safe)", "Direct HDR"],
             {
                 "default": "Auto (Recommended)",
                 "tooltip": (
-                    "Auto uses direct HDR only when encode metadata survives; otherwise it is sampler-safe. "
-                    "Sampler mode always decodes standard diffusion latents without log inversion. "
-                    "Direct HDR / RUDRA forces LogC4 decode to scene-linear Linear output, "
-                    "disables display tonemapping, and preserves values above 1.0."
+                    "Auto: Direct HDR when the latent comes straight from Radiance HDR Encode "
+                    "(its fingerprint still matches), sampler-safe for anything a sampler "
+                    "touched. Sampler: standard SDR decode, never log inversion. Direct HDR: "
+                    "scene-linear output above 1.0, no display tonemap; an HDR Encode latent "
+                    "is log-inverted exactly, any other latent is decoded and its clipped "
+                    "highlights are reconstructed by the pixel SDR -> HDR model. The metadata "
+                    "output names the path that ran."
+                ),
+            },
+        )
+        # 3.5: mastering peak for the RUDRA pixel reconstruction that Direct
+        # HDR runs on ordinary (non log-encoded) latents. Appended after
+        # decode_mode so saved widgets_values keep their positions.
+        types["optional"]["hdr_peak_nits"] = (
+            "FLOAT",
+            {
+                "default": 1000.0, "min": 200.0, "max": 10000.0, "step": 50.0,
+                "tooltip": (
+                    "Direct HDR on an ordinary sampler latent: the mastering peak the "
+                    "reconstructed highlights are limited to. Output is linear with SDR "
+                    "white = 1.0 = 203 nits (BT.2408), so the peak sits at peak/203 "
+                    "(4.93 at 1000). Not used when the latent is log-encoded by HDR Encode."
                 ),
             },
         )
@@ -266,10 +290,8 @@ class RadianceHDRVAEDecode:
         decode_noise_scale: float = 0.0,
         decode_mode: str = "Auto (Recommended)",
         hdr_scale_factor: float = 1.0,
-        rudra_decoder: str = "Disabled",
-        decoder_size: str = "rudra_turbo",
-        model_meta: str = "",
-        crop_bbox: dict = None,             # ALBABIT-FIX: broadcast-resolution crop from RadianceResolution
+        crop_bbox: dict = None,
+        hdr_peak_nits: float = 1000.0,             # ALBABIT-FIX: broadcast-resolution crop from RadianceResolution
         **kwargs,                           # BUG 8 FIX: forward remaining params
     ):
         # Lazily instantiate once; RadianceVAE4KDecode is stateless so one
@@ -295,7 +317,7 @@ class RadianceHDRVAEDecode:
         latent_tensor = samples["samples"]
         if getattr(latent_tensor, "is_nested", False):
             # ALBABIT-FIX: AV latent (e.g. MiniMax H3). This node only does
-            # video (HDR/tonemap/RUDRA); peels the video stream the same way
+            # video (HDR/tonemap); peels the video stream the same way
             # ComfyUI's own LTXVSeparateAVLatent does (unbind()[0] = video).
             # Decode audio separately via a native VAEDecodeAudio fed from
             # the same latent and vae.
@@ -313,148 +335,95 @@ class RadianceHDRVAEDecode:
 
         # Track whether alpha was provided (for metadata / downstream use)
         alpha_provided = alpha is not None
-        radiance_meta = samples.get("radiance_meta", {})
-        encoded_hdr_mode = radiance_meta.get("hdr_mode") if isinstance(radiance_meta, dict) else None
-        auto_direct = decode_mode == "Auto (Recommended)" and encoded_hdr_mode in {"Compress (Log)", "Soft Clip"}
-        force_hdr_decode = decode_mode == "Direct HDR / RUDRA" or auto_direct
+        is_video = latent_tensor.ndim == 5
 
-        # ALBABIT-FIX: presence only known at execution time (a sampler
-        # between encode/decode strips this key). Used below to compute
-        # log_overexposure_risk for the frontend's post-execution marker.
-        radiance_meta_present = bool(samples.get("radiance_meta"))
+        # 3.5.0: samplers copy the latent dict and keep radiance_meta, so its
+        # hdr_mode used to survive KSampler and send Auto down the log path on
+        # a diffused latent (blown-out frames). Only a latent whose fingerprint
+        # still matches what HDR Encode produced keeps its HDR coding keys.
+        samples, meta_live = verify_radiance_meta(samples)
+        radiance_meta = samples.get("radiance_meta") or {}
+        encoded_hdr_mode = radiance_meta.get("hdr_mode") if isinstance(radiance_meta, dict) else None
+        log_encoded = encoded_hdr_mode in {"Compress (Log)", "Soft Clip"}
+
+        # "Direct HDR / RUDRA" is the pre-3.5 name of this mode; saved
+        # workflows still carry it.
+        if decode_mode in {"Direct HDR", "Direct HDR / RUDRA"}:
+            effective_decode_mode = "Direct HDR"
+        elif decode_mode == "Sampler (SDR-safe)":
+            effective_decode_mode = "Sampler (SDR-safe)"
+        else:  # Auto: direct only when live HDR Encode metadata says so
+            effective_decode_mode = "Direct HDR" if log_encoded else "Sampler (SDR-safe)"
+
+        # ALBABIT-FIX: presence only known at execution time. Used below to
+        # compute log_overexposure_risk for the frontend's post-execution marker.
+        radiance_meta_present = log_encoded
 
         # Forward extra vae.py params via **kwargs, stripping any key already
         # passed explicitly to avoid "multiple values for keyword argument".
-        # Derive the set from inspect.signature so it stays in sync automatically
-        # when new params are added to apply().
         _sig_params = set(inspect.signature(self.apply).parameters)
         _sig_params.discard("kwargs")       # the **kwargs catch-all itself
         safe_kwargs = {k: v for k, v in kwargs.items() if k not in _sig_params}
 
-        # Load distilled decoder if enabled.
-        # FIX (High — NameError): initialise model_type before the try block so the
-        # except handler can always format it safely. Previously, if
-        # samples.get("samples") returned None, _samples.shape raised AttributeError
-        # before model_type was assigned — the except block then raised NameError,
-        # masking the real error entirely.
-        # ALBABIT-FIX: model_type detection (including the 4ch SD1.x/2.x/SDXL
-        # disambiguation) lives in resolve_rudra_model_type() (fast_vae.py) —
-        # single source of truth shared with RadianceNDISender.
-        turbo_decoder = None
-        if rudra_decoder == "Enabled":
-            model_type = "unknown"  # safe sentinel — always defined before except block
-            try:
-                _samples = samples.get("samples")
-                if _samples is None:
-                    raise ValueError(
-                        "samples dict is missing the 'samples' tensor — "
-                        "ensure a LATENT is connected to this node."
-                    )
-                _ch = _samples.shape[1]
-                model_type = resolve_rudra_model_type(_ch, _samples.ndim == 5, vae=vae, model_meta=model_meta)
-
-                turbo_decoder = load_radiance_decoder_weights(
-                    model_type=model_type,
-                    model_size=decoder_size,
-                )
-                if turbo_decoder is not None:
-                    # Turbo/Full models expect log targets. Force log mode if not already set.
-                    if hdr_mode != "Compress (Log)":
-                        logger.warning(
-                            f"[RadianceHDRVAEDecode] RUDRA Decoder enabled but hdr_mode='{hdr_mode}'. "
-                            f"Distilled models require log-coded targets; forcing 'Compress (Log)'."
-                        )
-                        hdr_mode = "Compress (Log)"
-
-                    # Auto-align source_space to a valid log profile if needed
-                    VALID_LOG_SPACES = {"ARRI LogC4", "Sony S-Log3", "ARRI LogC3", "Panasonic V-Log", "DaVinci Intermediate", "RED Log3G10"}
-                    if source_space not in VALID_LOG_SPACES:
-                        from radiance.config.model_map import resolve_model_vae_config
-                        cfg = resolve_model_vae_config(model_type) or {}
-                        default_curve = cfg.get("log_curve", "ARRI LogC4")
-                        logger.info(
-                            f"[RadianceHDRVAEDecode] RUDRA Decoder enabled but source_space='{source_space}' "
-                            f"is not a log-encoded space. Automatically setting decompression profile to "
-                            f"'{default_curve}' to match distilled weights."
-                        )
-                        source_space = default_curve
-                else:
-                    # ALBABIT-FIX: load_radiance_decoder_weights() now returns None
-                    # (instead of a randomly-initialised decoder) when no compatible
-                    # RUDRA checkpoint is available — keep hdr_mode/source_space
-                    # untouched and fall back to the standard VAE decode.
-                    logger.info(
-                        f"[RadianceHDRVAEDecode] No RUDRA decoder available for "
-                        f"model_type={model_type!r} (size={decoder_size!r}). "
-                        f"Falling back to the standard VAE decoder."
-                    )
-            except Exception as _fast_err:
-                logger.error(
-                    f"[RadianceHDRVAEDecode] RUDRA decoder load failed "
-                    f"(model_type={model_type!r}, size={decoder_size!r}): {_fast_err}. "
-                    f"Falling back to standard VAE decoder."
-                )
-                turbo_decoder = None
-
-        # ALBABIT-FIX: track whether RUDRA was actually used (vs merely
-        # requested) — rudra_decoder/decoder_size below reported the request
-        # even on silent fallback (no checkpoint, load error), misleading the
-        # metadata JSON about what actually produced the image.
-        rudra_actually_used = turbo_decoder is not None
-        # ALBABIT-FIX: set by fast_vae.py when no checkpoint existed for the
-        # detected model_type and a cross-architecture one was substituted
-        # (_DECODER_TYPE_FALLBACKS, e.g. wan -> flux) -- distinct from a full
-        # fallback to the standard VAE (rudra_actually_used=False above).
-        rudra_substituted_type = getattr(turbo_decoder, "_radiance_resolved_type", None)
-
-        effective_decode_mode = (
-            "Direct HDR / RUDRA" if force_hdr_decode or rudra_actually_used
-            else "Sampler (SDR-safe)"
-        )
-        if effective_decode_mode == "Direct HDR / RUDRA":
-            force_hdr_decode = True
-            if encoded_hdr_mode in {"Compress (Log)", "Soft Clip"}:
-                hdr_mode = encoded_hdr_mode
-            elif hdr_mode not in {"Compress (Log)", "Soft Clip"} or rudra_actually_used:
-                hdr_mode = "Compress (Log)"
-            if hdr_mode == "Compress (Log)" and source_space not in {"ARRI LogC4", "Sony S-Log3", "ARRI LogC3", "Panasonic V-Log", "DaVinci Intermediate", "RED Log3G10"}:
-                source_space = "ARRI LogC4"
-            target_space = "Linear"
-            hdr_output = True
-            display_tonemap = "None"
+        # Which HDR path Direct HDR takes. Log inversion is only correct on a
+        # latent HDR Encode log-coded (live radiance_meta). Anything else is
+        # decoded to SDR and its clipped highlights are reconstructed to
+        # scene-linear by the pixel SDR -> HDR model.
+        direct = effective_decode_mode == "Direct HDR"
+        pixel_hdr = direct and not log_encoded
+        want_rhdr = bool(export_rhdr)
+        hdr_target = target_space if target_space in _SCENE_REFERRED else "Linear"
+        post_exposure = 0.0
+        notes = []
+        if pixel_hdr:
+            # Decode plain SDR; exposure is applied after reconstruction, in
+            # scene-linear, so a positive trim no longer clips highlights
+            # before the model sees them.
+            post_exposure = float(exposure_adjust)
+            eng = dict(hdr_mode="Clip (SDR)", source_space="sRGB", target_space="sRGB",
+                       display_tonemap="None", hdr_output=False, force_hdr_decode=False,
+                       exposure_adjust=0.0, inverse_tonemap=False,
+                       decode_noise_scale=0.0)
+            hdr_path = "pixel SDR->HDR"
+        elif direct:
+            log_source = radiance_meta.get("source_space")
+            if encoded_hdr_mode == "Compress (Log)" and log_source not in LOG_SPACE_GAMUT:
+                log_source = "ARRI LogC4"   # HDR Encode's curve for non-log sources
+            eng = dict(hdr_mode=encoded_hdr_mode, source_space=log_source or "sRGB",
+                       target_space=hdr_target, display_tonemap="None", hdr_output=True,
+                       force_hdr_decode=True, exposure_adjust=exposure_adjust,
+                       inverse_tonemap=False, decode_noise_scale=decode_noise_scale)
+            hdr_path = "log inversion (radiance_meta)"
         else:
-            force_hdr_decode = False
-            hdr_mode = "Clip (SDR)"
-            source_space = "sRGB"
-            if export_rhdr:
-                logger.warning(
-                    "[RadianceHDRVAEDecode] RHDR export is disabled in sampler-safe mode "
-                    "because the decoded image is display-referred. Select Direct HDR / RUDRA "
-                    "to export a scene-linear RHDR master."
-                )
-                export_rhdr = False
+            # Sampler-safe: a diffused latent is display-referred SDR. The
+            # visible target_space is honoured (hdr_output follows it, so
+            # "Linear" really is linear), and inverse_tonemap keeps the range
+            # it creates instead of being clamped straight back to 1.0.
+            samples = strip_hdr_meta(samples)
+            eng = dict(hdr_mode="Clip (SDR)", source_space="sRGB", target_space=target_space,
+                       display_tonemap="None",
+                       hdr_output=(target_space != "sRGB") or bool(inverse_tonemap),
+                       force_hdr_decode=False, exposure_adjust=exposure_adjust,
+                       inverse_tonemap=inverse_tonemap, decode_noise_scale=0.0)
+            hdr_path = "sampler SDR"
+            if want_rhdr:
+                notes.append("RHDR export skipped: the sampler-safe decode is display-referred")
+                want_rhdr = False
+            if hdr_scale_factor != 1.0:
+                notes.append("hdr_scale_factor applies to Direct HDR output only")
 
         result = engine.decode(
             samples=samples,
             vae=vae,
-            target_space=target_space,
             tile_size=tile_size,
             overlap=overlap,
-            exposure_adjust=exposure_adjust,
             alpha=alpha,
-            hdr_mode=hdr_mode,
-            display_tonemap=display_tonemap,
-            source_space=source_space,
-            force_hdr_decode=force_hdr_decode,
-            hdr_output=hdr_output,
-            inverse_tonemap=inverse_tonemap,
             target_stops=target_stops,
             crop_padding=crop_padding,
-            export_rhdr=export_rhdr,
+            export_rhdr=False,          # written below, after scale and crop
             rhdr_precision=rhdr_precision,
             processing_mode=processing_mode,
-            decode_noise_scale=decode_noise_scale,
-            turbo_decoder=turbo_decoder,
+            **eng,
             **safe_kwargs,
         )
 
@@ -467,82 +436,139 @@ class RadianceHDRVAEDecode:
                 engine_meta = {}
         latent_format = result[2] if isinstance(result, (tuple, list)) and len(result) > 2 else None
 
-        # BUG 2 FIX: guard hdr_scale_factor for display-referred spaces
-        # FIX (Issue 1): use exact set membership — substring matching was fragile
-        # and could misfire on future colorspace names that happen to contain a
-        # scene-referred name as a substring.
+        out_space = eng["target_space"]
+        pixel_report = None
+        if pixel_hdr:
+            image, pixel_report, hdr_path = self._pixel_hdr(
+                image, float(hdr_peak_nits), is_video=is_video)
+            if post_exposure != 0.0:
+                image = _scale_rgb(image, 2.0 ** post_exposure)
+            image = _linear709_to_target(image, hdr_target)
+            out_space = hdr_target
+
+        # hdr_scale_factor: Direct HDR only, RGB only (it used to scale alpha).
         scale_applied = False
-        if hdr_scale_factor != 1.0:
-            if target_space in _SCENE_REFERRED:
-                image = image * hdr_scale_factor
-                scale_applied = True
+        if direct and hdr_scale_factor != 1.0:
+            if out_space in _LOG_TARGETS:
+                notes.append("hdr_scale_factor not applied to a log-encoded target")
             else:
-                logger.warning(
-                    f"[RadianceHDRVAEDecode] hdr_scale_factor={hdr_scale_factor} ignored "
-                    f"for display-referred target_space='{target_space}' — would blow highlights. "
-                    f"Use a scene-referred space (Linear, ACEScg, LogC4 etc.) for HDR scaling."
-                )
+                image = _scale_rgb(image, float(hdr_scale_factor))
+                scale_applied = True
 
-        # ALBABIT-FIX: Restored from previous radiance version. Crops off
-        # model-alignment padding using RadianceResolution's crop_bbox output,
-        # instead of needing a separate crop node after this one.
+        # ALBABIT-FIX: crop off model-alignment padding using
+        # RadianceResolution's crop_bbox. 3.5.0: clamped to the image.
         if crop_bbox:
-            bx, by = int(crop_bbox.get("x", 0)), int(crop_bbox.get("y", 0))
-            bw = int(crop_bbox.get("width", image.shape[2]))
-            bh = int(crop_bbox.get("height", image.shape[1]))
-            image = image[:, by:by + bh, bx:bx + bw, :]
+            H, W = int(image.shape[1]), int(image.shape[2])
+            bx = min(max(int(crop_bbox.get("x", 0)), 0), W)
+            by = min(max(int(crop_bbox.get("y", 0)), 0), H)
+            bw = min(max(int(crop_bbox.get("width", W)), 0), W - bx)
+            bh = min(max(int(crop_bbox.get("height", H)), 0), H - by)
+            if bw > 0 and bh > 0:
+                image = image[:, by:by + bh, bx:bx + bw, :]
+            else:
+                notes.append(f"crop_bbox {crop_bbox} lies outside the {W}x{H} image; not applied")
 
-        # BUG 7 FIX: emit decode settings as metadata JSON
-        if rudra_actually_used:
-            rudra_status = (
-                f"Enabled (substituted {rudra_substituted_type!r} checkpoint for {model_type!r})"
-                if rudra_substituted_type else "Enabled"
-            )
-        elif rudra_decoder == "Enabled":
-            rudra_status = "Enabled (fallback: standard VAE used)"
-        else:
-            rudra_status = "Disabled"
+        # RHDR: Direct HDR only, from the final scene-linear image, so it
+        # carries the same scale, crop and target as the IMAGE output.
+        engine_meta.pop("rhdr_export", None)
+        if want_rhdr and direct:
+            if out_space in _LOG_TARGETS:
+                notes.append("RHDR export needs a linear target; skipped for a log target")
+            else:
+                names = self._write_rhdr(image, rhdr_precision)
+                if names:
+                    engine_meta["rhdr_export"] = names[0] if len(names) == 1 else names
+                    engine_meta["rhdr_precision"] = rhdr_precision
+        elif want_rhdr:
+            notes.append("RHDR export skipped: this decode ran sampler-safe SDR")
+
+        for n in notes:
+            logger.info("[RadianceHDRVAEDecode] %s", n)
 
         engine_meta.update({
             "node": "RadianceHDRVAEDecode",
-            "version": "3.1.0",
+            "version": "3.5.0",
             "decode_mode": effective_decode_mode,
-            "target_space": target_space,
-            "source_space": source_space,
-            "hdr_mode": hdr_mode,
-            "display_tonemap": display_tonemap,
+            "decode_mode_requested": decode_mode,
+            "hdr_path": hdr_path,
+            "radiance_meta_live": bool(meta_live),
+            "target_space": out_space,
+            "hdr_mode": eng["hdr_mode"],
+            "source_space": eng["source_space"],
             "exposure_adjust": exposure_adjust,
-            "hdr_scale_factor": hdr_scale_factor if scale_applied else "N/A (display-referred)",
-            "rudra_decoder": rudra_status,
-            "decoder_size": decoder_size if rudra_actually_used else "N/A",
-            "force_hdr_decode": force_hdr_decode,
+            "hdr_scale_factor": hdr_scale_factor if scale_applied else "N/A",
             "alpha_restored": bool(alpha_provided and image.shape[-1] == 4),
-            "hdr_output": hdr_output,
+            "hdr_output": bool(direct or eng["hdr_output"]),
             "latent_format": latent_format or engine_meta.get("latent_format", "unknown"),
             "timestamp": datetime.datetime.now(_tz.utc).isoformat(timespec="seconds"),
         })
+        if direct:
+            engine_meta["linear_convention"] = (
+                "1.0 = SDR diffuse white = 203 nits (BT.2408)" if pixel_hdr
+                else "1.0 = the encoded source's white")
+        if notes:
+            engine_meta["notes"] = notes
+        if pixel_report:
+            engine_meta["hdr_peak_nits"] = float(hdr_peak_nits)
+            engine_meta["sdr_to_hdr_report"] = pixel_report
         meta = json.dumps(engine_meta, indent=2)
 
-        # ALBABIT-FIX: surface the RUDRA fallback to the frontend via the "ui"
-        # channel (same convention as resolution.py's computed_width/height) so
-        # radiance_vae_widgets.js can flag it on rudra_decoder post-execution.
-        # The console log alone is easy to miss.
-        rudra_fallback = rudra_decoder == "Enabled" and not rudra_actually_used
-
-        # ALBABIT-FIX: surfaces to hdr_output's post-execution marker (see
-        # radiance_vae_widgets.js header for the full rationale). Only risky
-        # when Compress(Log) ran without a genuine HDR-encoded source
-        # upstream; display_tonemap doesn't gate this since hdr/vae.py
-        # applies it AFTER the log decompression that's the actual problem.
-        log_overexposure_risk = hdr_mode == "Compress (Log)" and not radiance_meta_present
+        log_overexposure_risk = (eng["hdr_mode"] == "Compress (Log)" and not radiance_meta_present
+                                 and not pixel_hdr)
         return {
             "ui": {
-                "rudra_fallback": [rudra_fallback],
-                "rudra_substituted_type": [rudra_substituted_type or ""],
                 "log_overexposure_risk": [log_overexposure_risk],
             },
             "result": (image, meta),
         }
+
+    @staticmethod
+    def _write_rhdr(image: torch.Tensor, precision: str):
+        try:
+            import folder_paths
+            out_dir = folder_paths.get_temp_directory()
+        except Exception as exc:  # noqa: BLE001 - export is best effort
+            logger.warning("[RadianceHDRVAEDecode] RHDR export failed: %s", exc)
+            return []
+        names = []
+        n = int(image.shape[0])
+        for i in range(n):
+            prefix = f"radiance_4k_f{i:04d}" if n > 1 else "radiance_4k"
+            fn = RadianceVAE4KDecode._save_rhdr(
+                image[i, ..., :3].float().cpu().numpy(), out_dir,
+                prefix=prefix, precision=precision)
+            if fn:
+                names.append(fn)
+        return names
+
+    @staticmethod
+    def _pixel_hdr(sdr: torch.Tensor, peak_nits: float, is_video: bool = False):
+        """Decoded SDR -> scene-linear HDR through SDR -> HDR Universal.
+
+        Hybrid mode with the Auto backend: deterministic expansion to BT.2408
+        reference white, plus RUDRA pixel reconstruction inside the clipped
+        highlights when the checkpoint is installed. Without the checkpoint
+        the result is the deterministic expansion, and the returned path
+        says so rather than claiming learned recovery.
+        """
+        from radiance.nodes.hdr.uplift_universal import RadianceSDRToHDRUniversal
+        out, _m, _s, _h, _sc, report = RadianceSDRToHDRUniversal().convert(
+            sdr.float().clamp(0.0, 1.0) if sdr.shape[-1] <= 3
+            else torch.cat([sdr[..., :3].float().clamp(0.0, 1.0), sdr[..., 3:].float()], dim=-1),
+            "sRGB", float(peak_nits), "adaptive", 0.75, 2.0, 0.85, "Linear",
+            reference_white_nits=203.0,
+            # 3.5.0: from the latent, not the batch size. A batch of four
+            # independent images used to be treated as a clip, which smoothed
+            # the adaptive knee across unrelated pictures.
+            batch_mode="Video Frames" if is_video and sdr.shape[0] > 1 else "Independent Images",
+            processing_mode="Hybrid", learned_backend="Auto",
+            pixel_recovery_mode="highlights",
+        )
+        learned = "learned recovery: applied" in report
+        path_line = next((l[6:] for l in report.splitlines() if l.startswith("path: ")), "")
+        hdr_path = (f"pixel SDR->HDR model ({path_line})" if learned
+                    else "SDR->HDR expansion only (no pixel checkpoint installed)")
+        return out, report, hdr_path
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -687,18 +713,19 @@ class RadianceHDRAnalysis:
 
 class RadianceNDISender:
     """
-    ◎ Radiance NDI Sender (Turbo)
+    ◎ Radiance NDI Sender
 
     Real-time streaming node to push frames to OBS, Resolume, Nuke,
     or any NDI receiver via NewTek NDI SDK.
 
-    v2.6.0 fixes:
-    - Singleton tracks stream_name and recreates sender on name change.
-    - Guard against empty image batch (IndexError).
-    - BUG 6 fix: fallback path (turbo failed) correctly applies log encoding.
-    - Duplicate numpy import removed.
+    - Singleton tracks stream_name and recreates the sender on name change.
+    - Guards against an empty image batch.
     - frame_rate exposed for NDI timing metadata.
     - connected BOOLEAN output for workflow branching.
+
+    3.5.0: the legacy latent "turbo" decode path was retired with the rest of
+    the latent RUDRA decoders. The node streams the IMAGE it is given; decode
+    upstream with HDR VAE Decode (Direct HDR) or SDR → HDR Universal.
 
     Note: NDIlib must be installed separately.
       pip install ndi-python
@@ -737,7 +764,7 @@ class RadianceNDISender:
                 "enable_streaming": ("BOOLEAN", {"default": True,
                     "tooltip": "Enable real-time NDI streaming during generation. Requires NDI SDK installed."
                 }),
-                "frame_rate": (                 # Suggestion C
+                "frame_rate": (
                     "FLOAT",
                     {
                         "default": 24.0,
@@ -745,36 +772,6 @@ class RadianceNDISender:
                         "max": 120.0,
                         "step": 1.0,
                         "tooltip": "Frame rate written into NDI video frame metadata.",
-                    },
-                ),
-            },
-            "optional": {
-                "latent_in": ("LATENT",),
-                "vae": ("VAE",),
-                "turbo_mode": (
-                    "BOOLEAN",
-                    {
-                        "default": False,
-                        "tooltip": (
-                            "Uses fast HDR decoder if latent_in and vae "
-                            "are connected. Bypasses full tiled decode."
-                        ),
-                    },
-                ),
-                # ALBABIT-FIX: same RUDRA model_type disambiguation as
-                # RadianceHDRVAEDecode -- see its model_meta tooltip. Only read
-                # when turbo_mode is enabled.
-                "model_meta": (
-                    "STRING",
-                    {
-                        "default": "",
-                        "forceInput": True,  # always a socket, never hand-typed
-                        "tooltip": (
-                            "Optional: connect RadianceUnifiedLoader's model_meta output "
-                            "to resolve the exact model architecture for the turbo decoder, "
-                            "instead of guessing from the latent/VAE shape. Only used when "
-                            "turbo_mode is enabled."
-                        ),
                     },
                 ),
             },
@@ -787,10 +784,7 @@ class RadianceNDISender:
         encoding: str,
         enable_streaming: bool,
         frame_rate: float = 24.0,
-        latent_in=None,
-        vae=None,
-        turbo_mode: bool = False,
-        model_meta: str = "",
+        **_legacy,   # latent_in / vae / turbo_mode / model_meta from pre-3.5 workflows
     ):
         if not enable_streaming:
             return (image, False)
@@ -800,86 +794,18 @@ class RadianceNDISender:
             logger.warning("[Radiance NDI] Received empty image batch — skipping.")
             return (image, False)
 
-        # ── Select frame source ────────────────────────────────────────────────
-        img_work = None
-        turbo_succeeded = False
+        if _legacy.get("turbo_mode"):
+            logger.warning(
+                "[Radiance NDI] turbo_mode is no longer available (the latent RUDRA "
+                "decoders were retired in 3.5.0); streaming the connected image."
+            )
 
-        if turbo_mode and latent_in is not None and vae is not None:
-            try:
-                profile_name = (
-                    "Sony S-Log3" if encoding == "S-Log3 (HDR)"
-                    else "ARRI LogC4" if encoding == "LogC4 (HDR)"
-                    else "None"
-                )
-
-                # ── VRAM relief before turbo forward pass ──────────────────────
-                try:
-                    import comfy.model_management as mm
-                    mm.soft_empty_cache()
-                    mm.unload_all_models()
-                    logger.debug("[Radiance NDI] Offloaded models before turbo decode")
-                except Exception as exc:
-                    logger.warning("[nodes_engine]: %s", exc)
-                try:
-                    import torch as _t
-                    if _t.cuda.is_available():
-                        _t.cuda.empty_cache()
-                except Exception as exc:
-                    logger.warning("[nodes_engine]: %s", exc)
-
-                # Direct fast decode via fast_vae library
-                latent = latent_in["samples"]
-                ch = latent.shape[1]
-                # ALBABIT-FIX: shared resolve_rudra_model_type() (fast_vae.py) replaces
-                # "ch >= 16 -> flux else sdxl", which misclassified 12ch (mochi) and
-                # 128ch (ltx-video, flux2/flux2-klein) latents as 4ch sdxl.
-                model_type = resolve_rudra_model_type(ch, latent.ndim == 5, vae=vae, model_meta=model_meta)
-                compute_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-                # ALBABIT-FIX: model_size="turbo" never matched on-disk
-                # "rudra_turbo_decoder_*_ema.safetensors" filenames — aligned to
-                # "rudra_turbo" like RadianceHDRVAEDecode. load_radiance_decoder_weights()
-                # can now return None (no compatible checkpoint); raise so the
-                # existing try/except below falls back to the plain image input
-                # (BUG 6 FIX).
-                decoder = load_radiance_decoder_weights(model_type=model_type, model_size="rudra_turbo")
-                if decoder is None:
-                    raise RuntimeError(f"No RUDRA decoder available for model_type={model_type!r}")
-                decoder = decoder.to(compute_device)
-                scale_factor = getattr(vae, "scale_factor", None)
-                if not isinstance(scale_factor, (int, float)) or scale_factor == 0:
-                    from radiance.config.model_map import get_model_vae_param
-                    scale_factor = get_model_vae_param(model_type, "scale_factor", default=0.18215)
-                from radiance.hdr.vae import LOG_PROFILE_HDR_PARAMS, LOG_PROFILE_HDR_DEFAULT
-                params = LOG_PROFILE_HDR_PARAMS.get(profile_name, LOG_PROFILE_HDR_DEFAULT)
-                log_curve = profile_name if profile_name != "None" else "ARRI LogC4"
-                img_work = decode_to_linear_realtime(
-                    latent=latent.to(compute_device),
-                    decoder=decoder,
-                    scale_factor=scale_factor,
-                    profile_params=params,
-                    precision="bf16",
-                    log_curve=log_curve,
-                ).cpu().float()
-                turbo_succeeded = True
-            except Exception as e:
-                logger.error(
-                    f"[Radiance NDI] Turbo path failed: {e}. "
-                    f"Falling back to image input."
-                )
-                img_work = image[0].clone()
-                # turbo_succeeded stays False — fallback path needs encoding below
-
-        if img_work is None:
-            img_work = image[0].clone()
-
-        # ── Apply log encoding ─────────── Apply log encoding ─────────────────────────────────────────────────
-        # BUG 6 FIX: turbo path pre-encodes — only skip encoding when turbo succeeded.
-        # If turbo failed and we fell back to the raw image, encoding must still apply.
-        if not turbo_succeeded:
+        def _encode(frame):
             if encoding == "S-Log3 (HDR)":
-                img_work = tensor_linear_to_slog3(img_work)
-            elif encoding == "LogC4 (HDR)":
-                img_work = tensor_linear_to_logc4(img_work)
+                return tensor_linear_to_slog3(frame)
+            if encoding == "LogC4 (HDR)":
+                return tensor_linear_to_logc4(frame)
+            return frame
 
         # ── NDI dispatch ───────────────────────────────────────────────────────
         connected = False
@@ -904,39 +830,38 @@ class RadianceNDISender:
                     return (image, False)
                 desc = ndi.SendCreate()
                 desc.p_ndi_name = stream_name
+                # Paced by the SDK at frame_rate, so a batch plays as video
+                # instead of arriving as a burst.
+                desc.clock_video = True
                 RadianceNDISender._ndi_send_instance = ndi.send_create(desc)
                 RadianceNDISender._ndi_video_frame   = ndi.VideoFrameV2()
                 RadianceNDISender._ndi_stream_name   = stream_name
                 logger.info(f"[Radiance NDI] Sender created: '{stream_name}'")
 
-        # BUG 9 FIX: numpy already imported at module level — no duplicate import
-        img_np  = img_work.cpu().float().numpy()
-        H, W, C = img_np.shape
-        img_8bit = np.clip(img_np * 255.0, 0, 255).astype(np.uint8)
-
-        if C == 3:
-            alpha_ch = np.full((H, W, 1), 255, dtype=np.uint8)
-            img_bgra = np.concatenate(
-                [img_8bit[..., 2:3], img_8bit[..., 1:2],
-                 img_8bit[..., 0:1], alpha_ch], axis=2,
-            )
-        else:
-            img_bgra = np.concatenate(
-                [img_8bit[..., 2:3], img_8bit[..., 1:2],
-                 img_8bit[..., 0:1], img_8bit[..., 3:4]], axis=2,
-            )
-
+        # Every frame of the batch is sent. Only image[0] used to go out, so a
+        # decoded clip streamed as one still. The wire format is 8-bit BGRA;
+        # the log encodings exist to fit HDR into those 8 bits.
         vf = RadianceNDISender._ndi_video_frame
-        vf.xres = W
-        vf.yres = H
-        vf.FourCC = ndi.FOURCC_VIDEO_TYPE_BGRA
-        vf.p_data = img_bgra
-        vf.line_stride_in_bytes = W * 4
-        # frame rate metadata
-        vf.frame_rate_N = int(frame_rate * 1000)
-        vf.frame_rate_D = 1000
-        ndi.send_send_video_v2(RadianceNDISender._ndi_send_instance, vf)
+        for idx in range(image.shape[0]):
+            img_np = _encode(image[idx].clone()).cpu().float().numpy()
+            H, W, C = img_np.shape
+            img_8bit = np.clip(img_np * 255.0 + 0.5, 0, 255).astype(np.uint8)
+            alpha_ch = (img_8bit[..., 3:4] if C >= 4
+                        else np.full((H, W, 1), 255, dtype=np.uint8))
+            img_bgra = np.ascontiguousarray(np.concatenate(
+                [img_8bit[..., 2:3], img_8bit[..., 1:2], img_8bit[..., 0:1], alpha_ch], axis=2,
+            ))
+            vf.xres = W
+            vf.yres = H
+            vf.FourCC = ndi.FOURCC_VIDEO_TYPE_BGRA
+            vf.p_data = img_bgra
+            vf.line_stride_in_bytes = W * 4
+            vf.frame_rate_N = int(frame_rate * 1000)
+            vf.frame_rate_D = 1000
+            ndi.send_send_video_v2(RadianceNDISender._ndi_send_instance, vf)
         connected = True
+        logger.info("[Radiance NDI] sent %d frame(s) to '%s' (8-bit BGRA, %s)",
+                    image.shape[0], stream_name, encoding)
 
         return (image, connected)
 

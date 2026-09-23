@@ -314,12 +314,17 @@ class RadianceMultipassMaster:
                 signed_n = signed_n * 2.0 - 1.0
             signed_n = signed_n / torch.sqrt((signed_n * signed_n).sum(dim=-1, keepdim=True).clamp(min=1e-8))
             pass_normal = (signed_n * 0.5 + 0.5).contiguous()
+            normal_source = "input normal_map"
         else:
             dsine_result = _normal_from_dsine(img, dsine_model_path, normal_convention)
             if dsine_result is not None:
                 pass_normal = dsine_result
+                normal_source = "DSINE"
             else:
                 pass_normal = _surface_normals_gradient(luma, normal_strength, normal_convention)
+                # Recorded in the passes so the fallback is visible downstream
+                # (it used to be a log line only).
+                normal_source = "luma gradient (DSINE unavailable)"
 
         # ── 3. Geometry Utilities ─────────────────────────────────────────────
         pass_curvature = _curvature_from_normals(pass_normal)
@@ -463,6 +468,7 @@ class RadianceMultipassMaster:
                 if name.startswith("_") and name != "_present":
                     passes_dict[name] = value
             passes_dict["_source_present"] = sorted(source_present)
+        passes_dict["_normal_source"] = normal_source
         passes_dict["_present"] = sorted(name for name, value in passes_dict.items() if isinstance(value, torch.Tensor))
 
         perf_finish(logger, "Multipass Extract", _perf, device)
