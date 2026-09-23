@@ -205,6 +205,14 @@ SPATIAL_SCALE = {
     "Manual": 1,
 }
 
+# ALBABIT-FIX: pixel alignment where it differs from the VAE's spatial compression.
+# MiniMax H3 compresses 16x but patchifies 2x2, so its keyframe latents (Add Guide,
+# Image to Video) need an even latent size: 45 rows (720px) crashes patchify_video.
+# The native nodes step width/height by 32 for the same reason.
+SPATIAL_ALIGN = {
+    "MiniMax H3 (24ch)": 32,
+}
+
 # ── Per-model latent temporal downscale factor (3D VAE compression) ─────────────
 # ALBABIT-FIX: Restored from previous radiance version — without this, the empty
 # video latent's temporal dimension was set to the raw pixel-space frame count
@@ -1040,7 +1048,7 @@ class RadianceResolution:
         # ── Step 2 (computed early): Determine Alignment Rule (model_type-driven) ──
         # ALBABIT-FIX: alignment is derived solely from SPATIAL_SCALE for the
         # selected model_type (LTXV=32, Flux.2=16, default=8), always rounded UP.
-        align_val   = SPATIAL_SCALE.get(model_type, 8)
+        align_val   = SPATIAL_ALIGN.get(model_type) or SPATIAL_SCALE.get(model_type, 8)
         align_label = f"{align_val}px"
 
         # ── Megapixel target mode overrides preset/custom ────────────────────────
@@ -1136,7 +1144,7 @@ class RadianceResolution:
 
         # Estimate VRAM
         v_count = video_frames if enable_video else batch_size
-        vram_est = _estimate_vram(w, h, latent_channels or LATENT_CHANNELS.get(model_type, 4), v_count, latent_format, align_val)
+        vram_est = _estimate_vram(w, h, latent_channels or LATENT_CHANNELS.get(model_type, 4), v_count, latent_format, SPATIAL_SCALE.get(model_type, 8))
 
         # Apply orientation
         w, h = _apply_orientation(w, h, orientation)

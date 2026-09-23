@@ -32,6 +32,7 @@ from nodes.generate.resolution import (
     VIDEO_MODEL_TYPES,
     LATENT_CHANNELS,
     SPATIAL_SCALE,
+    SPATIAL_ALIGN,
     TEMPORAL_SCALE,
     LATENT_FORMAT_MAP,
     MINIMAX_H3_MODEL_TYPE,
@@ -80,6 +81,9 @@ class TestMiniMaxH3Registration:
 
     def test_spatial_scale_is_16(self):
         assert SPATIAL_SCALE[MINIMAX_H3_MODEL_TYPE] == 16
+
+    def test_pixel_alignment_is_32(self):
+        assert SPATIAL_ALIGN[MINIMAX_H3_MODEL_TYPE] == 32
 
     def test_latent_format_matches_supported_models_unet_config(self):
         assert LATENT_FORMAT_MAP[MINIMAX_H3_MODEL_TYPE] == "minimax_h3"
@@ -194,7 +198,7 @@ class TestGenerateMiniMaxH3Latent:
     def test_on_grid_manual_frames_produces_correct_shape(self):
         node = RadianceResolution()
         latent, w, h, c, info, fr, frames, fmt, dur, crop_bbox = self._generate(node, video_frames=124)
-        # width=1344, height=768 at 16px alignment -> unchanged; //16 -> 84x48.
+        # width=1344, height=768 already on the 32px alignment; latent is //16 -> 84x48.
         assert tuple(latent["samples"].shape) == (1, 24, 37, 48, 84)
         assert (w, h, c) == (1344, 768, 24)
         assert fmt == "minimax_h3"
@@ -279,11 +283,19 @@ class TestGenerateMiniMaxH3Latent:
         text = "\n".join(str(call) for call in mock_logger.warning.call_args_list)
         assert "fixed at" not in text
 
-    def test_width_height_align_to_16px(self):
+    def test_width_height_align_to_32px_but_latent_stays_16x(self):
         node = RadianceResolution()
         latent, w, h, c, info, fr, frames, fmt, dur, crop_bbox = self._generate(node, width=1350, height=770)
-        assert w % 16 == 0 and h % 16 == 0
-        assert w >= 1350 and h >= 770
+        assert (w, h) == (1376, 800)
+        assert tuple(latent["samples"].shape[-2:]) == (h // 16, w // 16)
+
+    def test_720p_gets_an_even_latent_so_keyframes_can_patchify(self):
+        # 720 // 16 = 45 rows is odd and crashes patchify_video on keyframe latents.
+        node = RadianceResolution()
+        latent, w, h, c, info, fr, frames, fmt, dur, crop_bbox = self._generate(node, width=1280, height=720)
+        assert (w, h) == (1280, 736)
+        assert latent["samples"].shape[-2] % 2 == 0
+        assert crop_bbox == {"x": 0, "y": 8, "width": 1280, "height": 720}
 
 
 class TestNonMiniMaxRegressionGuard:

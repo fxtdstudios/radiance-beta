@@ -57,9 +57,9 @@ const SPATIAL_SCALE_JS = {
     // ALBABIT-FIX: WAN 2.2 TI2V-5B's VAE compresses 16x spatially (double
     // standard WAN's 8x) -- real bug fix, see resolution.py's SPATIAL_SCALE.
     "WAN TI2V (48ch)": 16,
-    // ALBABIT-FIX: MiniMax H3 — mirrors resolution.py's SPATIAL_SCALE (16px,
-    // confirmed against nodes_minimax_h3.py's plain height//16, width//16).
-    "MiniMax H3 (24ch)": 16,
+    // ALBABIT-FIX: MiniMax H3 mirrors resolution.py's SPATIAL_ALIGN (32px, not
+    // its 16x compression): keyframe latents need an even latent size.
+    "MiniMax H3 (24ch)": 32,
     // ALBABIT-FIX: "Manual" -> scale=1, _alignUp is a no-op and the +/- step
     // becomes 1, so width/height are fully unconstrained.
     "Manual": 1,
