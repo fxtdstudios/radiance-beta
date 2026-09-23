@@ -96,6 +96,12 @@ All notable changes to FXTD Radiance will be documented in this file.
   - *Lite Viewer.* Readout, clip check and diff read an fp16 float proxy, so they show source values at source coordinates. The canvas is in device pixels, so 1:1 is exact on scaled displays; it was sized from a bordered box, 0.3 % off. B is scaled to A, diff has a gain, and play/loop run at the source fps. Frames load progressively.
   - Tests: `tests/test_viewer_phase1.py` (11), and `js/tests/viewer_color.test.mjs` and `js/tests/lite_viewer.test.mjs`, which read real pixels back from Chromium.
 
+- **Synced with upstream (3.5.0).**
+  - *MiniMax H3 image guides crashed at 720p* (beta PR #75, merged). Keyframe latents were not padded to the 2x2 patch, so 45 latent rows failed in `patchify_video`. Resolution now aligns MiniMax H3 to 32 px and `crop_bbox` crops back after decode.
+  - *Write left nothing in ComfyUI history* (from public PR #18). As an output node with no `ui` block, `/history` had no record of what Write saved. Write and Digital Cinema Write now list every file in `radiance_files`; PNG / JPEG / WEBP inside the output directory also go to `images` for the preview. The node still returns `(saved, count)` as `result`.
+  - *Platform requirements downgraded ComfyUI's packages* (from public PR #18). `requirements_{windows,linux,mac_silicon}.txt` and `pyproject.toml` capped `Pillow<12`, `transformers<5` and nine others, so installing them into ComfyUI's environment could downgrade what ComfyUI or other packs had. Lower bounds only now, matching `requirements.txt`.
+  - Tests: `tests/test_write_history.py` (5).
+
 - **Viewer phase 2 (3.5.0).**
   - *Scopes measured the wrong thing.* Waveform, vectorscope, histogram and the reference scopes read the ungraded source texture or the 8-bit canvas (with overlays in it). They now read a display-signal render: graded, through the active view, with no overlays, false colour or viewer exposure. Checked: a 0.5 grey reads 128 on the scope with false colour on.
   - *Vectorscope.* Targets sat at the wrong angles. It is BT.709 Cb/Cr of the encoded signal now (100 % red at 102.9°), with 75 % and 100 % boxes and the skin line, on the CPU and GPU scopes alike.

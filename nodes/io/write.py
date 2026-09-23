@@ -34,6 +34,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -515,6 +516,64 @@ class RadianceRead:
 # § 4  RadianceWrite
 # ═══════════════════════════════════════════════════════════════════════════
 
+
+_PREVIEWABLE = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+def _history_entries(saved, t0: float) -> list:
+    """Files this write produced, as ComfyUI ``{filename, subfolder, type}``.
+
+    ``saved`` is the file for a single image or video, or the sequence
+    directory for a sequence; a sequence is listed from files in that
+    directory modified since the write started. Files outside ComfyUI's
+    output directory are reported with ``type: "absolute"`` and their full
+    path, since ``/view`` cannot serve them.
+    """
+    if not saved:
+        return []
+    p = Path(str(saved))
+    if p.is_dir():
+        files = sorted(f for f in p.iterdir() if f.is_file() and f.stat().st_mtime >= t0 - 1.0)
+    elif p.is_file():
+        files = [p]
+    else:
+        return []
+    out_root = None
+    if _HAS_FOLDER_PATHS:
+        try:
+            out_root = Path(_folder_paths.get_output_directory()).resolve()
+        except Exception:  # noqa: BLE001
+            out_root = None
+    entries = []
+    for f in files:
+        rf = f.resolve()
+        if out_root is not None and (rf == out_root or out_root in rf.parents):
+            rel = rf.relative_to(out_root)
+            sub = "" if str(rel.parent) == "." else rel.parent.as_posix()
+            entries.append({"filename": rf.name, "subfolder": sub, "type": "output"})
+        else:
+            entries.append({"filename": rf.name, "subfolder": str(rf.parent), "type": "absolute"})
+    return entries
+
+
+def _with_history(res, t0: float):
+    """Wrap a write result with a ComfyUI ``ui`` block listing its files.
+
+    ``images`` (which the frontend previews through ``/view``) only gets
+    PNG / JPEG / WEBP files inside the output directory; EXR, DPX, TIFF and
+    video would show as broken images. Every file is in ``radiance_files``.
+    """
+    saved = res[0] if isinstance(res, tuple) and res else None
+    entries = _history_entries(saved, t0)
+    if not entries:
+        return res
+    ui = {"radiance_files": entries}
+    previews = [e for e in entries if e["type"] == "output"
+                and Path(e["filename"]).suffix.lower() in _PREVIEWABLE]
+    if previews:
+        ui["images"] = previews
+    return {"ui": ui, "result": res}
+
 class RadianceWrite:
     """
     Universal writer — images, EXR, video, numbered sequences.
@@ -772,8 +831,13 @@ class RadianceWrite:
         radiance/io/writer.py; this signature is the widget contract and must
         not drift from it, because saved workflows are matched against it by
         name and order.
+
+        Returns ``{"ui": ..., "result": (saved, count)}`` so ComfyUI records
+        the written files in ``/history`` (API clients had no way to find
+        them). ``result`` keeps the old tuple for programmatic callers.
         """
-        return _write_frames(
+        t0 = time.time()
+        res = _write_frames(
             image=image,
             output_path=output_path,
             format=format,
@@ -799,6 +863,7 @@ class RadianceWrite:
             ocio_config=strip_path_quotes(ocio_config or "") if ocio_config else "",
             hdr_reference_nits=hdr_reference_nits,
         )
+        return _with_history(res, t0)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # § 5  RadianceEXRMultiPart — multi-layer AOV EXR writer
@@ -1104,8 +1169,10 @@ class RadianceDigitalCinemaWrite:
 
     def write(self, images, output_path, format="IMG │ EXR (16-bit half)", filename=""):
         writer = RadianceWrite()
-        writer.write(image=images, output_path=output_path, format=format, filename=filename)
-        return (f"OK: wrote '{filename or output_path}' as {format}",)
+        out = writer.write(image=images, output_path=output_path, format=format, filename=filename)
+        status = (f"OK: wrote '{filename or output_path}' as {format}",)
+        ui = out.get("ui") if isinstance(out, dict) else None
+        return {"ui": ui, "result": status} if ui else status
 
 
 NODE_CLASS_MAPPINGS = {
