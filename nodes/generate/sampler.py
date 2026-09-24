@@ -1587,7 +1587,10 @@ class RadianceSamplerPro:
         # Standardize to 5D for processing if it's a video model, otherwise keep 4D
         is_video = detected_type in VIDEO_MODEL_TYPES
         if is_video:
-            latent_samples = ensure_5d(latent_samples, "RadianceSamplerPro")
+            # ALBABIT-FIX: packed AV latents (LTX-AV, MiniMax H3) are handled natively
+            # below; ensure_5d now rejects anything that is not a plain Tensor.
+            if not getattr(latent_samples, "is_nested", False):
+                latent_samples = ensure_5d(latent_samples, "RadianceSamplerPro")
             frames = latent_samples.shape[2]
             logger.warning(
                 "[RadianceSamplerPro] Video model '%s' detected. "

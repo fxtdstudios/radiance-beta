@@ -923,6 +923,28 @@ class TestTensorContractRejectsNestedTensors:
             fn(self._Nested(), "SamplerPro")
 
 
+class TestSamplerKeepsPackedVideoLatents:
+    """3.5.0 made ensure_5d reject NestedTensor, and SamplerPro still called it
+    on every video latent, so LTX-AV and MiniMax H3 failed before sampling."""
+
+    class _Reached(Exception):
+        pass
+
+    def test_a_packed_latent_reaches_sampling(self):
+        reached = self._Reached
+
+        class Packed(_FakeNestedTensor):
+            shape = (1, 24, 2, 4, 4)
+            ndim = 5
+
+            def to(self, *args, **kwargs):
+                raise reached
+
+        latent = {"samples": Packed((torch.zeros(1, 24, 2, 4, 4), torch.zeros(1, 32, 2, 8)))}
+        with pytest.raises(self._Reached):
+            run_sampler(latent=latent, model_type="minimax", steps=2)
+
+
 def test_regional_replace_keeps_the_global_outside_the_region():
     """Audit 3.5: Replace dropped the base from the whole frame."""
     import torch
