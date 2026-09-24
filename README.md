@@ -131,11 +131,12 @@ The weights are published on Hugging Face under Apache-2.0:
 [fxtdstudios/RUDRA](https://huggingface.co/fxtdstudios/RUDRA).
 
 **It downloads automatically.** The first time SDR → HDR Universal or
-SDR → HDR Recover needs the model and none is installed, Radiance fetches it
-(about 5 MB) into your ComfyUI models folder:
+SDR → HDR Recover needs the model and none is installed, Radiance fetches
+RUDRA's shipped model, `sdr2hdr_shadow_v1` (about 5 MB), into your ComfyUI
+models folder:
 
 ```
-ComfyUI/models/radiance/sdr2hdr_pixel_image.pt
+ComfyUI/models/radiance/sdr2hdr_shadow_v1.safetensors
 ```
 
 The download is pinned to a fixed Hugging Face commit and checked by size and
@@ -144,7 +145,7 @@ once, and the console shows `[Radiance] Installed ...` when it is done. Leave
 the node's `pixel_checkpoint` field empty to use it.
 
 To install it by hand instead (offline or air-gapped machines), download
-[`sdr2hdr_pixel_image.pt`](https://huggingface.co/fxtdstudios/RUDRA/resolve/main/sdr2hdr_pixel_image.pt)
+[`sdr2hdr_shadow_v1.safetensors`](https://huggingface.co/fxtdstudios/RUDRA/resolve/main/sdr2hdr/sdr2hdr_shadow_v1.safetensors)
 and put it at the path above, creating the `radiance` folder if needed. To turn
 automatic downloads off, set any of these in the ComfyUI launch environment:
 
@@ -155,17 +156,37 @@ automatic downloads off, set any of these in the ComfyUI launch environment:
 
 Radiance registers `models/radiance` with ComfyUI, so a `radiance:` entry in
 `extra_model_paths.yaml` works too, and `RADIANCE_SDR2HDR_PIXEL` can point at
-a file anywhere. Any `sdr2hdr_pixel*.pt` in the folder is found; the
-preferred name above wins when several are present.
+a file anywhere. Every RUDRA image checkpoint loads, as Hugging Face publishes
+it (`.safetensors`, flat in the folder or under the `sdr2hdr/` subfolder
+`hf download` creates) or as the training scripts write it (`.pt`); each file
+carries its own architecture, so the shadow-gated and ungated models both
+build correctly. When several are present `sdr2hdr_shadow_v1` wins, then the
+other shadow seeds, then `sdr2hdr_image_v5`, then older `.pt` files.
+`sdr2hdr_temporal_v1` is not an image model and is refused with a message
+saying so.
 
 | File | Used by | Link |
 | :--- | :--- | :--- |
-| `sdr2hdr_pixel_image.pt` | SDR → HDR Universal (Recover / Hybrid) and SDR → HDR Recover, stills and frame batches | [download](https://huggingface.co/fxtdstudios/RUDRA/resolve/main/sdr2hdr_pixel_image.pt) (auto) |
+| `sdr2hdr_shadow_v1.safetensors` | SDR → HDR Universal (Recover / Hybrid) and SDR → HDR Recover, stills and frame batches | [download](https://huggingface.co/fxtdstudios/RUDRA/resolve/main/sdr2hdr/sdr2hdr_shadow_v1.safetensors) (auto) |
+| `sdr2hdr_shadow_s2` / `_s3`, `sdr2hdr_image_v5` / `_v6` | alternatives: other seeds of the shipped recipe, and the backbone without the shadow gate | [RUDRA/sdr2hdr](https://huggingface.co/fxtdstudios/RUDRA/tree/main/sdr2hdr) |
 | `temporal_rudra_residual_ema.safetensors` | the motion-aligned temporal model for ordered video (optional) | not yet published |
 
 If the model can't be found or downloaded, Universal falls back to
 deterministic expansion and says so in its `report` output; Recover raises
 rather than silently expanding.
+
+**What the model recovers, and what it doesn't.** In clipped highlights the
+network supplies brightness; the colour stays the source's. A clipped channel
+carries no information about its own value, and the released checkpoints were
+trained on renders that almost never clipped, so their per-channel guesses in
+blown areas are not reliable colour: letting them through drew false-colour
+rings round a clipped sun and cast white areas red. The learned lift fades in
+as the source goes to white (two or more channels near clip), is never darker
+than the deterministic expansion, and no channel of it exceeds `peak_nits`,
+so an HDR10 encode cannot clip it per channel. The model runs on the whole
+frame when it fits in memory; `pixel_tile_size` only applies when it does
+not, because the network normalises over its input and tiles shift the
+result.
 
 The other model downloads Radiance can make (Real-ESRGAN, HAT-L, SwinIR,
 Depth Anything V2, DSINE; 67 MB to 2.4 GB) still ask first: set
@@ -480,6 +501,12 @@ the gap is recorded under Open rather than quietly corrected.
       1.0 = 203 nits (BT.2408), HLG the BT.2100 1000-nit transcode OCIO uses,
       camera log targets in their camera gamut, AP0 matrix corrected. Checked
       against OpenColorIO and the shipped pixel checkpoint.
+- [x] **RUDRA pixel model: no false colour, no over-peak channels (3.5.0).**
+      From a user report on a clipped Flux.2 sunset. Recovered highlights keep
+      the source colour (no rings, no red cast, source-level chroma noise),
+      no channel exceeds `peak_nits`, the whole frame runs untiled when it
+      fits, and every published checkpoint loads, with the shipped
+      `sdr2hdr_shadow_v1` as the default and the auto-download.
 - [x] **Viewer and Lite Viewer, phase 1 (3.5.0).**
   - **Colour.** The node tags every frame: a ComfyUI IMAGE is shown exactly as ComfyUI shows it, and a linear source goes through OpenColorIO ACES 2.0. A normal image used to be read as linear and sRGB-encoded twice, which washed it out, and its input colour space was guessed from brightness.
   - **View menu.** Every entry is real (ACES 2.0 and 1.3 through OCIO, sRGB, Rec.709 BT.1886). The same view is baked into the PNG previews.

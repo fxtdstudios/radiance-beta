@@ -1,6 +1,8 @@
 """First-use download of Radiance's pixel SDR-to-HDR checkpoint.
 
-`RadianceSDRToHDRUniversal`'s learned modes need ``sdr2hdr_pixel_image.pt``.
+`RadianceSDRToHDRUniversal`'s learned modes need a RUDRA SDR2HDRNet
+checkpoint. The one fetched is ``sdr2hdr_shadow_v1.safetensors``, the model
+RUDRA ships: the v5 backbone plus its trained shadow gate.
 It used to be a manual install: download from Hugging Face, drop it in
 ``models/radiance``. Anyone who skipped that step got the plain expansion
 fallback with only a log line to say why.
@@ -31,15 +33,16 @@ from typing import Optional
 
 logger = logging.getLogger("radiance.model.pixel_download")
 
-PIXEL_FILENAME = "sdr2hdr_pixel_image.pt"
+PIXEL_FILENAME = "sdr2hdr_shadow_v1.safetensors"
 PIXEL_REPO = "fxtdstudios/RUDRA"
 PIXEL_REVISION = "9cecedfa80fd4eaafadc590b6d924c68d86dd12d"
+PIXEL_REPO_PATH = f"sdr2hdr/{PIXEL_FILENAME}"
 PIXEL_URL = (
-    f"https://huggingface.co/{PIXEL_REPO}/resolve/{PIXEL_REVISION}/{PIXEL_FILENAME}"
+    f"https://huggingface.co/{PIXEL_REPO}/resolve/{PIXEL_REVISION}/{PIXEL_REPO_PATH}"
 )
-PIXEL_PAGE_URL = f"https://huggingface.co/{PIXEL_REPO}/blob/main/{PIXEL_FILENAME}"
-PIXEL_SIZE = 4_817_807
-PIXEL_SHA256 = "80d9689c10db7860a9e89833dce5cd82e7440b7878f655ab1889d8cc8dcc4f47"
+PIXEL_PAGE_URL = f"https://huggingface.co/{PIXEL_REPO}/blob/main/{PIXEL_REPO_PATH}"
+PIXEL_SIZE = 4_878_392
+PIXEL_SHA256 = "cffaefc7c2d06fd381b1222fe084cac9019eef881eb533e09c365745f84df2ac"
 
 _TIMEOUT_S = 60
 _CHUNK = 1 << 20
