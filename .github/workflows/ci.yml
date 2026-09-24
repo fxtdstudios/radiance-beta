@@ -171,6 +171,13 @@ jobs:
         run: |
           python -m pytest tests/ --tb=short --timeout=120 -q
 
+      # `slow` is deselected by default (pyproject addopts). This is where the
+      # exhaustive checks still run, e.g. every video frame count from 1 to 100
+      # on H.264, H.265 10-bit and ProRes. A later -m overrides the default.
+      - name: Run slow tests (real deps)
+        run: |
+          python -m pytest tests/ -m slow --tb=short -q
+
   # ── Import smoke-test ───────────────────────────────────────────────────────
   # Verifies that pure-Python helpers import cleanly with minimal stubs,
   # independent of the test suite (catches syntax errors, bad imports at
