@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from ....performance import perf_finish, perf_start
+from ....core.tensor.chunking import chunks, compute_device, frames_per_chunk
 
 _NORMAL_INPUTS = ["OpenGL (Y-Up)", "DirectX (Y-Down)"]
 _LIGHT_TYPES = ["Directional", "Point"]
@@ -78,9 +79,17 @@ def _normalize(v: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     return v / torch.sqrt((v * v).sum(dim=-1, keepdim=True).clamp(min=eps))
 
 
-def _decode_normal_map(normal_map: torch.Tensor, convention: str) -> torch.Tensor:
+def _normals_are_encoded(normal_map: torch.Tensor) -> bool:
+    """True when the pass is 0..1 encoded (decode to -1..1), decided on the whole clip."""
+    n = normal_map[..., :3]
+    return float(n.detach().min()) >= -0.001 and float(n.detach().max()) <= 1.001
+
+
+def _decode_normal_map(normal_map: torch.Tensor, convention: str, encoded: Optional[bool] = None) -> torch.Tensor:
     n = normal_map.float()[..., :3]
-    if float(n.detach().min()) >= -0.001 and float(n.detach().max()) <= 1.001:
+    if encoded is None:
+        encoded = _normals_are_encoded(n)
+    if encoded:
         n = n * 2.0 - 1.0
     if convention == "DirectX (Y-Down)":
         n = torch.stack([n[..., 0], -n[..., 1], n[..., 2]], dim=-1)
@@ -205,95 +214,128 @@ class RadianceMultipassRelight:
         output_premultiplied: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str]:
         batch, height, width, _ = albedo.shape
-        device = albedo.device
+        # 3.5.0: shaded a few frames at a time on the GPU. The whole clip used
+        # to be shaded at once on the input's device (the CPU in ComfyUI) with
+        # about 25 frame-sized temporaries, and unconnected passes were built
+        # as full frames of a constant: 24 frames of 1024x576 ran out of
+        # memory in 6 GB. Unconnected passes and per-light constants are now
+        # broadcast values.
+        device = compute_device()
         _perf = perf_start(device)
-        base = _match_image(albedo, batch, height, width, 3).to(device=device).clamp(min=0.0)
-        normals = _decode_normal_map(
-            _match_image(normal_map, batch, height, width, 3).to(device=device),
-            normal_convention,
-        )
+        encoded = _normals_are_encoded(normal_map.float())
 
-        rough = _scalar_pass(roughness, batch, height, width, 0.5, device).clamp(0.045, 1.0)
-        metal = _scalar_pass(metallic, batch, height, width, 0.0, device)
-        spec = (
-            torch.ones((batch, height, width, 3), device=device, dtype=torch.float32)
-            if specular is None
-            else _match_image(specular, batch, height, width, 3).to(device=device).clamp(0.0, 1.0)
-        )
-        # Renderer convention (Arnold, Cycles, Karma, Multipass Estimate):
-        # white is open. This used to read the pass as an occlusion amount,
-        # which inverted every real AO pass loaded through Read AOVs.
-        accessibility = _scalar_pass(ao, batch, height, width, 1.0, device)
-        alpha_s = _scalar_pass(alpha, batch, height, width, 1.0, device)
-        shadow = _scalar_pass(shadow_mask, batch, height, width, 0.0, device)
-        visibility = (1.0 - shadow).clamp(0.0, 1.0)
+        def part(x: Optional[torch.Tensor], a: int, b: int) -> Optional[torch.Tensor]:
+            if x is None or x.shape[0] == 1:
+                return x
+            if x.shape[0] < batch:
+                raise ValueError(f"Batch mismatch: expected {batch} frames or a single broadcast frame, got {x.shape[0]}")
+            return x[a:b]
 
-        if light_type == "Point":
-            if world_position is not None:
-                positions = _match_image(world_position, batch, height, width, 3).to(device=device)
+        def scalar(x: Optional[torch.Tensor], a: int, b: int, n: int, default: float) -> torch.Tensor:
+            if x is None:
+                return torch.full((1, 1, 1), float(default), device=device, dtype=torch.float32)
+            return _scalar_pass(part(x, a, b), n, height, width, default, device)
+
+        outs = [torch.empty((batch, height, width, 3), dtype=torch.float32) for _ in range(5)]
+        per = frames_per_chunk(height, width, 3, 30.0, device)
+        for a, b in chunks(batch, per):
+            n = b - a
+            base = _match_image(part(albedo, a, b), n, height, width, 3).to(device=device).clamp(min=0.0)
+            normals = _decode_normal_map(
+                _match_image(part(normal_map, a, b), n, height, width, 3).to(device=device),
+                normal_convention, encoded,
+            )
+            rough = scalar(roughness, a, b, n, 0.5).clamp(0.045, 1.0)
+            metal = scalar(metallic, a, b, n, 0.0)
+            spec = (
+                1.0 if specular is None
+                else _match_image(part(specular, a, b), n, height, width, 3).to(device=device).clamp(0.0, 1.0)
+            )
+            # Renderer convention (Arnold, Cycles, Karma, Multipass Estimate):
+            # white is open. This used to read the pass as an occlusion amount,
+            # which inverted every real AO pass loaded through Read AOVs.
+            accessibility = scalar(ao, a, b, n, 1.0)
+            alpha_s = scalar(alpha, a, b, n, 1.0)
+            shadow = scalar(shadow_mask, a, b, n, 0.0)
+            visibility = (1.0 - shadow).clamp(0.0, 1.0)
+
+            if light_type == "Point":
+                if world_position is not None:
+                    positions = _match_image(part(world_position, a, b), n, height, width, 3).to(device=device)
+                else:
+                    positions = _view_positions(n, height, width, device, part(depth_map, a, b), depth_scale)
+                    if depth_map is not None and depth_near_is_white:
+                        positions[..., 2] = -positions[..., 2]
+                light_pos = _color_tensor(light_x, light_y, light_z, device)
+                l_vec = light_pos - positions
+                dist2 = (l_vec * l_vec).sum(dim=-1, keepdim=True).clamp(min=1e-6)
+                light_dir = _normalize(l_vec)
+                attenuation = 1.0 / (1.0 + dist2 * 0.08)
+                del l_vec, positions
             else:
-                positions = _view_positions(batch, height, width, device, depth_map, depth_scale)
-                if depth_map is not None and depth_near_is_white:
-                    positions[..., 2] = -positions[..., 2]
-            light_pos = _color_tensor(light_x, light_y, light_z, device)
-            l_vec = light_pos - positions
-            dist2 = (l_vec * l_vec).sum(dim=-1, keepdim=True).clamp(min=1e-6)
-            light_dir = _normalize(l_vec)
-            attenuation = 1.0 / (1.0 + dist2 * 0.08)
-        else:
-            light_dir = _normalize(_color_tensor(light_x, light_y, light_z, device))
-            light_dir = light_dir.expand(batch, height, width, 3)
-            attenuation = 1.0
+                light_dir = _normalize(_color_tensor(light_x, light_y, light_z, device))   # (1,1,1,3)
+                attenuation = 1.0
 
-        view_dir = _normalize(_color_tensor(0.0, 0.0, 1.0, device)).expand(batch, height, width, 3)
-        half_vec = _normalize(light_dir + view_dir)
+            view_dir = _normalize(_color_tensor(0.0, 0.0, 1.0, device))                   # (1,1,1,3)
+            half_vec = _normalize(light_dir + view_dir)
 
-        ndotl = (normals * light_dir).sum(dim=-1, keepdim=True).clamp(0.0, 1.0)
-        ndotv = (normals * view_dir).sum(dim=-1, keepdim=True).clamp(0.0, 1.0)
-        ndoth = (normals * half_vec).sum(dim=-1, keepdim=True).clamp(0.0, 1.0)
-        vdoth = (view_dir * half_vec).sum(dim=-1, keepdim=True).clamp(0.0, 1.0)
+            ndotl = (normals * light_dir).sum(dim=-1, keepdim=True).clamp(0.0, 1.0)
+            ndotv = (normals * view_dir).sum(dim=-1, keepdim=True).clamp(0.0, 1.0)
+            ndoth = (normals * half_vec).sum(dim=-1, keepdim=True).clamp(0.0, 1.0)
+            vdoth = (view_dir * half_vec).sum(dim=-1, keepdim=True).clamp(0.0, 1.0)
+            del normals, light_dir, half_vec
 
-        light_color = _color_tensor(light_r, light_g, light_b, device)
-        direct_scalar = ndotl * visibility.unsqueeze(-1) * attenuation * float(intensity)
-        diffuse_light = light_color * direct_scalar
+            light_color = _color_tensor(light_r, light_g, light_b, device)
+            direct_scalar = ndotl * visibility.unsqueeze(-1) * attenuation * float(intensity)
+            diffuse_light = light_color * direct_scalar
 
-        rough_v = rough.unsqueeze(-1)
-        alpha_ggx = (rough_v * rough_v).clamp(0.002, 1.0)
-        alpha2 = alpha_ggx * alpha_ggx
-        denom = (ndoth * ndoth * (alpha2 - 1.0) + 1.0)
-        d_ggx = alpha2 / (math.pi * denom * denom + 1e-8)
-        k = ((rough_v + 1.0) * (rough_v + 1.0)) / 8.0
-        g_l = ndotl / (ndotl * (1.0 - k) + k + 1e-8)
-        g_v = ndotv / (ndotv * (1.0 - k) + k + 1e-8)
-        f0_dielectric = 0.04 * spec
-        f0 = f0_dielectric * (1.0 - metal.unsqueeze(-1)) + base * metal.unsqueeze(-1)
-        fresnel = f0 + (1.0 - f0) * torch.pow((1.0 - vdoth).clamp(0.0, 1.0), 5.0)
-        spec_brdf = (d_ggx * g_l * g_v * fresnel) / (4.0 * ndotl * ndotv + 1e-6)
-        specular_light = (
-            spec_brdf
-            * ndotl
-            * light_color
-            * visibility.unsqueeze(-1)
-            * attenuation
-            * float(intensity)
-            * float(specular_intensity)
-        ).clamp(min=0.0)
+            rough_v = rough.unsqueeze(-1)
+            alpha_ggx = (rough_v * rough_v).clamp(0.002, 1.0)
+            alpha2 = alpha_ggx * alpha_ggx
+            denom = (ndoth * ndoth * (alpha2 - 1.0) + 1.0)
+            d_ggx = alpha2 / (math.pi * denom * denom + 1e-8)
+            k = ((rough_v + 1.0) * (rough_v + 1.0)) / 8.0
+            g_l = ndotl / (ndotl * (1.0 - k) + k + 1e-8)
+            g_v = ndotv / (ndotv * (1.0 - k) + k + 1e-8)
+            f0_dielectric = 0.04 * spec
+            metal_v = metal.unsqueeze(-1)
+            f0 = f0_dielectric * (1.0 - metal_v) + base * metal_v
+            fresnel = f0 + (1.0 - f0) * torch.pow((1.0 - vdoth).clamp(0.0, 1.0), 5.0)
+            spec_brdf = (d_ggx * g_l * g_v * fresnel) / (4.0 * ndotl * ndotv + 1e-6)
+            del denom, d_ggx, g_l, g_v, f0, fresnel
+            specular_light = (
+                spec_brdf
+                * ndotl
+                * light_color
+                * visibility.unsqueeze(-1)
+                * attenuation
+                * float(intensity)
+                * float(specular_intensity)
+            ).clamp(min=0.0)
+            del spec_brdf
 
-        ambient_light = light_color * float(ambient) * accessibility.unsqueeze(-1)
-        diffuse = base * (1.0 - metal.unsqueeze(-1)) * (diffuse_light + ambient_light)
-        relit = (diffuse + specular_light).clamp(min=0.0)
-        if output_premultiplied:
-            relit = relit * alpha_s.unsqueeze(-1)
-
-        if beauty is not None and mix_with_beauty > 0.0:
-            src = _match_image(beauty, batch, height, width, 3).to(device=device).clamp(min=0.0)
-            mix = float(max(0.0, min(1.0, mix_with_beauty)))
+            ambient_light = light_color * float(ambient) * accessibility.unsqueeze(-1)
+            diffuse = base * (1.0 - metal_v) * (diffuse_light + ambient_light)
+            relit = (diffuse + specular_light).clamp(min=0.0)
+            del diffuse
             if output_premultiplied:
-                src = src * alpha_s.unsqueeze(-1)
-            relit = relit * (1.0 - mix) + src * mix
+                relit = relit * alpha_s.unsqueeze(-1)
 
-        lighting = (diffuse_light + ambient_light + specular_light).clamp(min=0.0)
-        alpha_img = alpha_s.unsqueeze(-1).expand(-1, -1, -1, 3).contiguous()
+            if beauty is not None and mix_with_beauty > 0.0:
+                src = _match_image(part(beauty, a, b), n, height, width, 3).to(device=device).clamp(min=0.0)
+                mix = float(max(0.0, min(1.0, mix_with_beauty)))
+                if output_premultiplied:
+                    src = src * alpha_s.unsqueeze(-1)
+                relit = relit * (1.0 - mix) + src * mix
+
+            lighting = (diffuse_light + ambient_light + specular_light).clamp(min=0.0)
+            full = (n, height, width, 3)
+            outs[0][a:b] = relit.expand(full).cpu()
+            outs[1][a:b] = diffuse_light.expand(full).cpu()
+            outs[2][a:b] = specular_light.expand(full).cpu()
+            outs[3][a:b] = lighting.expand(full).cpu()
+            outs[4][a:b] = alpha_s.unsqueeze(-1).expand(full).cpu()
+            del base, relit, diffuse_light, specular_light, lighting, ambient_light
 
         info = {
             "mode": "real_pbr_relight",
@@ -323,14 +365,7 @@ class RadianceMultipassRelight:
         }
 
         perf_finish(logger, "Multipass Relight", _perf, device)
-        return (
-            relit.contiguous(),
-            diffuse_light.contiguous(),
-            specular_light.contiguous(),
-            lighting.contiguous(),
-            alpha_img.contiguous(),
-            json.dumps(info, indent=2),
-        )
+        return (*outs, json.dumps(info, indent=2))
 
 
 class RadianceMultipassComposite:

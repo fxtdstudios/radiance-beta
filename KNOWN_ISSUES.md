@@ -124,6 +124,10 @@ clear backlog.
   convention: highlights mastered above 1000 nits clip in the HLG signal. Use
   PQ for 4000- and 10000-nit masters.
 
+## VFX nodes: memory and speed (3.5.0)
+
+The six nodes that broke or crawled at production size are fixed (see the changelog). These still hold the whole clip in memory and run on the CPU even with a GPU present, so long 4K clips are slow and can run out of memory: Film Grain, Depth of Field, Lens Distortion, Chromatic Aberration, Anamorphic Streaks, Subpixel Stabilizer, HDR Grain Matcher, Relight Engine, Multipass Composite and Multipass Estimate's geometry passes (normals, GTAO, curvature). Multipass Estimate runs its models one frame at a time. The EXR Passes Writer writes frames serially and stores every channel as 32-bit float. Work in chunks of frames, or split long clips, until these are converted.
+
 ## Found while documenting every input (3.5.0)
 
 Writing a tooltip for all 1,259 inputs meant reading the code behind each

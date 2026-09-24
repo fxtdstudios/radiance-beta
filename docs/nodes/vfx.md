@@ -101,7 +101,7 @@ Quantise an image to a lower bit depth, with optional dither, and output the err
 | :--- | :--- | :--- | :--- | :--- |
 | `image` | IMAGE |  |  | Display-encoded 0..1 image, quantised as is (no transfer conversion); values outside 0..1 are clipped. Alpha passes through unchanged. |
 | `bit_depth` | int | 8 | 4 to 16, step 1 | Target bits per channel; the 0..1 range is split into 2^bits - 1 steps. |
-| `dither_mode` | choice | `triangular` | `none`, `triangular`, `floyd-steinberg` | none: plain rounding. triangular: random TPDF noise of +/-1 step before rounding. floyd-steinberg: error diffusion, pure Python per pixel and very slow on large images. |
+| `dither_mode` | choice | `triangular` | `none`, `triangular`, `floyd-steinberg` | none: plain rounding. triangular: random TPDF noise of +/-1 step before rounding. floyd-steinberg: error diffusion (the classic scan-line result, computed a diagonal at a time). |
 | `delta_gain` (optional) | float | 10 | 1 to 100, step 0.5 | Multiplier on the absolute error \|original - quantised\| for the delta_amplified output, clipped to 1. |
 | `banding_threshold` (optional) | float | 0.004 | 0.0005 to 0.05, step 0.0005 | Per-pixel error (0..1 units, largest channel) above which banding_mask is white. 0.004 is about one 8-bit code value. This flags quantisation error, not detected bands. |
 | `restore_from_quantized` (optional) | boolean | off |  | Currently has no effect: the node ignores this setting. |

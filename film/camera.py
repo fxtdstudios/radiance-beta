@@ -6,6 +6,8 @@ from typing import Tuple
 import math
 import logging
 
+from radiance.core.tensor.chunking import chunks, frames_per_chunk
+
 # Module logger
 logger = logging.getLogger("radiance.film.camera")
 
@@ -498,23 +500,20 @@ class RadianceMotionBlur:
         batch_size, h, w, c = image.shape
 
         try:
-            img = image.to(device).float()
-
-            # FIX 4: Vectorize all sample accumulation into a single batched
-            # affine_grid + grid_sample call instead of a Python loop.
-            # At samples=32, this replaces 32 sequential GPU kernel launches with
-            # one fused operation — ~10-20× faster on large images / high sample counts.
-
-            # Build all (batch_size × samples) affine matrices at once
-            t_vals = torch.linspace(-0.5, 0.5, samples, device=device, dtype=img.dtype)
+            # 3.5.0: one sample at a time, over chunks of frames. This used to
+            # tile the clip `samples` times and sample every copy at once
+            # (batch x samples images plus a batch x samples grid): 16 samples
+            # of 24 frames at 1024x576 ran out of memory in 6 GB, and one 4K
+            # frame at 64 samples needed about 17 GB. Now the working set is
+            # the chunk, its accumulator and one sampled copy.
+            dt = torch.float32
+            t_vals = torch.linspace(-0.5, 0.5, samples, dtype=torch.float64)
 
             if blur_type == "Directional":
                 angle_rad = math.radians(angle)
                 dx = math.cos(angle_rad) * amount / w
                 dy = math.sin(angle_rad) * amount / h
-
-                # theta: (samples, 2, 3) — identity + per-sample translation
-                thetas = torch.zeros(samples, 2, 3, device=device, dtype=img.dtype)
+                thetas = torch.zeros(samples, 2, 3, dtype=torch.float64)
                 thetas[:, 0, 0] = 1.0
                 thetas[:, 1, 1] = 1.0
                 thetas[:, 0, 2] = t_vals * dx * 2   # x offset
@@ -523,12 +522,10 @@ class RadianceMotionBlur:
             elif blur_type == "Radial":
                 cx = center_x * 2 - 1
                 cy = center_y * 2 - 1
-
                 rotations = t_vals * amount * 0.02
                 cos_r = torch.cos(rotations)
                 sin_r = torch.sin(rotations)
-
-                thetas = torch.zeros(samples, 2, 3, device=device, dtype=img.dtype)
+                thetas = torch.zeros(samples, 2, 3, dtype=torch.float64)
                 thetas[:, 0, 0] = cos_r
                 thetas[:, 0, 1] = -sin_r
                 thetas[:, 0, 2] = cx * (1 - cos_r) + cy * sin_r
@@ -539,40 +536,34 @@ class RadianceMotionBlur:
             else:  # Zoom
                 cx = center_x * 2 - 1
                 cy = center_y * 2 - 1
-                t_zoom = torch.linspace(0.0, 1.0, samples, device=device, dtype=img.dtype)
+                t_zoom = torch.linspace(0.0, 1.0, samples, dtype=torch.float64)
                 scales = 1.0 + (t_zoom - 0.5) * amount * 0.01
-
-                thetas = torch.zeros(samples, 2, 3, device=device, dtype=img.dtype)
+                thetas = torch.zeros(samples, 2, 3, dtype=torch.float64)
                 thetas[:, 0, 0] = scales
                 thetas[:, 1, 1] = scales
                 thetas[:, 0, 2] = cx * (1 - scales)
                 thetas[:, 1, 2] = cy * (1 - scales)
 
-            # Expand thetas for batch: (batch_size × samples, 2, 3)
-            thetas = thetas.unsqueeze(0).expand(batch_size, -1, -1, -1)
-            thetas = thetas.reshape(batch_size * samples, 2, 3)
+            thetas = thetas.to(device=device, dtype=dt)
+            # The same grid serves every frame: one (1, H, W, 2) per sample.
+            grids = [torch.nn.functional.affine_grid(thetas[s:s + 1], (1, c, h, w), align_corners=False)
+                     for s in range(samples)]
 
-            # Tile image: (batch_size × samples, C, H, W)
-            img_bchw = img.permute(0, 3, 1, 2)
-            img_tiled = img_bchw.unsqueeze(1).expand(-1, samples, -1, -1, -1)
-            img_tiled = img_tiled.reshape(batch_size * samples, c, h, w)
-
-            # Single batched affine_grid + grid_sample
-            grid = torch.nn.functional.affine_grid(
-                thetas, img_tiled.shape, align_corners=False
-            )
-            sampled = torch.nn.functional.grid_sample(
-                img_tiled, grid,
-                mode="bilinear", padding_mode="border", align_corners=False,
-            )
-
-            # Average across samples: (batch_size, C, H, W) → (batch_size, H, W, C)
-            sampled = sampled.reshape(batch_size, samples, c, h, w)
-            output = sampled.mean(dim=1).permute(0, 2, 3, 1)
-
-            # HDR: Preserve super-white values
-            output = torch.clamp(output, min=0)
-            return (output.cpu(),)
+            out = torch.empty((batch_size, h, w, c), dtype=dt)
+            # chunk in, accumulator, one sampled copy (+ grid-sample scratch)
+            per = frames_per_chunk(h, w, c, 4.0, device)
+            for a, b in chunks(batch_size, per):
+                n = b - a
+                x = image[a:b].to(device=device, dtype=dt).permute(0, 3, 1, 2)
+                acc = torch.zeros_like(x)
+                for g in grids:
+                    acc.add_(torch.nn.functional.grid_sample(
+                        x, g.expand(n, -1, -1, -1),
+                        mode="bilinear", padding_mode="border", align_corners=False))
+                acc.div_(samples).clamp_(min=0)          # HDR: keep super-whites
+                out[a:b] = acc.permute(0, 2, 3, 1).cpu()
+                del x, acc
+            return (out,)
 
         except RuntimeError:
             if use_gpu:
