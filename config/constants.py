@@ -33,4 +33,5 @@ WEB_DIRECTORY = "./js"
 #: inverts, implemented as RadianceVAE4KEncode but never registered.
 #: 2026-09-25: 158 -> 157. RadianceLiteViewer removed; the Viewer's Simple
 #: mode replaces it and the frontend converts saved Lite Viewers on load.
-EXPECTED_MIN_NODE_COUNT = 157
+#: 2026-09-25: 157 -> 156. RadianceVectorMaskDraw (Roto) removed.
+EXPECTED_MIN_NODE_COUNT = 156

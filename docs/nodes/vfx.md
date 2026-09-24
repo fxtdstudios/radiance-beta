@@ -4,7 +4,7 @@
 
 Plate prep, masks, inpaint, depth, optics, motion, multipass, and scene cuts.
 
-32 nodes. [All sections](README.md)
+31 nodes. [All sections](README.md)
 
 - [Aberration](#aberration)
 - [Anamorphic Streaks](#anamorphic-streaks)
@@ -29,7 +29,6 @@ Plate prep, masks, inpaint, depth, optics, motion, multipass, and scene cuts.
 - [Read Mask](#read-mask)
 - [Relight Engine](#relight-engine)
 - [Rolling Shutter](#rolling-shutter)
-- [Roto](#roto)
 - [SAM Multi-Mask Picker](#sam-multi-mask-picker)
 - [Scene Cut Detect](#scene-cut-detect)
 - [Scene Cut Split](#scene-cut-split)
@@ -674,28 +673,6 @@ Simulate rolling shutter artifacts (skew, wobble, flash banding).
 | Output | Type |
 | :--- | :--- |
 | `image` | IMAGE |
-
-## Roto
-
-`RadianceVectorMaskDraw`
-
-Draw a single-frame filled mask from a closed polygon or smooth closed spline defined by pixel coordinates, with an anti-aliased edge. Accepts JSON points or pasted Nuke shape data.
-
-**Inputs**
-
-| Input | Type | Default | Range or choices | What it does |
-| :--- | :--- | :--- | :--- | :--- |
-| `width` | int | 512 | 64 to 4096, step 8 | Output mask width in pixels. Match your plate. |
-| `height` | int | 512 | 64 to 4096, step 8 | Output mask height in pixels. Match your plate. |
-| `shape_type` | choice | `Polygon` | `Polygon`, `Bezier_Spline` | Polygon: straight edges between the points. Bezier_Spline: a smooth closed Catmull-Rom curve through every point. |
-| `points_data` | string | `[[128, 128], [384, 128], [384, 384], [128, 384]]` | multi-line text | Paste a JSON list of [x, y] pixel coordinates (origin top-left, y down) or a Nuke control points block. At least 3 points; fewer gives an empty mask. |
-| `anti_alias_width` | float | 1.5 | 0 to 8, step 0.1 | Edge softness in pixels on each side of the outline. 0.05 or less gives a hard, aliased edge. |
-
-**Outputs**
-
-| Output | Type |
-| :--- | :--- |
-| `vector_mask` | MASK |
 
 ## SAM Multi-Mask Picker
 

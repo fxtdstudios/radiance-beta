@@ -137,7 +137,6 @@
   "RadianceUpscaleRouter",
   "RadianceUpscaleTiler",
   "RadianceUpscaleVideo",
-  "RadianceVectorMaskDraw",
   "RadianceVideoAssembler",
   "RadianceVideoBatchDecode",
   "RadianceVideoCondMerge",

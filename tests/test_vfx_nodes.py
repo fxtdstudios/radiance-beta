@@ -19,10 +19,7 @@ from radiance.nodes.vfx.inpaint import (
     RadianceHDRStitch,
     RadianceTemporalStitchStabilizer,
 )
-from radiance.nodes.vfx.roto import (
-    RadianceVectorMaskDraw,
-    RadianceVideoMaskPropagator,
-)
+from radiance.nodes.vfx.mask_propagate import RadianceVideoMaskPropagator
 
 def test_sam_nodes_are_hidden_and_refuse_to_pretend():
     # 3.5.0 ships no SAM runtime. The two nodes stay registered so saved
@@ -152,50 +149,25 @@ def test_stitch_single_frame_every_blend_mode(blend_mode):
     assert float(out[0, 2, 2, 0]) == pytest.approx(0.25, abs=1e-3), "outside the mask changed"
 
 
-def test_roto_suite():
-    # 1. Test Vector Mask Draw (Polygon mode)
-    drawer = RadianceVectorMaskDraw()
-    points_json = "[[10, 10], [50, 10], [50, 50], [10, 50]]"
-    mask = drawer.draw(64, 64, "Polygon", points_json, 1.5)[0]
-    
-    assert mask.shape == (1, 64, 64)
-    # Check that mask has rendered active pixels inside the polygon
-    assert mask[0, 30, 30].item() > 0.9
-    assert mask[0, 2, 2].item() < 0.1
-    
-    # 2. Test Nuke-style raw format parser
-    nuke_points = "{ 10.0 10.0 } { 50.0 10.0 } { 50.0 50.0 } { 10.0 50.0 }"
-    mask_nuke = drawer.draw(64, 64, "Polygon", nuke_points, 1.5)[0]
-    assert mask_nuke.shape == (1, 64, 64)
-    assert mask_nuke[0, 30, 30].item() > 0.9
-    
-    # 3. Test Video Mask Propagator
+def test_mask_propagator_warps_a_keyframe():
     propagator = RadianceVideoMaskPropagator()
     masks_seq = torch.zeros((3, 64, 64), dtype=torch.float32)
-    masks_seq[0, 10:20, 10:20] = 1.0  # reference roto frame
-    
+    masks_seq[0, 10:20, 10:20] = 1.0  # keyframe
+
     # Flow vectors shape [3, H, W, 3] representing +2 pixels shift
     flow = torch.zeros((3, 64, 64, 3), dtype=torch.float32)
-    flow[..., 0] = 2.0 # shift right
-    flow[..., 1] = 0.0
-    
+    flow[..., 0] = 2.0  # shift right
+
     propagated = propagator.propagate(masks_seq, flow, "Forward")[0]
-    
+
     assert propagated.shape == (3, 64, 64)
-    # Check that frame 1 received warped mask shifted by 2 pixels
+    # Frame 1 received the keyframe warped 2 pixels right
     assert propagated[1, 15, 17].item() > 0.5
 
 
-def test_bezier_spline_is_not_the_polygon():
-    node = RadianceVectorMaskDraw()
-    pts = "[[16, 16], [112, 16], [112, 112], [16, 112]]"
-    poly = node.draw(128, 128, "Polygon", pts, 0.0)[0]
-    spline = node.draw(128, 128, "Bezier_Spline", pts, 0.0)[0]
-    # A closed spline through a square's corners bulges out between them:
-    # just outside the middle of the top edge is outside the polygon and
-    # inside the curve.
-    assert float(poly[0, 10, 64]) == 0.0 and float(spline[0, 10, 64]) == 1.0
-    assert float(spline[0, 64, 64]) == 1.0
+def test_roto_node_is_removed():
+    import radiance
+    assert "RadianceVectorMaskDraw" not in radiance.NODE_CLASS_MAPPINGS
 
 
 def test_mask_propagator_follows_the_motion():

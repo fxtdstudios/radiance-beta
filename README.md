@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/version-3.5.0-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
-[![Nodes](https://img.shields.io/badge/nodes-157-c8a96e?style=for-the-badge)](#node-map)
+[![Nodes](https://img.shields.io/badge/nodes-156-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
 [![Hugging Face](https://img.shields.io/badge/Hugging_Face-RUDRA_models-ffd21e?style=for-the-badge)](https://huggingface.co/fxtdstudios/RUDRA)
 
@@ -24,7 +24,7 @@ Artists get 32-bit, HDR, and ACES image tools, professional viewers, and VFX nod
 
 - 32-bit float and EXR workflows for VFX and finishing, with lossless scene-linear round-trips.
 - ACES, OCIO, log curves, LUTs, CDL, scopes, QC, and grade-transfer tools.
-- VFX utilities for plate prep, masks, roto, depth, camera and optics, motion, multipass, real AOV ingestion, and relighting.
+- VFX utilities for plate prep, masks, depth, camera and optics, motion, multipass, real AOV ingestion, and relighting.
 - Video and temporal workflow nodes for loading, routing, conditioning, sampling, and delivery.
 - In-canvas studio dashboards (Project Manager, Workflow Library, Assets) rendered over the ComfyUI graph, never in a separate browser tab.
 - **Radiance Sampler**, a preset-driven sampler that hides irrelevant parameters and adapts to the selected model.
@@ -68,7 +68,7 @@ Nothing else needs doing:
   [Multipass Estimate](#models-multipass-estimate)).
 
 Checked on a clean ComfyUI 0.32 with Python 3.13: the registry package
-installs, all 157 nodes load, OCIO is configured, and the first SDR → HDR run
+installs, all 156 nodes load, OCIO is configured, and the first SDR → HDR run
 fetches the model and applies it.
 
 ### Requirements
@@ -123,7 +123,7 @@ pip install -r requirements_mac_silicon.txt
 
 ### Verify
 
-Start ComfyUI and look for `Radiance: successfully loaded 157 nodes (v3.5.0)` in the log.
+Start ComfyUI and look for `Radiance: successfully loaded 156 nodes (v3.5.0)` in the log.
 A lower count means a node module failed to import, usually a missing optional
 dependency; the Environment Guard table printed at startup shows which.
 
@@ -146,7 +146,7 @@ missing on your install.
   `pip install -r ...` line as above, then restart ComfyUI.
 
 The startup log prints the installed version:
-`Radiance: successfully loaded 157 nodes (v3.5.0)`.
+`Radiance: successfully loaded 156 nodes (v3.5.0)`.
 
 ### Upgrading from 2.x or 3.4
 
@@ -408,7 +408,7 @@ The Lite Viewer node is gone: Simple mode does its job. A graph saved with a Lit
 
 ### VFX
 
-Plate prep, masks, roto, depth, optics, motion, and multipass. Motion estimation is DIS optical flow, which stays dense out to about 20 px of movement; the older Lucas–Kanade solver is still selectable. Multipass Estimate predicts passes from a plate with trained models (MoGe-2 geometry, Marigold materials and lighting); when you have real AOVs, the Multipass AOV Reader takes a multilayer EXR. Relighting works off either.
+Plate prep, masks, depth, optics, motion, and multipass. Motion estimation is DIS optical flow, which stays dense out to about 20 px of movement; the older Lucas–Kanade solver is still selectable. Multipass Estimate predicts passes from a plate with trained models (MoGe-2 geometry, Marigold materials and lighting); when you have real AOVs, the Multipass AOV Reader takes a multilayer EXR. Relighting works off either.
 
 ### Video
 
@@ -446,9 +446,9 @@ FXTD STUDIOS/Radiance
 └─ Pipeline
 ```
 
-**157 nodes**: 148 in the menu and 9 retired ones that stay registered so older saved graphs still open. A few depend on optional packages.
+**156 nodes**: 147 in the menu and 9 retired ones that stay registered so older saved graphs still open. A few depend on optional packages.
 
-Compositing nodes use compositing names (`Grade`, `CDL`, `OCIO ColorSpace`, `Roto`, `Defocus`, `Viewer`, `Read`, `Write`), so they read the way they do in Nuke or Flame. The diffusion layer keeps a `Radiance` prefix, so `Radiance Sampler` and `Radiance VAE Decode` are obviously the AI ones. Typing "radiance" in the search still finds everything.
+Compositing nodes use compositing names (`Grade`, `CDL`, `OCIO ColorSpace`, `Defocus`, `Viewer`, `Read`, `Write`), so they read the way they do in Nuke or Flame. The diffusion layer keeps a `Radiance` prefix, so `Radiance Sampler` and `Radiance VAE Decode` are obviously the AI ones. Typing "radiance" in the search still finds everything.
 
 | Section | Nodes | What's in it |
 | :--- | ---: | :--- |
@@ -457,7 +457,7 @@ Compositing nodes use compositing names (`Grade`, `CDL`, `OCIO ColorSpace`, `Rot
 | [Generate](docs/nodes/generate.md) | 13 | Loader, Sampler, VAE Encode (HDR), VAE Decode (HDR), prompts, LoRA, regional conditioning, denoise |
 | [Color](docs/nodes/color.md) | 18 | White Balance, Grade, Grade Match, CDL, curves, LUTs, OCIO, colour-space conversion |
 | [HDR](docs/nodes/hdr.md) | 36 | SDR → HDR, ACES 2.0, tone mapping, analysis, encoding, HDR synthesis |
-| [VFX](docs/nodes/vfx.md) | 32 | Plate prep, masks, roto, inpaint, depth, optics, motion, Multipass Estimate, AOV reader, relight |
+| [VFX](docs/nodes/vfx.md) | 31 | Plate prep, masks, inpaint, depth, optics, motion, Multipass Estimate, AOV reader, relight |
 | [Video](docs/nodes/video.md) | 15 | Text-to-video, image-to-video, video sampler, video HDR, batch decode, export |
 | [Upscale](docs/nodes/upscale.md) | 10 | Image and video upscale, tiling, face restoration |
 | [Review](docs/nodes/review.md) | 11 | Viewer, scopes, false colour, QC, Policy Guard, contact sheets, flipbook |
@@ -508,7 +508,7 @@ Models go in `ComfyUI/models/radiance` (MoGe in `models/geometry_estimation`); a
 
 ## Troubleshooting
 
-- **The log says fewer than 157 nodes loaded.** A module failed to import. The
+- **The log says fewer than 156 nodes loaded.** A module failed to import. The
   lines above it name the module and the error, and the Environment Guard
   table shows which package is missing. Reinstall the requirements into
   ComfyUI's own Python (for the Windows portable build:
@@ -552,7 +552,7 @@ is worse than one that says so. Full detail in the [changelog](CHANGELOG.md).
 
 - **No SAM runtime.** `SAM Loader` and `SAM Mask Generator` are hidden and
   raise when executed; they never ran a segmentation model. Use a SAM2 node
-  pack and feed its MASK into Radiance's matting, roto and propagation nodes.
+  pack and feed its MASK into Radiance's matting and propagation nodes.
 - **Upscale `confidence` is a tile weight.** It is 1 at tile centres and lower
   toward tile edges; no backend reports per-pixel hallucination.
 - **Multipass Estimate is an estimate.** Its passes come from models trained

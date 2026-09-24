@@ -34,10 +34,7 @@ from radiance.nodes.vfx.inpaint import (
     RadianceHDRStitch,
     RadianceTemporalStitchStabilizer,
 )
-from radiance.nodes.vfx.roto import (
-    RadianceVectorMaskDraw,
-    RadianceVideoMaskPropagator,
-)
+from radiance.nodes.vfx.mask_propagate import RadianceVideoMaskPropagator
 # `radiance.film` is an implementation package, not a node group: it is not in
 # nodes/catalog.py and the aggregate sweep never reaches it, because
 # `_leaf_modules` only walks the __path__ of the package it is given and skips
@@ -92,7 +89,6 @@ NODE_CLASS_MAPPINGS = {
     "RadianceTemporalStitchStabilizer": RadianceTemporalStitchStabilizer,
     
     # Phase 5: Advanced Rotoscoping & Propagation
-    "RadianceVectorMaskDraw": RadianceVectorMaskDraw,
     "RadianceVideoMaskPropagator": RadianceVideoMaskPropagator,
 
     # ── from radiance.film.camera (never reachable before 2026-09-18) ──────
@@ -129,7 +125,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceTemporalStitchStabilizer": "◎ Temporal Stitch Stabilizer",
     
     # Phase 5: Advanced Rotoscoping display names
-    "RadianceVectorMaskDraw": "◎ Vector Mask Draw (Roto)",
     "RadianceVideoMaskPropagator": "◎ Video Mask Propagator",
 
     # Camera-artefact display names. nodes/branding.py already carried a

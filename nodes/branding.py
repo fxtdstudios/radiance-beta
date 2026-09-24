@@ -176,7 +176,6 @@ NODE_SECTIONS = {
     "RadianceSceneCutSplit": "VFX",
     "RadianceSubpixelStabilizer": "VFX",
     "RadianceTemporalStitchStabilizer": "VFX",
-    "RadianceVectorMaskDraw": "VFX",
     "RadianceVignette": "VFX",
     # ── Video ─────────────────────────────────────────────────────────────
     "RadianceI2VPipeline": "Video",
@@ -321,7 +320,6 @@ TERM_OVERRIDES = {
     "RadianceMotionBlur": "MotionBlur",
     "RadianceChromaticAberration": "Aberration",
     "RadianceLensDistortion": "LensDistortion",
-    "RadianceVectorMaskDraw": "Roto",
     "RadianceSubpixelStabilizer": "Stabilize",
     "RadianceDepthMapGenerator": "Depth",
     "RadianceOpticalFlow": "MotionVectors",
