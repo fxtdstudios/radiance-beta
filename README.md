@@ -127,36 +127,94 @@ Learned SDR → HDR recovery uses the **RUDRA** pixel model: a compact network
 that takes decoded 8-bit SDR pixels and returns scene-linear HDR, recovering
 clipped highlights and crushed shadows. It works on any image or frame batch
 and needs no VAE, so it applies equally to generated frames and to footage.
-The weights are distributed with the RUDRA release on Hugging Face under
-Apache-2.0: [fxtdstudios/RUDRA](https://huggingface.co/fxtdstudios/RUDRA/tree/main).
+The weights are published on Hugging Face,
+[fxtdstudios/RUDRA](https://huggingface.co/fxtdstudios/RUDRA).
 
-Place the checkpoint in your ComfyUI models folder under a `radiance`
-subfolder, creating it if it doesn't exist:
+**The RUDRA weights are licensed for non-commercial use only**, unlike
+Radiance's code (GPL-3.0) and RUDRA's code (Apache 2.0). One training source
+(HdM-HDR-2014 / HdM-HFR-2017) is free for academic use only, and FXTD Studios
+cannot waive that term. Research, evaluation, teaching and personal projects
+are fine; commercial production, client deliverables and paid services need a
+commercial licence from [FXTD Studios](https://fxtdstudios.com). The full
+terms are in the weights'
+[licence](https://huggingface.co/fxtdstudios/RUDRA/blob/main/LICENSE). Expand
+mode uses no weights and has no such restriction.
+
+**It downloads automatically.** The first time SDR → HDR Universal or
+SDR → HDR Recover needs the model and none is installed, Radiance fetches
+RUDRA's shipped model, `sdr2hdr_shadow_v1` (about 5 MB), into your ComfyUI
+models folder:
 
 ```
-ComfyUI/models/radiance/sdr2hdr_pixel_image.pt
+ComfyUI/models/radiance/sdr2hdr_shadow_v1.safetensors
 ```
+
+The download is pinned to a fixed Hugging Face commit and checked by size and
+SHA-256 before it is used; a file that does not match is discarded. It happens
+once, and the console shows `[Radiance] Installed ...` when it is done. Leave
+the node's `pixel_checkpoint` field empty to use it.
+
+To install it by hand instead (offline or air-gapped machines), download
+[`sdr2hdr_shadow_v1.safetensors`](https://huggingface.co/fxtdstudios/RUDRA/resolve/main/sdr2hdr/sdr2hdr_shadow_v1.safetensors)
+and put it at the path above, creating the `radiance` folder if needed. To turn
+automatic downloads off, set any of these in the ComfyUI launch environment:
+
+| Variable | Effect |
+| :--- | :--- |
+| `RADIANCE_ALLOW_DOWNLOADS=0` | never download any Radiance model |
+| `HF_HUB_OFFLINE=1` or `TRANSFORMERS_OFFLINE=1` | treat the machine as offline |
 
 Radiance registers `models/radiance` with ComfyUI, so a `radiance:` entry in
 `extra_model_paths.yaml` works too, and `RADIANCE_SDR2HDR_PIXEL` can point at
-a file anywhere. Any `sdr2hdr_pixel*.pt` in the folder is found; the
-preferred name above wins when several are present.
+a file anywhere. Every RUDRA image checkpoint loads, as Hugging Face publishes
+it (`.safetensors`, flat in the folder or under the `sdr2hdr/` subfolder
+`hf download` creates) or as the training scripts write it (`.pt`); each file
+carries its own architecture, so the shadow-gated and ungated models both
+build correctly. When several are present `sdr2hdr_shadow_v1` wins, then the
+other shadow seeds, then `sdr2hdr_image_v5`, then older `.pt` files.
+`sdr2hdr_temporal_v1` is not an image model and is refused with a message
+saying so.
 
-| File | Used by |
-| :--- | :--- |
-| `sdr2hdr_pixel_image.pt` | SDR → HDR Universal (Recover / Hybrid) and SDR → HDR Recover, stills and frame batches |
-| `temporal_rudra_residual_ema.safetensors` | the motion-aligned temporal model for ordered video (optional; not yet published) |
+| File | Used by | Link |
+| :--- | :--- | :--- |
+| `sdr2hdr_shadow_v1.safetensors` | SDR → HDR Universal (Recover / Hybrid) and SDR → HDR Recover, stills and frame batches | [download](https://huggingface.co/fxtdstudios/RUDRA/resolve/main/sdr2hdr/sdr2hdr_shadow_v1.safetensors) (auto) |
+| `sdr2hdr_shadow_s2` / `_s3`, `sdr2hdr_image_v5` / `_v6` | alternatives: other seeds of the shipped recipe, and the backbone without the shadow gate | [RUDRA/sdr2hdr](https://huggingface.co/fxtdstudios/RUDRA/tree/main/sdr2hdr) |
+| `temporal_rudra_residual_ema.safetensors` | the motion-aligned temporal model for ordered video (optional) | not yet published |
 
-Without a checkpoint, Universal falls back to deterministic expansion and says
-so in its `report` output; Recover raises rather than silently expanding.
+If the model can't be found or downloaded, Universal falls back to
+deterministic expansion and says so in its `report` output; Recover raises
+rather than silently expanding.
+
+**What the model recovers, and what it doesn't.** In clipped highlights the
+network supplies brightness; the colour stays the source's. A clipped channel
+carries no information about its own value, and the released checkpoints were
+trained on renders that almost never clipped, so their per-channel guesses in
+blown areas are not reliable colour: letting them through drew false-colour
+rings round a clipped sun and cast white areas red. The learned lift fades in
+as the source goes to white (two or more channels near clip), is never darker
+than the deterministic expansion, and no channel of it exceeds `peak_nits`,
+so an HDR10 encode cannot clip it per channel. The model runs on the whole
+frame when it fits in memory; `pixel_tile_size` only applies when it does
+not, because the network normalises over its input and tiles shift the
+result.
+
+The other model downloads Radiance can make (Real-ESRGAN, HAT-L, SwinIR,
+Depth Anything V2, DSINE; 67 MB to 2.4 GB) still ask first: set
+`RADIANCE_ALLOW_DOWNLOADS=1` to allow them.
 
 The latent-space RUDRA decoders that earlier releases loaded inside HDR VAE
 Decode (`rudra_turbo_decoder_*` / `rudra_full_decoder_*`) were retired in
 3.5.0; see the changelog. The files can be deleted from `models/radiance`.
 
-### Example workflow
+### Example workflows
 
-To get started quickly, drag [`workflows/start.json`](workflows/start.json) onto the ComfyUI canvas: a ready-made graph wiring the Radiance loader, Sampler Pro, HDR VAE decode, and viewers end to end.
+Drag a workflow onto the ComfyUI canvas to load it. Both ship in the
+package's `workflows` folder.
+
+| Workflow | What it does | Models it needs |
+| :--- | :--- | :--- |
+| [`workflows/start.json`](workflows/start.json) | The quick start: Radiance Loader, Cinematic Prompt, Resolution, Sampler Pro, HDR VAE Decode and the viewers wired end to end for FLUX.1-dev. | [`flux1-dev.safetensors`](https://huggingface.co/black-forest-labs/FLUX.1-dev) and `ae.safetensors` from the same page (accept the licence first) in `models/diffusion_models` and `models/vae`; [`clip_l.safetensors`](https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors) and [`t5xxl_fp16.safetensors`](https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors) in `models/text_encoders` |
+| [`workflows/official/wan22_t2v_hdr_universal.json`](workflows/official/wan22_t2v_hdr_universal.json) | Wan 2.2 text-to-video through SDR → HDR Universal to an HDR master with HDR Encode and Write. | [`wan2.2_t2v_high_noise_14B_fp8_scaled`](https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors) and [`wan2.2_t2v_low_noise_14B_fp8_scaled`](https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors) in `models/diffusion_models`; [`umt5_xxl_fp8_e4m3fn_scaled`](https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors) in `models/text_encoders`; [`wan_2.1_vae`](https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors) in `models/vae`. The RUDRA model downloads itself. |
 
 ## What it does
 
@@ -180,7 +238,7 @@ Both ACES 2.0 tone scales are implemented against the published Output Transform
 
 Log encoding happens before the VAE, not after it, and the Compress Log profiles are clamp-free from decode through to the file. Highlights above 1.0 reach disk. That is the claim the package is built on and there is a test that writes negatives and values up to 64.0 through EXR and TIFF and requires them back exactly.
 
-The HDR VAE Decode node decodes through the model's own VAE, in a sampler-safe mode or a Direct HDR mode that inverts the log encoding to scene-linear and keeps everything above 1.0. Learned recovery of clipped highlights and crushed shadows is the job of SDR → HDR Universal and SDR → HDR Recover, which run the RUDRA pixel model on any image or frame batch, no VAE required; see the install section for where the weights go.
+The HDR VAE Decode node decodes through the model's own VAE, in a sampler-safe mode or a Direct HDR mode that inverts the log encoding to scene-linear and keeps everything above 1.0. Learned recovery of clipped highlights and crushed shadows is the job of SDR → HDR Universal and SDR → HDR Recover, which run the RUDRA pixel model on any image or frame batch, no VAE required; the weights download on first use (see Models above).
 
 There is also HDR LoRA loading and application, a LoRA stack with per-LoRA model and CLIP strengths, tone mapping, HDR synthesis, and relighting.
 
@@ -453,6 +511,12 @@ the gap is recorded under Open rather than quietly corrected.
       1.0 = 203 nits (BT.2408), HLG the BT.2100 1000-nit transcode OCIO uses,
       camera log targets in their camera gamut, AP0 matrix corrected. Checked
       against OpenColorIO and the shipped pixel checkpoint.
+- [x] **RUDRA pixel model: no false colour, no over-peak channels (3.5.0).**
+      From a user report on a clipped Flux.2 sunset. Recovered highlights keep
+      the source colour (no rings, no red cast, source-level chroma noise),
+      no channel exceeds `peak_nits`, the whole frame runs untiled when it
+      fits, and every published checkpoint loads, with the shipped
+      `sdr2hdr_shadow_v1` as the default and the auto-download.
 - [x] **Viewer and Lite Viewer, phase 1 (3.5.0).**
   - **Colour.** The node tags every frame: a ComfyUI IMAGE is shown exactly as ComfyUI shows it, and a linear source goes through OpenColorIO ACES 2.0. A normal image used to be read as linear and sRGB-encoded twice, which washed it out, and its input colour space was guessed from brightness.
   - **View menu.** Every entry is real (ACES 2.0 and 1.3 through OCIO, sRGB, Rec.709 BT.1886). The same view is baked into the PNG previews.
@@ -529,4 +593,6 @@ Every node also carries its own description and per-input tooltips, which ComfyU
 
 ## License
 
-Radiance is released under the [GPL-3.0 license](LICENSE).
+Radiance is released under the [GPL-3.0 license](LICENSE). The RUDRA model weights that
+SDR → HDR Universal and Recover download are a separate work under their own
+non-commercial licence; see [Models](#models-rudra-sdr--hdr).

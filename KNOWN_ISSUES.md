@@ -50,7 +50,7 @@ clear backlog.
   (per-model `rudra_turbo_decoder_*` / `rudra_full_decoder_*` checkpoints,
   the video decoders trained on stills, and the truncated `ltx-video` full
   decoder) were retired in 3.5.0. `SDR → HDR Universal` and `Recover` run the
-  pixel model (`sdr2hdr_pixel_image.pt`) on any image or frame batch and the
+  pixel model (`sdr2hdr_shadow_v1.safetensors`) on any image or frame batch and the
   temporal residual model on ordered video when its checkpoint is installed.
   The pixel model processes video frames independently; a clip may need
   downstream deflicker until the temporal checkpoint ships.
@@ -112,15 +112,31 @@ clear backlog.
 
 ## Minor
 
-- **`RadianceSDRToHDRUniversal`'s learned modes need a checkpoint you must
-  install yourself.** `Recover` and `Hybrid` are the reason the node is called
-  Universal, and with no `sdr2hdr_pixel_image.pt` in `models/radiance` and no
-  `RADIANCE_SDR2HDR_PIXEL`, they produce output bit-identical to `Expand`.
-  That is a safe fallback rather than a failure, and the node's `report`
-  output names the path that ran and, when the learned path did not, why and
-  what to install; a WARNING is also logged. The dedicated `Recover` node
-  raises instead. *Planned fix:* auto-fetch the default checkpoint, gated by
-  `RADIANCE_ALLOW_DOWNLOADS` like every other downloader.
+- **Learned highlight recovery restores brightness, not colour.** RUDRA's
+  released SDR → HDR checkpoints (v5, shadow_v1 and seeds) were trained on
+  SDR rendered at -1 EV, which almost never clipped (median clipped fraction
+  0.000%). In blown areas their per-channel output is outside what they
+  learned, so Radiance takes only the learned luminance there, keeps the
+  source colour, and fades it in as the source goes to white. A highlight
+  clipped in one channel only (a saturated red light) gets the deterministic
+  expansion, not a learned guess. *Planned fix:* a RUDRA checkpoint trained
+  on RUDRA's clipping corpus (0 EV render), after which the colour can be
+  handed back to the model.
+- **The pixel model has a hard edge where the clip mask starts.** The
+  highlight mask ramps over SDR codes `highlight_threshold`..1.0 (0.98 by
+  default), so on noisy or dithered 8-bit input the mask edge speckles.
+  Lowering `highlight_threshold` to about 0.9 widens the ramp.
+
+- **`RadianceSDRToHDRUniversal`'s learned modes need the RUDRA checkpoint,
+  which now downloads itself (3.5.0).** On first use, with no
+  RUDRA checkpoint installed, Radiance fetches `sdr2hdr_shadow_v1` (~5 MB, pinned
+  commit, SHA-256 checked) into `models/radiance`. What remains: on a machine
+  with `RADIANCE_ALLOW_DOWNLOADS=0`, `HF_HUB_OFFLINE=1`, no network, or no
+  writable models folder, `Recover` and `Hybrid` still produce output
+  bit-identical to `Expand`. That is a safe fallback; the node's `report`
+  output says which path ran and why, the console logs the manual download
+  link, and the dedicated `Recover` node raises instead. A failed download is
+  tried once per ComfyUI session; restart to try again.
 
 
 - **Naming overlap:** `Grade` / `Grade Apply` / `Apply Grade Info` read similarly;

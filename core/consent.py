@@ -22,6 +22,11 @@ Saying yes, in order of precedence:
 
 Studios that want the old always-download behaviour set
 `RADIANCE_ALLOW_DOWNLOADS=1` once in the ComfyUI launch environment.
+
+One exception to ask-first: Radiance's own pixel SDR-to-HDR checkpoint
+(~5 MB, first-party, sha256-pinned; weights licensed non-commercial) downloads on first use unless
+`RADIANCE_ALLOW_DOWNLOADS=0`, `HF_HUB_OFFLINE=1` or `TRANSFORMERS_OFFLINE=1`
+is set. See `radiance.model.pixel_download`.
 """
 from __future__ import annotations
 
@@ -51,11 +56,18 @@ def _flag(name: str) -> Optional[bool]:
     return None
 
 
-def downloads_allowed(*, legacy_offline_env: Optional[str] = None) -> bool:
+def downloads_allowed(
+    *, legacy_offline_env: Optional[str] = None, default: bool = False,
+) -> bool:
     """True when the operator has consented to fetching model weights.
 
     *legacy_offline_env* names an older opt-out variable to keep honouring, so
     existing studio configs do not silently start downloading again.
+
+    *default* is the answer when nothing is set. It stays False (ask first)
+    for the large third-party weights; only Radiance's own small checkpoint
+    (the ~5 MB pixel SDR-to-HDR model) passes True. ``RADIANCE_ALLOW_DOWNLOADS=0``
+    and the Hugging Face offline flags still turn it off.
     """
     explicit = _flag(ALLOW_ENV)
     if explicit is not None:
@@ -64,7 +76,10 @@ def downloads_allowed(*, legacy_offline_env: Optional[str] = None) -> bool:
     if legacy_offline_env and _flag(legacy_offline_env) is True:
         return False       # the old opt-out said no; that still means no
 
-    return False           # default: ask first
+    if _flag("HF_HUB_OFFLINE") is True or _flag("TRANSFORMERS_OFFLINE") is True:
+        return False       # the machine is declared offline
+
+    return bool(default)   # default: ask first, unless the caller says otherwise
 
 
 def refusal_message(

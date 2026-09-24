@@ -96,6 +96,77 @@ All notable changes to FXTD Radiance will be documented in this file.
   - *Lite Viewer.* Readout, clip check and diff read an fp16 float proxy, so they show source values at source coordinates. The canvas is in device pixels, so 1:1 is exact on scaled displays; it was sized from a bordered box, 0.3 % off. B is scaled to A, diff has a gain, and play/loop run at the source fps. Frames load progressively.
   - Tests: `tests/test_viewer_phase1.py` (11), and `js/tests/viewer_color.test.mjs` and `js/tests/lite_viewer.test.mjs`, which read real pixels back from Chromium.
 
+- **RUDRA weights licence stated correctly.** The README called the RUDRA
+  weights Apache-2.0. RUDRA's code is; its trained weights have been
+  non-commercial since 5 Sep 2026 (RUDRA `NOTICE` and `checkpoints/LICENSE`),
+  because the HdM-HDR training data is licensed for academic use only. The
+  README model section now says so and links the terms, the download log
+  states it on install, and the docstrings that repeated "Apache-2.0" are
+  corrected. Radiance's own code licence is unchanged.
+- **RUDRA pixel model: false colour, red cast and over-peak channels in
+  recovered highlights.** Reported on a clean Flux.2 sunset (Hybrid, default
+  settings, v5): false-colour rings around the sun lined up with where each
+  channel clipped, white areas came out with red about 2.2x green, glints had
+  4x the source's chroma noise, and 10% of pixels had a single channel above
+  the 1,000-nit peak (up to 3,500 nits). Reproduced through the node at
+  R/G 2.29, 9.4% over peak, 4,094 nits, 6x chroma noise. Four causes, all
+  fixed:
+  - *A Rec.2020 → Rec.709 matrix on a model that never changes primaries.*
+    The network is a per-channel mapping trained on SDR rendered
+    channel-wise; RUDRA's own inference writes its output as-is. The matrix
+    only over-saturated, and on a warm highlight multiplied the red cast by
+    another 1.5x. Removed.
+  - *Per-channel colour in blown areas.* The inverse tone curve is steepest
+    at the clip, so where red had clipped and green had not, red alone was
+    pushed up (the analytic baseline alone gives R/G 6.2 in that band against
+    1.26 in the source); each clip boundary became a ring. The shipped
+    checkpoints were also trained on a corpus that almost never clipped. In
+    clipped highlights Radiance now takes the learned luminance and keeps the
+    source chromaticity, lets the lift in as the source goes to white (median
+    channel from code 0.85), and never goes darker than the deterministic
+    base. Shadows keep the model's colour, where it was trained on it.
+  - *The peak limiter measured luminance.* `_soft_peak_limit` now bounds the
+    brightest channel with one hue-preserving gain, so nothing the learned
+    path returns can clip per channel in an HDR10 encode.
+  - *Tiles shifted the result.* Every block opens with GroupNorm, so a 512-px
+    tile was normalised by its own contents: 1.4 stops at p99 in the
+    highlights against the whole frame. The model now runs whole-frame when
+    it fits (measured ~1.5 KB/pixel fp32, half under bf16) and falls back to
+    tiles, including on CUDA out-of-memory.
+  After, on the same frame: R/G 1.00 in the clipped core, no channel above
+  peak, chroma noise equal to the source, clipped-core luminance 765 nits
+  (Expand alone: 193).
+- **Every published RUDRA checkpoint loads, and the shipped one is the
+  default.** Radiance carried a pre-gate copy of `SDR2HDRNet` and read only
+  `.pt`, while Hugging Face publishes `.safetensors` and names
+  `sdr2hdr_shadow_v1` (v5 plus a trained shadow gate) as the shipped model,
+  which Radiance could not build. The network is now ported from RUDRA's
+  reference (shadow gate, residual-scale gate, curve head, `from_config`,
+  corpus EV), verified bit-identical to it on shadow_v1, v5 and the legacy
+  `.pt`. Checkpoints load from `.safetensors` (config from the file's
+  metadata) or `.pt` (`weights_only`); heads the config forgot are read off
+  the state dict; the temporal refiner is refused by name. The per-frame
+  gates run once per frame, not per tile, as in RUDRA. Search order and the
+  auto-download now put `sdr2hdr_shadow_v1.safetensors` first (pinned
+  commit, SHA-256 checked); the flat and `sdr2hdr/` layouts are both found.
+  `tests/test_pixel_rudra_parity.py`.
+- **The RUDRA pixel model downloads itself.** SDR → HDR Universal and
+  SDR → HDR Recover used to need a RUDRA checkpoint installed by hand;
+  without it Universal quietly fell back to plain expansion. Radiance now
+  fetches it on first use (~5 MB) from
+  `huggingface.co/fxtdstudios/RUDRA`, pinned to a commit and verified by size
+  and SHA-256 before it is moved into `models/radiance` (new
+  `model/pixel_download.py`). Because it is small and first-party it is on by
+  default, unlike the large third-party weights, which still ask first. Off
+  with `RADIANCE_ALLOW_DOWNLOADS=0`, `HF_HUB_OFFLINE=1` or
+  `TRANSFORMERS_OFFLINE=1`; `core/consent.downloads_allowed` gained a
+  `default` argument and honours the two offline flags. One attempt per
+  session, one "downloads are off" message per session, and the test suite
+  runs with downloads off. `tests/test_pixel_download.py` covers the pin, the
+  opt-outs, verification failures and network errors.
+- **README: model and workflow links.** Direct download link for the RUDRA
+  model, the auto-download and opt-out, and a table for both shipped
+  workflows with a link to every model file each one needs.
 - **Final release review (3.5.0).** Run against a real ComfyUI 0.32 / frontend 1.48.
   - *The shipped start graph did not queue.* The frontend restores widgets by position, and `workflows/start.json` predated inputs added since (`audio_cfg` on the Sampler, `crop_to_broadcast_resolution` on Resolution, the viewers' `input_space` / `fps`, the encoder's `negative_mode`). Everything after each new input moved one slot: the Sampler's `audio_cfg` received "euler", its extension threw `samplerMode.includes is not a function`, and ComfyUI rejected the prompt. HDR VAE Decode also had no VAE connected, and the Flux loader had no `clip_l`. The file is re-saved from the frontend itself, the VAE is wired, `clip_l` is set, and Resolution uses the Flux 16-channel latent. It now passes ComfyUI's prompt validation.
   - *README said 131 nodes.* The log prints 156, so the install check told users a correct install had failed.

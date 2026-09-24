@@ -43,7 +43,6 @@ from typing import List, Optional
 import torch
 
 from radiance.color.ops import (
-    M_BT2020_TO_REC709,
     M_REC709_TO_ACES2065_1,
     M_REC709_TO_BT2020,
     apply_matrix_3x3,
@@ -197,24 +196,35 @@ def _soft_knee_expand(luma: torch.Tensor, knee: torch.Tensor,
 
 def _soft_peak_limit(rgb: torch.Tensor, peak_scale: float,
                      knee_ratio: float = 0.9) -> torch.Tensor:
-    """Hue-preserving luminance shoulder bounded by ``peak_scale``.
+    """Hue-preserving max-channel shoulder bounded by ``peak_scale``.
 
-    Values below ``knee_ratio * peak_scale`` are unchanged. Brighter values
-    approach the requested peak smoothly; a final numerical guard guarantees
-    that learned reconstruction can never exceed the mastering target.
+    Pixels whose brightest channel is below ``knee_ratio * peak_scale`` are
+    unchanged. Brighter ones are scaled, all three channels by one gain, so the
+    brightest channel approaches the peak smoothly; a final numerical guard
+    guarantees that no channel of the learned reconstruction exceeds the
+    mastering target.
+
+    The shoulder used to act on luminance. Luminance weights red at 0.21 and
+    blue at 0.07, so a saturated highlight could sit under the peak in
+    luminance with one channel far above it: measured on a user's sunset,
+    10% of pixels had a channel over a 1,000-nit peak and red reached
+    3,500 nits. HDR10 encodes channels, not luminance, so every one of those
+    pixels would have clipped per channel at the encoder, shifting its hue.
+    Bounding the max channel also bounds luminance (``Y <= max(R,G,B)``).
     """
     peak = max(float(peak_scale), _EPS)
     knee = peak * float(knee_ratio)
-    y = _luma(rgb).clamp(min=0.0)
+    rgb = rgb.clamp(min=0.0)
+    m = rgb.amax(dim=-1)
     span = max(peak - knee, _EPS)
-    compressed = knee + span * torch.tanh((y - knee).clamp(min=0.0) / span)
-    target_y = torch.where(y > knee, compressed, y).clamp(max=peak)
-    gain = target_y / y.clamp(min=_EPS)
-    limited = rgb.clamp(min=0.0) * gain.unsqueeze(-1)
+    compressed = knee + span * torch.tanh((m - knee).clamp(min=0.0) / span)
+    target_m = torch.where(m > knee, compressed, m).clamp(max=peak)
+    gain = target_m / m.clamp(min=_EPS)
+    limited = rgb * gain.unsqueeze(-1)
 
-    # Floating-point roundoff can leave luma a few ulps above the target.
-    limited_y = _luma(limited).clamp(min=_EPS)
-    guard = torch.clamp(peak / limited_y, max=1.0)
+    # Floating-point roundoff can leave a channel a few ulps above the target.
+    limited_m = limited.amax(dim=-1).clamp(min=_EPS)
+    guard = torch.clamp(peak / limited_m, max=1.0)
     return limited * guard.unsqueeze(-1)
 
 
@@ -348,25 +358,68 @@ class _RudraRecoveryCore:
         tile_overlap: int,
         recovery_mode: str,
         strength: float,
+        highlight_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Run the direct-pixel SDR2HDRNet and blend it into evidence masks.
 
-        The network consumes canonical sRGB code values and returns normalized
-        scene-linear Rec.2020 with 1.0 == 10,000 nits. Radiance's internal
-        working space is scene-linear Rec.709 with 1.0 == 100 nits.
+        The network consumes canonical sRGB code values and returns
+        scene-linear RGB with 1.0 == 10,000 nits, in the input's primaries
+        (Rec.709 here). Radiance's working space is scene-linear Rec.709 with
+        1.0 == 100 nits, so only the scale changes.
+
+        Inside clipped highlights the network supplies BRIGHTNESS only; the
+        colour comes from the source. A clipped channel carries no information
+        about its own value, and the network rebuilds each channel separately
+        from a per-channel inverse tone curve that is steepest exactly at the
+        clip, so where red has clipped and green has not, red alone is pushed
+        up. On a sunset whose channels clip in turn (red, then green, then blue)
+        that drew a false-colour ring at each clip boundary, cast white areas
+        red (R about 2.2x G) and quadrupled chroma noise on the glints. The
+        released checkpoints were also trained on a corpus that almost never
+        clipped (RUDRA's legacy -1 EV render), so clipped colour is outside
+        what they learned. Taking the learned luminance and the source
+        chromaticity leaves no hue to invent, and the learned lift is let in
+        as the source goes to white (see ``fullness``), never below the
+        deterministic base. Shadows keep the network's own colour: that is
+        where it was trained on it.
         """
         from radiance.pixel_sdr2hdr import linear_to_srgb, predict_pixel_sdr2hdr
 
         canonical_srgb = linear_to_srgb(sdr_linear.clamp(0.0, 1.0))
-        recovered_2020 = predict_pixel_sdr2hdr(
+        predicted = predict_pixel_sdr2hdr(
             canonical_srgb, checkpoint_path=checkpoint_path,
             tile_size=int(tile_size), tile_overlap=int(tile_overlap),
             recovery_mode=str(recovery_mode), strength=float(strength),
         )
-        recovered_709 = apply_matrix_3x3(
-            recovered_2020 * 100.0, M_BT2020_TO_REC709,
-        ).clamp(min=0.0)
-        recovered_709 = _soft_peak_limit(recovered_709, peak_scale)
+        # There used to be a Rec.2020 -> Rec.709 matrix here. The network is a
+        # per-channel mapping and never changes primaries (RUDRA's inference
+        # writes its output as-is), so the matrix only over-saturated, and on
+        # a warm highlight it multiplied the red cast by another 1.5x.
+        recovered = (predicted * 100.0).clamp(min=0.0)
+
+        # How far the source went to white: the MEDIAN channel's code value.
+        # One clipped channel says the pixel is bright in that primary and
+        # nothing about how bright; the network's answer there is driven by
+        # that channel's inverse curve alone, and switching it on at the first
+        # clipped channel doubled luminance in one step (80 -> 185 nits across
+        # a smooth sky) and drew a hard plateau edge round the sun. Two
+        # channels at clip is a highlight the tone curve has flattened, and
+        # that is where learned brightness is let in, fading in from code 0.85.
+        median_code = canonical_srgb.median(dim=-1).values
+        fullness = ((median_code - 0.85) / 0.15).clamp(0.0, 1.0)
+        fullness = fullness * fullness * (3.0 - 2.0 * fullness)
+        base_y = _luma(base_hdr).clamp(min=_EPS)
+        lift = (_luma(recovered) - base_y).clamp(min=0.0)   # never darker than the base
+        target_y = base_y + lift * fullness
+        hue_kept = base_hdr.clamp(min=0.0) * (target_y / base_y).unsqueeze(-1)
+        if highlight_mask is None:
+            share = torch.ones_like(mask)
+        else:
+            share = (highlight_mask / mask.clamp(min=_EPS)).clamp(0.0, 1.0)
+        share = share.unsqueeze(-1)
+        recovered = hue_kept * share + recovered * (1.0 - share)
+
+        recovered = _soft_peak_limit(recovered, peak_scale)
         weight = (mask * float(blend)).unsqueeze(-1)
         # Limit the LEARNED signal only, then blend -- do not re-limit the
         # result. _soft_peak_limit is a tanh compressor and not idempotent, so
@@ -375,7 +428,7 @@ class _RudraRecoveryCore:
         # that pixels outside the recovery masks are preserved exactly. The
         # peak guarantee still holds: the blend is convex and both inputs
         # respect peak_scale.
-        return base_hdr * (1.0 - weight) + recovered_709 * weight
+        return base_hdr * (1.0 - weight) + recovered * weight
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -425,8 +478,9 @@ class RadianceSDRToHDRRecover(_RudraRecoveryCore):
                 "batch_mode": (["Independent Images", "Video Frames"], {"default": "Independent Images",
                     "tooltip": "Video Frames treats the batch as an ordered clip and prefers the temporal model."}),
                 "pixel_checkpoint": ("STRING", {"default": "",
-                    "tooltip": "Direct-pixel .pt checkpoint. Empty searches models/radiance and RADIANCE_SDR2HDR_PIXEL."}),
-                "pixel_tile_size": ("INT", {"default": 512, "min": 128, "max": 2048, "step": 64}),
+                    "tooltip": "Direct-pixel .pt checkpoint. Empty searches models/radiance and RADIANCE_SDR2HDR_PIXEL, and downloads the default RUDRA model (~5 MB) on first use unless RADIANCE_ALLOW_DOWNLOADS=0."}),
+                "pixel_tile_size": ("INT", {"default": 512, "min": 128, "max": 2048, "step": 64,
+                    "tooltip": "Tile size used only when the whole frame does not fit in memory. The model normalises over its input, so whole-frame inference is more accurate and is always tried first."}),
                 "pixel_tile_overlap": ("INT", {"default": 64, "min": 0, "max": 512, "step": 16}),
                 "temporal_window": ([5, 7, 9], {"default": 5,
                     "tooltip": "Adjacent frames used by the temporal residual model."}),
@@ -501,7 +555,7 @@ class RadianceSDRToHDRRecover(_RudraRecoveryCore):
                 hdr = self._pixel_reconstruct(
                     lin, lin, recovery_mask, str(pixel_checkpoint), 1.0,
                     peak_scale, int(pixel_tile_size), int(pixel_tile_overlap),
-                    mode, 1.0,
+                    mode, 1.0, highlight_mask=h_weighted,
                 )
                 h_conf, s_conf = h_weighted, s_weighted
             except Exception as exc:  # noqa: BLE001 — convert to an actionable node error
@@ -602,8 +656,9 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
                     "tooltip": "Auto: temporal model on ordered video when installed, else the direct-pixel model. "
                                "Direct Pixel: pixel model per frame. Temporal: temporal model only (video, 5+ frames)."}),
                 "pixel_checkpoint": ("STRING", {"default": "",
-                    "tooltip": "Direct-pixel .pt checkpoint. Empty searches models/radiance and RADIANCE_SDR2HDR_PIXEL."}),
-                "pixel_tile_size": ("INT", {"default": 512, "min": 128, "max": 2048, "step": 64}),
+                    "tooltip": "Direct-pixel .pt checkpoint. Empty searches models/radiance and RADIANCE_SDR2HDR_PIXEL, and downloads the default RUDRA model (~5 MB) on first use unless RADIANCE_ALLOW_DOWNLOADS=0."}),
+                "pixel_tile_size": ("INT", {"default": 512, "min": 128, "max": 2048, "step": 64,
+                    "tooltip": "Tile size used only when the whole frame does not fit in memory. The model normalises over its input, so whole-frame inference is more accurate and is always tried first."}),
                 "pixel_tile_overlap": ("INT", {"default": 64, "min": 0, "max": 512, "step": 16}),
                 "pixel_recovery_mode": (["highlights", "all", "shadows", "off"], {"default": "highlights",
                     "tooltip": "Highlights is safest and avoids hallucinating chroma in deep shadows."}),
@@ -779,6 +834,8 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
                             float(rudra_blend), peak_scale, int(pixel_tile_size),
                             int(pixel_tile_overlap), str(pixel_recovery_mode),
                             float(pixel_strength),
+                            highlight_mask=(clipped if pixel_recovery_mode in {"highlights", "all"}
+                                            else torch.zeros_like(clipped)),
                         )
                         h_conf = clipped * float(rudra_blend) if pixel_recovery_mode in {"highlights", "all"} else torch.zeros_like(clipped)
                         s_conf = shadows * float(rudra_blend) if pixel_recovery_mode in {"shadows", "all"} else torch.zeros_like(shadows)

@@ -353,7 +353,7 @@ class TestRudraPath(unittest.TestCase):
                                       0.0, "Linear", processing_mode="Hybrid")
         self.assertTrue(self.torch.allclose(out, base))
         self.assertIn("NOT APPLIED", report)
-        self.assertIn("sdr2hdr_pixel_image.pt", report)
+        self.assertIn("sdr2hdr_shadow_v1.safetensors", report)
 
     def test_rudra_blended_only_into_recovery_regions(self):
         """Hybrid changes clipped highlights/shadows, not clean midtones."""
@@ -508,7 +508,7 @@ class TestRudraPath(unittest.TestCase):
         called = {"n": 0}
 
         def pixel(source, base, mask, checkpoint, blend, peak_scale,
-                  tile_size, tile_overlap, recovery_mode, strength):
+                  tile_size, tile_overlap, recovery_mode, strength, **kwargs):
             called["n"] += 1
             self.assertEqual(checkpoint, "pixel.pt")
             self.assertEqual(recovery_mode, "highlights")
@@ -528,7 +528,7 @@ class TestRudraPath(unittest.TestCase):
     def test_direct_pixel_backend_accepts_video_frame_batches(self):
         called = {"frames": 0}
 
-        def pixel(source, base, mask, *args):
+        def pixel(source, base, mask, *args, **kwargs):
             called["frames"] = source.shape[0]
             return base
 
