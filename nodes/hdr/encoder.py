@@ -148,7 +148,11 @@ def _compute_channel_stats(image: torch.Tensor):
 
 class RadianceHDRTurboEncoder:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
-    DESCRIPTION = "Fast HDR latent encoding optimised for TurboDecoder workflows."
+    DESCRIPTION = (
+        "Legacy. Its TurboDecoder was retired, so no Radiance node decodes this "
+        "latent back to HDR (it comes back compressed and clipped). For an HDR "
+        "latent use VAE Encode (HDR), which VAE Decode (HDR) inverts exactly."
+    )
     """
     ◎ Radiance HDR Turbo Encoder
 
@@ -403,8 +407,10 @@ class RadianceHDRLatentEncoder:
     RETURN_TYPES  = ("LATENT", "STRING")
     RETURN_NAMES  = ("latent",  "channel_stats")
     DESCRIPTION = (
-        "Unified HDR latent encoder.  Soft-Knee (LTX-aligned) or Log Calibration mode. "
-        "Optional per-channel normalisation — wire channel_stats to RadianceHDRPerChannelDenorm."
+        "Legacy. The latent decoders this fed were retired in 3.5.0, so no Radiance "
+        "node decodes this latent back to HDR (VAE Decode (HDR) returns it clipped at "
+        "1.0). For an HDR latent use VAE Encode (HDR), which VAE Decode (HDR) inverts "
+        "exactly. Kept so saved workflows load."
     )
 
     _MODES = ["Soft-Knee (LTX)", "Log Calibration"]

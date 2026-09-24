@@ -6,6 +6,7 @@ import logging
 from radiance.nodes.generate.sampler import RadianceSamplerPro
 from radiance.nodes.generate.engine import (
     RadianceHDRVAEDecode,
+    RadianceHDRVAEEncode,
 )
 from radiance.nodes.generate.loader import (
     RadianceControlNetApply,
@@ -28,6 +29,10 @@ logger = logging.getLogger("radiance.nodes.generate")
 NODE_CLASS_MAPPINGS = {
     "RadianceSamplerPro": RadianceSamplerPro,
     "RadianceHDRVAEDecode": RadianceHDRVAEDecode,
+    # 3.5.0: the encoder HDR VAE Decode's Auto/Direct HDR log inversion was
+    # built for. Implemented and tested since v2 as RadianceVAE4KEncode, never
+    # registered, so no latent on the menu could be decoded back to HDR.
+    "RadianceHDRVAEEncode": RadianceHDRVAEEncode,
     "RadianceLoraStack": RadianceLoraStack,
     "RadianceUnifiedLoader": RadianceUnifiedLoader,
     # Written, complete and importable since v3, but never listed here,
@@ -47,6 +52,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceSamplerPro": "◎ Radiance Sampler Pro",
     "RadianceHDRVAEDecode": "◎ HDR VAE Decode",
+    "RadianceHDRVAEEncode": "◎ HDR VAE Encode",
     "RadianceLoraStack": "◎ LoRA Stack",
     "RadianceUnifiedLoader": "◎ Radiance Read Models",
     "RadianceControlNetApply": "◎ Radiance ControlNet Apply",

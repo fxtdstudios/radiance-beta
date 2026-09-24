@@ -1,5 +1,5 @@
 # ============================================================
-# FXTD STUDIOS — Radiance v3.0.0
+# FXTD STUDIOS — Radiance
 # nodes_audio_cut.py  —  Audio-Driven Cut Detection & Transcription
 # ============================================================
 # Priority 7 of 7 in the Griptape-inspired feature roadmap.
@@ -19,7 +19,7 @@
 #     • Returns full transcript + per-segment word timings as JSON
 # ============================================================
 
-__version__ = "3.1.0"
+from radiance.config.constants import VERSION as __version__  # noqa: E402
 
 import io
 import json

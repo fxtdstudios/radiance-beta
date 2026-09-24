@@ -1,5 +1,5 @@
 # ============================================================
-# FXTD STUDIOS — Radiance v3.0.0
+# FXTD STUDIOS — Radiance
 # nodes_dit_adapter.py  —  DiT Latent Space Adapter
 # ============================================================
 # Bridges Radiance's HDR color pipeline to Diffusion Transformer
@@ -18,7 +18,7 @@
 #
 # ============================================================
 
-__version__ = "3.1.0"
+from radiance.config.constants import VERSION as __version__  # noqa: E402
 
 import json
 import math

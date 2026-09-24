@@ -25,6 +25,7 @@ import folder_paths
 
 # Re-import modular components
 from radiance.cache import _viewer_cache_get, _progress_set
+from radiance.config.constants import VERSION as _RADIANCE_VERSION
 from radiance.color.grading import apply_grading
 
 logger = logging.getLogger("radiance.delivery.handler")
@@ -221,7 +222,7 @@ def _export_aces_clip_xml(media_path: str, grading: dict, color_space: str, vers
 
     # Header
     hdr = ET.SubElement(root, f'{{{ns}}}amf_info')
-    ET.SubElement(hdr, f'{{{ns}}}description').text = f'Radiance v3.0.0 — ACES grade export ({version_str})'
+    ET.SubElement(hdr, f'{{{ns}}}description').text = f'Radiance v{_RADIANCE_VERSION} — ACES grade export ({version_str})'
     ET.SubElement(hdr, f'{{{ns}}}uuid').text = f'urn:uuid:{os.urandom(16).hex()}'
     ET.SubElement(hdr, f'{{{ns}}}date_time').text = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
@@ -775,14 +776,14 @@ async def radiance_deliver_endpoint(request):
                         gt_np[lo]  = gt_np[lo] / 12.92
                         gt_np[~lo] = np.power((gt_np[~lo] + 0.055) / 1.055, 2.4)
                         graded_tensor = torch.from_numpy(gt_np)
-                        logger.info('[Deliver v3.0.0] Grade baked into EXR — sRGB→linear applied')
+                        logger.info('[Deliver] Grade baked into EXR — sRGB→linear applied')
                     except Exception as _e:
-                        logger.warning(f'[Deliver v3.0.0] Grade bake linearize failed: {_e}')
+                        logger.warning(f'[Deliver] Grade bake linearize failed: {_e}')
                         _note(warnings,
                               f"Grade bake linearise failed, the EXR is still "
                               f"{color_space}: {type(_e).__name__}: {_e}")
                 else:
-                    logger.info(f'[Deliver v3.0.0] Grade baked into EXR — {color_space} (already linear)')
+                    logger.info(f'[Deliver] Grade baked into EXR — {color_space} (already linear)')
                 # Baking means the EXR holds scene-linear values, so the writer
                 # must not re-encode them. It used to be handed 'sRGB' anyway,
                 # which applied the forward EOTF straight back over the bake --
@@ -811,9 +812,9 @@ async def radiance_deliver_endpoint(request):
                                 f'Frame {i-1}→{i}: {ev_delta:.2f} EV jump (mid-luma {p0:.3f}→{p1:.3f})'
                             )
                     if continuity_report:
-                        logger.warning(f'[Deliver v3.0.0] Continuity issues: {len(continuity_report)} flicker events')
+                        logger.warning(f'[Deliver] Continuity issues: {len(continuity_report)} flicker events')
                 except Exception as _e:
-                    logger.debug(f'[Deliver v3.0.0] Continuity scan failed: {_e}')
+                    logger.debug(f'[Deliver] Continuity scan failed: {_e}')
 
             _progress_set(instance_key, {"current": 90, "total": 100, "status": "encoding", "message": "Encoding Master..."})
 
@@ -956,9 +957,9 @@ async def radiance_deliver_endpoint(request):
                 if len(_sessions) > 500:
                     _sessions = _sessions[-500:]
                 _write_sessions_atomically(_sessions_path, _sessions)
-                logger.debug(f'[Deliver v3.0.0] Session logged → {_sessions_path}')
+                logger.debug(f'[Deliver] Session logged → {_sessions_path}')
             except Exception as _e:
-                logger.debug(f'[Deliver v3.0.0] Session log failed (non-fatal): {_e}')
+                logger.debug(f'[Deliver] Session log failed (non-fatal): {_e}')
 
             _cont_warn = ""
             if continuity_report:

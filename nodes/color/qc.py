@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import numpy as np
 
+from radiance.config.constants import VERSION as _RADIANCE_VERSION
+
 from radiance.image import defects
 from radiance.path_utils import get_safe_output_dir, strip_path_quotes
 from radiance.color.luma import luma_bt709 as _luma
@@ -223,7 +225,7 @@ class RadianceQC:
 
             text_lines = [
                 "\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557",
-                "\u2551     RADIANCE QC REPORT v3.0.0           \u2551",
+                "\u2551" + f"     RADIANCE QC REPORT v{_RADIANCE_VERSION}".ljust(40) + "\u2551",
                 "\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d",
                 f"Image: {B} frame(s), {W}x{H}, {C} channel(s)", "",
             ]

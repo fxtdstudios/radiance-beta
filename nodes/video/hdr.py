@@ -1,5 +1,5 @@
 # ============================================================
-# FXTD STUDIOS — Radiance v3.0.0
+# FXTD STUDIOS — Radiance
 # nodes_video_hdr.py  —  HDR Video Generation Pipeline
 # ============================================================
 # Connects any DiT video model running in ComfyUI to Radiance's
@@ -26,7 +26,7 @@
 #     per-frame grading nodes (CDL, LUT, policy guard) then reassemble.
 # ============================================================
 
-__version__ = "3.1.0"
+from radiance.config.constants import VERSION as __version__  # noqa: E402
 
 import logging
 logger = logging.getLogger("radiance.video.hdr")

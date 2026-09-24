@@ -29,4 +29,6 @@ WEB_DIRECTORY = "./js"
 #: declared and no group registered; twenty-five of them ship, and
 #: RadianceHDRHistogram is withheld for a 5-D IMAGE output. See
 #: nodes/catalog.py and tests/test_node_publication_completeness.py.
-EXPECTED_MIN_NODE_COUNT = 156
+#: 2026-09-24: 156 -> 157. RadianceHDRVAEEncode, the encoder HDR VAE Decode
+#: inverts, implemented as RadianceVAE4KEncode but never registered.
+EXPECTED_MIN_NODE_COUNT = 157

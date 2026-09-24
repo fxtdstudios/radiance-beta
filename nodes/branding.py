@@ -95,6 +95,7 @@ NODE_SECTIONS = {
     "RadianceEnergyMask": "Generate",
     "RadianceHDRLatentEncoder": "Generate",
     "RadianceHDRVAEDecode": "Generate",
+    "RadianceHDRVAEEncode": "Generate",
     "RadianceLoraStack": "Generate",
     "RadianceRegionalGrid": "Generate",
     "RadianceRegionalPrompt": "Generate",
@@ -350,7 +351,10 @@ TERM_OVERRIDES = {
     "RadianceUnifiedLoader": "Loader",
     "RadianceCinematicPromptEncoder": "Prompt",
     "RadianceHDRVAEDecode": "VAE Decode (HDR)",
-    "RadianceHDRLatentEncoder": "VAE Encode (HDR)",
+    "RadianceHDRVAEEncode": "VAE Encode (HDR)",
+    # Its decoder was retired in 3.5.0; kept registered for saved workflows.
+    "RadianceHDRLatentEncoder": "HDR Latent Encoder (Legacy)",
+    "RadianceHDRTurboEncoder": "HDR Turbo Encoder (Legacy)",
     "RadianceControlNetApply": "ControlNet",
     "RadianceControlApply": "Control",
 }

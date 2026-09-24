@@ -1,5 +1,5 @@
 # ============================================================
-# FXTD STUDIOS — Radiance v3.0.0
+# FXTD STUDIOS — Radiance
 # t2v.py  —  Text-to-Video & Image-to-Video Wrappers
 # ============================================================
 # Unified wrapper layer over any DiT video model loaded in ComfyUI.
@@ -33,7 +33,7 @@
 #   Generic      — encode image, inject as first frame, pad remaining
 # ============================================================
 
-__version__ = "3.1.0"
+from radiance.config.constants import VERSION as __version__  # noqa: E402
 
 import logging
 logger = logging.getLogger("radiance.video.t2v")

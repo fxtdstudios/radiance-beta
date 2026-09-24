@@ -79,6 +79,7 @@
   "RadianceHDRToneMap",
   "RadianceHDRTurboEncoder",
   "RadianceHDRVAEDecode",
+  "RadianceHDRVAEEncode",
   "RadianceHighlightSynthesis",
   "RadianceHueCurves",
   "RadianceI2VPipeline",

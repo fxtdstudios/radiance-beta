@@ -2,7 +2,9 @@ opencv-python>=4.8.0
 imageio>=2.31.0
 Pillow>=10.0.0
 numpy>=1.22
-OpenEXR>=3.2.0
+# No OpenEXR wheel exists for Python 3.14 yet; a source build there would fail
+# the whole `pip install -r`. EXR I/O falls back to OpenImageIO, then OpenCV.
+OpenEXR>=3.2.0; python_version < "3.14"
 # Imath ships inside the OpenEXR wheel — do NOT add a separate Imath dependency (PyPI imath maxes at 0.0.2).
 OpenImageIO>=3.0.0
 # DPX has no Pillow plugin; OpenImageIO is the VFX-industry-standard library for it.

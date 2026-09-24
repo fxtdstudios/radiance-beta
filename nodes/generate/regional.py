@@ -1,5 +1,5 @@
 """
-◎ Radiance v3.0.0 — Phase 4: Radiance Sampler Expansion
+◎ Radiance — Phase 4: Radiance Sampler Expansion
 nodes_regional.py
 
 Provides:

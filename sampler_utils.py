@@ -1,5 +1,10 @@
 import torch
 import time
+
+try:
+    from radiance.config.constants import VERSION as _RADIANCE_VERSION
+except Exception:  # noqa: BLE001 - imported outside the package (tests, tools)
+    _RADIANCE_VERSION = "unknown"
 import math
 import logging
 import gc
@@ -1349,7 +1354,7 @@ def build_sigma_report(
 
     video_tag = f" | Frames: {frames}" if frames is not None and frames > 1 else ""
     lines = [
-        f"═══ Radiance Sampler v3.0.0 ═══",
+        f"═══ Radiance Sampler v{_RADIANCE_VERSION} ═══",
         f"Model: {detected_type} | Target Steps: {steps} | Scheduler: {scheduler}{'  [AYS]' if ays_active else ''}{video_tag}",
         f"Shift: {flux_shift} | Denoise: {denoise} | Mode: {sampler_mode}",
     ]
@@ -2307,7 +2312,7 @@ def _build_latent_meta(
     sigma_max = float(sigmas.max())
     is_video = frames is not None and frames > 1
     meta = {
-        "version": "3.0.0",
+        "version": _RADIANCE_VERSION,
         "detected_arch": detected_type,
         "is_video": is_video,
         "frames": frames if is_video else None,

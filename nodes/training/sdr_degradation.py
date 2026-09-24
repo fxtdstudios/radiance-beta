@@ -1,5 +1,5 @@
 """
-◎ Radiance v3.0.0 — SDR Degradation Pipeline
+◎ Radiance — SDR Degradation Pipeline
 nodes_sdr_degradation.py
 
 Training data generation for IC-LoRA HDR conditioning.
