@@ -185,6 +185,12 @@ python_functions = ["test_*"]
 # Per-test timeout — guards against infinite loops in node code (CI & local)
 timeout = 30
 
+# `slow` tests are opt-in: `pytest -m slow` runs them (a later -m wins). The
+# 1-to-100 frame-count sweep is marked slow and used to run on every plain
+# `pytest`, 68 s of a 245 s suite, although the README and the test itself
+# said it was deselected. CI runs the slow set in its own step.
+addopts = "-m 'not slow'"
+
 # Registered markers (suppresses PytestUnknownMarkWarning)
 markers = [
     "slow: marks tests as slow — skip in fast CI with `-m 'not slow'`",

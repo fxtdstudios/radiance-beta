@@ -21,8 +21,10 @@ when this ffmpeg build cannot encode it, the same way test_video_read.py does.
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
@@ -230,6 +232,26 @@ def test_every_frame_count_from_one_to_one_hundred(tmp_path, codec):
     100 encodes per codec, so it is marked slow and the sweep above is what
     runs by default. Run it with `-m slow` before changing anything in
     radiance.core.video's frame selection or its ffmpeg command line.
+
+    Each length is its own encoder-produced file, as before. The time is
+    ffmpeg/ffprobe start-up (three processes per length on a 56x16 clip), not
+    codec work, so the lengths run on a thread pool: the threads only wait on
+    subprocesses. Results are checked in order, so a failure still names the
+    first bad length.
     """
-    for frames in range(1, 101):
-        _assert_exactly(_encode(tmp_path, codec, frames), frames)
+    def one(frames):
+        return frames, _encode(tmp_path, codec, frames)
+
+    workers = min(8, os.cpu_count() or 1)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        encoded = list(pool.map(one, range(1, 101)))
+        decoded = list(pool.map(lambda fp: (fp[0], fp[1], V.decode(str(fp[1]))), encoded))
+    for frames, path, (arr, info) in decoded:
+        assert arr.shape[0] == frames, (
+            f"{path.name}: encoded {frames} frames, decoded {arr.shape[0]}")
+        assert _decoded_indices(arr) == list(range(frames)), (
+            f"{path.name}: the right number of frames came back but not the right "
+            f"frames, in order: got {_decoded_indices(arr)}")
+        assert info.frames == frames, (
+            f"{path.name}: the probe reports {info.frames} frames for a "
+            f"{frames}-frame clip")

@@ -93,6 +93,15 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ### Fixed
 
+- **`slow` tests ran on every plain `pytest`.** The 1-to-100 frame-count
+  sweep (300 encoded clips) is marked `slow` and the README said slow tests
+  were deselected by default, but nothing deselected them: it cost 68 s of a
+  245 s suite locally and in CI. `pyproject.toml` now sets
+  `addopts = "-m 'not slow'"`; `pytest -m slow` runs them, and CI's
+  full-dependency job runs them in their own step so the sweep is not lost.
+  The sweep itself now encodes and decodes on a thread pool (its time is
+  process start-up, not codec work): 68 s to 40 s on 2 cores, more on a
+  workstation. Every length is still its own encoder-produced file.
 - **VAE Decode (HDR) told users of the recommended pair that correct output
   was wrong.** Every run of VAE Encode (HDR) into VAE Decode (HDR) with a
   linear source logged "output colors will be WRONG". The encoder carries a

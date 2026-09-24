@@ -705,6 +705,10 @@ the gap is recorded under Open rather than quietly corrected.
       no channel exceeds `peak_nits`, the whole frame runs untiled when it
       fits, and every published checkpoint loads, with the shipped
       `sdr2hdr_shadow_v1` as the default and the auto-download.
+- [x] **Slow tests are opt-in (3.5.0).** The 1-to-100 video frame-count
+      sweep ran on every `pytest` although it is marked `slow`; it is now
+      deselected by default (`pytest -m slow` runs it, and CI runs it in its
+      own step) and runs in parallel. Default suite about 68 s faster.
 - [x] **Release feature test from the registry package (3.5.0).** Packed
       with `comfy node pack` (238 files, 3.5 MB, no tests or dev tools),
       installed into a clean ComfyUI 0.32 on Python 3.13 the way
