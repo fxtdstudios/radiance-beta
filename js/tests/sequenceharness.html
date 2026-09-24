@@ -140,6 +140,9 @@ window.__run = async function (opts) {
             n2.id = 2;
             n2.addDOMWidget = (name, type, el) => { auto.appendChild(el); return { name, type, element: el }; };
             n2.onNodeCreated();
+            // 3.5.0: a new viewer opens in Simple, which hides the panels this
+            // measures. Advanced is the case that grew the node.
+            n2.radianceViewer?.setUIMode?.('advanced');
             await sleep(300);
             out.autoHostHeight = Math.round(auto.getBoundingClientRect().height);
             out.autoContentHeight = Math.max(...[...auto.querySelectorAll('.radiance-right-control-panel, .radiance-pro-sidebar')]

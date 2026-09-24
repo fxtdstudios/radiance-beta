@@ -70,6 +70,18 @@ class RadianceWebGLRenderer extends RadianceRenderer {
         this.wipeRefEnabled = enabled;
     }
 
+    /**
+     * 3.5.0: what the whole frame shows when comparing. 0 = A (with the wipe
+     * if on), 1 = B only (the B side of blink, or "show B"), 2 = |A - B| times
+     * `gain`, on display values. B is the reference texture (the compare
+     * input's frame, or a pinned still). Only difference and B need it; with
+     * no reference both show A.
+     */
+    setCompareShow(show, gain = 4) {
+        this.compareShow = show | 0;
+        this.diffGain = Number.isFinite(gain) ? gain : 4;
+    }
+
     setDisplayLutStrength(v) {
         this.displayLutStrength = v;
     }
@@ -1238,8 +1250,12 @@ class RadianceWebGLRenderer extends RadianceRenderer {
         // Without handlers, the entire renderer silently dies with no recovery.
         this._contextLost = false;
         this.canvas.addEventListener('webglcontextlost', (e) => {
-            e.preventDefault(); // Required to allow restoration
             this._contextLost = true;
+            // 3.5.0: destroy() releases the context on purpose (a removed
+            // node, a graph loaded over this one). That is not a failure and
+            // must not be kept restorable or logged as one.
+            if (this._destroyed) return;
+            e.preventDefault(); // Required to allow restoration
             console.error('[Radiance] WebGL context lost — renderer paused. Waiting for recovery...');
         }, false);
 
@@ -1740,6 +1756,8 @@ ${GRADE_GLSL}
             uniform float u_wipe;
             uniform bool u_wipeRefEnabled;
             uniform sampler2D u_referenceImage;
+            uniform int u_compareShow;          // 3.5.0: 0 A, 1 B, 2 |A-B| x gain
+            uniform float u_diffGain;
 
             // v2.2 Pro Grids
             uniform int u_gridMode;
@@ -3389,10 +3407,16 @@ vec3 getDenoiseColor(vec2 uv) {
             }
         }
 
-        // 8. Wipe Comparison (A/B)
+        // 8. Compare. B is the reference texture in display values, like color here.
+        if (u_wipeRefEnabled && u_compareShow == 1) {
+            color = texture(u_referenceImage, v_texcoord).rgb;
+        } else if (u_wipeRefEnabled && u_compareShow == 2) {
+            color = clamp(abs(color - texture(u_referenceImage, v_texcoord).rgb) * u_diffGain, 0.0, 1.0);
+        }
+        // Wipe:
         // LEFT  (x < wipeLine) = B side: reference / frozen snapshot
         // RIGHT (x >= wipeLine) = A side: current live/graded frame
-        if (u_wipeEnabled) {
+        if (u_wipeEnabled && u_compareShow == 0) {
             float wipeLine = u_wipe;
             if (v_texcoord.x < wipeLine) {
                 // Side B: Reference image (grabbed still)
@@ -4364,6 +4388,8 @@ vec3 getDenoiseColor(vec2 uv) {
         this._ui1(program, 'u_wipeEnabled', this.wipeEnabled ? 1 : 0);
         this._uf1(program, 'u_wipe', this.wipe);
         this._ui1(program, 'u_wipeRefEnabled', this.wipeRefEnabled ? 1 : 0);
+        this._ui1(program, 'u_compareShow', this.compareShow | 0);
+        this._uf1(program, 'u_diffGain', Number.isFinite(this.diffGain) ? this.diffGain : 4);
 
         gl.activeTexture(gl.TEXTURE6);
         gl.bindTexture(gl.TEXTURE_2D, this.textures.reference || this.textures.empty);
@@ -4765,6 +4791,7 @@ vec3 getDenoiseColor(vec2 uv) {
         // only reclaimed on GC, which browsers do lazily; ~16 add/delete cycles
         // hit Chrome's context limit and it starts killing the OLDEST context,
         // which may be the live viewer or ComfyUI's own canvas.
+        this._destroyed = true;
         try { this.gl.getExtension('WEBGL_lose_context')?.loseContext(); } catch (e) { /* best effort */ }
 
         console.log('[Radiance] WebGL renderer destroyed — all GPU resources released');

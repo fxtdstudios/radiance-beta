@@ -4,7 +4,7 @@
 
 Viewer, scopes, preview servers, contact sheets, and QC.
 
-12 nodes. [All sections](README.md)
+11 nodes. [All sections](README.md)
 
 - [Burn-In](#burn-in)
 - [Contact Sheet](#contact-sheet)
@@ -17,7 +17,6 @@ Viewer, scopes, preview servers, contact sheets, and QC.
 - [QC](#qc)
 - [Split View](#split-view)
 - [Viewer](#viewer)
-- [Viewer (Lite)](#viewer-lite)
 
 ## Burn-In
 
@@ -282,7 +281,7 @@ Side-by-side or wipe comparison between two images or versions.
 
 `RadianceViewer`
 
-Radiance Viewer, VFX review for scene-linear and HDR images: • GPU Waveform / RGB Parade / Vectorscope / Histogram scopes • Power Windows masking (Radial + Box, feather, rotation) • Comparison Bridge — mouse-draggable wipe + reference shelf (8 stills) • Anamorphic lens streaks + Brown-Conrady k1/k2 distortion • Edge-preserving Bilateral Filter denoising (7×7 GPU kernel) • Channel viewing (RGB/R/G/B/Alpha/Luma), False Color, Zebra • 16-bit PNG + .rhdr HDR sidecar + .exr export • IMAGE passthrough — no longer a dead-end node
+Radiance Viewer, VFX review for scene-linear and HDR images: • Simple mode (picture, compare, playback) or Advanced (every panel), switched in its title bar • Compare against compare_image or a pinned frame: B, wipe, difference, blink • GPU Waveform / RGB Parade / Vectorscope / Histogram scopes • Power Windows masking (Radial + Box, feather, rotation) • Comparison Bridge — mouse-draggable wipe + reference shelf (8 stills) • Anamorphic lens streaks + Brown-Conrady k1/k2 distortion • Edge-preserving Bilateral Filter denoising (7×7 GPU kernel) • Channel viewing (RGB/R/G/B/Alpha/Luma), False Color, Zebra • 16-bit PNG + .rhdr HDR sidecar + .exr export • IMAGE passthrough — no longer a dead-end node
 
 **Inputs**
 
@@ -295,27 +294,6 @@ Radiance Viewer, VFX review for scene-linear and HDR images: • GPU Waveform / 
 | `input_space` (optional) | choice | `Auto` | `Auto`, `sRGB (ComfyUI IMAGE)`, `Linear Rec.709 (sRGB)`, `ACEScg`, `Linear Rec.2020`, `Linear P3-D65`, `ACES2065-1` | What the incoming pixels are. A ComfyUI IMAGE is sRGB-encoded and is shown untouched, exactly as ComfyUI previews it. Linear sources (HDR Decode, SDR -> HDR, Read in a linear working space) are shown through OpenColorIO's ACES 2.0 SDR view. Auto: linear when any value is above 1.0 or below 0, otherwise sRGB. Set it explicitly for linear material that stays inside 0-1. |
 | `float_precision` (optional) | choice | `Half (16-bit)` | `Half (16-bit)`, `Full (32-bit)` | Precision of the float frames sent to the browser. Half is what OpenEXR, RV and Nuke's viewer cache use: exact for display and grading, half the size (about 60 MB less per 4K frame). Full keeps every fp32 bit for values above 65504 or bit-exact probing. |
 | `fps` (optional) | float | 0 | 0 to 240, step 0.001 | Playback rate. 0 = the source's rate (a VIDEO input carries it), 24 for an image batch. 23.976 / 29.97 / 59.94 are handled as the NTSC rates. |
-
-**Outputs**
-
-| Output | Type |
-| :--- | :--- |
-| `image` | IMAGE |
-
-## Viewer (Lite)
-
-`RadianceLiteViewer`
-
-Fast lightweight viewer for compare/check workflows. Provides fit, 1:1, pan/zoom, wipe, split, diff, onion, clipping, alpha, and pixel inspect.
-
-**Inputs**
-
-| Input | Type | Default | Range or choices | What it does |
-| :--- | :--- | :--- | :--- | :--- |
-| `image` | IMAGE,VIDEO |  |  | IMAGE batch or VIDEO to check. Returned unchanged as an IMAGE; input_space decides how it is displayed. |
-| `compare_image` (optional) | IMAGE,VIDEO |  |  | Optional B image for wipe, split, diff, and onion checks. |
-| `input_space` (optional) | choice | `Auto` | `Auto`, `sRGB (ComfyUI IMAGE)`, `Linear Rec.709 (sRGB)`, `ACEScg`, `Linear Rec.2020`, `Linear P3-D65`, `ACES2065-1` | What the incoming pixels are. sRGB (a ComfyUI IMAGE) is shown untouched; linear sources are shown through OpenColorIO ACES 2.0 SDR, the same view as the Radiance Viewer. Auto: linear when any value is above 1.0 or below 0. |
-| `fps` (optional) | float | 0 | 0 to 240, step 0.001 | Playback rate. 0 = the source's rate (VIDEO input), 24 for an image batch. |
 
 **Outputs**
 

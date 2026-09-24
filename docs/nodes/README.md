@@ -14,10 +14,10 @@ Every node in the menu, by section: what it does, every input with its type, def
 | [VFX](vfx.md) | 32 | Plate prep, masks, inpaint, depth, optics, motion, multipass, and scene cuts. |
 | [Video](video.md) | 15 | Text-to-video, image-to-video, temporal generation, and video HDR. |
 | [Upscale](upscale.md) | 10 | AI upscaling, repair, enhancement, and restoration. |
-| [Review](review.md) | 12 | Viewer, scopes, preview servers, contact sheets, and QC. |
+| [Review](review.md) | 11 | Viewer, scopes, preview servers, contact sheets, and QC. |
 | [Pipeline](pipeline.md) | 7 | DCC bridges, metadata, audio, project handoff, and studio integration. |
 
-149 nodes in the menu.
+148 nodes in the menu.
 
 ## Retired nodes
 
@@ -32,3 +32,4 @@ Hidden from the menu. They still load so saved graphs open; the changelog says w
 - Project Manager (`RadianceWorkspace`)
 - Read Image (`RadianceImageLoader`)
 - SAM Loader (not shipped) (`RadianceSAMModelLoader`)
+- Viewer (Lite) (`RadianceLiteViewer`)

@@ -28,7 +28,7 @@ Artists get 32-bit, HDR, and ACES image tools, professional viewers, and VFX nod
 - Video and temporal workflow nodes for loading, routing, conditioning, sampling, and delivery.
 - In-canvas studio dashboards (Project Manager, Workflow Library, Assets) rendered over the ComfyUI graph, never in a separate browser tab.
 - **Radiance Sampler**, a preset-driven sampler that hides irrelevant parameters and adapts to the selected model.
-- A full-featured **Viewer** and a lightweight **Lite Viewer** with scopes, frame review, and keyboard shortcuts.
+- One **Viewer** with a Simple mode (picture, compare, playback) and an Advanced mode (scopes, grade, inspector, timeline tools), and keyboard shortcuts.
 - HDR VAE Encode / Decode that carry values above 1.0 through the model's VAE, learned SDR → HDR recovery (RUDRA), and HDR LoRA tooling for scene-linear generation.
 - Dynamic Gizmos: collapse any group of nodes into a single reusable custom node.
 - Secure-by-default handoff to Nuke and DaVinci Resolve.
@@ -380,13 +380,17 @@ There is also HDR LoRA loading and application, a LoRA stack with per-LoRA model
 
 FP32 and RGBA32F end to end, on WebGL2.
 
+A switch in the Viewer's title bar picks **Simple** or **Advanced**. Simple is the picture, a transport and compare, nothing else. Advanced adds the menus, tool rail, scopes, grade, inspector and timeline tools. A new Viewer opens in Simple; the choice is saved with the node, and a graph saved before the switch existed opens in Advanced, as it looked.
+
+Compare works the same in both modes: **A**, **B**, **Wipe** (drag the line), **Diff** (|A − B| × 4) and **Blink** (flips A and B twice a second). B is the node's `compare_image`, following the playhead. With nothing connected, **Pin A as B** keeps the current frame as B, and it stays through new runs: pin, change the graph, queue, compare. **Release B** goes back to the input.
+
 Scopes: histogram, waveform, vectorscope and parade. You pick the scale (10 or 12-bit code value, percent, millivolts, or nits for ST.2084 and HLG) and data or video levels, and whether the scopes measure before or after the viewer's colour transforms. Every graticule line carries its number.
 
 The pixel probe samples a cursor, a region or the whole frame, and reports RGBA, luminance, EV, cd/m², HSV and hex, with min, max, mean and median per channel. NaN, Inf and negative counts are excluded from the statistics and reported separately, because a mean that quietly includes a NaN is worse than no mean.
 
 Then the things you reach for while looking: false colour, zebra, a nit-accurate HDR heatmap anchored to BT.2408 reference white, safe areas labelled with the standard they come from, aspect-ratio mattes, nearest-neighbour magnification, timecode, A/B compare with wipe, difference and blink, EXR channel and layer inspection, focus peaking, and a sequence timeline with per-frame thumbnails.
 
-A Lite Viewer exists for when you want a frame on the node and nothing else.
+The Lite Viewer is retired: Simple mode does its job. Saved graphs with a Lite Viewer still open and run, in the Viewer's Simple mode.
 
 | Key | Action |
 | :--- | :--- |
@@ -394,10 +398,12 @@ A Lite Viewer exists for when you want a frame on the node and nothing else.
 | Left / Right | Previous / next frame |
 | F | Fit to view |
 | 1 | 1:1 pixels |
-| C / R / G / B / L | Colour, red, green, blue, luma |
+| J / K / L | Play backwards / stop / play forwards |
+| I / O | In / out point (Alt+X clears) |
+| C / R / G / B / Y / A | Colour, red, green, blue, luma, alpha |
 | W | Waveform |
 | V | Vectorscope |
-| A | Cycle A/B compare |
+| X | Wipe compare on / off |
 | N | Nearest-neighbour / linear |
 
 ### VFX
@@ -440,7 +446,7 @@ FXTD STUDIOS/Radiance
 └─ Pipeline
 ```
 
-**158 nodes**: 149 in the menu and 9 retired ones that stay registered so older saved graphs still open. A few depend on optional packages.
+**158 nodes**: 148 in the menu and 10 retired ones that stay registered so older saved graphs still open. A few depend on optional packages.
 
 Compositing nodes use compositing names (`Grade`, `CDL`, `OCIO ColorSpace`, `Roto`, `Defocus`, `Viewer`, `Read`, `Write`), so they read the way they do in Nuke or Flame. The diffusion layer keeps a `Radiance` prefix, so `Radiance Sampler` and `Radiance VAE Decode` are obviously the AI ones. Typing "radiance" in the search still finds everything.
 
@@ -454,7 +460,7 @@ Compositing nodes use compositing names (`Grade`, `CDL`, `OCIO ColorSpace`, `Rot
 | [VFX](docs/nodes/vfx.md) | 32 | Plate prep, masks, roto, inpaint, depth, optics, motion, Multipass Estimate, AOV reader, relight |
 | [Video](docs/nodes/video.md) | 15 | Text-to-video, image-to-video, video sampler, video HDR, batch decode, export |
 | [Upscale](docs/nodes/upscale.md) | 10 | Image and video upscale, tiling, face restoration |
-| [Review](docs/nodes/review.md) | 12 | Viewer, Lite Viewer, scopes, false colour, QC, Policy Guard, contact sheets, flipbook |
+| [Review](docs/nodes/review.md) | 11 | Viewer, scopes, false colour, QC, Policy Guard, contact sheets, flipbook |
 | [Pipeline](docs/nodes/pipeline.md) | 7 | Send to Nuke, DaVinci Resolve handoff, metadata, audio, studio integration |
 
 The [node reference](docs/nodes/README.md) lists every node with every input

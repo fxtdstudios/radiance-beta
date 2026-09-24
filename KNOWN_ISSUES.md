@@ -35,7 +35,9 @@ clear backlog.
   differs from WebGL in: no sRGB decode for 8-bit input; a 3D LUT read with the
   wrong stride; the red curve applied to every channel; a transposed hue
   matrix; misregistered bloom; and no heatmap, gamut/clip warnings, scope
-  signal, viewer f-stop or scene-linear graded EXR. `FEATURE_PARITY` now says
+  signal, viewer f-stop or scene-linear graded EXR, and compare shows only
+  wipe there (B, Difference and Blink need `setCompareShow`, WebGL only).
+  `FEATURE_PARITY` now says
   false. Porting these to WGSL is the remaining work; until then WebGL is the
   default and the tested path.
 
@@ -197,7 +199,8 @@ removes it, with a test per item.
 ## Viewer: remaining (phase 3)
 
 - **No HDR output.** The canvas is SDR (sRGB or Display P3, 8-bit, dithered). A Rec.2100 PQ / HLG canvas needs a float16 HDR drawing buffer in both the WebGL and the 2D compositing canvas; browser support is still settling and it cannot be verified without an HDR display. Use HDR Monitor or an external HDR display for HDR review.
-- **Compare B side.** It is the node's display-referred preview, baked with ACES 2.0 or untouched for sRGB. Switching the A side to another view does not re-render B. Side-by-side and difference are 2D-fallback only.
+- **Compare B side.** It is the node's display-referred preview, baked with ACES 2.0 or untouched for sRGB. Switching the A side to another view does not re-render B. A B of a different size is stretched to A. Side-by-side is 2D-fallback only.
+- **Blink rate is fixed** at two flips a second; there is no control for it yet.
 - **Non-OCIO views on non-Rec.709 sources.** A source tagged ACEScg or Rec.2020 is shown with Rec.709 primaries in the sRGB, Rec.709 and Filmic views. The Auto and ACES views go through OCIO with the right source.
 - **Annotations are screen-space.** They do not follow pan and zoom.
 - **Reverse video is seeked, not played.** J on a video loaded straight into the Viewer steps back one seek at a time. On long-GOP files (typical H.264) each seek decodes from the previous keyframe, so reverse can run below the set rate. Image sequences and clips from a Read node are not affected.

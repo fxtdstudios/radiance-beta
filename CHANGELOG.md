@@ -143,7 +143,7 @@ All notable changes to FXTD Radiance will be documented in this file.
   - *PNG previews.* Linear frames got x/(1+x) with no display encoding (dark), and 8-bit conversion truncated. Both viewers now bake the OCIO ACES 2.0 view (exact, threaded) and round. The bake also no longer overwrites the IMAGE passed downstream.
   - *Always dirty.* `IS_CHANGED` returned NaN on every queue, re-running every node downstream of a viewer. It now fingerprints the inputs, and is NaN only while the delivery cache has no frames for the node.
   - *Lite Viewer.* Readout, clip check and diff read an fp16 float proxy, so they show source values at source coordinates. The canvas is in device pixels, so 1:1 is exact on scaled displays; it was sized from a bordered box, 0.3 % off. B is scaled to A, diff has a gain, and play/loop run at the source fps. Frames load progressively.
-  - Tests: `tests/test_viewer_phase1.py` (11), and `js/tests/viewer_color.test.mjs` and `js/tests/lite_viewer.test.mjs`, which read real pixels back from Chromium.
+  - Tests: `tests/test_viewer_phase1.py` (11), and `js/tests/viewer_color.test.mjs` and `js/tests/lite_viewer.test.mjs` (removed with the Lite Viewer), which read real pixels back from Chromium.
 
 - **Legacy nodes off the menu.** HDR Latent Encoder and HDR Turbo Encoder are
   hidden (`DEPRECATED`) and now raise when run, naming VAE Encode (HDR): a
@@ -309,6 +309,14 @@ All notable changes to FXTD Radiance will be documented in this file.
   - *Transport.* In/out points, J/K/L shuttle, ping-pong and play-once, play every frame (waits for each frame) or realtime with a dropped-frame count.
   - *WebGPU.* `FEATURE_PARITY` is false and the gaps are listed in KNOWN_ISSUES; WebGL stays the default.
   - Tests: `js/tests/viewer_color.test.mjs` grows to 16 browser checks (shader compile, ARRI green, gamut, scope signal, viewer f-stop, DPR 2 crisp zoom, key scoping, ping-pong, P3).
+
+- **Viewer: Simple / Advanced, one compare, Lite Viewer retired (3.5.0).**
+  - *Simple mode.* A switch in the Viewer's title bar. Simple shows the picture, a transport (play, step, scrub, frame) and compare; Advanced shows every panel as before. A new Viewer opens in Simple; the choice is saved with the node. Graphs saved before the switch open in Advanced, as they looked. Choosing Advanced grows a small node to 1180 x 760.
+  - *Compare did not work as labelled.* A/B grabbed a still of A over a connected `compare_image`, so A was compared with itself. Wipe with no B showed the ungraded source. Difference and Blink drew nothing on the default WebGL path, and Blink started playback. One controller now drives every compare control in both modes: A, B, Wipe, Diff (|A − B| × 4) and Blink (two flips a second), drawn in the shader. B is the `compare_image` frame under the playhead; with none, **Pin A as B** keeps the current frame, read at image resolution so it lines up at any zoom, and it survives a new run. **Release B** returns to the input.
+  - *Lite Viewer retired.* Simple mode does its job, and two viewers meant two frontends and two sets of compare bugs. `◎ Radiance Lite Viewer` is hidden from the menu; a saved one still opens, in the Viewer's Simple mode, runs through the Viewer's code, and keeps its `input_space` and `fps` values. Its frontend (`js/radiance_lite_viewer.js`) is removed. `workflows/start.json` uses a Viewer in Simple mode instead.
+  - *Context loss reported on every graph load.* Removing a viewer releases its WebGL context on purpose, and the context-lost handler logged that as an error and kept the context restorable. It now ignores its own release.
+  - *Docs.* The README key table listed A for compare and L for luma; compare is X, luma is Y, A is alpha, and J / K / L are the shuttle.
+  - Tests: `js/tests/viewer_compare_mode.test.mjs` (10). `tests/test_viewer_phase1.py` and `tests/test_viewer_paging_and_temp.py` check the retired node's inputs and that it runs through the Viewer.
 
 - **Viewer player, checked end to end (3.5.0).** Driven in a browser on a bar-coded 96- and 240-frame clip and a 48-frame PNG sequence, reading the frame number back from the pixels.
   - *Playback froze at the end of the range.* The loop checked whether the in point was loaded whatever the loop mode, so ping-pong and play-once waited at the out point for a frame they would never show, and a whole-clip loop longer than the 16-frame paging window waited for a frame 0 that had been paged out. One function now decides the next frame for both the check and the step; a loop wrap moves the playhead so the window re-centres and loads the in point first.

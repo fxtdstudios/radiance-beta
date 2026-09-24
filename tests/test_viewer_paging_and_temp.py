@@ -15,7 +15,7 @@ Four separate faults are covered here, all in nodes/monitor.
 
 3. RadianceLiteViewer wrote one FULL RESOLUTION RGBA PNG per frame despite a
    docstring promising "compact temp PNG previews", and had no purge path at
-   all.
+   all. (Retired in 3.5.0: it now runs through the Radiance Viewer.)
 
 4. RadiancePreviewServer._ensure_server caught OSError, logged, and returned,
    and serve() then returned a working-looking URL for a server that never
@@ -72,7 +72,7 @@ def _real_shared_modules():
     # instead would rebuild the node classes the shared registry points at.
     from radiance.core.system.path_utils import safe_join as real_safe_join
     rebound = []
-    for name in ("radiance.nodes.monitor.viewer", "radiance.nodes.monitor.lite_viewer"):
+    for name in ("radiance.nodes.monitor.viewer",):
         mod = sys.modules.get(name)
         if mod is not None and getattr(mod, "safe_join", None) is not real_safe_join:
             rebound.append((mod, mod.safe_join))
@@ -96,12 +96,11 @@ def temp_out(monkeypatch):
     `import folder_paths` here returns. Patch the one they actually bound.
     """
     import folder_paths
-    from radiance.nodes.monitor import lite_viewer as _lite
     from radiance.nodes.monitor import viewer as _viewer
 
     d = tempfile.mkdtemp()
     seen = set()
-    for mod in (folder_paths, _viewer.folder_paths, _lite.folder_paths):
+    for mod in (folder_paths, _viewer.folder_paths):
         if id(mod) in seen:
             continue
         seen.add(id(mod))
@@ -300,65 +299,19 @@ def test_every_fallback_path_records_a_reason():
 
 
 # ── 4. The lite viewer ──────────────────────────────────────────────────────
+# Retired in 3.5.0: a saved Lite Viewer runs through the Radiance Viewer, so
+# its previews are the Radiance Viewer's, purged by the same bookkeeping.
 
 @pytest.mark.real_torch
-def test_lite_viewer_writes_a_preview_not_the_plate(temp_out):
-    """_to_preview_rgba did no downscaling; a 4K plate wrote a 4K PNG a frame."""
-    from PIL import Image as PILImage
-    from radiance.nodes.monitor.lite_viewer import RadianceLiteViewer, LITE_PREVIEW_MAX_DIM
-
-    out = RadianceLiteViewer().view(torch.rand(1, 2000, 2600, 3), unique_id="lite1")
-    entry = out["ui"]["radiance_lite_images"][0]
-
-    with PILImage.open(os.path.join(temp_out, entry["filename"])) as im:
-        assert max(im.size) <= LITE_PREVIEW_MAX_DIM, \
-            f"lite viewer wrote a {im.size} PNG per frame"
-        assert (im.width, im.height) == (entry["preview_width"], entry["preview_height"])
-    # The reported source dimensions stay the plate's, which is what the
-    # frontend status line means by them.
-    assert entry["width"] == 2600 and entry["height"] == 2000
-
-
-@pytest.mark.real_torch
-def test_lite_viewer_does_not_downscale_something_already_small(temp_out):
-    from PIL import Image as PILImage
-    from radiance.nodes.monitor.lite_viewer import RadianceLiteViewer
-
-    out = RadianceLiteViewer().view(torch.rand(1, 64, 96, 3), unique_id="lite2")
-    entry = out["ui"]["radiance_lite_images"][0]
-    with PILImage.open(os.path.join(temp_out, entry["filename"])) as im:
-        assert im.size == (96, 64)
-
-
-@pytest.mark.real_torch
-def test_lite_viewer_purges_the_previous_execution(temp_out):
-    """
-    There was no purge path at all: every uuid-named PNG survived, so
-    re-queueing a 240-frame shot ten times left 2,400 files behind.
-    """
+def test_retired_lite_viewer_purges_like_the_viewer(temp_out):
     from radiance.nodes.monitor.lite_viewer import RadianceLiteViewer
 
     node = RadianceLiteViewer()
-    node.view(torch.rand(6, 16, 24, 3), unique_id="lite3")
+    node.view(torch.rand(3, 16, 24, 3), unique_id="lite3")
     first = set(_listdir(temp_out))
-    # 3.5.0: a display PNG plus the fp16 float proxy the probe reads, per frame.
-    assert len(first) == 12
-
-    node.view(torch.rand(6, 16, 24, 3), unique_id="lite3")
-    survivors = first & set(_listdir(temp_out))
-    assert not survivors, f"orphaned lite previews: {sorted(survivors)}"
-    assert len(_listdir(temp_out)) == 12
-
-
-@pytest.mark.real_torch
-def test_lite_viewer_purge_is_scoped_to_the_node(temp_out):
-    """Two lite viewers in one graph must not delete each other's previews."""
-    from radiance.nodes.monitor.lite_viewer import RadianceLiteViewer
-
-    RadianceLiteViewer().view(torch.rand(2, 16, 24, 3), unique_id="A")
-    after_a = set(_listdir(temp_out))
-    RadianceLiteViewer().view(torch.rand(2, 16, 24, 3), unique_id="B")
-    assert after_a <= set(_listdir(temp_out)), "node B purged node A's previews"
+    assert first
+    node.view(torch.rand(3, 16, 24, 3), unique_id="lite3")
+    assert not (first & set(_listdir(temp_out))), "the previous execution's previews survived"
 
 
 # ── 5. The preview server ───────────────────────────────────────────────────

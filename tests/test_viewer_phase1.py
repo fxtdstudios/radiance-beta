@@ -43,7 +43,7 @@ def _real_shared_modules():
             importlib.import_module(name)
     from radiance.core.system.path_utils import safe_join as real_safe_join
     rebound = []
-    for name in ("radiance.nodes.monitor.viewer", "radiance.nodes.monitor.lite_viewer"):
+    for name in ("radiance.nodes.monitor.viewer",):
         mod = sys.modules.get(name)
         if mod is not None and getattr(mod, "safe_join", None) is not real_safe_join:
             rebound.append((mod, mod.safe_join))
@@ -60,11 +60,10 @@ def _real_shared_modules():
 @pytest.fixture
 def temp_out(monkeypatch):
     import folder_paths
-    from radiance.nodes.monitor import lite_viewer as _lite
     from radiance.nodes.monitor import viewer as _viewer
     d = tempfile.mkdtemp()
     seen = set()
-    for mod in (folder_paths, _viewer.folder_paths, _lite.folder_paths):
+    for mod in (folder_paths, _viewer.folder_paths):
         if id(mod) in seen:
             continue
         seen.add(id(mod))
@@ -175,15 +174,11 @@ def test_srgb_preview_is_untouched_and_rounded(temp_out):
 @pytest.mark.skipif(not HAS_OCIO, reason="OpenColorIO not installed")
 def test_linear_preview_goes_through_aces2_like_the_float_path(temp_out):
     from radiance.nodes.monitor.viewer import RadianceViewer
-    from radiance.nodes.monitor.lite_viewer import RadianceLiteViewer
     img = torch.full((1, 8, 8, 3), 0.18); img[0, 0, 0] = 4.0          # linear by Auto
     e = RadianceViewer().view(img, unique_id="p7")["ui"]["radiance_images"][0]
     assert e["source_encoding"] == "linear"
     px = _png(os.path.join(temp_out, e["filename"]))
     assert abs(int(px[4, 4, 0]) - 89) <= 1, f"0.18 through ACES 2.0 SDR is 89/255, got {px[4, 4, 0]}"
-    le = RadianceLiteViewer().view(img, unique_id="p8")["ui"]["radiance_lite_images"][0]
-    lpx = _png(os.path.join(temp_out, le["filename"]))
-    assert abs(int(lpx[4, 4, 0]) - 89) <= 1, "the Lite Viewer must show the same view"
 
 
 @pytest.mark.skipif(not HAS_OCIO, reason="OpenColorIO not installed")
@@ -197,20 +192,29 @@ def test_display_preview_is_exact_ocio():
     assert np.abs(out - np.clip(ref.reshape(frame.shape), 0, 1)).max() < 1e-6
 
 
-# ── Lite Viewer float proxy ──────────────────────────────────────────────────
+# ── Lite Viewer, retired ─────────────────────────────────────────────────────
+
+def test_the_lite_viewer_is_retired_but_saved_graphs_still_load():
+    from radiance.nodes.monitor.lite_viewer import RadianceLiteViewer
+    assert RadianceLiteViewer.DEPRECATED is True
+    spec = RadianceLiteViewer.INPUT_TYPES()
+    # Saved graphs restore widget values by position: the order must not move.
+    assert list(spec["required"]) == ["image"]
+    assert list(spec["optional"]) == ["compare_image", "input_space", "fps"]
+
 
 @pytest.mark.real_torch
-def test_lite_writes_a_float_proxy_with_source_values(temp_out):
-    from radiance.nodes.monitor.lite_viewer import LITE_PREVIEW_MAX_DIM, RadianceLiteViewer
-    img = torch.full((1, 32, 48, 3), 0.25)
-    res = RadianceLiteViewer().view(img, fps=25, unique_id="l1")["ui"]
-    e = res["radiance_lite_images"][0]
-    assert res["fps"] == [25.0]
-    flags, arr = _rhdr(os.path.join(temp_out, e["float_filename"]))
-    assert flags == 0 and arr.shape == (32, 48, 4)
-    assert arr[..., :3].mean() == pytest.approx(0.25, abs=1e-3)
-    assert arr[..., 3].min() == 1.0
-    assert LITE_PREVIEW_MAX_DIM == 2048
+def test_a_saved_lite_viewer_runs_through_the_radiance_viewer(temp_out):
+    from radiance.nodes.monitor.lite_viewer import RadianceLiteViewer
+    img = torch.full((2, 16, 24, 3), 0.25)
+    cmp = torch.full((2, 16, 24, 3), 0.5)
+    out = RadianceLiteViewer().view(img, compare_image=cmp, fps=25, unique_id="l1")
+    ui = out["ui"]
+    assert "radiance_lite_images" not in ui
+    main = [e for e in ui["radiance_images"] if not e.get("is_compare")]
+    b = [e for e in ui["radiance_images"] if e.get("is_compare")]
+    assert len(main) == 2 and len(b) == 2, "the Radiance Viewer frontend needs A and B frames"
+    assert torch.equal(out["result"][0], img)
 
 
 # ── caching ──────────────────────────────────────────────────────────────────
@@ -236,10 +240,8 @@ def test_the_viewers_never_modify_the_image_they_pass_through(temp_out):
     """OCIO applies in place; a view of the input used to be handed to it, so
     the IMAGE output downstream came back as display values."""
     from radiance.nodes.monitor.viewer import RadianceViewer
-    from radiance.nodes.monitor.lite_viewer import RadianceLiteViewer
     img = torch.full((2, 16, 16, 3), 0.18); img[:, 0, 0, 0] = 4.0
     before = img.clone()
     out = RadianceViewer().view(img, unique_id="m1")["result"][0]
-    RadianceLiteViewer().view(img, unique_id="m2")
     assert torch.equal(img, before), "the viewer overwrote its input"
     assert torch.equal(out, before)

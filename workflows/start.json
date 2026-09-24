@@ -1,8 +1,8 @@
 {
   "id": "eb335ae7-92b1-41ea-b0db-4f7fbd589a1a",
   "revision": 0,
-  "last_node_id": 36,
-  "last_link_id": 36,
+  "last_node_id": 37,
+  "last_link_id": 37,
   "nodes": [
     {
       "id": 4,
@@ -1107,36 +1107,93 @@
       "bgcolor": "#141419"
     },
     {
-      "id": 7,
-      "type": "RadianceLiteViewer",
+      "id": 37,
+      "type": "RadianceViewer",
       "pos": [
         13.78067886916699,
         12301.967243455805
       ],
       "size": [
-        708.5625,
-        1198.171875
+        960,
+        640
       ],
       "flags": {},
       "order": 6,
       "mode": 0,
+      "showAdvanced": null,
       "inputs": [
         {
+          "color_off": null,
+          "color_on": null,
+          "dir": null,
+          "label": null,
           "localized_name": "image",
+          "locked": null,
           "name": "image",
+          "nameLocked": null,
+          "removable": null,
+          "shape": null,
           "type": "IMAGE,VIDEO",
-          "link": 32
+          "pos": null,
+          "link": 37
         },
         {
+          "color_off": null,
+          "color_on": null,
+          "dir": null,
+          "label": null,
           "localized_name": "compare_image",
+          "locked": null,
           "name": "compare_image",
+          "nameLocked": null,
+          "removable": null,
           "shape": 7,
           "type": "IMAGE,VIDEO",
+          "pos": null,
           "link": null
         },
         {
+          "color_off": null,
+          "color_on": null,
+          "dir": null,
+          "label": null,
+          "localized_name": "zdepth",
+          "locked": null,
+          "name": "zdepth",
+          "nameLocked": null,
+          "removable": null,
+          "shape": 7,
+          "type": "IMAGE,VIDEO",
+          "pos": null,
+          "link": null
+        },
+        {
+          "color_off": null,
+          "color_on": null,
+          "dir": null,
+          "label": null,
+          "localized_name": "exposure_bracketing",
+          "locked": null,
+          "name": "exposure_bracketing",
+          "nameLocked": null,
+          "removable": null,
+          "shape": 7,
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "exposure_bracketing"
+          },
+          "link": null
+        },
+        {
+          "color_off": null,
+          "color_on": null,
+          "dir": null,
+          "label": null,
           "localized_name": "input_space",
+          "locked": null,
           "name": "input_space",
+          "nameLocked": null,
+          "removable": null,
           "shape": 7,
           "type": "COMBO",
           "widget": {
@@ -1145,8 +1202,32 @@
           "link": null
         },
         {
+          "color_off": null,
+          "color_on": null,
+          "dir": null,
+          "label": null,
+          "localized_name": "float_precision",
+          "locked": null,
+          "name": "float_precision",
+          "nameLocked": null,
+          "removable": null,
+          "shape": 7,
+          "type": "COMBO",
+          "widget": {
+            "name": "float_precision"
+          },
+          "link": null
+        },
+        {
+          "color_off": null,
+          "color_on": null,
+          "dir": null,
+          "label": null,
           "localized_name": "fps",
+          "locked": null,
           "name": "fps",
+          "nameLocked": null,
+          "removable": null,
           "shape": 7,
           "type": "FLOAT",
           "widget": {
@@ -1157,17 +1238,31 @@
       ],
       "outputs": [
         {
+          "color_off": null,
+          "color_on": null,
+          "dir": null,
+          "label": null,
           "localized_name": "image",
+          "locked": null,
           "name": "image",
+          "nameLocked": null,
+          "removable": null,
+          "shape": null,
           "type": "IMAGE",
+          "pos": null,
+          "slot_index": null,
           "links": null
         }
       ],
+      "title": "Viewer (Lite)",
       "properties": {
-        "Node name for S&R": "RadianceLiteViewer"
+        "Node name for S&R": "RadianceViewer",
+        "radiance_viewer_mode": "simple"
       },
       "widgets_values": [
+        false,
         "Auto",
+        "Half (16-bit)",
         0,
         ""
       ],
@@ -1592,7 +1687,7 @@
           "name": "image",
           "type": "IMAGE",
           "links": [
-            32,
+            37,
             33,
             34
           ]
@@ -1947,14 +2042,6 @@
       "LATENT"
     ],
     [
-      32,
-      35,
-      0,
-      7,
-      0,
-      "IMAGE"
-    ],
-    [
       33,
       35,
       0,
@@ -1985,6 +2072,14 @@
       35,
       1,
       "VAE"
+    ],
+    [
+      37,
+      35,
+      0,
+      37,
+      0,
+      "IMAGE"
     ]
   ],
   "groups": [
