@@ -55,6 +55,8 @@ dependencies = [
     "OpenImageIO>=3.0.0",
     "opencolorio>=2.3.0",
     "transformers>=4.36.0",
+    "diffusers>=0.33.0",    # Multipass Estimate: Marigold IID materials and lighting
+    "accelerate>=0.26.0",   # low-memory loading of the Marigold UNets
     "scipy>=1.10.0",
     "defusedxml>=0.7.1",
     "imageio-ffmpeg>=0.4.9",
@@ -93,10 +95,10 @@ full = [
     "tifffile>=2023.7.10",
     "colour-science>=0.4",
     "transformers>=4.35",
-    "diffusers>=0.25",   # upscale: SD x4 / latent upscaler backends
     "openai>=1.0",       # audio: transcription
-    # anthropic, google-generativeai, accelerate and peft were listed here and
-    # imported nowhere in the package.
+    # diffusers and accelerate are core dependencies now (Multipass Estimate).
+    # anthropic, google-generativeai and peft were listed here and imported
+    # nowhere in the package.
 ]
 
 [project.urls]

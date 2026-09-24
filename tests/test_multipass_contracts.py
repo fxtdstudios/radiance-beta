@@ -40,13 +40,16 @@ class TestMultipassContracts(unittest.TestCase):
             _match_optional_image(torch.zeros(2, 4, 4, 3), 3, 4, 4)
 
     @pytest.mark.real_torch
-    def test_relight_treats_ao_as_occlusion_amount(self):
+    def test_relight_reads_ao_in_renderer_convention(self):
+        # 1 = open, 0 = occluded, as Arnold/Cycles/Karma and Multipass Estimate write it.
         relight = RadianceMultipassRelight()
         albedo = torch.ones(1, 2, 2, 3)
         normal = torch.tensor([0.5, 0.5, 1.0]).view(1, 1, 1, 3).expand_as(albedo)
         common = dict(albedo=albedo, normal_map=normal, intensity=0.0, ambient=1.0)
-        open_result = relight.relight(ao=torch.zeros_like(albedo), **common)[0]
-        blocked_result = relight.relight(ao=torch.ones_like(albedo), **common)[0]
+        open_result = relight.relight(ao=torch.ones_like(albedo), **common)[0]
+        blocked_result = relight.relight(ao=torch.zeros_like(albedo), **common)[0]
+        default_result = relight.relight(**common)[0]
+        self.assertTrue(torch.allclose(default_result, open_result))
         self.assertTrue(torch.allclose(open_result, torch.ones_like(open_result)))
         self.assertTrue(torch.allclose(blocked_result, torch.zeros_like(blocked_result)))
 
@@ -116,7 +119,7 @@ class TestMultipassContracts(unittest.TestCase):
         depth = torch.full((1, 8, 8, 3), 0.5)
         normal = torch.tensor([0.5, 0.5, 1.0]).view(1, 1, 1, 3).expand(1, 8, 8, 3)
         renderer_albedo = torch.full((1, 8, 8, 3), 0.25)
-        result = master.extract(
+        result = master._legacy_extract(
             beauty, depth_map=depth, normal_map=normal,
             source_passes={"albedo": renderer_albedo, "_present": ["albedo"]},
             ao_strength=0.0, object_id_segments=2,
@@ -125,6 +128,11 @@ class TestMultipassContracts(unittest.TestCase):
         self.assertTrue(torch.equal(result[2], renderer_albedo))
         self.assertEqual(result[0]["motion_vector"].shape[-1], 3)
         self.assertEqual(len(result), 22)
+
+    def test_master_is_retired_with_a_pointer_to_estimate(self):
+        self.assertTrue(RadianceMultipassMaster.DEPRECATED)
+        with self.assertRaisesRegex(RuntimeError, "Multipass Estimate"):
+            RadianceMultipassMaster().extract(torch.zeros(1, 4, 4, 3))
 
     def test_writer_rejects_filename_paths_before_writing(self):
         writer = RadianceEXRPassesWriter()

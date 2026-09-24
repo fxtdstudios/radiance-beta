@@ -991,9 +991,11 @@ def _load_sd_x4_pipeline(device: torch.device) -> Any:
 
         dtype = _torch.float16 if device.type == "cuda" else _torch.float32
         logger.info("[Radiance/Upscale] Loading SD x4 upscaler pipeline (~2.4 GB)...")
+        # Consent gate: without it, load only a copy already in the HF cache.
         pipe = StableDiffusionUpscalePipeline.from_pretrained(
             "stabilityai/stable-diffusion-x4-upscaler",
             torch_dtype=dtype,
+            local_files_only=_offline_mode(),
         )
         pipe = pipe.to(device)
         pipe.enable_attention_slicing()
@@ -1092,6 +1094,7 @@ def _load_seedvr2_pipeline(device: torch.device) -> Any:
         pipe = DiffusionPipeline.from_pretrained(
             "ByteDance/SeedVR2",
             torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
+            local_files_only=_offline_mode(),
         )
         pipe = pipe.to(device)
         _DIFFUSION_PIPE_CACHE.put(cache_key, pipe)

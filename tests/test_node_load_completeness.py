@@ -61,6 +61,7 @@ def test_multipass_group_complete():
     keys = set(radiance.NODE_CLASS_MAPPINGS)
     expected = {
         "RadianceMultipassMaster",
+        "RadianceMultipassEstimate",
         "RadianceMultipassAOVReader",
         "RadianceMultipassComposite",
         "RadianceMultipassRelight",

@@ -162,9 +162,19 @@ def _write_exr_singlepart_multilayer(
     return True
 
 
+_LEGACY_MULTIPASS_STOP = (
+    "Multipass Extract is retired in Radiance 3.5.0. Its albedo, specular, roughness, "
+    "metallic, emission, transmission, reflection and object-ID passes were image filters, "
+    "not measurements, and its depth-derived passes had no real scale. Use 'Multipass "
+    "Estimate' (MoGe-2 geometry, Marigold materials and lighting) for passes from a plate, "
+    "or 'Read AOVs' for renderer passes."
+)
+
+
 class RadianceMultipassMaster:
     CATEGORY = "FXTD STUDIOS/Radiance/VFX"
-    DESCRIPTION = "Estimate utility, material, and lighting passes from beauty, while preserving connected renderer AOVs."
+    DESCRIPTION = "Retired: use Multipass Estimate. Kept so saved graphs open and explain the replacement."
+    DEPRECATED = True   # hidden from the menu; saved graphs still open
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -236,7 +246,10 @@ class RadianceMultipassMaster:
 
     FUNCTION = "extract"
 
-    def extract(
+    def extract(self, beauty: torch.Tensor, **kwargs) -> Tuple:
+        raise RuntimeError(f"[Multipass Extract] {_LEGACY_MULTIPASS_STOP}")
+
+    def _legacy_extract(
         self,
         beauty: torch.Tensor,
         depth_map: Optional[torch.Tensor] = None,
@@ -651,6 +664,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceMultipassMaster": "Multipass Extract",
+    "RadianceMultipassMaster": "Multipass Extract (Legacy)",
     "RadianceEXRPassesWriter": "Write EXR Passes"
 }

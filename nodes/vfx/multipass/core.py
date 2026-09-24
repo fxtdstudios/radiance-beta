@@ -697,10 +697,12 @@ def _depth_anything_v2_infer(
 
         if hf_pipe_id not in _DA_PIPELINE_CACHE:
             logger.info(f"[Radiance] Loading Depth Anything V2 pipeline ({model_key}) — first run may download weights …")
+            from radiance.core.consent import downloads_allowed
             pipe = hf_pipeline(
                 task="depth-estimation",
                 model=hf_pipe_id,
                 device=0 if device.type == "cuda" else -1,
+                model_kwargs={"local_files_only": not downloads_allowed()},
             )
             _DA_PIPELINE_CACHE.put(hf_pipe_id, pipe)
             logger.info(f"[Radiance] Depth Anything V2 ({model_key}) ready.")

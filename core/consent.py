@@ -27,6 +27,11 @@ One exception to ask-first: Radiance's own pixel SDR-to-HDR checkpoint
 (~5 MB, first-party, sha256-pinned; weights licensed non-commercial) downloads on first use unless
 `RADIANCE_ALLOW_DOWNLOADS=0`, `HF_HUB_OFFLINE=1` or `TRANSFORMERS_OFFLINE=1`
 is set. See `radiance.model.pixel_download`.
+
+Multipass Estimate is the other: its node has a `download_missing_models`
+switch, and placing the node with the switch on is the yes. The environment
+can still say no (`RADIANCE_ALLOW_DOWNLOADS=0` or the offline flags). See
+`radiance.nodes.vfx.multipass.estimate_models`.
 """
 from __future__ import annotations
 

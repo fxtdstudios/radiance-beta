@@ -143,7 +143,7 @@ class RadianceMultipassRelight:
                 "roughness": ("IMAGE",),
                 "metallic": ("IMAGE",),
                 "specular": ("IMAGE",),
-                "ao": ("IMAGE",),
+                "ao": ("IMAGE", {"tooltip": "Ambient occlusion as renderers write it: 1 = open, 0 = fully occluded."}),
                 "alpha": ("IMAGE",),
                 "shadow_mask": ("IMAGE",),
                 "depth_map": ("IMAGE",),
@@ -215,8 +215,10 @@ class RadianceMultipassRelight:
             if specular is None
             else _match_image(specular, batch, height, width, 3).to(device=device).clamp(0.0, 1.0)
         )
-        occlusion = _scalar_pass(ao, batch, height, width, 0.0, device)
-        accessibility = 1.0 - occlusion
+        # Renderer convention (Arnold, Cycles, Karma, Multipass Estimate):
+        # white is open. This used to read the pass as an occlusion amount,
+        # which inverted every real AO pass loaded through Read AOVs.
+        accessibility = _scalar_pass(ao, batch, height, width, 1.0, device)
         alpha_s = _scalar_pass(alpha, batch, height, width, 1.0, device)
         shadow = _scalar_pass(shadow_mask, batch, height, width, 0.0, device)
         visibility = (1.0 - shadow).clamp(0.0, 1.0)
@@ -305,7 +307,7 @@ class RadianceMultipassRelight:
                 "roughness": 0.5 if roughness is None else None,
                 "metallic": 0.0 if metallic is None else None,
                 "specular": 1.0 if specular is None else None,
-                "ao": 0.0 if ao is None else None,
+                "ao": 1.0 if ao is None else None,
                 "alpha": 1.0 if alpha is None else None,
                 "shadow_mask": 0.0 if shadow_mask is None else None,
             },

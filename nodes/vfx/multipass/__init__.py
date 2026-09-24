@@ -11,6 +11,7 @@ SOURCE_MODULES = (
     "relight_comp",
     "master",
     "aov_reader",
+    "estimate",
 )
 
 _load_result = load_node_group(__name__, child_source_modules=SOURCE_MODULES, logger=logger)

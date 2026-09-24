@@ -97,6 +97,19 @@ clear backlog.
   may be needed. `pixel_tile_size` changes the result slightly (each tile sees
   less context); keep it at 512 or above. On CPU a 1080p frame takes ~19 s
   (0.16 s for Expand); GPU timing is still to be measured on the 4080.
+- **Multipass Estimate passes are predictions from one image.** MoGe-2's
+  metric scale is an estimate (typically within 10 to 20 percent indoors), and
+  so is the field of view unless `fov_x_degrees` is given. Marigold was
+  trained mostly on synthetic interiors: it can call painted walls slightly
+  metallic, and it sees values above 1.0 clipped, so on HDR plates the
+  lighting fit leaves clipped pixels out and `specular_lighting` under-reads
+  the brightest highlights. The lighting passes add back up to the plate only
+  approximately; `info` gives the error per frame (about 10 percent RMS on a
+  clean photo, much worse on a clipped sunset). Video is estimated frame by
+  frame; a fixed seed limits flicker but does not remove it. AO is screen
+  space: nothing outside the frame or behind the visible surface occludes.
+  *Planned fix:* temporal models when they are released; until then, render
+  real passes where they exist.
 - **HLG is referenced to a 1000-nit display.** BT.2100 / BT.2408 / OCIO
   convention: highlights mastered above 1000 nits clip in the HLG signal. Use
   PQ for 4000- and 10000-nit masters.
