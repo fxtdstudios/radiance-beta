@@ -3358,11 +3358,16 @@ class RadianceViewer {
         // being squeezed into sRGB first. sRGB content converts exactly.
         let _p3 = false;
         try { _p3 = window.matchMedia('(color-gamut: p3)').matches; } catch { /* no matchMedia */ }
+        // 3.5.0: no willReadFrequently. That flag keeps the canvas in CPU
+        // memory, so every frame read the GPU-rendered image back and rescaled
+        // it on the CPU in the blit below (about 430 ms a frame under
+        // software GL; a 33 MB readback per frame at 4K on a GPU). Nothing
+        // reads pixels from this canvas: the probe and scopes use their own.
         try {
-            this.ctx = this.canvas.getContext('2d', { willReadFrequently: true, alpha: false,
+            this.ctx = this.canvas.getContext('2d', { alpha: false,
                 ...(_p3 ? { colorSpace: 'display-p3' } : {}) });
         } catch {
-            this.ctx = this.canvas.getContext('2d', { willReadFrequently: true, alpha: false });
+            this.ctx = this.canvas.getContext('2d', { alpha: false });
         }
         this.displayP3Capable = _p3;
         this.canvasWrapper.appendChild(this.canvas);
@@ -9517,6 +9522,7 @@ else:
     togglePlayback() {
         if (this.videoMode && this.videoEl) {
             // Video element mode — delegate to native play/pause
+            if (this._videoReversing) { this._videoReverse(false); return; }
             if (this.videoEl.paused) {
                 this.videoEl.play();
             } else {
@@ -9568,14 +9574,31 @@ else:
             // (default, what a review needs) waits for it; "realtime" keeps the
             // clock and counts the frame as dropped. It used to move the
             // counter on while the previous picture stayed up, silently.
-            const [a, b] = this._range();
-            const dir = this.playDirection || 1;
-            let next = this.currentFrame + dir;
-            if (next > b) next = a; if (next < a) next = b;
-            const ready = this._frameReady(next);
-            if (!ready && this.playEveryFrame !== false) {
+            //
+            // The frame checked is the one _advance() will actually show. This
+            // used to wrap to the in point whatever the loop mode, so at the
+            // end of the range ping-pong and play-once waited for a frame they
+            // would never show, and a loop longer than the paging window waited
+            // for an in point that had been paged out: playback froze.
+            const step = this._nextPlayFrame();
+            if (step.stop) {
+                this._advance();                       // play-once: stops here
+            } else if (!this._frameReady(step.frame) && this.playEveryFrame !== false) {
                 this._stallCount = (this._stallCount || 0) + 1;
+                if (this._frameWindow && !this._frameWindow.inSpan(step.frame)) {
+                    // A loop wrapping back to its in point: that frame is
+                    // outside the paging window, and loading it there would
+                    // only get it evicted again (it is the furthest from the
+                    // playhead). Move the playhead to it: the window re-centres
+                    // and loads it first, and it is displayed when it lands.
+                    this._advance();
+                    this.lastFrameTime = now;
+                } else if (this._frameWindow && !this._frameWindow.has(step.frame)) {
+                    // Ask for it rather than wait for the read-ahead to find it.
+                    this._frameWindow.ensure(step.frame).catch(() => {});
+                }
             } else {
+                const ready = this._frameReady(step.frame);
                 if (!ready) this.droppedFrames = (this.droppedFrames || 0) + 1;
                 this._advance();
                 this.lastFrameTime = now - ((now - this.lastFrameTime) % interval);
@@ -9626,13 +9649,14 @@ else:
         });
 
         vid.addEventListener('play', () => {
+            if (this._videoReversing) this._videoReverse(false);
             this.isPlaying = true;
             this._updatePlayBtn();
             this._videoRenderLoop();
         });
 
         vid.addEventListener('pause', () => {
-            this.isPlaying = false;
+            this.isPlaying = !!this._videoReversing;
             this._updatePlayBtn();
             if (this._videoRAF) { cancelAnimationFrame(this._videoRAF); this._videoRAF = null; }
             // Still capture the paused frame
@@ -9669,6 +9693,8 @@ else:
 
     unloadVideo() {
         if (this._videoRAF) { cancelAnimationFrame(this._videoRAF); this._videoRAF = null; }
+        if (this._videoRevRAF) { cancelAnimationFrame(this._videoRevRAF); this._videoRevRAF = null; }
+        this._videoReversing = false;
         if (this.videoEl) {
             this.videoEl.pause();
             this.videoEl.src = '';
@@ -9684,6 +9710,40 @@ else:
         this.videoMode = false;
         this.isPlaying = false;
         this._updatePlayBtn();
+    }
+
+    /**
+     * Reverse playback for a video element (J). Seeks one step back per
+     * frame interval, waiting for each seek to land so seeks never pile up;
+     * wraps to the end when looping, otherwise stops at the start.
+     */
+    _videoReverse(on) {
+        const vid = this.videoEl;
+        if (this._videoRevRAF) { cancelAnimationFrame(this._videoRevRAF); this._videoRevRAF = null; }
+        this._videoReversing = !!(on && vid);
+        if (!this._videoReversing) {
+            if (vid && vid.paused) { this.isPlaying = false; this._updatePlayBtn(); }
+            return;
+        }
+        this.isPlaying = true;
+        this._updatePlayBtn();
+        let last = performance.now();
+        const tick = (now) => {
+            if (!this._videoReversing || this.videoEl !== vid) return;
+            const fps = this._videoNativeFps || 25;
+            if (!vid.seeking && now - last >= 1000 / fps) {
+                const step = ((now - last) / 1000) * (this.playbackSpeed || 1);
+                last = now;
+                let t = vid.currentTime - step;
+                if (t <= 0) {
+                    if (this.loop && vid.duration) t = Math.max(0, vid.duration - 1 / fps);
+                    else { vid.currentTime = 0; this._videoReverse(false); return; }
+                }
+                vid.currentTime = t;
+            }
+            this._videoRevRAF = requestAnimationFrame(tick);
+        };
+        this._videoRevRAF = requestAnimationFrame(tick);
     }
 
     // ── RAF loop for video frame capture → WebGL ─────────────────────────────
@@ -9806,7 +9866,11 @@ else:
     /** J/K/L: dir -1 play reverse, 0 stop, +1 play forward. */
     shuttle(dir) {
         if (this.videoMode && this.videoEl) {
-            if (dir === 0) this.videoEl.pause(); else if (dir > 0) this.videoEl.play();
+            // Browsers cannot play a video backwards (a negative playbackRate
+            // is ignored), so J used to do nothing on a video loaded straight
+            // into the Viewer. Reverse is stepped by seeking instead.
+            if (dir < 0) { this.videoEl.pause(); this._videoReverse(true); }
+            else { this._videoReverse(false); if (dir === 0) this.videoEl.pause(); else this.videoEl.play(); }
             return;
         }
         if (dir === 0) {
@@ -9817,25 +9881,35 @@ else:
         if (!this.isPlaying) this.togglePlayback();
     }
 
-    /** One playback step inside [in, out], honouring direction and loop mode. */
-    _advance() {
+    /**
+     * The frame the next playback step lands on, honouring in/out, direction
+     * and loop mode: {frame, dir, stop}. The one place this is decided, so the
+     * readiness check and the step itself cannot disagree.
+     */
+    _nextPlayFrame() {
         const [a, b] = this._range();
         const dir = this.playDirection || 1;
-        let n = this.currentFrame + dir;
-        if (n > b || n < a) {
-            const mode = this.loopMode || (this.loop ? 'loop' : 'once');
-            if (mode === 'pingpong') {
-                this.playDirection = -dir;
-                n = Math.max(a, Math.min(b, this.currentFrame - dir));
-            } else if (mode === 'loop') {
-                n = dir > 0 ? a : b;
-            } else {
-                this.isPlaying = false;
-                this._updatePlayBtn?.();
-                return false;
-            }
+        const n = this.currentFrame + dir;
+        if (n >= a && n <= b) return { frame: n, dir, stop: false };
+        const mode = this.loopMode || (this.loop ? 'loop' : 'once');
+        if (mode === 'pingpong') {
+            return { frame: Math.max(a, Math.min(b, this.currentFrame - dir)), dir: -dir, stop: false };
         }
-        this.setFrame(n);
+        if (mode === 'loop') return { frame: dir > 0 ? a : b, dir, stop: false };
+        return { frame: this.currentFrame, dir, stop: true };
+    }
+
+    /** One playback step inside [in, out], honouring direction and loop mode. */
+    _advance() {
+        const step = this._nextPlayFrame();
+        if (step.stop) {
+            this.isPlaying = false;
+            if (this._seqRAF) { cancelAnimationFrame(this._seqRAF); this._seqRAF = null; }
+            this._updatePlayBtn?.();
+            return false;
+        }
+        this.playDirection = step.dir;
+        this.setFrame(step.frame);
         return true;
     }
 
@@ -21000,8 +21074,17 @@ app.registerExtension({
 
             const container = document.createElement('div');
             container.id = `radiance-viewer-${this.id}`;
-            const viewerWidget = this.addDOMWidget("viewer", "viewer", container, { serialize: false, hideOnZoom: false });
-            viewerWidget.computeSize = () => [this.size[0] - 20, this.size[1] - 110];
+            // 3.5.0: the widget takes the space the node leaves it, with a
+            // floor. It used to report [width, node height - 110] as its own
+            // size; the node's sockets and setting rows need more than 110 px,
+            // so every layout pass asked for a taller node than it had and the
+            // frontend grew it without limit (measured: 760 px to 5688 px in
+            // three seconds on ComfyUI 0.32 / frontend 1.48), leaving the
+            // image in a strip below the screen.
+            const viewerWidget = this.addDOMWidget("viewer", "viewer", container, {
+                serialize: false, hideOnZoom: false,
+                getMinHeight: () => 420,
+            });
 
             // Force container properties to ensure it expands
             container.style.display = 'flex';

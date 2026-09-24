@@ -310,6 +310,13 @@ All notable changes to FXTD Radiance will be documented in this file.
   - *WebGPU.* `FEATURE_PARITY` is false and the gaps are listed in KNOWN_ISSUES; WebGL stays the default.
   - Tests: `js/tests/viewer_color.test.mjs` grows to 16 browser checks (shader compile, ARRI green, gamut, scope signal, viewer f-stop, DPR 2 crisp zoom, key scoping, ping-pong, P3).
 
+- **Viewer player, checked end to end (3.5.0).** Driven in a browser on a bar-coded 96- and 240-frame clip and a 48-frame PNG sequence, reading the frame number back from the pixels.
+  - *Playback froze at the end of the range.* The loop checked whether the in point was loaded whatever the loop mode, so ping-pong and play-once waited at the out point for a frame they would never show, and a whole-clip loop longer than the 16-frame paging window waited for a frame 0 that had been paged out. One function now decides the next frame for both the check and the step; a loop wrap moves the playhead so the window re-centres and loads the in point first.
+  - *The node grew without limit.* The viewer widget sized itself from the node (height minus 110), so LiteGraph grew the node every frame: 760 to 5688 px in 3 s, with the picture pushed off screen. The widget has a fixed minimum height now and the node keeps its size.
+  - *J did nothing on a video loaded straight into the Viewer.* Browsers cannot play a video element backwards; J now steps back by seeking, at the playback rate, and wraps when looping. K, L and Space stop it.
+  - *Every frame went through the CPU.* The main 2D canvas asked for `willReadFrequently`, which makes Chrome keep it in software, so the WebGL frame was copied back to the CPU on every draw. The flag is gone; the pixel readouts read the WebGL buffer.
+  - Tests: `js/tests/playback_step.test.mjs` (8). The browser run passes 20 of 21 checks on the 240-frame clip, including bounded memory over a full loop; the one left is the frame rate, which this software-GL machine cannot reach.
+
 - **HDR VAE Decode and SDR → HDR audit (3.5.0).**
   - *Auto log-inverted sampled latents.* Samplers copy the latent dict, so HDR
     Encode's `radiance_meta` survived KSampler and Auto (and even Sampler

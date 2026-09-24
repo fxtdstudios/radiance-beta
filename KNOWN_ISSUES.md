@@ -200,6 +200,8 @@ removes it, with a test per item.
 - **Compare B side.** It is the node's display-referred preview, baked with ACES 2.0 or untouched for sRGB. Switching the A side to another view does not re-render B. Side-by-side and difference are 2D-fallback only.
 - **Non-OCIO views on non-Rec.709 sources.** A source tagged ACEScg or Rec.2020 is shown with Rec.709 primaries in the sRGB, Rec.709 and Filmic views. The Auto and ACES views go through OCIO with the right source.
 - **Annotations are screen-space.** They do not follow pan and zoom.
+- **Reverse video is seeked, not played.** J on a video loaded straight into the Viewer steps back one seek at a time. On long-GOP files (typical H.264) each seek decodes from the previous keyframe, so reverse can run below the set rate. Image sequences and clips from a Read node are not affected.
+- **Playback rate not yet measured on a GPU.** The player's correctness is checked in a browser with software WebGL, which tops out near 3 fps; real-time rate at 24 fps and above is to be confirmed on the RTX 4080 before tagging.
 - **No audio.** Playback is picture only.
 - **Pro scope "False colour" mode** is a display-level zone map, not the ARRI bands of the viewer overlay.
 
