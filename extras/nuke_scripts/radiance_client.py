@@ -10,7 +10,7 @@ Usage inside Nuke (Script Editor or menu.py):
     from radiance_client import RadianceClient
 
     r = RadianceClient("localhost", 7863)
-    r.ping()                     # → {"status": "ok", "version": "3.0.1"}
+    r.ping()                     # → {"status": "ok", "version": "<Nuke version>"}
     r.status()                   # → session info dict
     img = r.get_frame()          # → Nuke node with frame from ComfyUI
     r.colorize("MYNODE", "logc4", "acescg")   # decode log → ACEScg in-place
@@ -107,7 +107,7 @@ class RadianceClient:
 
         Returns
         -------
-        dict  {"status": "ok", "version": "3.0.1"}
+        dict  {"status": "ok", "version": "<Nuke version>"}
 
         Raises
         ------
@@ -123,7 +123,7 @@ class RadianceClient:
         -------
         dict with keys:
           status        "running"
-          version       "3.0.1"
+          version       Nuke version string
           frame_ready   bool — True if a frame is cached
           frame_width   int
           frame_height  int

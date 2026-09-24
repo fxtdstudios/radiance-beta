@@ -1,5 +1,5 @@
 # ============================================================
-# FXTD STUDIOS — Radiance v3.0.0
+# FXTD STUDIOS — Radiance
 # nodes_character.py  —  Character Consistency System
 # ============================================================
 # Consolidation (v3.0):  6 nodes → 3 multi-mode nodes
@@ -25,7 +25,7 @@
 #   3. Colour HSV histogram  (36-D, no dependencies)
 # ============================================================
 
-__version__ = "3.1.0"
+from radiance.config.constants import VERSION as __version__  # noqa: E402
 
 import io
 import json

@@ -680,7 +680,7 @@ def _sample_custom_progress_safe(context: str, **kwargs):
 
 class RadianceSamplerPro:
     """
-    Universal diffusion sampler (v3.0.0) — Flux, SD3, SDXL, WAN, LTX,
+    Universal diffusion sampler — Flux, SD3, SDXL, WAN, LTX,
     HunyuanVideo, Lumina2, Chroma.  Supports phase-shift sampling, AYS
     schedules, PAG, tiled sampling, multi-conditioning, noise types,
     refiner chaining, and restart (IRES) sampling.
@@ -1046,7 +1046,7 @@ class RadianceSamplerPro:
     FUNCTION = "sample"
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Generate"
     DESCRIPTION = (
-        "v3.0.0 — Universal diffusion sampler. Auto-detects model type (Flux, SD3, SDXL, "
+        "Universal diffusion sampler. Auto-detects model type (Flux, SD3, SDXL, "
         "WAN, LTX, HunyuanVideo, Lumina2, Chroma). Phase-shift sampling, AYS schedules, "
         "PAG, dynamic guidance, tiled sampling, multi-conditioning, noise types, refiner chain. "
         "Restart sampling (IRES style), noise alpha schedule, sigma plot output, "
@@ -2001,7 +2001,7 @@ class RadianceSamplerPro:
 
         if SamplerMode.is_phase_shift(sampler_mode) and detected_type in VIDEO_MODEL_TYPES:
             logger.warning(
-                f"[v3.0.0] Phase-Shift mode is not supported for video model '{detected_type}' — "
+                f"Phase-Shift mode is not supported for video model '{detected_type}' — "
                 f"sampler switching mid-schedule causes temporal discontinuities. "
                 f"Falling back to Standard mode."
             )
@@ -2281,7 +2281,7 @@ class RadianceSamplerPro:
                     _tile_positive = apply_flux_guidance(positive, flux_guidance)
 
                 logger.info(
-                    "[v3.0.0] Tile sampling: size=%d, overlap=%d, blend=%s | "
+                    "Tile sampling: size=%d, overlap=%d, blend=%s | "
                     "steps %d-%d of %d | sampler=%s | add_noise=%s",
                     tile_size, tile_overlap, tile_blend,
                     effective_start + 1, effective_end, target_total_steps,
@@ -2313,7 +2313,7 @@ class RadianceSamplerPro:
                 timings["tile_sampling"] = time.time() - t_tile
                 timings["sampling"] = timings["tile_sampling"]
                 logger.info(
-                    f"[v3.0.0] Tile sampling done in {timings['tile_sampling']:.2f}s"
+                    f"Tile sampling done in {timings['tile_sampling']:.2f}s"
                 )
 
             # ALBABIT-FIX: LTX-AV NestedTensor is packed to (B, 1, flat_N) by

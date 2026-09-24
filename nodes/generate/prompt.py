@@ -1,5 +1,5 @@
 """
-◎ Radiance Cinematic Prompt Encoder — v3.0.0
+◎ Radiance Cinematic Prompt Encoder
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Production-grade cinematic prompt builder with direct CLIP/T5 encoding.
 Auto-selects prose for Flux/T5 and structured keywords for SD1.5/SDXL.
@@ -100,7 +100,7 @@ from typing import Optional
 
 logger = logging.getLogger("radiance.prompt")
 
-__version__ = "3.2.2"
+from radiance.config.constants import VERSION as __version__  # noqa: E402
 
 
 class CinematicDatasets:

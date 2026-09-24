@@ -1,5 +1,5 @@
 """
-nodes_optics.py — Radiance Optical Nodes  v3.0.0
+nodes_optics.py — Radiance Optical Nodes
 
 CHANGELOG vs v1.0:
 

@@ -14,7 +14,7 @@ Radiance is a production-grade node pack for ComfyUI built around 32-bit float a
 
 Artists get 32-bit, HDR, and ACES image tools, professional viewers, and VFX nodes. Supervisors and coordinators get project, shot, asset, and workflow management built directly into the canvas.
 
-[Install](#installation) · [What it does](#what-it-does) · [Node map](#node-map) · [DCC handoff](#dcc-handoff) · [Known limitations](#known-limitations) · [Notes](#notes--tips) · [Status](#status) · [Docs](#documentation)
+[Install](#installation) · [Quick start](#quick-start) · [Models](#models-rudra-sdr--hdr) · [What it does](#what-it-does) · [Node map](#node-map) · [Settings](#settings) · [Troubleshooting](#troubleshooting) · [Known limitations](#known-limitations) · [Docs](#documentation)
 
 </div>
 
@@ -29,7 +29,7 @@ Artists get 32-bit, HDR, and ACES image tools, professional viewers, and VFX nod
 - In-canvas studio dashboards (Project Manager, Workflow Library, Assets) rendered over the ComfyUI graph, never in a separate browser tab.
 - **Radiance Sampler**, a preset-driven sampler that hides irrelevant parameters and adapts to the selected model.
 - A full-featured **Viewer** and a lightweight **Lite Viewer** with scopes, frame review, and keyboard shortcuts.
-- HDR VAE decoders (Turbo and Full) and HDR LoRA tooling for scene-linear generation.
+- HDR VAE Encode / Decode that carry values above 1.0 through the model's VAE, learned SDR → HDR recovery (RUDRA), and HDR LoRA tooling for scene-linear generation.
 - Dynamic Gizmos: collapse any group of nodes into a single reusable custom node.
 - Secure-by-default handoff to Nuke and DaVinci Resolve.
 
@@ -135,6 +135,35 @@ python custom_nodes\radiance\tools\gpu_acceptance.py
 It writes `gpu_acceptance_report.md` next to the script, and names any nodes
 missing on your install.
 
+### Updating
+
+- **ComfyUI Manager / Registry:** use *Update* on Radiance in the Manager, then restart ComfyUI.
+- **Git install:** `git pull` in `ComfyUI/custom_nodes/radiance`, run the same
+  `pip install -r ...` line as above, then restart ComfyUI.
+
+The startup log prints the installed version:
+`Radiance: successfully loaded 157 nodes (v3.5.0)`.
+
+### Upgrading from 2.x or 3.4
+
+3.5.0 is a large release; the full list is in the [changelog](CHANGELOG.md#350---2026-09-24).
+What affects an existing graph:
+
+- **Check widget values once on HDR VAE Decode, SDR → HDR Universal, SDR → HDR
+  Recover and NDI Sender.** Inputs were removed from them, and ComfyUI stores
+  widget values by position.
+- **HDR is measured one way everywhere:** linear 1.0 = reference white, 203
+  nits by default (ITU-R BT.2408). Universal and Recover output that used 1.0 =
+  100 nits is now 2.03x smaller in value and identical in nits.
+- **Learned SDR → HDR is one pixel model** that downloads itself; the older
+  latent decoders (`rudra_turbo_decoder_*`, `rudra_full_decoder_*`) are no
+  longer read and can be deleted from `models/radiance`.
+- **To carry HDR through a VAE, use VAE Encode (HDR)** with VAE Decode (HDR).
+  HDR Latent Encoder and HDR Turbo Encoder are marked *Legacy*: nothing decodes
+  their latents back to HDR any more.
+- **SAM Loader and SAM Mask Generator** no longer pretend to segment; use a SAM2
+  node pack and feed its mask into Radiance.
+
 ### Models (RUDRA SDR → HDR)
 
 Learned SDR → HDR recovery uses the **RUDRA** pixel model: a compact network
@@ -229,6 +258,29 @@ package's `workflows` folder.
 | :--- | :--- | :--- |
 | [`workflows/start.json`](workflows/start.json) | The quick start: Radiance Loader, Cinematic Prompt, Resolution, Sampler Pro, HDR VAE Decode and the viewers wired end to end for FLUX.1-dev. | [`flux1-dev.safetensors`](https://huggingface.co/black-forest-labs/FLUX.1-dev) and `ae.safetensors` from the same page (accept the licence first) in `models/diffusion_models` and `models/vae`; [`clip_l.safetensors`](https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors) and [`t5xxl_fp16.safetensors`](https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors) in `models/text_encoders` |
 | [`workflows/official/wan22_t2v_hdr_universal.json`](workflows/official/wan22_t2v_hdr_universal.json) | Wan 2.2 text-to-video through SDR → HDR Universal to an HDR master with HDR Encode and Write. | [`wan2.2_t2v_high_noise_14B_fp8_scaled`](https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors) and [`wan2.2_t2v_low_noise_14B_fp8_scaled`](https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors) in `models/diffusion_models`; [`umt5_xxl_fp8_e4m3fn_scaled`](https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors) in `models/text_encoders`; [`wan_2.1_vae`](https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors) in `models/vae`. The RUDRA model downloads itself. |
+
+## Quick start
+
+**Generate in HDR.** Drag [`workflows/start.json`](workflows/start.json) onto
+the canvas, pick your FLUX.1-dev files in the Loader (see
+[Example workflows](#example-workflows) for the downloads), and queue. VAE
+Decode (HDR) is in Direct HDR mode, so the Viewer shows a scene-linear HDR
+frame; save it with **Write** as EXR.
+
+**Turn an existing image or video into HDR.**
+
+1. **Read** your image, video or sequence.
+2. Add **SDR → HDR Universal**. The defaults are a sensible HDR10 master:
+   `Hybrid`, 1,000-nit peak, 203-nit reference white. The first run downloads
+   the RUDRA model (about 5 MB).
+3. For an EXR, leave `output_encoding` on `Linear` and **Write** EXR. For HDR10
+   delivery, set it to `PQ (HDR10)` and Write a 10-bit or higher format.
+4. Wire the `report` output to a preview to see what ran, including whether
+   learned recovery was applied.
+
+**Look at HDR properly.** Feed any image into the **Viewer**. It knows what the
+pixels are (scene-linear, sRGB, PQ, log) and applies the display transform, so
+nothing is clipped or double-converted on screen.
 
 ## What it does
 
@@ -355,6 +407,51 @@ Then use the Send to Nuke node from ComfyUI. The listener binds to `127.0.0.1` b
 
 Radiance supports DaVinci Resolve through a folder handoff: the Send to DaVinci Resolve node exports PNG, TIFF, or EXR media into a folder Resolve can import.
 
+## Settings
+
+Radiance works with no configuration. These environment variables change its
+behaviour; set them where you start ComfyUI and restart it.
+
+| Variable | What it does |
+| :--- | :--- |
+| `RADIANCE_ALLOW_DOWNLOADS` | `0` never downloads any model. `1` also allows the larger third-party weights (upscalers, depth), which otherwise ask first. |
+| `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE` | `1` treats the machine as offline; nothing is downloaded. |
+| `RADIANCE_SDR2HDR_PIXEL` | Path to a specific RUDRA SDR → HDR checkpoint. |
+| `RADIANCE_TEMPORAL_RUDRA` | Path to a temporal RUDRA checkpoint for ordered video. |
+| `OCIO` | Your studio's OpenColorIO config. Without it Radiance uses OpenColorIO's built-in ACES studio config. |
+| `RADIANCE_OCIO_ROOTS` | Extra folders the OCIO nodes may load configs and LUTs from (`;` on Windows, `:` elsewhere). |
+| `RADIANCE_READ_ROOTS` | Extra folders the Read node may *preview* from, such as a NAS or UNC share. Reading any path works without it. |
+| `RADIANCE_FFMPEG` | Path to the ffmpeg to use. Otherwise the one on `PATH`, then the bundled imageio-ffmpeg. |
+| `RADIANCE_LOG_LEVEL` | `DEBUG` for full tracebacks in the console when something fails. |
+| `RADIANCE_DCC_AUTH_TOKEN` | Shared token for the Nuke connection. |
+
+Models go in `ComfyUI/models/radiance`; a `radiance:` entry in
+`extra_model_paths.yaml` adds more folders.
+
+## Troubleshooting
+
+- **The log says fewer than 157 nodes loaded.** A module failed to import. The
+  lines above it name the module and the error, and the Environment Guard
+  table shows which package is missing. Reinstall the requirements into
+  ComfyUI's own Python (for the Windows portable build:
+  `python_embeded\python.exe -m pip install -r ComfyUI\custom_nodes\radiance\requirements.txt`).
+- **SDR → HDR says "learned recovery: NOT APPLIED".** The model is not
+  installed and could not be downloaded (offline, `RADIANCE_ALLOW_DOWNLOADS=0`,
+  or no write access to `models/radiance`). The console gives the direct
+  download link; put the file in `ComfyUI/models/radiance/`. The node still
+  outputs a correct deterministic HDR expansion meanwhile.
+- **HDR looks clipped or washed out in a normal image preview.** Standard
+  preview nodes show values above 1.0 as white. Use the Viewer, or write an
+  EXR / PQ file and check it in an HDR-aware application.
+- **An EXR will not read or write.** Check the Environment Guard table for
+  OpenEXR and OpenImageIO. On Python 3.14 OpenEXR is not installed yet and
+  OpenImageIO is used instead.
+- **Colours look different after upgrading from ≤ 3.2.0.** See
+  [Notes & Tips](#notes--tips); older versions skipped some colour-space
+  conversions.
+- **Anything else:** open an issue with the startup log (from the Radiance
+  Environment Guard table down) and the node's `report` or `metadata` output.
+
 ## Known limitations
 
 Kept here rather than in a tracker, because a control that quietly does nothing
@@ -370,26 +467,10 @@ is worse than one that says so. Full detail in the [changelog](CHANGELOG.md).
   `"linear"` and `"gaussian_feather"` are genuinely different.
 - **`chromatic_adaptation` has no effect.** The white-point adaptation is baked
   into the precomputed conversion matrices.
-- **Optical flow works to about 20 px of motion, not beyond.** The solver is
-  DIS (dense inverse search), and it holds a dense field, 99% or more of the
-  frame within half a pixel, out to 20 px on the test plates. Past roughly 28
-  px it fails, as does every other solver here, because the correspondence
-  becomes ambiguous rather than merely hard.
-
-  Pyramidal Lucas–Kanade is still selectable and is the fallback if OpenCV
-  cannot be imported. It is bounded by its 15×15 integration window: the
-  fraction of the field landing within half a pixel falls from 100% at 3 px to
-  84% at 8, 71% at 12, 58% at 16 and 29% at 20, and on aperiodic detail it is
-  already at 9% by 12 px. What degrades is the *field*, not the median, which
-  is the worst way for a flow solver to fail: the number you would check looks
-  right while the mask you propagate tears.
-
-  Deepening the LK pyramid does not help, and that was measured rather than
-  assumed: the coarsest level has to stay larger than the window, and going
-  from four levels to five on a 256×512 plate made every displacement worse (at
-  8 px, 96% of the field within half a pixel became 32%). Shrinking the window
-  with the level to buy depth was tried too, and measured worse for the same
-  reason.
+- **Optical flow holds to about 20 px of motion per frame.** Beyond roughly
+  28 px every solver here loses the correspondence. The Lucas–Kanade fallback
+  degrades earlier (well before 20 px on fine detail); prefer the default DIS
+  solver. Measurements are in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 - **No SAM runtime.** `SAM Loader` and `SAM Mask Generator` are hidden and
   raise when executed; they never ran a segmentation model. Use a SAM2 node
@@ -411,13 +492,37 @@ is worse than one that says so. Full detail in the [changelog](CHANGELOG.md).
 
 - **Upgrading from ≤ 3.2.0: re-check graded masters.** `RadianceColorSpaceConvert` previously performed no conversion at all for 10 of its 16 spaces (all camera-log and ACES working spaces) whenever no OCIO config was loaded, which is the default install. Anything that passed through those conversions was graded on unconverted pixels. Details in the [changelog](CHANGELOG.md).
 
-## Status
+## Documentation
+
+Full documentation is available at [www.fxtdstudios.com](https://www.fxtdstudios.com): setup, core concepts, workflow recipes, a complete node reference, and troubleshooting.
+
+Every node also carries its own description and per-input tooltips, which ComfyUI shows on hover, so the parameter reference travels with the package.
+
+## Support
+
+- Issues: [GitHub Issues](https://github.com/fxtdstudios/radiance/issues)
+- Documentation: [www.fxtdstudios.com](https://www.fxtdstudios.com)
+- Studio: [www.fxtdstudios.com](https://www.fxtdstudios.com)
+
+## License
+
+Radiance is released under the [GPL-3.0 license](LICENSE). The RUDRA model weights that
+SDR → HDR Universal and Recover download are a separate work under their own
+non-commercial licence; see [Models](#models-rudra-sdr--hdr).
+
+## Development status
+
+For contributors and reviewers: what has been verified, and what is open
+before and after this release.
+
+<details>
+<summary>Verification record and release checklist</summary>
 
 Radiance is **ready with conditions**. Everything below is measured rather than
 asserted; the full history is in the [changelog](CHANGELOG.md), and per-defect
 detail in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
-### Verified
+#### Verified
 
 Standing properties of the shipped package. Pinned by a test unless the row
 says otherwise. An audit number that no test holds is a number that can
@@ -445,7 +550,7 @@ the gap is recorded under Open rather than quietly corrected.
 | **Layering** | `radiance/io/writer.py` and `radiance/io/reader.py` import nothing above them, checked by AST walk *and* by running them in a bare interpreter with no ComfyUI present. |
 | **Suite** | 3755 Python tests and 260 JavaScript tests. On the full dependency lane: 3667 pass, 84 skip, 3 are `slow` and deselected by default; JS is 256 pass, 4 skip, 0 todo. Coverage is **59.6% of 28,018 statements** (56.0% counting branches, which is what the floor gates on). The old 53% was the figure the full lane would have produced had it run; CI's lightweight lane was really reporting 22% against a `--cov-fail-under=15` that overrode the project's own floor. There is one floor now, in `pyproject.toml`, enforced on the lane that can execute the code. The JS side includes a GPU lane that compiles the real shaders in both GLSL and WGSL and compares them against the CPU implementations they were generated from, and a browser lane that builds all fourteen Viewer panels and operates their controls. Verified from a checkout named `radiance-beta` as well as `radiance`. |
 
-### Open
+#### Open
 
 **Blocking a release**
 
@@ -598,20 +703,4 @@ runs in CI.
       and `RadianceHDROCIOTransform`'s defaults resolve. OpenCV's EXR codec is
       forced on (`OPENCV_IO_ENABLE_OPENEXR=1`) before anything imports cv2.
 
-## Documentation
-
-Full documentation is available at [www.fxtdstudios.com](https://www.fxtdstudios.com): setup, core concepts, workflow recipes, a complete node reference, and troubleshooting.
-
-Every node also carries its own description and per-input tooltips, which ComfyUI shows on hover, so the parameter reference travels with the package.
-
-## Support
-
-- Issues: [GitHub Issues](https://github.com/fxtdstudios/radiance/issues)
-- Documentation: [www.fxtdstudios.com](https://www.fxtdstudios.com)
-- Studio: [www.fxtdstudios.com](https://www.fxtdstudios.com)
-
-## License
-
-Radiance is released under the [GPL-3.0 license](LICENSE). The RUDRA model weights that
-SDR → HDR Universal and Recover download are a separate work under their own
-non-commercial licence; see [Models](#models-rudra-sdr--hdr).
+</details>

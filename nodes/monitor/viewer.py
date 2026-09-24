@@ -338,7 +338,7 @@ class RadianceViewer:
     RETURN_NAMES = ("image",)
     FUNCTION = "view"
     OUTPUT_NODE = True
-    DESCRIPTION = """VFX Industry-Standard Viewer v3.0.0 — Temporal & Intelligence Update:
+    DESCRIPTION = """Radiance Viewer, VFX review for scene-linear and HDR images:
 • GPU Waveform / RGB Parade / Vectorscope / Histogram scopes
 • Power Windows masking (Radial + Box, feather, rotation)
 • Comparison Bridge — mouse-draggable wipe + reference shelf (8 stills)
@@ -1022,9 +1022,9 @@ class RadianceViewer:
             pick_filepath = safe_join(output_dir, pick_filename)
             if _save_pick_buffer(frame, pick_filepath):
                 result["pick_filename"] = pick_filename
-                logger.debug(f"[Radiance v3.0.0] Pick buffer saved: {pick_filename}")
+                logger.debug(f"[Radiance] Pick buffer saved: {pick_filename}")
         except ValueError as e:
-            logger.debug(f"[Radiance v3.0.0] Pick buffer path error: {e}")
+            logger.debug(f"[Radiance] Pick buffer path error: {e}")
 
         return result
 

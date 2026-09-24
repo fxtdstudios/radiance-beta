@@ -1,5 +1,5 @@
 """
-nodes_engine.py — Radiance Engine Nodes  v3.0.2
+nodes_engine.py — Radiance Engine Nodes
 
 CHANGELOG v3.0.1 (audit + scored-review fixes):
   ROUND 1 — structural audit:
@@ -70,6 +70,7 @@ from datetime import timezone as _tz
 import torch
 import numpy as np
 
+from radiance.config.constants import VERSION
 from radiance.hdr.vae import RadianceVAE4KEncode, RadianceVAE4KDecode
 from radiance.hdr.decode_meta import (
     LOG_SPACE_GAMUT,
@@ -532,7 +533,7 @@ class RadianceHDRVAEDecode:
 
         engine_meta.update({
             "node": "RadianceHDRVAEDecode",
-            "version": "3.5.0",
+            "version": VERSION,
             "decode_mode": effective_decode_mode,
             "decode_mode_requested": decode_mode,
             "hdr_path": hdr_path,

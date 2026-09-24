@@ -4,12 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "radiance"
-description = "Professional VFX, HDR color science, review, and DCC handoff nodes for ComfyUI."
+description = "HDR, ACES and 32-bit float VFX nodes for ComfyUI: learned SDR to HDR, HDR VAE encode and decode, OCIO colour management, EXR I/O, a pro Viewer, and Nuke / Resolve handoff."
+# Keep in step with config/constants.py VERSION, package.json and CHANGELOG.md;
+# tests/test_version_sync.py fails if they drift.
 version = "3.5.0"
 readme = "README.md"
 license = "GPL-3.0-only"
 license-files = ["LICENSE"]
-requires-python = ">=3.9"
+requires-python = ">=3.10"   # ComfyUI's own floor
 authors = [
     { name = "FXTD Studios" },
 ]
@@ -23,13 +25,16 @@ keywords = [
     "openexr",
     "nuke",
     "davinci-resolve",
+    "sdr-to-hdr",
+    "exr",
+    "vfx",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: OS Independent",
     "Environment :: GPU :: NVIDIA CUDA",
     "Environment :: GPU :: Apple Metal",
@@ -88,18 +93,19 @@ full = [
     "tifffile>=2023.7.10",
     "colour-science>=0.4",
     "transformers>=4.35",
-    "diffusers>=0.25",
-    "accelerate>=0.25",
-    "peft>=0.7",
-    "anthropic>=0.28",
-    "openai>=1.0",
-    "google-generativeai>=0.5",
+    "diffusers>=0.25",   # upscale: SD x4 / latent upscaler backends
+    "openai>=1.0",       # audio: transcription
+    # anthropic, google-generativeai, accelerate and peft were listed here and
+    # imported nowhere in the package.
 ]
 
 [project.urls]
+Homepage      = "https://www.fxtdstudios.com"
 Repository    = "https://github.com/fxtdstudios/radiance"
-Documentation = "https://www.fxtdstudios.com"
+Documentation = "https://github.com/fxtdstudios/radiance#readme"
+Changelog     = "https://github.com/fxtdstudios/radiance/blob/main/CHANGELOG.md"
 "Bug Tracker" = "https://github.com/fxtdstudios/radiance/issues"
+Models        = "https://huggingface.co/fxtdstudios/RUDRA"
 
 [tool.comfy]
 PublisherId      = "fxtdstudios"

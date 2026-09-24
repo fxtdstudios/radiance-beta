@@ -44,7 +44,7 @@ import torch
 try:
     from ...config.constants import VERSION as _RADIANCE_VERSION
 except Exception:  # keep the writer importable even if constants move
-    _RADIANCE_VERSION = "3.1.1"
+    _RADIANCE_VERSION = "unknown"
 
 try:
     import folder_paths as _folder_paths

@@ -4,7 +4,7 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ## [Unreleased]
 
-## [3.5.0] - 2026-09-23
+## [3.5.0] - 2026-09-24
 
 ### Upgrade note
 
@@ -24,7 +24,8 @@ All notable changes to FXTD Radiance will be documented in this file.
    latent training scripts and the `rudra` dataset tools moved to
    `_to_delete/legacy-latent-rudra-20260923/`.
 2. **Learned SDR → HDR is one pixel model.** `SDR → HDR Universal` and
-   `Recover` run `sdr2hdr_pixel_image.pt` (RUDRA's pixel-space network) on any
+   `Recover` run RUDRA's pixel-space network (`sdr2hdr_shadow_v1.safetensors`,
+   downloaded on first use) on any
    image or frame batch, with the temporal residual model preferred on ordered
    video when its checkpoint exists. Backends are `Auto` / `Direct Pixel` /
    `Temporal`. Checkpoints are found in every `models/radiance` folder
@@ -33,11 +34,11 @@ All notable changes to FXTD Radiance will be documented in this file.
    names the path that ran.
 
 3. **HDR VAE Decode's Direct HDR mode runs the pixel model after the VAE.**
-   On a plain latent (anything that did not come from HDR Encode, i.e. every
+   On a plain latent (anything that did not come from VAE Encode (HDR), i.e. every
    sampler output) Direct HDR now decodes sampler-safe sRGB through the
    model's VAE and hands it to the RUDRA pixel SDR → HDR model, returning
    scene-linear HDR (1.0 = 203 nit reference white) with highlights up to the
-   new `hdr_peak_nits` input (default 1000). The log inversion is used only on latents that carry HDR Encode's
+   new `hdr_peak_nits` input (default 1000). The log inversion is used only on latents that carry VAE Encode (HDR)'s
    `radiance_meta`, the one case where it is correct. `metadata` names the
    path (`hdr_path`) and carries the SDR → HDR report.
 4. **SAM Loader and SAM Mask Generator are hidden.** No SAM runtime ships;
@@ -96,6 +97,26 @@ All notable changes to FXTD Radiance will be documented in this file.
   - *Lite Viewer.* Readout, clip check and diff read an fp16 float proxy, so they show source values at source coordinates. The canvas is in device pixels, so 1:1 is exact on scaled displays; it was sized from a bordered box, 0.3 % off. B is scaled to A, diff has a gain, and play/loop run at the source fps. Frames load progressively.
   - Tests: `tests/test_viewer_phase1.py` (11), and `js/tests/viewer_color.test.mjs` and `js/tests/lite_viewer.test.mjs`, which read real pixels back from Chromium.
 
+- **One version everywhere.** `pyproject.toml`, `config/constants.py`,
+  `package.json`, the CHANGELOG and the README badge all read 3.5.0, and
+  `tests/test_version_sync.py` fails if they drift. What users saw still said
+  older releases: the Sampler's node description and its report header
+  ("Radiance Sampler v3.0.0") and metadata, the QC report header, the AMF
+  exported by Deliver, the Viewer's description, and module versions of 3.1.0
+  to 3.2.2 in the prompt, audio and video nodes. They all derive from the one
+  constant now.
+- **`pyproject.toml` for the registry.** Python 3.10 to 3.13 (ComfyUI's own
+  floor; 3.9 was listed and cannot run ComfyUI), a description of what the pack
+  does, Homepage / Changelog / Models links, and the `full` extra without four
+  packages nothing imports (anthropic, google-generativeai, accelerate, peft).
+  The registry currently serves 2.3.3, so 3.5.0 is the next registry release.
+- **README for end users.** New Quick start, Updating, Upgrading from 2.x or
+  3.4, Settings (every environment variable a user may set) and
+  Troubleshooting sections. The overview no longer advertises the retired
+  Turbo / Full HDR decoders, the optical-flow limitation is two lines with the
+  measurements in KNOWN_ISSUES, and the verification record and release
+  checklist moved to a collapsed "Development status" section at the end.
+  Upgrade notes 2 and 3 above name the current model and encoder.
 - **HDR latents could not be decoded back to HDR: VAE Encode (HDR) is now the
   encoder VAE Decode (HDR) inverts.** Found on a clean install with a real VAE
   (SD `vae-ft-mse`) and an HDR plate peaking at 7.75. The two HDR latent
