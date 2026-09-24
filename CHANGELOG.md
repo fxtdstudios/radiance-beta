@@ -93,6 +93,21 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ### Fixed
 
+- **VAE Decode (HDR) told users of the recommended pair that correct output
+  was wrong.** Every run of VAE Encode (HDR) into VAE Decode (HDR) with a
+  linear source logged "output colors will be WRONG". The encoder carries a
+  non-log source in ARRI LogC4 and records it in the latent, so the LogC4
+  decode is the exact inverse. The warning now appears only when a latent
+  without encoder metadata is decoded in Compress (Log), and says what to
+  pick instead.
+- **Pass-through video was tagged as linear light.** Write's default
+  "Linear (pass-through)" writes the IMAGE unchanged, which for ordinary
+  ComfyUI images is display-encoded, but tagged MP4 / ProRes with a linear
+  transfer, so players that honour the tag decoded it wrong. The transfer is
+  now left unspecified for pass-through; an encoding you choose is still
+  tagged.
+- **Multipass Estimate's MoGe download left a `.radiance_download` folder**
+  of Hugging Face lock and metadata files in `models/geometry_estimation`.
 - **Four model loads skipped the download consent gate.** Depth Map
   Generator (Depth Anything V2; Base and Large are CC-BY-NC-4.0), the SD x4
   upscaler (~2.4 GB), the SeedVR2 fallback and character-consistency CLIP
@@ -556,6 +571,31 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ### Removed
 
+- **Release clean-up: files nothing loaded, called or documented.**
+  `core/param_memory.py` (a SQLite parameter-history node never registered
+  in the catalog), `lut_utils.py` (no importer), the empty `nodes/training`
+  group and its unused `sdr_degradation.py`, `extras/nuke_scripts/radiance_client.py`
+  (a client for a `RadianceNukeServer` node that does not exist; the Nuke
+  path is `scripts/start_nuke_server.py`), `js/radiance_vfx_multipass.js`
+  (styled a `RadianceVFXMultipass` node that does not exist),
+  `js/docs/` (a stale offline manual quoting 121 nodes that ComfyUI loaded
+  as an extension on every page in git installs), `scripts/resolve_bridge.py`
+  (posted a placeholder graph of nonexistent nodes),
+  `scripts/radiance_batch_convert.py`, the Poly Haven / AmbientCG HDRI
+  downloaders and the Wan LoRA data-prep scripts (hard-coded local drive
+  paths, VAE training that was retired), `tools/make_validation_contact_sheet.py`,
+  `tools/clean_release.py` (its dead-file list named files already gone),
+  `rpacks/SDXL_Standard.rpack`, and three unreferenced images (`icon.png`,
+  `Viewer_shortcut.png`, `radiance_workspace.png`). The unused
+  `DYNAMIC_EXEC_ENABLED` flag in the Nuke listener went with them; nothing
+  read it.
+- **`tools/check_release_ready.py` works again and runs in the suite.** It
+  had crashed since `license` became an SPDX string, looked for README
+  headings that no longer exist, and flagged local `__pycache__` as release
+  content. It now checks the SPDX licence and its file, that pyproject, the
+  runtime `VERSION` and the README node badge agree, that every listed
+  package and package-data pattern exists, and that no generated file is
+  committed.
 - `fast_vae.py` (latent RUDRA decoders and their loader), `model/vae.py`,
   `tools/build_rudra_cache.py`, `tools/validate_rudra_dataset.py`,
   `tools/compute_descriptor_stats.py` (all imported a `rudra` package that

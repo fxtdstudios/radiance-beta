@@ -340,7 +340,12 @@ class OutputColour:
         tags = ["-colorspace", matrix, "-color_range", "tv"]
         if prim:
             tags += ["-color_primaries", prim]
-        if trc:
+        # Pass-through writes the values unchanged, so the transfer is whatever
+        # the IMAGE already carries; a ComfyUI IMAGE is usually display
+        # encoded. Tagging it "linear" (the working space's name) told players
+        # to decode ordinary 8-bit video as linear light. Leave it unspecified
+        # unless an encoding was actually applied.
+        if trc and not (self.color_space == "Linear (pass-through)" and not self.ocio_colorspace):
             tags += ["-color_trc", trc]
         return tags
 

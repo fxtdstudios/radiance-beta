@@ -205,6 +205,10 @@ def ensure_moge(allow_download: bool) -> Path:
             raise EstimateModelError(f"[Multipass Estimate] {MOGE_FILENAME} downloaded with the wrong size.")
         final = target / MOGE_FILENAME
         os.replace(local, final)
+        # hf_hub_download leaves its lock and metadata files in the staging
+        # folder; nothing reads them once the file is in place.
+        import shutil
+        shutil.rmtree(staging, ignore_errors=True)
         logger.info("[Radiance] Installed %s", final)
         return final
 

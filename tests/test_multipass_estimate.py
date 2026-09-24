@@ -283,3 +283,24 @@ class TestNode(unittest.TestCase):
         except (ImportError, RuntimeError) as exc:  # no EXR backend in this lane
             self.skipTest(str(exc))
         self.assertTrue(path.endswith(".exr"))
+
+
+def test_moge_download_leaves_no_staging_folder(tmp_path, monkeypatch):
+    """hf_hub_download's lock/metadata files used to stay behind in
+    models/geometry_estimation/.radiance_download."""
+    monkeypatch.setenv("RADIANCE_ALLOW_DOWNLOADS", "1")
+
+    def fake_download(repo_id, filename, revision, local_dir):
+        p = os.path.join(local_dir, filename)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        os.makedirs(os.path.join(local_dir, ".cache", "huggingface"), exist_ok=True)
+        with open(p, "wb") as fh:
+            fh.truncate(em.MOGE_SIZE)
+        return p
+
+    import huggingface_hub
+    with mock.patch.object(em, "_geometry_dirs", return_value=[tmp_path]), \
+         mock.patch.object(huggingface_hub, "hf_hub_download", fake_download):
+        path = em.ensure_moge(True)
+    assert path == tmp_path / em.MOGE_FILENAME and path.stat().st_size == em.MOGE_SIZE
+    assert sorted(p.name for p in tmp_path.iterdir()) == [em.MOGE_FILENAME]

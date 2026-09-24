@@ -23,7 +23,6 @@ from radiance.nodes.vfx.roto import (
     RadianceVectorMaskDraw,
     RadianceVideoMaskPropagator,
 )
-from radiance.core.param_memory import RadianceParamHistoryTracker
 
 def test_sam_nodes_are_hidden_and_refuse_to_pretend():
     # 3.5.0 ships no SAM runtime. The two nodes stay registered so saved
@@ -151,27 +150,6 @@ def test_stitch_single_frame_every_blend_mode(blend_mode):
     assert blend.shape == (1, 64, 64)
     assert float(out[0, 32, 32, 0]) > 3.0, "the crop was not composited back"
     assert float(out[0, 2, 2, 0]) == pytest.approx(0.25, abs=1e-3), "outside the mask changed"
-
-
-def test_param_history_tracker(tmp_path):
-    tracker = RadianceParamHistoryTracker()
-    # Override database path to temporary path for testing
-    test_db = os.path.join(tmp_path, "test_history.db")
-    tracker.db_path = test_db
-    tracker._init_db()
-    
-    params = {"exposure_offset": 1.5, "compression_ratio": 0.5}
-    summary, diff = tracker.record("RadianceHDREncoder", json.dumps(params))
-    
-    assert "RadianceHDREncoder" in summary
-    assert "exposure_offset" in summary
-    
-    # Second run with changed parameter to verify diffing
-    new_params = {"exposure_offset": 2.0, "compression_ratio": 0.5}
-    summary2, diff2 = tracker.record("RadianceHDREncoder", json.dumps(new_params))
-    
-    assert "exposure_offset" in diff2
-    assert "1.5" in diff2 or "2" in diff2
 
 
 def test_roto_suite():

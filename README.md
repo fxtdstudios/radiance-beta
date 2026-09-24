@@ -705,6 +705,25 @@ the gap is recorded under Open rather than quietly corrected.
       no channel exceeds `peak_nits`, the whole frame runs untiled when it
       fits, and every published checkpoint loads, with the shipped
       `sdr2hdr_shadow_v1` as the default and the auto-download.
+- [x] **Release feature test from the registry package (3.5.0).** Packed
+      with `comfy node pack` (238 files, 3.5 MB, no tests or dev tools),
+      installed into a clean ComfyUI 0.32 on Python 3.13 the way
+      ComfyUI-Manager does it: 158 nodes, OCIO configured, the RUDRA model
+      and MoGe-2 fetched on first use. Run through the API: SDR → HDR
+      Universal to 32-bit EXR (HDR to 4.9, 19 % of pixels above 1.0) and the
+      Viewer; Grade, CDL, colour-space convert, OCIO and tone map to 16-bit
+      PNG; VAE Encode (HDR) to VAE Decode (HDR) with a real SD VAE (median
+      error 0.09 stops, 96 % of over-range values kept); 8-frame H.264 and
+      ProRes 422 HQ (8 frames each); Multipass Estimate to EXR passes, Read
+      AOVs and Relight. In a headless browser every node creates, and the
+      graph saves and reloads, with no Radiance console error. Three bugs
+      this found are fixed (see the changelog).
+- [x] **Release clean-up (3.5.0).** Removed 21 files that nothing loaded,
+      called or documented, including a stale offline manual that ComfyUI
+      loaded as an extension on every page in git installs and a front-end
+      extension for a node that does not exist. `tools/check_release_ready.py`
+      is fixed and now runs in the suite, so version, node count, licence
+      and packaging drift fail a test.
 - [x] **Multipass passes are real or removed (3.5.0).** Multipass Extract's
       image-filter passes (Retinex albedo, blur-difference specular, contrast
       roughness, emission, transmission, reflection, k-means object ID) are

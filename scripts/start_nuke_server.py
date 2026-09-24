@@ -18,7 +18,6 @@ BIND_HOST = os.environ.get("RADIANCE_NUKE_BIND_HOST", os.environ.get("RADIANCE_N
 # ComfyUI base URL for history/prompt API calls.
 COMFY_URL = os.environ.get("RADIANCE_COMFY_URL", "http://127.0.0.1:8188")
 DCC_AUTH_TOKEN = os.environ.get("RADIANCE_DCC_AUTH_TOKEN", "")
-DYNAMIC_EXEC_ENABLED = os.environ.get("RADIANCE_DEV", "").strip().lower() in {"1", "true", "yes", "on"}
 RUNNING = True
 _SERVER_THREAD = None
 

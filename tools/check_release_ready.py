@@ -29,6 +29,7 @@ def main() -> int:
     comfy = pyproject.get("tool", {}).get("comfy", {})
 
     _check_project_metadata(project, comfy, errors)
+    _check_version_and_count(project, errors)
     _check_readme(errors)
     _check_package_paths(pyproject, errors)
     _check_generated_files(errors)
@@ -58,13 +59,40 @@ def _check_project_metadata(project: dict, comfy: dict, errors: list[str]) -> No
     if not readme or not (ROOT / str(readme)).is_file():
         errors.append("project.readme is missing or does not exist")
 
-    license_file = project.get("license", {}).get("file")
-    if not license_file or not (ROOT / str(license_file)).is_file():
-        errors.append("project.license.file is missing or does not exist")
+    # PEP 639: `license` is an SPDX string and `license-files` names the text.
+    # The older table form ({file = ...}) is still accepted.
+    license_value = project.get("license")
+    if isinstance(license_value, dict):
+        license_files = [license_value.get("file")] if license_value.get("file") else []
+    else:
+        if not license_value:
+            errors.append("project.license (SPDX expression) is missing")
+        license_files = list(project.get("license-files", []))
+    if not license_files:
+        errors.append("no licence file declared (project.license-files)")
+    for rel in license_files:
+        if not (ROOT / str(rel)).is_file():
+            errors.append(f"licence file does not exist: {rel}")
 
     for key in ("PublisherId", "DisplayName"):
         if not comfy.get(key):
             errors.append(f"[tool.comfy].{key} is required")
+
+
+def _check_version_and_count(project: dict, errors: list[str]) -> None:
+    """pyproject, the runtime constant and the README badge must agree."""
+    constants = (ROOT / "config" / "constants.py").read_text(encoding="utf-8")
+    runtime = re.search(r'^VERSION\s*=\s*"([^"]+)"', constants, re.M)
+    if not runtime or runtime.group(1) != str(project.get("version")):
+        errors.append(
+            f"config/constants.py VERSION {runtime.group(1) if runtime else None!r} "
+            f"!= pyproject version {project.get('version')!r}"
+        )
+    count = re.search(r"^EXPECTED_MIN_NODE_COUNT\s*=\s*(\d+)", constants, re.M)
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    badge = re.search(r"badge/nodes-(\d+)-", readme)
+    if count and badge and badge.group(1) != count.group(1):
+        errors.append(f"README node badge says {badge.group(1)}, EXPECTED_MIN_NODE_COUNT is {count.group(1)}")
 
 
 def _check_readme(errors: list[str]) -> None:
@@ -79,27 +107,55 @@ def _check_readme(errors: list[str]) -> None:
         if claim.lower() in readme.lower():
             errors.append(f"README contains stale or unsafe claim: {claim!r}")
 
-    required_sections = ("## Install", "## Node Map", "## DCC Handoff", "## Release Status")
+    required_sections = ("## Installation", "## Node map", "## DCC Handoff", "## Settings",
+                         "## Troubleshooting", "## Known limitations", "## License")
     for section in required_sections:
         if section not in readme:
             errors.append(f"README missing section: {section}")
 
 
 def _check_package_paths(pyproject: dict, errors: list[str]) -> None:
-    packages = pyproject.get("tool", {}).get("setuptools", {}).get("packages", [])
-    for package_name in packages:
+    setuptools = pyproject.get("tool", {}).get("setuptools", {})
+    for package_name in setuptools.get("packages", []):
         rel = str(package_name).removeprefix("radiance").replace(".", "/").strip("/")
         package_path = ROOT / rel if rel else ROOT
-        if not package_path.exists():
-            errors.append(f"package path missing for {package_name}: {package_path}")
+        if not (package_path / "__init__.py").is_file():
+            errors.append(f"package listed but missing: {package_name}")
+    # A package-data entry that matches nothing is a file that was removed
+    # without the manifest being told.
+    for pattern in setuptools.get("package-data", {}).get("radiance", []):
+        if not any(ROOT.glob(pattern)) and "TEMPLATES" not in pattern:
+            errors.append(f"package-data entry matches no file: {pattern}")
+
+
+def _tracked_files() -> list[str] | None:
+    """Files git tracks, or None outside a checkout."""
+    import subprocess
+    try:
+        out = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return out.stdout.splitlines()
 
 
 def _check_generated_files(errors: list[str]) -> None:
+    """Generated files must not be committed (in a checkout) or present (in an unpacked archive).
+
+    Local __pycache__ in a working tree is gitignored and never ships, so a
+    checkout is judged by what git tracks rather than by what is on disk.
+    """
+    import fnmatch
+    tracked = _tracked_files()
     for pattern in GENERATED_PATTERNS:
-        matches = [path for path in ROOT.glob(pattern) if path.exists()]
+        if tracked is not None:
+            flat = pattern.replace("**/", "")
+            matches = [f for f in tracked
+                       if fnmatch.fnmatch(f, pattern) or fnmatch.fnmatch(f.rsplit("/", 1)[-1], flat)
+                       or ("/" + flat.strip("*") + "/") in ("/" + f)]
+        else:
+            matches = [str(path.relative_to(ROOT)) for path in ROOT.glob(pattern) if path.exists()]
         if matches:
-            preview = ", ".join(str(path.relative_to(ROOT)) for path in matches[:5])
-            errors.append(f"generated files present for {pattern}: {preview}")
+            errors.append(f"generated files present for {pattern}: {', '.join(matches[:5])}")
 
 
 if __name__ == "__main__":
