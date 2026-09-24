@@ -151,7 +151,7 @@ the gap is recorded under Open rather than quietly corrected.
       AOVs and Relight. In a headless browser every node creates, and the
       graph saves and reloads, with no Radiance console error. Three bugs
       this found are fixed (see the changelog).
-- [x] **Release clean-up (3.5.0).** Removed 21 files that nothing loaded,
+- [x] **Release clean-up (3.5.0).** Removed 26 files (21, then 5 in a second pass) that nothing loaded,
       called or documented, including a stale offline manual that ComfyUI
       loaded as an extension on every page in git installs and a front-end
       extension for a node that does not exist. `tools/check_release_ready.py`

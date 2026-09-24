@@ -13,7 +13,6 @@ dist/
 *.egg-info/
 node_modules/
 package.json
-package-lock.json
 
 # ── Caches and local scratch ────────────────────────────────────────────────
 __pycache__/
@@ -42,10 +41,8 @@ tests/
 js/tests/
 tools/check_mojibake.py
 tools/check_release_ready.py
-tools/validate_hdr_pipeline.py
 tools/gpu_acceptance.py
 tools/build_node_reference.py
-scripts/build_js.js
 
 # ── Repository documentation ────────────────────────────────────────────────
 # Node descriptions and input tooltips ship inside the package and ComfyUI

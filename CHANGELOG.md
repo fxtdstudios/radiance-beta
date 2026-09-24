@@ -642,7 +642,12 @@ All notable changes to FXTD Radiance will be documented in this file.
   `rpacks/SDXL_Standard.rpack`, and three unreferenced images (`icon.png`,
   `Viewer_shortcut.png`, `radiance_workspace.png`). The unused
   `DYNAMIC_EXEC_ENABLED` flag in the Nuke listener went with them; nothing
-  read it.
+  read it. A second pass removed five more: `nodes/hdr/patch.py` and
+  `nodes/monitor/scopes.py` (empty modules that registered nothing),
+  `tools/validate_hdr_pipeline.py` (imported a `radiance_color` module that
+  no longer exists, so it could not run), and `scripts/build_js.js` with
+  `package-lock.json` (minified the frontend into a `build/` folder nothing
+  loads; `package.json` keeps only `npm test`).
 - **`tools/check_release_ready.py` works again and runs in the suite.** It
   had crashed since `license` became an SPDX string, looked for README
   headings that no longer exist, and flagged local `__pycache__` as release
