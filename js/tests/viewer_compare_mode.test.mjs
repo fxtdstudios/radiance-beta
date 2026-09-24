@@ -5,7 +5,8 @@
  * connected compare_image (A compared with itself), Wipe with no B showed the
  * ungraded source, and Difference and Blink drew nothing on the default WebGL
  * path (Blink started playback). One controller, setCompareMode(), now drives
- * every control, in both modes. The Lite Viewer is retired into Simple mode.
+ * every control, in both modes. The Lite Viewer node is removed; a saved one
+ * is converted into a Viewer in Simple mode when the graph loads.
  *
  * The methods are lifted from the source and run on a stand-in viewer with a
  * recording renderer (radiance_viewer.js cannot be imported in Node). The
@@ -142,18 +143,69 @@ test('every compare control goes through setCompareMode', () => {
 test('Simple / Advanced: saved on the node, old graphs open as they looked', () => {
     assert.match(methodSource('setUIMode'), /properties\.radiance_viewer_mode = mode/);
     const reg = src.slice(src.indexOf('async beforeRegisterNodeDef'));
-    assert.match(reg, /"RadianceLiteViewer"\]\.includes\(nodeData\.name\)/, 'the retired Lite Viewer must open in this viewer');
-    assert.match(reg, /this\.type === 'RadianceLiteViewer' \? 'simple' : 'advanced'/);
+    assert.match(reg, /setUIMode\?\.\(saved \|\| 'advanced'\)/, 'a graph saved before the switch must open in Advanced');
     const install = methodSource('_installUIMode');
     for (const el of ['proToolbar', 'proSidebar', 'rightControlPanel', 'viewerBar', 'sequenceDock', 'statusBar']) {
         assert.match(install, new RegExp(`this\\.${el}`), `${el} is not hidden in Simple`);
     }
 });
 
-test('the Lite Viewer frontend is gone', () => {
-    let gone = false;
-    try { readFileSync(join(JS, 'radiance_lite_viewer.js')); } catch { gone = true; }
-    assert.ok(gone, 'a second frontend would register over RadianceLiteViewer');
+// ── The Lite Viewer node is removed; saved ones are converted on load ───────
+const migSrc = src.slice(src.indexOf('const VIEWER_SOCKETS'), src.indexOf('window.RadianceMigrateLiteViewers'));
+const migrate = new Function(`${migSrc}; return migrateLiteViewerNodes;`)();
+
+function liteGraph(linksAsObjects = false) {
+    const links = [[5, 1, 0, 9, 0, 'IMAGE'], [6, 2, 0, 9, 1, 'IMAGE'], [7, 3, 0, 9, 3, 'FLOAT']];
+    return {
+        nodes: [{ id: 9, type: 'RadianceLiteViewer', widgets_values: ['Linear Rec.2020', 25, ''],
+            properties: { 'Node name for S&R': 'RadianceLiteViewer' },
+            inputs: [{ name: 'image', link: 5 }, { name: 'compare_image', link: 6 },
+                     { name: 'input_space', widget: { name: 'input_space' }, link: null },
+                     { name: 'fps', widget: { name: 'fps' }, link: 7 }] }],
+        links: linksAsObjects
+            ? links.map(([id, o, os, t, ts, type]) => ({ id, origin_id: o, origin_slot: os, target_id: t, target_slot: ts, type }))
+            : links,
+    };
+}
+
+test('a saved Lite Viewer becomes a Viewer in Simple, with its links and values', () => {
+    const g = liteGraph();
+    assert.equal(migrate(g), 1);
+    const n = g.nodes[0];
+    assert.equal(n.type, 'RadianceViewer');
+    assert.equal(n.properties.radiance_viewer_mode, 'simple');
+    assert.deepEqual(n.widgets_values, [false, 'Linear Rec.2020', 'Half (16-bit)', 25]);
+    const slot = (name) => n.inputs.findIndex((i) => i.name === name);
+    assert.equal(n.inputs[slot('image')].link, 5);
+    assert.equal(n.inputs[slot('compare_image')].link, 6);
+    assert.equal(n.inputs[slot('fps')].link, 7);
+    assert.deepEqual(g.links.map((l) => l[4]), [slot('image'), slot('compare_image'), slot('fps')],
+        'links into the node must point at the same sockets by name');
+});
+
+test('the conversion handles object links and subgraphs, and leaves other nodes alone', () => {
+    const inner = liteGraph(true);
+    const g = { nodes: [{ id: 1, type: 'RadianceViewer', widgets_values: [1, 2] }], links: [],
+        definitions: { subgraphs: [inner] } };
+    assert.equal(migrate(g), 1);
+    assert.deepEqual(g.nodes[0].widgets_values, [1, 2]);
+    assert.equal(inner.nodes[0].type, 'RadianceViewer');
+    assert.equal(inner.links.find((l) => l.id === 7).target_slot, 6);
+    assert.equal(migrate({}), 0);
+});
+
+test('the conversion runs before ComfyUI checks for missing nodes', () => {
+    const ext = src.slice(src.indexOf('name: "FXTD.RadianceViewer"'), src.indexOf('name: "FXTD.RadianceViewer"') + 400);
+    assert.match(ext, /beforeConfigureGraph\(graphData\)\s*\{\s*const n = migrateLiteViewerNodes\(graphData\)/);
+});
+
+test('the Lite Viewer node and frontend are gone', () => {
+    for (const f of [join(JS, 'radiance_lite_viewer.js'), join(JS, '..', 'nodes', 'monitor', 'lite_viewer.py')]) {
+        let gone = false;
+        try { readFileSync(f); } catch { gone = true; }
+        assert.ok(gone, `${f} is back`);
+    }
+    assert.doesNotMatch(src.slice(src.indexOf('async beforeRegisterNodeDef')), /RadianceLiteViewer/);
 });
 
 test('releasing the context on teardown is not reported as a failure', () => {

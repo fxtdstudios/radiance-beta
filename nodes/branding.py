@@ -138,7 +138,6 @@ NODE_SECTIONS = {
     "RadianceFocusPeaking": "Review",
     "RadianceFrameStamp": "Review",
     "RadianceHDRMonitor": "Review",
-    "RadianceLiteViewer": "Review",
     "RadiancePolicyGuard": "Review",
     "RadiancePreviewServer": "Review",
     "RadianceQC": "Review",
@@ -343,7 +342,6 @@ TERM_OVERRIDES = {
     "RadianceEXRPassesWriter": "Write EXR Passes",
     # ── Review ────────────────────────────────────────────────────────────
     "RadianceViewer": "Viewer",
-    "RadianceLiteViewer": "Viewer (Lite)",
     "RadianceFrameStamp": "Burn-In",
     # ── Pipeline / DCC ────────────────────────────────────────────────────
     "RadianceNukeSend": "Export to Nuke",

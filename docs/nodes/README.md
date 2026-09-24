@@ -32,4 +32,3 @@ Hidden from the menu. They still load so saved graphs open; the changelog says w
 - Project Manager (`RadianceWorkspace`)
 - Read Image (`RadianceImageLoader`)
 - SAM Loader (not shipped) (`RadianceSAMModelLoader`)
-- Viewer (Lite) (`RadianceLiteViewer`)

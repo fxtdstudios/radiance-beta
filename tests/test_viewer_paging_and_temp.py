@@ -15,7 +15,7 @@ Four separate faults are covered here, all in nodes/monitor.
 
 3. RadianceLiteViewer wrote one FULL RESOLUTION RGBA PNG per frame despite a
    docstring promising "compact temp PNG previews", and had no purge path at
-   all. (Retired in 3.5.0: it now runs through the Radiance Viewer.)
+   all. (Removed in 3.5.0: the Viewer's Simple mode replaces it.)
 
 4. RadiancePreviewServer._ensure_server caught OSError, logged, and returned,
    and serve() then returned a working-looking URL for a server that never
@@ -296,22 +296,6 @@ def test_every_fallback_path_records_a_reason():
     assert js.count("_noteHDRFallback(") >= 2, \
         "a path that drops to the 8-bit proxy is back to only warning the console"
     assert "payload.fallbackReason" in js
-
-
-# ── 4. The lite viewer ──────────────────────────────────────────────────────
-# Retired in 3.5.0: a saved Lite Viewer runs through the Radiance Viewer, so
-# its previews are the Radiance Viewer's, purged by the same bookkeeping.
-
-@pytest.mark.real_torch
-def test_retired_lite_viewer_purges_like_the_viewer(temp_out):
-    from radiance.nodes.monitor.lite_viewer import RadianceLiteViewer
-
-    node = RadianceLiteViewer()
-    node.view(torch.rand(3, 16, 24, 3), unique_id="lite3")
-    first = set(_listdir(temp_out))
-    assert first
-    node.view(torch.rand(3, 16, 24, 3), unique_id="lite3")
-    assert not (first & set(_listdir(temp_out))), "the previous execution's previews survived"
 
 
 # ── 5. The preview server ───────────────────────────────────────────────────

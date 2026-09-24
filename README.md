@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/version-3.5.0-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
-[![Nodes](https://img.shields.io/badge/nodes-158-c8a96e?style=for-the-badge)](#node-map)
+[![Nodes](https://img.shields.io/badge/nodes-157-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
 [![Hugging Face](https://img.shields.io/badge/Hugging_Face-RUDRA_models-ffd21e?style=for-the-badge)](https://huggingface.co/fxtdstudios/RUDRA)
 
@@ -68,7 +68,7 @@ Nothing else needs doing:
   [Multipass Estimate](#models-multipass-estimate)).
 
 Checked on a clean ComfyUI 0.32 with Python 3.13: the registry package
-installs, all 158 nodes load, OCIO is configured, and the first SDR → HDR run
+installs, all 157 nodes load, OCIO is configured, and the first SDR → HDR run
 fetches the model and applies it.
 
 ### Requirements
@@ -123,7 +123,7 @@ pip install -r requirements_mac_silicon.txt
 
 ### Verify
 
-Start ComfyUI and look for `Radiance: successfully loaded 158 nodes (v3.5.0)` in the log.
+Start ComfyUI and look for `Radiance: successfully loaded 157 nodes (v3.5.0)` in the log.
 A lower count means a node module failed to import, usually a missing optional
 dependency; the Environment Guard table printed at startup shows which.
 
@@ -146,7 +146,7 @@ missing on your install.
   `pip install -r ...` line as above, then restart ComfyUI.
 
 The startup log prints the installed version:
-`Radiance: successfully loaded 158 nodes (v3.5.0)`.
+`Radiance: successfully loaded 157 nodes (v3.5.0)`.
 
 ### Upgrading from 2.x or 3.4
 
@@ -390,7 +390,7 @@ The pixel probe samples a cursor, a region or the whole frame, and reports RGBA,
 
 Then the things you reach for while looking: false colour, zebra, a nit-accurate HDR heatmap anchored to BT.2408 reference white, safe areas labelled with the standard they come from, aspect-ratio mattes, nearest-neighbour magnification, timecode, A/B compare with wipe, difference and blink, EXR channel and layer inspection, focus peaking, and a sequence timeline with per-frame thumbnails.
 
-The Lite Viewer is retired: Simple mode does its job. Saved graphs with a Lite Viewer still open and run, in the Viewer's Simple mode.
+The Lite Viewer node is gone: Simple mode does its job. A graph saved with a Lite Viewer opens with a Viewer in its place, in Simple mode, with the same connections and `input_space` / `fps`.
 
 | Key | Action |
 | :--- | :--- |
@@ -446,7 +446,7 @@ FXTD STUDIOS/Radiance
 └─ Pipeline
 ```
 
-**158 nodes**: 148 in the menu and 10 retired ones that stay registered so older saved graphs still open. A few depend on optional packages.
+**157 nodes**: 148 in the menu and 9 retired ones that stay registered so older saved graphs still open. A few depend on optional packages.
 
 Compositing nodes use compositing names (`Grade`, `CDL`, `OCIO ColorSpace`, `Roto`, `Defocus`, `Viewer`, `Read`, `Write`), so they read the way they do in Nuke or Flame. The diffusion layer keeps a `Radiance` prefix, so `Radiance Sampler` and `Radiance VAE Decode` are obviously the AI ones. Typing "radiance" in the search still finds everything.
 
@@ -508,7 +508,7 @@ Models go in `ComfyUI/models/radiance` (MoGe in `models/geometry_estimation`); a
 
 ## Troubleshooting
 
-- **The log says fewer than 158 nodes loaded.** A module failed to import. The
+- **The log says fewer than 157 nodes loaded.** A module failed to import. The
   lines above it name the module and the error, and the Environment Guard
   table shows which package is missing. Reinstall the requirements into
   ComfyUI's own Python (for the Windows portable build:

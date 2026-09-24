@@ -89,7 +89,6 @@
   "RadianceLensDistortion",
   "RadianceLinearCheck",
   "RadianceLinearMatting",
-  "RadianceLiteViewer",
   "RadianceLoadImageMask",
   "RadianceLoraStack",
   "RadianceLuminanceGuidance",

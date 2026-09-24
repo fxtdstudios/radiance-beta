@@ -192,29 +192,16 @@ def test_display_preview_is_exact_ocio():
     assert np.abs(out - np.clip(ref.reshape(frame.shape), 0, 1)).max() < 1e-6
 
 
-# ── Lite Viewer, retired ─────────────────────────────────────────────────────
+# ── Lite Viewer, removed ─────────────────────────────────────────────────────
 
-def test_the_lite_viewer_is_retired_but_saved_graphs_still_load():
-    from radiance.nodes.monitor.lite_viewer import RadianceLiteViewer
-    assert RadianceLiteViewer.DEPRECATED is True
-    spec = RadianceLiteViewer.INPUT_TYPES()
-    # Saved graphs restore widget values by position: the order must not move.
-    assert list(spec["required"]) == ["image"]
-    assert list(spec["optional"]) == ["compare_image", "input_space", "fps"]
-
-
-@pytest.mark.real_torch
-def test_a_saved_lite_viewer_runs_through_the_radiance_viewer(temp_out):
-    from radiance.nodes.monitor.lite_viewer import RadianceLiteViewer
-    img = torch.full((2, 16, 24, 3), 0.25)
-    cmp = torch.full((2, 16, 24, 3), 0.5)
-    out = RadianceLiteViewer().view(img, compare_image=cmp, fps=25, unique_id="l1")
-    ui = out["ui"]
-    assert "radiance_lite_images" not in ui
-    main = [e for e in ui["radiance_images"] if not e.get("is_compare")]
-    b = [e for e in ui["radiance_images"] if e.get("is_compare")]
-    assert len(main) == 2 and len(b) == 2, "the Radiance Viewer frontend needs A and B frames"
-    assert torch.equal(out["result"][0], img)
+def test_the_lite_viewer_node_is_gone():
+    """Removed in 3.5.0: the Viewer's Simple mode replaces it. The frontend
+    converts a saved Lite Viewer into a Viewer when a graph loads
+    (js/tests/viewer_compare_mode.test.mjs checks that conversion)."""
+    import radiance
+    from pathlib import Path
+    assert "RadianceLiteViewer" not in radiance.NODE_CLASS_MAPPINGS
+    assert not (Path(radiance.__file__).parent / "nodes" / "monitor" / "lite_viewer.py").exists()
 
 
 # ── caching ──────────────────────────────────────────────────────────────────

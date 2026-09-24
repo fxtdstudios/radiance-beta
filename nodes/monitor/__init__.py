@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 
-from radiance.nodes.monitor.lite_viewer import RadianceLiteViewer
 from radiance.nodes.monitor.viewer import RadianceGradeApply, RadianceViewer
 from radiance.nodes.monitor.realtime import (
     RadianceFalseColorMonitor,
@@ -19,7 +18,6 @@ from radiance.nodes.aggregate import fold_in_module_nodes
 logger = logging.getLogger("radiance.nodes.monitor")
 
 NODE_CLASS_MAPPINGS = {
-    "RadianceLiteViewer": RadianceLiteViewer,
     "RadianceViewer": RadianceViewer,
     "RadianceFocusPeaking": RadianceFocusPeaking,
     "RadianceContactSheet": RadianceContactSheet,
@@ -46,7 +44,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceGradeApply": "◎ Radiance Bake Viewer Grade",
     "RadianceFalseColorMonitor": "◎ False Color Monitor",
     "RadianceSplitView": "◎ Split View",
-    "RadianceLiteViewer": "◎ Radiance Lite Viewer",
     "RadianceViewer": "◎ Radiance Viewer",
     "RadianceFocusPeaking": "◎ Focus Peaking",
     "RadianceContactSheet": "◎ Contact Sheet",

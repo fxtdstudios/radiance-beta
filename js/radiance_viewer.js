@@ -21174,8 +21174,61 @@ window.RadianceViewer = RadianceViewer;
 //                          NODE REGISTRATION
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//                 3.5.0: SAVED LITE VIEWERS BECOME VIEWERS
+// ═══════════════════════════════════════════════════════════════════════════════
+// The Lite Viewer node was removed; the Viewer's Simple mode does its job. A
+// graph saved with one is rewritten before ComfyUI configures it, so it opens
+// as a Radiance Viewer in Simple mode instead of a missing node: same links,
+// same input_space and fps. Runs on the root graph and every subgraph.
+const VIEWER_SOCKETS = [
+    ['image', 'IMAGE,VIDEO', null], ['compare_image', 'IMAGE,VIDEO', null], ['zdepth', 'IMAGE,VIDEO', null],
+    ['exposure_bracketing', 'BOOLEAN', 'exposure_bracketing'], ['input_space', 'COMBO', 'input_space'],
+    ['float_precision', 'COMBO', 'float_precision'], ['fps', 'FLOAT', 'fps'],
+];
+function migrateLiteViewerNodes(graph) {
+    if (!graph || typeof graph !== 'object') return 0;
+    let count = 0;
+    const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+    const links = Array.isArray(graph.links) ? graph.links : [];
+    for (const node of nodes) {
+        if (!node || node.type !== 'RadianceLiteViewer') continue;
+        const oldInputs = Array.isArray(node.inputs) ? node.inputs : [];
+        const linkOf = (name) => oldInputs.find((i) => i?.name === name)?.link ?? null;
+        const wv = Array.isArray(node.widgets_values) ? node.widgets_values : [];
+        const inputSpace = typeof wv[0] === 'string' ? wv[0] : 'Auto';
+        const fps = Number.isFinite(Number(wv[1])) ? Number(wv[1]) : 0;
+        node.type = 'RadianceViewer';
+        node.inputs = VIEWER_SOCKETS.map(([name, type, widget], i) => ({
+            name, localized_name: name, type, ...(i > 0 ? { shape: 7 } : {}),
+            ...(widget ? { widget: { name: widget } } : {}),
+            link: linkOf(name),
+        }));
+        node.widgets_values = [false, inputSpace, 'Half (16-bit)', fps];
+        node.properties = { ...(node.properties || {}), 'Node name for S&R': 'RadianceViewer', radiance_viewer_mode: 'simple' };
+        // Links into this node carry the socket index: re-point them by name.
+        node.inputs.forEach((inp, slot) => {
+            if (inp.link == null) return;
+            for (const l of links) {
+                if (Array.isArray(l) && l[0] === inp.link) l[4] = slot;
+                else if (l && !Array.isArray(l) && l.id === inp.link) l.target_slot = slot;
+            }
+        });
+        count++;
+    }
+    for (const sub of graph.definitions?.subgraphs || []) count += migrateLiteViewerNodes(sub);
+    return count;
+}
+window.RadianceMigrateLiteViewers = migrateLiteViewerNodes;
+
 app.registerExtension({
     name: "FXTD.RadianceViewer",
+    // Before ComfyUI looks for missing node types, so a saved Lite Viewer is
+    // never reported missing.
+    async beforeConfigureGraph(graphData) {
+        const n = migrateLiteViewerNodes(graphData);
+        if (n) console.info(`[Radiance] ${n} Lite Viewer node(s) opened as Radiance Viewer (Simple mode).`);
+    },
     init() {
         // Hide the two pinned legacy widgets on Radiance viewer nodes only.
         //
@@ -21219,8 +21272,7 @@ app.registerExtension({
         }
     },
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
-        // 3.5.0: the retired Lite Viewer opens here too, in Simple mode.
-        if (!["RadianceViewer", "FXTD_RadianceViewer", "RadianceLiteViewer"].includes(nodeData.name)) return;
+        if (!["RadianceViewer", "FXTD_RadianceViewer"].includes(nodeData.name)) return;
 
         // exposure_bracketing was pinned here to true and hidden, while
         // having no entry in INPUT_TYPES at all: a legacy hidden widget that
@@ -21365,11 +21417,10 @@ app.registerExtension({
             const result = onConfigure?.apply(this, arguments);
             scheduleHiddenViewerDefaults(this);
             // 3.5.0: a saved graph opens in the mode it was saved in. Graphs
-            // saved before the switch existed open the way they looked then:
-            // Advanced for the Radiance Viewer, Simple for a Lite Viewer.
+            // saved before the switch existed open the way they looked then,
+            // in Advanced (a converted Lite Viewer carries 'simple').
             const saved = info?.properties?.radiance_viewer_mode;
-            const legacy = this.type === 'RadianceLiteViewer' ? 'simple' : 'advanced';
-            this.radianceViewer?.setUIMode?.(saved || legacy);
+            this.radianceViewer?.setUIMode?.(saved || 'advanced');
             return result;
         };
 

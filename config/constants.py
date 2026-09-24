@@ -31,4 +31,6 @@ WEB_DIRECTORY = "./js"
 #: nodes/catalog.py and tests/test_node_publication_completeness.py.
 #: 2026-09-24: 156 -> 157. RadianceHDRVAEEncode, the encoder HDR VAE Decode
 #: inverts, implemented as RadianceVAE4KEncode but never registered.
-EXPECTED_MIN_NODE_COUNT = 158
+#: 2026-09-25: 158 -> 157. RadianceLiteViewer removed; the Viewer's Simple
+#: mode replaces it and the frontend converts saved Lite Viewers on load.
+EXPECTED_MIN_NODE_COUNT = 157
