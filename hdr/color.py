@@ -1158,6 +1158,10 @@ class ARRIWideGamut4:
 
 class ACES2OutputTransform:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
+    # 3.5.0: hidden from the node menu, still fully working. It duplicates
+    # "ACES 2.0 Output Transform" (RadianceACES2OutputTransformFull); saved
+    # graphs that use it keep loading and rendering correctly.
+    DEPRECATED = True
     """
     Apply ACES 2.0 Output Transform with proper gamut mapping
     for SDR, HDR, or Cinema output.

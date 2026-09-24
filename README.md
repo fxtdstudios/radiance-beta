@@ -159,8 +159,11 @@ What affects an existing graph:
   latent decoders (`rudra_turbo_decoder_*`, `rudra_full_decoder_*`) are no
   longer read and can be deleted from `models/radiance`.
 - **To carry HDR through a VAE, use VAE Encode (HDR)** with VAE Decode (HDR).
-  HDR Latent Encoder and HDR Turbo Encoder are marked *Legacy*: nothing decodes
-  their latents back to HDR any more.
+  HDR Latent Encoder and HDR Turbo Encoder are retired: nothing decodes their
+  latents back to HDR any more. They are gone from the menu, and a saved graph
+  that uses one still opens but stops with a message to swap in VAE Encode
+  (HDR). ACES 2.0 Output Transform (Legacy) is also off the menu; it still
+  works in saved graphs, and ACES 2.0 Output Transform replaces it.
 - **SAM Loader and SAM Mask Generator** no longer pretend to segment; use a SAM2
   node pack and feed its mask into Radiance.
 

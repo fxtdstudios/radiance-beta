@@ -97,6 +97,13 @@ All notable changes to FXTD Radiance will be documented in this file.
   - *Lite Viewer.* Readout, clip check and diff read an fp16 float proxy, so they show source values at source coordinates. The canvas is in device pixels, so 1:1 is exact on scaled displays; it was sized from a bordered box, 0.3 % off. B is scaled to A, diff has a gain, and play/loop run at the source fps. Frames load progressively.
   - Tests: `tests/test_viewer_phase1.py` (11), and `js/tests/viewer_color.test.mjs` and `js/tests/lite_viewer.test.mjs`, which read real pixels back from Chromium.
 
+- **Legacy nodes off the menu.** HDR Latent Encoder and HDR Turbo Encoder are
+  hidden (`DEPRECATED`) and now raise when run, naming VAE Encode (HDR): a
+  graph using them used to render clipped with no warning, since their
+  decoders were retired. ACES 2.0 Output Transform (Legacy) is hidden and keeps
+  working; ACES 2.0 Output Transform replaces it. All three stay registered so
+  saved graphs open, and the registry's 2.3.3 had none of them. 157 nodes
+  registered, 149 in the menu.
 - **One version everywhere.** `pyproject.toml`, `config/constants.py`,
   `package.json`, the CHANGELOG and the README badge all read 3.5.0, and
   `tests/test_version_sync.py` fails if they drift. What users saw still said
