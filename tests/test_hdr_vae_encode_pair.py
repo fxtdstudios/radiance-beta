@@ -51,8 +51,22 @@ def test_mean_sampling_accepts_a_plain_tensor_posterior():
     assert isinstance(out, torch.Tensor) and out.shape == (1, 3, 2, 2)
 
 
-def test_legacy_encoders_say_so():
+def test_legacy_encoders_are_hidden_and_stop_with_the_replacement():
+    """They stay registered so saved graphs open, but running one would render
+    clipped with no warning, so it stops and names VAE Encode (HDR)."""
     from radiance.nodes.hdr.encoder import RadianceHDRLatentEncoder, RadianceHDRTurboEncoder
     for cls in (RadianceHDRLatentEncoder, RadianceHDRTurboEncoder):
+        assert cls.DEPRECATED is True
         assert cls.DESCRIPTION.startswith("Legacy.")
         assert "VAE Encode (HDR)" in cls.DESCRIPTION
+        with pytest.raises(RuntimeError, match="VAE Encode \\(HDR\\)"):
+            getattr(cls(), cls.FUNCTION)(image=torch.zeros(1, 8, 8, 3), vae=object())
+
+
+def test_legacy_aces_output_transform_is_hidden_but_still_works():
+    from radiance.hdr.color import ACES2OutputTransform
+    assert ACES2OutputTransform.DEPRECATED is True
+    import numpy as np
+    out = ACES2OutputTransform()._apply_tonescale_drt(
+        np.full((1, 1, 1, 3), 0.18, dtype=np.float32), peak_luminance=100.0, is_hdr=False)
+    assert 0.05 < float(out[0, 0, 0, 0]) < 0.2        # ACES 2.0 SDR grey ~10 nits

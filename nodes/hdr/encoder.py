@@ -146,8 +146,17 @@ def _compute_channel_stats(image: torch.Tensor):
 # RadianceHDRTurboEncoder  (redesigned)
 # ─────────────────────────────────────────────────────────────────────────────
 
+_LEGACY_ENCODER_STOP = (
+    "this encoder is retired: the latent decoders it fed were removed in "
+    "Radiance 3.5.0, so nothing can decode its latent back to HDR and the "
+    "graph would render clipped. Replace it with 'VAE Encode (HDR)' (same "
+    "image and vae inputs), which 'VAE Decode (HDR)' inverts exactly."
+)
+
+
 class RadianceHDRTurboEncoder:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
+    DEPRECATED = True   # hidden from the menu; saved graphs still open
     DESCRIPTION = (
         "Legacy. Its TurboDecoder was retired, so no Radiance node decodes this "
         "latent back to HDR (it comes back compressed and clipped). For an HDR "
@@ -199,7 +208,11 @@ class RadianceHDRTurboEncoder:
     # VAE encode builds an autograd graph unless guarded: .eval() does not
     # freeze parameters, so requires_grad stays True on every weight.
     @torch.no_grad()
-    def encode(self, image: torch.Tensor, vae, compression_ratio: float, exposure_offset: float):
+    def encode(self, image: torch.Tensor, vae, compression_ratio: float = 0.5,
+               exposure_offset: float = 0.0):
+        raise RuntimeError(f"[HDR Turbo Encoder] {_LEGACY_ENCODER_STOP}")
+
+    def _legacy_encode(self, image: torch.Tensor, vae, compression_ratio: float, exposure_offset: float):
         # 1. Exposure offset in scene-linear light
         img = image * (2.0 ** exposure_offset)
 
@@ -406,6 +419,7 @@ class RadianceHDRLatentEncoder:
     FUNCTION    = "encode"
     RETURN_TYPES  = ("LATENT", "STRING")
     RETURN_NAMES  = ("latent",  "channel_stats")
+    DEPRECATED = True   # hidden from the menu; saved graphs still open
     DESCRIPTION = (
         "Legacy. The latent decoders this fed were retired in 3.5.0, so no Radiance "
         "node decodes this latent back to HDR (VAE Decode (HDR) returns it clipped at "
@@ -457,8 +471,11 @@ class RadianceHDRLatentEncoder:
 
     # VAE encode builds an autograd graph unless guarded: .eval() does not
     # freeze parameters, so requires_grad stays True on every weight.
+    def encode(self, image=None, vae=None, *args, **kwargs):
+        raise RuntimeError(f"[HDR Latent Encoder] {_LEGACY_ENCODER_STOP}")
+
     @torch.no_grad()
-    def encode(
+    def _legacy_encode(
         self,
         image: "torch.Tensor",
         vae,
