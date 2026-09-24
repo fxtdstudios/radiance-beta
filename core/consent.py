@@ -24,7 +24,7 @@ Studios that want the old always-download behaviour set
 `RADIANCE_ALLOW_DOWNLOADS=1` once in the ComfyUI launch environment.
 
 One exception to ask-first: Radiance's own pixel SDR-to-HDR checkpoint
-(~5 MB, Apache-2.0, sha256-pinned) downloads on first use unless
+(~5 MB, first-party, sha256-pinned; weights licensed non-commercial) downloads on first use unless
 `RADIANCE_ALLOW_DOWNLOADS=0`, `HF_HUB_OFFLINE=1` or `TRANSFORMERS_OFFLINE=1`
 is set. See `radiance.model.pixel_download`.
 """

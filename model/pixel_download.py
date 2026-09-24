@@ -7,11 +7,12 @@ It used to be a manual install: download from Hugging Face, drop it in
 ``models/radiance``. Anyone who skipped that step got the plain expansion
 fallback with only a log line to say why.
 
-This module fetches it on first use instead. The file is small (~5 MB),
-first-party and Apache-2.0, so unlike the large third-party weights it is
-allowed by default. It is pinned to one Hugging Face commit and verified by
-size and sha256 before it is moved into place, so a changed or truncated file
-is never loaded.
+This module fetches it on first use instead. The file is small (~5 MB) and
+first-party, so unlike the large third-party weights it is allowed by default.
+The weights are licensed for NON-COMMERCIAL use (RUDRA's weights licence,
+separate from Radiance's GPL-3.0 code), and the download says so in the log.
+It is pinned to one Hugging Face commit and verified by size and sha256
+before it is moved into place, so a changed or truncated file is never loaded.
 
 Turn it off with any of::
 
@@ -41,6 +42,7 @@ PIXEL_URL = (
     f"https://huggingface.co/{PIXEL_REPO}/resolve/{PIXEL_REVISION}/{PIXEL_REPO_PATH}"
 )
 PIXEL_PAGE_URL = f"https://huggingface.co/{PIXEL_REPO}/blob/main/{PIXEL_REPO_PATH}"
+PIXEL_LICENSE_URL = f"https://huggingface.co/{PIXEL_REPO}/blob/main/LICENSE"
 PIXEL_SIZE = 4_878_392
 PIXEL_SHA256 = "cffaefc7c2d06fd381b1222fe084cac9019eef881eb533e09c365745f84df2ac"
 
@@ -147,7 +149,12 @@ def download_pixel_checkpoint(*, force: bool = False) -> Optional[Path]:
             )
             return None
 
-        logger.info("[Radiance] Installed %s", final)
+        logger.info(
+            "[Radiance] Installed %s\n"
+            "           RUDRA weights are licensed for non-commercial use only; "
+            "commercial use needs a licence from FXTD Studios. Terms: %s",
+            final, PIXEL_LICENSE_URL,
+        )
         return final
 
 

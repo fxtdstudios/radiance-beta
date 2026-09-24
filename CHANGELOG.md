@@ -96,6 +96,13 @@ All notable changes to FXTD Radiance will be documented in this file.
   - *Lite Viewer.* Readout, clip check and diff read an fp16 float proxy, so they show source values at source coordinates. The canvas is in device pixels, so 1:1 is exact on scaled displays; it was sized from a bordered box, 0.3 % off. B is scaled to A, diff has a gain, and play/loop run at the source fps. Frames load progressively.
   - Tests: `tests/test_viewer_phase1.py` (11), and `js/tests/viewer_color.test.mjs` and `js/tests/lite_viewer.test.mjs`, which read real pixels back from Chromium.
 
+- **RUDRA weights licence stated correctly.** The README called the RUDRA
+  weights Apache-2.0. RUDRA's code is; its trained weights have been
+  non-commercial since 5 Sep 2026 (RUDRA `NOTICE` and `checkpoints/LICENSE`),
+  because the HdM-HDR training data is licensed for academic use only. The
+  README model section now says so and links the terms, the download log
+  states it on install, and the docstrings that repeated "Apache-2.0" are
+  corrected. Radiance's own code licence is unchanged.
 - **RUDRA pixel model: false colour, red cast and over-peak channels in
   recovered highlights.** Reported on a clean Flux.2 sunset (Hybrid, default
   settings, v5): false-colour rings around the sun lined up with where each
@@ -146,7 +153,7 @@ All notable changes to FXTD Radiance will be documented in this file.
 - **The RUDRA pixel model downloads itself.** SDR → HDR Universal and
   SDR → HDR Recover used to need a RUDRA checkpoint installed by hand;
   without it Universal quietly fell back to plain expansion. Radiance now
-  fetches it on first use (~5 MB, Apache-2.0) from
+  fetches it on first use (~5 MB) from
   `huggingface.co/fxtdstudios/RUDRA`, pinned to a commit and verified by size
   and SHA-256 before it is moved into `models/radiance` (new
   `model/pixel_download.py`). Because it is small and first-party it is on by

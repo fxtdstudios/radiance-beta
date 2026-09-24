@@ -127,8 +127,18 @@ Learned SDR → HDR recovery uses the **RUDRA** pixel model: a compact network
 that takes decoded 8-bit SDR pixels and returns scene-linear HDR, recovering
 clipped highlights and crushed shadows. It works on any image or frame batch
 and needs no VAE, so it applies equally to generated frames and to footage.
-The weights are published on Hugging Face under Apache-2.0:
+The weights are published on Hugging Face,
 [fxtdstudios/RUDRA](https://huggingface.co/fxtdstudios/RUDRA).
+
+**The RUDRA weights are licensed for non-commercial use only**, unlike
+Radiance's code (GPL-3.0) and RUDRA's code (Apache 2.0). One training source
+(HdM-HDR-2014 / HdM-HFR-2017) is free for academic use only, and FXTD Studios
+cannot waive that term. Research, evaluation, teaching and personal projects
+are fine; commercial production, client deliverables and paid services need a
+commercial licence from [FXTD Studios](https://fxtdstudios.com). The full
+terms are in the weights'
+[licence](https://huggingface.co/fxtdstudios/RUDRA/blob/main/LICENSE). Expand
+mode uses no weights and has no such restriction.
 
 **It downloads automatically.** The first time SDR → HDR Universal or
 SDR → HDR Recover needs the model and none is installed, Radiance fetches
@@ -583,4 +593,6 @@ Every node also carries its own description and per-input tooltips, which ComfyU
 
 ## License
 
-Radiance is released under the [GPL-3.0 license](LICENSE).
+Radiance is released under the [GPL-3.0 license](LICENSE). The RUDRA model weights that
+SDR → HDR Universal and Recover download are a separate work under their own
+non-commercial licence; see [Models](#models-rudra-sdr--hdr).
