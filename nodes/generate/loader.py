@@ -886,9 +886,12 @@ class RadianceControlNetApply:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "conditioning": ("CONDITIONING", ),
-                "control_net": ("CONTROL_NET", ),
-                "image": ("IMAGE", ),
+                "conditioning": ("CONDITIONING", {
+                    "tooltip": "Conditioning to attach the ControlNet to (usually the positive). An existing ControlNet on it is chained, not replaced."}),
+                "control_net": ("CONTROL_NET", {
+                    "tooltip": "ControlNet model from a ControlNet loader. Strength 0 returns the conditioning unchanged."}),
+                "image": ("IMAGE", {
+                    "tooltip": "Control hint image (edges, depth, pose and so on) in display-referred 0-1 values. No VAE is passed, so ControlNets that need a VAE-encoded hint are not supported."}),
                 "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05,
                     "tooltip": "Global strength of the control effect."}),
                 "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,

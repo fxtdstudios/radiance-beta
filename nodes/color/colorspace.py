@@ -61,7 +61,10 @@ def _temperature_to_xy(kelvin: float) -> Tuple[float, float]:
 
 class RadianceWhiteBalance:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Color"
-    DESCRIPTION = "Adjust white balance using a reference neutral or colour temperature."
+    DESCRIPTION = (
+        "Shift white balance of a linear image by colour temperature and tint, a Bradford illuminant adaptation, "
+        "or per-channel RGB gains. Use it on scene-linear plates; it does not sample a neutral from the image."
+    )
     FUNCTION = "apply"
     RETURN_TYPES = ("IMAGE", "STRING")
     RETURN_NAMES = ("image", "grade_info")
@@ -70,20 +73,20 @@ class RadianceWhiteBalance:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "mode": (["Temperature / Tint", "Illuminant Adapt", "Manual RGB Gain"], {"default": "Temperature / Tint"}),
-                "preset": (["Manual", "Daylight (5500K)", "Tungsten (3200K)", "Fluorescent (4200K)", "Flash (6000K)", "Shade (7500K)"], {"default": "Manual"}),
-                "temperature": ("FLOAT", {"default": 6500.0, "min": 1667.0, "max": 25000.0, "step": 50.0}),
-                "tint": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.005}),
-                "src_illuminant": (list(_ILLUMINANT_XY.keys()), {"default": "D65"}),
-                "dst_illuminant": (list(_ILLUMINANT_XY.keys()), {"default": "D50"}),
-                "gain_r": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.001}),
-                "gain_g": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.001}),
-                "gain_b": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.001}),
-                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "image": ("IMAGE", {"tooltip": "RGB image to rebalance, scene-linear (Rec.709 primaries). Apply to linear data, not display-encoded sRGB."}),
+                "mode": (["Temperature / Tint", "Illuminant Adapt", "Manual RGB Gain"], {"default": "Temperature / Tint", "tooltip": "Temperature / Tint: adapt from D65 to a Kelvin white plus a green/magenta tint. Illuminant Adapt: Bradford from src to dst illuminant. Manual RGB Gain: multiply channels."}),
+                "preset": (["Manual", "Daylight (5500K)", "Tungsten (3200K)", "Fluorescent (4200K)", "Flash (6000K)", "Shade (7500K)"], {"default": "Manual", "tooltip": "Replaces temperature with a preset Kelvin value. Only used in Temperature / Tint mode; Manual uses the temperature slider."}),
+                "temperature": ("FLOAT", {"default": 6500.0, "min": 1667.0, "max": 25000.0, "step": 50.0, "tooltip": "Target white in Kelvin (Planckian locus), adapted from D65. Lower values warm the image, higher values cool it; 6500 is close to neutral. Temperature / Tint mode only."}),
+                "tint": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.005, "tooltip": "Green channel gain of 2^(-tint/2): positive adds magenta, negative adds green, +/-1 = half a stop. Temperature / Tint mode only."}),
+                "src_illuminant": (list(_ILLUMINANT_XY.keys()), {"default": "D65", "tooltip": "White point the image was balanced for (CIE standard illuminant). Illuminant Adapt mode only."}),
+                "dst_illuminant": (list(_ILLUMINANT_XY.keys()), {"default": "D50", "tooltip": "White point to adapt to with the Bradford transform. Illuminant Adapt mode only."}),
+                "gain_r": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.001, "tooltip": "Linear red multiplier, 1 = unchanged. Manual RGB Gain mode only."}),
+                "gain_g": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.001, "tooltip": "Linear green multiplier, 1 = unchanged. Manual RGB Gain mode only."}),
+                "gain_b": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.001, "tooltip": "Linear blue multiplier, 1 = unchanged. Manual RGB Gain mode only."}),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Linear mix between the original (0) and the corrected image (1)."}),
             },
             "optional": {
-                "grade_info_in": ("STRING", {"forceInput": True}),
+                "grade_info_in": ("STRING", {"forceInput": True, "tooltip": "Optional grade_info JSON from an upstream node. Only recorded as \"upstream\" in this node's info output; it does not change the image."}),
             },
         }
 
@@ -136,7 +139,10 @@ class RadianceWhiteBalance:
 
 class RadianceColorSpaceConvert:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Color"
-    DESCRIPTION = "Convert images between named colour spaces."
+    DESCRIPTION = (
+        "Convert pixel values between working, display and camera-log colour spaces via a Rec.709-primaries linear "
+        "intermediate (OCIO for the non-log spaces when a config is loaded). Camera logs are transfer curves only, no gamut change."
+    )
     FUNCTION = "apply"
     RETURN_TYPES = ("IMAGE", "STRING")
     RETURN_NAMES = ("image", "grade_info")
@@ -158,14 +164,14 @@ class RadianceColorSpaceConvert:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "src_space": (cls._COLOR_SPACES, {"default": "Linear sRGB (D65)"}),
-                "dst_space": (cls._COLOR_SPACES, {"default": "ACEScg"}),
-                "direction": (["Forward", "Inverse"], {"default": "Forward"}),
-                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "image": ("IMAGE", {"tooltip": "Image encoded in src_space (or in dst_space when direction is Inverse)."}),
+                "src_space": (cls._COLOR_SPACES, {"default": "Linear sRGB (D65)", "tooltip": "Encoding of the input. Camera-log choices decode the log curve only and keep Rec.709 primaries; ACES choices also convert AP1 primaries."}),
+                "dst_space": (cls._COLOR_SPACES, {"default": "ACEScg", "tooltip": "Encoding to convert to. Camera-log choices apply the log curve only, on Rec.709 primaries."}),
+                "direction": (["Forward", "Inverse"], {"default": "Forward", "tooltip": "Forward converts src_space to dst_space. Inverse swaps them (dst_space to src_space)."}),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Mix between input and converted pixel values (0 = input, 1 = full conversion). The mix is done on the raw values of two different encodings."}),
             },
             "optional": {
-                "grade_info_in": ("STRING", {"forceInput": True}),
+                "grade_info_in": ("STRING", {"forceInput": True, "tooltip": "Optional grade_info JSON from an upstream node. Only recorded as \"upstream\" in this node's info output; it does not change the image."}),
             },
         }
 
@@ -397,7 +403,10 @@ _M_XYZ_TO_REC2020 = torch.tensor([
 
 class RadianceACESTransform:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Color"
-    DESCRIPTION = "Apply ACES 1.x Input, Viewing, or Output Transform to an image."
+    DESCRIPTION = (
+        "Approximate ACES-style output transform: a fitted filmic tone curve (Narkowicz ACES fit, not the full RRT) "
+        "on ACEScg, then conversion and encoding for an sRGB, P3, PQ or HLG display. Use for quick previews, not deliverables."
+    )
     FUNCTION = "apply"
     RETURN_TYPES = ("IMAGE", "STRING")
     RETURN_NAMES = ("image", "aces_info")
@@ -409,13 +418,13 @@ class RadianceACESTransform:
         return {
             "required": {
                 "image": ("IMAGE", {"tooltip": "Scene-linear ACEScg image."}),
-                "odt": (cls._ODT_OPTIONS, {"default": "sRGB D65"}),
-                "exposure_offset": ("FLOAT", {"default": 0.0, "min": -4.0, "max": 4.0, "step": 0.1}),
-                "peak_nits": ("FLOAT", {"default": 1000.0, "min": 100.0, "max": 10000.0, "step": 100.0}),
-                "saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.5, "step": 0.02}),
+                "odt": (cls._ODT_OPTIONS, {"default": "sRGB D65", "tooltip": "Target display. sRGB: sRGB curve. DCI-P3 D65: P3 primaries, 2.6 gamma. Rec.2020 PQ: ST 2084 signal. Rec.2020 HLG: HLG signal, tone-mapped white at signal 1.0."}),
+                "exposure_offset": ("FLOAT", {"default": 0.0, "min": -4.0, "max": 4.0, "step": 0.1, "tooltip": "Exposure change in stops applied to the scene-linear input before the tone curve."}),
+                "peak_nits": ("FLOAT", {"default": 1000.0, "min": 100.0, "max": 10000.0, "step": 100.0, "tooltip": "Luminance in nits that tone-mapped white (1.0) is encoded at. Only used by Rec.2020 PQ (HDR10); ignored by the other outputs."}),
+                "saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.5, "step": 0.02, "tooltip": "Saturation after the tone curve, around Rec.709-weighted luma: 0 = greyscale, 1 = unchanged. Result is clamped to 0..1."}),
             },
             "optional": {
-                "grade_info_in": ("STRING", {"forceInput": True}),
+                "grade_info_in": ("STRING", {"forceInput": True, "tooltip": "Optional grade_info JSON from an upstream node. Only recorded as \"upstream\" in this node's info output; it does not change the image."}),
             },
         }
 
@@ -489,7 +498,10 @@ class RadianceACESTransform:
 
 class RadianceBitDepthDegrade:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Color"
-    DESCRIPTION = "Simulate lower bit-depth quantisation for look development and QC."
+    DESCRIPTION = (
+        "Quantise an image to a lower bit depth, with optional dither, and output the error and a threshold mask. "
+        "Use it to preview banding in 8/10-bit deliveries; feed the display-encoded image as it will be delivered."
+    )
     FUNCTION = "degrade"
     RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "STRING")
     RETURN_NAMES = ("quantized", "delta_amplified", "banding_mask", "metrics")
@@ -498,14 +510,14 @@ class RadianceBitDepthDegrade:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "bit_depth": ("INT", {"default": 8, "min": 4, "max": 16, "step": 1, "display": "slider"}),
-                "dither_mode": (["none", "triangular", "floyd-steinberg"], {"default": "triangular"}),
+                "image": ("IMAGE", {"tooltip": "Display-encoded 0..1 image, quantised as is (no transfer conversion); values outside 0..1 are clipped. Alpha passes through unchanged."}),
+                "bit_depth": ("INT", {"default": 8, "min": 4, "max": 16, "step": 1, "display": "slider", "tooltip": "Target bits per channel; the 0..1 range is split into 2^bits - 1 steps."}),
+                "dither_mode": (["none", "triangular", "floyd-steinberg"], {"default": "triangular", "tooltip": "none: plain rounding. triangular: random TPDF noise of +/-1 step before rounding. floyd-steinberg: error diffusion, pure Python per pixel and very slow on large images."}),
             },
             "optional": {
-                "delta_gain": ("FLOAT", {"default": 10.0, "min": 1.0, "max": 100.0, "step": 0.5}),
-                "banding_threshold": ("FLOAT", {"default": 0.004, "min": 0.0005, "max": 0.05, "step": 0.0005}),
-                "restore_from_quantized": ("BOOLEAN", {"default": False}),
+                "delta_gain": ("FLOAT", {"default": 10.0, "min": 1.0, "max": 100.0, "step": 0.5, "tooltip": "Multiplier on the absolute error |original - quantised| for the delta_amplified output, clipped to 1."}),
+                "banding_threshold": ("FLOAT", {"default": 0.004, "min": 0.0005, "max": 0.05, "step": 0.0005, "tooltip": "Per-pixel error (0..1 units, largest channel) above which banding_mask is white. 0.004 is about one 8-bit code value. This flags quantisation error, not detected bands."}),
+                "restore_from_quantized": ("BOOLEAN", {"default": False, "tooltip": "Currently has no effect: the node ignores this setting."}),
             },
         }
 

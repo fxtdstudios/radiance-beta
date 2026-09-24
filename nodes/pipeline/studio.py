@@ -72,6 +72,7 @@ class RadianceCinemaStudio:
                         "multiline": True,
                         "default": "A cinematic shot of...",
                         "dynamicPrompts": False,
+                        "tooltip": "Subject and scene description. It opens the prompt (after the shot type, if set) and gets a closing full stop if it has none.",
                     },
                 ),
                 "camera": (
@@ -79,20 +80,23 @@ class RadianceCinemaStudio:
                     {
                         "default": (
                             cls.CAMERA_LIST[1] if len(cls.CAMERA_LIST) > 1 else "None"
-                        )
+                        ),
+                        "tooltip": "Camera body named in the prompt as 'Shot on <camera>'; its sensor is listed in the technical report. Text only, no image processing. None omits it.",
                     },
                 ),
                 "lens_series": (
                     cls.LENS_LIST,
-                    {"default": cls.LENS_LIST[1] if len(cls.LENS_LIST) > 1 else "None"},
+                    {"default": cls.LENS_LIST[1] if len(cls.LENS_LIST) > 1 else "None",
+                     "tooltip": "Lens set named in the prompt as 'using <lens>'. None omits it."},
                 ),
-                "focal_length": (cls.FOCAL_LENGTHS, {"default": "50mm Standard"}),
-                "aperture": (APERTURES, {"default": "T2.0 (Cinematic Separation)"}),
+                "focal_length": (cls.FOCAL_LENGTHS, {"default": "50mm Standard", "tooltip": "Focal length added as 'at <N>mm' (the descriptive word is dropped). Variable / Zoom omits it."}),
+                "aperture": (APERTURES, {"default": "T2.0 (Cinematic Separation)", "tooltip": "T-stop written into the prompt as 'aperture T<N>', a depth-of-field cue for the model. Always included."}),
                 "shutter": (
                     SHUTTER_ANGLES,
-                    {"default": "180° (Standard Motion - 1/48s)"},
+                    {"default": "180° (Standard Motion - 1/48s)",
+                     "tooltip": "Shutter angle written as 'shutter <angle>°', a motion-blur cue for the model. Always included."},
                 ),
-                "iso": (ISO_SETTINGS, {"default": "800 ISO (Native Digital)"}),
+                "iso": (ISO_SETTINGS, {"default": "800 ISO (Native Digital)", "tooltip": "ISO written as 'ISO <N>', a noise and grain cue for the model. Always included."}),
             },
             "optional": {
                 "shot_type": (
@@ -108,7 +112,8 @@ class RadianceCinemaStudio:
                         "Extreme Close-Up",
                         "Macro Detail",
                     ],
-                    {"default": "Medium Shot"},
+                    {"default": "Medium Shot",
+                     "tooltip": "Framing prefixed to the prompt as '<shot type> of <base prompt>'. None omits it."},
                 ),
                 "camera_movement": (
                     [
@@ -125,7 +130,8 @@ class RadianceCinemaStudio:
                         "Dutch Angle",
                         "Whip Pan",
                     ],
-                    {"default": "None"},
+                    {"default": "None",
+                     "tooltip": "Camera move added as its own sentence after the subject. None omits it."},
                 ),
             },
         }
@@ -134,7 +140,7 @@ class RadianceCinemaStudio:
     RETURN_NAMES = ("prompt", "technical_data_str")
     FUNCTION = "generate_cinema_prompt"
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Generate"
-    DESCRIPTION = "Generate authentic cinematic prompts using real-world camera and lens profiles."
+    DESCRIPTION = "Build a text prompt from camera, lens, exposure and framing choices using real-world camera and lens names. Outputs the prompt plus a plain-text technical report; it does not process images."
 
     def generate_cinema_prompt(
         self,

@@ -20,7 +20,7 @@ class RadianceMotionBlur:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": "Frames to blur, same size and batch as motion_vectors. Averaged as given, so scene-linear input gives physically correct highlight streaks."}),
                 "motion_vectors": ("IMAGE", {"tooltip": "32-bit UV vectors from Radiance Optical Flow."}),
                 "shutter_angle": ("FLOAT", {"default": 180.0, "min": 0.0, "max": 720.0, "step": 1.0,
                     "tooltip": "Standard cinema is 180°. Higher = more blur. 360° = full frame motion blur."}),

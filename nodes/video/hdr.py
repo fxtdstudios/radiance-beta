@@ -181,16 +181,26 @@ class RadianceVideoHDRConditioner:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "positive": ("CONDITIONING",),
-                "peak_nits": ([str(n) for n in PEAK_NITS], {"default": "1000"}),
-                "target_gamut": (GAMUT_OPTIONS, {"default": "BT.2020"}),
-                "eotf": (EOTF_OPTIONS, {"default": "PQ (ST.2084)"}),
+                "positive": ("CONDITIONING", {
+                    "tooltip": "Encoded positive prompt. The HDR descriptor embeddings are concatenated "
+                               "onto each entry (needs clip)."}),
+                "peak_nits": ([str(n) for n in PEAK_NITS], {"default": "1000",
+                    "tooltip": "Mastering peak in nits: adds a luminance descriptor to the tokens and is "
+                               "stored as peak_nits in hdr_metadata_json for RadianceVideoHDRDecode."}),
+                "target_gamut": (GAMUT_OPTIONS, {"default": "BT.2020",
+                    "tooltip": "Adds a gamut descriptor to the tokens and is stored as gamut in "
+                               "hdr_metadata_json (RadianceVideoHDRDecode converts to it)."}),
+                "eotf": (EOTF_OPTIONS, {"default": "PQ (ST.2084)",
+                    "tooltip": "Adds a transfer-function descriptor to the tokens and is stored in "
+                               "hdr_metadata_json. RadianceVideoHDRDecode uses its own output_eotf."}),
             },
             "optional": {
                 "clip": ("CLIP", {"tooltip": "Text encoder used for positive. Required for the "
                                              "descriptors to reach the model."}),
-                "camera_move": (list(_CAMERA_TOKENS.keys()), {"default": "None"}),
-                "mood": (list(_MOOD_TOKENS.keys()), {"default": "None"}),
+                "camera_move": (list(_CAMERA_TOKENS.keys()), {"default": "None",
+                    "tooltip": "Adds camera-movement words to the descriptor tokens. None adds nothing."}),
+                "mood": (list(_MOOD_TOKENS.keys()), {"default": "None",
+                    "tooltip": "Adds lighting-mood words to the descriptor tokens. None adds nothing."}),
                 "extra_hdr_prompt": ("STRING", {
                     "multiline": True,
                     "default": "",
@@ -293,7 +303,8 @@ class RadianceVideoHDRConditioner:
 
 class RadianceVideoHDRDecode:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
-    DESCRIPTION = "Decode video latents to HDR pixel frames with colour space handling."
+    DESCRIPTION = ("Encode decoded sRGB video frames (IMAGE, not latents) to an HDR signal at the "
+                   "metadata's peak nits and gamut, with PQ or HLG output and an SDR preview.")
     """
     Post-process DiT video output through the Radiance HDR pipeline.
 
@@ -318,23 +329,31 @@ class RadianceVideoHDRDecode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {
+                    "tooltip": "Decoded video frames, display-referred sRGB Rec.709 in [0, 1]. Linearised "
+                               "with a pure 2.2 gamma; 1.0 is mapped to peak_nits."}),
                 "hdr_metadata_json": ("STRING", {
                     "multiline": False,
                     "default": '{"peak_nits":1000,"gamut":"BT.2020","eotf":"PQ (ST.2084)"}',
                     "tooltip": "JSON from RadianceVideoHDRConditioner or manually entered",
                 }),
-                "tonemap": (cls.TONEMAP_MODES, {"default": "Reinhard"}),
+                "tonemap": (cls.TONEMAP_MODES, {"default": "Reinhard",
+                    "tooltip": "Reinhard: x / (1 + x / peak), so input white lands at half peak_nits. "
+                               "Linear clip: clamp at 10,000 nits. Pass-through: no curve."}),
             },
             "optional": {
                 "exposure_compensation_ev": ("FLOAT", {
                     "default": 0.0, "min": -6.0, "max": 6.0, "step": 0.1,
                     "tooltip": "EV adjustment before tone-mapping",
                 }),
-                "output_eotf": (EOTF_OPTIONS, {"default": "PQ (ST.2084)"}),
+                "output_eotf": (EOTF_OPTIONS, {"default": "PQ (ST.2084)",
+                    "tooltip": "Encoding of hdr_image. PQ: ST 2084 code values (1.0 = 10,000 nits). HLG: "
+                               "BT.2100 OETF. Linear and sRGB / BT.1886 both output clamped linear light "
+                               "normalised to 10,000 nits (no sRGB curve)."}),
                 "sdr_preview_nits": ("FLOAT", {
                     "default": 100.0, "min": 1.0, "max": 203.0,
-                    "tooltip": "Scale factor for the SDR preview output",
+                    "tooltip": "Knee (in nits) of the Reinhard curve for sdr_preview. The preview is not "
+                               "renormalised to display white, so it stays dark (about 0.12 at 100 nits).",
                 }),
                 "gamut_clip": ("BOOLEAN", {
                     "default": True,
@@ -457,20 +476,31 @@ class RadianceVideoPromptBuilder:
                 "subject": ("STRING", {
                     "multiline": False,
                     "default": "a person walking through a neon-lit cityscape",
+                    "tooltip": "Main subject and action. Placed first in the positive prompt.",
                 }),
-                "peak_nits": ([str(n) for n in PEAK_NITS], {"default": "1000"}),
-                "target_gamut": (GAMUT_OPTIONS, {"default": "BT.2020"}),
-                "eotf": (EOTF_OPTIONS, {"default": "PQ (ST.2084)"}),
+                "peak_nits": ([str(n) for n in PEAK_NITS], {"default": "1000",
+                    "tooltip": "Adds a peak-luminance descriptor (e.g. '1000 nits HDR10 ...') to the "
+                               "prompt. Prompt text only."}),
+                "target_gamut": (GAMUT_OPTIONS, {"default": "BT.2020",
+                    "tooltip": "Adds a gamut descriptor to the prompt. Prompt text only."}),
+                "eotf": (EOTF_OPTIONS, {"default": "PQ (ST.2084)",
+                    "tooltip": "Adds a transfer-function descriptor to the prompt. Prompt text only."}),
             },
             "optional": {
-                "camera_move": (list(_CAMERA_TOKENS.keys()), {"default": "Slow push-in"}),
-                "mood": (list(_MOOD_TOKENS.keys()), {"default": "Neon / cyberpunk"}),
+                "camera_move": (list(_CAMERA_TOKENS.keys()), {"default": "Slow push-in",
+                    "tooltip": "Adds camera-movement words after the mood words. None adds nothing."}),
+                "mood": (list(_MOOD_TOKENS.keys()), {"default": "Neon / cyberpunk",
+                    "tooltip": "Adds lighting-mood words right after the subject. None adds nothing."}),
                 "style_suffix": ("STRING", {
                     "multiline": True,
                     "default": "photorealistic, 8K, film grain, anamorphic lens",
+                    "tooltip": "Free text appended at the end of the positive prompt.",
                 }),
-                "suppress_artefacts": ("BOOLEAN", {"default": True}),
-                "print_prompt": ("BOOLEAN", {"default": False}),
+                "suppress_artefacts": ("BOOLEAN", {"default": True,
+                    "tooltip": "On: negative_prompt is a fixed list of common video artefacts. "
+                               "Off: negative_prompt is empty."}),
+                "print_prompt": ("BOOLEAN", {"default": False,
+                    "tooltip": "Also write both prompts to the ComfyUI console log."}),
             },
         }
 
@@ -557,15 +587,19 @@ class RadianceVideoFrameRouter:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "video_image": ("IMAGE",),
+                "video_image": ("IMAGE", {"tooltip": "Frame batch to pick from. Also returned unchanged "
+                                                     "on passthrough."}),
                 "frame_index": ("INT", {
                     "default": 0, "min": 0, "max": 4096,
+                    "tooltip": "0-based frame to extract. Past the end it wraps or clamps to the last "
+                               "frame, per wrap_index.",
                 }),
             },
             "optional": {
                 "wrap_index": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "If frame_index >= total_frames, wrap around (modulo)",
+                    "tooltip": "If frame_index >= total_frames, wrap around (modulo). Off: clamp to "
+                               "the last frame.",
                 }),
             },
         }
@@ -608,9 +642,14 @@ class RadianceVideoAssembler:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "frame": ("IMAGE",),
-                "session_key": ("STRING", {"default": "video_session_0"}),
-                "expected_total_frames": ("INT", {"default": 24, "min": 1}),
+                "frame": ("IMAGE", {"tooltip": "Frame (or batch) to append to this session's buffer. "
+                                               "Buffers live in memory and are lost on restart."}),
+                "session_key": ("STRING", {"default": "video_session_0",
+                    "tooltip": "Name of the accumulation buffer. Use a different key per clip being "
+                               "assembled in parallel."}),
+                "expected_total_frames": ("INT", {"default": 24, "min": 1,
+                    "tooltip": "Output is complete, and the buffer cleared, once this many inputs have "
+                               "arrived. Counts executions, not images, if frame is a batch."}),
             },
             "optional": {
                 "flush": ("BOOLEAN", {

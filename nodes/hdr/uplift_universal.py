@@ -464,15 +464,25 @@ class RadianceSDRToHDRRecover(_RudraRecoveryCore):
         return {
             "required": {
                 "image": ("IMAGE", {"tooltip": "SDR still, image batch, or ordered video frames."}),
-                "inverse_oetf": (["sRGB", "Rec.709", "Gamma 2.2", "Gamma 2.4", "None"], {"default": "sRGB"}),
-                "peak_nits": ("FLOAT", {"default": 1000.0, "min": 200.0, "max": 10000.0, "step": 50.0}),
+                "inverse_oetf": (["sRGB", "Rec.709", "Gamma 2.2", "Gamma 2.4", "None"], {"default": "sRGB",
+                    "tooltip": "Transfer curve the SDR input is encoded with, decoded to linear before recovery. "
+                               "None treats the input as already linear. Input is clamped to 0-1 first."}),
+                "peak_nits": ("FLOAT", {"default": 1000.0, "min": 200.0, "max": 10000.0, "step": 50.0,
+                    "tooltip": "Mastering display peak in nits. Recovered highlights keep the source hue and no "
+                               "channel exceeds it; it is also the PQ encode peak."}),
                 "highlight_threshold": ("FLOAT", {"default": 0.98, "min": 0.8, "max": 0.999, "step": 0.001,
                     "tooltip": "SDR code-value threshold used to identify clipped luma or RGB channels."}),
                 "shadow_threshold": ("FLOAT", {"default": 0.05, "min": 0.001, "max": 0.5, "step": 0.005,
                     "tooltip": "Linear-luma threshold used to identify crushed shadows."}),
-                "highlight_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "shadow_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "output_encoding": (["Linear", "Linear ACES2065-1 (AP0)", "PQ (HDR10)", "HLG"], {"default": "Linear"}),
+                "highlight_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Scales the clipped-highlight recovery mask: 1 applies the learned highlights fully "
+                               "inside the mask, 0 leaves highlights at their decoded SDR level."}),
+                "shadow_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Scales the crushed-shadow recovery mask: 1 applies the learned shadow detail fully "
+                               "inside the mask, 0 leaves shadows at their decoded SDR level."}),
+                "output_encoding": (["Linear", "Linear ACES2065-1 (AP0)", "PQ (HDR10)", "HLG"], {"default": "Linear",
+                    "tooltip": "Linear: scene-linear Rec.709, 1.0 = reference_white_nits. AP0: the same in ACES2065-1. "
+                               "PQ (HDR10) and HLG: Rec.2020 delivery code values (BT.2100)."}),
             },
             "optional": {
                 "batch_mode": (["Independent Images", "Video Frames"], {"default": "Independent Images",
@@ -481,7 +491,9 @@ class RadianceSDRToHDRRecover(_RudraRecoveryCore):
                     "tooltip": "Direct-pixel .pt checkpoint. Empty searches models/radiance and RADIANCE_SDR2HDR_PIXEL, and downloads the default RUDRA model (~5 MB) on first use unless RADIANCE_ALLOW_DOWNLOADS=0."}),
                 "pixel_tile_size": ("INT", {"default": 512, "min": 128, "max": 2048, "step": 64,
                     "tooltip": "Tile size used only when the whole frame does not fit in memory. The model normalises over its input, so whole-frame inference is more accurate and is always tried first."}),
-                "pixel_tile_overlap": ("INT", {"default": 64, "min": 0, "max": 512, "step": 16}),
+                "pixel_tile_overlap": ("INT", {"default": 64, "min": 0, "max": 512, "step": 16,
+                    "tooltip": "Overlap in pixels between tiles, feathered to hide seams. Used only when tiling "
+                               "kicks in; must be smaller than pixel_tile_size."}),
                 "temporal_window": ([5, 7, 9], {"default": 5,
                     "tooltip": "Adjacent frames used by the temporal residual model."}),
                 "temporal_checkpoint": ("STRING", {"default": "",
@@ -600,7 +612,9 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
         return {
             "required": {
                 "image": ("IMAGE", {"tooltip": "SDR still, image batch, or video frames [B,H,W,C]."}),
-                "inverse_oetf": (["sRGB", "Rec.709", "Gamma 2.2", "Gamma 2.4", "None"], {"default": "sRGB"}),
+                "inverse_oetf": (["sRGB", "Rec.709", "Gamma 2.2", "Gamma 2.4", "None"], {"default": "sRGB",
+                    "tooltip": "Transfer curve the SDR input is encoded with, decoded to linear before expansion. "
+                               "None treats the input as already linear. Input is clamped to 0-1 first."}),
                 "peak_nits": ("FLOAT", {
                     "default": 1000.0, "min": 200.0, "max": 10000.0, "step": 50.0,
                     "tooltip": (
@@ -622,8 +636,12 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
                         "and Write's hdr_reference_nits."
                     ),
                 }),
-                "knee_mode": (["adaptive", "manual"], {"default": "adaptive"}),
-                "knee": ("FLOAT", {"default": 0.75, "min": 0.05, "max": 0.99, "step": 0.01}),
+                "knee_mode": (["adaptive", "manual"], {"default": "adaptive",
+                    "tooltip": "adaptive: the knee is measured per frame as a percentile of linear luma (see knee). "
+                               "manual: knee is used directly as a fixed linear-luma level."}),
+                "knee": ("FLOAT", {"default": 0.75, "min": 0.05, "max": 0.99, "step": 0.01,
+                    "tooltip": "Where expansion starts. adaptive: the luma percentile (0.75 = 75th percentile of the "
+                               "frame). manual: a linear-luma level. Below the knee the image is unchanged."}),
                 "shoulder_gamma": ("FLOAT", {
                     "default": 2.0, "min": 1.0, "max": 6.0, "step": 0.05,
                     "tooltip": (
@@ -633,13 +651,19 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
                         "straight line to peak and steps the gradient."
                     ),
                 }),
-                "temporal_smoothing": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 0.98, "step": 0.01}),
-                "output_encoding": (["Linear", "Linear ACES2065-1 (AP0)", "PQ (HDR10)", "HLG"], {"default": "Linear"}),
+                "temporal_smoothing": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 0.98, "step": 0.01,
+                    "tooltip": "Frame-to-frame smoothing of the adaptive knee to stop flicker (0 = per-frame knee, "
+                               "higher = steadier). Used only with knee_mode adaptive and batch_mode Video Frames."}),
+                "output_encoding": (["Linear", "Linear ACES2065-1 (AP0)", "PQ (HDR10)", "HLG"], {"default": "Linear",
+                    "tooltip": "Linear: scene-linear Rec.709, 1.0 = reference_white_nits. AP0: the same in ACES2065-1. "
+                               "PQ (HDR10) and HLG: Rec.2020 delivery code values (BT.2100)."}),
             },
             "optional": {
                 "rudra_blend": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
                     "tooltip": "How much of the learned reconstruction is blended into the recovery masks. 0 disables it."}),
-                "batch_mode": (["Independent Images", "Video Frames"], {"default": "Independent Images"}),
+                "batch_mode": (["Independent Images", "Video Frames"], {"default": "Independent Images",
+                    "tooltip": "Video Frames treats the batch as an ordered clip: enables temporal knee smoothing "
+                               "and the temporal learned backend. Independent Images processes each frame alone."}),
                 "shadow_threshold": ("FLOAT", {"default": 0.05, "min": 0.001, "max": 0.5, "step": 0.005,
                     "tooltip": "Linear-luma level below which shadows count as crushed. Shapes the "
                                "shadow_mask output; changes the image only when pixel_recovery_mode "
@@ -659,10 +683,14 @@ class RadianceSDRToHDRUniversal(_RudraRecoveryCore):
                     "tooltip": "Direct-pixel .pt checkpoint. Empty searches models/radiance and RADIANCE_SDR2HDR_PIXEL, and downloads the default RUDRA model (~5 MB) on first use unless RADIANCE_ALLOW_DOWNLOADS=0."}),
                 "pixel_tile_size": ("INT", {"default": 512, "min": 128, "max": 2048, "step": 64,
                     "tooltip": "Tile size used only when the whole frame does not fit in memory. The model normalises over its input, so whole-frame inference is more accurate and is always tried first."}),
-                "pixel_tile_overlap": ("INT", {"default": 64, "min": 0, "max": 512, "step": 16}),
+                "pixel_tile_overlap": ("INT", {"default": 64, "min": 0, "max": 512, "step": 16,
+                    "tooltip": "Overlap in pixels between tiles, feathered to hide seams. Used only when tiling "
+                               "kicks in; must be smaller than pixel_tile_size."}),
                 "pixel_recovery_mode": (["highlights", "all", "shadows", "off"], {"default": "highlights",
                     "tooltip": "Highlights is safest and avoids hallucinating chroma in deep shadows."}),
-                "pixel_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "pixel_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05,
+                    "tooltip": "Multiplier on the pixel model's learned residual over its own inverse tone curve "
+                               "(0 = curve only, 1 = as trained, 2 = doubled). Direct Pixel backend only."}),
             },
         }
 

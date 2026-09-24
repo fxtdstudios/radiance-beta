@@ -395,7 +395,7 @@ class RadianceHDRLoRALoader:
                     "default": "",
                     "multiline": False,
                     "placeholder": "/path/to/radiance_hdr_lora.safetensors",
-                    "tooltip": "Path to a Radiance HDR LoRA checkpoint (.safetensors or .pt). Leave blank to use the RADIANCE_HDR_LORA env var."
+                    "tooltip": "Path to a Radiance HDR LoRA .safetensors file (surrounding quotes are stripped); a relative path resolves from ComfyUI's working directory. Required: a blank path raises an error."
                 }),
             },
             "optional": {
@@ -404,7 +404,7 @@ class RadianceHDRLoRALoader:
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.01,
-                    "tooltip": "Used when LoRA metadata does not contain compression_ratio.",
+                    "tooltip": "compression_ratio output by this node when the LoRA metadata has none. HDR LoRA Apply does not see this value; it falls back to 0.5 on its own.",
                 }),
             },
         }
@@ -512,8 +512,12 @@ class RadianceHDRLoRAApply:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model":    ("MODEL",),
-                "lora_dict": ("LORA_DICT",),
+                "model":    ("MODEL", {
+                    "tooltip": "Diffusion model to patch. It is cloned and the LoRA deltas are added as ComfyUI patches, so the upstream model is left untouched.",
+                }),
+                "lora_dict": ("LORA_DICT", {
+                    "tooltip": "LoRA tensors and metadata from Radiance HDR LoRA Loader. If no tensor matches a model weight the node raises an error.",
+                }),
                 "strength": ("FLOAT", {
                     "default": 1.0,
                     "min": 0.0,

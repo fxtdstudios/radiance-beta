@@ -426,7 +426,9 @@ class RadianceMultipassEstimate:
                 "geometry_detail": ("INT", {"default": 9, "min": 0, "max": 9, "tooltip": "MoGe resolution level: 0 fastest, 9 most detail."}),
                 "fov_x_degrees": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 170.0, "step": 0.1,
                                              "tooltip": "Known horizontal field of view. 0 = estimate it."}),
-                "normal_convention": (list(NORMAL_CONVENTIONS), {"default": NORMAL_CONVENTIONS[0]}),
+                "normal_convention": (list(NORMAL_CONVENTIONS), {"default": NORMAL_CONVENTIONS[0],
+                                                                  "tooltip": "Encoding of the camera-space normal pass (0..1, +Z toward the camera). "
+                                                                             "DirectX (Y-Down) flips the green channel; match the renderer or tool reading it."}),
                 "ao_radius_m": ("FLOAT", {"default": 0.5, "min": 0.01, "max": 50.0, "step": 0.01,
                                           "tooltip": "Occlusion search radius in metres of scene space."}),
                 "ao_quality": ("INT", {"default": 8, "min": 2, "max": 32, "tooltip": "AO slices and steps per slice."}),

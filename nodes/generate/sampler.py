@@ -692,11 +692,22 @@ class RadianceSamplerPro:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "model": ("MODEL",),
-                "positive": ("CONDITIONING",),
-                "negative": ("CONDITIONING",),
-                "latent_image": ("LATENT",),
-                "preset": (WORKFLOW_PRESETS, {"default": "Auto"}),
+                "model": ("MODEL", {"tooltip": (
+                    "Diffusion model to sample with. It is cloned before any patch (PAG, guidance "
+                    "rescale, SDR anchor, windowing), so the loader's model is not modified.")}),
+                "positive": ("CONDITIONING", {"tooltip": (
+                    "Prompt conditioning to steer toward. For guidance-embedded models (Flux, Flux.2, "
+                    "LTXV, LongCat) flux_guidance is written into it.")}),
+                "negative": ("CONDITIONING", {"tooltip": (
+                    "Conditioning to steer away from. Only evaluated when cfg is above 1.0; at 1.0 "
+                    "ComfyUI skips the negative pass.")}),
+                "latent_image": ("LATENT", {"tooltip": (
+                    "Starting latent: empty for text-to-image, VAE-encoded for img2img (lower denoise). "
+                    "A noise_mask on it limits sampling to the masked area.")}),
+                "preset": (WORKFLOW_PRESETS, {"default": "Auto", "tooltip": (
+                    "Auto and Custom let the node replace cfg, flux_guidance, steps, flux_shift and "
+                    "sampler with the detected model's defaults while they sit at their widget defaults. "
+                    "A named preset only fills the widgets in the UI; at run time the widget values are used as-is.")}),
                 "steps": ("INT", {"default": 20, "min": 1, "max": 200, "step": 1,
                     "tooltip": "Total denoising steps. More steps = higher quality but slower. 20–30 is typical for most samplers."
                 }),
@@ -722,7 +733,11 @@ class RadianceSamplerPro:
                 ),
                 "cfg": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 20.0, "step": 0.1},
+                    {"default": 1.0, "min": 0.0, "max": 20.0, "step": 0.1,
+                     "tooltip": (
+                         "Classifier-free guidance scale. 1.0 runs one model pass per step and ignores the "
+                         "negative; above 1.0 adds a negative pass (about twice the time). Keep 1.0 for Flux "
+                         "and distilled or turbo models and use flux_guidance instead.")},
                 ),
                 "audio_cfg": (
                     "FLOAT",
@@ -735,32 +750,59 @@ class RadianceSamplerPro:
                                    "half of the latent. 0 = same as cfg (single-CFG, pre-2.5 behavior).",
                     },
                 ),
-                "sampler": (comfy.samplers.KSampler.SAMPLERS,),
-                "sampler_mode": (SamplerMode.ALL, {"default": SamplerMode.STANDARD}),
+                "sampler": (comfy.samplers.KSampler.SAMPLERS, {"tooltip": (
+                    "ComfyUI sampling algorithm. With preset Auto or Custom, 'euler' is replaced by the "
+                    "detected model's recommended sampler, if it has one.")}),
+                "sampler_mode": (SamplerMode.ALL, {"default": SamplerMode.STANDARD, "tooltip": (
+                    "Standard: one sampler throughout. Phase-Shift: switch at phase_split to dpmpp_2m "
+                    "(DPM) or to the same sampler on the sgm_uniform schedule (SGM); not used for video "
+                    "models. CFG++: scales cfg toward 1.0 by a cosine of each stage's starting sigma, so a "
+                    "plain single-stage run keeps cfg unchanged.")}),
                 "phase_split": (
                     "FLOAT",
-                    {"default": 0.40, "min": 0.0, "max": 1.0, "step": 0.05},
+                    {"default": 0.40, "min": 0.0, "max": 1.0, "step": 0.05,
+                     "tooltip": "Phase-Shift modes only: fraction of the total steps at which the second sampler takes over (0.4 of 20 steps = step 8)."},
                 ),
-                "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
+                "scheduler": (comfy.samplers.KSampler.SCHEDULERS, {"tooltip": (
+                    "ComfyUI noise schedule used to build the sigmas. Ignored when ays_schedule, "
+                    "sigmas_override or the SD/SDXL Turbo schedule is in use.")}),
                 "scheduler_mode": (
                     ["Manual", "Auto (Match Steps)"],
-                    {"default": "Manual"},
+                    {"default": "Manual", "tooltip": (
+                        "Manual uses the scheduler widget. Auto replaces it with the detected model's "
+                        "default scheduler (it does not depend on the step count).")},
                 ),
                 "denoise": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
+                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                     "tooltip": (
+                         "Fraction of the noise schedule to run. 1.0 starts from pure noise; lower values "
+                         "skip the noisiest steps and keep more of latent_image (img2img). Fewer steps run "
+                         "unless force_exact_steps is on.")},
                 ),
                 "flux_shift": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.01, "max": 10.0, "step": 0.1},
+                    {"default": 1.0, "min": 0.01, "max": 10.0, "step": 0.1,
+                     "tooltip": (
+                         "Extra time-shift applied to the sigma schedule, shift*s / (1 + (shift-1)*s), on top "
+                         "of the model's own shift. 1.0 = off; higher spends more steps at high noise. Intended "
+                         "for flow-matching models (sigmas 0-1). Auto/Custom replace 1.0 with the model default.")},
                 ),
                 "flux_guidance": (
                     "FLOAT",
-                    {"default": 3.5, "min": 0.0, "max": 20.0, "step": 0.1},
+                    {"default": 3.5, "min": 0.0, "max": 20.0, "step": 0.1,
+                     "tooltip": (
+                         "Embedded guidance written into the positive conditioning for Flux, Flux.2, LTXV and "
+                         "LongCat; ignored by other models. Auto/Custom replace 3.5 with the model default "
+                         "(for example 0 for Schnell).")},
                 ),
                 "flux_guidance_profile": (
                     ["Static", "Dynamic (Creative Start/End)"],
-                    {"default": "Static"},
+                    {"default": "Static", "tooltip": (
+                        "Static: one value for the whole run. Dynamic: splits the run into stages; "
+                        "guidance-embedded models start at 0.6x flux_guidance and end slightly lower, CFG models "
+                        "start at 1.2x cfg and end lower (cfg above 1.0 only). Values are taken at each stage "
+                        "start, so the middle stage lands between the targets, depending on step count. Ignored in tile_mode.")},
                 ),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF,
                     "tooltip": "Random seed for reproducible results. Use the control below it (randomize / increment / fixed) to vary the seed between runs."
@@ -773,11 +815,13 @@ class RadianceSamplerPro:
                         "min": 0.0,
                         "max": 5.0,
                         "step": 0.1,
-                        "tooltip": "PAG strength (0=off). Perturbs attention for better prompt adherence.",
+                        "tooltip": "Perturbed-attention guidance strength (0 = off). It perturbs the unconditional pass, so it only works with cfg above 1.0.",
                     },
                 ),
 
-                "model_type": (MODEL_TYPES, {"default": "auto"}),
+                "model_type": (MODEL_TYPES, {"default": "auto", "tooltip": (
+                    "Model family used for defaults, guidance handling and schedules. auto detects it from "
+                    "the model (or from model_meta when connected); set it by hand if detection is wrong.")}),
                 "sigma_blend_steps": (
                     "INT",
                     {
@@ -800,7 +844,9 @@ class RadianceSamplerPro:
                     },
                 ),
 
-                "preview_method": (PREVIEW_METHODS, {"default": "None"}),
+                "preview_method": (PREVIEW_METHODS, {"default": "None", "tooltip": (
+                    "Live preview during sampling. TAESD needs the taesd weights in models/vae_approx and "
+                    "falls back to Latent2RGB without them. None sends no Radiance preview, only ComfyUI's progress bar.")}),
 
                 "noise_type": (
                     NOISE_TYPES,
@@ -812,7 +858,8 @@ class RadianceSamplerPro:
                 "conditioning_clip_target": (
                     CLIP_TARGETS,
                     {"default": "Auto",
-                     "tooltip": "Route conditioning to a specific encoder slot (clip_l, clip_g, t5xxl). Auto = no routing."},
+                     "tooltip": ("Has no effect. Kept so saved workflows load; any value other than Auto only logs a "
+                                 "warning. Choose the text encoder at encode time instead (e.g. CLIPTextEncodeSDXL).")},
                 ),
 
                 "add_noise": ("BOOLEAN", {"default": True,
@@ -864,12 +911,18 @@ class RadianceSamplerPro:
                 # ALBABIT-FIX: Removed UI normalization factors entirely. Native LTX handles recombination cleanly.
             },
             "optional": {
-                "refiner_model": ("MODEL",),
+                "refiner_model": ("MODEL", {"tooltip": (
+                    "Optional second model that takes over from refiner_start_step with the same conditioning, "
+                    "so it must accept the same text-encoder width. PAG, guidance rescale and the SDR anchor are "
+                    "not applied to it. Ignored in tile_mode.")}),
                 "refiner_start_step": (
                     "INT",
-                    {"default": 20, "min": 0, "max": 200, "step": 1},
+                    {"default": 20, "min": 0, "max": 200, "step": 1,
+                     "tooltip": "Step index (0-based, out of steps) where refiner_model takes over. At or above the last step being run, the refiner never runs."},
                 ),
-                "noise_override": ("LATENT",),
+                "noise_override": ("LATENT", {"tooltip": (
+                    "Use this latent's samples as the initial noise instead of generating it from seed and "
+                    "noise_type. Its shape must match latent_image exactly.")}),
 
                 "sigmas_override": (
                     "SIGMAS",
@@ -914,10 +967,10 @@ class RadianceSamplerPro:
                         "max": 1.0,
                         "step": 0.05,
                         "tooltip": (
-                            "Blend weight of the selected noise_type at step 0. "
-                            "1.0 = pure noise_type. Cosine-interpolates to noise_alpha_end "
-                            "across the denoising trajectory. Set <1 to blend structured "
-                            "noise with Gaussian (e.g. 0.8 Perlin → 0.0 Gaussian for video)."
+                            "Weight of the selected noise_type against Gaussian at step 0 "
+                            "(1.0 = pure noise_type; no effect with Gaussian). The noise is "
+                            "injected once, so the start/end cosine ramp is read only at "
+                            "start_step: on a run from step 0 only this value matters."
                         ),
                     },
                 ),
@@ -929,9 +982,9 @@ class RadianceSamplerPro:
                         "max": 1.0,
                         "step": 0.05,
                         "tooltip": (
-                            "Blend weight of the selected noise_type at the final step. "
-                            "Set lower than noise_alpha_start to fade structured noise "
-                            "into pure Gaussian in late denoising steps."
+                            "Weight of the selected noise_type at the final step of the ramp. "
+                            "The noise is injected once, at start_step, so this only has an "
+                            "effect when start_step is above 0 (partial or multi-pass runs)."
                         ),
                     },
                 ),
@@ -960,19 +1013,29 @@ class RadianceSamplerPro:
                     },
                 ),
                 # ── SDR conditioning ─────────────────────────
-                "sdr_reference": ("IMAGE",),
-                "sdr_vae": ("VAE",),
+                "sdr_reference": ("IMAGE", {"tooltip": (
+                    "Optional structure reference: a display-referred 0-1 image, VAE-encoded with sdr_vae and "
+                    "resized to the latent. Needs sdr_vae connected and sdr_blend above 0.")}),
+                "sdr_vae": ("VAE", {"tooltip": "VAE used to encode sdr_reference. Use the VAE that matches the model."}),
                 "sdr_blend": (
                     "FLOAT",
-                    {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.05},
+                    {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.05,
+                     "tooltip": (
+                         "Weight of the encoded reference: it is mixed into the starting latent at this weight, "
+                         "and is the starting weight of the per-step anchor. 0 disables SDR conditioning.")},
                 ),
                 "sdr_inject_steps": (
                     "INT",
-                    {"default": 6, "min": 0, "max": 100, "step": 1},
+                    {"default": 6, "min": 0, "max": 100, "step": 1,
+                     "tooltip": (
+                         "Number of model evaluations after CFG in which the denoised result is pulled toward the "
+                         "reference (0 = only the starting-latent mix). Multi-evaluation samplers use these up "
+                         "faster than one per step.")},
                 ),
                 "sdr_decay": (
                     "FLOAT",
-                    {"default": 0.65, "min": 0.0, "max": 1.0, "step": 0.05},
+                    {"default": 0.65, "min": 0.0, "max": 1.0, "step": 0.05,
+                     "tooltip": "Per-evaluation falloff of the anchor: weight = sdr_blend x sdr_decay^n. Lower fades faster; 1.0 holds it constant."},
                 ),
                 # ── Model-aware auto defaults ─────────────────────────────────
                 "model_meta": (

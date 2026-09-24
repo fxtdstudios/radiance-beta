@@ -27,7 +27,8 @@ class RadianceOpticalFlow:
         return {
             "required": {
                 "images": ("IMAGE", {"tooltip": "Batch of frames to analyze."}),
-                "preset": (["Fast", "Medium", "Ultra"], {"default": "Medium"}),
+                "preset": (["Fast", "Medium", "Ultra"], {"default": "Medium",
+                    "tooltip": "Solver effort. DIS: ultrafast, fast or medium preset (mostly a speed trade, similar accuracy). Lucas-Kanade: window radius 3, 5 or 9 px."}),
                 "flow_scale": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1,
                     "tooltip": "Scale factor for output vectors. 1.0 = pixel units."}),
                 "visualize": ("BOOLEAN", {"default": False,

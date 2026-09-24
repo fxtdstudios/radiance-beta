@@ -161,7 +161,10 @@ class RadianceFalseColorMonitor:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {
+                    "tooltip": "Image to check, returned unchanged on passthrough. Zones read the BT.709 "
+                               "luma of the values as given (no linearisation), so on a display-encoded "
+                               "sRGB image the '18% grey' band is code value 0.165 to 0.235."}),
                 "strength": ("FLOAT", {
                     "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05,
                     "tooltip": "Blend factor. 0 = off, 1 = full false color.",
@@ -170,8 +173,8 @@ class RadianceFalseColorMonitor:
             "optional": {
                 "hdr_peak": ("FLOAT", {
                     "default": 1.0, "min": 0.1, "max": 100.0, "step": 0.1,
-                    "tooltip": "Normalise input by this value before zone lookup. "
-                               "Set to peak_nits/100 for HDR images (e.g. 10 for 1000-nit).",
+                    "tooltip": "Luma is divided by this before the zone lookup (1.0 for SDR). For "
+                               "scene-linear HDR at 1.0 = 203 nits, a 1000-nit peak is about 4.93.",
                 }),
             },
         }
@@ -238,13 +241,16 @@ class RadianceFocusPeaking:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {
+                    "tooltip": "Image to check, returned unchanged on passthrough. Edges are measured on "
+                               "BT.709 luma, normalised to the strongest edge in each frame."}),
                 "threshold": ("FLOAT", {
                     "default": 0.20, "min": 0.01, "max": 1.0, "step": 0.01,
                     "tooltip": "Normalised Sobel magnitude above which a pixel is considered in-focus.",
                 }),
                 "peak_color": (["Red", "Green", "White", "Yellow", "Cyan"], {
                     "default": "Red",
+                    "tooltip": "Overlay colour painted on pixels above threshold.",
                 }),
                 "strength": ("FLOAT", {
                     "default": 0.85, "min": 0.0, "max": 1.0, "step": 0.05,
@@ -361,10 +367,14 @@ class RadianceSplitView:
                 "image_b": ("IMAGE", {"tooltip": "Processed / graded image."}),
                 "mode": (["wipe_h", "wipe_v", "side_by_side", "diff"], {
                     "default": "wipe_h",
+                    "tooltip": "wipe_h: A left, B right of a vertical line. wipe_v: A above, B below. "
+                               "side_by_side: left half of A beside right half of B (fixed 50% split). "
+                               "diff: |A - B| x 4, clipped to [0, 1].",
                 }),
                 "position": ("FLOAT", {
                     "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "Wipe position (0 = full A, 1 = full B). Unused in side_by_side.",
+                    "tooltip": "Wipe line position as a fraction of width (wipe_h) or height (wipe_v): "
+                               "0 = all B, 1 = all A. Unused in side_by_side and diff.",
                 }),
             },
         }
@@ -407,7 +417,9 @@ class RadianceContactSheet:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "images": ("IMAGE",),
+                "images": ("IMAGE", {
+                    "tooltip": "Frame batch to lay out, left to right then top to bottom. Clamped to "
+                               "[0, 1] and resized through 8-bit, so display-encoded input is expected."}),
                 "thumb_width": ("INT", {
                     "default": 160, "min": 32, "max": 512, "step": 8,
                     "tooltip": "Width of each thumbnail in pixels.",
@@ -422,7 +434,8 @@ class RadianceContactSheet:
                     "default": True,
                     "tooltip": "Print the frame index below each thumbnail.",
                 }),
-                "background": (["Black", "Grey", "White"], {"default": "Black"}),
+                "background": (["Black", "Grey", "White"], {"default": "Black",
+                    "tooltip": "Fill colour for empty cells and label strips (Grey is 64/255)."}),
             },
         }
 
@@ -513,7 +526,9 @@ class RadianceFlipbookGIF:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "images": ("IMAGE",),
+                "images": ("IMAGE", {
+                    "tooltip": "Frames to animate, returned unchanged on passthrough. Clamped to [0, 1] "
+                               "and quantised to a 256-colour palette, so display-encoded input is expected."}),
                 "save_path": ("STRING", {
                     "default": "preview/flipbook.gif",
                     "tooltip": (
@@ -639,7 +654,9 @@ class RadianceFrameStamp:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "images": ("IMAGE",),
+                "images": ("IMAGE", {
+                    "tooltip": "Frames to stamp. Stamped frames are clamped to [0, 1] and quantised to "
+                               "8 bits, so stamp a display copy, not a linear or HDR plate."}),
                 "start_frame": ("INT", {
                     "default": 1001, "min": 0, "max": 999999,
                     "tooltip": "Frame number of the first frame in the batch.",
@@ -658,20 +675,27 @@ class RadianceFrameStamp:
                         "Uses ';' separator instead of ':' for the frame field."
                     ),
                 }),
-                "show_frame_number": ("BOOLEAN", {"default": True}),
-                "show_timecode":     ("BOOLEAN", {"default": True}),
+                "show_frame_number": ("BOOLEAN", {"default": True,
+                    "tooltip": "Burn the frame number as '# 001001' (6 digits)."}),
+                "show_timecode":     ("BOOLEAN", {"default": True,
+                    "tooltip": "Burn the SMPTE timecode of the frame number at fps. "
+                               "Frame 0 is 00:00:00:00."}),
                 "custom_text": ("STRING", {
                     "default": "",
                     "tooltip": "Additional text burned into each frame (e.g. shot name, version).",
                 }),
                 "position": (["bottom_left", "bottom_right", "top_left", "top_right", "center"], {
                     "default": "bottom_left",
+                    "tooltip": "Where the text block sits in the frame.",
                 }),
                 "font_scale": ("FLOAT", {
                     "default": 1.0, "min": 0.5, "max": 4.0, "step": 0.1,
+                    "tooltip": "Text size: 14 px x scale (minimum 12 px) with DejaVu Sans Mono. Without "
+                               "that font, Pillow's fixed default font is used and only the margins scale.",
                 }),
                 "opacity": ("FLOAT", {
                     "default": 0.85, "min": 0.1, "max": 1.0, "step": 0.05,
+                    "tooltip": "Text opacity; the dark backing box uses 0.6 x this.",
                 }),
             },
         }
@@ -987,7 +1011,9 @@ class RadiancePreviewServer:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "images": ("IMAGE",),
+                "images": ("IMAGE", {
+                    "tooltip": "Frames to publish, returned unchanged on passthrough. Only the last frame "
+                               "is served, clamped to [0, 1] as an 8-bit JPEG."}),
                 "port": ("INT", {
                     "default": 8765, "min": 1024, "max": 65535,
                     "tooltip": "TCP port for the preview HTTP server.",
@@ -1007,7 +1033,9 @@ class RadiancePreviewServer:
                     "tooltip": "Resize frame before serving (0 = original size). "
                                "Smaller = faster over network.",
                 }),
-                "enabled": ("BOOLEAN", {"default": True}),
+                "enabled": ("BOOLEAN", {"default": True,
+                    "tooltip": "Off: skip publishing this frame. A server already started keeps running "
+                               "and serves the previous frame."}),
             },
         }
 

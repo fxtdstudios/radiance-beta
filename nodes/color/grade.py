@@ -229,28 +229,28 @@ class RadianceGrade:
         return {
             "required": {
                 "image": ("IMAGE", {"tooltip": "Input image to grade."}),
-                "preset": (preset_names, {"default": "None (Custom)"}),
-                "preset_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "preset": (preset_names, {"default": "None (Custom)", "tooltip": "Built-in look. Its lift/gamma/gain/offset/contrast/saturation values are blended with the manual sliders by preset_strength; pivot is not part of a preset. None (Custom) uses the sliders only."}),
+                "preset_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "Mix between the manual slider values (0) and the preset values (1). At 1.0 a selected preset fully replaces the manual lift/gamma/gain/offset/contrast/saturation sliders."}),
             },
             "optional": {
                 "reference_image": ("IMAGE", {"tooltip": "Optional reference image for automatic grade matching."}),
-                "match_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
-                "preset_file": ("STRING", {"default": "", "multiline": False}),
-                "lift_r": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
-                "lift_g": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
-                "lift_b": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
-                "gamma_r": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 5.0, "step": 0.001}),
-                "gamma_g": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 5.0, "step": 0.001}),
-                "gamma_b": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 5.0, "step": 0.001}),
-                "gain_r": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.001}),
-                "gain_g": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.001}),
-                "gain_b": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.001}),
-                "offset_r": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
-                "offset_g": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
-                "offset_b": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001}),
-                "contrast": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 3.0, "step": 0.01}),
-                "pivot": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 3.0, "step": 0.01}),
+                "match_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "How far gain and offset are pulled toward the values derived from reference_image (0 = off, 1 = full). Only used when a reference image is connected."}),
+                "preset_file": ("STRING", {"default": "", "multiline": False, "tooltip": "Optional path to a JSON file of presets, keyed by name, using the same fields as the built-ins. It is merged over the built-ins, so it can only redefine a preset already listed in the preset menu."}),
+                "lift_r": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001, "tooltip": "Value added to the red channel before gain (so it is scaled by gain). A flat additive offset, not a shadow-weighted lift."}),
+                "lift_g": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001, "tooltip": "Value added to the green channel before gain (so it is scaled by gain). A flat additive offset, not a shadow-weighted lift."}),
+                "lift_b": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001, "tooltip": "Value added to the blue channel before gain (so it is scaled by gain). A flat additive offset, not a shadow-weighted lift."}),
+                "gamma_r": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 5.0, "step": 0.001, "tooltip": "Power applied to the red channel after lift, gain and offset: out = in^(1/gamma), sign preserved. Above 1.0 brightens mid-tones, below 1.0 darkens them; 1.0 is neutral."}),
+                "gamma_g": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 5.0, "step": 0.001, "tooltip": "Power applied to the green channel after lift, gain and offset: out = in^(1/gamma), sign preserved. Above 1.0 brightens mid-tones, below 1.0 darkens them; 1.0 is neutral."}),
+                "gamma_b": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 5.0, "step": 0.001, "tooltip": "Power applied to the blue channel after lift, gain and offset: out = in^(1/gamma), sign preserved. Above 1.0 brightens mid-tones, below 1.0 darkens them; 1.0 is neutral."}),
+                "gain_r": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.001, "tooltip": "Multiplier on the red channel, applied after lift. 1.0 is neutral, 0 is black; values above 1.0 can push HDR highlights higher."}),
+                "gain_g": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.001, "tooltip": "Multiplier on the green channel, applied after lift. 1.0 is neutral, 0 is black; values above 1.0 can push HDR highlights higher."}),
+                "gain_b": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.001, "tooltip": "Multiplier on the blue channel, applied after lift. 1.0 is neutral, 0 is black; values above 1.0 can push HDR highlights higher."}),
+                "offset_r": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001, "tooltip": "Value added to the red channel after gain (not scaled by gain), shifting the whole channel up or down in the image's own encoding."}),
+                "offset_g": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001, "tooltip": "Value added to the green channel after gain (not scaled by gain), shifting the whole channel up or down in the image's own encoding."}),
+                "offset_b": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001, "tooltip": "Value added to the blue channel after gain (not scaled by gain), shifting the whole channel up or down in the image's own encoding."}),
+                "contrast": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 3.0, "step": 0.01, "tooltip": "Linear contrast around pivot: out = (in - pivot) * contrast + pivot, applied after gamma. 1.0 is neutral, 0 flattens everything to the pivot value."}),
+                "pivot": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Grey level that contrast rotates around, in the image's own encoding (0.5 suits display-referred sRGB; scene-linear mid-grey is about 0.18)."}),
+                "saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 3.0, "step": 0.01, "tooltip": "Saturation relative to Rec.709 luma, applied last. 1.0 is neutral, 0 is monochrome, above 1.0 increases colourfulness."}),
             },
         }
 
@@ -335,11 +335,11 @@ class RadianceApplyGradeInfo:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "grade_info": ("STRING", {"forceInput": True}),
+                "image": ("IMAGE", {"tooltip": "Image to grade, processed in its own encoding (the grade is plain arithmetic, not colour-managed). Single-channel images are expanded to RGB."}),
+                "grade_info": ("STRING", {"forceInput": True, "tooltip": "grade_info JSON from Radiance Grade or Grade Match (lift, gamma, gain, offset lists plus contrast, pivot, saturation). Missing keys fall back to neutral; invalid JSON passes the image through unchanged."}),
             },
             "optional": {
-                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "Mix between the original image (0) and the fully graded result (1)."}),
             },
         }
 
@@ -385,7 +385,7 @@ class RadianceGradeMatch:
             "required": {
                 "source": ("IMAGE", {"tooltip": "Image to be matched."}),
                 "reference": ("IMAGE", {"tooltip": "Target image."}),
-                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "Mix of the derived gain and offset against neutral (0 = no change, 1 = full match). The match is an approximation built from LAB mean and standard deviation."}),
             },
         }
 

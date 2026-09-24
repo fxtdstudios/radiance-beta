@@ -44,6 +44,7 @@ tools/check_mojibake.py
 tools/check_release_ready.py
 tools/validate_hdr_pipeline.py
 tools/gpu_acceptance.py
+tools/build_node_reference.py
 scripts/build_js.js
 
 # ── Repository documentation ────────────────────────────────────────────────
@@ -52,6 +53,9 @@ scripts/build_js.js
 # lives at www.fxtdstudios.com.
 CONTRIBUTING.md
 KNOWN_ISSUES.md
+# The generated node reference (docs/nodes) is for GitHub readers; the same
+# text ships inside the nodes as hover tooltips.
+docs/
 
 # ── Internal write-ups, should any reappear ─────────────────────────────────
 # Audits, reviews and session logs go stale and mislead. Findings that matter

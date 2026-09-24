@@ -20,12 +20,12 @@ class RadianceSDRtoHDRExpand:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "inverse_oetf": (["None", "sRGB", "Rec.709"], {"default": "sRGB"}),
-                "threshold": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Luminance threshold above which HDR expansion begins. 0.8 = expand highlights above 80% SDR white."}),
-                "expansion_gain": ("FLOAT", {"default": 5.0, "min": 1.0, "max": 100.0, "step": 0.1, "tooltip": "Peak luminance multiplier for expanded highlights. 5.0 = 500 nits from 100-nit SDR white."}),
-                "expansion_gamma": ("FLOAT", {"default": 1.2, "min": 0.1, "max": 5.0, "step": 0.01, "tooltip": "Power curve applied to the expansion mask. Values > 1.0 create a harder shoulder; < 1.0 a softer roll-off."}),
-                "smoothness": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 0.5, "step": 0.01, "tooltip": "Feathering radius for the expansion mask edge. Higher values prevent harsh highlight boundaries."}),
+                "image": ("IMAGE", {"tooltip": "SDR image, display-encoded as chosen in inverse_oetf. Alpha, if present, passes through untouched."}),
+                "inverse_oetf": (["None", "sRGB", "Rec.709"], {"default": "sRGB", "tooltip": "Transfer curve removed before expansion, giving linear light. None = the image is already linear. The output stays linear."}),
+                "threshold": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Linear luminance (after the inverse OETF) above which expansion begins. 0.8 = 80% of SDR white in linear light."}),
+                "expansion_gain": ("FLOAT", {"default": 5.0, "min": 1.0, "max": 100.0, "step": 0.1, "tooltip": "Multiplier on the added highlight energy: luma gains gain x (luma - threshold)^gamma. With the defaults SDR white (1.0) rises to about 1.6, not 5x."}),
+                "expansion_gamma": ("FLOAT", {"default": 1.2, "min": 0.1, "max": 5.0, "step": 0.01, "tooltip": "Exponent on the amount luma exceeds the threshold. Above 1.0 the expansion starts more gently and adds less; below 1.0 it rises faster just above the threshold."}),
+                "smoothness": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 0.5, "step": 0.01, "tooltip": "Width, in linear luma units, of the soft onset at the threshold (a sigmoid on luma, not a spatial blur). 0 = hard onset."}),
             }
         }
 
@@ -94,20 +94,20 @@ class RadianceHDRSynthesisEngine:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": "SDR image. Highlights are found where the low-pass luma passes about 0.7; no transfer curve is removed, so linearise first for a linear result."}),
                 "energy_target": ("FLOAT", {"default": 10.0, "min": 1.0, "max": 100.0, "step": 1.0,
-                    "tooltip": "Target peak luminance multiplier (e.g. 10.0 = 10 stops above SDR white)."}),
+                    "tooltip": "Approximate brightness multiplier reached at SDR white (10.0 lifts 1.0 to about 9.6, roughly 3.3 stops). 1.0 = no lift."}),
                 "recovery_iters": ("INT", {"default": 3, "min": 0, "max": 8, "step": 1,
                     "tooltip": "Pyramid depth. The lift is applied to the 1/2^N low-pass, so detail "
                                "finer than about 2^N px keeps its original contrast. 0 lifts the whole "
                                "image. It does not reconstruct clipped detail."}),
                 "chroma_preservation": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Prevents expanded highlights from losing saturation or shifting hue."}),
+                    "tooltip": "Blend towards the original RGB ratios at the lifted luminance. The lift already scales R, G and B equally, so this currently has no visible effect."}),
             },
             "optional": {
                 "guidance_mask":  ("MASK",  {"tooltip": "Per-pixel guidance mask from Radiance Luminance Guidance."}),
                 "guidance_nits":  ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10000.0, "step": 50.0,
-                    "tooltip": "Local target peak nits. 0 = use global energy_target only."}),
+                    "tooltip": "Target peak in nits inside guidance_mask, converted at 100 nits = 1.0 (not the package's 203 nits). 0 = ignore the mask and use energy_target everywhere."}),
             }
         }
 
@@ -212,8 +212,8 @@ class RadianceRelightEngine:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "normal_map": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": "Image to light. The lighting pass is added on top of it, not multiplied by an albedo."}),
+                "normal_map": ("IMAGE", {"tooltip": "Normal map encoded 0 to 1 (RGB = XYZ x 0.5 + 0.5). Resized to the image if the sizes differ."}),
                 "light_dir_x": ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.01, "tooltip": "Light direction X component. Normalized internally — sets the horizontal angle of the synthetic light."}),
                 "light_dir_y": ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.01, "tooltip": "Light direction Y component. Positive = light from above."}),
                 "light_dir_z": ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.01, "tooltip": "Light direction Z component. Positive = light in front of surface."}),
@@ -225,7 +225,7 @@ class RadianceRelightEngine:
                 "specular_roughness": ("FLOAT", {"default": 0.1, "min": 0.01, "max": 1.0, "step": 0.01, "tooltip": "Surface roughness for Blinn-Phong specular. Low = sharp glints (metallic), high = soft broad highlights (matte)."}),
             },
             "optional": {
-                "camera": ("RADIANCE_CAMERA",),
+                "camera": ("RADIANCE_CAMERA", {"tooltip": "Optional camera. Only the position in its transform is used, as the viewpoint for the specular term relative to a -1 to 1 image plane. Without it a viewer at z = 2 is assumed."}),
             }
         }
 

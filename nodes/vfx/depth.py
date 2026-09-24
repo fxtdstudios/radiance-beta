@@ -137,7 +137,7 @@ class RadianceDepthMapGenerator:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": "Display-encoded image or frame batch. Frames with values above 1.05 are Reinhard tone-mapped to 0..1 first; alpha is ignored."}),
                 "model_size": (
                     cls.MODEL_SIZES,
                     {

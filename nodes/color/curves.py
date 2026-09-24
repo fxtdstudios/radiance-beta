@@ -62,7 +62,7 @@ def _apply_curve_1d(x: torch.Tensor, ctrl_x: list, ctrl_y: list) -> torch.Tensor
 
 class RadianceHueCurves:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Color"
-    DESCRIPTION = "Per-hue selective colour adjustment using spline curves."
+    DESCRIPTION = "Per-hue selective colour adjustment: a piecewise-linear curve over hue shifts hue, saturation or lightness of the colours it targets. HDR values above 1.0 are scaled down for the HSL maths and restored afterwards."
     FUNCTION = "apply"
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
@@ -71,16 +71,17 @@ class RadianceHueCurves:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "mode": (["Hue vs Hue", "Hue vs Saturation", "Hue vs Luminance"], {"default": "Hue vs Hue"}),
+                "image": ("IMAGE", {"tooltip": "Image to adjust, RGB in any encoding. Pixels with luma above 1.0 are normalised for the HSL conversion and rescaled afterwards."}),
+                "mode": (["Hue vs Hue", "Hue vs Saturation", "Hue vs Luminance"], {"default": "Hue vs Hue", "tooltip": "What the curve's output changes for each input hue: hue rotation, HSL saturation, or HSL lightness."}),
                 "control_points": ("STRING", {
                     "default": "[[0.0,0.0],[0.167,0.0],[0.333,0.0],[0.5,0.0],[0.667,0.0],[0.833,0.0],[1.0,0.0]]",
                     "multiline": False,
+                    "tooltip": "JSON list of [hue, amount] points, hue 0 to 1 (0 red, 0.333 green, 0.667 blue, 1 red again). Amount is added: hue shift in turns, or a saturation or lightness delta; 0 everywhere (the default) changes nothing.",
                 }),
-                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Multiplier on the curve's amounts. 0 = no change, 1 = as drawn, 2 = doubled."}),
             },
             "optional": {
-                "grade_info": ("STRING", {"forceInput": True}),
+                "grade_info": ("STRING", {"forceInput": True, "tooltip": "Upstream grade metadata. Currently ignored: it is neither used nor passed through."}),
             },
         }
 
@@ -119,7 +120,7 @@ class RadianceHueCurves:
 
 class RadianceCurves:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Color"
-    DESCRIPTION = "RGB and luminance spline curve grading with customisable control points."
+    DESCRIPTION = "RGB curve grading with piecewise-linear control points: a master curve on all three channels, then per-channel red, green and blue curves. Values beyond the end points are extrapolated along the last segment, so HDR values are not clipped."
     FUNCTION = "apply"
     RETURN_TYPES = ("IMAGE", "STRING")
     RETURN_NAMES = ("image", "grade_info")
@@ -129,15 +130,15 @@ class RadianceCurves:
         _default_pts = "[[0.0,0.0],[0.25,0.25],[0.5,0.5],[0.75,0.75],[1.0,1.0]]"
         return {
             "required": {
-                "image": ("IMAGE",),
-                "master": ("STRING", {"default": _default_pts, "multiline": False}),
-                "red": ("STRING", {"default": _default_pts, "multiline": False}),
-                "green": ("STRING", {"default": _default_pts, "multiline": False}),
-                "blue": ("STRING", {"default": _default_pts, "multiline": False}),
-                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "image": ("IMAGE", {"tooltip": "Image to grade. Curves act on the values as they arrive, so point positions are in that encoding (0 to 1 for display-referred sRGB)."}),
+                "master": ("STRING", {"default": _default_pts, "multiline": False, "tooltip": "JSON list of [in, out] points applied to R, G and B before the per-channel curves. The default diagonal is identity."}),
+                "red": ("STRING", {"default": _default_pts, "multiline": False, "tooltip": "JSON list of [in, out] points for the red channel, applied after the master curve. The default diagonal is identity."}),
+                "green": ("STRING", {"default": _default_pts, "multiline": False, "tooltip": "JSON list of [in, out] points for the green channel, applied after the master curve. The default diagonal is identity."}),
+                "blue": ("STRING", {"default": _default_pts, "multiline": False, "tooltip": "JSON list of [in, out] points for the blue channel, applied after the master curve. The default diagonal is identity."}),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Mix between the input (0) and the fully curved result (1)."}),
             },
             "optional": {
-                "grade_info_in": ("STRING", {"forceInput": True}),
+                "grade_info_in": ("STRING", {"forceInput": True, "tooltip": "Upstream grade metadata. Not used for the grade; it is stored as the 'upstream' field of the grade_info output."}),
             },
         }
 

@@ -258,10 +258,10 @@ class RadianceHDRAutoLogSelect:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": "Scene-linear HDR image (18% grey = 0.18). Its 95th-percentile luma sets how many stops above grey the log format must hold. The image itself is not changed."}),
                 "override": (
                     ["auto", "LogC4", "SLog3", "VLog", "LogC3", "ACEScct"],
-                    {"default": "auto"},
+                    {"default": "auto", "tooltip": "auto = choose the log format with the smallest highlight range that still fits the image. Any other choice forces that format; stops_detected is still measured."},
                 ),
             },
             "optional": {
@@ -394,7 +394,7 @@ class RadianceHDRDiagnostics:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": "HDR image before compression, encoded as set by colorspace. Metrics treat linear 1.0 as 203 nits."}),
             },
             "optional": {
                 "compression_ratio": ("FLOAT", {
@@ -411,7 +411,7 @@ class RadianceHDRDiagnostics:
                     "forceInput": True,
                     "tooltip": "JSON from RadianceHDRPerChannelNorm (optional).",
                 }),
-                "coherence_map": ("IMAGE",),
+                "coherence_map": ("IMAGE", {"tooltip": "Optional coherence map (0 to 1). Only its mean is reported, as coherence_mean in the JSON."}),
                 "colorspace": (
                     ["Linear (sRGB)", "ACEScg", "sRGB", "Rec.709"],
                     {"default": "Linear (sRGB)",

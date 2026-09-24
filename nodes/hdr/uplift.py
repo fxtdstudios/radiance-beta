@@ -184,12 +184,21 @@ class RadianceClipDetector:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {
+                    "tooltip": "Display-encoded SDR image (code values 0-1). Tested as is, no decoding.",
+                }),
                 "threshold": ("FLOAT", {
                     "default": 0.97, "min": 0.5, "max": 1.0, "step": 0.005,
                     "tooltip": "Pixels brighter than this are marked as clipped.",
                 }),
-                "channel_mode": (["any", "all", "luma"], {"default": "any"}),
+                "channel_mode": (["any", "all", "luma"], {
+                    "default": "any",
+                    "tooltip": (
+                        "any: flag a pixel when any RGB channel is over threshold. all: only when all "
+                        "three are. luma: Rec.709 luma. Only applies when soft_edge is 0; with a soft "
+                        "edge the mask always uses the brightest channel."
+                    ),
+                }),
                 "soft_edge": ("FLOAT", {
                     "default": 0.03, "min": 0.0, "max": 0.2, "step": 0.005,
                     "tooltip": "Feathering width below the threshold. 0 = hard binary mask.",
@@ -292,8 +301,15 @@ class RadianceSDRToHDRPrepare:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "clip_mask": ("MASK",),
+                "image": ("IMAGE", {
+                    "tooltip": "Display-encoded SDR image, decoded to linear with inverse_eotf.",
+                }),
+                "clip_mask": ("MASK", {
+                    "tooltip": (
+                        "Clip mask from Clip Detector, same size as image. Highlights are boosted "
+                        "inside it and it becomes the feathered inpainting mask output."
+                    ),
+                }),
                 "compression_ratio": ("FLOAT", {
                     "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01,
                     "tooltip": "Must match RadianceHDRDecoder. Wire from preset or LoRALoader.",
@@ -302,7 +318,13 @@ class RadianceSDRToHDRPrepare:
             "optional": {
                 "inverse_eotf": (
                     ["sRGB", "Rec.709", "Gamma 2.2", "Linear (no-op)"],
-                    {"default": "sRGB"},
+                    {
+                        "default": "sRGB",
+                        "tooltip": (
+                            "Transfer curve of the input, decoded to linear before the highlight "
+                            "boost. Linear (no-op) only clamps negatives."
+                        ),
+                    },
                 ),
                 "highlight_boost": ("FLOAT", {
                     "default": 4.0, "min": 1.0, "max": 32.0, "step": 0.5,
@@ -450,14 +472,32 @@ class RadianceHDRHighlightComposite:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "original_image": ("IMAGE",),
-                "hdr_image":      ("IMAGE",),
-                "clip_mask":      ("MASK",),
+                "original_image": ("IMAGE", {
+                    "tooltip": (
+                        "Original display-encoded SDR image. Linearised with inverse_eotf and "
+                        "used outside the mask; its alpha is carried to the output."
+                    ),
+                }),
+                "hdr_image":      ("IMAGE", {
+                    "tooltip": (
+                        "Scene-linear HDR reconstruction (e.g. from HDR Decoder). Used inside the "
+                        "mask; resized bilinearly if its size differs from original_image."
+                    ),
+                }),
+                "clip_mask":      ("MASK", {
+                    "tooltip": "Blend guide from Clip Detector: 1 takes hdr_image, 0 keeps the original.",
+                }),
             },
             "optional": {
                 "inverse_eotf": (
                     ["sRGB", "Rec.709", "Gamma 2.2", "Linear (no-op)"],
-                    {"default": "sRGB"},
+                    {
+                        "default": "sRGB",
+                        "tooltip": (
+                            "Transfer curve of original_image, used to linearise it so it matches "
+                            "hdr_image. Use the same setting as SDR to HDR Prepare."
+                        ),
+                    },
                 ),
                 "blend_softness": ("INT", {
                     "default": 24, "min": 0, "max": 128, "step": 1,

@@ -93,6 +93,9 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ### Fixed
 
+- **HDR Color Pipeline crashed on PQ input.** It still passed `peak_nits` to
+  a PQ decode that had dropped the argument on purpose, so every PQ run
+  raised TypeError. PQ is absolute; `pq_peak_nits` no longer reaches it.
 - **`slow` tests ran on every plain `pytest`.** The 1-to-100 frame-count
   sweep (300 encoded clips) is marked `slow` and the README said slow tests
   were deselected by default, but nothing deselected them: it cost 68 s of a
@@ -528,6 +531,26 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ### Added
 
+- **Every node and every input is documented.** All 149 menu nodes have a
+  description and all 1,259 inputs a tooltip, each written from the code that
+  reads it: units, range, colour space, what the default does, and what a
+  control does not do. Before: 14 nodes had no description and 561 inputs no
+  tooltip. About 80 existing tooltips and descriptions that were wrong were
+  corrected (gamma directions, the Split View position, the Grade temperature
+  scale, nits examples at 100 instead of 203, a LoRA environment variable
+  that does not exist, and more). `tests/test_node_docs.py` fails when a new
+  node or input lands undocumented.
+- **Node reference, `docs/nodes/`.** One page per menu section with every
+  node's inputs (type, default, range, meaning) and outputs, generated from
+  the nodes by `tools/build_node_reference.py`, so it cannot drift:
+  `tests/test_node_reference.py` fails when it is stale, when the README's
+  node map disagrees with it, or when a local link in the docs is broken.
+- **Five example workflows**, listed in ComfyUI's Templates browser: SDR to
+  HDR, HDR through a VAE, Multipass Estimate and relight, a colour grade, and
+  HDR delivery (EXR, tagged HDR10 and ACES 2.0 SDR from one master). Each was
+  loaded from its saved file into a clean install and run. Tests check every
+  Radiance node in a shipped workflow exists and is not retired, every
+  required socket is connected, and no workflow carries a machine path.
 - **Multipass Estimate.** Render-style passes from a plate, from trained
   models only.
   - *Geometry, MoGe-2 ViT-L (Microsoft, MIT), through ComfyUI's native MoGe:*
@@ -577,6 +600,13 @@ All notable changes to FXTD Radiance will be documented in this file.
   registers `models/radiance` with `folder_paths` (so `extra_model_paths.yaml`
   works), searches every registered folder, and describes where it looked
   when nothing is found.
+
+### Changed
+
+- **README is for users; the development record moved** to
+  `docs/DEVELOPMENT.md`. The node map links to the generated reference, and
+  its hand-written table, which had drifted (Project Manager under Core, QC
+  under Color), is replaced.
 
 ### Removed
 

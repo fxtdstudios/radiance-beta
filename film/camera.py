@@ -217,7 +217,10 @@ class RadianceDepthOfField:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {
+                    "tooltip": "Image or frame batch to defocus. Works on linear or display-encoded "
+                    "values; super-whites are kept.",
+                }),
                 "blur_amount": (
                     "FLOAT",
                     {
@@ -226,11 +229,16 @@ class RadianceDepthOfField:
                         "max": 50.0,
                         "step": 0.5,
                         "display": "slider",
+                        "tooltip": "Maximum defocus in pixels: Gaussian sigma for Circle (kernel capped "
+                        "at 31 px), kernel radius for the other shapes. Below 0.1 the image is returned unchanged.",
                     },
                 ),
             },
             "optional": {
-                "depth_map": ("IMAGE",),
+                "depth_map": ("IMAGE", {
+                    "tooltip": "Depth in 0-1 from the first channel, 0 = near, 1 = far; resized to the "
+                    "image. Without it, a radial map is used (sharp centre, blurred corners).",
+                }),
                 "focus_distance": (
                     "FLOAT",
                     {
@@ -239,11 +247,15 @@ class RadianceDepthOfField:
                         "max": 1.0,
                         "step": 0.01,
                         "display": "slider",
+                        "tooltip": "Depth value that is in focus, on the depth_map scale (0 = near, "
+                        "1 = far). With no depth map, 0 is the frame centre.",
                     },
                 ),
                 "focus_range": (
                     "FLOAT",
-                    {"default": 0.1, "min": 0.01, "max": 0.5, "step": 0.01},
+                    {"default": 0.1, "min": 0.01, "max": 0.5, "step": 0.01,
+                     "tooltip": "Depth distance either side of focus_distance that stays sharp; blur "
+                     "then ramps up to full over the rest of the depth range."},
                 ),
                 "bokeh_shape": (
                     cls.BOKEH_SHAPES,
@@ -254,10 +266,13 @@ class RadianceDepthOfField:
                 ),
                 "highlight_boost": (
                     "FLOAT",
-                    {"default": 1.0, "min": 1.0, "max": 3.0, "step": 0.1},
+                    {"default": 1.0, "min": 1.0, "max": 3.0, "step": 0.1,
+                     "tooltip": "Brightens defocused highlights (luma above 0.8) by up to this factor, "
+                     "scaled by the amount of blur. 1.0 = off."},
                 ),
                 "foreground_blur": ("BOOLEAN", {"default": True,
-                    "tooltip": "Apply additional blur to near-clipping (foreground) objects for realistic lens bokeh.",
+                    "tooltip": "Blur areas nearer than focus_distance (depth below it). Off keeps the "
+                    "foreground sharp and blurs only the background.",
                 }),
                 "use_gpu": ("BOOLEAN", {"default": True,
                     "tooltip": "Run the effect on GPU via CUDA/MPS. Falls back to CPU if unavailable.",
@@ -589,7 +604,9 @@ class RadianceRollingShutter:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {
+                    "tooltip": "Image or frame batch. Every frame gets the same static distortion.",
+                }),
                 "skew_amount": (
                     "FLOAT",
                     {
@@ -598,26 +615,40 @@ class RadianceRollingShutter:
                         "max": 50.0,
                         "step": 1.0,
                         "display": "slider",
+                        "tooltip": "Total shear in pixels between the first and last scanline; the sign "
+                        "sets the lean. 0 = no skew.",
                     },
                 ),
             },
             "optional": {
-                "shutter_direction": (cls.SHUTTER_MODES, {"default": "Vertical"}),
+                "shutter_direction": (cls.SHUTTER_MODES, {
+                    "default": "Vertical",
+                    "tooltip": "Vertical: scan runs top to bottom, rows shift sideways. Horizontal: "
+                    "columns shift up/down. Both: half of each.",
+                }),
                 "wobble_frequency": (
                     "FLOAT",
-                    {"default": 0.0, "min": 0.0, "max": 20.0, "step": 0.5},
+                    {"default": 0.0, "min": 0.0, "max": 20.0, "step": 0.5,
+                     "tooltip": "Jello wobble cycles per half frame along the scan axis (2x this over "
+                     "the full frame). Needs wobble_amplitude above 0."},
                 ),
                 "wobble_amplitude": (
                     "FLOAT",
-                    {"default": 0.0, "min": 0.0, "max": 20.0, "step": 0.5},
+                    {"default": 0.0, "min": 0.0, "max": 20.0, "step": 0.5,
+                     "tooltip": "Peak-to-peak wobble displacement in pixels (half that in Both mode). "
+                     "0 = off."},
                 ),
                 "flash_band_position": (
                     "FLOAT",
-                    {"default": -1.0, "min": -1.0, "max": 1.0, "step": 0.05},
+                    {"default": -1.0, "min": -1.0, "max": 1.0, "step": 0.05,
+                     "tooltip": "Centre of a partial-exposure flash band along the scan axis, -1 = "
+                     "top/left edge, 1 = bottom/right. Any value below -0.5 turns the band off."},
                 ),
                 "flash_band_width": (
                     "FLOAT",
-                    {"default": 0.1, "min": 0.01, "max": 0.5, "step": 0.01},
+                    {"default": 0.1, "min": 0.01, "max": 0.5, "step": 0.01,
+                     "tooltip": "Gaussian width of the flash band as a fraction of half the frame. "
+                     "The band adds a flat +0.3 to all channels."},
                 ),
                 "use_gpu": ("BOOLEAN", {"default": True,
                     "tooltip": "Run the effect on GPU via CUDA/MPS. Falls back to CPU if unavailable.",
@@ -773,8 +804,15 @@ class RadianceCompressionArtifacts:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "artifact_type": (cls.ARTIFACT_TYPES, {"default": "JPEG"}),
+                "image": ("IMAGE", {
+                    "tooltip": "Display-encoded image. It is quantised to 8 bits and clipped to 0-1 "
+                    "in every mode, so HDR values are lost; alpha is kept.",
+                }),
+                "artifact_type": (cls.ARTIFACT_TYPES, {
+                    "default": "JPEG",
+                    "tooltip": "JPEG: real JPEG round trip plus block averaging (block_size). Banding: "
+                    "posterise to banding_levels. Both: JPEG then banding.",
+                }),
                 "quality": (
                     "INT",
                     {
@@ -783,23 +821,29 @@ class RadianceCompressionArtifacts:
                         "max": 100,
                         "step": 1,
                         "display": "slider",
+                        "tooltip": "JPEG encoder quality, 1 = worst, 100 = best. Ignored in Banding mode.",
                     },
                 ),
             },
             "optional": {
                 "block_size": ("INT", {"default": 8, "min": 4, "max": 32, "step": 4,
-                    "tooltip": "Block size for DCT/frequency-domain processing. Larger blocks capture more structure.",
+                    "tooltip": "Size in pixels of the square blocks each averaged to one flat colour after the JPEG pass "
+                    "(a mosaic, not a DCT setting). Applies in JPEG and Both. Image sides must be a multiple of it.",
                 }),
                 "color_subsampling": ("BOOLEAN", {"default": True,
                     "tooltip": "Apply chroma subsampling (4:2:0) to simulate video codec color compression.",
                 }),
                 "banding_levels": (
                     "INT",
-                    {"default": 32, "min": 4, "max": 256, "step": 4},
+                    {"default": 32, "min": 4, "max": 256, "step": 4,
+                     "tooltip": "Quantisation steps per channel in Banding and Both modes (rounded down, "
+                     "so it darkens by up to one step). Fewer = stronger banding."},
                 ),
                 "noise_amount": (
                     "FLOAT",
-                    {"default": 0.0, "min": 0.0, "max": 0.1, "step": 0.005},
+                    {"default": 0.0, "min": 0.0, "max": 0.1, "step": 0.005,
+                     "tooltip": "Standard deviation of Gaussian noise added at the end, in 0-1 code "
+                     "values (0.01 = about 2.5 of 255). 0 = off."},
                 ),
                 "seed": (
                     "INT",

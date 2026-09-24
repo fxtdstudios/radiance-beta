@@ -33,7 +33,7 @@ class RadianceLoadImageMask:
         files = folder_paths.filter_files_content_types(files, ["image"])
         # Same widget signature as default LoadImage
         return {"required":
-                    {"image": (sorted(files), {"image_upload": True})},
+                    {"image": (sorted(files), {"image_upload": True, "tooltip": "Image file from the ComfyUI input folder, loaded as 8-bit sRGB (0-1). If '<name>_radmask.png' sits beside it, that file's alpha is the mask as-is; otherwise the image's own alpha is inverted, as in Load Image."})},
                 }
 
     CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"

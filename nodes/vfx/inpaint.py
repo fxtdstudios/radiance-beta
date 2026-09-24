@@ -14,14 +14,16 @@ class RadianceHDRCrop:
     to multiples of 16 to guarantee compatibility with Wan / LTX video architectures.
     """
     
+    DESCRIPTION = "Crop an image batch to the region around a mask, with extra context, for inpainting at full resolution. Pair with Radiance HDR Stitch to put the result back."
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "mask": ("MASK",),
-                "context_padding": ("FLOAT", {"default": 1.5, "min": 1.0, "max": 4.0, "step": 0.05}),
-                "force_multiple": ("INT", {"default": 16, "min": 1, "max": 256, "step": 1}),
+                "image": ("IMAGE", {"tooltip": "Plate or frame batch to crop. Values pass through unchanged, so HDR and scene-linear data are kept."}),
+                "mask": ("MASK", {"tooltip": "Region to inpaint. Pixels above 0.05 on any frame define one union box used for every frame, so the crop does not move over time. An empty mask crops the full frame."}),
+                "context_padding": ("FLOAT", {"default": 1.5, "min": 1.0, "max": 4.0, "step": 0.05, "tooltip": "Crop size as a multiple of the mask's bounding box, centred on it. 1.0 = tight to the mask, 1.5 = 50% larger for surrounding context."}),
+                "force_multiple": ("INT", {"default": 16, "min": 1, "max": 256, "step": 1, "tooltip": "Round the crop width and height up to a multiple of this (16 suits Wan and LTX latents). 1 = no rounding. A crop that reaches the frame edge is limited to the frame size and may not be a multiple."}),
             }
         }
 
@@ -114,16 +116,18 @@ class RadianceHDRStitch:
     to eliminate color seams without dynamic range clamping.
     """
     
+    DESCRIPTION = "Composite an inpainted crop from Radiance HDR Crop back into the original plate through its mask, with a feathered or multi-band blend. Output is not clamped above 1.0."
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "original_image": ("IMAGE",),
-                "cropped_image": ("IMAGE",),
-                "cropped_mask": ("MASK",),
-                "stitcher_data": ("STITCHER_DATA",),
-                "blend_mode": (["Linear_Laplacian", "Linear_Gaussian", "Standard"], {"default": "Linear_Laplacian"}),
-                "feather_radius": ("INT", {"default": 16, "min": 0, "max": 128, "step": 1}),
+                "original_image": ("IMAGE", {"tooltip": "The full-size plate that was passed to HDR Crop."}),
+                "cropped_image": ("IMAGE", {"tooltip": "The processed crop. It must keep the crop's exact width and height, as it is pasted back at the stored coordinates."}),
+                "cropped_mask": ("MASK", {"tooltip": "Mask for the crop (normally cropped_mask from HDR Crop). Only this area of the crop replaces the plate."}),
+                "stitcher_data": ("STITCHER_DATA", {"tooltip": "Crop coordinates from HDR Crop."}),
+                "blend_mode": (["Linear_Laplacian", "Linear_Gaussian", "Standard"], {"default": "Linear_Laplacian", "tooltip": "Linear_Laplacian: 3-level multi-band blend with the feathered mask, negatives clamped to 0. Linear_Gaussian: plain mix through the feathered mask. Standard: mix through the unfeathered mask."}),
+                "feather_radius": ("INT", {"default": 16, "min": 0, "max": 128, "step": 1, "tooltip": "Mask softening radius in pixels (a box blur of 2 x radius + 1). 0 = hard edge. Not used by Standard, although the returned blend mask is still feathered."}),
             }
         }
 
@@ -238,12 +242,14 @@ class RadianceTemporalStitchStabilizer:
     along the sequence timeline for each mask pixel.
     """
     
+    DESCRIPTION = "Smooth a mask sequence over time with a per-pixel Gaussian filter across frames, to remove edge jitter and popping before stitching."
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "masks": ("MASK",),
-                "temporal_sigma": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 16.0, "step": 0.5}),
+                "masks": ("MASK", {"tooltip": "Mask sequence, one mask per frame in timeline order. A single mask is returned unchanged."}),
+                "temporal_sigma": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 16.0, "step": 0.5, "tooltip": "Gaussian width in frames; the filter reaches 3 x sigma frames each way. Values of 0.1 or less bypass the node."}),
             }
         }
 

@@ -251,11 +251,15 @@ class RadianceViewer:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "image": (image_video_type,),
+                "image": (image_video_type, {
+                    "tooltip": "IMAGE batch or VIDEO to review. Returned unchanged as an IMAGE; "
+                               "input_space decides how it is displayed."}),
             },
             "optional": {
                 # ── Compare / Depth ──
-                "compare_image": (image_video_type,),
+                "compare_image": (image_video_type, {
+                    "tooltip": "Optional B side (IMAGE or VIDEO) for the viewer's wipe and compare "
+                               "modes. Every frame is sent; its display space is resolved like image's."}),
                 "zdepth": (
                     image_video_type,
                     {"tooltip": "Z-Depth map to display when pressing Z button"},
@@ -1281,10 +1285,13 @@ class RadianceGradeApply:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {
+                    "tooltip": "Image to grade, treated as linear Rec.709/sRGB primaries. The result is "
+                               "not clamped (values above 1.0 are kept); NaN and Inf are zeroed or capped."}),
                 # Global
                 "exposure": ("FLOAT", {"default": 0.0, "min": -10.0, "max": 10.0, "step": 0.01,
-                    "tooltip": "EV exposure adjustment applied to the viewer display. Does not affect pipeline values."
+                    "tooltip": "Exposure in stops, baked into the output: RGB is multiplied by 2^exposure "
+                               "before every other control."
                 }),
                 "offset": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.001,
                     "tooltip": "Additive brightness lift applied after exposure. Shifts all tones uniformly."
@@ -1294,41 +1301,51 @@ class RadianceGradeApply:
                     "tooltip": "Shadow lift (black point raise). Raises the darkest values without affecting highlights."
                 }),
                 "gamma": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 4.0, "step": 0.01,
-                    "tooltip": "Mid-tone power curve. Values > 1.0 darken, < 1.0 brighten the midtones."
+                    "tooltip": "Mid-tone power curve, applied as x^(1/gamma) to positive values. "
+                               "Values > 1.0 brighten, < 1.0 darken the midtones."
                 }),
                 "gain": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01,
-                    "tooltip": "Highlight gain multiplier. Scales bright values more than darks."
+                    "tooltip": "RGB multiplier (slope), applied after lift. 1.0 = no change."
                 }),
                 # Tone
                 "contrast": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.01,
-                    "tooltip": "S-curve contrast around the pivot point. Higher values increase separation."
+                    "tooltip": "Linear contrast around pivot: (x - pivot) x contrast + pivot, per channel. "
+                               "Not an S-curve, so values can go negative or above 1.0."
                 }),
                 "pivot": ("FLOAT", {"default": 0.18, "min": 0.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "Luminance pivot point for contrast and curves adjustments. 0.18 = 18% grey."
+                    "tooltip": "Value left unchanged by contrast. 0.18 = 18% grey in linear light."
                 }),
                 "shadows": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "Shadow colour tint strength. Negative values push shadows toward the colour."
+                    "tooltip": "Shadow brightness, no tint: RGB is scaled by 1 + 0.5 x shadows x (1 - luma)^2. "
+                               "Positive brightens dark areas, negative darkens them."
                 }),
                 "highlights": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "Highlight colour tint strength. Positive values push highlights toward the colour."
+                    "tooltip": "Highlight brightness, no tint: RGB is scaled by 1 + 0.5 x highlights x luma^2 "
+                               "(luma clipped to 1). Positive brightens bright areas, negative darkens them."
                 }),
                 # Color
                 "saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.01,
                     "tooltip": "Global colour saturation. 1.0 = original, 0.0 = monochrome, > 1.0 = boosted."
                 }),
                 "temperature": ("FLOAT", {"default": 6500.0, "min": 2000.0, "max": 12000.0, "step": 10.0,
-                    "tooltip": "Colour temperature offset in Kelvin-relative units. Positive = warmer (yellow), negative = cooler (blue)."
+                    "tooltip": "White balance in absolute Kelvin, 6500 = no change. RGB is multiplied by the "
+                               "blackbody colour of this temperature: lower values warm the image, higher cool it."
                 }),
                 "hue_shift": ("FLOAT", {"default": 0.0, "min": -180.0, "max": 180.0, "step": 0.1,
                     "tooltip": "Global hue rotation in degrees. 0 = no change, 180 = complementary hues."
                 }),
                 # LUT
-                "lut_name": (LUT_MODES, {"default": "None"}),
+                "lut_name": (LUT_MODES, {"default": "None",
+                    "tooltip": "Built-in transform applied last, after the grade: display/tone-map curves, "
+                               "linear-to-camera-log encodes, log-to-linear IDTs, or analysis views "
+                               "(False Color, Clip Check). None and the separator do nothing."}),
                 "lut_intensity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "Blend strength of the connected LUT. 0.0 = bypass, 1.0 = full LUT application."
+                    "tooltip": "Blend strength of the selected lut_name. 0.0 = bypass, 1.0 = full LUT application."
                 }),
                 # Color Science
-                "color_science": (["Linear (sRGB)", "ACEScct"], {"default": "Linear (sRGB)"}),
+                "color_science": (["Linear (sRGB)", "ACEScct"], {"default": "Linear (sRGB)",
+                    "tooltip": "Space for offset, lift, gamma and gain. ACEScct converts linear sRGB to "
+                               "ACEScct, applies them there and converts back; the other controls stay linear."}),
             }
         }
 

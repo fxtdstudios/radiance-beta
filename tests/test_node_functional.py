@@ -630,3 +630,15 @@ def test_the_harness_actually_covered_the_catalog():
     assert len(_KEYS) >= EXPECTED_MIN_NODE_COUNT, (
         f"only {len(_KEYS)} nodes were collected for functional testing"
     )
+
+
+@pytest.mark.real_torch
+def test_hdr_color_pipeline_decodes_pq():
+    """Every PQ run raised TypeError: the node still passed peak_nits to an
+    _eotf_pq() that dropped it. PQ code 0.58 is about 203 nits, i.e. 1.0."""
+    import torch
+    from radiance.nodes.hdr.colorspace import RadianceHDRColorPipeline
+    node = RadianceHDRColorPipeline()
+    img = torch.full((1, 4, 4, 3), 0.5807)
+    out = getattr(node, node.FUNCTION)(img, encoding="PQ (ST.2084)")[1]   # scene-linear output
+    assert abs(float(out[0, 0, 0, 0]) - 1.0) < 0.02

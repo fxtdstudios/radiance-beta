@@ -32,7 +32,7 @@ class RadianceHighlightSynthesis:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": "Image with clipped highlights, in any encoding (threshold is compared with its Rec.709 luma). Every channel, alpha included if present, receives the detail noise."}),
                 "threshold": (
                     "FLOAT",
                     {
@@ -50,7 +50,7 @@ class RadianceHighlightSynthesis:
                         "min": 1.0,
                         "max": 4.0,
                         "step": 0.1,
-                        "tooltip": "How much to expand highlight range (multiplier for values > 1.0).",
+                        "tooltip": "Highlight gain above the threshold: gain = 1 + (luma - threshold) x (expansion - 1) x 2, faded in by the highlight mask. 1.0 = no expansion.",
                     },
                 ),
                 "detail_amount": (
@@ -73,9 +73,9 @@ class RadianceHighlightSynthesis:
                         "tooltip": "Scale/frequency of the synthetic detail.",
                     },
                 ),
-                "blend_mode": (["Screen", "Add", "Soft Light"], {"default": "Screen"}),
+                "blend_mode": (["Screen", "Add", "Soft Light"], {"default": "Screen", "tooltip": "How the monochrome detail noise is combined. Add: plain offset. Screen: a + n - a x n, which inverts the noise on values above 1.0. Soft Light: contrast-style blend, normalised by the frame peak."}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF,
-                    "tooltip": "Random seed for noise generation. Set to -1 for a random seed each run.",
+                    "tooltip": "Random seed for the detail noise; frame N of a batch uses seed + N. The same seed always gives the same pattern.",
                 }),
             }
         }

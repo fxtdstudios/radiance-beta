@@ -15,11 +15,11 @@ class RadianceDenoise:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": "Image or frame batch to denoise, float32 in any encoding (scene-linear HDR above 1.0 is kept). A batch of more than one frame enables the temporal options."}),
                 "filter_type": (["Bilateral", "Guided"], {"default": "Bilateral",
                     "tooltip": "The core spatial denoising algorithm. Bilateral preserves edges; Guided runs faster, preserves finer detail, and avoids halos."}),
                 "d": ("INT", {"default": 9, "min": 1, "max": 50,
-                    "tooltip": "Filter diameter. In Bilateral mode, this defines the pixel neighborhood. In Guided mode, this translates to window radius."
+                    "tooltip": "Base filter radius in pixels. It sets the band split (d/2 and 1.5 x d box blurs) and the per-band filter radius (d/4, d/2, d); Bilateral caps each radius at 8 px."
                 }),
                 "sigmaColor": (
                     "FLOAT",
@@ -33,20 +33,20 @@ class RadianceDenoise:
                 "sigmaSpace": (
                     "FLOAT",
                     {"default": 75.0, "min": 0.1, "max": 500.0, "step": 0.5,
-                     "tooltip": "Spatial distance threshold. Higher = smoother across wider neighborhoods but slower in Bilateral mode."},
+                     "tooltip": "Gaussian spatial falloff in pixels for the Bilateral filter (higher = flatter spatial weights). It does not change speed and is ignored by Guided."},
                 ),
                 "hdr_auto_sigma": (
                     "BOOLEAN",
                     {"default": True,
                      "tooltip": (
-                         "Highly recommended for HDR! Automatically scales the color similarity threshold "
-                         "to match the local maximum range of the image, keeping denoise strength uniform."
+                         "Multiplies the colour threshold by the peak value of the whole batch when that peak exceeds 1.01, "
+                         "so HDR input gets a proportionally wider threshold. No effect on 0-1 images."
                      )},
                 ),
                 "auto_profiling": (
                     "BOOLEAN",
                     {"default": False,
-                     "tooltip": "Enables fully automatic, hands-free noise profiling. Scans the image for the flatest region (sensor noise floor) and dynamically scales all thresholds."}
+                     "tooltip": "Replaces sigmaColor with a measured noise level: the lowest luma standard deviation among 32 px patches, times profile_multiplier. Other settings are unchanged."}
                 ),
                 "profile_multiplier": (
                     "FLOAT",
@@ -101,12 +101,12 @@ class RadianceDenoise:
                 "motion_compensation": (
                     "BOOLEAN",
                     {"default": True,
-                     "tooltip": "Enables 9-directional block-matching motion compensation to align adjacent frames, preventing ghosting on moving objects."}
+                     "tooltip": "Before temporal blending, shifts each neighbour frame per pixel by the best of the 9 offsets within 1 pixel (lowest RGB difference). Only helps with motion of about 1 pixel per frame."}
                 ),
                 "detail_recovery": (
                     "FLOAT",
                     {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
-                     "tooltip": "Blends high-frequency detail from the original image back into the denoised image to recover skin pores/grain."}
+                     "tooltip": "Mixes the original input back over the denoised result (0 = fully denoised, 1 = original). Restores fine grain and texture along with the noise that was removed."}
                 ),
                 "sharpen_strength": (
                     "FLOAT",

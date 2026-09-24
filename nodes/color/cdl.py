@@ -20,7 +20,7 @@ class RadianceCDLTransform:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": "Image to grade. The CDL maths is applied to the values as they arrive (no colour space conversion), so feed it the encoding the CDL was authored in."}),
                 "slope_r": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.01, "tooltip": "Red channel slope (gain). 1.0 = unity."}),
                 "slope_g": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.01, "tooltip": "Green channel slope (gain). 1.0 = unity."}),
                 "slope_b": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.01, "tooltip": "Blue channel slope (gain). 1.0 = unity."}),
@@ -33,7 +33,7 @@ class RadianceCDLTransform:
                 "saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.01, "tooltip": "Global saturation. 1.0 = unity."}),
             },
             "optional": {
-                "cdl_data": ("STRING", {"forceInput": True, "tooltip": "JSON CDL data from RadianceCDLImport."}),
+                "cdl_data": ("STRING", {"forceInput": True, "tooltip": "JSON CDL data from Radiance CDL Import. When connected, its slope, offset, power and saturation values replace the sliders above."}),
             }
         }
 
@@ -140,19 +140,19 @@ class RadianceCDLExport:
                         "ComfyUI's output/ folder; absolute paths are used as given."
                     ),
                 }),
-                "slope_r": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.001}),
-                "slope_g": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.001}),
-                "slope_b": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.001}),
-                "offset_r": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.0001}),
-                "offset_g": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.0001}),
-                "offset_b": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.0001}),
-                "power_r": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 4.0, "step": 0.001}),
-                "power_g": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 4.0, "step": 0.001}),
-                "power_b": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 4.0, "step": 0.001}),
-                "saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.001}),
+                "slope_r": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.001, "tooltip": "Red slope (gain) written to the file. 1.0 = unity."}),
+                "slope_g": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.001, "tooltip": "Green slope (gain) written to the file. 1.0 = unity."}),
+                "slope_b": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.001, "tooltip": "Blue slope (gain) written to the file. 1.0 = unity."}),
+                "offset_r": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.0001, "tooltip": "Red offset written to the file. 0.0 = no shift."}),
+                "offset_g": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.0001, "tooltip": "Green offset written to the file. 0.0 = no shift."}),
+                "offset_b": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.0001, "tooltip": "Blue offset written to the file. 0.0 = no shift."}),
+                "power_r": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 4.0, "step": 0.001, "tooltip": "Red power (exponent) written to the file. 1.0 = unity."}),
+                "power_g": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 4.0, "step": 0.001, "tooltip": "Green power (exponent) written to the file. 1.0 = unity."}),
+                "power_b": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 4.0, "step": 0.001, "tooltip": "Blue power (exponent) written to the file. 1.0 = unity."}),
+                "saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.001, "tooltip": "Saturation written to the file's SaturationNode. 1.0 = unity."}),
             },
             "optional": {
-                "cdl_data": ("STRING", {"forceInput": True}),
+                "cdl_data": ("STRING", {"forceInput": True, "tooltip": "JSON CDL data (from CDL Import or the cdl_info output of CDL Transform). When connected, its values replace the sliders above."}),
             }
         }
 

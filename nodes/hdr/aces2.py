@@ -763,12 +763,15 @@ class RadianceACES2ReachGamutCompress:
                 }),
                 "threshold_cyan": ("FLOAT", {
                     "default": 0.815, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Distance from neutral (on R) where cyan compression starts. Lower protects fewer colours; below strength 1 it is also lowered slightly.",
                 }),
                 "threshold_magenta": ("FLOAT", {
                     "default": 0.803, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Distance from neutral (on G) where magenta compression starts. Lower protects fewer colours; below strength 1 it is also lowered slightly.",
                 }),
                 "threshold_yellow": ("FLOAT", {
                     "default": 0.880, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Distance from neutral (on B) where yellow compression starts. Lower protects fewer colours; below strength 1 it is also lowered slightly.",
                 }),
             },
         }
@@ -853,19 +856,20 @@ class RadianceACES2OutputTransformFull:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": "Scene-linear image in the space chosen by input_colorspace (18% grey = 0.18). A display-encoded sRGB image must be linearised first."}),
                 "input_colorspace": (
                     ["ACEScg", "ACES2065-1", "Linear_sRGB", "Linear_Rec2020"],
-                    {"default": "ACEScg"},
+                    {"default": "ACEScg", "tooltip": "Primaries of the incoming linear image; it is converted to ACEScg (AP1) before the transform. No transfer curve is removed."},
                 ),
                 "output_transform": (cls.OUTPUT_TRANSFORMS, {
                     "default": "ACES 2.0 SDR (sRGB/Rec.709)",
+                    "tooltip": "Target display: sets primaries, encoding (sRGB, PQ, HLG or gamma 2.6) and peak. Output is display-encoded 0 to 1. Both Cinema options use P3-D65 primaries.",
                 }),
             },
             "optional": {
                 "peak_luminance": ("FLOAT", {
                     "default": 100.0, "min": 48.0, "max": 10000.0, "step": 1.0,
-                    "tooltip": "SDR peak luminance (nits). Ignored for HDR outputs.",
+                    "tooltip": "Display peak luminance in nits for the SDR and HLG outputs. Ignored for the PQ outputs (fixed by their name) and Cinema (fixed 48 nits).",
                 }),
                 "surround": (["Dark", "Dim", "Average"], {
                     "default": "Dim",
@@ -877,6 +881,7 @@ class RadianceACES2OutputTransformFull:
                 }),
                 "creative_white_scale": ("FLOAT", {
                     "default": 1.0, "min": 0.5, "max": 2.0, "step": 0.01,
+                    "tooltip": "Linear multiplier on all channels after conversion to ACEScg, so it acts as extra exposure (2.0 = +1 stop), not a white point change. 1.0 = no change.",
                 }),
                 "gamut_compress_strength": ("FLOAT", {
                     "default": 1.0, "min": 0.0, "max": 1.5, "step": 0.05,
@@ -1019,13 +1024,16 @@ class RadianceACESMetadataFile:
                 }),
                 "peak_nits": ("FLOAT", {
                     "default": 100.0, "min": 48.0, "max": 10000.0, "step": 1.0,
+                    "tooltip": "(write) Display peak luminance in nits, stored as the output transform's peakLuminance.",
                 }),
                 "min_nits": ("FLOAT", {
                     "default": 0.005, "min": 0.0, "max": 1.0, "step": 0.001,
+                    "tooltip": "(write) Display black level in nits, stored as the output transform's minLuminance.",
                 }),
                 "description": ("STRING", {
                     "default": "Created by Radiance ACES 2.0 pipeline.",
                     "multiline": True,
+                    "tooltip": "(write) Free text stored in the AMF's amfInfo description. It is inserted verbatim, so avoid < and & characters.",
                 }),
                 "save_path": ("STRING", {
                     "default": "",
@@ -1133,12 +1141,13 @@ class RadianceACES2Compliance:
                 }),
                 "output_type": (
                     ["SDR_sRGB", "SDR_P3", "HDR_PQ_1000", "HDR_PQ_2000", "HDR_PQ_4000", "HDR_HLG"],
-                    {"default": "SDR_sRGB"},
+                    {"default": "SDR_sRGB", "tooltip": "Output type named in the report header. Currently a label only: the same checks and thresholds run for every choice."},
                 ),
             },
             "optional": {
                 "peak_nits": ("FLOAT", {
                     "default": 100.0, "min": 48.0, "max": 10000.0, "step": 1.0,
+                    "tooltip": "Display peak in nits shown in the report header. Currently a label only: the checks do not use it.",
                 }),
             },
         }

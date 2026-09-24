@@ -9,7 +9,7 @@ logger = logging.getLogger("radiance.ocio")
 
 class RadianceOCIOContext:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Color"
-    DESCRIPTION = "Set OpenColorIO context variables for environment-aware transforms."
+    DESCRIPTION = "Load an OpenColorIO config into Radiance's shared OCIO manager for this session (used, for example, by Radiance Color Space Convert as its OCIO path). It does not set OCIO context variables."
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -17,9 +17,11 @@ class RadianceOCIOContext:
             "required": {
                 "config_path": ("STRING", {
                     "default": "C:/ACES/config.ocio", "multiline": False,
+                    "tooltip": "Path to a config.ocio file. A relative path is looked for in ComfyUI's input/ then output/ folder. The loaded config replaces the session-wide one until another is loaded.",
                 }),
                 "working_space": ("STRING", {
                     "default": "ACES - ACEScg",
+                    "tooltip": "Working colour space name, stored in the ocio_context output only. It is not validated against the config and no node currently reads it.",
                 }),
             },
         }

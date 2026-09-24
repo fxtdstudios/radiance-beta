@@ -414,7 +414,10 @@ class RadianceSceneCutSplit:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "images":    ("IMAGE",),
+                "images":    ("IMAGE", {
+                    "tooltip": "The same frame batch that was analysed by RadianceSceneCutDetect. "
+                               "Returned whole if cut_data has no shots.",
+                }),
                 "cut_data":  ("STRING", {
                     "tooltip": "JSON from RadianceSceneCutDetect.",
                 }),

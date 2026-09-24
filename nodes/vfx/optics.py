@@ -85,16 +85,16 @@ class RadianceLensDistortion:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image":   ("IMAGE",),
+                "image":   ("IMAGE", {"tooltip": "Image or sequence to distort or undistort. Pixels are only resampled (no colour change), so any encoding works."}),
                 "k1":      ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0,  "step": 0.005,
                     "tooltip": "Primary radial distortion. k1<0 = barrel, k1>0 = pincushion."}),
                 "k2":      ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0,  "step": 0.005,
                     "tooltip": "Secondary radial distortion. Affects extreme corners. Use sparingly."}),
                 "scale":   ("FLOAT", {"default": 1.0, "min": 0.1,  "max": 2.0,  "step": 0.01,
                     "tooltip": "Uniform scale applied after distortion. Use to crop black borders."}),
-                "center_x":("FLOAT", {"default": 0.5, "min": 0.0,  "max": 1.0,  "step": 0.01, "tooltip": "Horizontal center of the vignette (0 = left, 1 = right).",
+                "center_x":("FLOAT", {"default": 0.5, "min": 0.0,  "max": 1.0,  "step": 0.01,
                     "tooltip": "Optical center X (0.5 = image center)."}),
-                "center_y":("FLOAT", {"default": 0.5, "min": 0.0,  "max": 1.0,  "step": 0.01, "tooltip": "Vertical center of the vignette (0 = top, 1 = bottom).",
+                "center_y":("FLOAT", {"default": 0.5, "min": 0.0,  "max": 1.0,  "step": 0.01,
                     "tooltip": "Optical center Y (0.5 = image center)."}),
                 "padding_mode": (["zeros", "reflection", "border"], {"default": "zeros",
                     "tooltip": "Edge fill: zeros=black, reflection=mirrored, border=edge-clamped."}),
@@ -193,7 +193,7 @@ class RadianceChromaticAberration:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image":    ("IMAGE",),
+                "image":    ("IMAGE", {"tooltip": "Image whose red, green and blue channels are scaled radially by separate amounts. Alpha is not shifted."}),
                 "shift_r":  ("FLOAT", {"default":  0.005, "min": -0.1, "max": 0.1, "step": 0.001,
                     "tooltip": "Radial scale for Red channel. Positive = pushed outward."}),
                 "shift_g":  ("FLOAT", {"default":  0.0,   "min": -0.1, "max": 0.1, "step": 0.001,
@@ -295,9 +295,9 @@ class RadianceAnamorphicStreaks:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image":           ("IMAGE",),
+                "image":           ("IMAGE", {"tooltip": "Image to add streaks to, ideally scene-linear so that highlights above 1.0 drive the flare."}),
                 "threshold":       ("FLOAT", {"default": 1.0,  "min": 0.0, "max": 10.0, "step": 0.01,
-                    "tooltip": "Luminance threshold above which highlights generate streaks."}),
+                    "tooltip": "Per-channel value above which highlights generate streaks; only the excess over it is streaked. 1.0 = SDR white."}),
                 "streak_length":   ("INT",   {"default": 64,   "min": 1,   "max": 512,  "step": 1,
                     "tooltip": "Maximum streak tail length in pixels."}),
                 "streak_color_r":  ("FLOAT", {"default": 0.0,  "min": 0.0, "max": 5.0,  "step": 0.01,
@@ -445,7 +445,7 @@ class RadianceFilmGrain:
     FUNCTION = "apply"
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
-    DESCRIPTION = "Simulate photochemical film grain. Luminance-weighted noise, HDR-safe — grain intensity scales with pixel brightness."
+    DESCRIPTION = "Add simulated film grain: Gaussian noise blurred to a per-channel grain size and added to the image, optionally reduced in highlights (hdr_aware) so it stays usable on HDR plates."
 
     @classmethod
     def IS_CHANGED(cls, image, grain_size, grain_strength, grain_size_r_offset,
@@ -459,7 +459,7 @@ class RadianceFilmGrain:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image":    ("IMAGE",),
+                "image":    ("IMAGE", {"tooltip": "Image to grain. Grain is added in the image's own encoding; alpha is left untouched."}),
                 "grain_size":     ("FLOAT", {"default": 1.0, "min": 0.1, "max": 8.0, "step": 0.05,
                     "tooltip": "Base grain size in pixels (Gaussian sigma). 1.0 ≈ ISO 400 medium format."}),
                 "grain_strength": ("FLOAT", {"default": 0.04, "min": 0.0, "max": 1.0, "step": 0.001,
@@ -472,12 +472,12 @@ class RadianceFilmGrain:
                     "tooltip": "B channel grain size offset. Blue grain is typically finest."}),
                 "hdr_aware":  ("BOOLEAN", {"default": True,
                     "tooltip": (
-                        "Scale grain amplitude by 1/√luminance (Poisson shot-noise model). "
-                        "Makes highlights finer-grained than shadows — physically correct. "
-                        "Disable for flat/uniform grain."
+                        "Scale grain amplitude by 1/sqrt(luma + 1): full strength at black, "
+                        "about 0.7x at 1.0 and 0.45x at 4.0. Grain size is unchanged. "
+                        "Disable for uniform grain."
                     )}),
                 "seed":   ("INT", {"default": 0, "min": 0, "max": 2**31 - 1, "step": 1,
-                    "tooltip": "Random seed. 0 = random each run."}),
+                    "tooltip": "Random seed for a repeatable grain pattern. 0 = no reseed, so the pattern depends on the global random state when the node runs."}),
             }
         }
 
@@ -599,7 +599,7 @@ class RadianceVignette:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image":    ("IMAGE",),
+                "image":    ("IMAGE", {"tooltip": "Image to vignette. RGB is multiplied by the falloff, so linear and display-encoded images both work; alpha is untouched."}),
                 "strength": ("FLOAT", {"default": 0.5,  "min": 0.0,  "max": 1.0,  "step": 0.01,
                     "tooltip": "Vignette intensity at corners. 0=no effect, 1=full black."}),
                 "power":    ("FLOAT", {"default": 2.0,  "min": 0.5,  "max": 8.0,  "step": 0.1,

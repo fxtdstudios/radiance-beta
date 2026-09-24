@@ -298,7 +298,7 @@ class OCIOColorTransform:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": "Image encoded in source_colorspace. RGB goes through OCIO; alpha is passed through unchanged."}),
                 # DEFAULTS FIX: these used to default to "Linear" and
                 # "ACES - ARRI LogC4 (EI800)". Neither name exists in the ACES
                 # CG config this package bundles (the camera log spaces are in
@@ -365,7 +365,8 @@ class OCIOColorTransform:
                         "step": 0.1,
                         "tooltip": (
                             "Pre-transform exposure in stops (multiplies by 2^stops). "
-                            "Applied before the OCIO transform in the source colorspace's linear domain."
+                            "Applied to the raw source values before the OCIO transform, so it is "
+                            "true exposure only when the source colorspace is linear."
                         ),
                     },
                 ),

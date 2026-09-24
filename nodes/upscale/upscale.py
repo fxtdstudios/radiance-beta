@@ -1455,7 +1455,11 @@ class RadianceUpscaleTiler:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "operation": (["Tile", "ColourFix"], {"default": "Tile"}),
+                "operation": (["Tile", "ColourFix"], {
+                    "default": "Tile",
+                    "tooltip": "Tile: tiled upscale of images (output clamped to 0-1). ColourFix: "
+                               "histogram-match source to reference to remove upscaler colour drift.",
+                }),
             },
             "optional": {
                 # ── Tile inputs ────────────────────────────────────────────
@@ -1482,7 +1486,8 @@ class RadianceUpscaleTiler:
                 ),
                 "upscale_model": (
                     "UPSCALE_MODEL",
-                    {"tooltip": "Any ComfyUI UPSCALE_MODEL. Leave empty to use built-in Real-ESRGAN."},
+                    {"tooltip": "Any ComfyUI UPSCALE_MODEL; its native scale should match scale. "
+                                "Leave empty to use the built-in model chosen by model_tier."},
                 ),
                 "model_tier": (
                     _TIER_CHOICES,
@@ -1644,14 +1649,20 @@ class RadianceUpscaleImage:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "operation": (["Upscale", "Route"], {"default": "Upscale"}),
+                "operation": (["Upscale", "Route"], {
+                    "default": "Upscale",
+                    "tooltip": "Upscale: run super-resolution. Route: pass images through and output "
+                               "the recommended tier, content class and stats (no upscale).",
+                }),
                 "images": ("IMAGE", {"tooltip": "Input image batch."}),
             },
             "optional": {
                 # ── Upscale inputs ─────────────────────────────────────────
                 "scale": (
                     _SCALE_CHOICES,
-                    {"default": "4×"},
+                    {"default": "4×",
+                     "tooltip": "Output scale. 8× runs the 4× model twice, the second pass "
+                                "area-downsampled by half."},
                 ),
                 "hdr_mode": (
                     ["auto", "preserve", "clamp"],
@@ -1687,7 +1698,8 @@ class RadianceUpscaleImage:
                 ),
                 "overlap": (
                     "INT",
-                    {"default": 128, "min": 32, "max": 256, "step": 32},
+                    {"default": 128, "min": 32, "max": 256, "step": 32,
+                     "tooltip": "Overlap between tiles in input pixels, blended to hide seams."},
                 ),
                 "sharpness_boost": (
                     "FLOAT",
@@ -1699,7 +1711,11 @@ class RadianceUpscaleImage:
                     {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
                      "tooltip": "Gaussian pre-denoise strength."},
                 ),
-                "upscale_model": ("UPSCALE_MODEL", {}),
+                "upscale_model": ("UPSCALE_MODEL", {
+                    "tooltip": "Optional ComfyUI UPSCALE_MODEL; its native scale should match scale. "
+                               "When connected it replaces the built-in tiers (model_tier and creative "
+                               "mode are ignored).",
+                }),
                 "model_tier": (
                     _TIER_CHOICES,
                     {"default": "auto",
@@ -1707,15 +1723,21 @@ class RadianceUpscaleImage:
                 ),
                 "diffusion_steps": (
                     "INT",
-                    {"default": 20, "min": 1, "max": 50, "step": 1},
+                    {"default": 20, "min": 1, "max": 50, "step": 1,
+                     "tooltip": "Inference steps for Tier 3 diffusion (creative mode or a tier3 "
+                                "model_tier). More steps are slower; SeedVR2 is one-step."},
                 ),
                 "diffusion_noise_level": (
                     "INT",
-                    {"default": 20, "min": 0, "max": 350, "step": 10},
+                    {"default": 20, "min": 0, "max": 350, "step": 10,
+                     "tooltip": "SD x4 upscaler only: noise added to the low-res input. Higher lets "
+                                "the model invent more detail and drift further from the source."},
                 ),
                 "guidance_scale": (
                     "FLOAT",
-                    {"default": 7.5, "min": 1.0, "max": 20.0, "step": 0.5},
+                    {"default": 7.5, "min": 1.0, "max": 20.0, "step": 0.5,
+                     "tooltip": "SD x4 upscaler only: classifier-free guidance toward "
+                                "enhancement_prompt. Higher follows the prompt more strongly."},
                 ),
                 "enhancement_prompt": (
                     "STRING",
@@ -1995,11 +2017,14 @@ class RadianceUpscaleVideo:
                 ),
                 "scale": (
                     _SCALE_CHOICES,
-                    {"default": "4×"},
+                    {"default": "4×",
+                     "tooltip": "Output scale. 8× runs the 4× model twice, the second pass "
+                                "area-downsampled by half."},
                 ),
                 "tile_size": (
                     "INT",
-                    {"default": 512, "min": 128, "max": 1024, "step": 64},
+                    {"default": 512, "min": 128, "max": 1024, "step": 64,
+                     "tooltip": "Spatial tile size in input pixels. Reduce if OOM."},
                 ),
                 "overlap_spatial": (
                     "INT",
@@ -2027,11 +2052,15 @@ class RadianceUpscaleVideo:
                 ),
                 "sharpness_boost": (
                     "FLOAT",
-                    {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05},
+                    {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                     "tooltip": "Unsharp-mask strength (sigma 1.5 px) applied after upscaling. 0 = off."},
                 ),
             },
             "optional": {
-                "upscale_model": ("UPSCALE_MODEL", {}),
+                "upscale_model": ("UPSCALE_MODEL", {
+                    "tooltip": "Optional ComfyUI UPSCALE_MODEL; its native scale should match scale. "
+                               "When connected it replaces model_tier.",
+                }),
                 "model_tier": (
                     _TIER_CHOICES,
                     {"default": "tier1_fast    (Real-ESRGAN — GAN, ms/frame)",
@@ -2346,6 +2375,10 @@ class RadianceUpscaleRouter:
     """
 
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Upscale"
+    DESCRIPTION = (
+        "Measure noise, sharpness and saturation on one frame and recommend a model_tier "
+        "for Upscale Image or Video. Heuristic statistics only; images pass through unchanged."
+    )
     RETURN_TYPES = ("STRING", "STRING", "STRING", "IMAGE")
     RETURN_NAMES = ("recommended_tier", "content_class", "stats_json", "images")
     FUNCTION     = "route"
@@ -2354,7 +2387,9 @@ class RadianceUpscaleRouter:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "images": ("IMAGE", {}),
+                "images": ("IMAGE", {
+                    "tooltip": "Image or frame batch to analyse; returned unchanged on the images output.",
+                }),
                 "prefer_speed": (
                     "BOOLEAN",
                     {"default": False,

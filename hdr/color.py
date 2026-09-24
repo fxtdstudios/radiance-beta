@@ -93,14 +93,14 @@ class ImageToFloat32:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": "Image to convert to float32. Values are not clamped."}),
             },
             "optional": {
                 "normalize": (
                     "BOOLEAN",
                     {
                         "default": False,
-                        "tooltip": "Normalize each frame independently to [0,1] range.",
+                        "tooltip": "Per frame, divide by the frame's maximum when that maximum is above 1.0, so each frame peaks at 1.0. Frames already within 0 to 1 are left as they are.",
                     },
                 ),
                 "source_gamma": (
@@ -225,7 +225,7 @@ class Float32ColorCorrect:
                         "min": 0.1,
                         "max": 4.0,
                         "step": 0.01,
-                        "tooltip": "Gamma correction (power curve). <1 = brighten midtones, >1 = darken. Sign-preserving for HDR.",
+                        "tooltip": "Gamma correction: values are raised to 1/gamma. >1 = brighten midtones, <1 = darken. Sign-preserving for HDR.",
                     },
                 ),
                 "lift_r": (
@@ -235,7 +235,7 @@ class Float32ColorCorrect:
                         "min": -0.5,
                         "max": 0.5,
                         "step": 0.01,
-                        "tooltip": "Red channel lift (shadow offset). Applied first in the chain.",
+                        "tooltip": "Value added to the red channel at every level, applied first, so exposure and gain then scale it. A flat offset, not a shadow-weighted lift.",
                     },
                 ),
                 "lift_g": (
@@ -245,6 +245,7 @@ class Float32ColorCorrect:
                         "min": -0.5,
                         "max": 0.5,
                         "step": 0.01,
+                        "tooltip": "Value added to the green channel at every level, applied first, so exposure and gain then scale it. A flat offset, not a shadow-weighted lift."
                     },
                 ),
                 "lift_b": (
@@ -254,6 +255,7 @@ class Float32ColorCorrect:
                         "min": -0.5,
                         "max": 0.5,
                         "step": 0.01,
+                        "tooltip": "Value added to the blue channel at every level, applied first, so exposure and gain then scale it. A flat offset, not a shadow-weighted lift."
                     },
                 ),
                 "gain_r": (
@@ -273,6 +275,7 @@ class Float32ColorCorrect:
                         "min": 0.0,
                         "max": 2.0,
                         "step": 0.01,
+                        "tooltip": "Green channel gain (multiplier). Applied after lift and exposure, before contrast."
                     },
                 ),
                 "gain_b": (
@@ -282,6 +285,7 @@ class Float32ColorCorrect:
                         "min": 0.0,
                         "max": 2.0,
                         "step": 0.01,
+                        "tooltip": "Blue channel gain (multiplier). Applied after lift and exposure, before contrast."
                     },
                 ),
                 "luma_space": (
@@ -574,9 +578,9 @@ class ColorSpaceConvert:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "image": ("IMAGE",),
-                "source_space": (cls.COLOR_SPACES, {"default": "sRGB"}),
-                "target_space": (cls.COLOR_SPACES, {"default": "ACEScg"}),
+                "image": ("IMAGE", {"tooltip": "Image encoded as source_space."}),
+                "source_space": (cls.COLOR_SPACES, {"default": "sRGB", "tooltip": "Encoding of the input. sRGB and Rec709 are decoded with the sRGB curve and ACEScct with its log curve; every other option is treated as linear with those primaries."}),
+                "target_space": (cls.COLOR_SPACES, {"default": "ACEScg", "tooltip": "Encoding of the output. sRGB and Rec709 get the sRGB curve and ACEScct its log curve; every other option is written linear with those primaries."}),
             },
             "optional": {
                 "exposure": (
@@ -968,8 +972,8 @@ class DaVinciWideGamut:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "image": ("IMAGE",),
-                "transform": (cls.TRANSFORMS, {"default": "Linear to DaVinci WG"}),
+                "image": ("IMAGE", {"tooltip": "Image in the space named on the left of the chosen transform. 'Linear' means linear Rec.709/sRGB primaries, not display-encoded sRGB."}),
+                "transform": (cls.TRANSFORMS, {"default": "Linear to DaVinci WG", "tooltip": "Conversion to run. The DaVinci WG options change primaries only (linear in, linear out); the Intermediate options also apply or remove the DaVinci Intermediate log curve."}),
             }
         }
 
@@ -1081,7 +1085,7 @@ class ARRIWideGamut4:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": "Linear image in the space named on the left of the chosen direction. Remove any LogC4 encoding first: this node converts primaries only."}),
                 "direction": (
                     [
                         "AWG4 to ACEScg",
@@ -1089,7 +1093,7 @@ class ARRIWideGamut4:
                         "AWG4 to Linear sRGB",
                         "Linear sRGB to AWG4",
                     ],
-                    {"default": "AWG4 to ACEScg"},
+                    {"default": "AWG4 to ACEScg", "tooltip": "Primaries conversion to run, linear in and linear out. ACEScg options include a Bradford D65 to D60 white adaptation."},
                 ),
             }
         }

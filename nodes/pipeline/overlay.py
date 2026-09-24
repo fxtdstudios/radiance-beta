@@ -26,7 +26,7 @@ class RadianceBlendComposite:
             "required": {
                 "base":    ("IMAGE", {"tooltip": "Bottom layer (background)."}),
                 "blend":   ("IMAGE", {"tooltip": "Top layer (foreground)."}),
-                "mode":    (BLEND_MODES, {"default": "Normal"}),
+                "mode":    (BLEND_MODES, {"default": "Normal", "tooltip": "Blend operation of blend over base, in fp32. Add, Multiply and Divide keep HDR values above 1.0; Screen clamps both layers to 0-1 first; Overlay and Soft Light assume 0-1 display-range values."}),
                 "opacity": (
                     "FLOAT",
                     {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
