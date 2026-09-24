@@ -18,13 +18,18 @@ REQUIRED = [
 
 
 def _missing():
-    return [pip for mod, pip in REQUIRED if importlib.util.find_spec(mod) is None]
+    todo = [pip for mod, pip in REQUIRED if importlib.util.find_spec(mod) is None]
+    if sys.version_info >= (3, 14):
+        # No OpenEXR wheel for 3.14 yet; a source build fails. Radiance reads
+        # and writes EXR through OpenImageIO (then OpenCV) without it.
+        todo = [t for t in todo if not t.startswith("OpenEXR")]
+    return todo
 
 
 def main() -> int:
     todo = _missing()
     if not todo:
-        print("[Radiance] OpenEXR and OpenColorIO present; OCIO is configured automatically at startup.")
+        print("[Radiance] Colour libraries present; OCIO is configured automatically at startup.")
         return 0
     print(f"[Radiance] installing {', '.join(todo)} ...")
     rc = subprocess.call([sys.executable, "-m", "pip", "install", *todo])

@@ -811,13 +811,18 @@ def _encode_with_sampling_mode(vae: Any, pixels: torch.Tensor, mode: str) -> tor
             # Diffusers-style: returns an object with .latent_dist
             posterior = posterior.latent_dist
 
-        if hasattr(posterior, "mean"):
+        # A plain tensor first: torch.Tensor HAS a ``mean`` attribute (the
+        # reduction method), so testing ``hasattr(posterior, "mean")`` first
+        # returned the bound method as the latent. ComfyUI's first_stage_model
+        # returns a tensor, so with latent_sampling="mean" every encode
+        # through a real ComfyUI VAE crashed downstream on
+        # "'builtin_function_or_method' object has no attribute 'detach'".
+        if isinstance(posterior, torch.Tensor):
+            latent = posterior
+        elif isinstance(getattr(posterior, "mean", None), torch.Tensor):
             latent = posterior.mean
         elif hasattr(posterior, "mode"):
             latent = posterior.mode() if callable(posterior.mode) else posterior.mode
-        elif isinstance(posterior, torch.Tensor):
-            # Some encoders return the latent directly (no distribution)
-            latent = posterior
         else:
             raise TypeError(f"Unknown posterior type: {type(posterior)}")
 

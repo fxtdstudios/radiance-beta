@@ -81,6 +81,18 @@ _meta_spec.loader.exec_module(_meta_module)
 
 vae_module = types.ModuleType("radiance.hdr.vae")
 vae_module.RadianceVAE4KDecode = FakeDecode
+
+
+class FakeEncode:
+    """engine.py subclasses the 4K encoder as RadianceHDRVAEEncode."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}, "optional": {
+            "hdr_mode": (["Clip (SDR)", "Compress (Log)"], {"default": "Clip (SDR)"})}}
+
+
+vae_module.RadianceVAE4KEncode = FakeEncode
 sys.modules["radiance.hdr.vae"] = vae_module
 
 

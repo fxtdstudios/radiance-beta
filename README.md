@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/version-3.5.0-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
-[![Nodes](https://img.shields.io/badge/nodes-156-c8a96e?style=for-the-badge)](#node-map)
+[![Nodes](https://img.shields.io/badge/nodes-157-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
 [![Hugging Face](https://img.shields.io/badge/Hugging_Face-RUDRA_models-ffd21e?style=for-the-badge)](https://huggingface.co/fxtdstudios/RUDRA)
 
@@ -52,6 +52,20 @@ Artists get 32-bit, HDR, and ACES image tools, professional viewers, and VFX nod
 ### ComfyUI Manager / Comfy Registry
 
 Search for **Radiance** in ComfyUI Manager, or install it from the Comfy Registry.
+Nothing else needs doing:
+
+- **Dependencies** install from `requirements.txt` (OpenColorIO, OpenEXR,
+  OpenImageIO, OpenCV and the rest; all ship as wheels for Python 3.9 to
+  3.13). On Python 3.14, which has no OpenEXR wheel yet, OpenEXR is skipped
+  and EXR goes through OpenImageIO.
+- **OCIO** configures itself at startup: your `$OCIO` if you have one,
+  otherwise OpenColorIO's built-in ACES studio config. No files to download.
+- **The RUDRA SDR → HDR model** downloads the first time a graph needs it
+  (about 5 MB, see [Models](#models-rudra-sdr--hdr)).
+
+Checked on a clean ComfyUI 0.32 with Python 3.13: the registry package
+installs, all 157 nodes load, OCIO is configured, and the first SDR → HDR run
+fetches the model and applies it.
 
 ### Requirements
 
@@ -61,8 +75,7 @@ Install into the **same Python environment as ComfyUI**. Radiance relies on Comf
 
 ```bat
 cd ComfyUI\custom_nodes
-git clone https://github.com/fxtdstudios/radiance-beta.git
-
+git clone https://github.com/fxtdstudios/radiance.git
 cd radiance
 pip install -r requirements_windows.txt
 ```
@@ -106,12 +119,13 @@ pip install -r requirements_mac_silicon.txt
 
 ### Verify
 
-Start ComfyUI and look for `Radiance: successfully loaded 156 nodes (v3.5.0)` in the log.
+Start ComfyUI and look for `Radiance: successfully loaded 157 nodes (v3.5.0)` in the log.
 A lower count means a node module failed to import, usually a missing optional
 dependency; the Environment Guard table printed at startup shows which.
 
 For a full machine-level check (every node executed on your GPU, VRAM peaks,
-and the RUDRA SDR → HDR pixel model benchmarked and scored), run:
+and the RUDRA SDR → HDR pixel model benchmarked and scored), run the
+acceptance tool. It ships with a git install, not with the registry package:
 
 ```bat
 cd ComfyUI
@@ -238,7 +252,7 @@ Both ACES 2.0 tone scales are implemented against the published Output Transform
 
 Log encoding happens before the VAE, not after it, and the Compress Log profiles are clamp-free from decode through to the file. Highlights above 1.0 reach disk. That is the claim the package is built on and there is a test that writes negatives and values up to 64.0 through EXR and TIFF and requires them back exactly.
 
-The HDR VAE Decode node decodes through the model's own VAE, in a sampler-safe mode or a Direct HDR mode that inverts the log encoding to scene-linear and keeps everything above 1.0. Learned recovery of clipped highlights and crushed shadows is the job of SDR → HDR Universal and SDR → HDR Recover, which run the RUDRA pixel model on any image or frame batch, no VAE required; the weights download on first use (see Models above).
+VAE Encode (HDR) and VAE Decode (HDR) are a pair. Encode log-codes a scene-linear image and stamps the latent; Decode in Auto inverts that exactly, so values above 1.0 survive the VAE (measured through the SD VAE: highlights within 0.03 stops, 97% of the range above 1.0 kept). A latent a sampler has touched is decoded sampler-safe, identical to ComfyUI's own VAE Decode, and Direct HDR on it reconstructs clipped highlights with the RUDRA model. Learned recovery of clipped highlights and crushed shadows is the job of SDR → HDR Universal and SDR → HDR Recover, which run the RUDRA pixel model on any image or frame batch, no VAE required; the weights download on first use (see Models above).
 
 There is also HDR LoRA loading and application, a LoRA stack with per-LoRA model and CLIP strengths, tone mapping, HDR synthesis, and relighting.
 
@@ -306,7 +320,7 @@ FXTD STUDIOS/Radiance
 └─ Pipeline
 ```
 
-**156 nodes**, plus whatever Gizmos you build. A few depend on optional packages.
+**157 nodes**, plus whatever Gizmos you build. A few depend on optional packages.
 
 Compositing nodes use compositing names (`Grade`, `CDL`, `OCIO ColorSpace`, `Roto`, `Defocus`, `Viewer`, `Read`, `Write`), so they read the way they do in Nuke or Flame. The diffusion layer keeps a `Radiance` prefix, so `Radiance Sampler` and `Radiance VAE Decode` are obviously the AI ones. Typing "radiance" in the search still finds everything.
 
@@ -314,7 +328,7 @@ Compositing nodes use compositing names (`Grade`, `CDL`, `OCIO ColorSpace`, `Rot
 | :--- | :--- |
 | Core | Project Manager, Workspace, Resolution, workspace utilities |
 | Load & Save | Read, Write, EXR alpha and mask, EXR multipart, sequence export, DPX read and write |
-| Generate | Loader, Sampler, VAE Decode (HDR), prompt tools, LoRA stack, HDR LoRA, regional prompts |
+| Generate | Loader, Sampler, VAE Encode (HDR), VAE Decode (HDR), prompt tools, LoRA stack, HDR LoRA, regional prompts |
 | Color | Grade, Grade Match, CDL, LUT Apply / Blend, Curves, Hue Curves, White Balance, Colour Space Convert, QC, Policy Guard |
 | HDR | ACES 2.0, OCIO, HDR VAE encode and decode, tone mapping, HDR synthesis, relight, QC |
 | VFX | Plate prep, masks, roto, depth, optics, motion, multipass, AOV reader, relight |
@@ -425,8 +439,8 @@ the gap is recorded under Open rather than quietly corrected.
 | **Video** | Frame counts are exact from 1 to 100 frames across H.264, H.265 10-bit and ProRes 422 HQ, by encoding and reading back real media. The default suite covers 17 lengths per codec, chosen around the 1/2/3 degenerate cases and both sides of every GOP boundary, and asserts the identity and order of each frame as well as the count, at `core.video` and again at the Read node. The exhaustive 1-to-100 sweep runs under `-m slow`. Sequences read correctly by frame number for `####`, `%04d` and explicit ranges. |
 | **Duration** | The write path, the HDR VAE encode and decode, the viewer and the sampler's noise generation all hold a working window rather than the clip. Measured, not asserted: writing 32 frames and writing 512 frames peak within 0.1 MB of each other, and enabling a colour transform costs 1.6 MB rather than a second copy of the shot. The VAE's decode overhead is flat at 5.7 MB from 4 frames to 32 where it used to grow by a whole extra clip. Sequence length is bounded by disk. Generation is the exception and has its own control, see below. |
 | **Memory** | Flat across 150 consecutive 1080p runs, an audit measurement rather than a standing test. |
-| **Security** | `weights_only` loads, sha256-pinned downloads, no `shell=True`, and no model weight downloads without `RADIANCE_ALLOW_DOWNLOADS=1` through a gate every downloader shares. Nodes never write into the ComfyUI install directory. |
-| **Catalog** | All 156 nodes declare their menu section explicitly; a test fails if a registered node is missing from the table. Withholding a node from the menu requires a named entry with a written reason a test reads and checks the length of. Separately, an AST walk of every file in the distribution finds every `NODE_CLASS_MAPPINGS` and asserts each class in it is registered as the class that ships, so a node stranded in a package the catalog does not load turns the suite red. That is how 26 finished nodes stayed out of the menu until 3.4.0. |
+| **Security** | `weights_only` loads, sha256-pinned downloads, no `shell=True`, and no third-party weight downloads without `RADIANCE_ALLOW_DOWNLOADS=1`, through a gate every downloader shares. The one exception is Radiance's own ~5 MB RUDRA checkpoint, fetched on first use, pinned to a commit and SHA-256 checked, and off with `RADIANCE_ALLOW_DOWNLOADS=0`. Nodes never write into the ComfyUI install directory. |
+| **Catalog** | All 157 nodes declare their menu section explicitly; a test fails if a registered node is missing from the table. Withholding a node from the menu requires a named entry with a written reason a test reads and checks the length of. Separately, an AST walk of every file in the distribution finds every `NODE_CLASS_MAPPINGS` and asserts each class in it is registered as the class that ships, so a node stranded in a package the catalog does not load turns the suite red. That is how 26 finished nodes stayed out of the menu until 3.4.0. |
 | **Isolation** | Every one of the eleven node groups imports with `aiohttp` and `server` blocked, proven in a subprocess rather than for one hand-listed module. The blocker uses `find_spec`; it previously used `find_module`, which Python 3.12 removed, so on the 3.12 leg of the matrix it silently blocked nothing and the test passed while measuring nothing. The harness now proves it is blocking before it reports anything. |
 | **Layering** | `radiance/io/writer.py` and `radiance/io/reader.py` import nothing above them, checked by AST walk *and* by running them in a bare interpreter with no ComfyUI present. |
 | **Suite** | 3755 Python tests and 260 JavaScript tests. On the full dependency lane: 3667 pass, 84 skip, 3 are `slow` and deselected by default; JS is 256 pass, 4 skip, 0 todo. Coverage is **59.6% of 28,018 statements** (56.0% counting branches, which is what the floor gates on). The old 53% was the figure the full lane would have produced had it run; CI's lightweight lane was really reporting 22% against a `--cov-fail-under=15` that overrode the project's own floor. There is one floor now, in `pyproject.toml`, enforced on the lane that can execute the code. The JS side includes a GPU lane that compiles the real shaders in both GLSL and WGSL and compares them against the CPU implementations they were generated from, and a browser lane that builds all fourteen Viewer panels and operates their controls. Verified from a checkout named `radiance-beta` as well as `radiance`. |
@@ -436,7 +450,7 @@ the gap is recorded under Open rather than quietly corrected.
 **Blocking a release**
 
 - [ ] **One full GPU render in live ComfyUI.** Checked on 2026-09-24 in a real
-      ComfyUI 0.32 with frontend 1.48 (CPU): all 156 nodes register, every
+      ComfyUI 0.32 with frontend 1.48 (CPU): all 157 nodes register, every
       Radiance node can be created, saved and reloaded with no frontend error,
       and `workflows/start.json` passes ComfyUI's own prompt validation. The
       Viewer and the pixel SDR → HDR model have run live on the RTX 4080. What
@@ -511,6 +525,11 @@ the gap is recorded under Open rather than quietly corrected.
       1.0 = 203 nits (BT.2408), HLG the BT.2100 1000-nit transcode OCIO uses,
       camera log targets in their camera gamut, AP0 matrix corrected. Checked
       against OpenColorIO and the shipped pixel checkpoint.
+- [x] **Clean install from the registry package (3.5.0).** Packed with
+      `comfy node pack`, installed into a fresh ComfyUI 0.32 on Python 3.13:
+      157 nodes, OCIO configured, the RUDRA model fetched and applied on first
+      run, the suite green there. VAE Encode (HDR) registered as the encoder
+      VAE Decode (HDR) inverts; the two legacy HDR latent encoders labelled.
 - [x] **RUDRA pixel model: no false colour, no over-peak channels (3.5.0).**
       From a user report on a clipped Flux.2 sunset. Recovered highlights keep
       the source colour (no rings, no red cast, source-level chroma noise),

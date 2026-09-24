@@ -112,6 +112,10 @@ clear backlog.
 
 ## Minor
 
+- **HDR Latent Encoder and HDR Turbo Encoder are legacy.** Their decoders were
+  retired in 3.5.0, so VAE Decode (HDR) returns their latents clipped at 1.0.
+  They stay registered so saved workflows load. Replace them with VAE Encode
+  (HDR). *Planned:* remove them in 3.6.
 - **Learned highlight recovery restores brightness, not colour.** RUDRA's
   released SDR → HDR checkpoints (v5, shadow_v1 and seeds) were trained on
   SDR rendered at -1 EV, which almost never clipped (median clipped fraction

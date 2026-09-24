@@ -96,6 +96,40 @@ All notable changes to FXTD Radiance will be documented in this file.
   - *Lite Viewer.* Readout, clip check and diff read an fp16 float proxy, so they show source values at source coordinates. The canvas is in device pixels, so 1:1 is exact on scaled displays; it was sized from a bordered box, 0.3 % off. B is scaled to A, diff has a gain, and play/loop run at the source fps. Frames load progressively.
   - Tests: `tests/test_viewer_phase1.py` (11), and `js/tests/viewer_color.test.mjs` and `js/tests/lite_viewer.test.mjs`, which read real pixels back from Chromium.
 
+- **HDR latents could not be decoded back to HDR: VAE Encode (HDR) is now the
+  encoder VAE Decode (HDR) inverts.** Found on a clean install with a real VAE
+  (SD `vae-ft-mse`) and an HDR plate peaking at 7.75. The two HDR latent
+  encoders on the menu, HDR Latent Encoder and HDR Turbo Encoder, fed latent
+  decoders retired in 3.5.0; nothing stamped their latents, so VAE Decode (HDR)
+  took them as ordinary diffusion latents and returned them clipped at 1.0,
+  midtones 2.5 to 14 stops off. The encoder its Auto / Direct HDR log inversion
+  was written for, `RadianceVAE4KEncode`, was implemented and tested but never
+  registered. It is now `RadianceHDRVAEEncode`, shown as **VAE Encode (HDR)**
+  beside VAE Decode (HDR), defaulting to Compress (Log) in both the widget and
+  the method signature (API prompts omit optional inputs). Measured through
+  the SD VAE: highlights within 0.03 stops (median), 97% of the range above 1.0
+  kept, midtones within 0.04 stops. The old two stay registered so saved
+  workflows load, relabelled "(Legacy)" with a description that says why.
+  157 nodes. `tests/test_hdr_vae_encode_pair.py`.
+- **VAE Encode (HDR) crashed with `latent_sampling = mean` on any ComfyUI
+  VAE.** `torch.Tensor` has a `mean` method, and the posterior check tested
+  `hasattr(posterior, "mean")` before `isinstance(posterior, Tensor)`, so the
+  bound method became the latent. Tensors are checked first.
+- **Fresh install verified from the registry package.** Packed with
+  `comfy node pack` exactly as the registry builds it, installed into a clean
+  ComfyUI 0.32 on Python 3.13 with `requirements.txt` and `install.py`: 157
+  nodes load in 0.9 s, OCIO configures itself from the built-in ACES studio
+  config, the first SDR → HDR run downloads the RUDRA model and applies it, the
+  sampler-safe decode is bit-identical to ComfyUI's own VAE Decode, and the
+  suite passes there too (4,187 tests, OpenCV 5.0, NumPy 2.5).
+- **OpenEXR is skipped on Python 3.14.** It has no 3.14 wheel, so a source
+  build there failed the whole `pip install -r` and nothing installed. The
+  requirements files and `pyproject.toml` carry `python_version < "3.14"`, and
+  `install.py` skips it there; EXR goes through OpenImageIO, then OpenCV.
+- **README install section.** Says what the registry install does by itself
+  (dependencies, OCIO, the RUDRA model), the Windows clone pointed at the beta
+  repo, and the GPU acceptance tool is marked git-install only (the registry
+  package excludes it).
 - **RUDRA weights licence stated correctly.** The README called the RUDRA
   weights Apache-2.0. RUDRA's code is; its trained weights have been
   non-commercial since 5 Sep 2026 (RUDRA `NOTICE` and `checkpoints/LICENSE`),
