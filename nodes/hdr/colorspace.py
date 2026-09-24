@@ -292,8 +292,16 @@ class RadianceHDRColorPipeline:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "encoding": (list(_EOTF_MAP.keys()), {"default": "sRGB"}),
+                "image": ("IMAGE", {
+                    "tooltip": "Encoded input image. Negatives are clamped to 0; alpha is passed through.",
+                }),
+                "encoding": (list(_EOTF_MAP.keys()), {
+                    "default": "sRGB",
+                    "tooltip": (
+                        "Transfer curve of the input, decoded to linear. PQ decodes so 203 nits = 1.0; "
+                        "log curves decode to camera scene-linear. Linear (none) only clamps negatives."
+                    ),
+                }),
                 "compression_ratio": ("FLOAT", {
                     "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01,
                     "tooltip": "Compression ratio for soft-knee HDR highlight compression.",
@@ -302,19 +310,40 @@ class RadianceHDRColorPipeline:
             "optional": {
                 "source_primaries": (
                     _PRIMARIES_LIST,
-                    {"default": "Rec.709 (sRGB)"},
+                    {
+                        "default": "Rec.709 (sRGB)",
+                        "tooltip": (
+                            "Primaries of the input. Only Rec.709 to/from BT.2020, Rec.709 to/from "
+                            "ACEScg and DCI-P3 to BT.2020 are converted; other pairs pass through unchanged."
+                        ),
+                    },
                 ),
                 "target_primaries": (
                     _PRIMARIES_LIST,
-                    {"default": "Rec.709 (sRGB)"},
+                    {
+                        "default": "Rec.709 (sRGB)",
+                        "tooltip": (
+                            "Primaries to convert to (see source_primaries for supported pairs). "
+                            "Same as source leaves colours unchanged."
+                        ),
+                    },
                 ),
                 "chromatic_adaptation": (
                     ["None"] + list(_BRADFORD_CAT.keys()),
-                    {"default": "None"},
+                    {
+                        "default": "None",
+                        "tooltip": (
+                            "Bradford white-point matrix applied to the linear RGB before the primaries "
+                            "step. Leave None for Rec.709 to ACEScg, which is already adapted."
+                        ),
+                    },
                 ),
                 "pq_peak_nits": ("FLOAT", {
                     "default": 1000.0, "min": 100.0, "max": 10000.0, "step": 100.0,
-                    "tooltip": "Reference peak luminance in nits for PQ decoding. Only used when encoding is 'PQ (ST.2084)'."
+                    "tooltip": (
+                        "Has no effect on the decode: PQ is absolute, so it always decodes with "
+                        "203 nits = 1.0 whatever this is set to."
+                    ),
                 }),
             },
         }
@@ -341,10 +370,10 @@ class RadianceHDRColorPipeline:
         # 1. Inverse EOTF → scene-linear
         fn = _EOTF_MAP.get(encoding, _eotf_srgb)
         img = image[..., :3].float().clamp(min=0.0)
-        if encoding == "PQ (ST.2084)":
-            linear = fn(img, peak_nits=pq_peak_nits)
-        else:
-            linear = fn(img)
+        # PQ is absolute (10 000 cd/m2 ceiling), so the decode takes no peak:
+        # _eotf_pq() dropped its peak_nits argument on purpose and this call
+        # still passed it, so every PQ run raised TypeError.
+        linear = fn(img)
 
         # 2. Chromatic adaptation
         if chromatic_adaptation != "None":
@@ -415,17 +444,25 @@ class RadianceColorSpaceInfo:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "encoding": (list(_EOTF_MAP.keys()), {"default": "sRGB"}),
-                "primaries": (_PRIMARIES_LIST, {"default": "Rec.709 (sRGB)"}),
+                "image": ("IMAGE", {
+                    "tooltip": "Image passed through unchanged; only its size, channels and batch are read.",
+                }),
+                "encoding": (list(_EOTF_MAP.keys()), {
+                    "default": "sRGB",
+                    "tooltip": "Transfer curve to record in the JSON. Metadata only; the image is not decoded.",
+                }),
+                "primaries": (_PRIMARIES_LIST, {
+                    "default": "Rec.709 (sRGB)",
+                    "tooltip": "Primaries to record in the JSON. Metadata only; no conversion is done.",
+                }),
             },
             "optional": {
                 "scene_referred": ("BOOLEAN", {"default": False,
-                    "tooltip": "When enabled, treats values > 1.0 as valid HDR energy rather than clamping. Required for linear HDR inputs."
+                    "tooltip": "Records in the JSON that the image is scene-referred (values above 1.0 are valid). Metadata only; nothing is clamped either way."
                 }),
                 "peak_nits": ("FLOAT", {
                     "default": 100.0, "min": 80.0, "max": 10000.0, "step": 10.0,
-                    "tooltip": "Mastering display peak luminance in nits. Scales the absolute nit value of scene-linear 1.0."
+                    "tooltip": "Mastering display peak in nits to record in the JSON. Metadata only; pixel values are not scaled."
                 }),
                 "notes": ("STRING", {"default": "", "multiline": False,
                     "tooltip": "Optional free-text notes stored alongside the colorspace metadata JSON output."

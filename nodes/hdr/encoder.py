@@ -274,7 +274,7 @@ class RadianceHDRPerChannelNorm:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image":       ("IMAGE",),
+                "image":       ("IMAGE", {"tooltip": "HDR image or batch, usually scene-linear. One mean and std per channel is measured over the whole batch; values beyond +/- norm_center std are clipped in the output."}),
                 "norm_center": ("FLOAT", {
                     "default": 3.0, "min": 1.0, "max": 8.0, "step": 0.5,
                     "tooltip": "Window half-width in σ units mapped to [0,1]. 3.0 captures ±3σ.",
@@ -327,9 +327,9 @@ class RadianceHDRPerChannelDenorm:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image":      ("IMAGE",),
+                "image":      ("IMAGE", {"tooltip": "Normalised image (0 to 1), typically the VAE-decoded result of an image that went through HDR Per-Channel Norm."}),
                 "stats_json": ("STRING", {"forceInput": True,
-                    "tooltip": "JSON string of per-channel statistics (mean, std, min, max). Used to normalize the latent.",
+                    "tooltip": "stats_json output of HDR Per-Channel Norm (per-channel mean, std and norm_center). Used to undo that normalisation.",
                 }),
             }
         }

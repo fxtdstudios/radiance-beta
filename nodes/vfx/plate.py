@@ -13,17 +13,19 @@ class RadianceHDRGrainMatcher:
     and maps it matching the target image's exposure range to prevent highlight burnout.
     """
     
+    DESCRIPTION = "Transfer grain from a reference plate onto a clean image: the reference's fine detail is high-pass filtered in log2 space and added to the target in log2, so it scales with exposure and does not burn out highlights."
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "target": ("IMAGE",),
-                "reference": ("IMAGE",),
-                "intensity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.05}),
-                "kernel_size": ("INT", {"default": 3, "min": 1, "max": 15, "step": 2}),
-                "r_gain": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
-                "g_gain": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
-                "b_gain": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "target": ("IMAGE", {"tooltip": "Clean RGB image or sequence to receive grain, ideally scene-linear. Negative values are clamped to 0."}),
+                "reference": ("IMAGE", {"tooltip": "Grainy plate to take grain from. Must match the target's width and height; frames are reused in a cycle if it is shorter than the target. All high-frequency detail is transferred, so use a flat, defocused area if possible."}),
+                "intensity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.05, "tooltip": "Multiplier on the extracted grain. 0 = no grain, 1 = matched to the reference."}),
+                "kernel_size": ("INT", {"default": 3, "min": 1, "max": 15, "step": 2, "tooltip": "Box-blur size in pixels used to split grain from the image. Larger values capture coarser grain (and more image detail); 1 extracts nothing."}),
+                "r_gain": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "Extra grain multiplier for the red channel. 1.0 = unchanged."}),
+                "g_gain": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "Extra grain multiplier for the green channel. 1.0 = unchanged."}),
+                "b_gain": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "Extra grain multiplier for the blue channel. 1.0 = unchanged."}),
             }
         }
 
@@ -81,13 +83,15 @@ class RadianceSubpixelStabilizer:
     Calculates displacements using high-precision sub-pixel FFT Phase Correlation in pure PyTorch.
     """
     
+    DESCRIPTION = "Stabilise an image sequence to one anchor frame using sub-pixel FFT phase correlation. Corrects translation only (no rotation or scale); also outputs the per-frame shift as an image (red = x, green = y, in pixels)."
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "anchor_frame": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1}),
-                "max_shift": ("INT", {"default": 64, "min": 4, "max": 512, "step": 4}),
+                "image": ("IMAGE", {"tooltip": "Image sequence to stabilise. Shifts are measured on the channel average of each frame."}),
+                "anchor_frame": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "tooltip": "Zero-based index of the frame every other frame is aligned to. Values past the end use the last frame."}),
+                "max_shift": ("INT", {"default": 64, "min": 4, "max": 512, "step": 4, "tooltip": "Largest correction applied, in pixels per axis. A larger measured shift is clamped to this rather than rejected."}),
             }
         }
 

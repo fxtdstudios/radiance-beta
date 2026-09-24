@@ -493,13 +493,23 @@ class RadianceVideoModelInfo:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("MODEL",),
-                "model_preset": (MODEL_NAMES, {"default": "LTX-Video (128ch)"}),
+                "model": ("MODEL", {
+                    "tooltip": "Video diffusion model to inspect. It is passed through unchanged "
+                               "on the model output."}),
+                "model_preset": (MODEL_NAMES, {"default": "LTX-Video (128ch)",
+                    "tooltip": "Latent spec used when auto-detection finds nothing. Detection reads "
+                               "the model class name (ltx, hunyuan, wan, cogvideo, mochi) and wins over "
+                               "this choice; any Wan model is detected as Wan2.1 (16ch)."}),
             },
             "optional": {
-                "override_channels": ("INT", {"default": 0, "min": 0, "max": 512}),
-                "override_latent_scale": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0}),
-                "print_info": ("BOOLEAN", {"default": False}),
+                "override_channels": ("INT", {"default": 0, "min": 0, "max": 512,
+                    "tooltip": "Replace the latent channel count written to dit_config. "
+                               "0 keeps the preset's value."}),
+                "override_latent_scale": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0,
+                    "tooltip": "Replace the preset's latent_scale in dit_config (RadianceVideoBatchDecode "
+                               "divides the latent by it before decoding). 0 keeps the preset's value."}),
+                "print_info": ("BOOLEAN", {"default": False,
+                    "tooltip": "Also write the info report to the ComfyUI console log."}),
             },
         }
 
@@ -585,11 +595,21 @@ class RadianceVideoLatentNoise:
                     "default": "{}",
                     "tooltip": "JSON from RadianceVideoModelInfo",
                 }),
-                "width":  ("INT", {"default": 512,  "min": 64, "max": 4096, "step": 8}),
-                "height": ("INT", {"default": 512,  "min": 64, "max": 4096, "step": 8}),
-                "frames": ("INT", {"default": 25,   "min": 1,  "max": 512}),
-                "batch_size": ("INT", {"default": 1, "min": 1, "max": 16}),
-                "seed":   ("INT", {"default": 0,   "min": 0,  "max": 2**31}),
+                "width":  ("INT", {"default": 512,  "min": 64, "max": 4096, "step": 8,
+                    "tooltip": "Target frame width in pixels. Divided (rounded down) by the spec's "
+                               "spatial compression to size the latent."}),
+                "height": ("INT", {"default": 512,  "min": 64, "max": 4096, "step": 8,
+                    "tooltip": "Target frame height in pixels. Divided (rounded down) by the spec's "
+                               "spatial compression to size the latent."}),
+                "frames": ("INT", {"default": 25,   "min": 1,  "max": 512,
+                    "tooltip": "Target pixel frames. The latent gets ceil(frames / temporal compression) "
+                               "frames; use a multiple of the compression plus 1 (e.g. 25, 49) to decode "
+                               "back to exactly this count."}),
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 16,
+                    "tooltip": "Number of independent noise samples in the batch."}),
+                "seed":   ("INT", {"default": 0,   "min": 0,  "max": 2**31,
+                    "tooltip": "Seed for the CPU noise generator; the same seed and shape give "
+                               "identical noise."}),
             },
             "optional": {
                 "noise_scale": ("FLOAT", {
@@ -666,15 +686,30 @@ class RadianceVideoCondMerge:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "text_conditioning": ("CONDITIONING",),
-                "merge_mode": (cls.MODES, {"default": "concat"}),
+                "text_conditioning": ("CONDITIONING", {
+                    "tooltip": "Base conditioning, usually the encoded prompt. The output keeps its "
+                               "entries; the other inputs are merged into them."}),
+                "merge_mode": (cls.MODES, {"default": "concat",
+                    "tooltip": "concat: append the other inputs' tokens (times their weights) after the "
+                               "text tokens. weighted: weighted average of the token tensors. priority: "
+                               "keep the text tokens, only copy missing dict keys from the others."}),
             },
             "optional": {
-                "character_conditioning": ("CONDITIONING",),
-                "hdr_conditioning": ("CONDITIONING",),
-                "text_weight":      ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
-                "character_weight": ("FLOAT", {"default": 0.75,"min": 0.0, "max": 2.0, "step": 0.05}),
-                "hdr_weight":       ("FLOAT", {"default": 0.5, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "character_conditioning": ("CONDITIONING", {
+                    "tooltip": "Optional conditioning (e.g. a character or identity embedding) merged "
+                               "per merge_mode."}),
+                "hdr_conditioning": ("CONDITIONING", {
+                    "tooltip": "Optional conditioning (e.g. from RadianceVideoHDRConditioner) merged "
+                               "per merge_mode."}),
+                "text_weight":      ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05,
+                    "tooltip": "Weight of text_conditioning in weighted mode. concat and priority keep "
+                               "the text tokens unscaled."}),
+                "character_weight": ("FLOAT", {"default": 0.75,"min": 0.0, "max": 2.0, "step": 0.05,
+                    "tooltip": "Multiplier on the character tokens in concat and weighted modes. "
+                               "Ignored in priority mode."}),
+                "hdr_weight":       ("FLOAT", {"default": 0.5, "min": 0.0, "max": 2.0, "step": 0.05,
+                    "tooltip": "Multiplier on the HDR tokens in concat and weighted modes. "
+                               "Ignored in priority mode."}),
             },
         }
 
@@ -803,15 +838,26 @@ class RadianceVideoSampler:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("MODEL",),
-                "positive": ("CONDITIONING",),
-                "negative": ("CONDITIONING",),
-                "latent_noise": ("LATENT",),
-                "steps": ("INT", {"default": 25, "min": 1, "max": 200}),
-                "cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 30.0, "step": 0.1}),
-                "sampler_name": (_SAMPLERS, {"default": "euler"}),
-                "scheduler": (_SCHEDULERS, {"default": "normal"}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 2**31}),
+                "model": ("MODEL", {"tooltip": "Video diffusion model to sample with."}),
+                "positive": ("CONDITIONING", {"tooltip": "Positive (prompt) conditioning."}),
+                "negative": ("CONDITIONING", {"tooltip": "Negative conditioning, used by classifier-free "
+                                                         "guidance."}),
+                "latent_noise": ("LATENT", {
+                    "tooltip": "Noise latent, e.g. from RadianceVideoLatentNoise. It is used as both the "
+                               "noise and the start latent, so its shape must match the model."}),
+                "steps": ("INT", {"default": 25, "min": 1, "max": 200,
+                    "tooltip": "Sampling steps. Ignored when dit_config carries a model_name."}),
+                "cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 30.0, "step": 0.1,
+                    "tooltip": "Classifier-free guidance scale. Replaced by the model default when "
+                               "dit_config carries a model_name, then by the first value of "
+                               "cfg_schedule_json."}),
+                "sampler_name": (_SAMPLERS, {"default": "euler",
+                    "tooltip": "ComfyUI sampler. Ignored when dit_config carries a model_name."}),
+                "scheduler": (_SCHEDULERS, {"default": "normal",
+                    "tooltip": "ComfyUI sigma scheduler. Ignored when dit_config carries a model_name."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 2**31,
+                    "tooltip": "Seed for the sampler's own noise (ancestral and SDE samplers). The "
+                               "initial noise comes from latent_noise."}),
             },
             "optional": {
                 # ALBABIT-FIX: dit_config promoted from required to optional.
@@ -826,7 +872,9 @@ class RadianceVideoSampler:
                     "default": "",
                     "tooltip": "JSON float array from RadianceAudioCFGSchedule — first value overrides CFG",
                 }),
-                "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Fraction of the noise schedule to run (1.0 = full). The start latent is "
+                               "latent_noise itself, so below 1.0 this is not a video-to-video strength."}),
                 # The "tiling" widget is deliberately not offered. It drove
                 # `model.model.set_tiling(True)`, and no ComfyUI version defines
                 # set_tiling (or enable_tiling) on a model or a VAE, so the probe
@@ -938,41 +986,67 @@ class RadianceT2VPipeline:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("MODEL",),
-                "clip": ("CLIP",),
-                "vae": ("VAE",),
+                "model": ("MODEL", {"tooltip": "Video diffusion model. Image models (2-D latents) "
+                                               "are rejected."}),
+                "clip": ("CLIP", {"tooltip": "Text encoder matching the model, used for both prompts."}),
+                "vae": ("VAE", {"tooltip": "VAE matching the model. Its compression sets the latent "
+                                           "shape and it decodes preview_frames."}),
                 "positive_prompt": ("STRING", {
                     "multiline": True,
                     "default": "cinematic HDR video, stunning visuals, 4K, film grain",
+                    "tooltip": "What to generate. HDR descriptors from peak_nits, target_gamut and "
+                               "hdr_eotf are appended unless hdr_strength is 0.",
                 }),
                 "negative_prompt": ("STRING", {
                     "multiline": True,
                     "default": "watermark, blurry, low quality, sdr, flickering",
+                    "tooltip": "What to steer away from, encoded with the same text encoder.",
                 }),
-                "width":  ("INT", {"default": 768,  "min": 64, "max": 4096, "step": 8}),
-                "height": ("INT", {"default": 512,  "min": 64, "max": 4096, "step": 8}),
-                "frames": ("INT", {"default": 25,   "min": 1,  "max": 512}),
-                "seed":   ("INT", {"default": 0,    "min": 0,  "max": 2**31}),
+                "width":  ("INT", {"default": 768,  "min": 64, "max": 4096, "step": 8,
+                    "tooltip": "Output width in pixels, rounded down to a multiple of the VAE's "
+                               "spatial compression."}),
+                "height": ("INT", {"default": 512,  "min": 64, "max": 4096, "step": 8,
+                    "tooltip": "Output height in pixels, rounded down to a multiple of the VAE's "
+                               "spatial compression."}),
+                "frames": ("INT", {"default": 25,   "min": 1,  "max": 512,
+                    "tooltip": "Requested frames. The latent holds ceil(frames / temporal compression) "
+                               "frames; use a multiple of the compression plus 1 (e.g. 25, 49, 81) to "
+                               "get exactly this count back."}),
+                "seed":   ("INT", {"default": 0,    "min": 0,  "max": 2**31,
+                    "tooltip": "Seed for the initial noise and the sampler."}),
             },
             "optional": {
                 "dit_config": ("STRING", {"default": "{}",
-                    "tooltip": "JSON from RadianceVideoModelInfo — sets model-specific defaults"}),
-                "character_conditioning": ("CONDITIONING",),
+                    "tooltip": "JSON from RadianceVideoModelInfo. When it carries a model_name, that "
+                               "model's defaults replace steps, cfg, sampler_name and scheduler."}),
+                "character_conditioning": ("CONDITIONING", {
+                    "tooltip": "Optional conditioning whose tokens are appended to the positive prompt "
+                               "at weight 0.75. Skipped if its embedding width differs."}),
                 "cfg_schedule_json": ("STRING", {"default": "",
                     "tooltip": "JSON float array from RadianceAudioCFGSchedule. Only the first value is "
                                "used, as a static CFG override; CFG does not vary per step."}),
                 "steps": ("INT", {"default": 0, "min": 0, "max": 200,
-                    "tooltip": "0 = use model default"}),
+                    "tooltip": "Sampling steps. 0 uses the model default (the LTX-Video preset's 25 when "
+                               "no dit_config is connected). Ignored when dit_config carries a model_name."}),
                 "cfg":   ("FLOAT", {"default": 0.0, "min": 0.0, "max": 30.0, "step": 0.1,
-                    "tooltip": "0 = use model default"}),
-                "sampler_name": (_SAMPLERS, {"default": "euler"}),
-                "scheduler":    (_SCHEDULERS, {"default": "normal"}),
+                    "tooltip": "Guidance scale. 0 uses the model default (the LTX-Video preset's 3.5 when "
+                               "no dit_config is connected). cfg_schedule_json overrides it."}),
+                "sampler_name": (_SAMPLERS, {"default": "euler",
+                    "tooltip": "ComfyUI sampler. Ignored when dit_config carries a model_name."}),
+                "scheduler":    (_SCHEDULERS, {"default": "normal",
+                    "tooltip": "ComfyUI sigma scheduler. Ignored when dit_config carries a model_name."}),
                 "peak_nits":    ([str(n) for n in [100,203,400,600,1000,4000,10000]],
-                                  {"default": "1000"}),
+                                  {"default": "1000",
+                                   "tooltip": "Adds '<n> nits HDR' to the prompt. Prompt text only, no "
+                                              "pixel change; 100 adds nothing."}),
                 "target_gamut": (["BT.2020","P3-D65","P3-DCI","BT.709","ACEScg"],
-                                  {"default": "BT.2020"}),
+                                  {"default": "BT.2020",
+                                   "tooltip": "Adds a gamut descriptor to the prompt. Prompt text only; "
+                                              "P3-DCI has no descriptor and adds nothing."}),
                 "hdr_eotf":     (["PQ (ST.2084)","HLG (BT.2100)","Linear","sRGB / BT.1886"],
-                                  {"default": "PQ (ST.2084)"}),
+                                  {"default": "PQ (ST.2084)",
+                                   "tooltip": "Adds a transfer-function descriptor to the prompt. Prompt "
+                                              "text only; sRGB / BT.1886 adds nothing."}),
                 "hdr_strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05,
                     "tooltip": "Prompt weight of the appended HDR descriptors (gamut, EOTF, peak nits), "
                                "as (text:weight) with weight = 2 x strength: 0.5 is neutral, "
@@ -1215,24 +1289,40 @@ class RadianceI2VPipeline:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("MODEL",),
-                "clip": ("CLIP",),
-                "vae": ("VAE",),
-                "reference_image": ("IMAGE",),
+                "model": ("MODEL", {"tooltip": "Video diffusion model. Image models are rejected; a "
+                                               "model with an image-concat input (Wan I2V) enables "
+                                               "concat_channels."}),
+                "clip": ("CLIP", {"tooltip": "Text encoder matching the model, used for both prompts."}),
+                "vae": ("VAE", {"tooltip": "VAE matching the model. Encodes the reference image, sets "
+                                           "the latent shape and decodes preview_frames."}),
+                "reference_image": ("IMAGE", {
+                    "tooltip": "Start frame (display-referred sRGB, one image). Its width and height set "
+                               "the video size, rounded down to the VAE's spatial compression."}),
                 "positive_prompt": ("STRING", {
                     "multiline": True,
                     "default": "smooth camera motion, cinematic HDR, 4K",
+                    "tooltip": "What should happen in the shot. ', <n> nits HDR, <gamut>' is appended "
+                               "when peak_nits is above 100.",
                 }),
                 "negative_prompt": ("STRING", {
                     "multiline": True,
                     "default": "watermark, blurry, flickering, sdr",
+                    "tooltip": "What to steer away from, encoded with the same text encoder.",
                 }),
-                "frames": ("INT", {"default": 25, "min": 1, "max": 512}),
-                "seed":   ("INT", {"default": 0,  "min": 0, "max": 2**31}),
+                "frames": ("INT", {"default": 25, "min": 1, "max": 512,
+                    "tooltip": "Requested frames. The latent holds ceil(frames / temporal compression) "
+                               "frames; use a multiple of the compression plus 1 (e.g. 25, 49, 81) to "
+                               "get exactly this count back."}),
+                "seed":   ("INT", {"default": 0,  "min": 0, "max": 2**31,
+                    "tooltip": "Seed for the initial noise and the sampler."}),
             },
             "optional": {
-                "dit_config": ("STRING", {"default": "{}"}),
-                "character_conditioning": ("CONDITIONING",),
+                "dit_config": ("STRING", {"default": "{}",
+                    "tooltip": "JSON from RadianceVideoModelInfo. When it carries a model_name, that "
+                               "model's defaults replace steps, cfg, sampler_name and scheduler."}),
+                "character_conditioning": ("CONDITIONING", {
+                    "tooltip": "Optional conditioning whose tokens are appended to the positive prompt "
+                               "at weight 0.75. Skipped if its embedding width differs."}),
                 "cfg_schedule_json": ("STRING", {"default": "",
                     "tooltip": "JSON float array. Only the first value is used, as a static CFG "
                                "override; CFG does not vary per step."}),
@@ -1245,22 +1335,38 @@ class RadianceI2VPipeline:
                                "clip_vision_output, which Wan 2.1 I2V reads (clip_fea)."}),
                 "image_strength": ("FLOAT", {
                     "default": 0.85, "min": 0.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "How strongly the reference image anchors the generation",
+                    "tooltip": "first_frame_lock and prepend_latent only: blend weight of the image "
+                               "latent into the first latent frame; also lowers denoise to "
+                               "1 - 0.4 x strength. Ignored by concat_channels and clip_vision_inject.",
                 }),
                 "motion_strength": ("FLOAT", {
                     "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "Amount of motion / temporal variation (0=nearly static)",
+                    "tooltip": "first_frame_lock and prepend_latent only: scales the starting noise "
+                               "to 0.2 + 0.8 x strength of its unit amplitude. Ignored by "
+                               "concat_channels and clip_vision_inject.",
                 }),
-                "steps": ("INT", {"default": 0, "min": 0, "max": 200}),
-                "cfg":   ("FLOAT", {"default": 0.0, "min": 0.0, "max": 30.0, "step": 0.1}),
-                "sampler_name": (_SAMPLERS, {"default": "euler"}),
-                "scheduler":    (_SCHEDULERS, {"default": "normal"}),
+                "steps": ("INT", {"default": 0, "min": 0, "max": 200,
+                    "tooltip": "Sampling steps. 0 uses the model default (the LTX-Video preset's 25 when "
+                               "no dit_config is connected). Ignored when dit_config carries a model_name."}),
+                "cfg":   ("FLOAT", {"default": 0.0, "min": 0.0, "max": 30.0, "step": 0.1,
+                    "tooltip": "Guidance scale. 0 uses the model default (the LTX-Video preset's 3.5 when "
+                               "no dit_config is connected). cfg_schedule_json overrides it."}),
+                "sampler_name": (_SAMPLERS, {"default": "euler",
+                    "tooltip": "ComfyUI sampler. Ignored when dit_config carries a model_name."}),
+                "scheduler":    (_SCHEDULERS, {"default": "normal",
+                    "tooltip": "ComfyUI sigma scheduler. Ignored when dit_config carries a model_name."}),
                 "peak_nits":    ([str(n) for n in [100,203,400,600,1000,4000,10000]],
-                                  {"default": "1000"}),
+                                  {"default": "1000",
+                                   "tooltip": "Above 100, adds '<n> nits HDR, <target_gamut>' to the "
+                                              "prompt. Prompt text only, no pixel change."}),
                 "target_gamut": (["BT.2020","P3-D65","P3-DCI","BT.709","ACEScg"],
-                                  {"default": "BT.2020"}),
+                                  {"default": "BT.2020",
+                                   "tooltip": "Gamut name added to the prompt, only when peak_nits is "
+                                              "above 100. Prompt text only."}),
                 "hdr_eotf":     (["PQ (ST.2084)","HLG (BT.2100)","Linear","sRGB / BT.1886"],
-                                  {"default": "PQ (ST.2084)"}),
+                                  {"default": "PQ (ST.2084)",
+                                   "tooltip": "Has no effect in this node: the I2V prompt does not "
+                                              "include an EOTF descriptor."}),
             },
         }
 
@@ -1588,11 +1694,16 @@ class RadianceVideoBatchDecode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "vae": ("VAE",),
-                "latent": ("LATENT",),
+                "vae": ("VAE", {"tooltip": "VAE matching the model that produced the latent."}),
+                "latent": ("LATENT", {
+                    "tooltip": "Video latent from a sampler or pipeline. A 5-D latent is decoded through "
+                               "the VAE's temporal path."}),
             },
             "optional": {
-                "dit_config": ("STRING", {"default": "{}"}),
+                "dit_config": ("STRING", {"default": "{}",
+                    "tooltip": "JSON from RadianceVideoModelInfo. A latent_scale other than 1.0 divides "
+                               "the latent before decoding (this double-scales a ComfyUI-sampled latent); "
+                               "its compression values are used only if the VAE does not report its own."}),
                 "tile_decode": ("BOOLEAN", {
                     "default": False,
                     "tooltip": "Route the decode through the VAE's own tiled entry point "
@@ -1767,18 +1878,29 @@ class RadianceVideoExport:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "frames": ("IMAGE",),
-                "mode": (cls.MODES, {"default": "passthrough"}),
+                "frames": ("IMAGE", {
+                    "tooltip": "Decoded frames. EXR writes the values unchanged as 32-bit float; the GIF "
+                               "clamps to [0, 1] display-referred."}),
+                "mode": (cls.MODES, {"default": "passthrough",
+                    "tooltip": "passthrough: return frames. hdr_decode: run RadianceVideoHDRDecode "
+                               "(Reinhard, PQ out) and return the HDR signal. exr_sequence / preview_gif: "
+                               "also write files. Only the last two write to disk."}),
             },
             "optional": {
                 "hdr_metadata_json": ("STRING", {
                     "default": '{"peak_nits":1000,"eotf":"PQ (ST.2084)"}',
+                    "tooltip": "hdr_decode only. Its peak_nits and gamut (BT.2020 if absent) are used; "
+                               "the eotf key is ignored, output is always PQ.",
                 }),
                 "output_folder": ("STRING", {"default": "",
                     "tooltip": "Empty: ComfyUI's output folder."}),
-                "filename_prefix": ("STRING", {"default": "radiance_video"}),
-                "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0}),
-                "frame_offset": ("INT", {"default": 0, "min": 0}),
+                "filename_prefix": ("STRING", {"default": "radiance_video",
+                    "tooltip": "File name start: <prefix>_<6-digit frame>.exr, or <prefix>_preview.gif "
+                               "(overwritten on each run)."}),
+                "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0,
+                    "tooltip": "GIF playback rate (frame duration 1000 / fps ms). preview_gif only."}),
+                "frame_offset": ("INT", {"default": 0, "min": 0,
+                    "tooltip": "Added to the frame number in EXR file names. exr_sequence only."}),
             },
         }
 
@@ -1786,7 +1908,8 @@ class RadianceVideoExport:
     RETURN_NAMES = ("frames", "frame_count", "export_report")
     FUNCTION = "export"
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Video"
-    DESCRIPTION = "Export generated video frames to a file with format and codec options."
+    DESCRIPTION = ("Pass decoded video frames through, HDR-encode them, or write them as a 32-bit "
+                   "float EXR sequence or a small GIF preview. No movie codecs: use a video writer node.")
     OUTPUT_NODE = True
 
     def export(self, frames, mode, hdr_metadata_json="{}",

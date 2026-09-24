@@ -640,7 +640,8 @@ class RadianceWrite:
                 "placeholder": "/output/render  or  //nas/share/render  or  Z:/renders/shot",
                 "tooltip": (
                     "Output directory + filename stem.  Extension is appended automatically based on format.\n"
-                    "For sequences: frame number and extension are appended (e.g. /out/frame_0001.exr).\n\n"
+                    "For sequences: output_path becomes a folder and frames are named <folder>_<frame>.<ext> "
+                    "(e.g. /out/shot -> /out/shot/shot_1001.exr).\n\n"
                     "Network paths are fully supported — use the path as mounted on this machine:\n"
                     "  Linux / Mac  →  /mnt/nas/renders/shot_001\n"
                     "  Windows UNC  →  \\\\server\\share\\renders\\shot_001\n"
@@ -909,7 +910,8 @@ class RadianceEXRMultiPart:
     """
 
     CATEGORY = "FXTD STUDIOS/Radiance/◎ IO & Delivery"
-    DESCRIPTION = "Read or write multi-part OpenEXR files with named channel layers."
+    DESCRIPTION = ("Write one multi-part OpenEXR frame with named AOV parts (beauty, depth, normal, albedo, "
+                   "two custom). Values are written unchanged; if multi-part output fails, one EXR per part is written.")
     FUNCTION    = "write_multipart"
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("output_path",)
@@ -919,23 +921,38 @@ class RadianceEXRMultiPart:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "filename_prefix": ("STRING", {"default": "radiance_multipart"}),
-                "beauty":    ("IMAGE",),
-                "bit_depth": (_EXR_BIT_DEPTHS,   {"default": "16-bit Half Float"}),
-                "compression": (_EXR_COMPRESSIONS, {"default": "ZIP"}),
+                "filename_prefix": ("STRING", {"default": "radiance_multipart",
+                    "tooltip": "File name stem. The file is written as <prefix>.<frame_index, 4-digit padded>.exr."}),
+                "beauty":    ("IMAGE", {
+                    "tooltip": "Main image, written as the 'beauty' part (R, G, B, plus A if it has 4 channels). Values are written unchanged, so feed scene-linear data. Only the first frame of a batch is written."}),
+                "bit_depth": (_EXR_BIT_DEPTHS,   {"default": "16-bit Half Float",
+                    "tooltip": "Pixel type for every part: 16-bit half float (smaller, about 11 bits of precision) or 32-bit float."}),
+                "compression": (_EXR_COMPRESSIONS, {"default": "ZIP",
+                    "tooltip": "EXR compression for every part. ZIP, ZIPS, PIZ, RLE and Uncompressed are lossless; PXR24 is lossy on 32-bit float; B44, B44A, DWAA and DWAB are lossy."}),
             },
             "optional": {
-                "depth":         ("IMAGE",),
-                "normal":        ("IMAGE",),
-                "albedo":        ("IMAGE",),
-                "custom_1":      ("IMAGE",),
-                "custom_1_name": ("STRING", {"default": "emission"}),
-                "custom_2":      ("IMAGE",),
-                "custom_2_name": ("STRING", {"default": "specular"}),
-                "output_path":   ("STRING", {"default": ""}),
-                "remote_path":   ("STRING", {"default": ""}),
-                "frame_index":   ("INT",    {"default": 1, "min": 1}),
-                "custom_metadata": ("STRING", {"default": "", "multiline": True}),
+                "depth":         ("IMAGE", {
+                    "tooltip": "Depth AOV written as a single Z channel in a 'depth' part. Only the first (red) channel is used; values are not normalised."}),
+                "normal":        ("IMAGE", {
+                    "tooltip": "Normals AOV written as NX, NY, NZ in a 'normal' part, values unchanged (no 0-1 to -1..1 remap)."}),
+                "albedo":        ("IMAGE", {
+                    "tooltip": "Albedo AOV written as albedo.R/G/B in an 'albedo' part, values unchanged."}),
+                "custom_1":      ("IMAGE", {
+                    "tooltip": "Extra AOV written as <custom_1_name>.R/G/B in a part of that name."}),
+                "custom_1_name": ("STRING", {"default": "emission",
+                    "tooltip": "Part and channel-prefix name for custom_1. Letters, digits, underscore, hyphen or dot only; anything else stops the node."}),
+                "custom_2":      ("IMAGE", {
+                    "tooltip": "Extra AOV written as <custom_2_name>.R/G/B in a part of that name."}),
+                "custom_2_name": ("STRING", {"default": "specular",
+                    "tooltip": "Part and channel-prefix name for custom_2. Letters, digits, underscore, hyphen or dot only."}),
+                "output_path":   ("STRING", {"default": "",
+                    "tooltip": "Output folder. Empty writes to the ComfyUI output folder; a relative path is inside it; an absolute path is used as-is. Created if missing."}),
+                "remote_path":   ("STRING", {"default": "",
+                    "tooltip": "Optional second folder (for example a NAS or UNC share) the finished file is copied to. A failed copy only logs a warning."}),
+                "frame_index":   ("INT",    {"default": 1, "min": 1,
+                    "tooltip": "Frame number used in the file name only. It does not select a frame from the batch."}),
+                "custom_metadata": ("STRING", {"default": "", "multiline": True,
+                    "tooltip": "Extra header attributes, one key=value per line. Keys are stored with a 'rad_' prefix unless they are standard EXR names (owner, comments, capDate and so on)."}),
             },
         }
 
@@ -1041,10 +1058,15 @@ class RadianceDigitalCinemaRead:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "source_path": ("STRING", {"default": ""}),
-                "read_mode": (["Auto", "Video", "Sequence", "EXR"], {"default": "Auto"}),
-                "start_frame": ("INT", {"default": 1, "min": 1}),
-                "frame_limit": ("INT", {"default": 0, "min": 0}),
+                "source_path": ("STRING", {"default": "",
+                    "tooltip": "Video file, image, or frame sequence (e.g. shot.####.exr). Required: an empty path stops the graph."}),
+                "read_mode": (["Auto", "Video", "Sequence", "EXR"], {"default": "Auto",
+                    "tooltip": "How to treat source_path. Auto detects from the path; EXR is handled exactly like Sequence."}),
+                "start_frame": ("INT", {"default": 1, "min": 1,
+                    "tooltip": ("Sequence: the frame number to start at (a number outside the range on disk "
+                                "falls back to the first frame). Video: a 0-based offset, so the default 1 skips the clip's first frame.")}),
+                "frame_limit": ("INT", {"default": 0, "min": 0,
+                    "tooltip": "Maximum number of frames to read from start_frame. 0 reads to the end."}),
                 "input_colorspace": (["sRGB (Standard)"] + [c for c in INPUT_COLOR_SPACES if c != "sRGB"],
                                      {"default": "sRGB (Standard)",
                                       "tooltip": "Transfer the source was encoded with. It is decoded "
@@ -1058,6 +1080,8 @@ class RadianceDigitalCinemaRead:
     RETURN_NAMES = ("image", "mask", "shot_metadata")
     FUNCTION = "read"
     CATEGORY = "FXTD Studios/Radiance/IO"
+    DESCRIPTION = ("Read a video, image or frame sequence through Radiance Read, decoded to scene-linear, "
+                   "and output shot metadata (source info, colorspace, fps) for downstream pipeline nodes.")
 
     def read(self, source_path, read_mode, start_frame, frame_limit, input_colorspace, fps_override=0.0):
         # An executed read with no source is a mistake, not a placeholder. The
@@ -1146,18 +1170,23 @@ class RadianceDigitalCinemaWrite:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "images": ("IMAGE",),
+                "images": ("IMAGE", {
+                    "tooltip": "Frames to write, passed to Radiance Write with its defaults (color_space Linear (pass-through), so values are written unchanged)."}),
                 # Same default as RadianceWrite, which this node delegates to.
                 # It used to default to "", so dropping the node and queueing
                 # crashed inside pathlib instead of writing anything.
                 "output_path": ("STRING", {
                     "default": str(Path.home() / "radiance_output"),
                     "placeholder": "/output/render  or  Z:/renders/shot",
+                    "tooltip": ("Output path, as in Radiance Write. With filename empty it is the full stem "
+                                "(single images and video get the extension appended; sequences use it as a folder)."),
                 }),
             },
             "optional": {
-                "format": (WRITE_FORMATS, {"default": "IMG │ EXR (16-bit half)"}),
-                "filename": ("STRING", {"default": ""}),
+                "format": (WRITE_FORMATS, {"default": "IMG │ EXR (16-bit half)",
+                    "tooltip": "Output format. IMG writes only the first frame of a batch; SEQ and VID write every frame."}),
+                "filename": ("STRING", {"default": "",
+                    "tooltip": "Optional stem. When set, output_path is treated as a folder and the file is named <filename>_v0001."}),
             },
         }
 
@@ -1166,6 +1195,8 @@ class RadianceDigitalCinemaWrite:
     FUNCTION = "write"
     OUTPUT_NODE = True
     CATEGORY = "FXTD STUDIOS/Radiance/Pipeline"
+    DESCRIPTION = ("Simplified writer kept for older pipelines: passes images, output_path, format and filename "
+                   "to Radiance Write with every other setting at its default, and returns a status string.")
 
     def write(self, images, output_path, format="IMG │ EXR (16-bit half)", filename=""):
         writer = RadianceWrite()

@@ -58,31 +58,55 @@ class HDRExposureBlend:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "low_exposure": ("IMAGE",),  # Darker image - good highlights
-                "high_exposure": ("IMAGE",),  # Brighter image - good shadows
-                "blend_method": (cls.BLEND_METHODS, {"default": "Mertens Fusion"}),
+                "low_exposure": ("IMAGE", {
+                    "tooltip": "Darker bracket, the source of highlight detail. Should be linear; "
+                    "only the first frame of a batch is used.",
+                }),  # Darker image - good highlights
+                "high_exposure": ("IMAGE", {
+                    "tooltip": "Brighter bracket, the source of shadow detail. Should be linear and "
+                    "the same size as low_exposure; only the first frame is used.",
+                }),  # Brighter image - good shadows
+                "blend_method": (cls.BLEND_METHODS, {
+                    "default": "Mertens Fusion",
+                    "tooltip": "How brackets are merged after EV compensation. Mertens: per-pixel "
+                    "contrast/saturation/exposedness weights. Exposure Weighted currently falls back "
+                    "to a plain average of low and high.",
+                }),
             },
             "optional": {
-                "mid_exposure": ("IMAGE",),  # Optional middle exposure
+                "mid_exposure": ("IMAGE", {
+                    "tooltip": "Optional middle bracket, compensated by exposure_offset_mid. Used "
+                    "only by Mertens Fusion; the other methods ignore it.",
+                }),  # Optional middle exposure
                 "shadow_weight": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.1},
+                    {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.1,
+                     "tooltip": "Relative weight of high_exposure in the shadow zone (low_exposure "
+                     "luma below 0.25). Shadow/Highlight Mask method only."},
                 ),
                 "highlight_weight": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.1},
+                    {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.1,
+                     "tooltip": "Relative weight of low_exposure in the highlight zone (low_exposure "
+                     "luma above 0.75). Shadow/Highlight Mask method only."},
                 ),
                 "transition_smoothness": (
                     "FLOAT",
-                    {"default": 0.3, "min": 0.05, "max": 1.0, "step": 0.05},
+                    {"default": 0.3, "min": 0.05, "max": 1.0, "step": 0.05,
+                     "tooltip": "Width in luma of the crossfade between brackets; higher is softer. "
+                     "Used by Luminance Weighted and Shadow/Highlight Mask only."},
                 ),
                 "exposure_offset_low": (
                     "FLOAT",
-                    {"default": -2.0, "min": -6.0, "max": 0.0, "step": 0.5},
+                    {"default": -2.0, "min": -6.0, "max": 0.0, "step": 0.5,
+                     "tooltip": "EV of low_exposure relative to 0 EV. It is multiplied by 2^-EV "
+                     "(-2 brightens it 4x) so all brackets share one linear scale."},
                 ),
                 "exposure_offset_high": (
                     "FLOAT",
-                    {"default": 2.0, "min": 0.0, "max": 6.0, "step": 0.5},
+                    {"default": 2.0, "min": 0.0, "max": 6.0, "step": 0.5,
+                     "tooltip": "EV of high_exposure relative to 0 EV. It is multiplied by 2^-EV "
+                     "(+2 darkens it 4x) so all brackets share one linear scale."},
                 ),
                 "exposure_offset_mid": (
                     "FLOAT",
@@ -97,7 +121,8 @@ class HDRExposureBlend:
                     },
                 ),
                 "ghost_removal": ("BOOLEAN", {"default": False,
-                    "tooltip": "Detect and remove ghosting artifacts in HDR merges caused by moving objects between frames.",
+                    "tooltip": "Align brackets by global translation (up to 64 px). Mertens Fusion also "
+                    "down-weights pixels that disagree between brackets (moving objects); other methods only align.",
                 }),
             },
         }
@@ -630,32 +655,47 @@ class HDRShadowHighlightRecovery:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {
+                    "tooltip": "Linear HDR image (values above 1.0 allowed). Only the first frame of a "
+                    "batch is processed.",
+                }),
                 "shadow_amount": (
                     "FLOAT",
-                    {"default": 0.5, "min": 0.0, "max": 2.0, "step": 0.05},
+                    {"default": 0.5, "min": 0.0, "max": 2.0, "step": 0.05,
+                     "tooltip": "Shadow gain at black: pixels are multiplied by up to 1 + amount, "
+                     "fading out with luma (see shadow_tone). 0 = off."},
                 ),
                 "highlight_amount": (
                     "FLOAT",
-                    {"default": 0.5, "min": 0.0, "max": 2.0, "step": 0.05},
+                    {"default": 0.5, "min": 0.0, "max": 2.0, "step": 0.05,
+                     "tooltip": "Highlight compression above highlight_tone, never clipping. At the "
+                     "default, luma 1.0 is scaled by 0.8 and brighter values more. 0 = off."},
                 ),
             },
             "optional": {
                 "shadow_tone": (
                     "FLOAT",
-                    {"default": 0.25, "min": 0.0, "max": 0.5, "step": 0.01},
+                    {"default": 0.25, "min": 0.0, "max": 0.5, "step": 0.01,
+                     "tooltip": "Linear-luma width of the shadow lift. It decays exponentially and is "
+                     "down to about 5% at this luma."},
                 ),
                 "highlight_tone": (
                     "FLOAT",
-                    {"default": 0.75, "min": 0.5, "max": 1.0, "step": 0.01},
+                    {"default": 0.75, "min": 0.5, "max": 1.0, "step": 0.01,
+                     "tooltip": "Linear luma above which highlight compression starts; it keeps "
+                     "increasing past 1.0 for super-whites."},
                 ),
                 "color_correction": (
                     "FLOAT",
-                    {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.1},
+                    {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.1,
+                     "tooltip": "Desaturates lifted shadows to counter the colour boost of the lift "
+                     "(up to 30% at 1.0, deepest shadows most). 0 = off."},
                 ),
                 "local_contrast": (
                     "FLOAT",
-                    {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1},
+                    {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1,
+                     "tooltip": "Large-radius local contrast (about 50 px blur of luma). Positive "
+                     "adds, negative flattens, 0 = off."},
                 ),
             },
         }
@@ -763,19 +803,27 @@ class GPUTensorOps:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {
+                    "tooltip": "Image to process, usually linear float. The whole batch is processed.",
+                }),
                 "operation": (
                     ["Exposure", "Gamma", "Lift/Gain", "Normalize", "Clamp"],
-                    {"default": "Exposure"},
+                    {"default": "Exposure",
+                     "tooltip": "Exposure: x * 2^value. Gamma: sign-preserving x^(1/value). "
+                     "Lift/Gain: adds value (an offset only, no gain). Normalize: per-frame min/max "
+                     "to 0-1. Clamp: to 0-1."},
                 ),
             },
             "optional": {
                 "value": (
                     "FLOAT",
-                    {"default": 0.0, "min": -10.0, "max": 10.0, "step": 0.1},
+                    {"default": 0.0, "min": -10.0, "max": 10.0, "step": 0.1,
+                     "tooltip": "Exposure: stops. Gamma: gamma (0 means 2.2, anything below 0.1 "
+                     "including negatives is treated as 0.1). Lift/Gain: offset added. Ignored by "
+                     "Normalize and Clamp."},
                 ),
                 "force_gpu": ("BOOLEAN", {"default": True,
-                    "tooltip": "Force GPU processing even when image fits in CPU memory. Useful for batch throughput.",
+                    "tooltip": "Run on CUDA when available. Off always runs on the CPU. Results are the same either way.",
                 }),
             },
         }

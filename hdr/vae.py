@@ -2859,17 +2859,23 @@ class RadianceVAE4KDecode:
         # "sRGB", "ACEScg") the code silently falls back to LogC4 decompression,
         # producing wrong colors with no visible error.
         # Valid source spaces for Compress(Log): the 6 camera log formats.
-        if hdr_mode == "Compress (Log)":
+        #
+        # 3.5.0: not when the latent came from VAE Encode (HDR). Its encoder
+        # carries a non-log source (Linear, ACEScg, ...) in LogC4 and records
+        # that in radiance_meta, so decoding with LogC4 is the exact inverse.
+        # The warning fired on every run of the recommended encode/decode
+        # pair, telling users correct output was wrong.
+        if hdr_mode == "Compress (Log)" and not radiance_meta:
             _valid_log_source = set(LOG_PROFILE_HDR_PARAMS.keys())
             if source_space not in _valid_log_source and not _quiet_diag:
                 logger.warning(
-                    f"[Radiance 4K Decode v2.3.7] hdr_mode='Compress (Log)' but "
-                    f"source_space='{source_space}' is not a log-encoded space. "
-                    f"Valid options: {sorted(_valid_log_source)}. "
-                    f"Falling back to ARRI LogC4 decompression — output colors will "
-                    f"be WRONG unless source material was actually LogC4-encoded. "
-                    f"For standard diffusion model output (SDXL/FLUX/SD1.5), "
-                    f"use hdr_mode='Clip (SDR)' or 'Soft Clip' instead."
+                    f"[Radiance 4K Decode v2.3.7] hdr_mode='Compress (Log)' with "
+                    f"source_space='{source_space}' and no encoder metadata: decoding "
+                    f"with the ARRI LogC4 curve VAE Encode (HDR) uses for non-log "
+                    f"sources. That is correct for a latent from VAE Encode (HDR); "
+                    f"for anything else pick the log space it was encoded in "
+                    f"({', '.join(sorted(_valid_log_source))}), or 'Clip (SDR)' for "
+                    f"ordinary diffusion output."
                 )
 
         # 3.5.0: gamut of the linear light inside the latent. Compress(Log)

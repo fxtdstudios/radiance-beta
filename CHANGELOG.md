@@ -79,7 +79,55 @@ All notable changes to FXTD Radiance will be documented in this file.
    - `Shift+K` toggles focus peaking; the sequence dock's tools moved to Shift+letter.
    - Zoom above 1:1 is nearest-neighbour by default (it was always smoothed).
 
+9. **Multipass Extract is retired; Multipass Estimate replaces it.** Its
+   material and lighting passes were image filters (Retinex albedo, image
+   minus blur as "specular", roughness from local contrast, emission and
+   transmission from saturation and brightness, a k-means "object ID") and
+   its geometry passes had no real scale. The node is hidden from the menu; a
+   saved graph still opens and stops with a message naming the replacement.
+   Multipass Estimate's outputs differ (see Added), so reconnect them.
+10. **Multipass Relight reads `ao` as renderers write it, 1 = open.** It used
+    to read the pass as an occlusion amount, which inverted real AO loaded
+    through Read AOVs. With nothing connected the default is still fully
+    open. A hand-made occlusion mask now needs inverting once.
+
 ### Fixed
+
+- **HDR Color Pipeline crashed on PQ input.** It still passed `peak_nits` to
+  a PQ decode that had dropped the argument on purpose, so every PQ run
+  raised TypeError. PQ is absolute; `pq_peak_nits` no longer reaches it.
+- **`slow` tests ran on every plain `pytest`.** The 1-to-100 frame-count
+  sweep (300 encoded clips) is marked `slow` and the README said slow tests
+  were deselected by default, but nothing deselected them: it cost 68 s of a
+  245 s suite locally and in CI. `pyproject.toml` now sets
+  `addopts = "-m 'not slow'"`; `pytest -m slow` runs them, and CI's
+  full-dependency job runs them in their own step so the sweep is not lost.
+  The sweep itself now encodes and decodes on a thread pool (its time is
+  process start-up, not codec work): 68 s to 40 s on 2 cores, more on a
+  workstation. Every length is still its own encoder-produced file.
+- **VAE Decode (HDR) told users of the recommended pair that correct output
+  was wrong.** Every run of VAE Encode (HDR) into VAE Decode (HDR) with a
+  linear source logged "output colors will be WRONG". The encoder carries a
+  non-log source in ARRI LogC4 and records it in the latent, so the LogC4
+  decode is the exact inverse. The warning now appears only when a latent
+  without encoder metadata is decoded in Compress (Log), and says what to
+  pick instead.
+- **Pass-through video was tagged as linear light.** Write's default
+  "Linear (pass-through)" writes the IMAGE unchanged, which for ordinary
+  ComfyUI images is display-encoded, but tagged MP4 / ProRes with a linear
+  transfer, so players that honour the tag decoded it wrong. The transfer is
+  now left unspecified for pass-through; an encoding you choose is still
+  tagged.
+- **Multipass Estimate's MoGe download left a `.radiance_download` folder**
+  of Hugging Face lock and metadata files in `models/geometry_estimation`.
+- **Four model loads skipped the download consent gate.** Depth Map
+  Generator (Depth Anything V2; Base and Large are CC-BY-NC-4.0), the SD x4
+  upscaler (~2.4 GB), the SeedVR2 fallback and character-consistency CLIP
+  called `from_pretrained` directly, so they downloaded even with
+  `RADIANCE_ALLOW_DOWNLOADS=0`. Without consent they now load only a copy
+  already in the Hugging Face cache; Depth Map Generator says what to set or
+  where to get the model, and character matching falls back to colour
+  histograms as before.
 
 - **Viewer and Lite Viewer, phase 1 (3.5.0).**
   - *Standard images washed out.* Float frames were always read as linear, so an sRGB IMAGE was encoded twice. The renderer now folds the node's tag into `isLinearTexture`, so the shader, scopes and bloom all see it.
@@ -483,6 +531,58 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ### Added
 
+- **Every node and every input is documented.** All 149 menu nodes have a
+  description and all 1,259 inputs a tooltip, each written from the code that
+  reads it: units, range, colour space, what the default does, and what a
+  control does not do. Before: 14 nodes had no description and 561 inputs no
+  tooltip. About 80 existing tooltips and descriptions that were wrong were
+  corrected (gamma directions, the Split View position, the Grade temperature
+  scale, nits examples at 100 instead of 203, a LoRA environment variable
+  that does not exist, and more). `tests/test_node_docs.py` fails when a new
+  node or input lands undocumented.
+- **Node reference, `docs/nodes/`.** One page per menu section with every
+  node's inputs (type, default, range, meaning) and outputs, generated from
+  the nodes by `tools/build_node_reference.py`, so it cannot drift:
+  `tests/test_node_reference.py` fails when it is stale, when the README's
+  node map disagrees with it, or when a local link in the docs is broken.
+- **Five example workflows**, listed in ComfyUI's Templates browser: SDR to
+  HDR, HDR through a VAE, Multipass Estimate and relight, a colour grade, and
+  HDR delivery (EXR, tagged HDR10 and ACES 2.0 SDR from one master). Each was
+  loaded from its saved file into a clean install and run. Tests check every
+  Radiance node in a shipped workflow exists and is not retired, every
+  required socket is connected, and no workflow carries a machine path.
+- **Multipass Estimate.** Render-style passes from a plate, from trained
+  models only.
+  - *Geometry, MoGe-2 ViT-L (Microsoft, MIT), through ComfyUI's native MoGe:*
+    metric depth (metres), camera-space world position (OpenGL axes, metres),
+    normals (OpenGL or DirectX), a surface mask, and the estimated field of
+    view. A model from Load MoGe Model can be connected instead.
+  - *Computed from that geometry:* ambient occlusion as the GTAO integral
+    (cosine-weighted, radius in metres, 1 = open), using normals taken from
+    the point map so the occlusion plane matches the surface, and with the
+    flying pixels along silhouettes excluded as occluders; and mean
+    curvature in 1/metre, undefined (0) across depth edges. Checked on
+    analytic scenes: a plane facing the camera is open (0.99), a 90 degree
+    crease closes to about 0.6, a unit sphere reads curvature 1.0.
+  - *Materials, Marigold IID Appearance v1.1 (ETH Zurich, OpenRAIL++-M):*
+    albedo (linear), roughness, metallic.
+  - *Lighting, Marigold IID Lighting v1.1:* diffuse and specular (residual)
+    light. The model predicts them only up to scale, so they are fitted to the
+    linear plate per frame by non-negative least squares; `info` reports the
+    scales and the rebuild error (11 percent RMS on an indoor photo).
+  - *Measured:* backward motion vectors from DIS optical flow, in pixels,
+    +y up.
+  - Weights download on first run (about 4.9 GB, pinned commits) while the
+    node's `download_missing_models` switch is on; `RADIANCE_ALLOW_DOWNLOADS=0`
+    or `HF_HUB_OFFLINE=1` always stops them. On the CPU only one model is held
+    in memory at a time, the Marigold text encoder is used once to cache the
+    empty-prompt embedding beside the weights, and all frames go through one
+    model before the next.
+  - Removed with the old node: emission, transmission, reflection mask,
+    segmentation ID, highpass, the tone masks and the blur-difference
+    "specular". None of them measured what its name said.
+  - `diffusers>=0.33` and `accelerate>=0.26` are now dependencies (install.py
+    installs them for ComfyUI-Manager installs).
 - **ComfyUI 0.32 model families.** Qwen-Image, Krea 2, HiDream-I1, OmniGen2,
   LongCat-Image, Kandinsky 5 (video and image), HunyuanImage 2.1 (64ch, 32px)
   and HunyuanVideo 1.5 (32ch, 16px / 4 frames) are detected from their
@@ -501,8 +601,40 @@ All notable changes to FXTD Radiance will be documented in this file.
   works), searches every registered folder, and describes where it looked
   when nothing is found.
 
+### Changed
+
+- **README is for users; the development record moved** to
+  `docs/DEVELOPMENT.md`. The node map links to the generated reference, and
+  its hand-written table, which had drifted (Project Manager under Core, QC
+  under Color), is replaced.
+
 ### Removed
 
+- **Release clean-up: files nothing loaded, called or documented.**
+  `core/param_memory.py` (a SQLite parameter-history node never registered
+  in the catalog), `lut_utils.py` (no importer), the empty `nodes/training`
+  group and its unused `sdr_degradation.py`, `extras/nuke_scripts/radiance_client.py`
+  (a client for a `RadianceNukeServer` node that does not exist; the Nuke
+  path is `scripts/start_nuke_server.py`), `js/radiance_vfx_multipass.js`
+  (styled a `RadianceVFXMultipass` node that does not exist),
+  `js/docs/` (a stale offline manual quoting 121 nodes that ComfyUI loaded
+  as an extension on every page in git installs), `scripts/resolve_bridge.py`
+  (posted a placeholder graph of nonexistent nodes),
+  `scripts/radiance_batch_convert.py`, the Poly Haven / AmbientCG HDRI
+  downloaders and the Wan LoRA data-prep scripts (hard-coded local drive
+  paths, VAE training that was retired), `tools/make_validation_contact_sheet.py`,
+  `tools/clean_release.py` (its dead-file list named files already gone),
+  `rpacks/SDXL_Standard.rpack`, and three unreferenced images (`icon.png`,
+  `Viewer_shortcut.png`, `radiance_workspace.png`). The unused
+  `DYNAMIC_EXEC_ENABLED` flag in the Nuke listener went with them; nothing
+  read it.
+- **`tools/check_release_ready.py` works again and runs in the suite.** It
+  had crashed since `license` became an SPDX string, looked for README
+  headings that no longer exist, and flagged local `__pycache__` as release
+  content. It now checks the SPDX licence and its file, that pyproject, the
+  runtime `VERSION` and the README node badge agree, that every listed
+  package and package-data pattern exists, and that no generated file is
+  committed.
 - `fast_vae.py` (latent RUDRA decoders and their loader), `model/vae.py`,
   `tools/build_rudra_cache.py`, `tools/validate_rudra_dataset.py`,
   `tools/compute_descriptor_stats.py` (all imported a `rudra` package that

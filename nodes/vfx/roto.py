@@ -22,19 +22,21 @@ class RadianceVectorMaskDraw:
     (Nuke shapes paste this way; their tangent handles are read as points).
     """
     
+    DESCRIPTION = "Draw a single-frame filled mask from a closed polygon or smooth closed spline defined by pixel coordinates, with an anti-aliased edge. Accepts JSON points or pasted Nuke shape data."
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "width": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 8}),
-                "height": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 8}),
-                "shape_type": (["Polygon", "Bezier_Spline"], {"default": "Polygon"}),
+                "width": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 8, "tooltip": "Output mask width in pixels. Match your plate."}),
+                "height": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 8, "tooltip": "Output mask height in pixels. Match your plate."}),
+                "shape_type": (["Polygon", "Bezier_Spline"], {"default": "Polygon", "tooltip": "Polygon: straight edges between the points. Bezier_Spline: a smooth closed Catmull-Rom curve through every point."}),
                 "points_data": ("STRING", {
                     "default": "[[128, 128], [384, 128], [384, 384], [128, 384]]",
                     "multiline": True,
-                    "tooltip": "Paste JSON coordinate list or Nuke control points block."
+                    "tooltip": "Paste a JSON list of [x, y] pixel coordinates (origin top-left, y down) or a Nuke control points block. At least 3 points; fewer gives an empty mask."
                 }),
-                "anti_alias_width": ("FLOAT", {"default": 1.5, "min": 0.0, "max": 8.0, "step": 0.1}),
+                "anti_alias_width": ("FLOAT", {"default": 1.5, "min": 0.0, "max": 8.0, "step": 0.1, "tooltip": "Edge softness in pixels on each side of the outline. 0.05 or less gives a hard, aliased edge."}),
             }
         }
 
@@ -179,13 +181,15 @@ class RadianceVideoMaskPropagator:
     to warp and propagate roto masks dynamically across the video sequence timeline.
     """
     
+    DESCRIPTION = "Fill empty frames of a mask sequence by warping neighbouring keyframe masks along optical flow. Frames that already contain a mask are kept as keyframes."
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "masks": ("MASK",),
+                "masks": ("MASK", {"tooltip": "Mask sequence, one per frame. Frames with any mask content are keyframes; empty frames are filled by propagation."}),
                 "flow_vectors": ("IMAGE", {"tooltip": "32-bit flow vectors from Radiance Optical Flow."}),
-                "propagation_mode": (["Forward", "Backward", "Bidirectional"], {"default": "Bidirectional"}),
+                "propagation_mode": (["Forward", "Backward", "Bidirectional"], {"default": "Bidirectional", "tooltip": "Forward carries masks from earlier frames, Backward from later frames. Bidirectional runs both and keeps the union (maximum) on filled frames."}),
             }
         }
 

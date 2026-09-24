@@ -140,8 +140,15 @@ class RadianceRegionalPrompt:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "base_cond": ("CONDITIONING",),
-                "region_cond": ("CONDITIONING",),
+                "base_cond": ("CONDITIONING", {
+                    "tooltip": (
+                        "Global positive conditioning, passed through with its strength set to global_strength. "
+                        "When chaining, every entry in it (including earlier regions) gets this node's global_strength."
+                    ),
+                }),
+                "region_cond": ("CONDITIONING", {
+                    "tooltip": "Encoded prompt for this region, restricted to the x/y/w/h box (or the mask's bounding box) via ComfyUI area conditioning.",
+                }),
                 "region_label": ("STRING", {
                     "default": "region_1",
                     "tooltip": "Human-readable label for this region (used in JSON output).",
@@ -359,8 +366,12 @@ class RadianceRegionalGrid:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "base_cond": ("CONDITIONING",),
-                "clip": ("CLIP",),
+                "base_cond": ("CONDITIONING", {
+                    "tooltip": "Global positive conditioning for the whole frame, passed through with its strength set to global_strength. Cells with no prompt get only this.",
+                }),
+                "clip": ("CLIP", {
+                    "tooltip": "Text encoder used to encode each cell's prompt from grid_prompts.",
+                }),
                 "grid_prompts": ("STRING", {
                     "default": '["subject in left area", "background on right"]',
                     "multiline": True,

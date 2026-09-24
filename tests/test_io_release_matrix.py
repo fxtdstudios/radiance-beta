@@ -397,3 +397,17 @@ def test_max_video_frames_and_step(nodes, tmp_path):
     assert img.shape[0] == 5
     img, _, _ = nodes.RadianceRead().read(path=p, start_frame=2, end_frame=10, frame_step=4)
     assert img.shape[0] == 3        # 2, 6, 10
+
+
+def test_pass_through_video_is_not_tagged_linear():
+    """Pass-through writes the IMAGE's values untouched; stamping them with a
+    linear transfer made players decode ordinary display-encoded frames as
+    linear light. An encoding the user actually asked for is still tagged."""
+    from radiance.io.writer import OutputColour
+    passthrough = OutputColour("Linear (pass-through)").ffmpeg_tags()
+    assert "-color_trc" not in passthrough
+    assert passthrough[passthrough.index("-color_primaries") + 1] == "bt709"
+    srgb = OutputColour("sRGB").ffmpeg_tags()
+    assert srgb[srgb.index("-color_trc") + 1] == "iec61966-2-1"
+    linear = OutputColour("Linear Rec.709 (sRGB)").ffmpeg_tags()
+    assert linear[linear.index("-color_trc") + 1] == "linear"

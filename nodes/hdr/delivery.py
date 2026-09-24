@@ -113,8 +113,8 @@ class RadianceHDREncode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "format": (cls._FORMATS, {"default": "PQ (HDR10)"}),
+                "image": ("IMAGE", {"tooltip": "Scene-linear HDR, 1.0 = reference white (203 nits by default). Primaries are either BT.709 (turn apply_bt2020 on) or already BT.2020 (leave it off). Negatives are clipped."}),
+                "format": (cls._FORMATS, {"default": "PQ (HDR10)", "tooltip": "PQ: absolute ST.2084 signal clipped at peak_nits. HLG: BT.2100 transcode for a 1000-nit display, reference white at 75% signal."}),
             },
             "optional": {
                 "peak_nits": (
@@ -210,8 +210,8 @@ class RadianceHDRMonitor:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "mode": (cls._MODES, {"default": "Preview (SDR)"}),
+                "image": ("IMAGE", {"tooltip": "Scene-linear HDR, 1.0 = reference white (203 nits for the PQ and HLG modes). Negatives are clipped."}),
+                "mode": (cls._MODES, {"default": "Preview (SDR)", "tooltip": "Preview (SDR): tone-map to 0 to 1 for a normal monitor. Rec.2100 PQ / HLG: encode the signal for an HDR display (no gamut conversion)."}),
             },
             "optional": {
                 # ── SDR preview ──────────────────────────────────────────────
@@ -230,7 +230,7 @@ class RadianceHDRMonitor:
                 }),
                 "gamma": ("FLOAT", {
                     "default": 2.2, "min": 1.0, "max": 3.0, "step": 0.05,
-                    "tooltip": "[Preview (SDR)] Display gamma. 2.2 ≈ sRGB, 2.4 = IEC 61966 precise.",
+                    "tooltip": "[Preview (SDR)] Display gamma, applied as a pure 1/gamma power. 2.2 approximates sRGB, 2.4 matches BT.1886.",
                 }),
                 "reinhard_white": ("FLOAT", {
                     "default": 4.0, "min": 0.5, "max": 100.0, "step": 0.5,
@@ -243,7 +243,7 @@ class RadianceHDRMonitor:
                 }),
                 "gamma_correct_sdr": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "[Preview (SDR)] Apply sRGB gamma encoding to output.",
+                    "tooltip": "[Preview (SDR)] Apply the 1/gamma display encoding after tone mapping. The Exposure + Gamma operator always applies gamma, whatever this is set to.",
                 }),
             },
         }
@@ -313,7 +313,7 @@ class RadianceLuminanceGuidance:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "mask": ("MASK",),
+                "mask": ("MASK", {"tooltip": "Region whose highlights should be driven towards target_nits, 0 to 1."}),
                 "target_nits": ("FLOAT", {
                     "default": 1000.0, "min": 100.0, "max": 10000.0,
                     "tooltip": "Target brightness in nits for the masked region. "

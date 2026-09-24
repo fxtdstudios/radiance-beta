@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/version-3.5.0-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
-[![Nodes](https://img.shields.io/badge/nodes-157-c8a96e?style=for-the-badge)](#node-map)
+[![Nodes](https://img.shields.io/badge/nodes-158-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
 [![Hugging Face](https://img.shields.io/badge/Hugging_Face-RUDRA_models-ffd21e?style=for-the-badge)](https://huggingface.co/fxtdstudios/RUDRA)
 
@@ -62,9 +62,13 @@ Nothing else needs doing:
   otherwise OpenColorIO's built-in ACES studio config. No files to download.
 - **The RUDRA SDR → HDR model** downloads the first time a graph needs it
   (about 5 MB, see [Models](#models-rudra-sdr--hdr)).
+- **The Multipass Estimate models** (MoGe-2 and Marigold IID, about 4.9 GB)
+  download the first time that node runs, unless its
+  `download_missing_models` switch is off (see
+  [Multipass Estimate](#models-multipass-estimate)).
 
 Checked on a clean ComfyUI 0.32 with Python 3.13: the registry package
-installs, all 157 nodes load, OCIO is configured, and the first SDR → HDR run
+installs, all 158 nodes load, OCIO is configured, and the first SDR → HDR run
 fetches the model and applies it.
 
 ### Requirements
@@ -119,7 +123,7 @@ pip install -r requirements_mac_silicon.txt
 
 ### Verify
 
-Start ComfyUI and look for `Radiance: successfully loaded 157 nodes (v3.5.0)` in the log.
+Start ComfyUI and look for `Radiance: successfully loaded 158 nodes (v3.5.0)` in the log.
 A lower count means a node module failed to import, usually a missing optional
 dependency; the Environment Guard table printed at startup shows which.
 
@@ -142,7 +146,7 @@ missing on your install.
   `pip install -r ...` line as above, then restart ComfyUI.
 
 The startup log prints the installed version:
-`Radiance: successfully loaded 157 nodes (v3.5.0)`.
+`Radiance: successfully loaded 158 nodes (v3.5.0)`.
 
 ### Upgrading from 2.x or 3.4
 
@@ -166,6 +170,14 @@ What affects an existing graph:
   works in saved graphs, and ACES 2.0 Output Transform replaces it.
 - **SAM Loader and SAM Mask Generator** no longer pretend to segment; use a SAM2
   node pack and feed its mask into Radiance.
+- **Multipass Extract is retired; use Multipass Estimate.** Its material and
+  lighting passes were image filters, not measurements. A saved graph that
+  uses it still opens and stops with a message naming the replacement.
+  Multipass Estimate has different outputs (no emission, transmission,
+  reflection mask, segmentation ID or highpass), so reconnect them.
+- **Multipass Relight reads `ao` the way renderers write it: 1 = open.** It
+  used to read the pass as an occlusion amount, which inverted real AO loaded
+  through Read AOVs. A hand-made occlusion mask needs inverting once.
 
 ### Models (RUDRA SDR → HDR)
 
@@ -252,13 +264,66 @@ The latent-space RUDRA decoders that earlier releases loaded inside HDR VAE
 Decode (`rudra_turbo_decoder_*` / `rudra_full_decoder_*`) were retired in
 3.5.0; see the changelog. The files can be deleted from `models/radiance`.
 
+### Models (Multipass Estimate)
+
+Multipass Estimate turns a plate into render-style passes using trained
+models only; every pass is a prediction of that quantity or is computed from
+one. It downloads its weights the first time it runs, pinned to fixed Hugging
+Face commits:
+
+| Model | Passes | Size | Licence | Installed to |
+| :--- | :--- | :--- | :--- | :--- |
+| [MoGe-2 ViT-L](https://huggingface.co/Comfy-Org/MoGe) (Microsoft) | depth (metres), world position, normals; AO and curvature computed from them | 662 MB | MIT | `models/geometry_estimation/moge_2_vitl_normal_fp16.safetensors` |
+| [Marigold IID Appearance v1.1](https://huggingface.co/prs-eth/marigold-iid-appearance-v1-1) (ETH Zurich) | albedo, roughness, metallic | 2.5 GB | OpenRAIL++-M | `models/radiance/marigold/iid-appearance-v1-1/` |
+| [Marigold IID Lighting v1.1](https://huggingface.co/prs-eth/marigold-iid-lighting-v1-1) | diffuse and specular lighting | 1.7 GB | OpenRAIL++-M | `models/radiance/marigold/iid-lighting-v1-1/` |
+
+MoGe-2 runs through ComfyUI's native MoGe support, so it needs a ComfyUI that
+has the MoGe nodes; a model from **Load MoGe Model** can also be connected.
+The Marigold licence allows commercial use with the use restrictions in its
+[licence](https://huggingface.co/prs-eth/marigold-iid-appearance-v1-1/blob/main/LICENSE).
+To install by hand, download the files into the folders above. Set the node's
+`download_missing_models` off, or `RADIANCE_ALLOW_DOWNLOADS=0`, to stop the
+download.
+
+What the passes are, and what they are not:
+
+- **Geometry is metric but estimated.** Depth and position are in metres in
+  camera space (OpenGL axes, the camera looks down -z), with the field of view
+  recovered from the image unless you give it. Scale is the model's estimate,
+  usually within about 10 to 20 percent indoors. Sky and other pixels without
+  a surface are 0 in depth and position and 0 in `geometry_mask`.
+- **AO and curvature are computed, not guessed.** AO is the GTAO integral
+  (cosine-weighted, radius in metres) over the estimated geometry, 1 = open.
+  Curvature is mean curvature in 1/metre, convex positive.
+- **Materials and lighting are learned decompositions.** Diffuse and specular
+  lighting are scaled to the plate by a least-squares fit per frame, and the
+  node's `info` output reports how closely they add back up to the beauty
+  (about 10 percent RMS on an indoor photo). Every colour pass is
+  scene-linear.
+- **Motion vectors** are measured with DIS optical flow: backward, in pixels,
+  +y up.
+- **Video is per frame.** The models see one frame at a time; a fixed seed
+  limits flicker but does not remove it.
+- **Speed and memory.** On a CPU a 640 px frame takes about two minutes for
+  materials and three for geometry plus lighting, and the node needs about
+  8 GB of free RAM (one model is held at a time). GPU timing is still to be
+  measured on the RTX 4080.
+
 ### Example workflows
 
-Drag a workflow onto the ComfyUI canvas to load it. Both ship in the
-package's `workflows` folder.
+Seven workflows ship in the package's `workflows` folder. The first five
+appear in ComfyUI's **Templates** browser under Radiance; any of them can also
+be dragged onto the canvas. Each one was run on a clean install before release.
+Pick your own file in the **Read** node; outputs go to
+`ComfyUI/output/radiance_examples/`.
 
 | Workflow | What it does | Models it needs |
 | :--- | :--- | :--- |
+| [`sdr_to_hdr`](workflows/sdr_to_hdr.json) | An 8-bit image or video to scene-linear HDR with SDR → HDR Universal, checked in the Viewer and saved as a 32-bit EXR. | The RUDRA model downloads itself (about 5 MB). |
+| [`hdr_vae_encode_decode`](workflows/hdr_vae_encode_decode.json) | Carries a linear HDR plate through a VAE with VAE Encode (HDR) and VAE Decode (HDR), and compares the result with the original in the Viewer. | The VAE your model uses, in `models/vae`. |
+| [`multipass_relight`](workflows/multipass_relight.json) | Multipass Estimate to a multilayer EXR of passes, and a point-light relight of the plate. | MoGe-2 and Marigold IID download themselves on first run (about 4.9 GB). |
+| [`colour_grade`](workflows/colour_grade.json) | White Balance, Grade and an ASC CDL, checked in the Viewer and saved as a 16-bit TIFF. | None. |
+| [`hdr_delivery`](workflows/hdr_delivery.json) | One scene-linear master to an EXR archive, a tagged HDR10 (PQ, Rec.2020) H.265 file and an ACES 2.0 SDR H.264 file. | None. |
 | [`workflows/start.json`](workflows/start.json) | The quick start: Radiance Loader, Cinematic Prompt, Resolution, Sampler Pro, HDR VAE Decode and the viewers wired end to end for FLUX.1-dev. | [`flux1-dev.safetensors`](https://huggingface.co/black-forest-labs/FLUX.1-dev) and `ae.safetensors` from the same page (accept the licence first) in `models/diffusion_models` and `models/vae`; [`clip_l.safetensors`](https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors) and [`t5xxl_fp16.safetensors`](https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors) in `models/text_encoders` |
 | [`workflows/official/wan22_t2v_hdr_universal.json`](workflows/official/wan22_t2v_hdr_universal.json) | Wan 2.2 text-to-video through SDR → HDR Universal to an HDR master with HDR Encode and Write. | [`wan2.2_t2v_high_noise_14B_fp8_scaled`](https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors) and [`wan2.2_t2v_low_noise_14B_fp8_scaled`](https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors) in `models/diffusion_models`; [`umt5_xxl_fp8_e4m3fn_scaled`](https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors) in `models/text_encoders`; [`wan_2.1_vae`](https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors) in `models/vae`. The RUDRA model downloads itself. |
 
@@ -337,7 +402,7 @@ A Lite Viewer exists for when you want a frame on the node and nothing else.
 
 ### VFX
 
-Plate prep, masks, roto, depth, optics, motion, and multipass. Motion estimation is DIS optical flow, which stays dense out to about 20 px of movement; the older Lucas–Kanade solver is still selectable. The Multipass Master extractor derives passes from a single image, which is useful for generated footage and is not a render pass; when you have real AOVs, the Multipass AOV Reader takes a multilayer EXR. Relighting works off either.
+Plate prep, masks, roto, depth, optics, motion, and multipass. Motion estimation is DIS optical flow, which stays dense out to about 20 px of movement; the older Lucas–Kanade solver is still selectable. Multipass Estimate predicts passes from a plate with trained models (MoGe-2 geometry, Marigold materials and lighting); when you have real AOVs, the Multipass AOV Reader takes a multilayer EXR. Relighting works off either.
 
 ### Video
 
@@ -375,22 +440,26 @@ FXTD STUDIOS/Radiance
 └─ Pipeline
 ```
 
-**157 nodes**, plus whatever Gizmos you build. A few depend on optional packages.
+**158 nodes**: 149 in the menu and 9 retired ones that stay registered so older saved graphs still open. A few depend on optional packages.
 
 Compositing nodes use compositing names (`Grade`, `CDL`, `OCIO ColorSpace`, `Roto`, `Defocus`, `Viewer`, `Read`, `Write`), so they read the way they do in Nuke or Flame. The diffusion layer keeps a `Radiance` prefix, so `Radiance Sampler` and `Radiance VAE Decode` are obviously the AI ones. Typing "radiance" in the search still finds everything.
 
-| Group | What's in it |
-| :--- | :--- |
-| Core | Project Manager, Workspace, Resolution, workspace utilities |
-| Load & Save | Read, Write, EXR alpha and mask, EXR multipart, sequence export, DPX read and write |
-| Generate | Loader, Sampler, VAE Encode (HDR), VAE Decode (HDR), prompt tools, LoRA stack, HDR LoRA, regional prompts |
-| Color | Grade, Grade Match, CDL, LUT Apply / Blend, Curves, Hue Curves, White Balance, Colour Space Convert, QC, Policy Guard |
-| HDR | ACES 2.0, OCIO, HDR VAE encode and decode, tone mapping, HDR synthesis, relight, QC |
-| VFX | Plate prep, masks, roto, depth, optics, motion, multipass, AOV reader, relight |
-| Video | Loader, prompt builder, sampler, text-to-video, image-to-video, routing, batch decode, export |
-| Upscale | Image and video upscale, tiling, face restoration |
-| Review | Viewer, Lite Viewer, scopes, focus peaking, contact sheets, flipbook, preview server |
-| Pipeline | Project Manager, Send to Nuke, DaVinci Resolve handoff |
+| Section | Nodes | What's in it |
+| :--- | ---: | :--- |
+| [Core](docs/nodes/core.md) | 1 | Resolution and everyday utilities |
+| [Load & Save](docs/nodes/load-save.md) | 5 | Read, Write, Write EXR, DPX read and write |
+| [Generate](docs/nodes/generate.md) | 13 | Loader, Sampler, VAE Encode (HDR), VAE Decode (HDR), prompts, LoRA, regional conditioning, denoise |
+| [Color](docs/nodes/color.md) | 18 | White Balance, Grade, Grade Match, CDL, curves, LUTs, OCIO, colour-space conversion |
+| [HDR](docs/nodes/hdr.md) | 36 | SDR → HDR, ACES 2.0, tone mapping, analysis, encoding, HDR synthesis |
+| [VFX](docs/nodes/vfx.md) | 32 | Plate prep, masks, roto, inpaint, depth, optics, motion, Multipass Estimate, AOV reader, relight |
+| [Video](docs/nodes/video.md) | 15 | Text-to-video, image-to-video, video sampler, video HDR, batch decode, export |
+| [Upscale](docs/nodes/upscale.md) | 10 | Image and video upscale, tiling, face restoration |
+| [Review](docs/nodes/review.md) | 12 | Viewer, Lite Viewer, scopes, false colour, QC, Policy Guard, contact sheets, flipbook |
+| [Pipeline](docs/nodes/pipeline.md) | 7 | Send to Nuke, DaVinci Resolve handoff, metadata, audio, studio integration |
+
+The [node reference](docs/nodes/README.md) lists every node with every input
+(type, default, range and what it does) and every output. It is generated from
+the nodes themselves, and ComfyUI shows the same text on hover.
 
 ## DCC Handoff
 
@@ -417,7 +486,7 @@ behaviour; set them where you start ComfyUI and restart it.
 
 | Variable | What it does |
 | :--- | :--- |
-| `RADIANCE_ALLOW_DOWNLOADS` | `0` never downloads any model. `1` also allows the larger third-party weights (upscalers, depth), which otherwise ask first. |
+| `RADIANCE_ALLOW_DOWNLOADS` | `0` never downloads any model. `1` also allows the larger third-party weights (upscalers, depth), which otherwise ask first. Multipass Estimate downloads when its `download_missing_models` switch is on, unless this is `0`. |
 | `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE` | `1` treats the machine as offline; nothing is downloaded. |
 | `RADIANCE_SDR2HDR_PIXEL` | Path to a specific RUDRA SDR → HDR checkpoint. |
 | `RADIANCE_TEMPORAL_RUDRA` | Path to a temporal RUDRA checkpoint for ordered video. |
@@ -428,12 +497,12 @@ behaviour; set them where you start ComfyUI and restart it.
 | `RADIANCE_LOG_LEVEL` | `DEBUG` for full tracebacks in the console when something fails. |
 | `RADIANCE_DCC_AUTH_TOKEN` | Shared token for the Nuke connection. |
 
-Models go in `ComfyUI/models/radiance`; a `radiance:` entry in
+Models go in `ComfyUI/models/radiance` (MoGe in `models/geometry_estimation`); a `radiance:` entry in
 `extra_model_paths.yaml` adds more folders.
 
 ## Troubleshooting
 
-- **The log says fewer than 157 nodes loaded.** A module failed to import. The
+- **The log says fewer than 158 nodes loaded.** A module failed to import. The
   lines above it name the module and the error, and the Environment Guard
   table shows which package is missing. Reinstall the requirements into
   ComfyUI's own Python (for the Windows portable build:
@@ -480,12 +549,16 @@ is worse than one that says so. Full detail in the [changelog](CHANGELOG.md).
   pack and feed its MASK into Radiance's matting, roto and propagation nodes.
 - **Upscale `confidence` is a tile weight.** It is 1 at tile centres and lower
   toward tile edges; no backend reports per-pixel hallucination.
+- **Multipass Estimate is an estimate.** Its passes come from models trained
+  to predict them, but they are predictions from one image: metric scale is
+  approximate, materials are what the model infers, and video is estimated
+  per frame, so expect some flicker. Details in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 - **CFG schedules are static.** The video pipelines use the first value of
   `cfg_schedule_json` as the CFG; it does not vary per step.
 
 ## Notes & Tips
 
-- **Estimated VFX passes.** The Multipass Master extractor derives passes (albedo, roughness, ambient occlusion, segmentation ID, and more) from a single image, handy for 2D and generated footage, but not a substitute for true render passes. For ground-truth passes, feed a multilayer EXR through the Multipass AOV Reader. The segmentation output is a clustered matte, not a Cryptomatte.
+- **Estimated VFX passes.** Multipass Estimate predicts passes from a single image with trained models, handy for 2D and generated footage, but not a substitute for true render passes. For ground-truth passes, feed a multilayer EXR through the Multipass AOV Reader.
 - **Super-resolution and color.** Upscale backends work in display-referred space. For scene-linear input, use the upscaler's HDR and color-encoding options to preserve your values.
 - **Previews from a NAS or server path.** The Read node opens any absolute path (local, mapped drive, UNC), but its inline preview/info widgets are served over unauthenticated HTTP routes restricted to ComfyUI's own folders. To preview media elsewhere, allow those roots explicitly (`;`-separated on Windows) and restart ComfyUI:
 
@@ -497,14 +570,21 @@ is worse than one that says so. Full detail in the [changelog](CHANGELOG.md).
 
 ## Documentation
 
-Full documentation is available at [www.fxtdstudios.com](https://www.fxtdstudios.com): setup, core concepts, workflow recipes, a complete node reference, and troubleshooting.
-
-Every node also carries its own description and per-input tooltips, which ComfyUI shows on hover, so the parameter reference travels with the package.
+- **In ComfyUI:** hover a node for its description and an input for what it
+  does, its units and its range. Every node and every input is documented.
+- **[Node reference](docs/nodes/README.md):** the same text as pages, one per
+  menu section, generated from the nodes.
+- **[Example workflows](#example-workflows):** seven graphs, also in ComfyUI's
+  Templates browser.
+- **[Changelog](CHANGELOG.md)** and **[known issues](KNOWN_ISSUES.md).**
+- **[Development record](docs/DEVELOPMENT.md):** what has been verified and
+  how, and what is open, for contributors and reviewers.
+- Studio site: [www.fxtdstudios.com](https://www.fxtdstudios.com).
 
 ## Support
 
 - Issues: [GitHub Issues](https://github.com/fxtdstudios/radiance/issues)
-- Documentation: [www.fxtdstudios.com](https://www.fxtdstudios.com)
+- Documentation: [node reference](docs/nodes/README.md) and this README
 - Studio: [www.fxtdstudios.com](https://www.fxtdstudios.com)
 
 ## License
@@ -512,198 +592,3 @@ Every node also carries its own description and per-input tooltips, which ComfyU
 Radiance is released under the [GPL-3.0 license](LICENSE). The RUDRA model weights that
 SDR → HDR Universal and Recover download are a separate work under their own
 non-commercial licence; see [Models](#models-rudra-sdr--hdr).
-
-## Development status
-
-For contributors and reviewers: what has been verified, and what is open
-before and after this release.
-
-<details>
-<summary>Verification record and release checklist</summary>
-
-Radiance is **ready with conditions**. Everything below is measured rather than
-asserted; the full history is in the [changelog](CHANGELOG.md), and per-defect
-detail in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
-
-#### Verified
-
-Standing properties of the shipped package. Pinned by a test unless the row
-says otherwise. An audit number that no test holds is a number that can
-quietly stop being true.
-
-A note on what changed here in 3.4.0. Until this release the job that installs
-real torch, OpenEXR and OpenColorIO was gated on `github.repository ==
-'fxtdstudios/radiance'`, and development happens on `radiance-beta`, so the lane
-that executes every row below had never run against this code. The numbers in
-this table used to be what the suite *would* report. They are now what it does
-report, from a lane that runs. Where the two differed, the row was rewritten and
-the gap is recorded under Open rather than quietly corrected.
-
-| Area | What is verified |
-| :-- | :-- |
-| **EXR** | 32-bit float round-trips bit-exactly through EXR and TIFF, negatives and over-range highlights included, the clamp-free HDR claim, as a write-and-read rather than an assertion. 16-bit half holds to 1e-3. |
-| **Colour** | All 16 colour spaces are pinned to a published 18%-grey value: 15 transfer curves plus the linear identity, each held to 1e-4 and cross-checked against colour-science's independent implementation of the same specification. Both ACES 2.0 tone scales place 18% scene grey where the ACES Output Transform publishes it: 10.000 / 13.193 / 14.512 / 15.747 / 16.824 nits for peaks of 100 / 500 / 1000 / 2000 / 4000, held to 1e-6, with intermediate peaks checked against the geometric-mean form of the log-log rule. The shipped table is compared against a transcription of the published one rather than against the interpolator that reads it, which is what made the old test unfalsifiable. HLG keeps its BT.2408 anchor. The OCIO bake is checked against OCIO's own CPU processor, exactly rather than approximately. |
-| **Transfer** | PQ encodes absolute luminance against ST.2084's fixed 10 000 cd/m² ceiling, pinned at five mastering peaks and against an absolute-luminance ladder, and cross-checked against the package's other PQ encoder. Rec.709 and Rec.2020 are the real BT.709-6 and BT.2020-2 OETFs with the BT.2020 primaries matrix, pinned by value, and every offered output colour space is asserted to change the data, so a missing conversion cannot pass as a successful write. |
-| **Video** | Frame counts are exact from 1 to 100 frames across H.264, H.265 10-bit and ProRes 422 HQ, by encoding and reading back real media. The default suite covers 17 lengths per codec, chosen around the 1/2/3 degenerate cases and both sides of every GOP boundary, and asserts the identity and order of each frame as well as the count, at `core.video` and again at the Read node. The exhaustive 1-to-100 sweep runs under `-m slow`. Sequences read correctly by frame number for `####`, `%04d` and explicit ranges. |
-| **Duration** | The write path, the HDR VAE encode and decode, the viewer and the sampler's noise generation all hold a working window rather than the clip. Measured, not asserted: writing 32 frames and writing 512 frames peak within 0.1 MB of each other, and enabling a colour transform costs 1.6 MB rather than a second copy of the shot. The VAE's decode overhead is flat at 5.7 MB from 4 frames to 32 where it used to grow by a whole extra clip. Sequence length is bounded by disk. Generation is the exception and has its own control, see below. |
-| **Memory** | Flat across 150 consecutive 1080p runs, an audit measurement rather than a standing test. |
-| **Security** | `weights_only` loads, sha256-pinned downloads, no `shell=True`, and no third-party weight downloads without `RADIANCE_ALLOW_DOWNLOADS=1`, through a gate every downloader shares. The one exception is Radiance's own ~5 MB RUDRA checkpoint, fetched on first use, pinned to a commit and SHA-256 checked, and off with `RADIANCE_ALLOW_DOWNLOADS=0`. Nodes never write into the ComfyUI install directory. |
-| **Catalog** | All 157 nodes declare their menu section explicitly; a test fails if a registered node is missing from the table. Withholding a node from the menu requires a named entry with a written reason a test reads and checks the length of. Separately, an AST walk of every file in the distribution finds every `NODE_CLASS_MAPPINGS` and asserts each class in it is registered as the class that ships, so a node stranded in a package the catalog does not load turns the suite red. That is how 26 finished nodes stayed out of the menu until 3.4.0. |
-| **Isolation** | Every one of the eleven node groups imports with `aiohttp` and `server` blocked, proven in a subprocess rather than for one hand-listed module. The blocker uses `find_spec`; it previously used `find_module`, which Python 3.12 removed, so on the 3.12 leg of the matrix it silently blocked nothing and the test passed while measuring nothing. The harness now proves it is blocking before it reports anything. |
-| **Layering** | `radiance/io/writer.py` and `radiance/io/reader.py` import nothing above them, checked by AST walk *and* by running them in a bare interpreter with no ComfyUI present. |
-| **Suite** | 3755 Python tests and 260 JavaScript tests. On the full dependency lane: 3667 pass, 84 skip, 3 are `slow` and deselected by default; JS is 256 pass, 4 skip, 0 todo. Coverage is **59.6% of 28,018 statements** (56.0% counting branches, which is what the floor gates on). The old 53% was the figure the full lane would have produced had it run; CI's lightweight lane was really reporting 22% against a `--cov-fail-under=15` that overrode the project's own floor. There is one floor now, in `pyproject.toml`, enforced on the lane that can execute the code. The JS side includes a GPU lane that compiles the real shaders in both GLSL and WGSL and compares them against the CPU implementations they were generated from, and a browser lane that builds all fourteen Viewer panels and operates their controls. Verified from a checkout named `radiance-beta` as well as `radiance`. |
-
-#### Open
-
-**Blocking a release**
-
-- [ ] **One full GPU render in live ComfyUI.** Checked on 2026-09-24 in a real
-      ComfyUI 0.32 with frontend 1.48 (CPU): all 157 nodes register, every
-      Radiance node can be created, saved and reloaded with no frontend error,
-      and `workflows/start.json` passes ComfyUI's own prompt validation. The
-      Viewer and the pixel SDR → HDR model have run live on the RTX 4080. What
-      is still owed is one real graph (sampler → HDR VAE Decode → Write)
-      rendering a frame on the GPU.
-- [ ] **The public repo is behind, and it is not a fast-forward.**
-      `fxtdstudios/radiance` `main` (`16e885f`) is 5 commits the beta line
-      never took. They were reviewed hunk by hunk on 2026-09-23: PR #18's
-      two real fixes are ported (Write reports its files to ComfyUI history;
-      no upper version caps in the platform requirements or `pyproject.toml`),
-      the rest are already fixed here, patch files that no longer exist, or
-      are features (movable controls panel, extra Save nodes) left for later.
-      PR #20 edits a README section that no longer exists. What remains is
-      the publishing decision: replace public `main` with this line.
-
-**Needs a GPU to confirm**
-
-- [ ] **Long-video windowing is unproven on a real model.** `temporal_window` on
-      the sampler denoises a long clip in overlapping latent windows, blended at
-      every step rather than after each window is finished, so peak VRAM follows
-      the window size instead of the clip length. CPU tests pin the parts that
-      are checkable without a model: the schedule covers every frame at full
-      weight, the blend weights form a partition of unity, step accounting and
-      seeding are stable across a rerun, and a single window reproduces the
-      unwindowed result. What CPU cannot show is whether the output is
-      temporally coherent on a real DiT. Default is 0, off, so nothing changes
-      until it is switched on deliberately. Treat it as ready to test, not ready
-      to deliver from, until a long clip has run on the 4080.
-
-**Correctness**
-
-- [x] **Legacy latent RUDRA decoders retired (3.5.0).** The video decoders
-      trained on stills, the truncated `ltx-video` full decoder and the
-      per-model checkpoint matrix are gone with them. Learned SDR → HDR is the
-      pixel model, one checkpoint for every model family, plus the temporal
-      residual model for video.
-- [x] **The Viewer rendered black (3.5.0), two causes, both verified live on
-      ComfyUI 0.32 / frontend 1.48.** (1) The WebGL renderer's `setMask` and
-      its mask uniforms addressed a `this.mask` object that the v3.1 refactor
-      had replaced with flat fields, so every `render()` threw before the draw
-      call; hidden while WebGPU auto-upgraded, exposed when 3.4.0 made WebGL
-      the default. (2) The Vue node frontend grew the node to the height of
-      the sidebar and inspector content (1180x760 became 1480x2286), the
-      canvas stretched with it, and `resize()` never refit, so the frame was
-      centred below the visible area. The container now has `contain: size`
-      and `resize()` refits an auto-fitted view. Pinned by browser tests that
-      load a real frame through `onExecuted`, read the canvas back, and host
-      the viewer in an auto-height parent.
-- [x] **Read / Write colour management and precision (3.5.0).** Every
-      encoding decodes and encodes transfer AND primaries to a selectable
-      working space (Linear Rec.709, ACEScg, Linear Rec.2020, Linear P3-D65,
-      ACES2065-1), through OpenColorIO's ACES studio config or any
-      `ocio_colorspace` / `ocio_config`, with an analytic fallback held to
-      OCIO in tests. Video uses the correct YUV matrix and is tagged; EXR and
-      DPX carry their colour metadata; 16-bit grey, half-float TIFF and
-      alpha read correctly. 65 write-and-read-back tests.
-- [x] **Honest release pass (3.5.0).** Every control, option and output was
-      checked against the code that reads it. Fixed: I2V strategies now write
-      the conditioning keys ComfyUI's Wan models read; T2V/I2V latents follow
-      the connected model instead of an LTX default; Video HDR Conditioner and
-      Decode reach the model and convert gamut; upscale reports what actually
-      ran and Face Restore `auto` restores; mask propagation follows motion;
-      Bezier roto, motion-blur energy, Policy Guard (all frames, HDR peak),
-      Diagnostics colorspace, Digital Cinema Read colorspace and fps, Audio
-      Cut and Camera Sync errors, Regional `Replace`, NDI batches, joint
-      bilateral chroma. SAM withheld; ViTMatte/RVM removed. Each has a test.
-- [x] **HDR VAE Decode and SDR → HDR (3.5.0).** Auto no longer log-inverts a
-      latent a sampler touched (HDR Encode now fingerprints its latent);
-      hidden widgets no longer steer the decode; Direct HDR honours
-      scene-referred targets, applies exposure after reconstruction and writes
-      RHDR from the returned image. One HDR convention everywhere: linear
-      1.0 = 203 nits (BT.2408), HLG the BT.2100 1000-nit transcode OCIO uses,
-      camera log targets in their camera gamut, AP0 matrix corrected. Checked
-      against OpenColorIO and the shipped pixel checkpoint.
-- [x] **Clean install from the registry package (3.5.0).** Packed with
-      `comfy node pack`, installed into a fresh ComfyUI 0.32 on Python 3.13:
-      157 nodes, OCIO configured, the RUDRA model fetched and applied on first
-      run, the suite green there. VAE Encode (HDR) registered as the encoder
-      VAE Decode (HDR) inverts; the two legacy HDR latent encoders labelled.
-- [x] **RUDRA pixel model: no false colour, no over-peak channels (3.5.0).**
-      From a user report on a clipped Flux.2 sunset. Recovered highlights keep
-      the source colour (no rings, no red cast, source-level chroma noise),
-      no channel exceeds `peak_nits`, the whole frame runs untiled when it
-      fits, and every published checkpoint loads, with the shipped
-      `sdr2hdr_shadow_v1` as the default and the auto-download.
-- [x] **Viewer and Lite Viewer, phase 1 (3.5.0).**
-  - **Colour.** The node tags every frame: a ComfyUI IMAGE is shown exactly as ComfyUI shows it, and a linear source goes through OpenColorIO ACES 2.0. A normal image used to be read as linear and sRGB-encoded twice, which washed it out, and its input colour space was guessed from brightness.
-  - **View menu.** Every entry is real (ACES 2.0 and 1.3 through OCIO, sRGB, Rec.709 BT.1886). The same view is baked into the PNG previews.
-  - **Units.** Everything reads 203 nits for 1.0, and the DaVinci Intermediate curve matches the spec again.
-  - **Compare and playback.** Compare works on WebGL and follows the playhead. Revisited frames no longer go black. Playback follows the source fps. Timecode is SMPTE, with drop-frame at 29.97 and 59.94.
-  - **Export and transport.** The graded EXR is scene-linear and tagged with its primaries. Frames travel as half-float by default, and an unchanged viewer no longer re-runs everything downstream.
-  - **Lite Viewer.** Readout, clip check and diff use float source values. 1:1 is exact on scaled displays. It has play/loop.
-- [x] **Cinematic Encoder, step 1 (3.5.0).** Long SDXL prompts keep their camera and lighting (no `BREAK`, no 77-token cut); Wan, Flux.2, Z-Image, Lumina2, Qwen-Image, AuraFlow and every other T5 / LLM encoder get prose instead of SDXL tags; the subject is never rewritten; Flux, Flux.2 and MiniMax skip the unused negative encode.
-- [x] **Viewer phase 2 (3.5.0).**
-  - **Scopes.** Waveform, vectorscope and histogram measure the picture as displayed (graded, through the active view), not the ungraded texture or the 8-bit canvas. The vectorscope is BT.709 Cb/Cr with 75 % and 100 % targets and a skin line.
-  - **Warnings.** False colour uses ARRI's bands on the Rec.709 signal. Clip and gamut warnings run before the display clamp, so they fire.
-  - **Viewer-only exposure and gamma.** `f/` and `γ` in the viewer bar (and `-` / `=`, `0` to reset) change only what you see, never scopes, readout or export.
-  - **Pixels.** The canvas is device-pixel sized; zoom above 1:1 is nearest-neighbour by default. Output is dithered, and a P3 monitor gets a Display P3 view and canvas.
-  - **Keys and transport.** Keys go to the viewer under the pointer only. In/out (`I` / `O`), J/K/L shuttle, ping-pong and play-once, play every frame with a dropped-frame count.
-- [x] **Sequential offload never engaged.** `setup_offload_mode("sequential")`
-      called a `comfy.model_management.set_lowvram_mode` that ComfyUI never
-      shipped, so it warned and did nothing on every run. It sets ComfyUI's
-      `vram_state` now.
-
-**Structural debt**
-
-- [ ] **Split the remaining monoliths.** Largest first: `hdr/vae.py` (3527
-      lines), `nodes/upscale/upscale.py` (3029), `image/upscale.py` (2741),
-      `nodes/generate/sampler.py` (2111), `nodes/pipeline/workspace.py` (1913),
-      `sampler_utils.py` (1897), `nodes/generate/prompt.py` (1830),
-      `nodes/io/write.py` (1261), `nodes/monitor/viewer.py` (1233).
-
-**Test coverage**
-
-59.6% of 28,018 statements, measured on the full dependency lane. Every node has
-structural coverage, though note what that does and does not mean: the smoke
-tests check that the method named by `FUNCTION` exists, they do not call it.
-Calling every registered node is `test_node_functional.py`'s job, and it now
-runs in CI.
-
-- [ ] **`image/upscale.py`, 1111 statements, 31%.** The one module that cannot
-      be finished on CPU: what remains is `RadianceAIUpscale`, the SUPIR path,
-      and the tiling code, all of which need model weights or a GPU. Newly
-      registered in 3.4.0, so this is the first release in which its coverage
-      counts for anything.
-
-**Colour management**
-
-- [x] **Sampler speed (3.5.0).** No second model load per stage, no silent
-      cfg 1.0 → base CFG (the extra unconditional pass that doubled turbo
-      runs), no cfg boost at 1.0 in Dynamic CFG, no gc / cache flush before
-      sampling, no debug statistics with DEBUG off. Flux with an empty
-      `clip_l` no longer falls back to Mochi's T5 encoder, and the Loader
-      reports when the weights cannot stay in VRAM.
-- [x] **OCIO is configured automatically (3.5.0).** OpenColorIO is a
-      required dependency (installed by ComfyUI-Manager via `requirements.txt`,
-      or by `install.py`). At startup Radiance uses `$OCIO` when you have one
-      and otherwise OpenColorIO's built-in ACES 2.0 studio config (55
-      colorspaces: every ACES space, the major camera logs, Rec.709 / Rec.2020
-      / P3 / PQ / HLG), written to `ACES/studio-config.ocio`, exported as
-      `$OCIO` for the process and made OCIO's current config, so every node
-      resolves the same names. Nothing is downloaded (the old startup fetch
-      from GitHub is gone). `RadianceColorSpaceConvert` now maps its names to
-      that config (the old targets existed in no config, so OCIO never ran)
-      and `RadianceHDROCIOTransform`'s defaults resolve. OpenCV's EXR codec is
-      forced on (`OPENCV_IO_ENABLE_OPENEXR=1`) before anything imports cv2.
-
-</details>

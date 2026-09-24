@@ -162,9 +162,19 @@ def _write_exr_singlepart_multilayer(
     return True
 
 
+_LEGACY_MULTIPASS_STOP = (
+    "Multipass Extract is retired in Radiance 3.5.0. Its albedo, specular, roughness, "
+    "metallic, emission, transmission, reflection and object-ID passes were image filters, "
+    "not measurements, and its depth-derived passes had no real scale. Use 'Multipass "
+    "Estimate' (MoGe-2 geometry, Marigold materials and lighting) for passes from a plate, "
+    "or 'Read AOVs' for renderer passes."
+)
+
+
 class RadianceMultipassMaster:
     CATEGORY = "FXTD STUDIOS/Radiance/VFX"
-    DESCRIPTION = "Estimate utility, material, and lighting passes from beauty, while preserving connected renderer AOVs."
+    DESCRIPTION = "Retired: use Multipass Estimate. Kept so saved graphs open and explain the replacement."
+    DEPRECATED = True   # hidden from the menu; saved graphs still open
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -236,7 +246,10 @@ class RadianceMultipassMaster:
 
     FUNCTION = "extract"
 
-    def extract(
+    def extract(self, beauty: torch.Tensor, **kwargs) -> Tuple:
+        raise RuntimeError(f"[Multipass Extract] {_LEGACY_MULTIPASS_STOP}")
+
+    def _legacy_extract(
         self,
         beauty: torch.Tensor,
         depth_map: Optional[torch.Tensor] = None,
@@ -499,17 +512,17 @@ class RadianceEXRPassesWriter:
         ]
         return {
             "required": {
-                "passes": ("RADIANCE_PASSES",),
-                "filename_prefix": ("STRING", {"default": "radiance_vfx_passes"}),
-                "bit_depth": (["16-bit Half Float", "32-bit Float"], {"default": "16-bit Half Float"}),
-                "compression": (compressions, {"default": "ZIP"}),
+                "passes": ("RADIANCE_PASSES", {"tooltip": "Pass bundle to write; must contain a beauty pass, and every pass must match its width and height. Pixel values are written as is, with no colour conversion."}),
+                "filename_prefix": ("STRING", {"default": "radiance_vfx_passes", "tooltip": "File name stem, not a path. Files are named <prefix>.<frame>.exr with a 4-digit padded frame number."}),
+                "bit_depth": (["16-bit Half Float", "32-bit Float"], {"default": "16-bit Half Float", "tooltip": "EXR pixel type. Files containing depth, world_position, motion_vector or object_id passes are always written as 32-bit float."}),
+                "compression": (compressions, {"default": "ZIP", "tooltip": "EXR compression. ZIP, ZIPS, PIZ, RLE and Uncompressed are lossless; lossy B44/B44A/DWAA/DWAB raise an error when data passes (depth, position, motion, object ID) are present."}),
             },
             "optional": {
-                "output_path": ("STRING", {"default": ""}),
-                "remote_path": ("STRING", {"default": ""}),
-                "frame_index": ("INT", {"default": 1001, "min": 0, "max": 999999}),
-                "exr_layout": (["Single-part multilayer", "Multi-part"], {"default": "Single-part multilayer"}),
-                "custom_metadata": ("STRING", {"default": "", "multiline": True}),
+                "output_path": ("STRING", {"default": "", "tooltip": "Output folder. Empty = ComfyUI output folder; a relative path is a subfolder of it; an absolute path is used as is. Created if missing."}),
+                "remote_path": ("STRING", {"default": "", "tooltip": "Optional absolute folder (for example a NAS share) that each written file is also copied to. A failed copy only logs a warning."}),
+                "frame_index": ("INT", {"default": 1001, "min": 0, "max": 999999, "tooltip": "Frame number of the first image in the batch; later images count up from it."}),
+                "exr_layout": (["Single-part multilayer", "Multi-part"], {"default": "Single-part multilayer", "tooltip": "Single-part multilayer: all passes as named channel layers in one part (widest compatibility). Multi-part: one EXR 2.0 part per pass."}),
+                "custom_metadata": ("STRING", {"default": "", "multiline": True, "tooltip": "Extra EXR header attributes, one key=value per line, stored as strings. Lines without = are ignored."}),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -651,6 +664,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceMultipassMaster": "Multipass Extract",
+    "RadianceMultipassMaster": "Multipass Extract (Legacy)",
     "RadianceEXRPassesWriter": "Write EXR Passes"
 }

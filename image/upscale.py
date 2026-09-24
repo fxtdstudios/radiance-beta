@@ -1004,7 +1004,10 @@ class RadianceProUpscale:
 
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {
+                    "tooltip": "Image or batch to resize, display-encoded sRGB or linear float (see "
+                    "input_color_space). Alpha is resized separately.",
+                }),
                 "scale_factor": (
                     "FLOAT",
                     {
@@ -1013,44 +1016,71 @@ class RadianceProUpscale:
                         "max": 8.0,
                         "step": 0.1,
                         "display": "slider",
+                        "tooltip": "Output size as a multiple of the input (rounded down to whole pixels). "
+                        "Below 1.0 downscales.",
                     },
                 ),
-                "preset": (preset_list,),
+                "preset": (preset_list, {
+                    "tooltip": "Custom uses the widgets below. Any other preset overrides method, sharpening, "
+                    "detail_enhancement and antialiasing, and the HDR/Cinematic presets force process_in_linear on.",
+                }),
             },
             "optional": {
-                "method": (METHOD_LIST_FULL,),
+                "method": (METHOD_LIST_FULL, {
+                    "tooltip": "Resampling filter. Without tiling it runs on torch: lanczos, lanczos4, mitchell "
+                    "and catrom use bicubic, hermite and gaussian use bilinear. The exact kernels run only on the tiled path.",
+                }),
                 "sharpening": (
                     "FLOAT",
-                    {"default": 0.3, "min": 0.0, "max": 2.0, "step": 0.05},
+                    {"default": 0.3, "min": 0.0, "max": 2.0, "step": 0.05,
+                     "tooltip": "Unsharp-mask amount applied after resizing. 0 = off, 1 = add the full "
+                     "detail difference once."},
                 ),
                 "sharpen_radius": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.5, "max": 5.0, "step": 0.1},
+                    {"default": 1.0, "min": 0.5, "max": 5.0, "step": 0.1,
+                     "tooltip": "Gaussian sigma in output pixels for the unsharp mask. Larger sharpens "
+                     "coarser detail."},
                 ),
                 "detail_enhancement": (
                     "FLOAT",
-                    {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05},
+                    {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05,
+                     "tooltip": "Multi-scale luma detail boost (blur sigmas 1, 2 and 4 px) added equally "
+                     "to RGB after resizing. 0 = off."},
                 ),
                 "antialiasing": (
                     "FLOAT",
-                    {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05},
+                    {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
+                     "tooltip": "Edge-aware softening applied last: blends in a 1 px Gaussian blur in "
+                     "proportion to edge strength. 0 = off; counteracts sharpening on edges."},
                 ),
-                "input_color_space": (["sRGB", "Linear", "Auto"],),
+                "input_color_space": (["sRGB", "Linear", "Auto"], {
+                    "tooltip": "Encoding of the input. sRGB allows the linear-light conversion; Linear and "
+                    "Auto both leave values untouched (Auto does no detection).",
+                }),
                 "process_in_linear": ("BOOLEAN", {"default": True,
-                    "tooltip": "Convert to linear light before processing, then back to sRGB. Improves accuracy for HDR content.",
+                    "tooltip": "Decode sRGB to linear before resampling and re-encode after, for gamma-correct "
+                    "filtering. Only acts when input_color_space is sRGB; linear/HDR input is never converted.",
                 }),
                 "use_tiles": ("BOOLEAN", {"default": False,
                     "tooltip": "Process image in overlapping tiles to handle large images that exceed VRAM.",
                 }),
                 "tile_size": (
                     "INT",
-                    {"default": 512, "min": 128, "max": 2048, "step": 64},
+                    {"default": 512, "min": 128, "max": 2048, "step": 64,
+                     "tooltip": "Input tile size in pixels for the tiled CPU path. Used only when tiling "
+                     "is on (or forced above 64 MP) and the image is larger than this."},
                 ),
                 "tile_overlap": (
                     "INT",
-                    {"default": 64, "min": 16, "max": 256, "step": 16},
+                    {"default": 64, "min": 16, "max": 256, "step": 16,
+                     "tooltip": "Overlap in input pixels between tiles, blended to hide seams. Tiled "
+                     "path only."},
                 ),
-                "output_bit_depth": (["32-bit Float", "16-bit Float", "8-bit"],),
+                "output_bit_depth": (["32-bit Float", "16-bit Float", "8-bit"], {
+                    "tooltip": "Precision of the result (always returned as float). 32-bit keeps values "
+                    "above 1.0; 16-bit rounds to half precision; 8-bit clamps to 0-1 and quantises to 256 levels.",
+                }),
             },
         }
 
@@ -1232,27 +1262,40 @@ class RadianceUpscaleBySize:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {
+                    "tooltip": "Image or batch to resize, display-encoded sRGB or linear float (see "
+                    "input_color_space). Alpha is resized separately.",
+                }),
                 "width": ("INT", {"default": 2048, "min": 64, "max": 16384, "step": 8,
                     "tooltip": "Target output width in pixels.",
                 }),
                 "height": (
                     "INT",
-                    {"default": 2048, "min": 64, "max": 16384, "step": 8},
+                    {"default": 2048, "min": 64, "max": 16384, "step": 8,
+                     "tooltip": "Target output height in pixels."},
                 ),
-                "method": (METHOD_LIST_FULL,),
+                "method": (METHOD_LIST_FULL, {
+                    "tooltip": "Resampling filter, run on torch: lanczos, lanczos4, mitchell and catrom "
+                    "use bicubic; hermite and gaussian use bilinear.",
+                }),
             },
             "optional": {
                 "maintain_aspect": ("BOOLEAN", {"default": True,
-                    "tooltip": "Lock aspect ratio when resizing. Height is computed automatically.",
+                    "tooltip": "Keep the source aspect ratio using aspect_mode to fit the width x height box. "
+                    "Off resizes to exactly width x height.",
                 }),
-                "aspect_mode": (["fit", "fill", "stretch"],),
+                "aspect_mode": (["fit", "fill", "stretch"], {
+                    "tooltip": "With maintain_aspect on. fit: largest size inside the box. fill: smallest "
+                    "size covering the box (not cropped, so one side exceeds it). stretch: exactly width x height.",
+                }),
                 "sharpening": (
                     "FLOAT",
-                    {"default": 0.2, "min": 0.0, "max": 2.0, "step": 0.05},
+                    {"default": 0.2, "min": 0.0, "max": 2.0, "step": 0.05,
+                     "tooltip": "Unsharp-mask amount (1 px sigma) applied after resizing. 0 = off."},
                 ),
                 "process_in_linear": ("BOOLEAN", {"default": True,
-                    "tooltip": "Convert to linear light before processing, then back to sRGB. Improves accuracy for HDR content.",
+                    "tooltip": "Decode sRGB to linear before resampling and re-encode after, for gamma-correct "
+                    "filtering. Only acts when input_color_space is sRGB; linear/HDR input is never converted.",
                 }),
                 "input_color_space": (
                     ["sRGB", "Linear", "Auto"],
@@ -1355,7 +1398,10 @@ class RadianceDownscale32bit:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {
+                    "tooltip": "Image or batch to downscale, display-encoded sRGB or linear float (see "
+                    "input_color_space). Values above 1.0 are kept.",
+                }),
                 "scale_factor": (
                     "FLOAT",
                     {
@@ -1364,24 +1410,34 @@ class RadianceDownscale32bit:
                         "max": 1.0,
                         "step": 0.05,
                         "display": "slider",
+                        "tooltip": "Output size as a fraction of the input (rounded down, minimum 1 px).",
                     },
                 ),
-                "method": (METHOD_LIST_QUALITY,),
+                "method": (METHOD_LIST_QUALITY, {
+                    "tooltip": "Resampling filter. On CUDA only bilinear and bicubic run as named (others "
+                    "use antialiased bicubic); the exact kernels run on the CPU path.",
+                }),
             },
             "optional": {
                 "antialiasing": (
                     "FLOAT",
-                    {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05},
+                    {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05,
+                     "tooltip": "Currently has no effect: the node does not read it. Use pre_blur to "
+                     "soften before downscaling."},
                 ),
                 "pre_blur": (
                     "FLOAT",
-                    {"default": 0.0, "min": 0.0, "max": 2.0, "step": 0.1},
+                    {"default": 0.0, "min": 0.0, "max": 2.0, "step": 0.1,
+                     "tooltip": "Gaussian sigma in input pixels applied before downscaling to suppress "
+                     "aliasing and moire. 0 = off."},
                 ),
                 "process_in_linear": ("BOOLEAN", {"default": True,
-                    "tooltip": "Convert to linear light before processing, then back to sRGB. Improves accuracy for HDR content.",
+                    "tooltip": "Decode sRGB to linear before resampling and re-encode after, for gamma-correct "
+                    "filtering. Only acts when input_color_space is sRGB; linear/HDR input is never converted.",
                 }),
                 "use_gpu": ("BOOLEAN", {"default": True,
-                    "tooltip": "Run the effect on GPU via CUDA/MPS. Falls back to CPU if unavailable.",
+                    "tooltip": "Run on CUDA when available (MPS is not used). Falls back to the CPU path, "
+                    "which uses the exact resampling kernels.",
                 }),
                 # FIX 5: parity with RadianceProUpscale / RadianceUpscaleBySize.
                 # Without this param, linear/HDR inputs were always run through

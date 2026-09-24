@@ -130,39 +130,44 @@ def _blur_bhwc(x: torch.Tensor, radius: int) -> torch.Tensor:
 
 class RadianceMultipassRelight:
     CATEGORY = "FXTD STUDIOS/Radiance/VFX"
+    DESCRIPTION = (
+        "Relights a CG or estimated plate from its albedo and normal passes with one directional or point light "
+        "(GGX specular, Lambert diffuse), using roughness, metallic, AO and shadow passes when supplied. "
+        "Use it to change key light direction or colour in comp without re-rendering; outputs are scene-linear."
+    )
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "albedo": ("IMAGE",),
-                "normal_map": ("IMAGE",),
+                "albedo": ("IMAGE", {"tooltip": "Diffuse albedo (base colour) pass, scene-linear with no lighting baked in. Also used as the specular colour where metallic is 1."}),
+                "normal_map": ("IMAGE", {"tooltip": "Normal pass: 0..1 encoded values are decoded to -1..1 automatically, signed passes are used as is. View direction is +Z toward the camera."}),
             },
             "optional": {
-                "beauty": ("IMAGE",),
-                "roughness": ("IMAGE",),
-                "metallic": ("IMAGE",),
-                "specular": ("IMAGE",),
-                "ao": ("IMAGE",),
-                "alpha": ("IMAGE",),
-                "shadow_mask": ("IMAGE",),
-                "depth_map": ("IMAGE",),
-                "world_position": ("IMAGE",),
-                "normal_convention": (_NORMAL_INPUTS, {"default": "OpenGL (Y-Up)"}),
-                "light_type": (_LIGHT_TYPES, {"default": "Directional"}),
-                "light_x": ("FLOAT", {"default": -0.35, "min": -10.0, "max": 10.0, "step": 0.01}),
-                "light_y": ("FLOAT", {"default": 0.45, "min": -10.0, "max": 10.0, "step": 0.01}),
-                "light_z": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
-                "light_r": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 8.0, "step": 0.01}),
-                "light_g": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 8.0, "step": 0.01}),
-                "light_b": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 8.0, "step": 0.01}),
-                "intensity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 20.0, "step": 0.05}),
-                "ambient": ("FLOAT", {"default": 0.03, "min": 0.0, "max": 4.0, "step": 0.01}),
-                "specular_intensity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 8.0, "step": 0.05}),
-                "depth_scale": ("FLOAT", {"default": 10.0, "min": 0.01, "max": 1000.0, "step": 0.1}),
-                "depth_near_is_white": ("BOOLEAN", {"default": True}),
-                "mix_with_beauty": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "output_premultiplied": ("BOOLEAN", {"default": False}),
+                "beauty": ("IMAGE", {"tooltip": "Original beauty render, scene-linear. Only used when mix_with_beauty is above 0."}),
+                "roughness": ("IMAGE", {"tooltip": "Roughness pass, first channel, 0 = mirror, 1 = fully rough (clamped to 0.045 minimum). Defaults to 0.5 when not connected."}),
+                "metallic": ("IMAGE", {"tooltip": "Metalness pass, first channel, 0 = dielectric, 1 = metal (no diffuse, albedo tints the reflection). Defaults to 0 when not connected."}),
+                "specular": ("IMAGE", {"tooltip": "Dielectric specular level pass, 0..1, scaling the default 4% reflectance at normal incidence (1 = 4%). Defaults to 1 when not connected."}),
+                "ao": ("IMAGE", {"tooltip": "Ambient occlusion as renderers write it: 1 = open, 0 = fully occluded."}),
+                "alpha": ("IMAGE", {"tooltip": "Coverage matte, first channel, 0..1. Passed through to the alpha output and used for output_premultiplied; defaults to 1."}),
+                "shadow_mask": ("IMAGE", {"tooltip": "Shadow pass, first channel: 1 = fully shadowed, 0 = lit. Blocks direct diffuse and specular light but not ambient."}),
+                "depth_map": ("IMAGE", {"tooltip": "Normalised 0..1 depth pass. Only used by a Point light when world_position is not connected, to give pixels a synthetic Z."}),
+                "world_position": ("IMAGE", {"tooltip": "Position pass in camera space metres (OpenGL axes: X right, Y up, +Z toward the camera). Only used by a Point light, and overrides depth_map."}),
+                "normal_convention": (_NORMAL_INPUTS, {"default": "OpenGL (Y-Up)", "tooltip": "Green channel convention of the normal pass. DirectX (Y-Down) flips the Y component before lighting."}),
+                "light_type": (_LIGHT_TYPES, {"default": "Directional", "tooltip": "Directional: light_x/y/z is a direction, no falloff. Point: light_x/y/z is a position, with soft distance falloff 1 / (1 + 0.08 d^2)."}),
+                "light_x": ("FLOAT", {"default": -0.35, "min": -10.0, "max": 10.0, "step": 0.01, "tooltip": "Light X (+ = screen right). Directional: component of the direction toward the light. Point: position in world_position units, or in screen units (X spans +/- aspect ratio) without it."}),
+                "light_y": ("FLOAT", {"default": 0.45, "min": -10.0, "max": 10.0, "step": 0.01, "tooltip": "Light Y (+ = up). Directional: component of the direction toward the light. Point: position in world_position units, or in screen units (Y spans -1..1) without it."}),
+                "light_z": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01, "tooltip": "Light Z (+ = toward the camera). Directional: component of the direction toward the light, so positive values light the front. Point: position along the camera axis."}),
+                "light_r": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 8.0, "step": 0.01, "tooltip": "Linear red multiplier of the light colour. Also tints the ambient term."}),
+                "light_g": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 8.0, "step": 0.01, "tooltip": "Linear green multiplier of the light colour. Also tints the ambient term."}),
+                "light_b": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 8.0, "step": 0.01, "tooltip": "Linear blue multiplier of the light colour. Also tints the ambient term."}),
+                "intensity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 20.0, "step": 0.05, "tooltip": "Linear multiplier on the direct light (diffuse and specular). Does not affect ambient."}),
+                "ambient": ("FLOAT", {"default": 0.03, "min": 0.0, "max": 4.0, "step": 0.01, "tooltip": "Flat fill light level, tinted by the light colour and multiplied by the AO pass. Applied to diffuse only."}),
+                "specular_intensity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 8.0, "step": 0.05, "tooltip": "Linear multiplier on the specular term only. 0 gives a purely diffuse relight."}),
+                "depth_scale": ("FLOAT", {"default": 10.0, "min": 0.01, "max": 1000.0, "step": 0.1, "tooltip": "Z range, in screen units (image height = 2), that the 0..1 depth pass spans around mid grey. Only used for a Point light with depth_map and no world_position."}),
+                "depth_near_is_white": ("BOOLEAN", {"default": True, "tooltip": "Set on when near pixels are white in depth_map. Only used for a Point light with depth_map and no world_position."}),
+                "mix_with_beauty": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Linear blend of the relit result toward the beauty input: 0 = relight only, 1 = original beauty. Needs beauty connected."}),
+                "output_premultiplied": ("BOOLEAN", {"default": False, "tooltip": "Multiply the relit output (and the beauty mix) by alpha. Off leaves it unpremultiplied."}),
             },
         }
 
@@ -215,8 +220,10 @@ class RadianceMultipassRelight:
             if specular is None
             else _match_image(specular, batch, height, width, 3).to(device=device).clamp(0.0, 1.0)
         )
-        occlusion = _scalar_pass(ao, batch, height, width, 0.0, device)
-        accessibility = 1.0 - occlusion
+        # Renderer convention (Arnold, Cycles, Karma, Multipass Estimate):
+        # white is open. This used to read the pass as an occlusion amount,
+        # which inverted every real AO pass loaded through Read AOVs.
+        accessibility = _scalar_pass(ao, batch, height, width, 1.0, device)
         alpha_s = _scalar_pass(alpha, batch, height, width, 1.0, device)
         shadow = _scalar_pass(shadow_mask, batch, height, width, 0.0, device)
         visibility = (1.0 - shadow).clamp(0.0, 1.0)
@@ -305,7 +312,7 @@ class RadianceMultipassRelight:
                 "roughness": 0.5 if roughness is None else None,
                 "metallic": 0.0 if metallic is None else None,
                 "specular": 1.0 if specular is None else None,
-                "ao": 0.0 if ao is None else None,
+                "ao": 1.0 if ao is None else None,
                 "alpha": 1.0 if alpha is None else None,
                 "shadow_mask": 0.0 if shadow_mask is None else None,
             },
@@ -328,27 +335,31 @@ class RadianceMultipassRelight:
 
 class RadianceMultipassComposite:
     CATEGORY = "FXTD STUDIOS/Radiance/VFX"
+    DESCRIPTION = (
+        "Alpha-over composite of a foreground onto a background with optional depth holdout, background shadow "
+        "and light wrap. Use it to put a (relit) CG element into a plate; feed scene-linear images for correct edges."
+    )
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "foreground": ("IMAGE",),
-                "alpha": ("IMAGE",),
+                "foreground": ("IMAGE", {"tooltip": "Foreground colour. Sets the output size and batch; its pixels are ignored when relit_foreground is connected."}),
+                "alpha": ("IMAGE", {"tooltip": "Foreground matte, first channel, 0..1 (1 = foreground fully covers the background)."}),
             },
             "optional": {
-                "background": ("IMAGE",),
-                "relit_foreground": ("IMAGE",),
-                "foreground_depth": ("IMAGE",),
-                "background_depth": ("IMAGE",),
-                "shadow_mask": ("IMAGE",),
-                "alpha_invert": ("BOOLEAN", {"default": False}),
-                "premultiplied_input": ("BOOLEAN", {"default": False}),
-                "depth_near_is_white": ("BOOLEAN", {"default": True}),
-                "depth_bias": ("FLOAT", {"default": 0.01, "min": -0.25, "max": 0.25, "step": 0.001}),
-                "shadow_strength": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "light_wrap": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "light_wrap_radius": ("INT", {"default": 8, "min": 0, "max": 64, "step": 1}),
+                "background": ("IMAGE", {"tooltip": "Background plate, resized to the foreground. Black when not connected."}),
+                "relit_foreground": ("IMAGE", {"tooltip": "Replaces the foreground pixels (for example the relit output of Multipass Relight). Same premultiplication as set by premultiplied_input."}),
+                "foreground_depth": ("IMAGE", {"tooltip": "Foreground depth pass, first channel. Used for the depth holdout only when background_depth is also connected."}),
+                "background_depth": ("IMAGE", {"tooltip": "Background depth pass in the same units and polarity as foreground_depth. Background pixels nearer than the foreground hold it out."}),
+                "shadow_mask": ("IMAGE", {"tooltip": "Shadow cast onto the background, first channel, 1 = full shadow. Darkens the background by shadow_strength before the over."}),
+                "alpha_invert": ("BOOLEAN", {"default": False, "tooltip": "Use 1 - alpha as the matte. Applied after unpremultiplying, which still uses the original alpha."}),
+                "premultiplied_input": ("BOOLEAN", {"default": False, "tooltip": "Set on when the foreground is already multiplied by alpha; it is divided by alpha first to avoid a double premultiply."}),
+                "depth_near_is_white": ("BOOLEAN", {"default": True, "tooltip": "Depth polarity of both depth passes. On: larger values are nearer. Off: smaller values are nearer (distance style Z)."}),
+                "depth_bias": ("FLOAT", {"default": 0.01, "min": -0.25, "max": 0.25, "step": 0.001, "tooltip": "Depth tolerance in depth-pass units. Positive values keep the foreground in front when depths are nearly equal, negative favours the background."}),
+                "shadow_strength": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "How much shadow_mask darkens the background: 0 = none, 1 = black where the mask is 1."}),
+                "light_wrap": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Amount of blurred background added to the foreground's soft edges. 0 = off; needs background connected."}),
+                "light_wrap_radius": ("INT", {"default": 8, "min": 0, "max": 64, "step": 1, "tooltip": "Box blur radius in pixels for the wrapped background. The edge band uses half this radius."}),
             },
         }
 

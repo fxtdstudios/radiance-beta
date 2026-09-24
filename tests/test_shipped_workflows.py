@@ -103,3 +103,48 @@ def test_start_graph_is_wired():
     widgets = [e[0] for e in _expected_widgets(_mappings()["RadianceUnifiedLoader"])]
     vals = dict(zip(widgets, loader["widgets_values"]))
     assert vals["clip_l"] != "None" and vals["t5xxl"] != "None", "Flux.1 needs both clip_l and t5xxl"
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_every_node_exists_and_is_not_retired(path):
+    mappings = _mappings()
+    wf = json.loads(path.read_text(encoding="utf-8"))
+    bad = []
+    for node in wf.get("nodes", []):
+        t = node.get("type") or ""
+        if not t.startswith("Radiance"):
+            continue            # a core ComfyUI node (VAELoader, Note, KSampler...)
+        cls = mappings.get(t)
+        if cls is None:
+            bad.append(f"{t} (not a registered node)")
+        elif getattr(cls, "DEPRECATED", False):
+            bad.append(f"{t} (retired)")
+    assert not bad, f"{path.name}: {bad}"
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_every_required_socket_is_connected(path):
+    """A required socket left empty makes ComfyUI refuse the whole graph."""
+    mappings = _mappings()
+    wf = json.loads(path.read_text(encoding="utf-8"))
+    loose = []
+    for node in wf.get("nodes", []):
+        cls = mappings.get(node.get("type"))
+        if cls is None:
+            continue
+        required = cls.INPUT_TYPES().get("required") or {}
+        sockets = {i["name"]: i for i in node.get("inputs", [])}
+        for name, spec in required.items():
+            typ = spec[0]
+            if isinstance(typ, str) and typ not in WIDGET_TYPES:
+                if name not in sockets or sockets[name].get("link") is None:
+                    loose.append(f"{node['type']} #{node['id']}.{name}")
+    assert not loose, f"{path.name}: required inputs not connected: {loose}"
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_no_machine_specific_paths(path):
+    """A path from the machine that saved the workflow is wrong on every other one."""
+    text = path.read_text(encoding="utf-8")
+    for marker in ("/root/", "/home/", "/tmp/", "/Users/", "C:\\\\Users", "C:/Users"):
+        assert marker not in text, f"{path.name} contains a machine path ({marker})"

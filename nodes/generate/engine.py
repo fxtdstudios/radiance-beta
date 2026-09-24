@@ -158,6 +158,14 @@ class RadianceHDRVAEEncode(RadianceVAE4KEncode):
     @classmethod
     def INPUT_TYPES(cls):
         types = super().INPUT_TYPES()
+        req = types["required"]
+        req["pixels"] = ("IMAGE", {"tooltip": (
+            "Image to encode, in the encoding named by source_space (scene-linear by "
+            "default, values above 1.0 allowed). It is linearised, exposed and HDR-coded "
+            "per hdr_mode before the VAE sees it.")})
+        req["vae"] = ("VAE", {"tooltip": (
+            "VAE of the model the latent is meant for. Pair it with the same VAE in "
+            "VAE Decode (HDR) so the HDR coding can be inverted.")})
         opt = types["optional"]
         choices, cfg = opt["hdr_mode"]
         opt["hdr_mode"] = (choices, {**cfg, "default": "Compress (Log)",
@@ -190,7 +198,8 @@ class RadianceHDRVAEDecode:
     """
 
     CATEGORY = "FXTD STUDIOS/Radiance/◎ HDR"
-    DESCRIPTION = "Decode HDR latents using a VAE conditioned for high-dynamic range."
+    DESCRIPTION = ("Decode a latent with an ordinary VAE into the chosen output space. Auto inverts the "
+                   "HDR coding of latents straight from VAE Encode (HDR); Direct HDR returns scene-linear values above 1.0.")
     FUNCTION = "apply"
     RETURN_TYPES  = ("IMAGE", "STRING")
     RETURN_NAMES  = ("image", "metadata")
@@ -208,6 +217,11 @@ class RadianceHDRVAEDecode:
     def INPUT_TYPES(cls):
         # Inherit all inputs from the production decode node
         types = RadianceVAE4KDecode.INPUT_TYPES()
+        types["required"]["samples"] = ("LATENT", {"tooltip": (
+            "Latent to decode: from a sampler, or straight from VAE Encode (HDR), whose "
+            "embedded metadata lets Auto invert the HDR coding exactly.")})
+        types["required"]["vae"] = ("VAE", {"tooltip": (
+            "VAE matching the model (and the VAE used by VAE Encode (HDR), if any).")})
 
         # BUG 3 FIX: explicitly set default to sRGB to match vae.py v2.3.8
         if "target_space" in types.get("required", {}):
@@ -662,7 +676,10 @@ class RadianceHDRAnalysis:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": (
+                    "Image to measure; set colorspace to match its encoding. Luma above "
+                    "1.0 counts as above SDR white (203 nits). Images over 500k pixels "
+                    "are measured on a strided subsample.")}),
             },
             "optional": {
                 "colorspace": (
@@ -798,14 +815,21 @@ class RadianceNDISender:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": (
+                    "Frames to stream, every frame of the batch in order. Sent as 8-bit "
+                    "BGRA, so with encoding None the values must already be display-ready 0-1.")}),
                 "stream_name": (
                     "STRING",
-                    {"default": "Radiance ComfyUI"},
+                    {"default": "Radiance ComfyUI",
+                     "tooltip": "NDI source name shown to receivers. Changing it recreates the sender."},
                 ),
                 "encoding": (
                     ["None (SDR)", "S-Log3 (HDR)", "LogC4 (HDR)"],
-                    {"default": "None (SDR)"},
+                    {"default": "None (SDR)",
+                     "tooltip": (
+                         "Curve applied before 8-bit quantisation. None sends values as-is (clipped "
+                         "to 0-1). S-Log3 and LogC4 expect scene-linear input and apply only the log "
+                         "curve (no gamut change), so the receiver must decode with the same curve.")},
                 ),
                 "enable_streaming": ("BOOLEAN", {"default": True,
                     "tooltip": "Enable real-time NDI streaming during generation. Requires NDI SDK installed."

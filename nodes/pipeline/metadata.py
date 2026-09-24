@@ -14,9 +14,9 @@ class RadianceLinearCheck:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "shot_metadata": ("RADIANCE_SHOT",),
-                "action": (["Log Warning", "Strict Error", "Ignore"], {"default": "Log Warning"}),
+                "image": ("IMAGE", {"tooltip": "Image passed through unchanged. Its pixels are not inspected; only the shot metadata's colorspace tag is checked."}),
+                "shot_metadata": ("RADIANCE_SHOT", {"tooltip": "Shot metadata whose 'colorspace' tag is tested. Tags containing 'Linear', or exactly 'ACEScg', pass; anything else (or a missing tag, read as 'Unknown') fails."}),
+                "action": (["Log Warning", "Strict Error", "Ignore"], {"default": "Log Warning", "tooltip": "What to do when the tag is not linear: Log Warning writes to the console and continues, Strict Error stops the graph, Ignore does nothing."}),
             },
         }
 
@@ -24,7 +24,7 @@ class RadianceLinearCheck:
     RETURN_NAMES = ("image", "shot_metadata")
     FUNCTION = "check"
     CATEGORY = "FXTD STUDIOS/Radiance/◎ IO & Delivery"
-    DESCRIPTION = "Verify that an image tensor is in linear scene-referred colour space."
+    DESCRIPTION = "Check that the shot metadata tags the image as scene-linear (Linear or ACEScg) before linear-only nodes. It reads the metadata tag only, not the pixel values."
 
     def check(self, image, shot_metadata, action):
         cs = shot_metadata.get("colorspace", "Unknown")

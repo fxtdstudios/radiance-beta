@@ -40,12 +40,12 @@ _audit_tmp/
 # ── Tests and developer tooling ─────────────────────────────────────────────
 tests/
 js/tests/
-js/docs/
 tools/check_mojibake.py
 tools/check_release_ready.py
 tools/validate_hdr_pipeline.py
-tools/clean_release.py
 tools/gpu_acceptance.py
+tools/build_node_reference.py
+scripts/build_js.js
 
 # ── Repository documentation ────────────────────────────────────────────────
 # Node descriptions and input tooltips ship inside the package and ComfyUI
@@ -53,6 +53,9 @@ tools/gpu_acceptance.py
 # lives at www.fxtdstudios.com.
 CONTRIBUTING.md
 KNOWN_ISSUES.md
+# The generated node reference (docs/nodes) is for GitHub readers; the same
+# text ships inside the nodes as hover tooltips.
+docs/
 
 # ── Internal write-ups, should any reappear ─────────────────────────────────
 # Audits, reviews and session logs go stale and mislead. Findings that matter

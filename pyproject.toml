@@ -55,6 +55,8 @@ dependencies = [
     "OpenImageIO>=3.0.0",
     "opencolorio>=2.3.0",
     "transformers>=4.36.0",
+    "diffusers>=0.33.0",    # Multipass Estimate: Marigold IID materials and lighting
+    "accelerate>=0.26.0",   # low-memory loading of the Marigold UNets
     "scipy>=1.10.0",
     "defusedxml>=0.7.1",
     "imageio-ffmpeg>=0.4.9",
@@ -93,10 +95,10 @@ full = [
     "tifffile>=2023.7.10",
     "colour-science>=0.4",
     "transformers>=4.35",
-    "diffusers>=0.25",   # upscale: SD x4 / latent upscaler backends
     "openai>=1.0",       # audio: transcription
-    # anthropic, google-generativeai, accelerate and peft were listed here and
-    # imported nowhere in the package.
+    # diffusers and accelerate are core dependencies now (Multipass Estimate).
+    # anthropic, google-generativeai and peft were listed here and imported
+    # nowhere in the package.
 ]
 
 [project.urls]
@@ -137,7 +139,6 @@ packages = [
     "radiance.nodes.io",
     "radiance.nodes.monitor",
     "radiance.nodes.pipeline",
-    "radiance.nodes.training",
     "radiance.nodes.upscale",
     "radiance.nodes.vfx",
     "radiance.nodes.vfx.multipass",
@@ -151,8 +152,6 @@ radiance = [
     "RADIANCE.png",
     "r_icon.png",
     "viewer.png",
-    "Viewer_shortcut.png",
-    "radiance_workspace.png",
     "basic_workflow.png",
     "ACES/*.ocio",
     "js/*.js",
@@ -185,6 +184,12 @@ python_functions = ["test_*"]
 
 # Per-test timeout — guards against infinite loops in node code (CI & local)
 timeout = 30
+
+# `slow` tests are opt-in: `pytest -m slow` runs them (a later -m wins). The
+# 1-to-100 frame-count sweep is marked slow and used to run on every plain
+# `pytest`, 68 s of a 245 s suite, although the README and the test itself
+# said it was deselected. CI runs the slow set in its own step.
+addopts = "-m 'not slow'"
 
 # Registered markers (suppresses PytestUnknownMarkWarning)
 markers = [

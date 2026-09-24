@@ -998,7 +998,11 @@ class RadianceResolution:
                 # a target duration in seconds instead of a raw frame count.
                 "frame_computation": (
                     ["Manual (Frames)", "Auto (Seconds)"],
-                    {"default": "Manual (Frames)"},
+                    {"default": "Manual (Frames)",
+                     "tooltip": (
+                         "How the video frame count is set (video only). Manual uses video_frames as typed; "
+                         "Auto (Seconds) uses duration_seconds x frame_rate snapped to the model's stride*k+1 grid."
+                     )},
                 ),
                 "duration_seconds": (
                     "FLOAT",

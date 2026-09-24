@@ -68,37 +68,43 @@ def download_and_load_model(model_size: str, device: torch.device):
             # Download and cache on the requested device.
             # Each (model_id, device) pair gets its own parameter copy
             # so concurrent callers on different devices never race.
-            if model_id not in _processor_cache:
-                logger.info(f"Downloading depth model: {model_size} ({model_id})")
-                try:
-                    from transformers import (
-                        AutoImageProcessor,
-                        AutoModelForDepthEstimation,
+            # Depth Anything V2 went straight to Hugging Face here, past the
+            # consent gate every other downloader shares (and Base / Large are
+            # CC-BY-NC-4.0). Without consent, load only what is cached.
+            from radiance.core.consent import downloads_allowed, refusal_message
+            local_only = not downloads_allowed()
+            try:
+                from transformers import (
+                    AutoImageProcessor,
+                    AutoModelForDepthEstimation,
+                )
+            except ImportError as e:
+                raise ImportError(
+                    "transformers library required for Depth Anything V2.\n"
+                    "Install with: pip install transformers"
+                ) from e
+            if not local_only:
+                logger.info(f"Loading depth model: {model_size} ({model_id}); downloads on first use")
+            try:
+                if model_id not in _processor_cache:
+                    _processor_cache[model_id] = AutoImageProcessor.from_pretrained(
+                        model_id, revision="main", local_files_only=local_only
                     )
-                    processor = AutoImageProcessor.from_pretrained(
-                        model_id, revision="main"
-                    )
-                    model = AutoModelForDepthEstimation.from_pretrained(
-                        model_id, revision="main"
-                    )
-                    model.eval()
-                    _processor_cache[model_id] = processor
-                    logger.info(f"Depth model loaded: {model_id}")
-                except ImportError as e:
-                    raise ImportError(
-                        "transformers library required for Depth Anything V2.\n"
-                        "Install with: pip install transformers"
-                    ) from e
-                except Exception as e:
-                    raise RuntimeError(
-                        f"Failed to download depth model '{model_id}': {e}"
-                    ) from e
-            else:
-                from transformers import AutoModelForDepthEstimation
                 model = AutoModelForDepthEstimation.from_pretrained(
-                    model_id, revision="main"
+                    model_id, revision="main", local_files_only=local_only
                 )
                 model.eval()
+                logger.info(f"Depth model loaded: {model_id}")
+            except Exception as e:
+                if local_only:
+                    raise FileNotFoundError(refusal_message(
+                        f"Depth Anything V2 ({model_id})",
+                        url=f"https://huggingface.co/{model_id}",
+                        dest="the Hugging Face cache (HF_HOME)",
+                    )) from e
+                raise RuntimeError(
+                    f"Failed to download depth model '{model_id}': {e}"
+                ) from e
 
             # Store already on the target device
             _model_cache.put(cache_key, model.to(device))
@@ -131,7 +137,7 @@ class RadianceDepthMapGenerator:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": "Display-encoded image or frame batch. Frames with values above 1.05 are Reinhard tone-mapped to 0..1 first; alpha is ignored."}),
                 "model_size": (
                     cls.MODEL_SIZES,
                     {

@@ -98,11 +98,11 @@ class RadianceLUTApply:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
-                "lut_file": (cls.get_lut_files(),),
+                "image": ("IMAGE", {"tooltip": "Image to transform. Values should be in the encoding the LUT expects; anything outside the LUT's DOMAIN_MIN/MAX (0 to 1 by default) is clamped to its edge before lookup."}),
+                "lut_file": (cls.get_lut_files(), {"tooltip": "3D .cube LUT from ComfyUI's models/luts folder."}),
                 "strength": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
+                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Mix between the original image (0) and the full LUT result (1)."},
                 ),
                 "log_space": (
                     "BOOLEAN",
@@ -110,11 +110,12 @@ class RadianceLUTApply:
                         "default": False,
                         "label_on": "Log Input",
                         "label_off": "Linear/sRGB Input",
+                        "tooltip": "When on, pixel values are raised to the power of the chosen base (e.g. 10^x) before the LUT lookup. This is a plain exponential, not a camera log curve decode, so leave it off for LUTs that expect log input.",
                     },
                 ),
             },
             "optional": {
-                "log_encoding": (cls.LOG_ENCODINGS, {"default": "Log10"}),
+                "log_encoding": (cls.LOG_ENCODINGS, {"default": "Log10", "tooltip": "Base of the exponential used when log_space is on: 10^x, 2^x or e^x. Ignored when log_space is off."}),
                 "clamp_output": (
                     "BOOLEAN",
                     {"default": False, "tooltip": "Clamp to 0-1. Disable for HDR."},
@@ -123,7 +124,7 @@ class RadianceLUTApply:
                     ["Trilinear", "Tetrahedral"],
                     {
                         "default": "Trilinear",
-                        "tooltip": "Tetrahedral is more accurate but slightly slower",
+                        "tooltip": "LUT interpolation between grid points. Tetrahedral is more accurate on hue and neutral axes but slightly slower.",
                     },
                 ),
             },
@@ -495,9 +496,9 @@ class RadianceLUTBlend:
         lut_files = RadianceLUTApply.get_lut_files()
         return {
             "required": {
-                "image": ("IMAGE",),
-                "lut_a": (lut_files,),
-                "lut_b": (lut_files,),
+                "image": ("IMAGE", {"tooltip": "Image to transform through both LUTs. Values outside each LUT's domain are clamped to its edge before lookup."}),
+                "lut_a": (lut_files, {"tooltip": "First .cube LUT from models/luts. It is the base look: the non-Linear modes keep its luminance or chroma."}),
+                "lut_b": (lut_files, {"tooltip": "Second .cube LUT from models/luts, blended towards by blend_factor."}),
                 "blend_factor": (
                     "FLOAT",
                     {
@@ -508,12 +509,12 @@ class RadianceLUTBlend:
                         "tooltip": "0.0 = LUT A only, 1.0 = LUT B only",
                     },
                 ),
-                "blend_mode": (cls.BLEND_MODES, {"default": "Linear"}),
+                "blend_mode": (cls.BLEND_MODES, {"default": "Linear", "tooltip": "Linear: mix the two results. Luminosity: A's colour with mixed luminance. Saturation: mixed chroma at A's luminance. Hue: mixed chroma direction with A's chroma amount and luminance."}),
             },
             "optional": {
                 "strength": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
+                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Mix between the original image (0) and the blended LUT result (1)."},
                 ),
                 "clamp_output": (
                     "BOOLEAN",
@@ -526,13 +527,13 @@ class RadianceLUTBlend:
                         "default": False,
                         "label_on": "Log Input",
                         "label_off": "Linear/sRGB Input",
-                        "tooltip": "Decode log-encoded input before applying LUTs.",
+                        "tooltip": "When on, pixel values are raised to the power of the chosen base (e.g. 10^x) before both LUT lookups. This is a plain exponential, not a camera log curve decode.",
                     },
                 ),
-                "log_encoding": (RadianceLUTApply.LOG_ENCODINGS, {"default": "Log10"}),
+                "log_encoding": (RadianceLUTApply.LOG_ENCODINGS, {"default": "Log10", "tooltip": "Base of the exponential used when log_space is on: 10^x, 2^x or e^x. Ignored when log_space is off."}),
                 "interpolation": (
                     ["Trilinear", "Tetrahedral"],
-                    {"default": "Trilinear"},
+                    {"default": "Trilinear", "tooltip": "LUT interpolation used for both lookups. Tetrahedral is more accurate but slightly slower."},
                 ),
             },
         }

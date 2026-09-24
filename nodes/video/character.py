@@ -114,9 +114,13 @@ def _clip_embed_transformers(pil_img) -> "np.ndarray":
     """512-D CLIP image embedding via HuggingFace transformers."""
     from transformers import CLIPProcessor, CLIPModel  # type: ignore
     import numpy as _np
+    from radiance.core.consent import downloads_allowed
     model_id = "openai/clip-vit-base-patch32"
-    model     = CLIPModel.from_pretrained(model_id)
-    processor = CLIPProcessor.from_pretrained(model_id)
+    # Consent gate: without it, use only a copy already in the HF cache (the
+    # caller falls back to colour histograms when this raises).
+    local_only = not downloads_allowed()
+    model     = CLIPModel.from_pretrained(model_id, local_files_only=local_only)
+    processor = CLIPProcessor.from_pretrained(model_id, local_files_only=local_only)
     inputs = processor(images=pil_img, return_tensors="pt")
     with (torch.no_grad() if HAS_TORCH else _dummy_ctx()):
         feats = model.get_image_features(**inputs)

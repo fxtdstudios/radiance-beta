@@ -156,21 +156,21 @@ class RadianceQC:
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {"mode": (cls.MODES, {"default": "Analyze"})},
+            "required": {"mode": (cls.MODES, {"default": "Analyze", "tooltip": "Analyze: run the checks on image. Export: write qc_report_json to disk (the image and check settings are ignored)."})},
             "optional": {
-                "image": ("IMAGE",),
-                "black_threshold": ("FLOAT", {"default": 0.0, "min": -0.1, "max": 0.1, "step": 0.001}),
-                "white_threshold": ("FLOAT", {"default": 1.0, "min": 0.8, "max": 2.0, "step": 0.01}),
-                "overlay_opacity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.1}),
-                "banding_threshold": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 20.0, "step": 0.5}),
-                "enable_focus_check": ("BOOLEAN", {"default": False}),
-                "enable_artifacts_check": ("BOOLEAN", {"default": True}),
-                "enable_noise_check": ("BOOLEAN", {"default": True}),
-                "fail_on_errors": ("BOOLEAN", {"default": False}),
-                "qc_report_json": ("STRING", {"forceInput": True}),
-                "output_path": ("STRING", {"default": ""}),
-                "filename_prefix": ("STRING", {"default": "qc_report"}),
-                "export_format": (["json", "csv", "html", "all"], {"default": "json"}),
+                "image": ("IMAGE", {"tooltip": "Image or sequence to check, as delivered (usually display-encoded 0..1). Required in Analyze mode."}),
+                "black_threshold": ("FLOAT", {"default": 0.0, "min": -0.1, "max": 0.1, "step": 0.001, "tooltip": "Channel values below this count as crushed, and any crushed value fails the frame. The default 0 flags only negative values."}),
+                "white_threshold": ("FLOAT", {"default": 1.0, "min": 0.8, "max": 2.0, "step": 0.01, "tooltip": "Channel values above this count as clipped, and any clipped value fails the frame. The default 1.0 flags only values over display white."}),
+                "overlay_opacity": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.1, "tooltip": "Opacity of the red (clipped) and blue (crushed) paint on the output image. 0 passes the image through."}),
+                "banding_threshold": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 20.0, "step": 0.5, "tooltip": "Banding risk, in percent of the frame, at or above which a banding warning is reported. Warning only, it never fails a frame."}),
+                "enable_focus_check": ("BOOLEAN", {"default": False, "tooltip": "Add a Laplacian-variance sharpness score; below 20/100 is reported as a low-sharpness warning."}),
+                "enable_artifacts_check": ("BOOLEAN", {"default": True, "tooltip": "Add an 8x8 block-edge score for JPEG/DCT compression artifacts; 10/100 or more is a warning."}),
+                "enable_noise_check": ("BOOLEAN", {"default": True, "tooltip": "Add a high-frequency noise score; below 5/100 warns of over-denoising, above 30/100 of high noise."}),
+                "fail_on_errors": ("BOOLEAN", {"default": False, "tooltip": "Adds (BLOCKING) to the status string when QC fails. It does not stop the workflow."}),
+                "qc_report_json": ("STRING", {"forceInput": True, "tooltip": "json_report output of an Analyze run. Export mode only."}),
+                "output_path": ("STRING", {"default": "", "tooltip": "Export folder. Empty = ComfyUI output folder; relative = subfolder of it; absolute paths are used as is. Export mode only."}),
+                "filename_prefix": ("STRING", {"default": "qc_report", "tooltip": "Report file name stem; a date-time stamp and the extension are appended. Export mode only."}),
+                "export_format": (["json", "csv", "html", "all"], {"default": "json", "tooltip": "Report file format to write; all writes JSON, CSV and HTML. Export mode only."}),
             },
         }
 
@@ -178,7 +178,8 @@ class RadianceQC:
     RETURN_NAMES = ("image", "text_report", "json_report", "status")
     FUNCTION = "run"
     CATEGORY = "FXTD STUDIOS/Radiance/◎ QC & Debug"
-    DESCRIPTION = "Run a configurable suite of QC checks on an image or sequence."
+    DESCRIPTION = ("Run technical QC on an image or sequence (crushed blacks, clipped whites, out-of-range values, "
+                   "banding, optional noise, compression and focus scores) with a paint overlay, or export a report.")
     OUTPUT_NODE = True
 
     def run(self, mode: str = "Analyze", image=None, black_threshold: float = 0.0,
@@ -398,23 +399,23 @@ class RadiancePolicyGuard:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "mode": (cls.MODES, {"default": "Guard"}),
-                "image": ("IMAGE",),
+                "mode": (cls.MODES, {"default": "Guard", "tooltip": "Preset: output a policy JSON (data1) and its description (data2); the image is not checked. Guard: check the image against a policy."}),
+                "image": ("IMAGE", {"tooltip": "Frames to check, display-referred 0..1 (peak is read as 1.0 = 100 nits). Ignored in Preset mode."}),
             },
             "optional": {
-                "preset": (list(_PRESETS.keys()), {"default": "Broadcast SDR"}),
-                "policy_file": ("STRING", {"default": ""}),
-                "custom_max_peak_nits": ("FLOAT", {"default": 1000.0, "min": 0.0, "max": 10000.0, "step": 10.0}),
-                "custom_max_clipping": ("FLOAT", {"default": 0.01, "min": 0.0, "max": 1.0, "step": 0.001}),
-                "custom_max_black_crush": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.001}),
-                "custom_max_saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
-                "policy": ("STRING", {"forceInput": True}),
-                "max_clipping": ("FLOAT", {"default": 0.01, "min": 0.0, "max": 1.0, "step": 0.001}),
-                "max_black_crush": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.001}),
-                "max_saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
-                "max_peak_nits": ("FLOAT", {"default": 1000.0, "min": 0.0, "max": 10000.0, "step": 10.0}),
-                "require_metadata": ("STRING", {"default": ""}),
-                "metadata_present": ("STRING", {"default": ""}),
+                "preset": (list(_PRESETS.keys()), {"default": "Broadcast SDR", "tooltip": "Delivery policy to output in Preset mode. Custom uses the custom_* values."}),
+                "policy_file": ("STRING", {"default": "", "tooltip": "Optional path to a policy JSON file; when it loads, it replaces the preset. A failed load logs a warning and falls back to the preset. Preset mode only."}),
+                "custom_max_peak_nits": ("FLOAT", {"default": 1000.0, "min": 0.0, "max": 10000.0, "step": 10.0, "tooltip": "Custom preset: highest allowed peak, in nits, with 1.0 = 100 nits. Preset mode only."}),
+                "custom_max_clipping": ("FLOAT", {"default": 0.01, "min": 0.0, "max": 1.0, "step": 0.001, "tooltip": "Custom preset: highest allowed fraction of pixels with luma above 0.99 (0.01 = 1%). Preset mode only."}),
+                "custom_max_black_crush": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.001, "tooltip": "Custom preset: highest allowed fraction of pixels with luma below 0.01 (0.05 = 5%). Preset mode only."}),
+                "custom_max_saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Custom preset: highest allowed mean HSV-style saturation, (max - min) / max per pixel. 1.0 only fails on negative pixel values. Preset mode only."}),
+                "policy": ("STRING", {"forceInput": True, "tooltip": "Policy JSON, usually data1 of a Preset-mode Policy Guard. When connected it replaces all max_* and require_metadata values. Guard mode only."}),
+                "max_clipping": ("FLOAT", {"default": 0.01, "min": 0.0, "max": 1.0, "step": 0.001, "tooltip": "Highest allowed fraction of pixels with luma above 0.99, worst frame. Guard mode, used only when policy is empty."}),
+                "max_black_crush": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.001, "tooltip": "Highest allowed fraction of pixels with luma below 0.01, worst frame. Guard mode, used only when policy is empty."}),
+                "max_saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Highest allowed mean saturation, (max - min) / max per pixel, worst frame. 1.0 only fails on negative pixel values. Guard mode, used only when policy is empty."}),
+                "max_peak_nits": ("FLOAT", {"default": 1000.0, "min": 0.0, "max": 10000.0, "step": 10.0, "tooltip": "Highest allowed peak, where the brightest channel value x 100 is taken as nits (1.0 = 100 nits). Guard mode, used only when policy is empty."}),
+                "require_metadata": ("STRING", {"default": "", "tooltip": "Comma-separated metadata keys that must appear in metadata_present, for example colorspace, eotf. Guard mode, used only when policy is empty."}),
+                "metadata_present": ("STRING", {"default": "", "tooltip": "Comma-separated metadata the deliverable carries, as keys or key=value pairs. Only the keys are checked. Guard mode only."}),
             },
         }
 

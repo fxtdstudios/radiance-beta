@@ -383,10 +383,32 @@ def _missing_file(arg):
     return predicate
 
 
-def _not_shipped(cls, kwargs):
-    """Gate: a placeholder node kept only so saved graphs open (3.5 SAM)."""
-    if getattr(cls, "DEPRECATED", False) and "SAM" in cls.__name__:
-        return "no SAM runtime ships with Radiance 3.5; the node raises by design"
+def _retired(cls, exc):
+    """A hidden node kept only so saved graphs open, raising by design.
+
+    SAM Loader / Generator (no SAM runtime ships) and Multipass Extract
+    (image-filter passes, replaced by Multipass Estimate). The node must be
+    DEPRECATED and its error must say what to use instead, so a real crash in
+    a hidden node is still reported.
+    """
+    if not getattr(cls, "DEPRECATED", False) or not isinstance(exc, RuntimeError):
+        return None
+    msg = str(exc)
+    if "SAM" in cls.__name__ or "Multipass Estimate" in msg:
+        return "retired node, raises by design with its replacement named"
+    return None
+
+
+def _no_estimate_models(cls, kwargs):
+    """Gate: Multipass Estimate needs MoGe-2 and both Marigold IID models (~4.9 GB)."""
+    from radiance.nodes.vfx.multipass import estimate_models as em
+    missing = [n for n, ok in (
+        ("MoGe-2", em.find_moge()),
+        ("Marigold appearance", em.find_marigold(em.MARIGOLD_APPEARANCE)),
+        ("Marigold lighting", em.find_marigold(em.MARIGOLD_LIGHTING)),
+    ) if not ok]
+    if missing:
+        return f"model weights not installed here: {', '.join(missing)} (fake-model tests in test_multipass_estimate.py)"
     return None
 
 
@@ -407,9 +429,9 @@ _ENVIRONMENT_GATED = {
     "RadianceSDRToHDRRecover": _no_pixel_checkpoint,
     # Placeholder default path; a missing file raises (3.5) instead of "[]".
     "RadianceAudioCut": _missing_file("audio_filepath"),
-    # Hidden placeholders; see KNOWN_ISSUES.
-    "RadianceSAMModelLoader": _not_shipped,
-    "RadianceSAMGenerator": _not_shipped,
+    # Four-plus GB of weights; the maths and the pass bundle are tested with
+    # fake models in test_multipass_estimate.py.
+    "RadianceMultipassEstimate": _no_estimate_models,
     # Ships defaults that the ACES CG config bundled with the package does not
     # define, so the harness cannot name a colorspace the config knows.
     "RadianceHDROCIOTransform": _ocio_config_lacks_colorspaces,
@@ -418,7 +440,7 @@ _ENVIRONMENT_GATED = {
 
 def _environment_gap(key, cls, kwargs, exc):
     """Why this call could not run here, or None if the failure is the node's."""
-    reason = _absence_signal(exc)
+    reason = _absence_signal(exc) or _retired(cls, exc)
     if reason:
         return reason
     gate = _ENVIRONMENT_GATED.get(key)
@@ -608,3 +630,15 @@ def test_the_harness_actually_covered_the_catalog():
     assert len(_KEYS) >= EXPECTED_MIN_NODE_COUNT, (
         f"only {len(_KEYS)} nodes were collected for functional testing"
     )
+
+
+@pytest.mark.real_torch
+def test_hdr_color_pipeline_decodes_pq():
+    """Every PQ run raised TypeError: the node still passed peak_nits to an
+    _eotf_pq() that dropped it. PQ code 0.58 is about 203 nits, i.e. 1.0."""
+    import torch
+    from radiance.nodes.hdr.colorspace import RadianceHDRColorPipeline
+    node = RadianceHDRColorPipeline()
+    img = torch.full((1, 4, 4, 3), 0.5807)
+    out = getattr(node, node.FUNCTION)(img, encoding="PQ (ST.2084)")[1]   # scene-linear output
+    assert abs(float(out[0, 0, 0, 0]) - 1.0) < 0.02

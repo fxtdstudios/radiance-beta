@@ -64,26 +64,26 @@ class HDRExpandDynamicRange:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": "Display-encoded SDR image. Output is linear light; alpha passes through untouched."}),
                 "source_gamma": (
                     "FLOAT",
-                    {"default": 2.2, "min": 1.0, "max": 3.0, "step": 0.1},
+                    {"default": 2.2, "min": 1.0, "max": 3.0, "step": 0.1, "tooltip": "Input decoding. 2.1 to 2.3 uses the exact sRGB curve, 1.0 means already linear, any other value is a pure power (e.g. 2.4, 2.6)."},
                 ),
                 "highlight_recovery": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.1},
+                    {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.1, "tooltip": "Mix between the linearised input (0) and the full expansion (1). Values above 1 push past the expansion curve."},
                 ),
                 "black_point": (
                     "FLOAT",
-                    {"default": 0.0, "min": -0.1, "max": 0.1, "step": 0.001},
+                    {"default": 0.0, "min": -0.1, "max": 0.1, "step": 0.001, "tooltip": "Linear value subtracted before expansion, then clipped at 0. Positive crushes blacks, negative lifts them."},
                 ),
                 "target_stops": (
                     "FLOAT",
-                    {"default": 14.0, "min": 8.0, "max": 20.0, "step": 0.5},
+                    {"default": 14.0, "min": 8.0, "max": 20.0, "step": 0.5, "tooltip": "Sets the peak that SDR white is mapped to: 2^(stops - 8) in linear, so 14 gives 64.0 and 8 gives no expansion."},
                 ),
                 "highlight_rolloff": (
                     "FLOAT",
-                    {"default": 1.5, "min": 1.0, "max": 3.0, "step": 0.1},
+                    {"default": 1.5, "min": 1.0, "max": 3.0, "step": 0.1, "tooltip": "Where expansion starts: linear luma threshold 1 - (rolloff - 1) x 0.2, capped at 0.95 (0.9 at the default, 0.6 at 3.0). Higher starts earlier with a gentler curve."},
                 ),
             }
         }

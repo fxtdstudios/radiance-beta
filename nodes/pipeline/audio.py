@@ -313,7 +313,10 @@ class RadianceAudioCut:
                     "default": 12, "min": 1,
                     "tooltip": "Minimum frames between consecutive cut points",
                 }),
-                "backend": (cls.BACKENDS, {"default": "Auto"}),
+                "backend": (cls.BACKENDS, {"default": "Auto",
+                    "tooltip": "Auto: librosa if installed, else scipy, else ffmpeg. scipy finds energy "
+                               "onsets; ffmpeg finds silence ends, its threshold running from -30 dB "
+                               "(sensitivity 1) to -10 dB (sensitivity 0)."}),
             },
             "optional": {
                 "frame_offset": ("INT", {
@@ -572,9 +575,15 @@ class RadianceAudioTranscribe:
                     "default": "/path/to/audio.wav",
                     "tooltip": "Absolute path to audio/video file",
                 }),
-                "backend": (cls.BACKENDS, {"default": "Auto"}),
-                "model_size": (cls.MODEL_SIZES, {"default": "base"}),
-                "language": (cls.LANGUAGES, {"default": "auto"}),
+                "backend": (cls.BACKENDS, {"default": "Auto",
+                    "tooltip": "Auto: local openai-whisper if installed, else the OpenAI API if a key "
+                               "resolves, else the whisper CLI on PATH. Failures are written to "
+                               "transcribe_report, not raised."}),
+                "model_size": (cls.MODEL_SIZES, {"default": "base",
+                    "tooltip": "Whisper model for local_whisper and whisper_cli (larger is slower and "
+                               "more accurate). openai_api always uses whisper-1."}),
+                "language": (cls.LANGUAGES, {"default": "auto",
+                    "tooltip": "Spoken language code passed to Whisper. auto lets Whisper detect it."}),
             },
             "optional": {
                 "openai_api_key_env": ("STRING", {

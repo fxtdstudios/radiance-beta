@@ -24,12 +24,11 @@ radiance/
 ├── nodes/                   # ComfyUI node classes — organized sub-package
 │   ├── ai/                  # AI assist · knowledge base · LLM driver
 │   ├── color/               # CDL · colorscience · curves · grade · OCIO · QC
-│   ├── generate/            # engine · fast_vae · HDR LoRA · loader · prompt · sampler
+│   ├── generate/            # engine · HDR LoRA · loader · prompt · sampler
 │   ├── hdr/                 # ACES2 · colorspace · delivery · encoder · smart · uplift
 │   ├── io/                  # EXR I/O · sequence · unified read/write · video I/O
 │   ├── monitor/             # Radiance Viewer · realtime preview
 │   ├── pipeline/            # audio_cut · DNA · layout · MCP bridge · workspace
-│   ├── training/            # SDR degradation · TurboDecoder training
 │   ├── upscale/             # Tiler · image/video upscale · face restore · router
 │   ├── vfx/                 # 3D · depth · motion · optics · overlay · multipass
 │   └── video/               # character · DiT adapter · T2V pipeline · HDR video
@@ -41,7 +40,7 @@ radiance/
 ├── path_utils.py            # Safe path construction (traversal prevention)
 ├── tensor_contract.py       # ensure_4d / ensure_5d tensor shape contracts
 ├── exceptions.py            # RadianceError hierarchy + decorators
-├── tests/                   # Test suite (49 files, pytest)
+├── tests/                   # Test suite (pytest)
 ├── .github/workflows/       # CI (pytest matrix + smoke test + lint-config)
 ├── requirements.txt         # Full production deps
 ├── requirements_windows.txt

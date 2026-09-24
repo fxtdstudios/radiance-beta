@@ -87,7 +87,9 @@ class RadianceLiteViewer:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "image": (image_video_type,),
+                "image": (image_video_type, {
+                    "tooltip": "IMAGE batch or VIDEO to check. Returned unchanged as an IMAGE; "
+                               "input_space decides how it is displayed."}),
             },
             "optional": {
                 "compare_image": (

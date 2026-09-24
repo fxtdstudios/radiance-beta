@@ -98,6 +98,7 @@
   "RadianceMultiMaskVisualPicker",
   "RadianceMultipassAOVReader",
   "RadianceMultipassComposite",
+  "RadianceMultipassEstimate",
   "RadianceMultipassMaster",
   "RadianceMultipassRelight",
   "RadianceNDISender",

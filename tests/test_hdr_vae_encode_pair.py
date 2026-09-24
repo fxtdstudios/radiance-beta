@@ -70,3 +70,36 @@ def test_legacy_aces_output_transform_is_hidden_but_still_works():
     out = ACES2OutputTransform()._apply_tonescale_drt(
         np.full((1, 1, 1, 3), 0.18, dtype=np.float32), peak_luminance=100.0, is_hdr=False)
     assert 0.05 < float(out[0, 0, 0, 0]) < 0.2        # ACES 2.0 SDR grey ~10 nits
+
+
+class _PixelVAE:
+    """A VAE whose latent is the image itself, at 1/8 size: enough to drive
+    the HDR encode/decode wrappers without model weights."""
+    downscale_ratio = 8
+    latent_channels = 4
+
+    def encode(self, pixels):
+        x = pixels[..., :3].movedim(-1, 1)
+        x = torch.nn.functional.avg_pool2d(x, 8)
+        return torch.cat([x, torch.zeros_like(x[:, :1])], dim=1)
+
+    def decode(self, latent):
+        x = torch.nn.functional.interpolate(latent[:, :3], scale_factor=8, mode="nearest")
+        return x.movedim(1, -1)
+
+
+def test_paired_decode_does_not_warn_that_correct_output_is_wrong(caplog):
+    """The pair carries a linear source in LogC4 and says so in radiance_meta.
+    The decoder used to warn 'output colors will be WRONG' on every run of it."""
+    import logging
+    from radiance.nodes.generate.engine import RadianceHDRVAEEncode, RadianceHDRVAEDecode
+    img = torch.rand(1, 64, 64, 3) * 4.0          # scene-linear, above 1.0
+    enc = RadianceHDRVAEEncode()
+    latent = getattr(enc, enc.FUNCTION)(pixels=img, vae=_PixelVAE(), source_space="Linear")[0]
+    assert latent.get("radiance_meta", {}).get("hdr_mode") == "Compress (Log)"
+    dec = RadianceHDRVAEDecode()
+    with caplog.at_level(logging.WARNING):
+        res = getattr(dec, dec.FUNCTION)(samples=latent, vae=_PixelVAE(), target_space="Linear")
+    out = (res["result"] if isinstance(res, dict) else res)[0]
+    assert not [r for r in caplog.records if "LogC4" in r.getMessage() and r.levelno >= logging.WARNING]
+    assert float(out.max()) > 1.5, "the pair should return HDR, not a clipped image"
