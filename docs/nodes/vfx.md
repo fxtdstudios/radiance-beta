@@ -173,7 +173,7 @@ Add compression artifacts (JPEG blocking, color banding).
 | `image` | IMAGE |  |  | Display-encoded image. It is quantised to 8 bits and clipped to 0-1 in every mode, so HDR values are lost; alpha is kept. |
 | `artifact_type` | choice | `JPEG` | `JPEG`, `Banding`, `Both` | JPEG: real JPEG round trip plus block averaging (block_size). Banding: posterise to banding_levels. Both: JPEG then banding. |
 | `quality` | int | 50 | 1 to 100, step 1 | JPEG encoder quality, 1 = worst, 100 = best. Ignored in Banding mode. |
-| `block_size` (optional) | int | 8 | 4 to 32, step 4 | Size in pixels of the square blocks each averaged to one flat colour after the JPEG pass (a mosaic, not a DCT setting). Applies in JPEG and Both. Image sides must be a multiple of it. |
+| `block_size` (optional) | int | 8 | 4 to 32, step 4 | Size in pixels of the square blocks each averaged to one flat colour after the JPEG pass (a mosaic, not a DCT setting). Applies in JPEG and Both. Blocks cut off at the right or bottom edge are averaged over the pixels they have. |
 | `color_subsampling` (optional) | boolean | on |  | Apply chroma subsampling (4:2:0) to simulate video codec color compression. |
 | `banding_levels` (optional) | int | 32 | 4 to 256, step 4 | Quantisation steps per channel in Banding and Both modes (rounded down, so it darkens by up to one step). Fewer = stronger banding. |
 | `noise_amount` (optional) | float | 0 | 0 to 0.1, step 0.005 | Standard deviation of Gaussian noise added at the end, in 0-1 code values (0.01 = about 2.5 of 255). 0 = off. |

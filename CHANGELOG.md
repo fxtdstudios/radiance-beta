@@ -343,6 +343,13 @@ All notable changes to FXTD Radiance will be documented in this file.
   - Optical Flow's Lucas-Kanade fallback still solves one pair at a time: its batched solve differs from the per-pair one by up to 0.07 px.
   - Tests: `tests/test_vfx_efficiency.py` grows to 40.
 
+- **EXR Passes Writer, Compression Artifacts and Scene Cut Detect ran one frame after another (3.5.0, phase 3).** CPU, 1024x576:
+  - *EXR Passes Writer* writes frames in parallel (OpenEXR compresses outside the GIL; up to 8 at once) and converts each pass one frame at a time instead of copying the whole clip first. 24 frames with beauty, normal, albedo and depth: 11.1 s to 5.3 s on this 2-core machine, and it scales with cores. Every file's header, channels and pixels are identical to before (180 files compared across layouts, bit depths and compressions).
+  - *Compression Artifacts* encodes frames in parallel and writes them straight into the output instead of a list that was then stacked: 64 frames 5.3 s to 2.2 s, +888 MB to +485 MB. Identical output, and the seeded noise is still drawn frame by frame in order.
+  - *Compression Artifacts crashed in JPEG or Both mode* when a side was not a multiple of `block_size` (100x100 with the default 8 raised ValueError). Blocks cut off at the right or bottom edge are now averaged over the pixels they have; whole-block images are unchanged.
+  - *Scene Cut Detect analysed every frame twice*, once in each pair it belongs to. Each frame's histograms and edge map are now computed once: 64 frames 4.3 s to 2.3 s, cuts and scores bit-identical.
+  - Tests: `tests/test_vfx_efficiency.py` grows to 43. Three chunked-versus-one-pass checks compare within 1e-6 instead of bit for bit: a vectorised reduction can round differently with the batch's memory alignment, and one did once in about 50 runs.
+
 - **Roto removed (3.5.0).** `◎ Vector Mask Draw (Roto)` (`RadianceVectorMaskDraw`) typed polygon or spline points as text, with no way to draw on the image, so it was slower to use than ComfyUI's own mask editor or a SAM / matting node. It is deleted; 156 nodes load. A saved graph that used it shows it as a missing node. The Video Mask Propagator that shared its file stays, now in `nodes/vfx/mask_propagate.py`.
 
 - **Viewer: Simple / Advanced, one compare, Lite Viewer removed (3.5.0).**

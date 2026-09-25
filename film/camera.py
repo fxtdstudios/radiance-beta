@@ -1,4 +1,5 @@
 import io
+import os
 import torch
 import numpy as np
 from PIL import Image
@@ -622,6 +623,26 @@ class RadianceRollingShutter:
 # =============================================================================
 
 
+def _block_average(result: np.ndarray, block_size: int) -> np.ndarray:
+    """Replace each block_size x block_size block of an (H, W, C) frame by its
+    mean. Blocks cut off at the right or bottom edge are averaged over the
+    pixels they have (the whole-block case is the same arithmetic as before;
+    an image side that was not a multiple of block_size used to raise)."""
+    h, w = result.shape[:2]
+    if h % block_size == 0 and w % block_size == 0:
+        small = result.reshape(h // block_size, block_size, w // block_size, block_size, -1).mean(axis=(1, 3))
+    else:
+        sh, sw = -(-h // block_size), -(-w // block_size)
+        padded = np.zeros((sh * block_size, sw * block_size, result.shape[2]), dtype=np.float32)
+        padded[:h, :w] = result
+        count = np.zeros((sh * block_size, sw * block_size, 1), dtype=np.float32)
+        count[:h, :w] = 1.0
+        sums = padded.reshape(sh, block_size, sw, block_size, -1).sum(axis=(1, 3))
+        small = sums / count.reshape(sh, block_size, sw, block_size, 1).sum(axis=(1, 3))
+    # Nearest-neighbour upsample back (hard blocks), cropped to the frame.
+    return np.repeat(np.repeat(small, block_size, axis=0), block_size, axis=1)[:h, :w]
+
+
 class RadianceCompressionArtifacts:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
     """
@@ -661,7 +682,8 @@ class RadianceCompressionArtifacts:
             "optional": {
                 "block_size": ("INT", {"default": 8, "min": 4, "max": 32, "step": 4,
                     "tooltip": "Size in pixels of the square blocks each averaged to one flat colour after the JPEG pass "
-                    "(a mosaic, not a DCT setting). Applies in JPEG and Both. Image sides must be a multiple of it.",
+                    "(a mosaic, not a DCT setting). Applies in JPEG and Both. Blocks cut off at the right or bottom edge "
+                    "are averaged over the pixels they have.",
                 }),
                 "color_subsampling": ("BOOLEAN", {"default": True,
                     "tooltip": "Apply chroma subsampling (4:2:0) to simulate video codec color compression.",
@@ -711,30 +733,23 @@ class RadianceCompressionArtifacts:
 
         # HDR warning: JPEG round-trip is inherently an 8-bit operation.
         # Any float32 values above 1.0 will be clipped before encoding.
-        if image.max().item() > 1.0:
+        peak = float(image.max()) if image.numel() else 0.0
+        if peak > 1.0:
             logger.warning(
                 "[RadianceCompressionArtifacts] Input contains HDR values (max=%.3f). "
                 "JPEG encoding clips to [0, 1] — HDR values above 1.0 will be lost. "
                 "Apply tone-mapping before this node if HDR preservation is needed.",
-                image.max().item(),
+                peak,
             )
 
-        rng = np.random.default_rng(seed)
-        batch_size = image.shape[0]
-        results = []
+        batch_size, height, width, channels = image.shape
+        has_alpha = channels == 4
 
-        for b in range(batch_size):
-            img = image[b].cpu().numpy()
-            has_alpha = img.shape[-1] == 4
-
-            # FIX 1: Strip alpha before JPEG encode — PIL cannot save RGBA as JPEG
-            # and raises OSError. Restore alpha after encode/decode.
-            if has_alpha:
-                alpha_channel = img[..., 3:4].copy()
-                img_rgb = img[..., :3]
-            else:
-                alpha_channel = None
-                img_rgb = img
+        def degrade(b: int) -> np.ndarray:
+            img = image[b].detach().float().cpu().numpy()
+            # PIL cannot save RGBA as JPEG, so alpha is split off here and put
+            # back after the noise.
+            img_rgb = img[..., :3] if has_alpha else img
 
             img_uint8 = (img_rgb * 255).clip(0, 255).astype(np.uint8)
             pil_img = Image.fromarray(img_uint8)  # Always RGB at this point
@@ -753,41 +768,46 @@ class RadianceCompressionArtifacts:
 
             result = np.array(pil_img).astype(np.float32) / 255.0
 
-            # FIX 2: Apply block_size as block-averaging quantization.
-            # Simulates DCT blocking by downsampling to block grid and
-            # upsampling back — visually identical to 8×8 JPEG macroblocks
-            # without requiring raw DCT access. Applied after JPEG if "Both".
+            # block_size as block averaging: each block is replaced by its mean,
+            # a mosaic that reads as 8x8 JPEG macroblocks without DCT access.
+            # Applied after JPEG in "Both".
             if block_size > 1 and artifact_type in ["JPEG", "Both"]:
-                h, w = result.shape[:2]
-                # Downsample to block grid (floor division → smaller)
-                small_h = max(1, h // block_size)
-                small_w = max(1, w // block_size)
-                small = (
-                    result.reshape(small_h, block_size, small_w, block_size, -1)
-                    .mean(axis=(1, 3))
-                )  # (small_h, small_w, C) — block averages
-                # Upsample back to original size (nearest-neighbour = hard blocks)
-                result = np.repeat(np.repeat(small, block_size, axis=0), block_size, axis=1)
-                # Crop to exact original size (last block may overshoot by < block_size)
-                result = result[:h, :w]
+                result = _block_average(result, block_size)
 
             if artifact_type in ["Banding", "Both"]:
                 result = np.floor(result * banding_levels) / banding_levels
+            return result
 
+        # 3.5.0: frames are encoded in parallel (PIL's JPEG codec runs outside
+        # the GIL) and written straight into the output; they were encoded one
+        # after another into a list that was then stacked, a second copy of
+        # the clip. The noise is still drawn frame by frame in order from one
+        # generator, so a seed gives the same noise as before.
+        rng = np.random.default_rng(seed)
+        out = torch.empty((batch_size, height, width, channels), dtype=torch.float32)
+        workers = max(1, min(batch_size, os.cpu_count() or 1, 8))
+
+        def finish(b: int, result: np.ndarray) -> None:
             # Seeded noise for reproducible results
             if noise_amount > 0:
                 noise = (
                     rng.standard_normal(result.shape).astype(np.float32) * noise_amount
                 )
                 result = np.clip(result + noise, 0, 1)
-
-            # FIX 1 continued: restore alpha after processing
+            out[b, ..., :result.shape[-1]] = torch.from_numpy(result)
             if has_alpha:
-                result = np.concatenate([result, alpha_channel], axis=-1)
+                out[b, ..., 3] = image[b, ..., 3].detach().float().cpu()
 
-            results.append(torch.from_numpy(result))
+        if workers == 1:
+            for b in range(batch_size):
+                finish(b, degrade(b))
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="radiance-jpeg") as pool:
+                for b, result in enumerate(pool.map(degrade, range(batch_size))):
+                    finish(b, result)
 
-        return (torch.stack(results),)
+        return (out,)
 
 
 # =============================================================================

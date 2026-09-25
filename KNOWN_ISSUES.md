@@ -126,7 +126,7 @@ clear backlog.
 
 ## VFX nodes: memory and speed (3.5.0)
 
-The six nodes that broke or crawled at production size, and ten more that held the clip several times over, now work in chunks of frames on the GPU (see the changelog). Still to convert: Multipass Estimate's geometry passes (normals, GTAO, curvature) hold the whole clip on the CPU and its models run one frame at a time; the EXR Passes Writer writes frames serially and stores every channel as 32-bit float; Compression Artifacts and Scene Cut Detect work on the whole clip at once. Multipass Composite returns four full-size images, so with every input connected a long clip needs about eleven clip-sized buffers in RAM. Split long 4K clips for these.
+The six nodes that broke or crawled at production size, ten more that held the clip several times over, and the EXR Passes Writer, Compression Artifacts and Scene Cut Detect are fixed (see the changelog). Still to convert: Multipass Estimate's geometry passes (normals, GTAO, curvature) hold the whole clip on the CPU and its models run one frame at a time; it needs its models to test. Multipass Composite returns four full-size images, so with every input connected a long clip needs about eleven clip-sized buffers in RAM; split long 4K clips for it. All timings so far are CPU; the GPU gains are still to be measured on an RTX 4080.
 
 ## Found while documenting every input (3.5.0)
 
@@ -136,9 +136,6 @@ each tooltip says what really happens, and these are the fixes owed.
 
 **Bugs**
 
-- **Compression Artifacts crashes in JPEG or Both mode** when the image size
-  is not a multiple of `block_size` (100x100 with the default 8 raises
-  ValueError). `film/camera.py`.
 - **ControlNet Apply passes the hint image in the wrong layout** (no
   `movedim(-1, 1)` as stock ComfyUI does) and passes no VAE, so ControlNets
   that need one fail. `nodes/generate/loader.py`.

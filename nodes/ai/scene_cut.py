@@ -90,16 +90,25 @@ def _confidence(raw: float, reference: float) -> float:
     return r / (1.0 + r)
 
 
-def _histogram_diff(a: np.ndarray, b: np.ndarray, bins: int = 64) -> float:
-    """Histogram intersection distance between two frames (0=identical, 2=opposite)."""
+def _histograms(frame: np.ndarray, bins: int = 64) -> list[np.ndarray]:
+    """One frame's normalised per-channel histograms, the input `_histogram_diff` compares."""
+    out = []
+    for c in range(3):
+        h, _ = np.histogram(frame[:, :, c].ravel(), bins=bins, range=(0.0, 1.0))
+        out.append(h.astype(np.float32) / (h.sum() + 1e-8))
+    return out
+
+
+def _histogram_distance(ha: list[np.ndarray], hb: list[np.ndarray]) -> float:
     score = 0.0
     for c in range(3):
-        ha, _ = np.histogram(a[:, :, c].ravel(), bins=bins, range=(0.0, 1.0))
-        hb, _ = np.histogram(b[:, :, c].ravel(), bins=bins, range=(0.0, 1.0))
-        ha = ha.astype(np.float32) / (ha.sum() + 1e-8)
-        hb = hb.astype(np.float32) / (hb.sum() + 1e-8)
-        score += float(np.abs(ha - hb).sum())
+        score += float(np.abs(ha[c] - hb[c]).sum())
     return score / 3.0
+
+
+def _histogram_diff(a: np.ndarray, b: np.ndarray, bins: int = 64) -> float:
+    """Histogram intersection distance between two frames (0=identical, 2=opposite)."""
+    return _histogram_distance(_histograms(a, bins), _histograms(b, bins))
 
 
 #: Box-blur width applied to luma before the gradient. The gradient operator is
@@ -168,9 +177,11 @@ def _edge_diff(a: np.ndarray, b: np.ndarray) -> float:
     cutting to white), and heavy grain still moves it more than a subtle cut
     does. `KNOWN_ISSUES.md` carries the details.
     """
-    mag_a = _edge_map(a)
-    mag_b = _edge_map(b)
+    return _edge_distance(_edge_map(a), _edge_map(b))
 
+
+def _edge_distance(mag_a: np.ndarray, mag_b: np.ndarray) -> float:
+    """`_edge_diff` on two frames' precomputed edge maps."""
     total = float((mag_a + mag_b).sum())
     if total <= 1e-9:
         # Two perfectly flat frames. They may still differ in level, which is
@@ -216,19 +227,32 @@ def detect_cuts(
     if B < 2:
         return [0], np.zeros(max(B - 1, 1), dtype=np.float32)
 
+    # 3.5.0: each frame's histograms and edge map are computed once and kept
+    # for the next pair; every inner frame used to be analysed twice, once as
+    # the later frame of a pair and once as the earlier. Same numbers.
+    use_hist = method != "edge"
+    use_edge = method != "histogram"
+
+    def features(i: int):
+        f = frames[i]
+        return (_histograms(f) if use_hist else None,
+                _edge_map(f) if use_edge else None)
+
     scores = np.zeros(B - 1, dtype=np.float32)
+    prev = features(0)
     for i in range(B - 1):
-        a, b = frames[i], frames[i + 1]
+        cur = features(i + 1)
         if method == "histogram":
-            scores[i] = _confidence(_histogram_diff(a, b), HISTOGRAM_CUT_REFERENCE)
+            scores[i] = _confidence(_histogram_distance(prev[0], cur[0]), HISTOGRAM_CUT_REFERENCE)
         elif method == "edge":
-            scores[i] = _confidence(_edge_diff(a, b), EDGE_CUT_REFERENCE)
+            scores[i] = _confidence(_edge_distance(prev[1], cur[1]), EDGE_CUT_REFERENCE)
         else:  # combined — both terms are now confidences, so the weights mean
                # what they say.
             scores[i] = (
-                0.6 * _confidence(_histogram_diff(a, b), HISTOGRAM_CUT_REFERENCE)
-                + 0.4 * _confidence(_edge_diff(a, b), EDGE_CUT_REFERENCE)
+                0.6 * _confidence(_histogram_distance(prev[0], cur[0]), HISTOGRAM_CUT_REFERENCE)
+                + 0.4 * _confidence(_edge_distance(prev[1], cur[1]), EDGE_CUT_REFERENCE)
             )
+        prev = cur
 
     # Compare the calibrated confidence to the threshold.
     #

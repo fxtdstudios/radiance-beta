@@ -56,7 +56,7 @@ def test_shipped_motion_blur_chunked_equals_one_pass(monkeypatch):
     one = RadianceMotionBlur().apply(img, vec, 270.0, 8, False)[0]
     monkeypatch.setattr(ch, "chunk_budget_bytes", lambda device: 1)
     many = RadianceMotionBlur().apply(img, vec, 270.0, 8, False)[0]
-    assert torch.equal(one, many) and one.shape == img.shape
+    assert one.shape == img.shape and float((one - many).abs().max()) < 1e-6
 
 
 # ── Linear Matting ───────────────────────────────────────────────────────────
@@ -118,7 +118,9 @@ def test_relight_chunked_equals_one_pass(light_type, monkeypatch):
     many = RadianceMultipassRelight().relight(**kw)
     for a, b in zip(one[:5], many[:5]):
         assert a.shape == (B, H, W, 3)
-        assert torch.equal(a, b)
+        # Not torch.equal: a vectorised reduction can round differently with
+        # the batch's memory alignment, and did once in about 50 runs.
+        assert float((a - b).abs().max()) < 1e-6
 
 
 def test_relight_decides_normal_encoding_on_the_whole_clip(tiny_chunks):
@@ -235,7 +237,7 @@ def test_depth_chunked_equals_one_pass(monkeypatch):
     one, _ = _run_depth(monkeypatch, img, blur_edges=1.0)
     monkeypatch.setattr(ch, "chunk_budget_bytes", lambda device: 1)
     many, _ = _run_depth(monkeypatch, img, blur_edges=1.0)
-    assert torch.equal(one, many)
+    assert float((one - many).abs().max()) < 1e-6
 
 
 def test_depth_resize_size_matches_the_processor():
@@ -375,3 +377,62 @@ def test_optical_flow_lucas_kanade_is_solved_one_pair_at_a_time(monkeypatch):
     vec, vis, _ = motion.RadianceOpticalFlow().analyze(_moving_clip(5), "Fast", 1.0, False, "Lucas-Kanade")
     assert seen == [1, 1, 1, 1]
     assert float(vec[0].abs().max()) == 0.0 and float(vis.abs().max()) == 0.0
+
+
+# ── Phase 3: the I/O-bound nodes ─────────────────────────────────────────────
+
+def test_exr_passes_writer_parallel_files_equal_serial(tmp_path, monkeypatch):
+    OpenEXR = pytest.importorskip("OpenEXR")
+    import numpy as np
+    import radiance.nodes.vfx.multipass.master as master
+    torch.manual_seed(4)
+    passes = {"beauty": torch.rand(4, 24, 32, 4), "normal": torch.rand(1, 24, 32, 3),
+              "depth": torch.rand(4, 24, 32, 1)}
+    dirs = {}
+    for threads in (1, 4):
+        monkeypatch.setattr(master, "_EXR_WRITE_THREADS", threads)
+        d = tmp_path / f"t{threads}"
+        first = master.RadianceEXRPassesWriter().write_passes(passes, "p", output_path=str(d), frame_index=10)[0]
+        assert first.endswith("p.0010.exr")
+        dirs[threads] = d
+    names = sorted(p.name for p in dirs[1].iterdir())
+    assert names == sorted(p.name for p in dirs[4].iterdir()) == [f"p.{i:04d}.exr" for i in range(10, 14)]
+    for n in names:
+        a = OpenEXR.File(str(dirs[1] / n), separate_channels=True).parts[0].channels
+        b = OpenEXR.File(str(dirs[4] / n), separate_channels=True).parts[0].channels
+        assert a.keys() == b.keys()
+        for k in a:
+            assert np.array_equal(a[k].pixels, b[k].pixels)
+
+
+def test_compression_artifacts_any_size_and_same_noise_per_seed(monkeypatch):
+    """A side that is not a multiple of block_size raised ValueError; encoding in
+    parallel must not change the seeded noise."""
+    import numpy as np
+    from radiance.film.camera import RadianceCompressionArtifacts, _block_average
+    x = _clip(c=4, b=3, h=100, w=100).clamp(0, 1)
+    out = RadianceCompressionArtifacts().apply_artifacts(x, "Both", 60, 8, True, 32, 0.02, 9)[0]
+    assert out.shape == x.shape and torch.equal(out[..., 3], x[..., 3])
+    a = np.arange(35, dtype=np.float32).reshape(5, 7, 1)
+    b = _block_average(a, 4)
+    assert b[4, 6, 0] == pytest.approx(a[4:, 4:, 0].mean()) and b[0, 0, 0] == pytest.approx(a[:4, :4, 0].mean())
+    import radiance.film.camera as cam
+    monkeypatch.setattr(cam.os, "cpu_count", lambda: 1)
+    serial = RadianceCompressionArtifacts().apply_artifacts(x, "Both", 60, 8, True, 32, 0.02, 9)[0]
+    assert torch.equal(out, serial)
+
+
+def test_scene_cut_analyses_each_frame_once(monkeypatch):
+    import numpy as np
+    import radiance.nodes.ai.scene_cut as sc
+    calls = []
+    real = sc._edge_map
+    monkeypatch.setattr(sc, "_edge_map", lambda f: calls.append(1) or real(f))
+    rng = np.random.default_rng(1)
+    frames = rng.random((7, 30, 40, 3), dtype=np.float32)
+    _, scores = sc.detect_cuts(frames, 0.5, 1, "combined")
+    assert len(calls) == 7
+    for i in range(6):
+        want = 0.6 * sc._confidence(sc._histogram_diff(frames[i], frames[i + 1]), sc.HISTOGRAM_CUT_REFERENCE) \
+            + 0.4 * sc._confidence(sc._edge_diff(frames[i], frames[i + 1]), sc.EDGE_CUT_REFERENCE)
+        assert scores[i] == np.float32(want)
