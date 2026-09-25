@@ -1,10 +1,9 @@
-"""Model weights must not be fetched without the operator saying so.
+"""One gate decides whether Radiance may fetch model weights.
 
-Real-ESRGAN, HAT-L, SwinIR, Depth Anything V2 and DSINE all download on first
-use — 67 MB to 2.4 GB between them — and it used to begin the moment a graph
-was queued. `nodes/upscale` had an opt-*out* (`RADIANCE_UPSCALE_OFFLINE=1`);
-`nodes/vfx/multipass` had no gate at all. The default is now ask-first, in one
-place, for both.
+Every downloader shares it. Since 3.5.0 the default is to download on first
+use (from a pinned source, SHA-256 checked, see radiance.core.model_fetch);
+RADIANCE_ALLOW_DOWNLOADS=0, the Hugging Face offline flags and the legacy
+per-area *_OFFLINE=1 flags always stop it.
 """
 import os
 import sys
@@ -28,11 +27,14 @@ def _clean_env(monkeypatch):
     monkeypatch.delenv(LEGACY_UPSCALE_OFFLINE_ENV, raising=False)
 
 
-class TestTheDefaultIsNo:
+class TestTheDefaultIsDownload:
 
-    def test_unset_means_do_not_download(self):
-        """The whole point: a fresh install does not spend someone's bandwidth."""
-        assert downloads_allowed() is False
+    def test_unset_means_download_on_first_use(self):
+        """3.5.0: a node that needs a model gets it without configuration."""
+        assert downloads_allowed() is True
+
+    def test_a_caller_can_still_ask_first(self):
+        assert downloads_allowed(default=False) is False
 
     def test_explicit_opt_in_allows_it(self, monkeypatch):
         monkeypatch.setenv(ALLOW_ENV, "1")
@@ -48,9 +50,10 @@ class TestTheDefaultIsNo:
         monkeypatch.setenv(ALLOW_ENV, value)
         assert downloads_allowed() is False
 
-    def test_garbage_falls_back_to_refusing(self, monkeypatch):
+    def test_garbage_falls_back_to_the_default(self, monkeypatch):
         monkeypatch.setenv(ALLOW_ENV, "maybe")
-        assert downloads_allowed() is False
+        assert downloads_allowed() is True
+        assert downloads_allowed(default=False) is False
 
 
 class TestTheLegacyOptOutStillCounts:
@@ -79,7 +82,8 @@ class TestTheRefusalIsActionable:
         assert "https://example.invalid/x4.pth" in msg
         assert ALLOW_ENV in msg, "the message must say how to allow it"
 
-    def test_require_consent_logs_the_refusal(self, caplog):
+    def test_require_consent_logs_the_refusal(self, caplog, monkeypatch):
+        monkeypatch.setenv(ALLOW_ENV, "0")
         with caplog.at_level("ERROR"):
             allowed = require_consent("Depth Anything V2 Large", size_mb=1340)
         assert allowed is False
@@ -89,23 +93,24 @@ class TestTheRefusalIsActionable:
 class TestBothDownloadersAreGated:
     """One helper, used by every downloader — not several mechanisms with one missing."""
 
-    def test_upscale_downloader_refuses_by_default(self, monkeypatch, tmp_path):
+    def test_upscale_downloader_stops_when_downloads_are_off(self, monkeypatch, tmp_path):
         pytest.importorskip("torch")
         from radiance.nodes.upscale import upscale as up
 
         def _boom(*a, **k):
-            raise AssertionError("a download was attempted without consent")
+            raise AssertionError("a download was attempted with downloads off")
 
+        monkeypatch.setenv(ALLOW_ENV, "0")
         monkeypatch.setattr(up, "_get_models_dir", lambda sub: str(tmp_path))
-        monkeypatch.setitem(sys.modules, "huggingface_hub", None)
-        monkeypatch.setattr("urllib.request.urlretrieve", _boom, raising=False)
+        monkeypatch.setattr("urllib.request.urlopen", _boom)
 
         key = next(iter(up._UPSCALE_MODEL_REGISTRY))
         assert up._download_upscale_model(key) is None
 
-    def test_multipass_downloader_refuses_by_default(self, monkeypatch, tmp_path):
+    def test_multipass_downloader_stops_when_downloads_are_off(self, monkeypatch, tmp_path):
         """This path previously had no gate whatsoever."""
         pytest.importorskip("torch")
+        monkeypatch.setenv(ALLOW_ENV, "0")
         from radiance.nodes.vfx.multipass import core
 
         def _boom(*a, **k):
@@ -157,12 +162,26 @@ class TestTheAIUpscaleDownloaderIsGated:
         ai._MODEL_CACHE.clear() if hasattr(ai._MODEL_CACHE, "clear") else None
         return node, calls
 
-    def test_refuses_without_consent(self, monkeypatch, tmp_path):
-        monkeypatch.delenv(ALLOW_ENV, raising=False)
-        node, calls = self._node(monkeypatch, tmp_path)
-        model, info = node._load_model("RealESRGAN_x4plus", auto_download=True)
-        assert model is None and calls == []
-        assert "RADIANCE_ALLOW_DOWNLOADS" in info
+    def test_stops_when_downloads_are_off(self, monkeypatch, tmp_path):
+        monkeypatch.setenv(ALLOW_ENV, "0")
+        self._node(monkeypatch, tmp_path)          # patches folder_paths / comfy.utils
+        from radiance.image import upscale as ai
+
+        def _boom(*a, **k):
+            raise AssertionError("a download was attempted with downloads off")
+        monkeypatch.setattr("urllib.request.urlopen", _boom)
+        real = ai.RadianceAIUpscale()              # the real downloader, not the mock
+        model, info = real._load_model("RealESRGAN_x4plus", auto_download=True)
+        assert model is None
+        assert "turned off" in info or "downloads are" in info
+
+    def test_pins_every_file_it_can_download(self):
+        pytest.importorskip("torch")
+        from radiance.image import upscale as ai
+        import re
+        for name, (url, sha, size) in ai.RadianceAIUpscale.MODEL_FILES.items():
+            assert re.fullmatch(r"[0-9a-f]{64}", sha) and size > 0, name
+            assert "/resolve/main/" not in url, name
 
     def test_auto_download_off_is_honoured_even_with_consent(self, monkeypatch, tmp_path):
         monkeypatch.setenv(ALLOW_ENV, "1")
@@ -171,8 +190,8 @@ class TestTheAIUpscaleDownloaderIsGated:
         assert model is None and calls == []
         assert "auto_download is off" in info
 
-    def test_downloads_with_consent_and_auto_download(self, monkeypatch, tmp_path):
-        monkeypatch.setenv(ALLOW_ENV, "1")
+    def test_downloads_by_default_with_auto_download(self, monkeypatch, tmp_path):
+        monkeypatch.delenv(ALLOW_ENV, raising=False)
         node, calls = self._node(monkeypatch, tmp_path)
         node._load_model("RealESRGAN_x4plus", auto_download=True)
         assert len(calls) == 1

@@ -262,9 +262,36 @@ frame when it fits in memory; `pixel_tile_size` only applies when it does
 not, because the network normalises over its input and tiles shift the
 result.
 
-The other model downloads Radiance can make (Real-ESRGAN, HAT-L, SwinIR,
-Depth Anything V2, DSINE; 67 MB to 2.4 GB) still ask first: set
-`RADIANCE_ALLOW_DOWNLOADS=1` to allow them.
+### Models every other node downloads
+
+Every node that needs a model downloads it the first time it runs. Each file
+is pinned (a fixed Hugging Face commit or the original release file) and its
+SHA-256 is checked before it is installed; a file that does not match is
+deleted. Downloads go to a `.part` file and resume after an interruption, and
+ComfyUI's progress bar shows them.
+
+| Node | Model | Size | From | Installed to |
+| :--- | :--- | :--- | :--- | :--- |
+| Upscale Image / Video, Tier 1 | Real-ESRGAN x4+, x2+, x4+ anime | 18-67 MB | [xinntao/Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN/releases) | `models/upscale_models/` |
+| Upscale Image / Video, Tier 2 | SwinIR-L x4 real-world GAN | 142 MB | [JingyunLiang/SwinIR](https://github.com/JingyunLiang/SwinIR/releases) | `models/upscale_models/` |
+| Upscale Image / Video, Tier 3 | SD x4 upscaler (diffusers) | 3.5 GB | [stabilityai/stable-diffusion-x4-upscaler](https://huggingface.co/stabilityai/stable-diffusion-x4-upscaler) | Hugging Face cache |
+| Upscale Face Restore | CodeFormer, GFPGAN 1.4, RetinaFace | 110-377 MB | original GitHub releases | `models/facerestore_models/`, `models/facedetection/` |
+| AI Upscale | SUPIR v0F / v0Q (fp16), Real-ESRGAN | 2.7 GB each | [Kijai/SUPIR_pruned](https://huggingface.co/Kijai/SUPIR_pruned) | `models/upscale_models/` |
+| Depth Map Generator | Depth Anything V2 Small / Base / Large | 99 MB-1.3 GB | [depth-anything](https://huggingface.co/depth-anything) | Hugging Face cache |
+| Read Models (`auto_download`) | the 60 checkpoints, text encoders and VAEs in its presets (FLUX.1 / FLUX.2 / klein, SDXL, LTX-2.3 / 2.5, MiniMax-H3) | 4 MB-66 GB | pinned Hugging Face commits | the matching `models/` folder |
+
+**Gated repositories.** FLUX.2-dev, FLUX.2-klein 9B and LTX-2.5 require
+accepting their licence on Hugging Face. Accept it on the model page, set
+`HF_TOKEN` to a read token (or run `huggingface-cli login`) and restart
+ComfyUI; the download then runs automatically. Without the token the node
+stops with a message giving both steps.
+
+**Installed by hand.** HAT-L (Upscale Tier 2) is published only on Google
+Drive, so there is no pinned download: get it from the
+[HAT page](https://github.com/XPixelGroup/HAT#how-to-test) and save it as
+`models/upscale_models/HAT_L_x4.pth` / `HAT_L_x2.pth`. Until then Tier 2
+uses SwinIR-L at 4x and Real-ESRGAN at 2x. SeedVR2 needs the
+ComfyUI-SeedVR2_VideoUpscaler node pack, which fetches its own weights.
 
 The latent-space RUDRA decoders that earlier releases loaded inside HDR VAE
 Decode (`rudra_turbo_decoder_*` / `rudra_full_decoder_*`) were retired in
@@ -498,7 +525,8 @@ behaviour; set them where you start ComfyUI and restart it.
 
 | Variable | What it does |
 | :--- | :--- |
-| `RADIANCE_ALLOW_DOWNLOADS` | `0` never downloads any model. `1` also allows the larger third-party weights (upscalers, depth), which otherwise ask first. Multipass Estimate downloads when its `download_missing_models` switch is on, unless this is `0`. |
+| `RADIANCE_ALLOW_DOWNLOADS` | Models download on first use by default. `0` never downloads any model; a missing one stops the node with the file name, size and folder to install it by hand. |
+| `HF_TOKEN` | Hugging Face read token, used for the gated repositories (FLUX.2-dev, FLUX.2-klein 9B, LTX-2.5) once their licence is accepted. `huggingface-cli login` works too. |
 | `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE` | `1` treats the machine as offline; nothing is downloaded. |
 | `RADIANCE_SDR2HDR_PIXEL` | Path to a specific RUDRA SDR → HDR checkpoint. |
 | `RADIANCE_TEMPORAL_RUDRA` | Path to a temporal RUDRA checkpoint for ordered video. |

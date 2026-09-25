@@ -20,6 +20,15 @@ DEPTH_MODELS = {
     "Large (335M - Best)": "depth-anything/Depth-Anything-V2-Large-hf",
 }
 
+#: Commit of each model repository that is loaded (3.5.0: pinned; it was
+#: "main", so a change upstream would change every depth map). Hugging Face
+#: checks every file against its sha256 as it downloads.
+DEPTH_REVISIONS = {
+    "depth-anything/Depth-Anything-V2-Small-hf": "5426e4f0f36572d16453bbda7a8389317b1bef99",
+    "depth-anything/Depth-Anything-V2-Base-hf": "b1958afc87fb45a9e3746cb387596094de553ed8",
+    "depth-anything/Depth-Anything-V2-Large-hf": "7581137eff8d4e94f6e796d3baea0e9fa79b22d2",
+}
+
 # Thread-safe cache for loaded models, keyed by (model_id, device_str).
 # Separate entries per device prevent the in-place .to(device) race
 # where two callers on different devices mutate the same nn.Module.
@@ -68,9 +77,9 @@ def download_and_load_model(model_size: str, device: torch.device):
             # Download and cache on the requested device.
             # Each (model_id, device) pair gets its own parameter copy
             # so concurrent callers on different devices never race.
-            # Depth Anything V2 went straight to Hugging Face here, past the
-            # consent gate every other downloader shares (and Base / Large are
-            # CC-BY-NC-4.0). Without consent, load only what is cached.
+            # Downloads on first use through the shared consent gate
+            # (RADIANCE_ALLOW_DOWNLOADS=0 or an offline flag loads only what is
+            # cached). Base and Large are CC-BY-NC-4.0.
             from radiance.core.consent import downloads_allowed, refusal_message
             local_only = not downloads_allowed()
             try:
@@ -88,10 +97,10 @@ def download_and_load_model(model_size: str, device: torch.device):
             try:
                 if model_id not in _processor_cache:
                     _processor_cache[model_id] = AutoImageProcessor.from_pretrained(
-                        model_id, revision="main", local_files_only=local_only
+                        model_id, revision=DEPTH_REVISIONS.get(model_id, "main"), local_files_only=local_only
                     )
                 model = AutoModelForDepthEstimation.from_pretrained(
-                    model_id, revision="main", local_files_only=local_only
+                    model_id, revision=DEPTH_REVISIONS.get(model_id, "main"), local_files_only=local_only
                 )
                 model.eval()
                 logger.info(f"Depth model loaded: {model_id}")

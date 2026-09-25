@@ -172,6 +172,20 @@ removes it, with a test per item.
 - **No audio.** Playback is picture only.
 - **Pro scope "False colour" mode** is a display-level zone map, not the ARRI bands of the viewer overlay.
 
+## Models that cannot download on their own (3.5.0)
+
+Every other model downloads on first use (see the README, "Models every other
+node downloads").
+
+- **HAT-L** (Upscale Tier 2) is published only on Google Drive, so there is no
+  pinned download. Install it by hand from the HAT page; until then Tier 2
+  uses SwinIR-L at 4x and Real-ESRGAN at 2x, and says so in the log.
+- **Gated repositories** (FLUX.2-dev, FLUX.2-klein 9B and base 9B, LTX-2.5)
+  download only after the licence is accepted on Hugging Face and `HF_TOKEN`
+  is set; the node stops with both steps until then.
+- **SeedVR2** needs the ComfyUI-SeedVR2_VideoUpscaler node pack, which fetches
+  its own weights; without it Tier 3 uses the SD x4 upscaler.
+
 ## Minor
 
 - **Three legacy nodes are hidden, not removed.** HDR Latent Encoder and HDR

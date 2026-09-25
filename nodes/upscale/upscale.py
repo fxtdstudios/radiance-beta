@@ -33,9 +33,11 @@ TILING ENGINE
     • Cosine feathering mask      fallback for unsupported backends
 
 MODEL AUTO-DOWNLOAD
-  Real-ESRGAN and HAT weights are fetched on first use into ComfyUI
-  models/upscale_models/, only with download consent
-  (RADIANCE_ALLOW_DOWNLOADS=1 or the consent file).
+  Real-ESRGAN, SwinIR-L, CodeFormer, GFPGAN and RetinaFace are fetched on
+  first use from their original release files into ComfyUI's models folders,
+  pinned to a SHA-256 and verified before they are installed. HAT-L has no
+  direct download and is installed by hand. RADIANCE_ALLOW_DOWNLOADS=0 (or
+  RADIANCE_UPSCALE_OFFLINE=1) turns downloads off.
 
 CONFIDENCE MAP (tile weight, not model confidence)
   The confidence output is geometric: 1.0 at tile centres, falling toward
@@ -70,8 +72,6 @@ logger = logging.getLogger("radiance.upscale")
 _UPSCALE_MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
     # ── Tier 1: Real-ESRGAN x4+ (general-purpose GAN) ─────────────────────
     "realesrgan_x4plus": {
-        "hf_repo":  "ai-forever/Real-ESRGAN",
-        "hf_file":  "RealESRGAN_x4plus.pth",
         "url":      "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
         "filename": "RealESRGAN_x4plus.pth",
         "subdir":   "upscale_models",
@@ -79,10 +79,10 @@ _UPSCALE_MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "scale":    4,
         "note":     "Real-ESRGAN x4+ — general purpose GAN upscaler",
         "tier":     1,
+        "sha256":   "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1",
+        "size":     67040989,
     },
     "realesrgan_x4plus_anime": {
-        "hf_repo":  "ai-forever/Real-ESRGAN",
-        "hf_file":  "RealESRGAN_x4plus_anime_6B.pth",
         "url":      "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
         "filename": "RealESRGAN_x4plus_anime_6B.pth",
         "subdir":   "upscale_models",
@@ -90,10 +90,10 @@ _UPSCALE_MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "scale":    4,
         "note":     "Real-ESRGAN x4+ anime — illustration / stylised content",
         "tier":     1,
+        "sha256":   "f872d837d3c90ed2e05227bed711af5671a6fd1c9f7d7e91c911a61f155e99da",
+        "size":     17938799,
     },
     "realesrgan_x2plus": {
-        "hf_repo":  "ai-forever/Real-ESRGAN",
-        "hf_file":  "RealESRGAN_x2plus.pth",
         "url":      "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
         "filename": "RealESRGAN_x2plus.pth",
         "subdir":   "upscale_models",
@@ -101,11 +101,11 @@ _UPSCALE_MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "scale":    2,
         "note":     "Real-ESRGAN x2+ — 2x fast upscale",
         "tier":     1,
+        "sha256":   "49fafd45f8fd7aa8d31ab2a22d14d91b536c34494a5cfe31eb5d89c2fa266abb",
+        "size":     67061725,
     },
     # ── Tier 2: SwinIR-L + HAT-L (transformer quality) ────────────────────
     "swinir_l_x4": {
-        "hf_repo":  "Iceclear/StableSR",
-        "hf_file":  "003_realSR_BSRGAN_DFOWMFC_s64w8_SwinIR-L_x4_GAN.pth",
         "url":      "https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/003_realSR_BSRGAN_DFOWMFC_s64w8_SwinIR-L_x4_GAN.pth",
         "filename": "SwinIR_L_x4_real_GAN.pth",
         "subdir":   "upscale_models",
@@ -113,11 +113,16 @@ _UPSCALE_MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "scale":    4,
         "note":     "SwinIR-L x4 real-world GAN — transformer quality baseline",
         "tier":     2,
+        "sha256":   "99adfa91350a84c99e946c1eb3d8fce34bc28f57d807b09dc8fe40a316328c0a",
+        "size":     142473939,
     },
     "hat_l_x4": {
-        "hf_repo":  "XPixelGroup/HAT",
-        "hf_file":  "HAT-L_SRx4_ImageNet-pretrain.pth",
-        "url":      "https://github.com/XPixelGroup/HAT/releases/download/v1.0.0/HAT-L_SRx4.pth",
+        # The official HAT-L weights are published only on Google Drive (see
+        # the page below); there is no pinned direct download, so this model
+        # is installed by hand. Without it Tier 2 uses SwinIR-L at 4x and
+        # Real-ESRGAN at 2x, which do download.
+        "url":      None,
+        "manual_url": "https://github.com/XPixelGroup/HAT#how-to-test",
         "filename": "HAT_L_x4.pth",
         "subdir":   "upscale_models",
         "size_mb":  96,
@@ -126,9 +131,12 @@ _UPSCALE_MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "tier":     2,
     },
     "hat_l_x2": {
-        "hf_repo":  "XPixelGroup/HAT",
-        "hf_file":  "HAT-L_SRx2_ImageNet-pretrain.pth",
-        "url":      "https://github.com/XPixelGroup/HAT/releases/download/v1.0.0/HAT-L_SRx2.pth",
+        # The official HAT-L weights are published only on Google Drive (see
+        # the page below); there is no pinned direct download, so this model
+        # is installed by hand. Without it Tier 2 uses SwinIR-L at 4x and
+        # Real-ESRGAN at 2x, which do download.
+        "url":      None,
+        "manual_url": "https://github.com/XPixelGroup/HAT#how-to-test",
         "filename": "HAT_L_x2.pth",
         "subdir":   "upscale_models",
         "size_mb":  96,
@@ -138,15 +146,15 @@ _UPSCALE_MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     # ── Tier 3: Diffusion creative (SD x4 upscaler) ────────────────────────
     "sd_x4_upscaler": {
-        "hf_repo":  "stabilityai/stable-diffusion-x4-upscaler",
-        "hf_file":  "x4-upscaler-ema.ckpt",
-        "url":      "https://huggingface.co/stabilityai/stable-diffusion-x4-upscaler/resolve/main/x4-upscaler-ema.ckpt",
+        "url":      "https://huggingface.co/stabilityai/stable-diffusion-x4-upscaler/resolve/572c99286543a273bfd17fac263db5a77be12c4c/x4-upscaler-ema.ckpt",
         "filename": "sd_x4_upscaler_ema.ckpt",
         "subdir":   "upscale_models",
         "size_mb":  2400,
         "scale":    4,
         "note":     "Stable Diffusion x4 Upscaler (EMA) — latent diffusion creative upscale",
         "tier":     3,
+        "sha256":   "57c63b7ed94406ba07e93f38e82622ff61952bb3fc0dec684a4058fa880cddd0",
+        "size":     3531514018,
     },
 }
 
@@ -241,9 +249,9 @@ def _verify_or_report_sha256(dest: str, info: Dict[str, Any], key: str) -> bool:
 def _offline_mode() -> bool:
     """True when auto-download is disabled (airgapped / studio offline).
 
-    Kept for backward compatibility. The decision now lives in
-    `radiance.core.consent`, which defaults to *ask first* rather than
-    download-unless-told-otherwise.
+    The decision lives in `radiance.core.consent`: downloads are on unless
+    RADIANCE_ALLOW_DOWNLOADS=0, RADIANCE_UPSCALE_OFFLINE=1 or an offline flag
+    is set.
     """
     from radiance.core.consent import downloads_allowed, LEGACY_UPSCALE_OFFLINE_ENV
     return not downloads_allowed(legacy_offline_env=LEGACY_UPSCALE_OFFLINE_ENV)
@@ -279,15 +287,14 @@ def _apply_color_transfer(t: "torch.Tensor", encoding: str, decode: bool = False
 
 
 def _download_upscale_model(key: str, force: bool = False) -> Optional[str]:
-    """
-    Download an upscale model by registry key.
-    Returns local file path or None on failure.
+    """Local path of an upscale / face model, downloading it on first use.
 
-    Downloads require consent (see radiance.core.consent): set
-    RADIANCE_ALLOW_DOWNLOADS=1 to permit them. The legacy
-    RADIANCE_UPSCALE_OFFLINE=1 opt-out is still honoured. Without consent the
-    model must already be present locally, otherwise a clear error names the
-    expected path so it can be placed manually.
+    Every entry is pinned to its original release file and SHA-256; the
+    download goes through radiance.core.model_fetch (verified before it is
+    installed, resumed after an interruption). RADIANCE_ALLOW_DOWNLOADS=0 or
+    the legacy RADIANCE_UPSCALE_OFFLINE=1 stop it. A model with no pinned
+    download (HAT-L) must be installed by hand; the log says where from.
+    Returns None when the model is not available.
     """
     if key not in _UPSCALE_MODEL_REGISTRY:
         logger.error(f"[Radiance/Upscale] Unknown model key '{key}'")
@@ -301,65 +308,21 @@ def _download_upscale_model(key: str, force: bool = False) -> Optional[str]:
         logger.debug(f"[Radiance/Upscale] Already present: {dest}")
         return dest
 
-    from radiance.core.consent import require_consent, LEGACY_UPSCALE_OFFLINE_ENV
-    if not require_consent(
-        info.get("note", key),
-        size_mb=info.get("size_mb"),
-        dest=dest,
-        url=info.get("url"),
-        legacy_offline_env=LEGACY_UPSCALE_OFFLINE_ENV,
-    ):
+    if not info.get("url"):
+        logger.warning(
+            f"[Radiance/Upscale] {info.get('note', key)} is not installed and has no automatic "
+            f"download. Get it from {info.get('manual_url')} and save it as {dest}.")
         return None
 
-    logger.info(f"[Radiance/Upscale] Downloading {info['note']} (~{info['size_mb']} MB)...")
-
-    # Path 1: huggingface_hub
+    from radiance.core.consent import LEGACY_UPSCALE_OFFLINE_ENV
+    from radiance.core.model_fetch import ModelFetchError, fetch
+    if force and os.path.isfile(dest):
+        os.remove(dest)
     try:
-        from huggingface_hub import hf_hub_download  # type: ignore
-        local = hf_hub_download(
-            repo_id=info["hf_repo"],
-            filename=info["hf_file"],
-            local_dir=save_dir,
-            local_dir_use_symlinks=False,
-        )
-        if os.path.abspath(local) != os.path.abspath(dest):
-            import shutil
-            shutil.copy2(local, dest)
-        if not _verify_or_report_sha256(dest, info, key):
-            return None
-        logger.info(f"[Radiance/Upscale] OK huggingface_hub -> {dest}")
-        return dest
-    except ImportError as _exc:
-        logger.debug(
-            "[Radiance] _download_upscale_model(): ignoring %s from `from huggingface_hub import hf_hub_download`: %s",
-            type(_exc).__name__, _exc,
-        )
-    except Exception as e:
-        logger.warning(f"[Radiance/Upscale] hf_hub failed: {e}; falling back to urllib")
-
-    # Path 2: urllib + atomic rename
-    tmp  = dest + ".part"
-    last = [-1]
-
-    def _hook(count, block, total):
-        if total > 0:
-            pct = min(100, count * block * 100 // total)
-            if pct // 10 != last[0] // 10:
-                logger.info(f"[Radiance/Upscale]   {key}: {pct}%")
-                last[0] = pct
-
-    try:
-        urllib.request.urlretrieve(info["url"], tmp, reporthook=_hook)
-        os.replace(tmp, dest)
-        if not _verify_or_report_sha256(dest, info, key):
-            return None
-        logger.info(f"[Radiance/Upscale] OK urllib -> {dest}")
-        return dest
-    except Exception as e:
-        logger.error(f"[Radiance/Upscale] Download failed: {e}")
-        for f in (tmp, dest):
-            if os.path.isfile(f) and os.path.getsize(f) < 1024:
-                os.remove(f)
+        return fetch(info["url"], dest, sha256=info["sha256"], size=info.get("size"),
+                     label=info.get("note", key), legacy_offline_env=LEGACY_UPSCALE_OFFLINE_ENV)
+    except ModelFetchError as e:
+        logger.error("%s", e)
         return None
 
 
@@ -976,6 +939,10 @@ def _load_tier2(model_key: str, scale: int, device: torch.device) -> Any:
 _DIFFUSION_PIPE_CACHE = GPUModelCache(max_size=1)
 
 
+#: stabilityai/stable-diffusion-x4-upscaler commit the diffusers pipeline loads.
+_SD_X4_REVISION = "572c99286543a273bfd17fac263db5a77be12c4c"
+
+
 def _load_sd_x4_pipeline(device: torch.device) -> Any:
     """
     Load the stabilityai/stable-diffusion-x4-upscaler pipeline via diffusers.
@@ -994,6 +961,7 @@ def _load_sd_x4_pipeline(device: torch.device) -> Any:
         # Consent gate: without it, load only a copy already in the HF cache.
         pipe = StableDiffusionUpscalePipeline.from_pretrained(
             "stabilityai/stable-diffusion-x4-upscaler",
+            revision=_SD_X4_REVISION,       # pinned; Hugging Face checks each file's sha256
             torch_dtype=dtype,
             local_files_only=_offline_mode(),
         )
@@ -1088,23 +1056,14 @@ def _load_seedvr2_pipeline(device: torch.device) -> Any:
     except Exception as e:
         logger.warning(f"[Radiance/Upscale] SeedVR2 load attempt failed: {e}")
 
-    # Attempt 2: diffusers VideoUpscalePipeline (if SeedVR2 is on HF)
-    try:
-        from diffusers import DiffusionPipeline  # type: ignore
-        pipe = DiffusionPipeline.from_pretrained(
-            "ByteDance/SeedVR2",
-            torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
-            local_files_only=_offline_mode(),
-        )
-        pipe = pipe.to(device)
-        _DIFFUSION_PIPE_CACHE.put(cache_key, pipe)
-        logger.info("[Radiance/Upscale] SeedVR2 (diffusers) pipeline loaded")
-        return pipe
-    except Exception as e:
-        raise RuntimeError(
-            f"[Radiance/Upscale] SeedVR2 not available ({e}). "
-            "Install ComfyUI-SeedVR2 or: pip install diffusers"
-        )
+    # SeedVR2 is not a diffusers pipeline (its weights, ByteDance-Seed/SeedVR2-3B
+    # and -7B, load through the seedvr2 package), so there is nothing to fetch
+    # here. The old second attempt loaded "ByteDance/SeedVR2" through diffusers,
+    # a repository that does not exist.
+    raise RuntimeError(
+        "[Radiance/Upscale] SeedVR2 needs the ComfyUI-SeedVR2_VideoUpscaler node pack "
+        "(it downloads its own weights). Falling back to the SD x4 upscaler."
+    )
 
 
 def _seedvr2_infer(
@@ -1342,7 +1301,15 @@ def _build_upscale_fn(
                      else "swinir_l_x4"
         label2     = f"{'HAT-L' if use_hat else 'SwinIR-L'} x{scale_int} (Tier 2)"
         try:
-            model2 = _load_tier2(model_key2, scale_int, device)
+            try:
+                model2 = _load_tier2(model_key2, scale_int, device)
+            except RuntimeError:
+                # HAT-L has no automatic download; at 4x SwinIR-L (which
+                # downloads) is the Tier 2 model until HAT-L is installed.
+                if not (use_hat and scale_int >= 4):
+                    raise
+                model_key2, label2 = "swinir_l_x4", f"SwinIR-L x{scale_int} (Tier 2, HAT-L not installed)"
+                model2 = _load_tier2(model_key2, scale_int, device)
             # Determine call path: spandrel ModelDescriptor vs plain nn.Module
             is_spandrel = not isinstance(model2, nn.Module)
 
@@ -2459,8 +2426,6 @@ class RadianceUpscaleRouter:
 # Add face restore model entries to the shared registry at module level
 _UPSCALE_MODEL_REGISTRY.update({
     "codeformer": {
-        "hf_repo":  "sczhou/CodeFormer",
-        "hf_file":  "codeformer.pth",
         "url":      "https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth",
         "filename": "codeformer.pth",
         "subdir":   "facerestore_models",
@@ -2468,10 +2433,10 @@ _UPSCALE_MODEL_REGISTRY.update({
         "scale":    1,
         "note":     "CodeFormer — blind face restoration with fidelity control",
         "tier":     3,
+        "sha256":   "1009e537e0c2a07d4cabce6355f53cb66767cd4b4297ec7a4a64ca4b8a5684b7",
+        "size":     376637898,
     },
     "gfpgan_v1.4": {
-        "hf_repo":  "TencentARC/GFPGANv1.4",
-        "hf_file":  "GFPGANv1.4.pth",
         "url":      "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth",
         "filename": "GFPGANv1.4.pth",
         "subdir":   "facerestore_models",
@@ -2479,10 +2444,10 @@ _UPSCALE_MODEL_REGISTRY.update({
         "scale":    1,
         "note":     "GFPGANv1.4 — GAN-based face restoration",
         "tier":     2,
+        "sha256":   "e2cd4703ab14f4d01fd1383a8a8b266f9a5833dacee8e6a79d3bf21a1b6be5ad",
+        "size":     348632874,
     },
     "retinaface_resnet50": {
-        "hf_repo":  "sczhou/CodeFormer",
-        "hf_file":  "detection_Resnet50_Final.pth",
         "url":      "https://github.com/xinntao/facexlib/releases/download/v0.1.0/detection_Resnet50_Final.pth",
         "filename": "detection_Resnet50_Final.pth",
         "subdir":   "facedetection",
@@ -2490,6 +2455,8 @@ _UPSCALE_MODEL_REGISTRY.update({
         "scale":    1,
         "note":     "RetinaFace ResNet50 — fast multi-scale face detection",
         "tier":     1,
+        "sha256":   "6d1de9c2944f2ccddca5f5e010ea5ae64a39845a86311af6fdf30841b0a5a16d",
+        "size":     109497761,
     },
 })
 

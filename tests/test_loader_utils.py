@@ -214,116 +214,124 @@ class TestSha256File:
 
 @pytest.fixture
 def dl_env(monkeypatch):
-    """Fake urlretrieve + tqdm + folder_paths for _download_model tests."""
+    """A fake server behind radiance.core.model_fetch (the downloader
+    _download_model delegates to since 3.5.0) + folder_paths."""
+    import io
+    import radiance.core.model_fetch as MF
     state = types.SimpleNamespace(
-        urls=[], payload=b"MODELDATA", raises=None, mkdir_at_partfile=False,
-        hook_steps=[(1, 4, 12), (3, 4, 12)],
+        urls=[], payload=b"MODELDATA", raises=None, headers=[],
         fp=FakeFolderPaths(folders={"vae": "/models/vae"}),
-        tqdm=FakeTqdm(),
     )
 
-    def fake_urlretrieve(url, filename=None, reporthook=None):
-        state.urls.append((url, filename))
-        if state.mkdir_at_partfile:
-            os.mkdir(filename)
+    class _Resp(io.BytesIO):
+        def __init__(self, data, status=200):
+            super().__init__(data)
+            self.status = status
+            self.headers = {"Content-Length": str(len(data))}
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            self.close()
+
+    def fake_urlopen(req, timeout=None):
+        state.urls.append(req.full_url)
+        state.headers.append(dict(req.header_items()))
         if state.raises is not None:
             raise state.raises
-        with open(filename, "wb") as fh:
-            fh.write(state.payload)
-        if reporthook:
-            for step in state.hook_steps:
-                reporthook(*step)
+        rng = req.get_header("Range")
+        if rng:
+            start = int(rng.split("=")[1].rstrip("-"))
+            return _Resp(state.payload[start:], status=206)
+        return _Resp(state.payload)
 
-    monkeypatch.setattr(L.urllib.request, "urlretrieve", fake_urlretrieve)
-    monkeypatch.setattr(L, "tqdm", state.tqdm)
+    monkeypatch.setattr(MF.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(L, "folder_paths", state.fp)
+    monkeypatch.delenv("RADIANCE_ALLOW_DOWNLOADS", raising=False)
+    monkeypatch.delenv("RADIANCE_LOADER_OFFLINE", raising=False)
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
     return state
 
 
+GOOD = hashlib.sha256(b"MODELDATA").hexdigest()
+
+
 class TestDownloadModel:
-    def test_success_moves_into_place_and_reports_digest(self, dl_env, tmp_path, loader_logs):
+    def test_success_moves_into_place(self, dl_env, tmp_path):
         target = tmp_path / "sub" / "model.safetensors"
-        assert L._download_model("http://host/m.safetensors", str(target), "vae") is True
+        assert L._download_model("http://host/m.safetensors", str(target), "vae", GOOD) is True
         assert target.read_bytes() == b"MODELDATA"
         assert not (tmp_path / "sub" / "model.safetensors.part").exists()
-        # unpinned download logs the observed digest so it can be pinned later
-        digest = hashlib.sha256(b"MODELDATA").hexdigest()
-        assert any(digest in m for m in msgs(loader_logs))
-        assert dl_env.urls[0][0] == "http://host/m.safetensors"
-        assert dl_env.urls[0][1] == str(target) + ".part"
+        assert dl_env.urls == ["http://host/m.safetensors"]
 
-    def test_progress_hook_maps_blocks_to_byte_updates(self, dl_env, tmp_path):
-        L._download_model("http://host/m", str(tmp_path / "m.bin"), "vae")
-        bar = dl_env.tqdm.bars[0]
-        assert bar.total == 12                      # tsize propagated from hook
-        assert bar.updates == [4, 8]                # (1-0)*4 then (3-1)*4
-        assert sum(bar.updates) == 12
-        assert bar.kwargs["desc"] == "m.bin"
-
-    def test_progress_hook_without_a_known_total(self, dl_env, tmp_path):
-        """A server that sends no Content-Length must still advance the bar."""
-        dl_env.hook_steps = [(2, 8, None)]
-        assert L._download_model("u", str(tmp_path / "m.bin"), "vae") is True
-        bar = dl_env.tqdm.bars[0]
-        assert bar.total is None
-        assert bar.updates == [16]
-
-    def test_cleanup_failure_does_not_mask_the_download_error(self, dl_env, tmp_path, loader_logs):
-        """os.remove on the .part path can itself fail — still return False, not raise."""
-        target = tmp_path / "m.bin"
-
-        dl_env.mkdir_at_partfile = True   # a directory where the .part file goes
-        dl_env.raises = OSError("stream closed")
-        assert L._download_model("u", str(target), "vae") is False
-        assert os.path.isdir(str(target) + ".part")
-        assert not target.exists()
-        assert any("stream closed" in m for m in msgs(loader_logs))
-
-    def test_matching_sha256_accepts_download(self, dl_env, tmp_path):
-        digest = hashlib.sha256(b"MODELDATA").hexdigest()
-        target = tmp_path / "m.bin"
-        assert L._download_model("u", str(target), "vae", digest) is True
-        assert target.exists()
+    def test_an_unpinned_download_is_refused(self, dl_env, tmp_path, loader_logs):
+        """3.5.0: nothing is downloaded without a SHA-256 to check it against."""
+        assert L._download_model("http://host/m", str(tmp_path / "m.bin"), "vae") is False
+        assert dl_env.urls == []
+        assert any("no SHA-256 is pinned" in m for m in msgs(loader_logs))
 
     def test_sha256_pin_is_case_and_whitespace_insensitive(self, dl_env, tmp_path):
-        digest = "  " + hashlib.sha256(b"MODELDATA").hexdigest().upper() + "\n"
-        assert L._download_model("u", str(tmp_path / "m.bin"), "vae", digest) is True
+        digest = "  " + GOOD.upper() + "\n"
+        assert L._download_model("http://host/u", str(tmp_path / "m.bin"), "vae", digest) is True
 
     def test_checksum_mismatch_discards_download(self, dl_env, tmp_path, loader_logs):
         target = tmp_path / "m.bin"
         bad = "0" * 64
-        assert L._download_model("u", str(target), "vae", bad) is False
+        assert L._download_model("http://host/u", str(target), "vae", bad) is False
         assert not target.exists(), "corrupt download must not land at the real path"
         assert not (tmp_path / "m.bin.part").exists()
         errs = [m for m in msgs(loader_logs) if "CHECKSUM MISMATCH" in m]
-        assert errs, msgs(loader_logs)
-        assert bad in errs[0] and hashlib.sha256(b"MODELDATA").hexdigest() in errs[0]
+        assert errs and bad in errs[0] and GOOD in errs[0]
 
-    def test_mismatch_leaves_a_preexisting_file_untouched(self, dl_env, tmp_path):
+    def test_a_preexisting_file_of_the_right_size_is_kept(self, dl_env, tmp_path):
         target = tmp_path / "m.bin"
         target.write_bytes(b"GOOD-OLD-MODEL")
-        assert L._download_model("u", str(target), "vae", "0" * 64) is False
-        assert target.read_bytes() == b"GOOD-OLD-MODEL"
+        assert L._download_model("http://host/u", str(target), "vae", "0" * 64, size=len(b"GOOD-OLD-MODEL")) is True
+        assert target.read_bytes() == b"GOOD-OLD-MODEL" and dl_env.urls == []
 
-    def test_transport_failure_returns_false_and_cleans_partfile(self, dl_env, tmp_path, loader_logs):
-        dl_env.raises = OSError("connection reset")
+    def test_transport_failure_keeps_the_part_file_and_the_next_run_resumes(self, dl_env, tmp_path, loader_logs):
         target = tmp_path / "m.bin"
-        assert L._download_model("http://host/x", str(target), "vae") is False
-        assert not target.exists()
-        assert not (tmp_path / "m.bin.part").exists()
+        (tmp_path / "m.bin.part").write_bytes(b"MODEL")         # an interrupted earlier run
+        dl_env.raises = OSError("connection reset")
+        assert L._download_model("http://host/x", str(target), "vae", GOOD) is False
+        assert not target.exists() and (tmp_path / "m.bin.part").exists()
         assert any("connection reset" in m for m in msgs(loader_logs))
+        dl_env.raises = None
+        assert L._download_model("http://host/x", str(target), "vae", GOOD) is True
+        assert dl_env.headers[-1].get("Range") == "bytes=5-"
+        assert target.read_bytes() == b"MODELDATA"
+
+    def test_hugging_face_requests_carry_the_token(self, dl_env, tmp_path, monkeypatch):
+        monkeypatch.setenv("HF_TOKEN", "hf_test")
+        url = "https://huggingface.co/org/repo/resolve/" + "a" * 40 + "/m.bin"
+        assert L._download_model(url, str(tmp_path / "m.bin"), "vae", GOOD) is True
+        assert dl_env.headers[-1].get("Authorization") == "Bearer hf_test"
+
+    def test_a_gated_repository_says_how_to_get_access(self, dl_env, tmp_path, loader_logs, monkeypatch):
+        import urllib.error
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+        dl_env.raises = urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)
+        url = "https://huggingface.co/black-forest-labs/FLUX.2-dev/resolve/" + "a" * 40 + "/m.bin"
+        assert L._download_model(url, str(tmp_path / "m.bin"), "vae", GOOD) is False
+        text = " ".join(msgs(loader_logs))
+        assert "gated" in text and "https://huggingface.co/black-forest-labs/FLUX.2-dev" in text and "HF_TOKEN" in text
+
+    def test_downloads_off_stops_before_any_request(self, dl_env, tmp_path, monkeypatch):
+        monkeypatch.setenv("RADIANCE_ALLOW_DOWNLOADS", "0")
+        assert L._download_model("http://host/u", str(tmp_path / "m.bin"), "vae", GOOD) is False
+        assert dl_env.urls == []
 
     def test_refresh_failure_is_retried_once(self, dl_env, tmp_path):
         """A raising first get_filename_list is caught and retried (2 calls)."""
         dl_env.fp._filename_list_raises = 1
-        assert L._download_model("u", str(tmp_path / "m.bin"), "vae") is True
+        assert L._download_model("http://host/u", str(tmp_path / "m.bin"), "vae", GOOD) is True
         assert dl_env.fp.filename_list_calls == ["vae", "vae"]
 
-    # Was xfail(strict): the defect it documented is fixed.
     def test_persistent_refresh_failure_should_still_report_success(self, dl_env, tmp_path):
         dl_env.fp._filename_list_raises = 2
         target = tmp_path / "m.bin"
-        result = L._download_model("u", str(target), "vae")
+        result = L._download_model("http://host/u", str(target), "vae", GOOD)
         assert target.read_bytes() == b"MODELDATA"   # the file really is there
         assert result is True
 
@@ -333,6 +341,14 @@ class TestDownloadModel:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestEnsureModelExists:
+    @pytest.fixture(autouse=True)
+    def _downloads_on(self, monkeypatch):
+        # conftest turns downloads off for the whole suite; these tests mock
+        # the downloader and need the 3.5.0 default (on).
+        monkeypatch.delenv("RADIANCE_ALLOW_DOWNLOADS", raising=False)
+        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+        monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
+
     @pytest.mark.parametrize("name", ["", None, "None"])
     def test_empty_selection_returns_none_without_touching_comfy(self, monkeypatch, name):
         fp = FakeFolderPaths()
@@ -386,7 +402,7 @@ class TestEnsureModelExists:
                             FakeFolderPaths(folders={"vae": str(tmp_path)}))
         seen = {}
 
-        def fake_dl(url, target_path, folder_type, expected_sha256=None):
+        def fake_dl(url, target_path, folder_type, expected_sha256=None, size=None):
             seen.update(url=url, target=target_path, ft=folder_type, sha=expected_sha256)
             return True
 

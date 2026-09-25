@@ -9,11 +9,9 @@ from __future__ import annotations
 import os
 import hashlib
 import time
-import urllib.request
 import logging
 
 import torch
-import tqdm
 import folder_paths
 import comfy.sd
 import comfy.utils
@@ -48,66 +46,10 @@ def _sha256_file(path: str, chunk: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
-def _download_model(url: str, target_path: str, folder_type: str,
-                    expected_sha256: str | None = None) -> bool:
-    """Download a model atomically.
-
-    Writes to a temporary ``.part`` file and only renames it into place after a
-    successful download (and SHA-256 check, if a digest is pinned). This prevents
-    a half-finished download from leaving a truncated checkpoint at the real model
-    path, which would otherwise be silently re-used and fail to load later.
-    """
-    tmp_path = target_path + ".part"
-    try:
-        os.makedirs(os.path.dirname(target_path), exist_ok=True)
-        logger.info("Radiance: Downloading model from %s...", url)
-
-        def progress_bar(t):
-            last_b = [0]
-            def update_to(b=1, bsize=1, tsize=None):
-                if tsize is not None:
-                    t.total = tsize
-                t.update((b - last_b[0]) * bsize)
-                last_b[0] = b
-            return update_to
-
-        with tqdm.tqdm(unit='B', unit_scale=True, unit_divisor=1024, miniters=1, desc=os.path.basename(target_path)) as t:
-            urllib.request.urlretrieve(url, filename=tmp_path, reporthook=progress_bar(t))
-
-        # Integrity check (only when a digest is pinned in the model map).
-        expected = (expected_sha256 or "").strip().lower()
-        actual = _sha256_file(tmp_path)
-        if expected:
-            if actual != expected:
-                logger.error(
-                    "Radiance: CHECKSUM MISMATCH for %s (expected %s, got %s) — discarding download.",
-                    os.path.basename(target_path), expected, actual,
-                )
-                os.remove(tmp_path)
-                return False
-            logger.info("Radiance: sha256 verified for %s", os.path.basename(target_path))
-        else:
-            logger.info(
-                "Radiance: %s sha256=%s (pin in model_map['sha256'] for integrity checks).",
-                os.path.basename(target_path), actual,
-            )
-
-        os.replace(tmp_path, target_path)   # atomic move into final location
-        logger.info("Download complete: %s", target_path)
-    except Exception as e:
-        logger.error("Download failed for %s: %s", url, e)
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except OSError as _exc:
-            logger.debug(
-                "Radiance: could not remove partial download %s: %s", tmp_path, _exc,
-            )
-        return False
-
-    # The file is verified and in place from here on. A failure to refresh
-    # ComfyUI's listing is a stale menu, not a failed download, and reporting
-    # it as one made the loader claim a model was missing that was on disk.
+def _refresh_listing(target_path: str, folder_type: str) -> None:
+    # A failure to refresh ComfyUI's listing is a stale menu, not a failed
+    # download, and reporting it as one made the loader claim a model was
+    # missing that was on disk.
     _exc = None
     try:
         folder_paths.folder_names_and_paths[folder_type]
@@ -124,10 +66,31 @@ def _download_model(url: str, target_path: str, folder_type: str,
             "Restart ComfyUI if the file does not appear in the menu.",
             os.path.basename(target_path), folder_type, _exc,
         )
+
+
+def _download_model(url: str, target_path: str, folder_type: str,
+                    expected_sha256: str | None = None, size: int | None = None) -> bool:
+    """Download a model through radiance.core.model_fetch: pinned SHA-256,
+    written to ``.part`` and renamed only after the digest matches, resumed
+    after an interruption, and sent with the Hugging Face token for gated
+    repositories. Returns True when the file is in place."""
+    from radiance.core.model_fetch import ModelFetchError, fetch
+    from radiance.core.consent import LEGACY_LOADER_OFFLINE_ENV
+    try:
+        fetch(url, target_path, sha256=expected_sha256 or "", size=size,
+              label=os.path.basename(target_path), legacy_offline_env=LEGACY_LOADER_OFFLINE_ENV)
+    except ModelFetchError as e:
+        logger.error("%s", e)
+        return False
+    _refresh_listing(target_path, folder_type)
     return True
 
 
-def ensure_model_exists(name: str, folder_type: str, auto_download: bool = False) -> str | None:
+def ensure_model_exists(name: str, folder_type: str, auto_download: bool = True) -> str | None:
+    """Path of `name` in `folder_type`; with `auto_download` (the default) a
+    model in RADIANCE_MODEL_MAP that is not installed is fetched first.
+    RADIANCE_ALLOW_DOWNLOADS=0, RADIANCE_LOADER_OFFLINE=1 or the Hugging Face
+    offline flags stop the download."""
     if not name or name == "None":
         return None
 
@@ -136,17 +99,19 @@ def ensure_model_exists(name: str, folder_type: str, auto_download: bool = False
         return path
 
     if auto_download and name in RADIANCE_MODEL_MAP:
-        if os.environ.get("RADIANCE_LOADER_OFFLINE", "").strip().lower() in ("1", "true", "yes", "on"):
+        from radiance.core.consent import LEGACY_LOADER_OFFLINE_ENV, downloads_allowed
+        if not downloads_allowed(legacy_offline_env=LEGACY_LOADER_OFFLINE_ENV):
             logger.error(
-                "Radiance: offline mode (RADIANCE_LOADER_OFFLINE=1) — '%s' not found and "
-                "auto-download disabled. Place the file manually.", name,
+                "Radiance: '%s' is not installed and downloads are off (RADIANCE_ALLOW_DOWNLOADS=0, "
+                "RADIANCE_LOADER_OFFLINE=1 or an offline flag). Place the file in models/%s or unset it.",
+                name, folder_type,
             )
             return None
         res = RADIANCE_MODEL_MAP[name]
         if res["type"] == folder_type:
             base_dir = folder_paths.get_folder_paths(folder_type)[0]
             target_path = os.path.join(base_dir, *name.replace("\\", "/").split("/"))
-            if _download_model(res["url"], target_path, folder_type, res.get("sha256")):
+            if _download_model(res["url"], target_path, folder_type, res.get("sha256"), res.get("size")):
                 return target_path
 
     return None

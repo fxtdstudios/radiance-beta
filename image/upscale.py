@@ -1872,13 +1872,28 @@ class RadianceAIUpscale:
         "SUPIR-v0Q_fp16",
     ]
 
-    MODEL_URLS = {
-        "SUPIR-v0F_fp16": "https://huggingface.co/Kijai/SUPIR_pruned/resolve/main/SUPIR-v0F_fp16.safetensors",
-        "SUPIR-v0Q_fp16": "https://huggingface.co/Kijai/SUPIR_pruned/resolve/main/SUPIR-v0Q_fp16.safetensors",
-        "RealESRGAN_x4plus": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
-        "RealESRGAN_x4plus_anime_6B": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
-        "RealESRGAN_x2plus": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
+    # 3.5.0: each file pinned to its SHA-256 and size and fetched through
+    # radiance.core.model_fetch (verified before it is installed, resumable).
+    # SUPIR from Kijai/SUPIR_pruned at a fixed commit; Real-ESRGAN from its
+    # original GitHub releases.
+    MODEL_FILES = {
+        "SUPIR-v0F_fp16": (
+            "https://huggingface.co/Kijai/SUPIR_pruned/resolve/eaabd8ecd86906f97626a39f3b9fe882d52d697d/SUPIR-v0F_fp16.safetensors",
+            "a8f1846de1985cf0473fac6d8c0ef17c9498a90d1c19906e944134c5572275d0", 2664825592),
+        "SUPIR-v0Q_fp16": (
+            "https://huggingface.co/Kijai/SUPIR_pruned/resolve/eaabd8ecd86906f97626a39f3b9fe882d52d697d/SUPIR-v0Q_fp16.safetensors",
+            "3eef33ec7633122ca23b1e5ef167faa048b5a0845768694d5e8070138ac013ce", 2664858464),
+        "RealESRGAN_x4plus": (
+            "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+            "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1", 67040989),
+        "RealESRGAN_x4plus_anime_6B": (
+            "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
+            "f872d837d3c90ed2e05227bed711af5671a6fd1c9f7d7e91c911a61f155e99da", 17938799),
+        "RealESRGAN_x2plus": (
+            "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
+            "49fafd45f8fd7aa8d31ab2a22d14d91b536c34494a5cfe31eb5d89c2fa266abb", 67061725),
     }
+    MODEL_URLS = {name: spec[0] for name, spec in MODEL_FILES.items()}
 
     def __init__(self):
         self.model = None
@@ -1972,67 +1987,17 @@ class RadianceAIUpscale:
     DESCRIPTION = "AI-powered upscaling using neural network models. Supports tiled processing for large images."
 
     def _download_model(self, model_name: str, target_path: str) -> bool:
-        """Download model if URL is available."""
-        if model_name not in self.MODEL_URLS:
+        """Fetch a pinned model file (see MODEL_FILES). True when it is installed."""
+        if model_name not in self.MODEL_FILES:
             return False
-
-        url = self.MODEL_URLS[model_name]
-
-        # v1.1.0: Log download size warning for large models
-        large_models = {"SUPIR-v0F_fp16", "SUPIR-v0Q_fp16"}
-        if model_name in large_models:
-            logger.warning(
-                f"◎ Downloading {model_name} — this is a large model (~6GB) and may take a while."
-            )
-
-        logger.info(f"Downloading {model_name} from {url}...")
-
+        url, sha256, size = self.MODEL_FILES[model_name]
+        from radiance.core.model_fetch import ModelFetchError, fetch
         try:
-            import urllib.request
-
-            if not url.startswith(("http://", "https://")):
-                logger.error(f"❌ Download failed: Invalid URL scheme - {url}")
-                return False
-
-            # Download with progress logging
-            def _report_progress(block_num, block_size, total_size):
-                if total_size > 0 and block_num % 100 == 0:
-                    downloaded = block_num * block_size
-                    pct = min(100, downloaded * 100 / total_size)
-                    logger.info(
-                        f"  ↳ {pct:.0f}% ({downloaded / 1024**2:.0f}MB / {total_size / 1024**2:.0f}MB)"
-                    )
-
-            urllib.request.urlretrieve(url, target_path, reporthook=_report_progress)  # nosec B310
-            logger.info(f"✓ Download complete: {target_path}")
+            fetch(url, target_path, sha256=sha256, size=size, label=model_name)
             return True
-        except Exception as e:
-            logger.error(f"❌ Download failed: {e}")
-            # Clean up partial download
-            try:
-                if os.path.exists(target_path):
-                    os.remove(target_path)
-            except Exception:  # nosec B110
-                pass
+        except ModelFetchError as e:
+            logger.error("%s", e)
             return False
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # ALBABIT-FIX: SUPIR-specific loading and inference
-    #
-    # SUPIR (v0Q / v0F) is a latent-diffusion upscaler, not a feedforward
-    # network.  Spandrel raises UnsupportedModelError (empty message) for it.
-    # These two methods provide a dedicated path that delegates to the
-    # ComfyUI-SUPIR extension (kijai/ComfyUI-SUPIR) when it is installed.
-    #
-    # State-dict layout of Kijai's pruned SUPIR safetensors:
-    #   first_stage_model.denoise_encoder.*  — LQ image encoder (built-in)
-    #   model.control_model.*               — ControlNet for LQ conditioning
-    #   model.diffusion_model.*             — SDXL-compatible denoising UNet
-    #
-    # External requirements for inference:
-    #   • SDXL VAE  (ae.safetensors)   → connect to the 'vae'  input
-    #   • SDXL CLIP (clip_l + openclip) → connect to the 'clip' input
-    # ──────────────────────────────────────────────────────────────────────────
 
     def _load_supir_model(self, model_name: str, model_path: str, sdxl_model_name: str = ""):
         """Load a SUPIR model via the ComfyUI-SUPIR extension bridge.
@@ -2278,23 +2243,13 @@ class RadianceAIUpscale:
                 ext = ".safetensors" if "SUPIR" in model_name else ".pth"
                 target_path = os.path.join(models_dir, f"{model_name}{ext}")
 
-                # 3.5: this downloaded unconditionally (up to ~6 GB for SUPIR),
-                # ignoring the node's own auto_download widget and the
-                # RADIANCE_ALLOW_DOWNLOADS consent gate every other Radiance
-                # downloader honours. Both are checked now.
-                allowed = False
-                if auto_download:
-                    from radiance.core.consent import require_consent
-                    allowed = require_consent(
-                        f"upscale model {model_name}",
-                        size_mb=6000 if "SUPIR" in model_name else 64,
-                        dest=target_path, url=self.MODEL_URLS.get(model_name),
-                    )
-                if allowed and self._download_model(model_name, target_path):
+                # The node's auto_download widget and RADIANCE_ALLOW_DOWNLOADS=0
+                # (checked inside the fetch) can both say no.
+                if auto_download and self._download_model(model_name, target_path):
                     model_path = target_path
                 else:
                     why = ("auto_download is off" if not auto_download
-                           else "downloads need consent (set RADIANCE_ALLOW_DOWNLOADS=1)")
+                           else "the download failed or downloads are turned off; see the log")
                     return (
                         None,
                         f"Model {model_name} not found and not downloaded: {why}. "

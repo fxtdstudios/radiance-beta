@@ -47,9 +47,10 @@ def test_url_is_pinned_to_a_commit():
     assert len(pd.PIXEL_REVISION) == 40 and len(pd.PIXEL_SHA256) == 64
 
 
-def test_consent_default_is_opt_in_only_for_callers_that_ask(env):
-    assert consent.downloads_allowed() is False
-    assert consent.downloads_allowed(default=True) is True
+def test_consent_default_is_download_unless_a_caller_asks_first(env):
+    """3.5.0: models download on first use; a caller can still ask first."""
+    assert consent.downloads_allowed() is True
+    assert consent.downloads_allowed(default=False) is False
 
 
 @pytest.mark.parametrize("var,val", [

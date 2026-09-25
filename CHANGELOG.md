@@ -101,8 +101,42 @@ All notable changes to FXTD Radiance will be documented in this file.
     video's first frame; EXR MultiPart writes every frame of a batch; Radiance
     QC with `fail_on_errors` stops the graph; Synthesis `guidance_nits` is on
     the 203-nit scale.
+12. **Models download on first use.** Nothing to set: a node that needs a
+    model fetches it, pinned and SHA-256 checked. Set
+    `RADIANCE_ALLOW_DOWNLOADS=0` to keep the old ask-first behaviour on a
+    metered or air-gapped machine. Gated models need `HF_TOKEN`.
 
 ### Fixed
+
+- **Models download automatically, pinned and verified (3.5.0).** Every node
+  that needs a model now fetches it on first use; `RADIANCE_ALLOW_DOWNLOADS=0`
+  or the Hugging Face offline flags still stop all downloads. One downloader,
+  `core/model_fetch.py`, installs a file only after its SHA-256 matches, writes
+  to `.part` and resumes after an interruption, shows ComfyUI's progress bar,
+  and sends the user's `HF_TOKEN` to gated repositories (a refusal names the
+  page to accept and the token to set). Found by auditing every source online:
+  - *Read Models* (`auto_download`, now on by default): all 60 catalogue files
+    were on unpinned `main` with no digest. Each is pinned to a commit with its
+    SHA-256 and size. `flux1-schnell-fp8` pointed at a file that does not
+    exist (now Kijai's `flux1-schnell-fp8-e4m3fn`), and the FLUX.1 VAE came
+    from the gated FLUX.1-dev repo (now Comfy-Org's ungated copy, the same
+    file byte for byte).
+  - *Upscale*: none of the nine files had a digest; the Hugging Face mirrors
+    tried first were missing or private, so every download fell back to a
+    second URL. Each now comes from its original release file with its
+    SHA-256. HAT-L's GitHub URLs return 404 (it is published only on Google
+    Drive): it is a manual install, and Tier 2 uses SwinIR-L at 4x until it
+    is present. SeedVR2's second attempt loaded a repository that does not
+    exist; it now says to install the SeedVR2 node pack. The SD x4 pipeline is
+    pinned to a commit.
+  - *AI Upscale* downloaded SUPIR and Real-ESRGAN straight to the final path,
+    with no check, so an interrupted download left a truncated model that was
+    loaded next time. Pinned and verified now.
+  - *Depth Map Generator* loaded Depth Anything V2 from `main`; pinned to a
+    commit per size.
+  - `tools/pin_models.py` re-checks every pin against its source (79 of 79 on
+    2026-09-25). Tests: `tests/test_model_pins.py`; the loader and consent
+    tests follow the new default.
 
 - **Bugs found while documenting every input.** The tooltip pass listed these
   in KNOWN_ISSUES as owed; each is fixed and pinned by a test that fails on

@@ -10,28 +10,20 @@ The gates were also inconsistent: `nodes/upscale` honoured an opt-*out*
 (`RADIANCE_UPSCALE_OFFLINE=1`), while `nodes/vfx/multipass` had no gate at all.
 Two mechanisms, one of them missing, both invisible from the node UI.
 
-This module is the single decision point. The default is **ask first**: a
-download is refused with an actionable message naming the file, the size and
-where to put it, unless the operator has said yes.
+This module is the single decision point. Since 3.5.0 the default is
+**download on first use**: every model a node needs is fetched automatically
+from a pinned source and checked against its SHA-256 before it is installed
+(see `radiance.core.model_fetch`). The operator can always say no:
 
-Saying yes, in order of precedence:
-
-    RADIANCE_ALLOW_DOWNLOADS=0   never download, even if something else says to
-    RADIANCE_ALLOW_DOWNLOADS=1   allow every model download
+    RADIANCE_ALLOW_DOWNLOADS=0   never download; missing models raise a
+                                 message naming the file, size and folder
+    HF_HUB_OFFLINE=1 or TRANSFORMERS_OFFLINE=1   the machine is offline
     RADIANCE_UPSCALE_OFFLINE=1   legacy opt-out, still honoured for upscale
+    RADIANCE_LOADER_OFFLINE=1    legacy opt-out, still honoured for Read Models
 
-Studios that want the old always-download behaviour set
-`RADIANCE_ALLOW_DOWNLOADS=1` once in the ComfyUI launch environment.
-
-One exception to ask-first: Radiance's own pixel SDR-to-HDR checkpoint
-(~5 MB, first-party, sha256-pinned; weights licensed non-commercial) downloads on first use unless
-`RADIANCE_ALLOW_DOWNLOADS=0`, `HF_HUB_OFFLINE=1` or `TRANSFORMERS_OFFLINE=1`
-is set. See `radiance.model.pixel_download`.
-
-Multipass Estimate is the other: its node has a `download_missing_models`
-switch, and placing the node with the switch on is the yes. The environment
-can still say no (`RADIANCE_ALLOW_DOWNLOADS=0` or the offline flags). See
-`radiance.nodes.vfx.multipass.estimate_models`.
+Nodes with their own switch (Read Models `auto_download`, AI Upscale
+`auto_download`, Multipass Estimate `download_missing_models`) also say no
+when it is off.
 """
 from __future__ import annotations
 
@@ -43,6 +35,7 @@ logger = logging.getLogger("radiance.consent")
 
 ALLOW_ENV = "RADIANCE_ALLOW_DOWNLOADS"
 LEGACY_UPSCALE_OFFLINE_ENV = "RADIANCE_UPSCALE_OFFLINE"
+LEGACY_LOADER_OFFLINE_ENV = "RADIANCE_LOADER_OFFLINE"
 
 _TRUE = ("1", "true", "yes", "on")
 _FALSE = ("0", "false", "no", "off")
@@ -62,17 +55,15 @@ def _flag(name: str) -> Optional[bool]:
 
 
 def downloads_allowed(
-    *, legacy_offline_env: Optional[str] = None, default: bool = False,
+    *, legacy_offline_env: Optional[str] = None, default: bool = True,
 ) -> bool:
     """True when the operator has consented to fetching model weights.
 
     *legacy_offline_env* names an older opt-out variable to keep honouring, so
     existing studio configs do not silently start downloading again.
 
-    *default* is the answer when nothing is set. It stays False (ask first)
-    for the large third-party weights; only Radiance's own small checkpoint
-    (the ~5 MB pixel SDR-to-HDR model) passes True. ``RADIANCE_ALLOW_DOWNLOADS=0``
-    and the Hugging Face offline flags still turn it off.
+    *default* is the answer when nothing is set: download (3.5.0). A caller
+    can pass False to keep a download ask-first.
     """
     explicit = _flag(ALLOW_ENV)
     if explicit is not None:
@@ -84,7 +75,7 @@ def downloads_allowed(
     if _flag("HF_HUB_OFFLINE") is True or _flag("TRANSFORMERS_OFFLINE") is True:
         return False       # the machine is declared offline
 
-    return bool(default)   # default: ask first, unless the caller says otherwise
+    return bool(default)   # default: download on first use
 
 
 def refusal_message(
@@ -100,9 +91,9 @@ def refusal_message(
     """
     size = f" (~{size_mb} MB)" if size_mb else ""
     lines = [
-        f"[Radiance] '{what}'{size} is not installed and automatic downloads are off.",
-        f"           Set {ALLOW_ENV}=1 to allow Radiance to fetch model weights,",
-        "           or install the file manually:",
+        f"[Radiance] '{what}'{size} is not installed and automatic downloads are off",
+        f"           ({ALLOW_ENV}=0, HF_HUB_OFFLINE=1, TRANSFORMERS_OFFLINE=1 or a legacy *_OFFLINE=1 is set).",
+        "           Unset it to let Radiance fetch the file, or install it manually:",
     ]
     if url:
         lines.append(f"             from: {url}")

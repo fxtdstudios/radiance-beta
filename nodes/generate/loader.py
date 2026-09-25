@@ -289,8 +289,8 @@ class RadianceUnifiedLoader:
                 "lora_on_error": (["warn", "raise"], {"default": "raise",
                     "tooltip": "'warn' skips failed LoRA and continues. "
                                " 'raise' stops execution."}),
-                "auto_download": ("BOOLEAN", {"default": False,
-                    "tooltip": "If a selected model is missing, automatically download it from Radiance mirrors."}),
+                "auto_download": ("BOOLEAN", {"default": True,
+                    "tooltip": "If a selected model is missing and is one Radiance knows, download it on first run from its pinned Hugging Face source, checked against its SHA-256 before it is installed (large: 4 to 60 GB). Gated repositories (FLUX.2-dev, FLUX.2-klein 9B, LTX-2.5) need their licence accepted on Hugging Face and HF_TOKEN set. RADIANCE_ALLOW_DOWNLOADS=0 always stops downloads."}),
             },
         }
 
@@ -327,7 +327,7 @@ class RadianceUnifiedLoader:
         check_vram="On",
         use_cache="On",
         lora_on_error="raise",
-        auto_download=False,
+        auto_download=True,
     ):
         def _none(val):
             return None if val in ("None", "", None) else val
@@ -586,7 +586,7 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
         check_vram="On",
         use_cache="On",
         lora_on_error="raise",
-        auto_download=False,
+        auto_download=True,
     ):
         def _none(val):
             return None if val in ("None", "", None) else val
