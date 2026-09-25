@@ -343,6 +343,8 @@ class RadianceViewer:
     FUNCTION = "view"
     OUTPUT_NODE = True
     DESCRIPTION = """Radiance Viewer, VFX review for scene-linear and HDR images:
+• Simple mode (picture, compare, playback) or Advanced (every panel), switched in its title bar
+• Compare against compare_image or a pinned frame: B, wipe, difference, blink
 • GPU Waveform / RGB Parade / Vectorscope / Histogram scopes
 • Power Windows masking (Radial + Box, feather, rotation)
 • Comparison Bridge — mouse-draggable wipe + reference shelf (8 stills)

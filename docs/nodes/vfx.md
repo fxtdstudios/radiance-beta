@@ -4,7 +4,7 @@
 
 Plate prep, masks, inpaint, depth, optics, motion, multipass, and scene cuts.
 
-32 nodes. [All sections](README.md)
+31 nodes. [All sections](README.md)
 
 - [Aberration](#aberration)
 - [Anamorphic Streaks](#anamorphic-streaks)
@@ -29,7 +29,6 @@ Plate prep, masks, inpaint, depth, optics, motion, multipass, and scene cuts.
 - [Read Mask](#read-mask)
 - [Relight Engine](#relight-engine)
 - [Rolling Shutter](#rolling-shutter)
-- [Roto](#roto)
 - [SAM Multi-Mask Picker](#sam-multi-mask-picker)
 - [Scene Cut Detect](#scene-cut-detect)
 - [Scene Cut Split](#scene-cut-split)
@@ -102,7 +101,7 @@ Quantise an image to a lower bit depth, with optional dither, and output the err
 | :--- | :--- | :--- | :--- | :--- |
 | `image` | IMAGE |  |  | Display-encoded 0..1 image, quantised as is (no transfer conversion); values outside 0..1 are clipped. Alpha passes through unchanged. |
 | `bit_depth` | int | 8 | 4 to 16, step 1 | Target bits per channel; the 0..1 range is split into 2^bits - 1 steps. |
-| `dither_mode` | choice | `triangular` | `none`, `triangular`, `floyd-steinberg` | none: plain rounding. triangular: random TPDF noise of +/-1 step before rounding. floyd-steinberg: error diffusion, pure Python per pixel and very slow on large images. |
+| `dither_mode` | choice | `triangular` | `none`, `triangular`, `floyd-steinberg` | none: plain rounding. triangular: random TPDF noise of +/-1 step before rounding. floyd-steinberg: error diffusion (the classic scan-line result, computed a diagonal at a time). |
 | `delta_gain` (optional) | float | 10 | 1 to 100, step 0.5 | Multiplier on the absolute error \|original - quantised\| for the delta_amplified output, clipped to 1. |
 | `banding_threshold` (optional) | float | 0.004 | 0.0005 to 0.05, step 0.0005 | Per-pixel error (0..1 units, largest channel) above which banding_mask is white. 0.004 is about one 8-bit code value. This flags quantisation error, not detected bands. |
 | `restore_from_quantized` (optional) | boolean | off |  | Currently has no effect: the node ignores this setting. |
@@ -174,7 +173,7 @@ Add compression artifacts (JPEG blocking, color banding).
 | `image` | IMAGE |  |  | Display-encoded image. It is quantised to 8 bits and clipped to 0-1 in every mode, so HDR values are lost; alpha is kept. |
 | `artifact_type` | choice | `JPEG` | `JPEG`, `Banding`, `Both` | JPEG: real JPEG round trip plus block averaging (block_size). Banding: posterise to banding_levels. Both: JPEG then banding. |
 | `quality` | int | 50 | 1 to 100, step 1 | JPEG encoder quality, 1 = worst, 100 = best. Ignored in Banding mode. |
-| `block_size` (optional) | int | 8 | 4 to 32, step 4 | Size in pixels of the square blocks each averaged to one flat colour after the JPEG pass (a mosaic, not a DCT setting). Applies in JPEG and Both. Image sides must be a multiple of it. |
+| `block_size` (optional) | int | 8 | 4 to 32, step 4 | Size in pixels of the square blocks each averaged to one flat colour after the JPEG pass (a mosaic, not a DCT setting). Applies in JPEG and Both. Blocks cut off at the right or bottom edge are averaged over the pixels they have. |
 | `color_subsampling` (optional) | boolean | on |  | Apply chroma subsampling (4:2:0) to simulate video codec color compression. |
 | `banding_levels` (optional) | int | 32 | 4 to 256, step 4 | Quantisation steps per channel in Banding and Both modes (rounded down, so it darkens by up to one step). Fewer = stronger banding. |
 | `noise_amount` (optional) | float | 0 | 0 to 0.1, step 0.005 | Standard deviation of Gaussian noise added at the end, in 0-1 code values (0.01 = about 2.5 of 255). 0 = off. |
@@ -674,28 +673,6 @@ Simulate rolling shutter artifacts (skew, wobble, flash banding).
 | Output | Type |
 | :--- | :--- |
 | `image` | IMAGE |
-
-## Roto
-
-`RadianceVectorMaskDraw`
-
-Draw a single-frame filled mask from a closed polygon or smooth closed spline defined by pixel coordinates, with an anti-aliased edge. Accepts JSON points or pasted Nuke shape data.
-
-**Inputs**
-
-| Input | Type | Default | Range or choices | What it does |
-| :--- | :--- | :--- | :--- | :--- |
-| `width` | int | 512 | 64 to 4096, step 8 | Output mask width in pixels. Match your plate. |
-| `height` | int | 512 | 64 to 4096, step 8 | Output mask height in pixels. Match your plate. |
-| `shape_type` | choice | `Polygon` | `Polygon`, `Bezier_Spline` | Polygon: straight edges between the points. Bezier_Spline: a smooth closed Catmull-Rom curve through every point. |
-| `points_data` | string | `[[128, 128], [384, 128], [384, 384], [128, 384]]` | multi-line text | Paste a JSON list of [x, y] pixel coordinates (origin top-left, y down) or a Nuke control points block. At least 3 points; fewer gives an empty mask. |
-| `anti_alias_width` | float | 1.5 | 0 to 8, step 0.1 | Edge softness in pixels on each side of the outline. 0.05 or less gives a hard, aliased edge. |
-
-**Outputs**
-
-| Output | Type |
-| :--- | :--- |
-| `vector_mask` | MASK |
 
 ## SAM Multi-Mask Picker
 

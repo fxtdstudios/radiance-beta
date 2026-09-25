@@ -59,11 +59,12 @@ Apply a ControlNet conditioning signal to the Radiance sampler.
 | :--- | :--- | :--- | :--- | :--- |
 | `conditioning` | CONDITIONING |  |  | Conditioning to attach the ControlNet to (usually the positive). An existing ControlNet on it is chained, not replaced. |
 | `control_net` | CONTROL_NET |  |  | ControlNet model from a ControlNet loader. Strength 0 returns the conditioning unchanged. |
-| `image` | IMAGE |  |  | Control hint image (edges, depth, pose and so on) in display-referred 0-1 values. No VAE is passed, so ControlNets that need a VAE-encoded hint are not supported. |
+| `image` | IMAGE |  |  | Control hint image (edges, depth, pose and so on) in display-referred 0-1 values. |
 | `strength` | float | 1 | 0 to 10, step 0.05 | Global strength of the control effect. |
 | `start_percent` | float | 0 | 0 to 1, step 0.01 | Percentage of the generation where control starts (0.0 = beginning). |
 | `end_percent` | float | 1 | 0 to 1, step 0.01 | Percentage of the generation where control ends (1.0 = end). |
 | `control_type` | choice | `auto` | `auto`, or one of ComfyUI's Union ControlNet types | For Union ControlNets (like Flux), select the specific control mode (Canny, Depth, etc.). |
+| `vae` (optional) | VAE |  |  | The model's VAE. Needed by ControlNets that take a VAE-encoded hint (SD3, Flux and other DiT ControlNets); leave unconnected for SD1.5 / SDXL ones. |
 
 **Outputs**
 
@@ -159,7 +160,7 @@ Universal loader v3.3 — streamlined to be extremely visual and modular. Auto-d
 | `check_vram` (optional) | choice | `On` | `On`, `Off` | Estimate VRAM before load and warn if tight. |
 | `use_cache` (optional) | choice | `On` | `On`, `Off` | Cache loaded models. Skips disk I/O when re-running with the same files. Cache auto-invalidates if files change. |
 | `lora_on_error` (optional) | choice | `raise` | `warn`, `raise` | 'warn' skips failed LoRA and continues. 'raise' stops execution. |
-| `auto_download` (optional) | boolean | off |  | If a selected model is missing, automatically download it from Radiance mirrors. |
+| `auto_download` (optional) | boolean | on |  | If a selected model is missing and is one Radiance knows, download it on first run from its pinned Hugging Face source, checked against its SHA-256 before it is installed (large: 4 to 60 GB). Gated repositories (FLUX.2-dev, FLUX.2-klein 9B, LTX-2.5) need their licence accepted on Hugging Face and HF_TOKEN set. RADIANCE_ALLOW_DOWNLOADS=0 always stops downloads. |
 
 **Outputs**
 
@@ -275,7 +276,7 @@ Apply region-specific text prompts with spatial masks.
 
 | Input | Type | Default | Range or choices | What it does |
 | :--- | :--- | :--- | :--- | :--- |
-| `base_cond` | CONDITIONING |  |  | Global positive conditioning, passed through with its strength set to global_strength. When chaining, every entry in it (including earlier regions) gets this node's global_strength. |
+| `base_cond` | CONDITIONING |  |  | Global positive conditioning, passed through with its strength set to global_strength. When chaining, regions from earlier nodes keep their own strength and area. |
 | `region_cond` | CONDITIONING |  |  | Encoded prompt for this region, restricted to the x/y/w/h box (or the mask's bounding box) via ComfyUI area conditioning. |
 | `region_label` | string | `region_1` |  | Human-readable label for this region (used in JSON output). |
 | `x` | float | 0 | 0 to 1, step 0.01 | Left edge of region as fraction of image width. |

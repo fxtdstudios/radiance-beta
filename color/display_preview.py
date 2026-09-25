@@ -1,7 +1,7 @@
 """Display-referred previews for the viewers (3.5.0).
 
-The Viewer and Lite Viewer write 8-bit PNG previews: the Lite Viewer shows them
-directly, the Viewer falls back to them and uses them as the node thumbnail.
+The Viewer writes 8-bit PNG previews: it falls back to them and uses them as
+the node thumbnail. (The Lite Viewer, retired in 3.5.0, showed them directly.)
 Linear sources used to go through ``x / (1 + x)`` with no display encoding,
 which is darker than any real view and matches nothing the float path shows.
 

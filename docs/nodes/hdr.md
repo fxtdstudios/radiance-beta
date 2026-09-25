@@ -179,7 +179,7 @@ Read or write ACES metadata XML sidecar files for shot archiving.
 | `output_transform` (optional) | string | `urn:ampas:aces:transformId:v2.0:ODT.Academy.Rec709-100nits.a2.0.0` |  | (write) ACES URN for the output transform. |
 | `peak_nits` (optional) | float | 100 | 48 to 10000, step 1 | (write) Display peak luminance in nits, stored as the output transform's peakLuminance. |
 | `min_nits` (optional) | float | 0.005 | 0 to 1, step 0.001 | (write) Display black level in nits, stored as the output transform's minLuminance. |
-| `description` (optional) | string | `Created by Radiance ACES 2.0 pipeline.` | multi-line text | (write) Free text stored in the AMF's amfInfo description. It is inserted verbatim, so avoid < and & characters. |
+| `description` (optional) | string | `Created by Radiance ACES 2.0 pipeline.` | multi-line text | (write) Free text stored in the AMF's amfInfo description (XML-escaped, so any characters are safe). |
 | `save_path` (optional) | string |  |  | (write) Full path to save .amf file. Leave blank to skip. |
 | `amf_xml_in` (optional) | string |  | multi-line text | (read) Paste AMF XML here, or load via save_path. |
 
@@ -417,9 +417,9 @@ Full colour pipeline: linearise → adapt → primaries → HDR compress. Output
 | `image` | IMAGE |  |  | Encoded input image. Negatives are clamped to 0; alpha is passed through. |
 | `encoding` | choice | `sRGB` | `sRGB`, `Rec.709 (OETF)`, `BT.1886 (TV γ2.4)`, `Gamma 2.2`, `Gamma 2.4`, `PQ (ST.2084)`, `HLG`, `ARRI LogC4`, `Sony S-Log3`, `Linear (none)` | Transfer curve of the input, decoded to linear. PQ decodes so 203 nits = 1.0; log curves decode to camera scene-linear. Linear (none) only clamps negatives. |
 | `compression_ratio` | float | 0.5 | 0 to 1, step 0.01 | Compression ratio for soft-knee HDR highlight compression. |
-| `source_primaries` (optional) | choice | `Rec.709 (sRGB)` | `Rec.709 (sRGB)`, `BT.2020`, `ACEScg`, `DCI-P3 (D65)`, `XYZ (D65)` | Primaries of the input. Only Rec.709 to/from BT.2020, Rec.709 to/from ACEScg and DCI-P3 to BT.2020 are converted; other pairs pass through unchanged. |
-| `target_primaries` (optional) | choice | `Rec.709 (sRGB)` | `Rec.709 (sRGB)`, `BT.2020`, `ACEScg`, `DCI-P3 (D65)`, `XYZ (D65)` | Primaries to convert to (see source_primaries for supported pairs). Same as source leaves colours unchanged. |
-| `chromatic_adaptation` (optional) | choice | `None` | `None`, `D65_to_D60`, `D60_to_D65`, `D65_to_D50`, `D50_to_D65` | Bradford white-point matrix applied to the linear RGB before the primaries step. Leave None for Rec.709 to ACEScg, which is already adapted. |
+| `source_primaries` (optional) | choice | `Rec.709 (sRGB)` | `Rec.709 (sRGB)`, `BT.2020`, `ACEScg`, `DCI-P3 (D65)`, `XYZ (D65)` | Primaries of the input. Any pair of the listed primaries converts, with a Bradford white-point adaptation where the whites differ (ACEScg is D60). |
+| `target_primaries` (optional) | choice | `Rec.709 (sRGB)` | `Rec.709 (sRGB)`, `BT.2020`, `ACEScg`, `DCI-P3 (D65)`, `XYZ (D65)` | Primaries to convert to. Same as source leaves colours unchanged. |
+| `chromatic_adaptation` (optional) | choice | `None` | `None`, `D65_to_D60`, `D60_to_D65`, `D65_to_D50`, `D50_to_D65` | Bradford white-point matrix applied to the linear RGB before the primaries step. Skipped, with a warning, when the primaries conversion already changes the white point (to or from ACEScg), so it is never applied twice. |
 | `pq_peak_nits` (optional) | float | 1000 | 100 to 10000, step 100 | Has no effect on the decode: PQ is absolute, so it always decodes with 203 nits = 1.0 whatever this is set to. |
 
 **Outputs**
@@ -681,7 +681,7 @@ Synthesise HDR imagery from SDR input and optional guidance signals.
 | `recovery_iters` | int | 3 | 0 to 8, step 1 | Pyramid depth. The lift is applied to the 1/2^N low-pass, so detail finer than about 2^N px keeps its original contrast. 0 lifts the whole image. It does not reconstruct clipped detail. |
 | `chroma_preservation` | float | 0.8 | 0 to 1, step 0.05 | Blend towards the original RGB ratios at the lifted luminance. The lift already scales R, G and B equally, so this currently has no visible effect. |
 | `guidance_mask` (optional) | MASK |  |  | Per-pixel guidance mask from Radiance Luminance Guidance. |
-| `guidance_nits` (optional) | float | 0 | 0 to 10000, step 50 | Target peak in nits inside guidance_mask, converted at 100 nits = 1.0 (not the package's 203 nits). 0 = ignore the mask and use energy_target everywhere. |
+| `guidance_nits` (optional) | float | 0 | 0 to 10000, step 50 | Target peak in nits inside guidance_mask, on the package's scale (203 nits = 1.0). 0 = ignore the mask and use energy_target everywhere. |
 
 **Outputs**
 

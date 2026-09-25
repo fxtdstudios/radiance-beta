@@ -65,6 +65,13 @@ def _make_area_cond(
     return out
 
 
+def _is_region(d: dict) -> bool:
+    """A conditioning entry restricted to an area (a region from an earlier node
+    in a chain, or ComfyUI's Conditioning Set Area), as opposed to the global
+    prompt."""
+    return isinstance(d.get("area"), tuple)
+
+
 def _mask_to_area(mask: torch.Tensor) -> Tuple[float, float, float, float]:
     """
     Compute the tight bounding box of a non-zero mask region.
@@ -143,7 +150,7 @@ class RadianceRegionalPrompt:
                 "base_cond": ("CONDITIONING", {
                     "tooltip": (
                         "Global positive conditioning, passed through with its strength set to global_strength. "
-                        "When chaining, every entry in it (including earlier regions) gets this node's global_strength."
+                        "When chaining, regions from earlier nodes keep their own strength and area."
                     ),
                 }),
                 "region_cond": ("CONDITIONING", {
@@ -255,12 +262,26 @@ class RadianceRegionalPrompt:
             y0, y1 = int(round(y * res)), int(round((y + h) * res))
             x0, x1 = int(round(x * res)), int(round((x + w) * res))
             outside[:, y0:y1, x0:x1] = 0.0
+            # Regions from earlier nodes in a chain keep their own strength
+            # and area; only the global prompt takes global_strength and the
+            # cut-out. Every entry used to be reset, so each chained node
+            # overwrote the earlier regions' strength. A global already cut by
+            # an earlier node keeps that cut as well as this one.
             global_out = []
             for c in base_cond:
                 t, d = c
+                if _is_region(d):
+                    global_out.append((t, d))
+                    continue
                 nd = dict(d)
                 nd["strength"] = global_strength
-                nd["mask"] = outside
+                prev = d.get("mask")
+                if isinstance(prev, _torch.Tensor) and prev.dim() == 3:
+                    prev = _torch.nn.functional.interpolate(
+                        prev.float().unsqueeze(1), size=(res, res), mode="nearest").squeeze(1)
+                    nd["mask"] = prev * outside
+                else:
+                    nd["mask"] = outside
                 nd["mask_strength"] = 1.0
                 nd["set_area_to_bounds"] = False
                 global_out.append((t, nd))
@@ -270,6 +291,9 @@ class RadianceRegionalPrompt:
             global_out = []
             for c in base_cond:
                 t, d = c
+                if _is_region(d):          # an earlier region keeps its strength
+                    global_out.append((t, d))
+                    continue
                 nd = dict(d)
                 nd["strength"] = global_strength
                 global_out.append((t, nd))
@@ -416,6 +440,9 @@ class RadianceRegionalGrid:
         result = []
         for c in base_cond:
             t, d = c
+            if _is_region(d):              # an earlier region keeps its strength
+                result.append((t, d))
+                continue
             nd = dict(d)
             nd["strength"] = global_strength
             result.append((t, nd))

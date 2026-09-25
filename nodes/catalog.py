@@ -34,11 +34,10 @@ class NodeGroupSpec:
 # sub-packages. Twenty-three finished nodes were invisible for that reason
 # until 2026-09-18.
 #
-# Adding them here is the obvious fix and it is the wrong one. `radiance.film`
-# declares RadianceFilmGrain and RadianceMotionBlur pointing at classes that
-# are NOT the ones radiance.nodes.vfx ships under those keys, so loading it as
-# a group would swap two shipping nodes for rival implementations with
-# different widgets, quietly breaking every saved workflow that uses them.
+# Adding them here is the obvious fix and it is the wrong one: a package loaded
+# as a group publishes everything it declares, so a rival class under a key
+# another group ships (as `radiance.film` had for RadianceFilmGrain and
+# RadianceMotionBlur until 3.5.0) would silently replace a shipping node.
 #
 # The registration layer is `radiance/nodes/<group>/__init__.py`: it imports
 # the implementation classes it wants and names them, one key at a time. See

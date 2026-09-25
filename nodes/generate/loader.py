@@ -289,8 +289,8 @@ class RadianceUnifiedLoader:
                 "lora_on_error": (["warn", "raise"], {"default": "raise",
                     "tooltip": "'warn' skips failed LoRA and continues. "
                                " 'raise' stops execution."}),
-                "auto_download": ("BOOLEAN", {"default": False,
-                    "tooltip": "If a selected model is missing, automatically download it from Radiance mirrors."}),
+                "auto_download": ("BOOLEAN", {"default": True,
+                    "tooltip": "If a selected model is missing and is one Radiance knows, download it on first run from its pinned Hugging Face source, checked against its SHA-256 before it is installed (large: 4 to 60 GB). Gated repositories (FLUX.2-dev, FLUX.2-klein 9B, LTX-2.5) need their licence accepted on Hugging Face and HF_TOKEN set. RADIANCE_ALLOW_DOWNLOADS=0 always stops downloads."}),
             },
         }
 
@@ -327,7 +327,7 @@ class RadianceUnifiedLoader:
         check_vram="On",
         use_cache="On",
         lora_on_error="raise",
-        auto_download=False,
+        auto_download=True,
     ):
         def _none(val):
             return None if val in ("None", "", None) else val
@@ -586,7 +586,7 @@ class RadianceVideoLoader(RadianceUnifiedLoader):
         check_vram="On",
         use_cache="On",
         lora_on_error="raise",
-        auto_download=False,
+        auto_download=True,
     ):
         def _none(val):
             return None if val in ("None", "", None) else val
@@ -891,7 +891,7 @@ class RadianceControlNetApply:
                 "control_net": ("CONTROL_NET", {
                     "tooltip": "ControlNet model from a ControlNet loader. Strength 0 returns the conditioning unchanged."}),
                 "image": ("IMAGE", {
-                    "tooltip": "Control hint image (edges, depth, pose and so on) in display-referred 0-1 values. No VAE is passed, so ControlNets that need a VAE-encoded hint are not supported."}),
+                    "tooltip": "Control hint image (edges, depth, pose and so on) in display-referred 0-1 values."}),
                 "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05,
                     "tooltip": "Global strength of the control effect."}),
                 "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
@@ -900,7 +900,12 @@ class RadianceControlNetApply:
                     "tooltip": "Percentage of the generation where control ends (1.0 = end)."}),
                 "control_type": (["auto"] + list(UNION_CONTROLNET_TYPES.keys()), {"default": "auto",
                     "tooltip": "For Union ControlNets (like Flux), select the specific control mode (Canny, Depth, etc.)."}),
-            }
+            },
+            "optional": {
+                "vae": ("VAE", {
+                    "tooltip": "The model's VAE. Needed by ControlNets that take a VAE-encoded hint "
+                    "(SD3, Flux and other DiT ControlNets); leave unconnected for SD1.5 / SDXL ones."}),
+            },
         }
     
     RETURN_TYPES = ("CONDITIONING",)
@@ -909,7 +914,8 @@ class RadianceControlNetApply:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ Generate"
     DESCRIPTION = "Apply a ControlNet conditioning signal to the Radiance sampler."
 
-    def apply_controlnet(self, conditioning, control_net, image, strength, start_percent, end_percent, control_type="auto"):
+    def apply_controlnet(self, conditioning, control_net, image, strength, start_percent, end_percent,
+                         control_type="auto", vae=None):
         # 1. Graceful Bypass: If no control_net or zero strength, just return the input conditioning.
         if control_net is None:
             logger.info("◎ Radiance Control: No ControlNet connected. Bypassing.")
@@ -927,11 +933,26 @@ class RadianceControlNetApply:
             control_net.set_extra_arg("control_type", [])
 
         # 3. Advanced Application (Standard ComfyUI Logic with added safety)
+        # ComfyUI's ControlNets take the hint channels-first, as its own
+        # ControlNet Apply passes it (IMAGE is B,H,W,C). The hint used to go in
+        # as B,H,W,C and a VAE was never passed, so ControlNets that encode the
+        # hint with the VAE could not work.
+        control_hint = image.movedim(-1, 1)
+
+        def with_hint(cn):
+            import inspect
+            try:
+                takes_vae = "vae" in inspect.signature(cn.set_cond_hint).parameters
+            except (TypeError, ValueError):
+                takes_vae = False
+            kw = {"vae": vae} if takes_vae else {}   # a ComfyUI older than the vae argument
+            return cn.set_cond_hint(control_hint, strength, (start_percent, end_percent), **kw)
+
         c = []
         try:
             for t in conditioning:
                 n = [t[0], t[1].copy()]
-                c_net = control_net.copy().set_cond_hint(image, strength, (start_percent, end_percent))
+                c_net = with_hint(control_net.copy())
                 if 'control' in n[1]:
                     c_net.set_previous_controlnet(n[1]['control'])
                 n[1]['control'] = c_net

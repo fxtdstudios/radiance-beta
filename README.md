@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/version-3.5.0-c8a96e?style=for-the-badge)](https://github.com/fxtdstudios/radiance)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green?style=for-the-badge)](LICENSE)
-[![Nodes](https://img.shields.io/badge/nodes-158-c8a96e?style=for-the-badge)](#node-map)
+[![Nodes](https://img.shields.io/badge/nodes-156-c8a96e?style=for-the-badge)](#node-map)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-Radiance-orange?style=for-the-badge)](https://registry.comfy.org/nodes/radiance)
 [![Hugging Face](https://img.shields.io/badge/Hugging_Face-RUDRA_models-ffd21e?style=for-the-badge)](https://huggingface.co/fxtdstudios/RUDRA)
 
@@ -24,11 +24,11 @@ Artists get 32-bit, HDR, and ACES image tools, professional viewers, and VFX nod
 
 - 32-bit float and EXR workflows for VFX and finishing, with lossless scene-linear round-trips.
 - ACES, OCIO, log curves, LUTs, CDL, scopes, QC, and grade-transfer tools.
-- VFX utilities for plate prep, masks, roto, depth, camera and optics, motion, multipass, real AOV ingestion, and relighting.
+- VFX utilities for plate prep, masks, depth, camera and optics, motion, multipass, real AOV ingestion, and relighting.
 - Video and temporal workflow nodes for loading, routing, conditioning, sampling, and delivery.
 - In-canvas studio dashboards (Project Manager, Workflow Library, Assets) rendered over the ComfyUI graph, never in a separate browser tab.
 - **Radiance Sampler**, a preset-driven sampler that hides irrelevant parameters and adapts to the selected model.
-- A full-featured **Viewer** and a lightweight **Lite Viewer** with scopes, frame review, and keyboard shortcuts.
+- One **Viewer** with a Simple mode (picture, compare, playback) and an Advanced mode (scopes, grade, inspector, timeline tools), and keyboard shortcuts.
 - HDR VAE Encode / Decode that carry values above 1.0 through the model's VAE, learned SDR → HDR recovery (RUDRA), and HDR LoRA tooling for scene-linear generation.
 - Dynamic Gizmos: collapse any group of nodes into a single reusable custom node.
 - Secure-by-default handoff to Nuke and DaVinci Resolve.
@@ -68,7 +68,7 @@ Nothing else needs doing:
   [Multipass Estimate](#models-multipass-estimate)).
 
 Checked on a clean ComfyUI 0.32 with Python 3.13: the registry package
-installs, all 158 nodes load, OCIO is configured, and the first SDR → HDR run
+installs, all 156 nodes load, OCIO is configured, and the first SDR → HDR run
 fetches the model and applies it.
 
 ### Requirements
@@ -123,7 +123,7 @@ pip install -r requirements_mac_silicon.txt
 
 ### Verify
 
-Start ComfyUI and look for `Radiance: successfully loaded 158 nodes (v3.5.0)` in the log.
+Start ComfyUI and look for `Radiance: successfully loaded 156 nodes (v3.5.0)` in the log.
 A lower count means a node module failed to import, usually a missing optional
 dependency; the Environment Guard table printed at startup shows which.
 
@@ -146,7 +146,7 @@ missing on your install.
   `pip install -r ...` line as above, then restart ComfyUI.
 
 The startup log prints the installed version:
-`Radiance: successfully loaded 158 nodes (v3.5.0)`.
+`Radiance: successfully loaded 156 nodes (v3.5.0)`.
 
 ### Upgrading from 2.x or 3.4
 
@@ -178,6 +178,12 @@ What affects an existing graph:
 - **Multipass Relight reads `ao` the way renderers write it: 1 = open.** It
   used to read the pass as an occlusion amount, which inverted real AO loaded
   through Read AOVs. A hand-made occlusion mask needs inverting once.
+- **Thirteen bug fixes change some outputs:** Video HDR Decode (white on
+  `peak_nits`, a real SDR preview), Video Batch Decode (no second
+  `latent_scale`), HDR Color Pipeline (every primaries pair, corrected D60
+  matrices), Multipass Relight's point light with a depth pass, Digital
+  Cinema Read (a video's first frame), EXR MultiPart (every frame). The
+  changelog's upgrade note lists them.
 
 ### Models (RUDRA SDR → HDR)
 
@@ -256,9 +262,36 @@ frame when it fits in memory; `pixel_tile_size` only applies when it does
 not, because the network normalises over its input and tiles shift the
 result.
 
-The other model downloads Radiance can make (Real-ESRGAN, HAT-L, SwinIR,
-Depth Anything V2, DSINE; 67 MB to 2.4 GB) still ask first: set
-`RADIANCE_ALLOW_DOWNLOADS=1` to allow them.
+### Models every other node downloads
+
+Every node that needs a model downloads it the first time it runs. Each file
+is pinned (a fixed Hugging Face commit or the original release file) and its
+SHA-256 is checked before it is installed; a file that does not match is
+deleted. Downloads go to a `.part` file and resume after an interruption, and
+ComfyUI's progress bar shows them.
+
+| Node | Model | Size | From | Installed to |
+| :--- | :--- | :--- | :--- | :--- |
+| Upscale Image / Video, Tier 1 | Real-ESRGAN x4+, x2+, x4+ anime | 18-67 MB | [xinntao/Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN/releases) | `models/upscale_models/` |
+| Upscale Image / Video, Tier 2 | SwinIR-L x4 real-world GAN | 142 MB | [JingyunLiang/SwinIR](https://github.com/JingyunLiang/SwinIR/releases) | `models/upscale_models/` |
+| Upscale Image / Video, Tier 3 | SD x4 upscaler (diffusers) | 3.5 GB | [stabilityai/stable-diffusion-x4-upscaler](https://huggingface.co/stabilityai/stable-diffusion-x4-upscaler) | Hugging Face cache |
+| Upscale Face Restore | CodeFormer, GFPGAN 1.4, RetinaFace | 110-377 MB | original GitHub releases | `models/facerestore_models/`, `models/facedetection/` |
+| AI Upscale | SUPIR v0F / v0Q (fp16), Real-ESRGAN | 2.7 GB each | [Kijai/SUPIR_pruned](https://huggingface.co/Kijai/SUPIR_pruned) | `models/upscale_models/` |
+| Depth Map Generator | Depth Anything V2 Small / Base / Large | 99 MB-1.3 GB | [depth-anything](https://huggingface.co/depth-anything) | Hugging Face cache |
+| Read Models (`auto_download`) | the 60 checkpoints, text encoders and VAEs in its presets (FLUX.1 / FLUX.2 / klein, SDXL, LTX-2.3 / 2.5, MiniMax-H3) | 4 MB-66 GB | pinned Hugging Face commits | the matching `models/` folder |
+
+**Gated repositories.** FLUX.2-dev, FLUX.2-klein 9B and LTX-2.5 require
+accepting their licence on Hugging Face. Accept it on the model page, set
+`HF_TOKEN` to a read token (or run `huggingface-cli login`) and restart
+ComfyUI; the download then runs automatically. Without the token the node
+stops with a message giving both steps.
+
+**Installed by hand.** HAT-L (Upscale Tier 2) is published only on Google
+Drive, so there is no pinned download: get it from the
+[HAT page](https://github.com/XPixelGroup/HAT#how-to-test) and save it as
+`models/upscale_models/HAT_L_x4.pth` / `HAT_L_x2.pth`. Until then Tier 2
+uses SwinIR-L at 4x and Real-ESRGAN at 2x. SeedVR2 needs the
+ComfyUI-SeedVR2_VideoUpscaler node pack, which fetches its own weights.
 
 The latent-space RUDRA decoders that earlier releases loaded inside HDR VAE
 Decode (`rudra_turbo_decoder_*` / `rudra_full_decoder_*`) were retired in
@@ -380,13 +413,17 @@ There is also HDR LoRA loading and application, a LoRA stack with per-LoRA model
 
 FP32 and RGBA32F end to end, on WebGL2.
 
+A switch in the Viewer's title bar picks **Simple** or **Advanced**. Simple is the picture, a transport and compare, nothing else. Advanced adds the menus, tool rail, scopes, grade, inspector and timeline tools. A new Viewer opens in Simple; the choice is saved with the node, and a graph saved before the switch existed opens in Advanced, as it looked.
+
+Compare works the same in both modes: **A**, **B**, **Wipe** (drag the line), **Diff** (|A − B| × 4) and **Blink** (flips A and B twice a second). B is the node's `compare_image`, following the playhead. With nothing connected, **Pin A as B** keeps the current frame as B, and it stays through new runs: pin, change the graph, queue, compare. **Release B** goes back to the input.
+
 Scopes: histogram, waveform, vectorscope and parade. You pick the scale (10 or 12-bit code value, percent, millivolts, or nits for ST.2084 and HLG) and data or video levels, and whether the scopes measure before or after the viewer's colour transforms. Every graticule line carries its number.
 
 The pixel probe samples a cursor, a region or the whole frame, and reports RGBA, luminance, EV, cd/m², HSV and hex, with min, max, mean and median per channel. NaN, Inf and negative counts are excluded from the statistics and reported separately, because a mean that quietly includes a NaN is worse than no mean.
 
 Then the things you reach for while looking: false colour, zebra, a nit-accurate HDR heatmap anchored to BT.2408 reference white, safe areas labelled with the standard they come from, aspect-ratio mattes, nearest-neighbour magnification, timecode, A/B compare with wipe, difference and blink, EXR channel and layer inspection, focus peaking, and a sequence timeline with per-frame thumbnails.
 
-A Lite Viewer exists for when you want a frame on the node and nothing else.
+The Lite Viewer node is gone: Simple mode does its job. A graph saved with a Lite Viewer opens with a Viewer in its place, in Simple mode, with the same connections and `input_space` / `fps`.
 
 | Key | Action |
 | :--- | :--- |
@@ -394,15 +431,17 @@ A Lite Viewer exists for when you want a frame on the node and nothing else.
 | Left / Right | Previous / next frame |
 | F | Fit to view |
 | 1 | 1:1 pixels |
-| C / R / G / B / L | Colour, red, green, blue, luma |
+| J / K / L | Play backwards / stop / play forwards |
+| I / O | In / out point (Alt+X clears) |
+| C / R / G / B / Y / A | Colour, red, green, blue, luma, alpha |
 | W | Waveform |
 | V | Vectorscope |
-| A | Cycle A/B compare |
+| X | Wipe compare on / off |
 | N | Nearest-neighbour / linear |
 
 ### VFX
 
-Plate prep, masks, roto, depth, optics, motion, and multipass. Motion estimation is DIS optical flow, which stays dense out to about 20 px of movement; the older Lucas–Kanade solver is still selectable. Multipass Estimate predicts passes from a plate with trained models (MoGe-2 geometry, Marigold materials and lighting); when you have real AOVs, the Multipass AOV Reader takes a multilayer EXR. Relighting works off either.
+Plate prep, masks, depth, optics, motion, and multipass. Motion estimation is DIS optical flow, which stays dense out to about 20 px of movement; the older Lucas–Kanade solver is still selectable. Multipass Estimate predicts passes from a plate with trained models (MoGe-2 geometry, Marigold materials and lighting); when you have real AOVs, the Multipass AOV Reader takes a multilayer EXR. Relighting works off either.
 
 ### Video
 
@@ -440,9 +479,9 @@ FXTD STUDIOS/Radiance
 └─ Pipeline
 ```
 
-**158 nodes**: 149 in the menu and 9 retired ones that stay registered so older saved graphs still open. A few depend on optional packages.
+**156 nodes**: 147 in the menu and 9 retired ones that stay registered so older saved graphs still open. A few depend on optional packages.
 
-Compositing nodes use compositing names (`Grade`, `CDL`, `OCIO ColorSpace`, `Roto`, `Defocus`, `Viewer`, `Read`, `Write`), so they read the way they do in Nuke or Flame. The diffusion layer keeps a `Radiance` prefix, so `Radiance Sampler` and `Radiance VAE Decode` are obviously the AI ones. Typing "radiance" in the search still finds everything.
+Compositing nodes use compositing names (`Grade`, `CDL`, `OCIO ColorSpace`, `Defocus`, `Viewer`, `Read`, `Write`), so they read the way they do in Nuke or Flame. The diffusion layer keeps a `Radiance` prefix, so `Radiance Sampler` and `Radiance VAE Decode` are obviously the AI ones. Typing "radiance" in the search still finds everything.
 
 | Section | Nodes | What's in it |
 | :--- | ---: | :--- |
@@ -451,10 +490,10 @@ Compositing nodes use compositing names (`Grade`, `CDL`, `OCIO ColorSpace`, `Rot
 | [Generate](docs/nodes/generate.md) | 13 | Loader, Sampler, VAE Encode (HDR), VAE Decode (HDR), prompts, LoRA, regional conditioning, denoise |
 | [Color](docs/nodes/color.md) | 18 | White Balance, Grade, Grade Match, CDL, curves, LUTs, OCIO, colour-space conversion |
 | [HDR](docs/nodes/hdr.md) | 36 | SDR → HDR, ACES 2.0, tone mapping, analysis, encoding, HDR synthesis |
-| [VFX](docs/nodes/vfx.md) | 32 | Plate prep, masks, roto, inpaint, depth, optics, motion, Multipass Estimate, AOV reader, relight |
+| [VFX](docs/nodes/vfx.md) | 31 | Plate prep, masks, inpaint, depth, optics, motion, Multipass Estimate, AOV reader, relight |
 | [Video](docs/nodes/video.md) | 15 | Text-to-video, image-to-video, video sampler, video HDR, batch decode, export |
 | [Upscale](docs/nodes/upscale.md) | 10 | Image and video upscale, tiling, face restoration |
-| [Review](docs/nodes/review.md) | 12 | Viewer, Lite Viewer, scopes, false colour, QC, Policy Guard, contact sheets, flipbook |
+| [Review](docs/nodes/review.md) | 11 | Viewer, scopes, false colour, QC, Policy Guard, contact sheets, flipbook |
 | [Pipeline](docs/nodes/pipeline.md) | 7 | Send to Nuke, DaVinci Resolve handoff, metadata, audio, studio integration |
 
 The [node reference](docs/nodes/README.md) lists every node with every input
@@ -486,7 +525,8 @@ behaviour; set them where you start ComfyUI and restart it.
 
 | Variable | What it does |
 | :--- | :--- |
-| `RADIANCE_ALLOW_DOWNLOADS` | `0` never downloads any model. `1` also allows the larger third-party weights (upscalers, depth), which otherwise ask first. Multipass Estimate downloads when its `download_missing_models` switch is on, unless this is `0`. |
+| `RADIANCE_ALLOW_DOWNLOADS` | Models download on first use by default. `0` never downloads any model; a missing one stops the node with the file name, size and folder to install it by hand. |
+| `HF_TOKEN` | Hugging Face read token, used for the gated repositories (FLUX.2-dev, FLUX.2-klein 9B, LTX-2.5) once their licence is accepted. `huggingface-cli login` works too. |
 | `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE` | `1` treats the machine as offline; nothing is downloaded. |
 | `RADIANCE_SDR2HDR_PIXEL` | Path to a specific RUDRA SDR → HDR checkpoint. |
 | `RADIANCE_TEMPORAL_RUDRA` | Path to a temporal RUDRA checkpoint for ordered video. |
@@ -502,7 +542,7 @@ Models go in `ComfyUI/models/radiance` (MoGe in `models/geometry_estimation`); a
 
 ## Troubleshooting
 
-- **The log says fewer than 158 nodes loaded.** A module failed to import. The
+- **The log says fewer than 156 nodes loaded.** A module failed to import. The
   lines above it name the module and the error, and the Environment Guard
   table shows which package is missing. Reinstall the requirements into
   ComfyUI's own Python (for the Windows portable build:
@@ -546,7 +586,7 @@ is worse than one that says so. Full detail in the [changelog](CHANGELOG.md).
 
 - **No SAM runtime.** `SAM Loader` and `SAM Mask Generator` are hidden and
   raise when executed; they never ran a segmentation model. Use a SAM2 node
-  pack and feed its MASK into Radiance's matting, roto and propagation nodes.
+  pack and feed its MASK into Radiance's matting and propagation nodes.
 - **Upscale `confidence` is a tile weight.** It is 1 at tile centres and lower
   toward tile edges; no backend reports per-pixel hallucination.
 - **Multipass Estimate is an estimate.** Its passes come from models trained

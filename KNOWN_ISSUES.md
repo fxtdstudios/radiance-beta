@@ -35,7 +35,9 @@ clear backlog.
   differs from WebGL in: no sRGB decode for 8-bit input; a 3D LUT read with the
   wrong stride; the red curve applied to every channel; a transposed hue
   matrix; misregistered bloom; and no heatmap, gamut/clip warnings, scope
-  signal, viewer f-stop or scene-linear graded EXR. `FEATURE_PARITY` now says
+  signal, viewer f-stop or scene-linear graded EXR, and compare shows only
+  wipe there (B, Difference and Blink need `setCompareShow`, WebGL only).
+  `FEATURE_PARITY` now says
   false. Porting these to WGSL is the remaining work; until then WebGL is the
   default and the tested path.
 
@@ -122,52 +124,16 @@ clear backlog.
   convention: highlights mastered above 1000 nits clip in the HLG signal. Use
   PQ for 4000- and 10000-nit masters.
 
+## VFX nodes: memory and speed (3.5.0)
+
+The six nodes that broke or crawled at production size, ten more that held the clip several times over, and the EXR Passes Writer, Compression Artifacts and Scene Cut Detect are fixed (see the changelog). Still to convert: Multipass Estimate's geometry passes (normals, GTAO, curvature) hold the whole clip on the CPU and its models run one frame at a time; it needs its models to test. Multipass Composite returns four full-size images, so with every input connected a long clip needs about eleven clip-sized buffers in RAM; split long 4K clips for it. All timings so far are CPU; the GPU gains are still to be measured on an RTX 4080.
+
 ## Found while documenting every input (3.5.0)
 
 Writing a tooltip for all 1,259 inputs meant reading the code behind each
-one. These do not do what their name says. Behaviour is unchanged for now;
-each tooltip says what really happens, and these are the fixes owed.
-
-**Bugs**
-
-- **Compression Artifacts crashes in JPEG or Both mode** when the image size
-  is not a multiple of `block_size` (100x100 with the default 8 raises
-  ValueError). `film/camera.py`.
-- **ControlNet Apply passes the hint image in the wrong layout** (no
-  `movedim(-1, 1)` as stock ComfyUI does) and passes no VAE, so ControlNets
-  that need one fail. `nodes/generate/loader.py`.
-- **Upscale Video runs the built-in models on the CPU** for more than one
-  frame (`device = frames.device`), and a single frame is handed to the image
-  path without `model_tier`, `sharpness_boost`, `enhancement_prompt` or
-  `diffusion_steps`. `nodes/upscale/upscale.py`.
-- **Multipass Relight with a point light and `depth_map`** (no
-  `world_position`) puts near pixels at negative Z whichever way
-  `depth_near_is_white` is set, so near and far read reversed. Multipass
-  Estimate supplies `world_position`, which avoids this.
-- **Video Batch Decode divides by dit_config's `latent_scale`** although
-  sampler output is already in VAE space, so HunyuanVideo, CogVideoX and SD
-  presets are scaled twice. `nodes/video/t2v.py`.
-- **Video HDR Decode's SDR preview peaks near 0.12** at the default 100 nits;
-  its `sRGB / BT.1886` output applies no curve (same as Linear), and Reinhard
-  maps input white to half of `peak_nits`. `nodes/video/hdr.py`.
-- **HDR Color Pipeline**: primaries pairs outside the five supported pass
-  through unchanged with no message, and `chromatic_adaptation` on an already
-  adapted Rec.709 to ACEScg matrix adapts twice.
-- **Model Info maps every Wan model to Wan 2.1 (16 channels)**, including the
-  48-channel Wan 2.2 TI2V 5B, and overrides `model_preset`.
-- **Digital Cinema Read skips the first frame of a video** (`start_frame`
-  defaults to 1 and is a 0-based offset for video).
-- **EXR MultiPart writes only the first frame** of a batch and keeps only the
-  red channel of `depth`.
-- **Policy Guard reads peak nits at 1.0 = 100 nits**, not the package's 203,
-  and reads PQ or HLG input as linear; `fail_on_errors` only labels the
-  status and does not stop the graph. **Synthesis `guidance_nits`** also uses
-  100.
-- **AMF writer does not escape `description`**, so `<` or `&` breaks the XML.
-- **Regional prompts**: each chained node resets the strength of every earlier
-  region to its own `global_strength`.
-- **Sampler `sdr_blend`** defaults to 0.0 in Python and 0.35 in the widget, so
-  API prompts that omit it disable SDR guidance.
+one. The bugs it found are fixed (see the changelog, "Bugs found while
+documenting every input"). These controls still do not do what their name
+says; each tooltip says what really happens.
 
 **Controls that do nothing or less than their name**
 
@@ -197,11 +163,28 @@ removes it, with a test per item.
 ## Viewer: remaining (phase 3)
 
 - **No HDR output.** The canvas is SDR (sRGB or Display P3, 8-bit, dithered). A Rec.2100 PQ / HLG canvas needs a float16 HDR drawing buffer in both the WebGL and the 2D compositing canvas; browser support is still settling and it cannot be verified without an HDR display. Use HDR Monitor or an external HDR display for HDR review.
-- **Compare B side.** It is the node's display-referred preview, baked with ACES 2.0 or untouched for sRGB. Switching the A side to another view does not re-render B. Side-by-side and difference are 2D-fallback only.
+- **Compare B side.** It is the node's display-referred preview, baked with ACES 2.0 or untouched for sRGB. Switching the A side to another view does not re-render B. A B of a different size is stretched to A. Side-by-side is 2D-fallback only.
+- **Blink rate is fixed** at two flips a second; there is no control for it yet.
 - **Non-OCIO views on non-Rec.709 sources.** A source tagged ACEScg or Rec.2020 is shown with Rec.709 primaries in the sRGB, Rec.709 and Filmic views. The Auto and ACES views go through OCIO with the right source.
 - **Annotations are screen-space.** They do not follow pan and zoom.
+- **Reverse video is seeked, not played.** J on a video loaded straight into the Viewer steps back one seek at a time. On long-GOP files (typical H.264) each seek decodes from the previous keyframe, so reverse can run below the set rate. Image sequences and clips from a Read node are not affected.
+- **Playback rate not yet measured on a GPU.** The player's correctness is checked in a browser with software WebGL, which tops out near 3 fps; real-time rate at 24 fps and above is to be confirmed on the RTX 4080 before tagging.
 - **No audio.** Playback is picture only.
 - **Pro scope "False colour" mode** is a display-level zone map, not the ARRI bands of the viewer overlay.
+
+## Models that cannot download on their own (3.5.0)
+
+Every other model downloads on first use (see the README, "Models every other
+node downloads").
+
+- **HAT-L** (Upscale Tier 2) is published only on Google Drive, so there is no
+  pinned download. Install it by hand from the HAT page; until then Tier 2
+  uses SwinIR-L at 4x and Real-ESRGAN at 2x, and says so in the log.
+- **Gated repositories** (FLUX.2-dev, FLUX.2-klein 9B and base 9B, LTX-2.5)
+  download only after the licence is accepted on Hugging Face and `HF_TOKEN`
+  is set; the node stops with both steps until then.
+- **SeedVR2** needs the ComfyUI-SeedVR2_VideoUpscaler node pack, which fetches
+  its own weights; without it Tier 3 uses the SD x4 upscaler.
 
 ## Minor
 

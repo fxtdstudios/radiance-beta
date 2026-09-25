@@ -924,7 +924,7 @@ class RadianceEXRMultiPart:
                 "filename_prefix": ("STRING", {"default": "radiance_multipart",
                     "tooltip": "File name stem. The file is written as <prefix>.<frame_index, 4-digit padded>.exr."}),
                 "beauty":    ("IMAGE", {
-                    "tooltip": "Main image, written as the 'beauty' part (R, G, B, plus A if it has 4 channels). Values are written unchanged, so feed scene-linear data. Only the first frame of a batch is written."}),
+                    "tooltip": "Main image, written as the 'beauty' part (R, G, B, plus A if it has 4 channels). Values are written unchanged, so feed scene-linear data. Each frame of a batch is written to its own file."}),
                 "bit_depth": (_EXR_BIT_DEPTHS,   {"default": "16-bit Half Float",
                     "tooltip": "Pixel type for every part: 16-bit half float (smaller, about 11 bits of precision) or 32-bit float."}),
                 "compression": (_EXR_COMPRESSIONS, {"default": "ZIP",
@@ -932,7 +932,7 @@ class RadianceEXRMultiPart:
             },
             "optional": {
                 "depth":         ("IMAGE", {
-                    "tooltip": "Depth AOV written as a single Z channel in a 'depth' part. Only the first (red) channel is used; values are not normalised."}),
+                    "tooltip": "Depth AOV written as a single Z channel in a 'depth' part, from the first channel (a grey depth image carries the same value in all three); values are not normalised."}),
                 "normal":        ("IMAGE", {
                     "tooltip": "Normals AOV written as NX, NY, NZ in a 'normal' part, values unchanged (no 0-1 to -1..1 remap)."}),
                 "albedo":        ("IMAGE", {
@@ -950,7 +950,7 @@ class RadianceEXRMultiPart:
                 "remote_path":   ("STRING", {"default": "",
                     "tooltip": "Optional second folder (for example a NAS or UNC share) the finished file is copied to. A failed copy only logs a warning."}),
                 "frame_index":   ("INT",    {"default": 1, "min": 1,
-                    "tooltip": "Frame number used in the file name only. It does not select a frame from the batch."}),
+                    "tooltip": "Frame number of the first image in the batch, used in the file name; later frames count up from it. An AOV with one frame is used for every frame."}),
                 "custom_metadata": ("STRING", {"default": "", "multiline": True,
                     "tooltip": "Extra header attributes, one key=value per line. Keys are stored with a 'rad_' prefix unless they are standard EXR names (owner, comments, capDate and so on)."}),
             },
@@ -984,8 +984,6 @@ class RadianceEXRMultiPart:
         out_dir = get_safe_output_dir(base_dir, output_path, allow_absolute=True)
         os.makedirs(out_dir, exist_ok=True)
 
-        frame_num = str(frame_index).zfill(4)
-        filepath  = os.path.join(out_dir, f"{filename_prefix}.{frame_num}.exr")
         comp      = _norm_exr_compression(compression)
 
         # Validate custom part names — spaces / special chars corrupt multi-part EXR
@@ -1007,16 +1005,11 @@ class RadianceEXRMultiPart:
                 k, v = line.split("=", 1)
                 meta[k.strip()] = v.strip()
 
-        def _t(t: Optional[torch.Tensor]) -> Optional[np.ndarray]:
-            if t is None:
-                return None
-            arr = t.squeeze(0) if t.dim() == 4 and t.shape[0] == 1 else t
-            if arr.dim() == 4:
-                arr = arr[0]
-            return arr.float().cpu().numpy()
-
-        parts: Dict[str, np.ndarray] = {}
-        parts["beauty"] = _t(beauty)  # type: ignore[assignment]
+        # 3.5.0: every frame of the batch is written, <prefix>.<frame_index + n>.exr.
+        # Only the first frame used to be written and the rest dropped. An AOV
+        # with one frame (or a 3-D tensor) is used for every frame.
+        batch = int(beauty.shape[0]) if beauty.dim() == 4 else 1
+        named = [(beauty, "beauty")]
         for tensor, name in (
             (depth,    "depth"),
             (normal,   "normal"),
@@ -1024,28 +1017,49 @@ class RadianceEXRMultiPart:
             (custom_1, custom_1_name or "custom_1"),
             (custom_2, custom_2_name or "custom_2"),
         ):
-            arr = _t(tensor)
-            if arr is not None:
-                parts[name] = arr
+            if tensor is None:
+                continue
+            if tensor.dim() == 4 and tensor.shape[0] not in (1, batch):
+                raise ValueError(f"[EXRMultiPart] '{name}' has {tensor.shape[0]} frames; beauty has {batch}. "
+                                 "Use the same count, or one frame to repeat.")
+            named.append((tensor, name))
 
-        if write_exr_multipart is not None:
-            ok = write_exr_multipart(filepath, parts, bit_depth, comp, meta)
-        elif write_exr_robust is not None:
-            log.warning("[EXRMultiPart] multi-part unavailable — writing beauty-only EXR")
-            ok = write_exr_robust(filepath, parts["beauty"], bit_depth, comp, meta)
+        def _t(t: torch.Tensor, b: int) -> np.ndarray:
+            arr = t if t.dim() == 3 else t[0 if t.shape[0] == 1 else b]
+            return arr.detach().float().cpu().numpy()
+
+        def write_frame(b: int) -> str:
+            frame_num = str(frame_index + b).zfill(4)
+            filepath  = os.path.join(out_dir, f"{filename_prefix}.{frame_num}.exr")
+            parts: Dict[str, np.ndarray] = {name: _t(t, b) for t, name in named}
+
+            if write_exr_multipart is not None:
+                ok = write_exr_multipart(filepath, parts, bit_depth, comp, meta)
+            elif write_exr_robust is not None:
+                log.warning("[EXRMultiPart] multi-part unavailable — writing beauty-only EXR")
+                ok = write_exr_robust(filepath, parts["beauty"], bit_depth, comp, meta)
+            else:
+                log.error("[EXRMultiPart] No EXR writer available")
+                ok = False
+
+            if not ok:
+                raise RuntimeError(f"[EXRMultiPart] Failed to write: {filepath}")
+
+            log.info("[EXRMultiPart] Wrote %d parts → %s", len(parts), filepath)
+
+            if remote_path:
+                _copy_to_remote_path(filepath, remote_path)
+            return filepath
+
+        workers = max(1, min(batch, os.cpu_count() or 1, 8))
+        if workers == 1:
+            paths = [write_frame(b) for b in range(batch)]
         else:
-            log.error("[EXRMultiPart] No EXR writer available")
-            ok = False
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="radiance-exr-mp") as pool:
+                paths = list(pool.map(write_frame, range(batch)))
 
-        if not ok:
-            raise RuntimeError(f"[EXRMultiPart] Failed to write: {filepath}")
-
-        log.info("[EXRMultiPart] Wrote %d parts → %s", len(parts), filepath)
-
-        if remote_path:
-            _copy_to_remote_path(filepath, remote_path)
-
-        return (filepath,)
+        return (paths[0],)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1064,7 +1078,8 @@ class RadianceDigitalCinemaRead:
                     "tooltip": "How to treat source_path. Auto detects from the path; EXR is handled exactly like Sequence."}),
                 "start_frame": ("INT", {"default": 1, "min": 1,
                     "tooltip": ("Sequence: the frame number to start at (a number outside the range on disk "
-                                "falls back to the first frame). Video: a 0-based offset, so the default 1 skips the clip's first frame.")}),
+                                "falls back to the first frame). Video: the frame to start at counting from 1, "
+                                "so the default 1 is the clip's first frame.")}),
                 "frame_limit": ("INT", {"default": 0, "min": 0,
                     "tooltip": "Maximum number of frames to read from start_frame. 0 reads to the end."}),
                 "input_colorspace": (["sRGB (Standard)"] + [c for c in INPUT_COLOR_SPACES if c != "sRGB"],
@@ -1112,12 +1127,25 @@ class RadianceDigitalCinemaRead:
         # numbered 1001-1100 read all 100 frames into RAM. The reader now
         # carries the window's LENGTH across that correction (see
         # `_sequence_frame_range`), so the span expressed here is what is read.
+        #
+        # A video's frames are numbered from 0 in the reader. This node's
+        # start_frame counts from 1 (its minimum and default), so it is turned
+        # into the 0-based offset here; passed straight through, the default
+        # skipped every clip's first frame. The span is carried by
+        # max_video_frames, since the reader's end_frame 0 means "to the end".
+        clean_path = str(source_path).strip().strip('"').strip("'")
+        is_video = media_type == "Video" or (media_type == "Auto" and _path_kind(clean_path) == "video")
+        if is_video:
+            read_start, read_end = max(int(start_frame) - 1, 0), 0
+        else:
+            read_start = start_frame
+            read_end = (start_frame + frame_limit - 1) if frame_limit > 0 else 0
         img, mask, read_info = reader.read(
             path=source_path,
             media_type=media_type,
             color_space=cs_in,
-            start_frame=start_frame,
-            end_frame=(start_frame + frame_limit - 1) if frame_limit > 0 else 0,
+            start_frame=read_start,
+            end_frame=read_end,
             max_video_frames=frame_limit if frame_limit > 0 else 0,
         )
 

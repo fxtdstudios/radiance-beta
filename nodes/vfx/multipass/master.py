@@ -141,6 +141,11 @@ def _pass_channels_for_multilayer(name: str, image: np.ndarray) -> Dict[str, np.
     return channels
 
 
+#: Frames written at once by the EXR Passes Writer. OpenEXR compresses outside
+#: the GIL, so this scales with cores; each worker holds one frame's passes.
+_EXR_WRITE_THREADS = max(1, min(8, os.cpu_count() or 1))
+
+
 def _write_exr_singlepart_multilayer(
     filepath: str,
     parts: Dict[str, np.ndarray],
@@ -591,7 +596,12 @@ class RadianceEXRPassesWriter:
             raise ValueError("[EXR Passes Writer] beauty must have shape (B,H,W,C).")
 
         B, H, W, _ = beauty.shape
-        numpy_parts: Dict[str, np.ndarray] = {}
+        # 3.5.0: passes are converted one frame at a time as each file is
+        # written (a GPU or half-precision pass used to be copied whole to the
+        # CPU first), and frames are written in parallel: OpenEXR compresses
+        # outside the GIL, so the files no longer queue behind each other.
+        # Each file's contents are unchanged.
+        pass_tensors: Dict[str, torch.Tensor] = {}
         for name, tensor in passes.items():
             if name.startswith("_") or not isinstance(tensor, torch.Tensor):
                 continue
@@ -602,46 +612,42 @@ class RadianceEXRPassesWriter:
                 raise ValueError(f"[EXR Passes Writer] pass '{name}' does not match beauty dimensions/channels.")
             if tensor.dim() == 4 and tensor.shape[0] not in (1, B):
                 raise ValueError(f"[EXR Passes Writer] pass '{name}' batch must be 1 or {B}, got {tensor.shape[0]}.")
-            numpy_parts[name] = tensor.float().cpu().numpy()
+            pass_tensors[name] = tensor
 
         data_passes = {"depth", "world_position", "motion_vector", "object_id"}
-        if data_passes.intersection(numpy_parts):
+        if data_passes.intersection(pass_tensors):
             if compression.upper() in {"B44", "B44A", "DWAA", "DWAB"}:
                 raise ValueError("[EXR Passes Writer] lossy compression is not allowed with data AOVs; use ZIP, ZIPS, PIZ, RLE, or Uncompressed.")
             if "16" in bit_depth:
                 logger.info("[EXR Passes Writer] Promoting data-AOV file to 32-bit float.")
                 bit_depth = "32-bit Float"
 
-        saved_paths: List[str] = []
+        if not _HAS_EXR or (exr_layout != "Single-part multilayer" and write_exr_multipart is None):
+            raise RuntimeError(
+                "[EXR Passes Writer] EXR writing modules not found or import failed."
+            )
+        # Normalise compression label
+        comp = "None" if compression.lower() == "uncompressed" else compression
 
-        # Iterate over each frame in batch
-        for b in range(B):
+        def write_frame(b: int) -> str:
             frame_num = str(frame_index + b).zfill(4)
             filename = f"{prefix}.{frame_num}.exr"
             filepath = safe_join(out_dir, filename)
 
             parts: Dict[str, np.ndarray] = {}
-            for name, array in numpy_parts.items():
-                parts[name] = array[0 if array.ndim == 4 and array.shape[0] == 1 else b] if array.ndim == 4 else array
-
-            # Normalise compression label
-            comp = "None" if compression.lower() == "uncompressed" else compression
+            for name, tensor in pass_tensors.items():
+                frame = tensor if tensor.dim() == 3 else tensor[0 if tensor.shape[0] == 1 else b]
+                parts[name] = frame.detach().float().cpu().numpy()
 
             # Write the EXR file
-            if _HAS_EXR and exr_layout == "Single-part multilayer":
+            if exr_layout == "Single-part multilayer":
                 ok = _write_exr_singlepart_multilayer(filepath, parts, bit_depth, comp, meta)
-            elif _HAS_EXR and write_exr_multipart is not None:
-                ok = write_exr_multipart(filepath, parts, bit_depth, comp, meta)
             else:
-                raise RuntimeError(
-                    "[EXR Passes Writer] EXR writing modules not found or import failed."
-                )
-
+                ok = write_exr_multipart(filepath, parts, bit_depth, comp, meta)
             if not ok:
                 raise RuntimeError(f"[EXR Passes Writer] Failed to write EXR file: {filepath}")
 
             logger.info("[EXR Passes Writer] Saved %d layers → %s", len(parts), filepath)
-            saved_paths.append(filepath)
 
             # Best effort copy to remote/NAS path
             if remote_path:
@@ -654,6 +660,15 @@ class RadianceEXRPassesWriter:
                     logger.info("[EXR Passes Writer] Copied to remote → %s", dest)
                 except Exception as ex:
                     logger.warning("[EXR Passes Writer] Remote copy failed: %s", ex)
+            return filepath
+
+        workers = max(1, min(B, _EXR_WRITE_THREADS))
+        if workers == 1:
+            saved_paths: List[str] = [write_frame(b) for b in range(B)]
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="radiance-exr") as pool:
+                saved_paths = list(pool.map(write_frame, range(B)))   # frame order; first error raises
 
         return (saved_paths[0] if saved_paths else "",)
 

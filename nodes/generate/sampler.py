@@ -1581,8 +1581,11 @@ class RadianceSamplerPro:
         temporal_overlap: int = 4,
         sdr_reference: Optional[torch.Tensor] = None,
         sdr_vae: Optional[Any] = None,
-        sdr_blend: float = 0.0,
-        sdr_inject_steps: int = 0,
+        # Same defaults as the widgets (0.35, 6). They were 0.0 and 0 here, so
+        # an API prompt that connected an SDR reference but left these out
+        # ran with SDR guidance off.
+        sdr_blend: float = 0.35,
+        sdr_inject_steps: int = 6,
         sdr_decay: float = 0.65,
         model_meta: str = "",
     ) -> Tuple:

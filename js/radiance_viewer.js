@@ -904,8 +904,16 @@ class RadianceViewer {
         this.loupeSize = 80;
         this.loupeMagnification = 8;
 
-        // Comparison
+        // Comparison. compareMode: 'none' | 'b' | 'wipe' | 'difference' |
+        // 'blink' (and 'sidebyside' on the 2D fallback). compareSource says
+        // where B comes from: 'input' (the node's compare_image, following the
+        // playhead) or 'pinned' (a still of A the user pinned).
         this.compareMode = 'none';
+        this.compareSource = null;
+        this.diffGain = 4;
+        this.blinkMs = 500;
+        this._blinkB = false;
+        this._blinkTimer = null;
         this.wipePosition = 0.5;
         this.isDraggingWipe = false;
 
@@ -1187,6 +1195,7 @@ class RadianceViewer {
 
     init() {
         this.createUI();
+        this._installUIMode();
 
         this.setupProgressUI();
         this.setupEventListeners();
@@ -2233,6 +2242,193 @@ class RadianceViewer {
         setTimeout(() => document.addEventListener('mousedown', close, true), 0);
     }
 
+    // ── 3.5.0: Simple / Advanced ─────────────────────────────────────────────
+    // Simple is the picture, compare (A, B, wipe, difference, blink, pin) and
+    // a transport: what the Lite Viewer was for. Advanced is everything. The
+    // choice is saved on the node, so a graph opens the way it was left.
+
+    static _uiModeCSS() {
+        if (document.getElementById('radiance-ui-mode')) return;
+        const st = document.createElement('style');
+        st.id = 'radiance-ui-mode';
+        st.textContent = `
+            .radiance-mode-simple [data-rv-advanced] { display: none !important; }
+            .radiance-mode-switch { display: flex; gap: 2px; padding: 2px; border-radius: 6px;
+                background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.12); }
+            .radiance-mode-switch button, .radiance-simple-bar button {
+                font: 600 11px var(--radiance-font-ui); color: rgba(232,238,247,.72); white-space: nowrap;
+                background: transparent; border: 0; border-radius: 4px; padding: 0 10px; height: 26px; cursor: pointer; }
+            .radiance-mode-switch button.is-active, .radiance-simple-bar button.is-active {
+                background: #1f3b57; color: #fff; }
+            .radiance-mode-switch button:focus-visible, .radiance-simple-bar button:focus-visible,
+            .radiance-simple-bar input:focus-visible { outline: 2px solid #39aaff; outline-offset: 1px; }
+            .radiance-simple-bar { display: none; flex: 0 0 auto; align-items: center; gap: 10px;
+                padding: 6px 10px; background: #0d1117; border-top: 1px solid rgba(255,255,255,.08);
+                font: 11px var(--radiance-font-ui); color: rgba(232,238,247,.8); min-width: 0; }
+            .radiance-mode-simple .radiance-simple-bar { display: flex; }
+            .radiance-simple-bar .rsb-group { display: flex; gap: 2px; padding: 2px; border-radius: 6px;
+                background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.10); flex-shrink: 0; }
+            .radiance-simple-bar .rsb-play { width: 34px; background: #39aaff; color: #071019; }
+            .radiance-simple-bar .rsb-play.is-active { background: #39aaff; color: #071019; }
+            .radiance-simple-bar .rsb-frame { font-family: var(--radiance-font-mono); min-width: 64px; }
+            .radiance-simple-bar .rsb-scrub { flex: 1 1 120px; min-width: 60px; accent-color: #39aaff; }
+            .radiance-simple-bar .rsb-b { color: rgba(232,238,247,.55); white-space: nowrap;
+                overflow: hidden; text-overflow: ellipsis; max-width: 150px; min-width: 0; }
+            .radiance-simple-bar .rsb-pin { border: 1px solid rgba(255,255,255,.14); }
+            .radiance-simple-bar button:disabled { opacity: .35; cursor: default; }
+        `;
+        document.head.appendChild(st);
+    }
+
+    _installUIMode() {
+        RadianceViewer._uiModeCSS();
+        // Everything that is not picture, compare or transport.
+        const menuItems = this.proMenuBar?.querySelector('.radiance-pro-menu-items');
+        [menuItems, this.proToolbar, this.proSidebar, this.rightControlPanel, this.scopePanel,
+         this.viewerBar, this.sequenceDock, this.bottomInfoBar, this.statusBar, this.transportPanel,
+         this.viewerFrame, this.viewerCross]
+            .forEach((el) => el?.setAttribute('data-rv-advanced', ''));
+
+        // The switch, in the title bar (visible in both modes).
+        const sw = document.createElement('div');
+        sw.className = 'radiance-mode-switch';
+        sw.setAttribute('role', 'group');
+        sw.setAttribute('aria-label', 'Viewer mode');
+        this._modeBtns = new Map();
+        [['simple', 'Simple', 'Picture, compare and playback only'],
+         ['advanced', 'Advanced', 'Every panel: grade, scopes, inspector, timeline tools']].forEach(([m, label, tip]) => {
+            const b = document.createElement('button');
+            b.type = 'button'; b.textContent = label; b.title = tip;
+            b.onclick = () => this.setUIMode(m, { grow: true });
+            sw.appendChild(b);
+            this._modeBtns.set(m, b);
+        });
+        const brand = this.proMenuBar?.querySelector('.radiance-pro-brand');
+        if (brand) brand.after(sw); else this.proMenuBar?.appendChild(sw);
+
+        this.simpleBar = this._createSimpleBar();
+        this.container.appendChild(this.simpleBar);
+
+        const saved = this.node?.properties?.radiance_viewer_mode;
+        this.setUIMode(saved === 'advanced' ? 'advanced' : 'simple', { persist: !!saved });
+    }
+
+    /** Switch between Simple and Advanced. Saved on the node unless `persist` is false. */
+    setUIMode(mode, { persist = true, grow = false } = {}) {
+        mode = mode === 'advanced' ? 'advanced' : 'simple';
+        // Advanced lays out a menu, a tool rail and a 520 px panel beside the
+        // picture; give it room when the user asks for it.
+        if (grow && mode === 'advanced' && this.node?.size) {
+            const [w, h] = this.node.size;
+            if (w < 1180 || h < 760) this.node.setSize?.([Math.max(w, 1180), Math.max(h, 760)]);
+        }
+        this.uiMode = mode;
+        this.container.classList.toggle('radiance-mode-simple', mode === 'simple');
+        if (persist && this.node) {
+            this.node.properties = this.node.properties || {};
+            this.node.properties.radiance_viewer_mode = mode;
+        }
+        this._modeBtns?.forEach((b, m) => {
+            b.classList.toggle('is-active', m === mode);
+            b.setAttribute('aria-pressed', String(m === mode));
+        });
+        this._syncCompareUI();
+        this._syncSimpleTransport();
+        requestAnimationFrame(() => { this.resize?.(); if (this.image) this.fitToView?.(); });
+    }
+
+    _createSimpleBar() {
+        const bar = document.createElement('div');
+        bar.className = 'radiance-simple-bar';
+        const btn = (label, title, onClick, cls = '') => {
+            const b = document.createElement('button');
+            b.type = 'button'; b.textContent = label; b.title = title;
+            if (cls) b.className = cls;
+            b.setAttribute('aria-label', title);
+            b.onclick = onClick;
+            return b;
+        };
+        const transport = document.createElement('div');
+        transport.className = 'rsb-group';
+        this._sbPrev = btn('‹', 'Previous frame (Left)', () => this.prevFrame?.());
+        this._sbPlay = btn('▶', 'Play / pause (Space)', () => this.togglePlayback(), 'rsb-play');
+        this._sbNext = btn('›', 'Next frame (Right)', () => this.nextFrame?.());
+        transport.append(this._sbPrev, this._sbPlay, this._sbNext);
+
+        const scrub = document.createElement('input');
+        scrub.type = 'range'; scrub.min = '0'; scrub.max = '0'; scrub.step = '1'; scrub.value = '0';
+        scrub.className = 'rsb-scrub';
+        scrub.setAttribute('aria-label', 'Frame');
+        scrub.oninput = () => { if ((this.totalFrames || 0) > 1) this.setFrame(parseInt(scrub.value, 10) || 0); };
+        this._sbScrub = scrub;
+        const frame = document.createElement('span');
+        frame.className = 'rsb-frame';
+        frame.textContent = '- / -';
+        this._sbFrame = frame;
+
+        const cmp = document.createElement('div');
+        cmp.className = 'rsb-group';
+        cmp.setAttribute('role', 'group');
+        cmp.setAttribute('aria-label', 'Compare');
+        this._sbCompare = new Map();
+        [['none', 'A', 'Show A'], ['b', 'B', 'Show B'], ['wipe', 'Wipe', 'Wipe between B (left) and A (right); drag the line'],
+         ['difference', 'Diff', 'Difference |A - B|, x4'], ['blink', 'Blink', 'Flip between A and B']].forEach(([m, label, tip]) => {
+            const b = btn(label, tip, () => this.setCompareMode(m));
+            cmp.appendChild(b);
+            this._sbCompare.set(m, b);
+        });
+
+        this._sbBLabel = document.createElement('span');
+        this._sbBLabel.className = 'rsb-b';
+        this._sbPin = btn('Pin A as B', 'Keep this frame as B (survives a new run)', () => {
+            if (this.compareSource === 'pinned') this.releaseReference();
+            else { this.pinReference(); if (this.compareMode === 'none') this.setCompareMode('wipe'); else this.render(); }
+            this._syncCompareUI();
+        }, 'rsb-pin');
+        const fit = btn('Fit', 'Fit to view (F)', () => this.fitToView?.());
+        bar.append(transport, scrub, frame, cmp, this._sbBLabel, this._sbPin, fit);
+        return bar;
+    }
+
+    /** Simple bar and viewer bar buttons follow the compare state. */
+    _syncCompareUI() {
+        this._syncViewerBarBtns?.();
+        if (!this._sbCompare) return;
+        const cm = this.compareMode || 'none';
+        this._sbCompare.forEach((b, m) => {
+            const active = m === cm || (m === 'none' && cm === 'sidebyside');
+            b.classList.toggle('is-active', active);
+            b.setAttribute('aria-pressed', String(active));
+        });
+        if (this._sbBLabel) {
+            this._sbBLabel.textContent = this.compareSource === 'pinned'
+                ? `B: frame ${(this._pinnedFrame ?? 0) + 1} (pinned)`
+                : this.compareSource === 'input' || this.frameCompareImages?.length ? 'B: compare_image'
+                : 'B: none yet';
+            this._sbBLabel.title = this.compareSource === 'pinned'
+                ? 'B is a still of A you pinned; it stays through new runs'
+                : this.frameCompareImages?.length ? "B is the node's compare_image input, following the playhead"
+                : 'Connect compare_image, or pin a frame of A as B';
+            if (cm === 'blink') this._sbBLabel.textContent += this._blinkB ? '  [B]' : '  [A]';
+        }
+        if (this._sbPin) {
+            this._sbPin.textContent = this.compareSource === 'pinned' ? 'Release B' : 'Pin A as B';
+            this._sbPin.disabled = !this.image && !this.renderer?.textures?.image;
+        }
+    }
+
+    _syncSimpleTransport() {
+        if (!this._sbScrub) return;
+        const n = this.totalFrames || 0;
+        const i = this.currentFrame || 0;
+        this._sbScrub.max = String(Math.max(0, n - 1));
+        this._sbScrub.value = String(i);
+        this._sbScrub.disabled = n <= 1;
+        this._sbFrame.textContent = n ? `${i + 1} / ${n}` : '- / -';
+        const single = n <= 1;
+        [this._sbPrev, this._sbPlay, this._sbNext].forEach((b) => { if (b) b.disabled = single && !this.videoMode; });
+    }
+
     toggleCompactLayout() {
         this.compactLayout = !this.compactLayout;
         this._applyResponsiveLayout();
@@ -2258,7 +2454,7 @@ class RadianceViewer {
         title.textContent = 'RADIANCE VIEWER';
         const version = document.createElement('span');
         version.className = 'radiance-pro-version';
-        version.textContent = 'v3.1';
+        version.textContent = 'v3.5';
         brand.appendChild(mark);
         brand.appendChild(title);
         brand.appendChild(version);
@@ -2547,10 +2743,11 @@ class RadianceViewer {
             left.appendChild(btn);
             return btn;
         };
-        this._vbAbBtn   = _vbBtn('A / B',      () => { this.cycleCompareMode(); this._syncViewerBarBtns(); });
-        this._vbWipeBtn = _vbBtn('Wipe',       () => { this.compareMode = 'wipe';       this.render(); this._syncViewerBarBtns(); });
-        this._vbDiffBtn = _vbBtn('Difference', () => { this.compareMode = 'difference'; this.render(); this._syncViewerBarBtns(); });
-        this._vbBlinkBtn= _vbBtn('Blink',      () => { this.togglePlayback();           this._syncViewerBarBtns(); });
+        const _toggle = (m) => () => this.setCompareMode(this.compareMode === m ? 'none' : m);
+        this._vbAbBtn   = _vbBtn('B',          _toggle('b'));
+        this._vbWipeBtn = _vbBtn('Wipe',       _toggle('wipe'));
+        this._vbDiffBtn = _vbBtn('Difference', _toggle('difference'));
+        this._vbBlinkBtn= _vbBtn('Blink',      _toggle('blink'));
         this._syncViewerBarBtns();
         bar.appendChild(left);
 
@@ -2788,7 +2985,7 @@ class RadianceViewer {
         const total = Math.max(this.totalFrames || 0, this.frameImages?.length || 0);
         const current = (this.currentFrame || 0) + 1;
         if (this.sequenceFrameLabel) {
-            this.sequenceFrameLabel.textContent = total > 0 ? `${current} / ${total}` : '— / —';
+            this.sequenceFrameLabel.textContent = total > 0 ? `${current} / ${total}` : '- / -';
         }
         if (this.sequencePlayButton) this.sequencePlayButton.textContent = this.isPlaying ? 'Ⅱ' : '▶';
         if (this.sequenceFpsLabel) {
@@ -3358,11 +3555,16 @@ class RadianceViewer {
         // being squeezed into sRGB first. sRGB content converts exactly.
         let _p3 = false;
         try { _p3 = window.matchMedia('(color-gamut: p3)').matches; } catch { /* no matchMedia */ }
+        // 3.5.0: no willReadFrequently. That flag keeps the canvas in CPU
+        // memory, so every frame read the GPU-rendered image back and rescaled
+        // it on the CPU in the blit below (about 430 ms a frame under
+        // software GL; a 33 MB readback per frame at 4K on a GPU). Nothing
+        // reads pixels from this canvas: the probe and scopes use their own.
         try {
-            this.ctx = this.canvas.getContext('2d', { willReadFrequently: true, alpha: false,
+            this.ctx = this.canvas.getContext('2d', { alpha: false,
                 ...(_p3 ? { colorSpace: 'display-p3' } : {}) });
         } catch {
-            this.ctx = this.canvas.getContext('2d', { willReadFrequently: true, alpha: false });
+            this.ctx = this.canvas.getContext('2d', { alpha: false });
         }
         this.displayP3Capable = _p3;
         this.canvasWrapper.appendChild(this.canvas);
@@ -7787,35 +7989,111 @@ else:
         this.render();
     }
 
+    /** A/B toggle (the A|B button and menu): wipe on, or compare off. */
     cycleCompareMode() {
-        if (!this.image && !this.renderer) { this.compareMode = 'none'; return; }
+        this.setCompareMode(this.compareMode === 'none' ? 'wipe' : 'none');
+    }
 
-        const wasOff = this.compareMode === 'none';
-        this.compareMode = wasOff ? 'wipe' : 'none';
+    /** True when a B picture is available to compare against. */
+    _hasCompareB() {
+        if (this.renderer?.textures) return !!this.renderer.textures.reference;
+        return !!this.compareImage;
+    }
 
-        if (this.compareMode === 'wipe') {
-            // Auto-grab the current rendered frame as the B (reference) side.
-            // Then we switch to wipe mode — any subsequent grading changes
-            // show on the RIGHT (A=live) vs LEFT (B=reference).
-            if (this.renderer && this.renderer.grabReferenceStill) {
-                this.renderer.grabReferenceStill(0);
-                // Activate ref slot 0 — sets wipeRefEnabled = true internally
-                this.renderer.swapReferenceShelf(0);
-            }
-            this.wipePosition = 0.5;
-            if (this.renderer) this.renderer.setWipe(this.wipePosition, true);
-        } else {
-            // Disable wipe on both paths
-            if (this.renderer) this.renderer.setWipe(0.5, false);
-            if (this.renderer && this.renderer.clearReferenceShelf) this.renderer.clearReferenceShelf();
+    /**
+     * 3.5.0: the one entry point for compare. Every control (Simple bar,
+     * viewer bar, A|B button, menu, keys) lands here, so they cannot disagree.
+     * A mode that needs B and has none pins the current frame as B first.
+     *
+     * It used to be four handlers: A/B grabbed a still of A over a connected
+     * compare_image (so A was compared with itself), Wipe without a B showed
+     * the ungraded source, and Difference and Blink did nothing on WebGL
+     * (Blink started playback).
+     */
+    setCompareMode(mode) {
+        const modes = ['none', 'b', 'wipe', 'difference', 'blink', 'sidebyside'];
+        if (!modes.includes(mode)) mode = 'none';
+        if (mode !== 'none' && !this._hasCompareB()) {
+            if (this.frameCompareImages?.length) this._updateCompareForFrame(this.currentFrame || 0, true);
+            if (!this._hasCompareB()) this.pinReference();
         }
-
-        this._updateCompareBtn();
+        this.compareMode = mode;
+        if (this._blinkTimer) { clearInterval(this._blinkTimer); this._blinkTimer = null; }
+        this._blinkB = false;
+        if (mode === 'blink') {
+            this._blinkTimer = setInterval(() => {
+                if (this.compareMode !== 'blink' || !this.container?.isConnected) {
+                    clearInterval(this._blinkTimer); this._blinkTimer = null; return;
+                }
+                this._blinkB = !this._blinkB;
+                this.render();
+                this._syncCompareUI();
+            }, this.blinkMs);
+        }
+        if (mode === 'wipe' && !Number.isFinite(this.wipePosition)) this.wipePosition = 0.5;
+        this.wipeEnabled = mode === 'wipe';
+        this._applyCompareToRenderer();
         this.render();
+        this._updateCompareBtn();
+    }
+
+    /** What the renderer draws for the current compare mode. */
+    _applyCompareToRenderer() {
+        const r = this.renderer;
+        if (!r) return;
+        const mode = this.compareMode || 'none';
+        r.setWipe?.(this.wipePosition ?? 0.5, mode === 'wipe');
+        const show = mode === 'b' || (mode === 'blink' && this._blinkB) ? 1 : mode === 'difference' ? 2 : 0;
+        r.setCompareShow?.(show, this.diffGain);
+    }
+
+    /**
+     * Pin the current frame, as displayed, as B. Replaces a connected
+     * compare_image until released. The still is read from the GL frame at
+     * image resolution with compare off, so it lines up with A at any zoom.
+     */
+    pinReference() {
+        const r = this.renderer;
+        if (r?.grabReferenceStill && r.textures?.image) {
+            const keep = this.compareMode;
+            this.compareMode = 'none';
+            r.setWipe?.(0.5, false);
+            r.setCompareShow?.(0, this.diffGain);
+            const lut = this.lutIntensity !== undefined ? this.lutIntensity : 1.0;
+            r.render(lut);
+            const slot = r.grabReferenceStill();
+            r.swapReferenceShelf?.(slot);
+            this.compareMode = keep;
+        } else {
+            const img = this.frameImages?.[this.currentFrame || 0] || this.image;
+            if (!img) { this._termLog?.('warn', '[Compare] Nothing loaded to pin.'); return false; }
+            this.compareImage = img;
+        }
+        this.compareSource = 'pinned';
+        this._pinnedFrame = this.currentFrame || 0;
+        this._syncCompareUI();
+        return true;
+    }
+
+    /** Release a pinned B: back to the compare input if there is one, else compare off. */
+    releaseReference() {
+        if (this.compareSource !== 'pinned') return;
+        this.compareSource = null;
+        this.renderer?.clearReferenceShelf?.();
+        this.compareImage = null;
+        if (this.frameCompareImages?.length) {
+            this._updateCompareForFrame(this.currentFrame || 0, true);
+            this._applyCompareToRenderer();
+            this.render();
+            this._syncCompareUI();
+        } else {
+            this.setCompareMode('none');
+        }
     }
 
     /** Sync the A|B toolbar button appearance to the current compare state. */
     _updateCompareBtn() {
+        this._syncCompareUI();
         if (!this._compareBtnEl) return;
         const on = this.compareMode === 'wipe';
         this._compareBtnEl.style.borderColor  = on ? '#00a8ff' : 'rgba(255,255,255,0.15)';
@@ -7832,10 +8110,10 @@ else:
             if (!btn) return;
             btn.classList.toggle('is-active', active);
         };
-        setActive(this._vbAbBtn,    cm === 'wipe' || cm === 'ab');
+        setActive(this._vbAbBtn,    cm === 'b');
         setActive(this._vbWipeBtn,  cm === 'wipe');
         setActive(this._vbDiffBtn,  cm === 'difference');
-        setActive(this._vbBlinkBtn, playing && cm === 'blink');
+        setActive(this._vbBlinkBtn, cm === 'blink');
     }
 
     /** Draw the wipe split-line, A/B labels and drag handle on top of the rendered canvas. */
@@ -9484,11 +9762,13 @@ else:
     }
 
     /** 3.5.0: the compare sequence follows the playhead (it stayed on frame 0). */
-    _updateCompareForFrame(idx) {
+    _updateCompareForFrame(idx, force = false) {
         const list = this.frameCompareImages;
         if (!list || !list.length) return;
+        if (this.compareSource === 'pinned') return;      // a pinned B stays put
         const img = list[Math.min(idx, list.length - 1)];
-        if (!img || img === this.compareImage) return;
+        if (!img || (img === this.compareImage && !force)) return;
+        this.compareSource = 'input';
         this.compareImage = img;
         this.diffCanvas = null;
         if (this.renderer?.loadCompareTexture) {
@@ -9497,7 +9777,10 @@ else:
     }
 
     setCompareImage(img) {
+        // A pinned B survives a new run: pin, change the graph, queue, compare.
+        if (this.compareSource === 'pinned') return;
         this.compareImage = img;
+        this.compareSource = img ? 'input' : null;
         this.diffCanvas = null; // Clear difference cache
         if (this.renderer && this.renderer.loadCompareTexture && img) {
             try {
@@ -9506,17 +9789,14 @@ else:
                 this._termLog?.('warn', `[Compare] This renderer cannot show a compare image: ${e.message}`);
             }
         }
-        if (this.compareMode === 'none') {
-            this.compareMode = 'wipe';
-            this.wipeEnabled = true;
-            if (this.renderer?.setWipe) this.renderer.setWipe(this.wipePosition ?? 0.5, true);
-        }
-        this.render();
+        if (this.compareMode === 'none') this.setCompareMode('wipe');
+        else { this._applyCompareToRenderer(); this.render(); this._syncCompareUI(); }
     }
 
     togglePlayback() {
         if (this.videoMode && this.videoEl) {
             // Video element mode — delegate to native play/pause
+            if (this._videoReversing) { this._videoReverse(false); return; }
             if (this.videoEl.paused) {
                 this.videoEl.play();
             } else {
@@ -9548,6 +9828,7 @@ else:
     }
 
     _updatePlayBtn() {
+        if (this._sbPlay) this._sbPlay.textContent = this.isPlaying ? '❚❚' : '▶';
         if (this.playBtn) this.playBtn.textContent = this.isPlaying ? '⏸' : '▶';
         if (this.sequencePlayButton) this.sequencePlayButton.textContent = this.isPlaying ? 'Ⅱ' : '▶';
         if (this.videoMode && this.videoEl) {
@@ -9568,14 +9849,31 @@ else:
             // (default, what a review needs) waits for it; "realtime" keeps the
             // clock and counts the frame as dropped. It used to move the
             // counter on while the previous picture stayed up, silently.
-            const [a, b] = this._range();
-            const dir = this.playDirection || 1;
-            let next = this.currentFrame + dir;
-            if (next > b) next = a; if (next < a) next = b;
-            const ready = this._frameReady(next);
-            if (!ready && this.playEveryFrame !== false) {
+            //
+            // The frame checked is the one _advance() will actually show. This
+            // used to wrap to the in point whatever the loop mode, so at the
+            // end of the range ping-pong and play-once waited for a frame they
+            // would never show, and a loop longer than the paging window waited
+            // for an in point that had been paged out: playback froze.
+            const step = this._nextPlayFrame();
+            if (step.stop) {
+                this._advance();                       // play-once: stops here
+            } else if (!this._frameReady(step.frame) && this.playEveryFrame !== false) {
                 this._stallCount = (this._stallCount || 0) + 1;
+                if (this._frameWindow && !this._frameWindow.inSpan(step.frame)) {
+                    // A loop wrapping back to its in point: that frame is
+                    // outside the paging window, and loading it there would
+                    // only get it evicted again (it is the furthest from the
+                    // playhead). Move the playhead to it: the window re-centres
+                    // and loads it first, and it is displayed when it lands.
+                    this._advance();
+                    this.lastFrameTime = now;
+                } else if (this._frameWindow && !this._frameWindow.has(step.frame)) {
+                    // Ask for it rather than wait for the read-ahead to find it.
+                    this._frameWindow.ensure(step.frame).catch(() => {});
+                }
             } else {
+                const ready = this._frameReady(step.frame);
                 if (!ready) this.droppedFrames = (this.droppedFrames || 0) + 1;
                 this._advance();
                 this.lastFrameTime = now - ((now - this.lastFrameTime) % interval);
@@ -9626,13 +9924,14 @@ else:
         });
 
         vid.addEventListener('play', () => {
+            if (this._videoReversing) this._videoReverse(false);
             this.isPlaying = true;
             this._updatePlayBtn();
             this._videoRenderLoop();
         });
 
         vid.addEventListener('pause', () => {
-            this.isPlaying = false;
+            this.isPlaying = !!this._videoReversing;
             this._updatePlayBtn();
             if (this._videoRAF) { cancelAnimationFrame(this._videoRAF); this._videoRAF = null; }
             // Still capture the paused frame
@@ -9669,6 +9968,8 @@ else:
 
     unloadVideo() {
         if (this._videoRAF) { cancelAnimationFrame(this._videoRAF); this._videoRAF = null; }
+        if (this._videoRevRAF) { cancelAnimationFrame(this._videoRevRAF); this._videoRevRAF = null; }
+        this._videoReversing = false;
         if (this.videoEl) {
             this.videoEl.pause();
             this.videoEl.src = '';
@@ -9684,6 +9985,40 @@ else:
         this.videoMode = false;
         this.isPlaying = false;
         this._updatePlayBtn();
+    }
+
+    /**
+     * Reverse playback for a video element (J). Seeks one step back per
+     * frame interval, waiting for each seek to land so seeks never pile up;
+     * wraps to the end when looping, otherwise stops at the start.
+     */
+    _videoReverse(on) {
+        const vid = this.videoEl;
+        if (this._videoRevRAF) { cancelAnimationFrame(this._videoRevRAF); this._videoRevRAF = null; }
+        this._videoReversing = !!(on && vid);
+        if (!this._videoReversing) {
+            if (vid && vid.paused) { this.isPlaying = false; this._updatePlayBtn(); }
+            return;
+        }
+        this.isPlaying = true;
+        this._updatePlayBtn();
+        let last = performance.now();
+        const tick = (now) => {
+            if (!this._videoReversing || this.videoEl !== vid) return;
+            const fps = this._videoNativeFps || 25;
+            if (!vid.seeking && now - last >= 1000 / fps) {
+                const step = ((now - last) / 1000) * (this.playbackSpeed || 1);
+                last = now;
+                let t = vid.currentTime - step;
+                if (t <= 0) {
+                    if (this.loop && vid.duration) t = Math.max(0, vid.duration - 1 / fps);
+                    else { vid.currentTime = 0; this._videoReverse(false); return; }
+                }
+                vid.currentTime = t;
+            }
+            this._videoRevRAF = requestAnimationFrame(tick);
+        };
+        this._videoRevRAF = requestAnimationFrame(tick);
     }
 
     // ── RAF loop for video frame capture → WebGL ─────────────────────────────
@@ -9806,7 +10141,11 @@ else:
     /** J/K/L: dir -1 play reverse, 0 stop, +1 play forward. */
     shuttle(dir) {
         if (this.videoMode && this.videoEl) {
-            if (dir === 0) this.videoEl.pause(); else if (dir > 0) this.videoEl.play();
+            // Browsers cannot play a video backwards (a negative playbackRate
+            // is ignored), so J used to do nothing on a video loaded straight
+            // into the Viewer. Reverse is stepped by seeking instead.
+            if (dir < 0) { this.videoEl.pause(); this._videoReverse(true); }
+            else { this._videoReverse(false); if (dir === 0) this.videoEl.pause(); else this.videoEl.play(); }
             return;
         }
         if (dir === 0) {
@@ -9817,25 +10156,35 @@ else:
         if (!this.isPlaying) this.togglePlayback();
     }
 
-    /** One playback step inside [in, out], honouring direction and loop mode. */
-    _advance() {
+    /**
+     * The frame the next playback step lands on, honouring in/out, direction
+     * and loop mode: {frame, dir, stop}. The one place this is decided, so the
+     * readiness check and the step itself cannot disagree.
+     */
+    _nextPlayFrame() {
         const [a, b] = this._range();
         const dir = this.playDirection || 1;
-        let n = this.currentFrame + dir;
-        if (n > b || n < a) {
-            const mode = this.loopMode || (this.loop ? 'loop' : 'once');
-            if (mode === 'pingpong') {
-                this.playDirection = -dir;
-                n = Math.max(a, Math.min(b, this.currentFrame - dir));
-            } else if (mode === 'loop') {
-                n = dir > 0 ? a : b;
-            } else {
-                this.isPlaying = false;
-                this._updatePlayBtn?.();
-                return false;
-            }
+        const n = this.currentFrame + dir;
+        if (n >= a && n <= b) return { frame: n, dir, stop: false };
+        const mode = this.loopMode || (this.loop ? 'loop' : 'once');
+        if (mode === 'pingpong') {
+            return { frame: Math.max(a, Math.min(b, this.currentFrame - dir)), dir: -dir, stop: false };
         }
-        this.setFrame(n);
+        if (mode === 'loop') return { frame: dir > 0 ? a : b, dir, stop: false };
+        return { frame: this.currentFrame, dir, stop: true };
+    }
+
+    /** One playback step inside [in, out], honouring direction and loop mode. */
+    _advance() {
+        const step = this._nextPlayFrame();
+        if (step.stop) {
+            this.isPlaying = false;
+            if (this._seqRAF) { cancelAnimationFrame(this._seqRAF); this._seqRAF = null; }
+            this._updatePlayBtn?.();
+            return false;
+        }
+        this.playDirection = step.dir;
+        this.setFrame(step.frame);
         return true;
     }
 
@@ -9978,6 +10327,8 @@ else:
     }
 
     updateFrameDisplay() {
+        this._syncSimpleTransport?.();
+        this._syncCompareUI?.();
         if (this.videoMode) return; // video mode manages its own timeline
 
         // Update frame counter text
@@ -10228,54 +10579,22 @@ else:
      * Freezes the current canvas state into a separate texture and enables wipe mode.
      */
     pinCurrentFrame() {
-        if (!this.renderer || !this.renderer.textures.image) {
-            this._termLog?.('warn', '[Pin Frame] No image loaded to pin.');
-            return;
+        if (!this.pinReference()) return;
+        if (this.compareMode === 'none') this.setCompareMode('wipe');
+        else { this._applyCompareToRenderer(); this.render(); }
+        this._termLog?.('info', `[Pin Frame] Frame ${this.currentFrame + 1} pinned as B.`);
+        if (this._pinFrameBtn) {
+            this._pinFrameBtn.style.borderColor = '#00a8ff';
+            this._pinFrameBtn.style.color = '#00a8ff';
+            this._pinFrameBtn.title = `Pinned: Frame ${this.currentFrame + 1}, click again to release`;
         }
-
-        // Capture the current display canvas state as a frozen reference image
-        const offscreen = document.createElement('canvas');
-        offscreen.width = this.canvas.width;
-        offscreen.height = this.canvas.height;
-        const ctx2d = offscreen.getContext('2d');
-        ctx2d.drawImage(this.canvas, 0, 0);
-
-        // Create an Image from the frozen canvas and load as compare texture
-        const pinnedImg = new Image();
-        pinnedImg.src = offscreen.toDataURL('image/png');
-        pinnedImg.onload = () => {
-            this.compareImage = pinnedImg;
-            if (this.renderer) {
-                this.renderer.loadCompareTexture(pinnedImg);
-                this.renderer.setWipeRef(true);
-            }
-            // Activate wipe mode
-            this.compareMode = 'wipe';
-            this.wipeEnabled = true;
-            if (this.renderer) this.renderer.setWipe(this.wipePosition, true);
-            this.requestRender();
-            this._termLog?.('info', `[Pin Frame] Frame ${this.currentFrame + 1} pinned as A/B reference.`);
-            // Show visual feedback
-            if (this._pinFrameBtn) {
-                this._pinFrameBtn.style.borderColor = '#00a8ff';
-                this._pinFrameBtn.style.color = '#00a8ff';
-                this._pinFrameBtn.title = `Pinned: Frame ${this.currentFrame + 1} — click again to release`;
-            }
-        };
     }
 
     /**
-     * Release (unpin) the pinned reference frame and disable wipe.
+     * Release (unpin) the pinned reference frame.
      */
     unpinFrame() {
-        this.compareImage = null;
-        if (this.renderer) {
-            this.renderer.setWipeRef(false);
-            this.renderer.setWipe(0.5, false);
-        }
-        this.compareMode = 'none';
-        this.wipeEnabled = false;
-        this.requestRender();
+        this.releaseReference();
         if (this._pinFrameBtn) {
             this._pinFrameBtn.style.borderColor = 'rgba(255,255,255,0.15)';
             this._pinFrameBtn.style.color = '#aaa';
@@ -10530,12 +10849,8 @@ else:
                 this.renderer.setDoFEnabled(false);
             }
 
-            // ── A/B Wipe: pass position to GPU shader every frame ──────────
-            if (this.compareMode === 'wipe') {
-                this.renderer.setWipe(this.wipePosition, true);
-            } else {
-                this.renderer.setWipe(0.5, false);
-            }
+            // ── Compare: wipe position and A / B / difference, every frame ──
+            this._applyCompareToRenderer();
 
             // Render to WebGL canvas (GPU)
             const lutStrength = this.lutIntensity !== undefined ? this.lutIntensity : 1.0;
@@ -10604,7 +10919,14 @@ else:
 
         const cmpImg = this.compareImage || (this.frameImages && this.frameImages[this.currentFrame]) || this.videoEl || this.image;
 
-        if (this.compareMode === 'sidebyside' && cmpImg) {
+        const showB = this.compareImage && (this.compareMode === 'b' || (this.compareMode === 'blink' && this._blinkB));
+        if (showB) {
+            ctx.save();
+            ctx.translate(this.panX, this.panY);
+            ctx.scale(this.zoom, this.zoom);
+            ctx.drawImage(this.compareImage, 0, 0, this.imageWidth || this.compareImage.width, this.imageHeight || this.compareImage.height);
+            ctx.restore();
+        } else if (this.compareMode === 'sidebyside' && cmpImg) {
             this.renderSideBySide(ctx, w, h, cmpImg);
         } else if (this.compareMode === 'difference' && cmpImg) {
             this.renderDifference(ctx, w, h, cmpImg);
@@ -20852,8 +21174,61 @@ window.RadianceViewer = RadianceViewer;
 //                          NODE REGISTRATION
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//                 3.5.0: SAVED LITE VIEWERS BECOME VIEWERS
+// ═══════════════════════════════════════════════════════════════════════════════
+// The Lite Viewer node was removed; the Viewer's Simple mode does its job. A
+// graph saved with one is rewritten before ComfyUI configures it, so it opens
+// as a Radiance Viewer in Simple mode instead of a missing node: same links,
+// same input_space and fps. Runs on the root graph and every subgraph.
+const VIEWER_SOCKETS = [
+    ['image', 'IMAGE,VIDEO', null], ['compare_image', 'IMAGE,VIDEO', null], ['zdepth', 'IMAGE,VIDEO', null],
+    ['exposure_bracketing', 'BOOLEAN', 'exposure_bracketing'], ['input_space', 'COMBO', 'input_space'],
+    ['float_precision', 'COMBO', 'float_precision'], ['fps', 'FLOAT', 'fps'],
+];
+function migrateLiteViewerNodes(graph) {
+    if (!graph || typeof graph !== 'object') return 0;
+    let count = 0;
+    const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+    const links = Array.isArray(graph.links) ? graph.links : [];
+    for (const node of nodes) {
+        if (!node || node.type !== 'RadianceLiteViewer') continue;
+        const oldInputs = Array.isArray(node.inputs) ? node.inputs : [];
+        const linkOf = (name) => oldInputs.find((i) => i?.name === name)?.link ?? null;
+        const wv = Array.isArray(node.widgets_values) ? node.widgets_values : [];
+        const inputSpace = typeof wv[0] === 'string' ? wv[0] : 'Auto';
+        const fps = Number.isFinite(Number(wv[1])) ? Number(wv[1]) : 0;
+        node.type = 'RadianceViewer';
+        node.inputs = VIEWER_SOCKETS.map(([name, type, widget], i) => ({
+            name, localized_name: name, type, ...(i > 0 ? { shape: 7 } : {}),
+            ...(widget ? { widget: { name: widget } } : {}),
+            link: linkOf(name),
+        }));
+        node.widgets_values = [false, inputSpace, 'Half (16-bit)', fps];
+        node.properties = { ...(node.properties || {}), 'Node name for S&R': 'RadianceViewer', radiance_viewer_mode: 'simple' };
+        // Links into this node carry the socket index: re-point them by name.
+        node.inputs.forEach((inp, slot) => {
+            if (inp.link == null) return;
+            for (const l of links) {
+                if (Array.isArray(l) && l[0] === inp.link) l[4] = slot;
+                else if (l && !Array.isArray(l) && l.id === inp.link) l.target_slot = slot;
+            }
+        });
+        count++;
+    }
+    for (const sub of graph.definitions?.subgraphs || []) count += migrateLiteViewerNodes(sub);
+    return count;
+}
+window.RadianceMigrateLiteViewers = migrateLiteViewerNodes;
+
 app.registerExtension({
     name: "FXTD.RadianceViewer",
+    // Before ComfyUI looks for missing node types, so a saved Lite Viewer is
+    // never reported missing.
+    async beforeConfigureGraph(graphData) {
+        const n = migrateLiteViewerNodes(graphData);
+        if (n) console.info(`[Radiance] ${n} Lite Viewer node(s) opened as Radiance Viewer (Simple mode).`);
+    },
     init() {
         // Hide the two pinned legacy widgets on Radiance viewer nodes only.
         //
@@ -20992,16 +21367,27 @@ app.registerExtension({
             onNodeCreated?.apply(this, arguments);
             // Pro viewer needs enough canvas real estate for the dedicated
             // menu, workflow sidebar, viewer and right dock to read correctly.
+            // 3.5.0: a new viewer opens in Simple mode, which needs less;
+            // Advanced grows the node when chosen (setUIMode).
             const curW = this.size?.[0] || 0;
             const curH = this.size?.[1] || 0;
-            if (curW < 1180 || curH < 760) this.size = [1180, 760];
+            if (curW < 960 || curH < 640) this.size = [Math.max(curW, 960), Math.max(curH, 640)];
 
             scheduleHiddenViewerDefaults(this);
 
             const container = document.createElement('div');
             container.id = `radiance-viewer-${this.id}`;
-            const viewerWidget = this.addDOMWidget("viewer", "viewer", container, { serialize: false, hideOnZoom: false });
-            viewerWidget.computeSize = () => [this.size[0] - 20, this.size[1] - 110];
+            // 3.5.0: the widget takes the space the node leaves it, with a
+            // floor. It used to report [width, node height - 110] as its own
+            // size; the node's sockets and setting rows need more than 110 px,
+            // so every layout pass asked for a taller node than it had and the
+            // frontend grew it without limit (measured: 760 px to 5688 px in
+            // three seconds on ComfyUI 0.32 / frontend 1.48), leaving the
+            // image in a strip below the screen.
+            const viewerWidget = this.addDOMWidget("viewer", "viewer", container, {
+                serialize: false, hideOnZoom: false,
+                getMinHeight: () => 420,
+            });
 
             // Force container properties to ensure it expands
             container.style.display = 'flex';
@@ -21027,9 +21413,14 @@ app.registerExtension({
         };
 
         const onConfigure = nodeType.prototype.onConfigure;
-        nodeType.prototype.onConfigure = function () {
+        nodeType.prototype.onConfigure = function (info) {
             const result = onConfigure?.apply(this, arguments);
             scheduleHiddenViewerDefaults(this);
+            // 3.5.0: a saved graph opens in the mode it was saved in. Graphs
+            // saved before the switch existed open the way they looked then,
+            // in Advanced (a converted Lite Viewer carries 'simple').
+            const saved = info?.properties?.radiance_viewer_mode;
+            this.radianceViewer?.setUIMode?.(saved || 'advanced');
             return result;
         };
 

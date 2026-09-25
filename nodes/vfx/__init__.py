@@ -34,10 +34,7 @@ from radiance.nodes.vfx.inpaint import (
     RadianceHDRStitch,
     RadianceTemporalStitchStabilizer,
 )
-from radiance.nodes.vfx.roto import (
-    RadianceVectorMaskDraw,
-    RadianceVideoMaskPropagator,
-)
+from radiance.nodes.vfx.mask_propagate import RadianceVideoMaskPropagator
 # `radiance.film` is an implementation package, not a node group: it is not in
 # nodes/catalog.py and the aggregate sweep never reaches it, because
 # `_leaf_modules` only walks the __path__ of the package it is given and skips
@@ -46,15 +43,9 @@ from radiance.nodes.vfx.roto import (
 # read. This group's __init__ is the registration layer, exactly as
 # nodes/color/__init__.py registers RadianceLUTApply out of radiance.color.lut.
 #
-# Only three of the five. film/__init__.py also declares RadianceFilmGrain and
-# RadianceMotionBlur, and those are DIFFERENT classes from the ones this group
-# already ships (radiance.nodes.vfx.optics.RadianceFilmGrain and
-# radiance.nodes.vfx.motion_blur.RadianceMotionBlur) -- two rival
-# implementations competing for one menu name. Registering radiance.film's
-# would silently replace two shipping nodes and break every saved workflow
-# wired to their widgets, so which survives is a product decision and both are
-# left where they are until it is made. This is also why radiance.film must not
-# simply be added to NODE_GROUPS; see nodes/catalog.py.
+# All three film/ nodes. film/ also held rival RadianceFilmGrain and
+# RadianceMotionBlur classes under the keys this group ships from optics.py
+# and motion_blur.py; they were deleted in 3.5.0 (the owner kept these).
 from radiance.film.camera import (
     RadianceDepthOfField,
     RadianceRollingShutter,
@@ -92,7 +83,6 @@ NODE_CLASS_MAPPINGS = {
     "RadianceTemporalStitchStabilizer": RadianceTemporalStitchStabilizer,
     
     # Phase 5: Advanced Rotoscoping & Propagation
-    "RadianceVectorMaskDraw": RadianceVectorMaskDraw,
     "RadianceVideoMaskPropagator": RadianceVideoMaskPropagator,
 
     # ── from radiance.film.camera (never reachable before 2026-09-18) ──────
@@ -129,7 +119,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceTemporalStitchStabilizer": "◎ Temporal Stitch Stabilizer",
     
     # Phase 5: Advanced Rotoscoping display names
-    "RadianceVectorMaskDraw": "◎ Vector Mask Draw (Roto)",
     "RadianceVideoMaskPropagator": "◎ Video Mask Propagator",
 
     # Camera-artefact display names. nodes/branding.py already carried a

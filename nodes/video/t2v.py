@@ -498,16 +498,18 @@ class RadianceVideoModelInfo:
                                "on the model output."}),
                 "model_preset": (MODEL_NAMES, {"default": "LTX-Video (128ch)",
                     "tooltip": "Latent spec used when auto-detection finds nothing. Detection reads "
-                               "the model class name (ltx, hunyuan, wan, cogvideo, mochi) and wins over "
-                               "this choice; any Wan model is detected as Wan2.1 (16ch)."}),
+                               "the model class name (ltx, hunyuan, wan, cogvideo, mochi) and the latent "
+                               "channel count the model reports. A preset from the detected family that "
+                               "matches the channels is kept; otherwise the matching one is used."}),
             },
             "optional": {
                 "override_channels": ("INT", {"default": 0, "min": 0, "max": 512,
                     "tooltip": "Replace the latent channel count written to dit_config. "
                                "0 keeps the preset's value."}),
                 "override_latent_scale": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0,
-                    "tooltip": "Replace the preset's latent_scale in dit_config (RadianceVideoBatchDecode "
-                               "divides the latent by it before decoding). 0 keeps the preset's value."}),
+                    "tooltip": "Replace the preset's latent_scale in dit_config. Reported for reference; "
+                               "Video Batch Decode does not apply it, since sampler output is already in "
+                               "VAE space. 0 keeps the preset's value."}),
                 "print_info": ("BOOLEAN", {"default": False,
                     "tooltip": "Also write the info report to the ComfyUI console log."}),
             },
@@ -533,17 +535,35 @@ class RadianceVideoModelInfo:
         inner_name  = type(model_inner).__name__.lower() if model_inner else ""
         combined    = cls_name + " " + inner_name
 
+        # The class name picks the family; the latent channel count the model
+        # itself reports (ComfyUI's latent_format) picks the preset inside it.
+        # A preset the user chose from the right family is kept. Every Wan
+        # model used to be forced to Wan2.1 (16ch), including the 48-channel
+        # Wan2.2 TI2V 5B, over whatever model_preset said.
+        families = (
+            ("ltx", ("LTX-Video (128ch)",)),
+            ("hunyuan", ("HunyuanVideo (16ch)", "HunyuanVideo-1.5 (32ch)")),
+            ("wan", ("Wan2.1 (16ch)", "Wan2.2-T2V-14B (16ch)", "Wan2.2-I2V-14B (16ch)",
+                     "Wan2.2-TI2V-5B (48ch)")),
+            ("cogvideo", ("CogVideoX (16ch)",)),
+            ("mochi", ("Mochi-1 (12ch)",)),
+        )
+        latent_format = getattr(model_inner, "latent_format", None)
+        reported_ch = getattr(latent_format, "latent_channels", None)
+        reported_ch = int(reported_ch) if isinstance(reported_ch, (int, float)) and reported_ch > 0 else None
+
         detected = None
-        if "ltx" in combined:
-            detected = "LTX-Video (128ch)"
-        elif "hunyuan" in combined:
-            detected = "HunyuanVideo (16ch)"
-        elif "wan" in combined:
-            detected = "Wan2.1 (16ch)"
-        elif "cogvideo" in combined:
-            detected = "CogVideoX (16ch)"
-        elif "mochi" in combined:
-            detected = "Mochi-1 (12ch)"
+        for key, presets in families:
+            if key not in combined:
+                continue
+            presets = [p for p in presets if p in MODEL_NAMES]
+            def fits(name):
+                return reported_ch is None or int(_get_spec(name).get("channels", 0)) == reported_ch
+            if model_preset in presets and fits(model_preset):
+                detected = model_preset
+            else:
+                detected = next((p for p in presets if fits(p)), presets[0] if presets else None)
+            break
 
         if detected and detected != model_preset:
             spec = dict(_get_spec(detected))
@@ -1701,9 +1721,9 @@ class RadianceVideoBatchDecode:
             },
             "optional": {
                 "dit_config": ("STRING", {"default": "{}",
-                    "tooltip": "JSON from RadianceVideoModelInfo. A latent_scale other than 1.0 divides "
-                               "the latent before decoding (this double-scales a ComfyUI-sampled latent); "
-                               "its compression values are used only if the VAE does not report its own."}),
+                    "tooltip": "JSON from RadianceVideoModelInfo. Its compression values are used only "
+                               "if the VAE does not report its own. Its latent_scale is not applied: a "
+                               "ComfyUI sampler already returns the latent in VAE space."}),
                 "tile_decode": ("BOOLEAN", {
                     "default": False,
                     "tooltip": "Route the decode through the VAE's own tiled entry point "
@@ -1743,11 +1763,14 @@ class RadianceVideoBatchDecode:
         samples = _to_tensor(latent)
         report.append(f"Latent shape : {list(samples.shape)}")
 
-        # Apply latent scale correction
+        # latent_scale is not applied. A ComfyUI sampler returns its latent
+        # already in VAE space (the model's process_latent_out undoes the
+        # scaling before the LATENT leaves the sampler), and VAE.decode takes
+        # it as is, as ComfyUI's own VAE Decode does. Dividing again scaled
+        # HunyuanVideo, CogVideoX and SD latents twice.
         scale = cfg_dict.get("latent_scale", 1.0)
-        if abs(scale - 1.0) > 1e-5 and HAS_TORCH:
-            samples = samples / scale
-            report.append(f"Scale correct: ÷{scale}")
+        if abs(float(scale) - 1.0) > 1e-5:
+            report.append(f"latent_scale {scale} in dit_config not applied (sampler output is in VAE space)")
 
         is_5d = HAS_TORCH and isinstance(samples, torch.Tensor) and samples.dim() == 5
         latent_batch = int(samples.shape[0]) if is_5d else None

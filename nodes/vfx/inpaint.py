@@ -4,6 +4,8 @@ import numpy as np
 import logging
 import json
 
+from radiance.core.tensor.chunking import FrameSink, chunks, compute_device, frames_per_chunk
+
 logger = logging.getLogger("radiance.vfx.inpaint")
 
 class RadianceHDRCrop:
@@ -136,100 +138,89 @@ class RadianceHDRStitch:
     FUNCTION = "apply"
     CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX/Inpainting"
 
+    @staticmethod
+    def _laplacian_blend(original_image: torch.Tensor, full_cropped_img: torch.Tensor, blend_mask: torch.Tensor) -> torch.Tensor:
+        """Linear Laplacian pyramid blend in pure PyTorch (unclamped scene-linear)."""
+        levels = 3
+        gp_orig = [original_image.permute(0, 3, 1, 2)]
+        gp_crop = [full_cropped_img.permute(0, 3, 1, 2)]
+        gp_mask = [blend_mask.unsqueeze(1)]
+        for l in range(levels - 1):
+            gp_orig.append(F.avg_pool2d(gp_orig[-1], 3, stride=2, padding=1))
+            gp_crop.append(F.avg_pool2d(gp_crop[-1], 3, stride=2, padding=1))
+            gp_mask.append(F.avg_pool2d(gp_mask[-1], 3, stride=2, padding=1))
+        lp_orig = []
+        lp_crop = []
+        for l in range(levels - 1):
+            size = gp_orig[l].shape[2:]
+            up_orig = F.interpolate(gp_orig[l + 1], size=size, mode="bilinear", align_corners=True)
+            up_crop = F.interpolate(gp_crop[l + 1], size=size, mode="bilinear", align_corners=True)
+            lp_orig.append(gp_orig[l] - up_orig)
+            lp_crop.append(gp_crop[l] - up_crop)
+        lp_orig.append(gp_orig[-1])
+        lp_crop.append(gp_crop[-1])
+        lp_fused = [lp_orig[l] * (1.0 - gp_mask[l]) + lp_crop[l] * gp_mask[l] for l in range(levels)]
+        recon = lp_fused[-1]
+        for l in reversed(range(levels - 1)):
+            size = lp_fused[l].shape[2:]
+            recon = F.interpolate(recon, size=size, mode="bilinear", align_corners=True) + lp_fused[l]
+        # recon is (B, C, H, W). This used to squeeze(0) first, which on a
+        # single frame (B == 1, the common case) left a 3-D tensor and the
+        # 4-D permute raised: the default blend mode failed on every still.
+        return recon.permute(0, 2, 3, 1).clamp(min=0.0)   # scene-linear, unclamped max
+
     def apply(self, original_image: torch.Tensor, cropped_image: torch.Tensor, cropped_mask: torch.Tensor, stitcher_data: dict, blend_mode: str, feather_radius: int):
         B, H, W, C = original_image.shape
-        device = original_image.device
-        
         ymin = stitcher_data["ymin"]
         xmin = stitcher_data["xmin"]
         ymax = stitcher_data["ymax"]
         xmax = stitcher_data["xmax"]
-        h_crop = stitcher_data["h_crop"]
-        w_crop = stitcher_data["w_crop"]
-        
-        # Bring cropped mask to B, H, W, C shape for multiplying
+
         if cropped_mask.dim() == 2:
             cropped_mask = cropped_mask.unsqueeze(0)
-        
-        # Build raw mask in original frame resolution
-        orig_mask = torch.zeros((B, H, W), device=device)
-        orig_mask[:, ymin:ymax, xmin:xmax] = cropped_mask.clamp(0.0, 1.0)
-        
-        # Feather/Gaussian blur the blending mask
-        if feather_radius > 0:
-            k = feather_radius * 2 + 1
-            pad = feather_radius
-            # Reshape for 2D pooling / blur
-            orig_mask_bchw = orig_mask.unsqueeze(1)
-            blurred_mask = F.avg_pool2d(orig_mask_bchw, k, stride=1, padding=pad)
-            blend_mask = blurred_mask.squeeze(1).clamp(0.0, 1.0)
-        else:
-            blend_mask = orig_mask
-            
-        blend_mask_3d = blend_mask.unsqueeze(-1) # B, H, W, 1
-        
-        # Reconstruct crop into full frame
-        full_cropped_img = original_image.clone()
-        full_cropped_img[:, ymin:ymax, xmin:xmax, :] = cropped_image
-        
-        if blend_mode == "Standard":
-            # Direct paste
-            stitched = original_image * (1.0 - orig_mask.unsqueeze(-1)) + full_cropped_img * orig_mask.unsqueeze(-1)
-        elif blend_mode == "Linear_Gaussian":
-            # Simple soft blending in linear space
-            stitched = original_image * (1.0 - blend_mask_3d) + full_cropped_img * blend_mask_3d
-        else:
-            # Linear Laplacian Pyramid Blending in pure PyTorch (unclamped scene-linear)
-            # Standard pyramid layers
-            levels = 3
-            
-            # Setup image pyrs
-            gp_orig = [original_image.permute(0, 3, 1, 2)]
-            gp_crop = [full_cropped_img.permute(0, 3, 1, 2)]
-            gp_mask = [blend_mask.unsqueeze(1)]
-            
-            for l in range(levels - 1):
-                gp_orig.append(F.avg_pool2d(gp_orig[-1], 3, stride=2, padding=1))
-                gp_crop.append(F.avg_pool2d(gp_crop[-1], 3, stride=2, padding=1))
-                gp_mask.append(F.avg_pool2d(gp_mask[-1], 3, stride=2, padding=1))
-                
-            # Build Laplacian Pyramids
-            lp_orig = []
-            lp_crop = []
-            
-            for l in range(levels - 1):
-                # Upsample next level to subtract from current
-                size = gp_orig[l].shape[2:]
-                up_orig = F.interpolate(gp_orig[l+1], size=size, mode="bilinear", align_corners=True)
-                up_crop = F.interpolate(gp_crop[l+1], size=size, mode="bilinear", align_corners=True)
-                
-                lp_orig.append(gp_orig[l] - up_orig)
-                lp_crop.append(gp_crop[l] - up_crop)
-                
-            # Last levels are standard Gaussians
-            lp_orig.append(gp_orig[-1])
-            lp_crop.append(gp_crop[-1])
-            
-            # Fuse Laplacian pyramids using mask layers
-            lp_fused = []
-            for l in range(levels):
-                mask_layer = gp_mask[l]
-                fused = lp_orig[l] * (1.0 - mask_layer) + lp_crop[l] * mask_layer
-                lp_fused.append(fused)
-                
-            # Reconstruct from fused Laplacian pyramid
-            recon = lp_fused[-1]
-            for l in reversed(range(levels - 1)):
-                size = lp_fused[l].shape[2:]
-                recon_up = F.interpolate(recon, size=size, mode="bilinear", align_corners=True)
-                recon = recon_up + lp_fused[l]
-                
-            # recon is (B, C, H, W). This used to squeeze(0) first, which on a
-            # single frame (B == 1, the common case) left a 3-D tensor and the
-            # 4-D permute raised: the default blend mode failed on every still.
-            stitched = recon.permute(0, 2, 3, 1)
-            stitched = stitched.clamp(min=0.0) # scene-linear float output (unclamped max!)
-            
+
+        def part(x, a, b):
+            return x if x.shape[0] == 1 else x[a:b]
+
+        # 3.5.0: a few frames at a time, on the GPU, and the feather as two
+        # 1-D passes (the same zero-padded box mean, O(r) instead of O(r^2)).
+        # The whole clip used to go through a 2-D blur and two full-frame
+        # pyramids at once: 24 s to paste a 208x240 crop into 24 frames of
+        # 1024x576, with about 10 frame-sized buffers alive.
+        dev = compute_device()
+        stitched_out = FrameSink((B, H, W, C))
+        mask_out = FrameSink((B, H, W))
+        per = frames_per_chunk(H, W, C, 14.0, dev)
+        for a, b in chunks(B, per):
+            n = b - a
+            orig = original_image[a:b].to(dev, torch.float32)
+            orig_mask = torch.zeros((n, H, W), device=dev)
+            orig_mask[:, ymin:ymax, xmin:xmax] = part(cropped_mask, a, b).to(dev, torch.float32).clamp(0.0, 1.0)
+
+            if feather_radius > 0:
+                k = feather_radius * 2 + 1
+                pad = feather_radius
+                m = F.avg_pool2d(orig_mask.unsqueeze(1), (1, k), stride=1, padding=(0, pad))
+                m = F.avg_pool2d(m, (k, 1), stride=1, padding=(pad, 0))
+                blend_mask = m.squeeze(1).clamp(0.0, 1.0)
+            else:
+                blend_mask = orig_mask
+            blend_mask_3d = blend_mask.unsqueeze(-1)
+
+            full_cropped_img = orig.clone()
+            full_cropped_img[:, ymin:ymax, xmin:xmax, :] = part(cropped_image, a, b).to(dev, torch.float32)
+
+            if blend_mode == "Standard":
+                stitched = orig * (1.0 - orig_mask.unsqueeze(-1)) + full_cropped_img * orig_mask.unsqueeze(-1)
+            elif blend_mode == "Linear_Gaussian":
+                stitched = orig * (1.0 - blend_mask_3d) + full_cropped_img * blend_mask_3d
+            else:
+                stitched = self._laplacian_blend(orig, full_cropped_img, blend_mask)
+            stitched_out.put(a, b, stitched)
+            mask_out.put(a, b, blend_mask)
+            del orig, orig_mask, blend_mask, blend_mask_3d, full_cropped_img, stitched
+
+        stitched, blend_mask = stitched_out.value, mask_out.value
         logger.info(f"[HDR Stitch] Composited crop back into frame using {blend_mode} (Feather: {feather_radius}).")
         return (stitched, blend_mask)
 

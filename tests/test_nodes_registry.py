@@ -198,7 +198,7 @@ def _package_namespace(fname: str) -> str:
       color/__init__.py → color
       color/lut.py      → color
       nodes_engine.py   → nodes_engine
-      film/grain.py     → film
+      film/camera.py    → film
     """
     parts = fname.replace("\\", "/").split("/")
     if len(parts) > 1:
@@ -217,10 +217,6 @@ _KNOWN_CROSS_MODULE_DUPLICATES: dict = {
     # it had been written in color/lut.py and left out of every mapping dict, so
     # the node existed but never reached ComfyUI's menu.
     "RadianceLUTBlend":  frozenset(["color", "nodes"]),
-    # film/ sub-package supersedes nodes_optics.py for FilmGrain
-    "RadianceFilmGrain": frozenset(["film", "nodes_optics"]),
-    # film/ sub-package supersedes nodes_motion_blur.py for MotionBlur
-    "RadianceMotionBlur": frozenset(["film", "nodes_motion_blur"]),
     # nodes_io_unified is the canonical IO module; nodes_io is its backward-compat
     # shim (Task #140 / #141-fix).  The shim re-exports the same keys so that
     # saved ComfyUI workflows and test_io.py continue to resolve them.
@@ -231,8 +227,6 @@ _KNOWN_CROSS_MODULE_DUPLICATES: dict = {
     "RadianceDigitalCinemaRead": frozenset(["nodes", "nodes_io"]),
     "RadianceDigitalCinemaWrite": frozenset(["nodes", "nodes_io"]),
     # v3 organized package plus compatibility wrappers.
-    "RadianceFilmGrain": frozenset(["film", "nodes"]),
-    "RadianceMotionBlur": frozenset(["film", "nodes"]),
     "RadianceCDLTransform": frozenset(["nodes", "nodes_cdl"]),
     "RadianceCDLImport": frozenset(["nodes", "nodes_cdl"]),
     "RadianceCDLExport": frozenset(["nodes", "nodes_cdl"]),

@@ -41,7 +41,7 @@ def test_depth_generator_stays_local_and_says_why(no_consent):
     fake = types.SimpleNamespace(AutoImageProcessor=proc, AutoModelForDepthEstimation=model)
     with mock.patch.dict(sys.modules, {"transformers": fake}):
         depth._processor_cache.clear()
-        with pytest.raises(FileNotFoundError, match="RADIANCE_ALLOW_DOWNLOADS=1"):
+        with pytest.raises(FileNotFoundError, match="automatic downloads are off"):
             depth.download_and_load_model("Small (25M - Fast)", torch.device("cpu"))
     assert proc.calls and all(c.get("local_files_only") is True for c in proc.calls + model.calls)
 

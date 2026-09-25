@@ -4,6 +4,7 @@ several filenames already referenced by the Loader's LTX-2.3 preset hints
 had no matching catalogue entry. Mirrors test_model_map_flux2.py's
 structure.
 """
+import re
 
 
 class TestLtx23DiffusionModels:
@@ -23,7 +24,8 @@ class TestLtx23DiffusionModels:
         assert fname in RADIANCE_MODEL_MAP
         entry = RADIANCE_MODEL_MAP[fname]
         assert entry["type"] == "diffusion_models"
-        assert entry["url"] == f"https://huggingface.co/Lightricks/LTX-2.3-fp8/resolve/main/{fname}"
+        assert re.fullmatch(rf"https://huggingface\.co/Lightricks/LTX-2\.3-fp8/resolve/[0-9a-f]{{40}}/{re.escape(fname)}",
+                            entry["url"])
 
 
 class TestLtx23Upscaler:
@@ -48,9 +50,8 @@ class TestLtx23TextEncoders:
             assert fname in RADIANCE_MODEL_MAP
             entry = RADIANCE_MODEL_MAP[fname]
             assert entry["type"] == "text_encoders"
-            assert entry["url"].startswith(
-                "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/"
-            )
+            assert re.match(r"https://huggingface\.co/Comfy-Org/ltx-2/resolve/[0-9a-f]{40}/split_files/text_encoders/",
+                            entry["url"])
 
     def test_text_projection_on_kijai_repo(self):
         from radiance.config.model_map import RADIANCE_MODEL_MAP
@@ -71,4 +72,4 @@ class TestLtx23VaeOnKijaiRepo:
             assert fname in RADIANCE_MODEL_MAP
             entry = RADIANCE_MODEL_MAP[fname]
             assert entry["type"] == "vae"
-            assert entry["url"].startswith("https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/")
+            assert re.match(r"https://huggingface\.co/Kijai/LTX2\.3_comfy/resolve/[0-9a-f]{40}/vae/", entry["url"])

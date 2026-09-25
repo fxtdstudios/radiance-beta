@@ -116,6 +116,26 @@ def _reinhard_tonemap(x: "torch.Tensor", peak: float = 1.0) -> "torch.Tensor":
     return x / (1.0 + x / max(peak, 1e-7))
 
 
+def _reinhard_extended(x: "torch.Tensor", unit: float, white: float) -> "torch.Tensor":
+    """Extended Reinhard in units of `unit`: L (1 + L / W^2) / (1 + L), with
+    L = x / unit and W = white / unit, returned in units of `unit`. It maps
+    `white` exactly to `unit`, so the brightest input lands on the target
+    rather than at half of it as plain Reinhard does. With W <= 1 there is no
+    headroom to compress and the curve is the identity."""
+    unit = max(float(unit), 1e-12)
+    w = float(white) / unit
+    lum = x / unit
+    if w <= 1.0 + 1e-9:
+        return x
+    return lum * (1.0 + lum / (w * w)) / (1.0 + lum) * unit
+
+
+def _srgb_encode(x: "torch.Tensor") -> "torch.Tensor":
+    """IEC 61966-2-1 sRGB inverse EOTF on display-relative linear light."""
+    x = x.clamp(0.0, 1.0)
+    return torch.where(x <= 0.0031308, 12.92 * x, 1.055 * x.clamp(min=1e-12).pow(1.0 / 2.4) - 0.055)
+
+
 def _pq_encode(x: "torch.Tensor") -> "torch.Tensor":
     """
     BT.2100 PQ EOTF (signal→display).
@@ -338,8 +358,11 @@ class RadianceVideoHDRDecode:
                     "tooltip": "JSON from RadianceVideoHDRConditioner or manually entered",
                 }),
                 "tonemap": (cls.TONEMAP_MODES, {"default": "Reinhard",
-                    "tooltip": "Reinhard: x / (1 + x / peak), so input white lands at half peak_nits. "
-                               "Linear clip: clamp at 10,000 nits. Pass-through: no curve."}),
+                    "tooltip": "Reinhard: extended Reinhard whose white point is the brightest input "
+                               "(1.0 lifted by a positive exposure_compensation_ev), so that value lands "
+                               "exactly on peak_nits and the highlights above it roll off; at 0 EV or "
+                               "less there is nothing to compress. Linear clip: clamp at 10,000 nits. "
+                               "Pass-through: no curve (clamped at 10,000 nits by the encode)."}),
             },
             "optional": {
                 "exposure_compensation_ev": ("FLOAT", {
@@ -348,12 +371,14 @@ class RadianceVideoHDRDecode:
                 }),
                 "output_eotf": (EOTF_OPTIONS, {"default": "PQ (ST.2084)",
                     "tooltip": "Encoding of hdr_image. PQ: ST 2084 code values (1.0 = 10,000 nits). HLG: "
-                               "BT.2100 OETF. Linear and sRGB / BT.1886 both output clamped linear light "
-                               "normalised to 10,000 nits (no sRGB curve)."}),
+                               "BT.2100 OETF. Linear: clamped linear light normalised to 10,000 nits. "
+                               "sRGB / BT.1886: the sRGB curve on light relative to peak_nits (1.0 = peak), "
+                               "an SDR signal."}),
                 "sdr_preview_nits": ("FLOAT", {
                     "default": 100.0, "min": 1.0, "max": 203.0,
-                    "tooltip": "Knee (in nits) of the Reinhard curve for sdr_preview. The preview is not "
-                               "renormalised to display white, so it stays dark (about 0.12 at 100 nits).",
+                    "tooltip": "Nits shown as white-ish mid-range in sdr_preview: light is measured in "
+                               "units of this value and rolled off with extended Reinhard so the brightest "
+                               "input reaches display white (1.0). Lower = brighter preview.",
                 }),
                 "gamut_clip": ("BOOLEAN", {
                     "default": True,
@@ -422,8 +447,13 @@ class RadianceVideoHDRDecode:
         x_nit = x_lin * (peak_nits / 10000.0)
 
         # 4. Tone-map
+        #    The brightest input is 1.0 lifted by a positive EV; Reinhard puts
+        #    it exactly on peak_nits. Plain x / (1 + x / peak) put input white
+        #    at half of peak_nits.
+        peak_n = peak_nits / 10000.0
+        brightest = peak_n * (2.0 ** max(exposure_compensation_ev, 0.0))
         if tonemap == "Reinhard":
-            x_tm = _reinhard_tonemap(x_nit, peak=peak_nits / 10000.0)
+            x_tm = _reinhard_extended(x_nit.clamp(min=0.0), peak_n, brightest)
         elif tonemap == "Linear clip":
             x_tm = x_nit.clamp(0, 1)
         else:
@@ -438,12 +468,19 @@ class RadianceVideoHDRDecode:
             x_enc = _pq_encode(x_tm)
         elif output_eotf == "HLG (BT.2100)":
             x_enc = _hlg_encode(x_tm)
+        elif output_eotf == "sRGB / BT.1886":
+            # An SDR signal: light relative to peak_nits through the sRGB
+            # curve. It used to be the same clamped linear light as "Linear".
+            x_enc = _srgb_encode(x_tm / peak_n)
         else:
             x_enc = x_tm.clamp(0, 1)
 
-        # 7. SDR preview: Reinhard tone-map + gamma 2.2
-        sdr_scale = sdr_preview_nits / 10000.0
-        x_sdr_lin = _reinhard_tonemap(x_nit, peak=sdr_scale)
+        # 7. SDR preview: light in units of sdr_preview_nits, rolled off so the
+        #    brightest input reaches display white, then the 2.2 gamma the input
+        #    was linearised with. It used to stay unnormalised at 1/10,000 of
+        #    display scale, peaking near 0.12.
+        sdr_unit = sdr_preview_nits / 10000.0
+        x_sdr_lin = _reinhard_extended(x_nit.clamp(min=0.0), sdr_unit, max(brightest, sdr_unit)) / sdr_unit
         x_sdr = x_sdr_lin.clamp(0, 1).pow(1.0 / 2.2)
 
         report.append(f"HDR out range: [{x_enc.min():.4f}, {x_enc.max():.4f}]")

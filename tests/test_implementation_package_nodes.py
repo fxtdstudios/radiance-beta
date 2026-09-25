@@ -73,11 +73,9 @@ ALREADY_SHIPPING_FROM_THE_SAME_CLASS = (
     "RadianceHDRToneMap",
 )
 
-#: Declared in radiance.film and NOT registered from there: the classes behind
-#: these keys in film/ are different nodes from the ones radiance.nodes.vfx
-#: ships. See SUPERSEDED_IMPLEMENTATIONS in
-#: tests/test_node_publication_completeness.py.
-STAYS_WITH_NODES_VFX = {
+#: radiance.film used to declare rival classes under these keys; they were
+#: deleted in 3.5.0 and the radiance.nodes.vfx implementations are the nodes.
+SHIPPED_BY_NODES_VFX = {
     "RadianceFilmGrain": "radiance.nodes.vfx.optics",
     "RadianceMotionBlur": "radiance.nodes.vfx.motion_blur",
 }
@@ -187,20 +185,9 @@ class TestWhatWasDeliberatelyNotRegistered:
 
         assert _live()[key] is radiance.hdr.NODE_CLASS_MAPPINGS[key]
 
-    @pytest.mark.parametrize("key,module", sorted(STAYS_WITH_NODES_VFX.items()))
-    def test_the_shipping_vfx_implementation_was_not_replaced(self, key, module):
-        """The reason radiance.film is not simply added to NODE_GROUPS.
-
-        Registering film's classes under these keys would swap two shipping
-        nodes for rivals with different widgets and break every saved workflow
-        wired to them. Which one survives is the owner's call; until then the
-        node that has always shipped keeps shipping.
-        """
-        assert _live()[key].__module__ == module
-
-    @pytest.mark.parametrize("key,module", sorted(STAYS_WITH_NODES_VFX.items()))
-    def test_the_rival_implementation_is_a_genuinely_different_class(self, key, module):
-        """If these ever converge, the rivalry is over and the note should go."""
+    @pytest.mark.parametrize("key,module", sorted(SHIPPED_BY_NODES_VFX.items()))
+    def test_the_vfx_implementation_ships_and_film_has_no_rival(self, key, module):
         import radiance.film
 
-        assert radiance.film.NODE_CLASS_MAPPINGS[key] is not _live()[key]
+        assert _live()[key].__module__ == module
+        assert key not in radiance.film.NODE_CLASS_MAPPINGS, "a rival class is back in radiance.film"

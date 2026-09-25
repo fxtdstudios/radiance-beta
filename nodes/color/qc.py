@@ -68,6 +68,26 @@ def _gamut_out_of_p3(arr: np.ndarray) -> float:
     return float(((arr < -0.001) | (arr > 1.001)).any(axis=-1).mean())
 
 
+#: How Policy Guard reads pixel values as light. It used to read every input
+#: as display SDR (1.0 = 100 nits), so scene-linear output of this package
+#: (1.0 = 203 nits) read about half as bright as it is and a PQ or HLG signal
+#: was read as if its code values were linear light.
+POLICY_SIGNALS = ["Display SDR (1.0 = 100 nits)", "Scene-linear (1.0 = 203 nits)",
+                  "PQ (ST 2084)", "HLG (BT.2100, 1000-nit display)"]
+
+
+def _peak_nits(arr: np.ndarray, signal: str) -> float:
+    """Brightest channel of a frame in nits, read as `signal`."""
+    from radiance.color.encodings import DEFAULT_REFERENCE_WHITE_NITS as ref, _hlg_decode, _pq_decode
+    if signal.startswith("Scene-linear"):
+        return float(arr.max()) * ref
+    if signal.startswith("PQ"):
+        return float(_pq_decode(arr[..., :3], ref).max()) * ref
+    if signal.startswith("HLG"):
+        return float(_hlg_decode(arr[..., :3], ref).max()) * ref
+    return float(arr.max()) * 100.0
+
+
 def _policy_analyse(arr: np.ndarray) -> Dict[str, float]:
     luma_map = _luma(arr)
     return {
@@ -90,7 +110,7 @@ def _evaluate_policy(stats: Dict[str, float], policy: Dict[str, Any],
     # Peak was only checked for policies under 200 nits, so an HDR policy's
     # max_peak_nits was never enforced. 1.0 = 100 nits (BT.1886 reference).
     max_nits = float(policy.get("max_peak_nits", 1000.0))
-    peak_nits_approx = stats["peak"] * 100.0
+    peak_nits_approx = float(stats.get("peak_nits", stats["peak"] * 100.0))
     if peak_nits_approx > max_nits:
         _viol("max_peak_nits", f"{peak_nits_approx:.1f} nits", f"{max_nits:.0f} nits")
 
@@ -166,7 +186,7 @@ class RadianceQC:
                 "enable_focus_check": ("BOOLEAN", {"default": False, "tooltip": "Add a Laplacian-variance sharpness score; below 20/100 is reported as a low-sharpness warning."}),
                 "enable_artifacts_check": ("BOOLEAN", {"default": True, "tooltip": "Add an 8x8 block-edge score for JPEG/DCT compression artifacts; 10/100 or more is a warning."}),
                 "enable_noise_check": ("BOOLEAN", {"default": True, "tooltip": "Add a high-frequency noise score; below 5/100 warns of over-denoising, above 30/100 of high noise."}),
-                "fail_on_errors": ("BOOLEAN", {"default": False, "tooltip": "Adds (BLOCKING) to the status string when QC fails. It does not stop the workflow."}),
+                "fail_on_errors": ("BOOLEAN", {"default": False, "tooltip": "Stop the workflow with an error, carrying the report, when QC fails. Off: the failure is only reported."}),
                 "qc_report_json": ("STRING", {"forceInput": True, "tooltip": "json_report output of an Analyze run. Export mode only."}),
                 "output_path": ("STRING", {"default": "", "tooltip": "Export folder. Empty = ComfyUI output folder; relative = subfolder of it; absolute paths are used as is. Export mode only."}),
                 "filename_prefix": ("STRING", {"default": "qc_report", "tooltip": "Report file name stem; a date-time stamp and the extension are appended. Export mode only."}),
@@ -337,9 +357,16 @@ class RadianceQC:
             status = "\u2713 PASS" if overall_pass else "\u2717 FAIL"
             if fail_on_errors and not overall_pass:
                 status += " (BLOCKING)"
-            return (result_tensor, text_report, json_report, status)
+                blocking = True
+            else:
+                blocking = False
         except Exception as exc:
             return self._error(f"Analysis failed: {type(exc).__name__}: {exc}")
+        # fail_on_errors stops the graph, as its name says. It used to add
+        # "(BLOCKING)" to the status and let everything downstream run.
+        if blocking:
+            raise RuntimeError(f"RadianceQC: QC failed and fail_on_errors is on. {status}\n{text_report}")
+        return (result_tensor, text_report, json_report, status)
 
     def _export(self, qc_report_json: str, output_path: str,
                 filename_prefix: str, export_format: str) -> str:
@@ -400,12 +427,12 @@ class RadiancePolicyGuard:
         return {
             "required": {
                 "mode": (cls.MODES, {"default": "Guard", "tooltip": "Preset: output a policy JSON (data1) and its description (data2); the image is not checked. Guard: check the image against a policy."}),
-                "image": ("IMAGE", {"tooltip": "Frames to check, display-referred 0..1 (peak is read as 1.0 = 100 nits). Ignored in Preset mode."}),
+                "image": ("IMAGE", {"tooltip": "Frames to check. Peak nits are read as set by signal; clipping, black crush and luma are measured on the values as they are. Ignored in Preset mode."}),
             },
             "optional": {
                 "preset": (list(_PRESETS.keys()), {"default": "Broadcast SDR", "tooltip": "Delivery policy to output in Preset mode. Custom uses the custom_* values."}),
                 "policy_file": ("STRING", {"default": "", "tooltip": "Optional path to a policy JSON file; when it loads, it replaces the preset. A failed load logs a warning and falls back to the preset. Preset mode only."}),
-                "custom_max_peak_nits": ("FLOAT", {"default": 1000.0, "min": 0.0, "max": 10000.0, "step": 10.0, "tooltip": "Custom preset: highest allowed peak, in nits, with 1.0 = 100 nits. Preset mode only."}),
+                "custom_max_peak_nits": ("FLOAT", {"default": 1000.0, "min": 0.0, "max": 10000.0, "step": 10.0, "tooltip": "Custom preset: highest allowed peak, in nits (read as set by signal in Guard mode). Preset mode only."}),
                 "custom_max_clipping": ("FLOAT", {"default": 0.01, "min": 0.0, "max": 1.0, "step": 0.001, "tooltip": "Custom preset: highest allowed fraction of pixels with luma above 0.99 (0.01 = 1%). Preset mode only."}),
                 "custom_max_black_crush": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.001, "tooltip": "Custom preset: highest allowed fraction of pixels with luma below 0.01 (0.05 = 5%). Preset mode only."}),
                 "custom_max_saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Custom preset: highest allowed mean HSV-style saturation, (max - min) / max per pixel. 1.0 only fails on negative pixel values. Preset mode only."}),
@@ -413,9 +440,10 @@ class RadiancePolicyGuard:
                 "max_clipping": ("FLOAT", {"default": 0.01, "min": 0.0, "max": 1.0, "step": 0.001, "tooltip": "Highest allowed fraction of pixels with luma above 0.99, worst frame. Guard mode, used only when policy is empty."}),
                 "max_black_crush": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.001, "tooltip": "Highest allowed fraction of pixels with luma below 0.01, worst frame. Guard mode, used only when policy is empty."}),
                 "max_saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01, "tooltip": "Highest allowed mean saturation, (max - min) / max per pixel, worst frame. 1.0 only fails on negative pixel values. Guard mode, used only when policy is empty."}),
-                "max_peak_nits": ("FLOAT", {"default": 1000.0, "min": 0.0, "max": 10000.0, "step": 10.0, "tooltip": "Highest allowed peak, where the brightest channel value x 100 is taken as nits (1.0 = 100 nits). Guard mode, used only when policy is empty."}),
+                "max_peak_nits": ("FLOAT", {"default": 1000.0, "min": 0.0, "max": 10000.0, "step": 10.0, "tooltip": "Highest allowed peak in nits, the brightest channel read as set by signal. Guard mode, used only when policy is empty."}),
                 "require_metadata": ("STRING", {"default": "", "tooltip": "Comma-separated metadata keys that must appear in metadata_present, for example colorspace, eotf. Guard mode, used only when policy is empty."}),
                 "metadata_present": ("STRING", {"default": "", "tooltip": "Comma-separated metadata the deliverable carries, as keys or key=value pairs. Only the keys are checked. Guard mode only."}),
+                "signal": (POLICY_SIGNALS, {"default": POLICY_SIGNALS[0], "tooltip": "How pixel values are read as light for the peak check. Display SDR: 1.0 = 100 nits (BT.1886 white). Scene-linear: Radiance's convention, 1.0 = 203 nits (BT.2408). PQ: ST 2084 code values, absolute. HLG: BT.2100 code values on the 1000-nit reference display. Guard mode only."}),
             },
         }
 
@@ -433,7 +461,7 @@ class RadiancePolicyGuard:
             image=None, policy: str = "", max_clipping: float = 0.01,
             max_black_crush: float = 0.05, max_saturation: float = 1.0,
             max_peak_nits: float = 1000.0, require_metadata: str = "",
-            metadata_present: str = ""):
+            metadata_present: str = "", signal: str = POLICY_SIGNALS[0]):
         if mode == "Preset":
             pol_json, description = self._preset(preset, policy_file, custom_max_peak_nits,
                                                   custom_max_clipping, custom_max_black_crush,
@@ -445,7 +473,8 @@ class RadiancePolicyGuard:
                 dummy = torch.zeros(1, 64, 64, 3)
                 return (dummy, False, '{"error":"image required"}', "ERROR: image is required", 0)
             return self._guard(image, policy, max_clipping, max_black_crush,
-                               max_saturation, max_peak_nits, require_metadata, metadata_present)
+                               max_saturation, max_peak_nits, require_metadata, metadata_present,
+                               signal)
 
     def _preset(self, preset, policy_file, max_peak_nits, max_clipping, max_black_crush, max_saturation):
         if policy_file.strip():
@@ -462,7 +491,7 @@ class RadiancePolicyGuard:
         return (json.dumps(pol), pol.get("description", ""))
 
     def _guard(self, image, policy_str, max_clipping, max_black_crush, max_saturation,
-               max_peak_nits, require_metadata, metadata_present):
+               max_peak_nits, require_metadata, metadata_present, signal=POLICY_SIGNALS[0]):
         if policy_str.strip():
             try:
                 pol = json.loads(policy_str)
@@ -493,6 +522,8 @@ class RadiancePolicyGuard:
         stats = {k: fn(p[k] for p in per_frame) for k, fn in worst.items()}
         lumas = [p["mean_luma"] for p in per_frame]
         stats["mean_luma"] = max(lumas) if max(lumas) > float(pol.get("max_luma", 1.0)) else min(lumas)
+        stats["peak_nits"] = max(_peak_nits(f, signal) for f in arr)
+        stats["signal"] = signal
         stats["frames_checked"] = len(per_frame)
         stats["worst_clipping_frame"] = int(np.argmax([p["clipping"] for p in per_frame]))
         passed, violations, score = _evaluate_policy(stats, pol, meta_keys)
@@ -505,7 +536,7 @@ class RadiancePolicyGuard:
         lines = [f"{status}  Score: {score}/100",
                  f"Policy: {pol.get('description', 'Inline')}", "",
                  "Stats:",
-                 f"  Peak:       {stats['peak']:.4f} ({stats['peak']*100:.1f} nits approx)",
+                 f"  Peak:       {stats['peak']:.4f} ({stats['peak_nits']:.1f} nits, {signal})",
                  f"  Mean luma:  {stats['mean_luma']:.4f}",
                  f"  Clipping:   {stats['clipping']:.2%}",
                  f"  Black crush:{stats['black_crush']:.2%}",

@@ -100,15 +100,18 @@ _MATRICES: dict[str, dict[str, list]] = {
 
 # Bradford chromatic adaptation matrices  (D65 → target)
 _BRADFORD_CAT: dict[str, list] = {
+    # 3.5.0: the D65/D60 pair was wrong (D65 white landed 1.2 % off D60 in
+    # X); these are Bradford from the D65 and ACES white points, and map one
+    # white exactly onto the other.
     "D65_to_D60": [
-        [ 0.9872240,  0.0061750, -0.0033995],
-        [-0.0081720,  1.0117720,  0.0023250],
-        [ 0.0033550, -0.0018660,  0.9254840],
+        [ 1.0130349,  0.0061053, -0.0149709],
+        [ 0.0076982,  0.9981634, -0.0050320],
+        [-0.0028413,  0.0046852,  0.9245061],
     ],
     "D60_to_D65": [
-        [ 1.0131176, -0.0061693,  0.0034780],
-        [ 0.0083040,  0.9884043, -0.0022636],
-        [-0.0036680,  0.0019880,  1.0802637],
+        [ 0.9872240, -0.0061132,  0.0159533],
+        [-0.0075984,  1.0018615,  0.0053300],
+        [ 0.0030726, -0.0050960,  1.0816806],
     ],
     "D65_to_D50": [
         [ 1.0478112,  0.0228866, -0.0501270],
@@ -140,10 +143,12 @@ _M_709_TO_ACESCG = [
     [ 0.0701972,  0.9163411,  0.0134617],
     [ 0.0206156,  0.1095698,  0.8698146],
 ]
+# The inverse of the matrix above (it was 4e-3 off, so ACEScg to Rec.709 and
+# back drifted); the same values as radiance.color.ops.M_ACESCG_TO_REC709.
 _M_ACESCG_TO_709 = [
-    [ 1.7048586, -0.6217610, -0.0830976],
-    [-0.1296266,  1.1379610, -0.0083344],
-    [-0.0241477, -0.1246181,  1.1487658],
+    [ 1.7050509, -0.6217921, -0.0832588],
+    [-0.1302564,  1.1408047, -0.0105483],
+    [-0.0240033, -0.1289690,  1.1529723],
 ]
 # DCI-P3 D65 → BT.2020
 _M_P3_TO_2020 = [
@@ -161,6 +166,44 @@ _PRIMARIES_MATRICES: dict[tuple, list] = {
 }
 
 _PRIMARIES_LIST = ["Rec.709 (sRGB)", "BT.2020", "ACEScg", "DCI-P3 (D65)", "XYZ (D65)"]
+
+# Each primaries set as (to-XYZ, from-XYZ, white point). Used to build every
+# pair the table above does not carry; the five pairs above keep their
+# published matrices so their output is unchanged.
+_PRIMARIES_XYZ: dict[str, tuple] = {
+    "Rec.709 (sRGB)": (_MATRICES["rec709_to_xyz"], _MATRICES["xyz_to_rec709"], "D65"),
+    "BT.2020":        (_MATRICES["bt2020_to_xyz"], _MATRICES["xyz_to_bt2020"], "D65"),
+    "DCI-P3 (D65)":   (_MATRICES["dcip3_to_xyz"],  _MATRICES["xyz_to_dcip3"],  "D65"),
+    "ACEScg":         (_MATRICES["acescg_to_xyz_d60"], _MATRICES["xyz_d60_to_acescg"], "D60"),
+    "XYZ (D65)":      ([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                       [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], "D65"),
+}
+
+
+def _matmul3(a: List[List[float]], b: List[List[float]]) -> List[List[float]]:
+    return [[sum(a[i][k] * b[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+
+
+def _primaries_matrix(source: str, target: str) -> Optional[List[List[float]]]:
+    """RGB-to-RGB matrix from `source` to `target` primaries, with a Bradford
+    white-point adaptation when their whites differ (ACEScg is D60, the rest
+    D65). None when either name is unknown."""
+    if (source, target) in _PRIMARIES_MATRICES:
+        return _PRIMARIES_MATRICES[(source, target)]
+    if source not in _PRIMARIES_XYZ or target not in _PRIMARIES_XYZ:
+        return None
+    to_xyz, _, w_src = _PRIMARIES_XYZ[source]
+    _, from_xyz, w_dst = _PRIMARIES_XYZ[target]
+    m = to_xyz
+    if w_src != w_dst:
+        m = _matmul3(_BRADFORD_CAT[f"{w_src}_to_{w_dst}"], m)
+    return _matmul3(from_xyz, m)
+
+
+def _primaries_adapt_white(source: str, target: str) -> bool:
+    """True when converting source to target already changes the white point."""
+    a, b = _PRIMARIES_XYZ.get(source), _PRIMARIES_XYZ.get(target)
+    return bool(a and b and a[2] != b[2])
 
 
 def _apply_matrix(img: torch.Tensor, M: List[List[float]]) -> torch.Tensor:
@@ -313,8 +356,8 @@ class RadianceHDRColorPipeline:
                     {
                         "default": "Rec.709 (sRGB)",
                         "tooltip": (
-                            "Primaries of the input. Only Rec.709 to/from BT.2020, Rec.709 to/from "
-                            "ACEScg and DCI-P3 to BT.2020 are converted; other pairs pass through unchanged."
+                            "Primaries of the input. Any pair of the listed primaries converts, with a "
+                            "Bradford white-point adaptation where the whites differ (ACEScg is D60)."
                         ),
                     },
                 ),
@@ -323,8 +366,7 @@ class RadianceHDRColorPipeline:
                     {
                         "default": "Rec.709 (sRGB)",
                         "tooltip": (
-                            "Primaries to convert to (see source_primaries for supported pairs). "
-                            "Same as source leaves colours unchanged."
+                            "Primaries to convert to. Same as source leaves colours unchanged."
                         ),
                     },
                 ),
@@ -334,7 +376,8 @@ class RadianceHDRColorPipeline:
                         "default": "None",
                         "tooltip": (
                             "Bradford white-point matrix applied to the linear RGB before the primaries "
-                            "step. Leave None for Rec.709 to ACEScg, which is already adapted."
+                            "step. Skipped, with a warning, when the primaries conversion already changes "
+                            "the white point (to or from ACEScg), so it is never applied twice."
                         ),
                     },
                 ),
@@ -375,17 +418,31 @@ class RadianceHDRColorPipeline:
         # still passed it, so every PQ run raised TypeError.
         linear = fn(img)
 
-        # 2. Chromatic adaptation
+        # 2. Chromatic adaptation. A primaries conversion between different
+        #    white points (anything to or from ACEScg, D60) already adapts, so
+        #    a second adaptation on top is skipped rather than applied twice.
+        adaptation_applied = "None"
         if chromatic_adaptation != "None":
-            M_cat = _BRADFORD_CAT.get(chromatic_adaptation)
-            if M_cat:
-                linear = _apply_matrix(linear, M_cat).clamp(min=0.0)
+            if source_primaries != target_primaries and _primaries_adapt_white(source_primaries, target_primaries):
+                logger.warning(
+                    "RadianceHDRColorPipeline: %s to %s already adapts the white point; "
+                    "chromatic_adaptation %s skipped so it is not applied twice.",
+                    source_primaries, target_primaries, chromatic_adaptation)
+            else:
+                M_cat = _BRADFORD_CAT.get(chromatic_adaptation)
+                if M_cat:
+                    linear = _apply_matrix(linear, M_cat).clamp(min=0.0)
+                    adaptation_applied = chromatic_adaptation
 
-        # 3. Primaries transform
+        # 3. Primaries transform. Every pair of the listed primaries converts;
+        #    pairs outside five hard-coded ones used to pass through unchanged
+        #    with no message.
         if source_primaries != target_primaries:
-            M_prim = _PRIMARIES_MATRICES.get((source_primaries, target_primaries))
-            if M_prim:
-                linear = _apply_matrix(linear, M_prim).clamp(min=0.0)
+            M_prim = _primaries_matrix(source_primaries, target_primaries)
+            if M_prim is None:
+                raise ValueError(
+                    f"RadianceHDRColorPipeline: no conversion from {source_primaries} to {target_primaries}.")
+            linear = _apply_matrix(linear, M_prim).clamp(min=0.0)
 
         peak_linear = float(linear.max().item())
 
@@ -406,6 +463,7 @@ class RadianceHDRColorPipeline:
             "source_primaries":     source_primaries,
             "target_primaries":     target_primaries,
             "chromatic_adaptation": chromatic_adaptation,
+            "chromatic_adaptation_applied": adaptation_applied,
             "compression_ratio":    compression_ratio,
             "peak_linear":          round(peak_linear, 4),
         }

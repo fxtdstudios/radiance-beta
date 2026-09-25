@@ -138,7 +138,6 @@ NODE_SECTIONS = {
     "RadianceFocusPeaking": "Review",
     "RadianceFrameStamp": "Review",
     "RadianceHDRMonitor": "Review",
-    "RadianceLiteViewer": "Review",
     "RadiancePolicyGuard": "Review",
     "RadiancePreviewServer": "Review",
     "RadianceQC": "Review",
@@ -177,7 +176,6 @@ NODE_SECTIONS = {
     "RadianceSceneCutSplit": "VFX",
     "RadianceSubpixelStabilizer": "VFX",
     "RadianceTemporalStitchStabilizer": "VFX",
-    "RadianceVectorMaskDraw": "VFX",
     "RadianceVignette": "VFX",
     # ── Video ─────────────────────────────────────────────────────────────
     "RadianceI2VPipeline": "Video",
@@ -322,7 +320,6 @@ TERM_OVERRIDES = {
     "RadianceMotionBlur": "MotionBlur",
     "RadianceChromaticAberration": "Aberration",
     "RadianceLensDistortion": "LensDistortion",
-    "RadianceVectorMaskDraw": "Roto",
     "RadianceSubpixelStabilizer": "Stabilize",
     "RadianceDepthMapGenerator": "Depth",
     "RadianceOpticalFlow": "MotionVectors",
@@ -343,7 +340,6 @@ TERM_OVERRIDES = {
     "RadianceEXRPassesWriter": "Write EXR Passes",
     # ── Review ────────────────────────────────────────────────────────────
     "RadianceViewer": "Viewer",
-    "RadianceLiteViewer": "Viewer (Lite)",
     "RadianceFrameStamp": "Burn-In",
     # ── Pipeline / DCC ────────────────────────────────────────────────────
     "RadianceNukeSend": "Export to Nuke",

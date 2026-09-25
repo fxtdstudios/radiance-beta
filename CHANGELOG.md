@@ -90,8 +90,107 @@ All notable changes to FXTD Radiance will be documented in this file.
     to read the pass as an occlusion amount, which inverted real AO loaded
     through Read AOVs. With nothing connected the default is still fully
     open. A hand-made occlusion mask now needs inverting once.
+11. **Fixes that change the output of a saved graph** (details under Fixed,
+    "Bugs found while documenting every input"): Multipass Relight's point
+    light with a depth pass is lit the right way round; Video Batch Decode no
+    longer divides HunyuanVideo, CogVideoX and SD latents by `latent_scale`;
+    Video HDR Decode puts input white on `peak_nits`, its SDR preview reaches
+    display white and its `sRGB / BT.1886` output has a curve; HDR Color
+    Pipeline converts every primaries pair and its D65/D60 adaptation and
+    ACEScg-to-Rec.709 matrices are corrected; Digital Cinema Read reads a
+    video's first frame; EXR MultiPart writes every frame of a batch; Radiance
+    QC with `fail_on_errors` stops the graph; Synthesis `guidance_nits` is on
+    the 203-nit scale.
+12. **Models download on first use.** Nothing to set: a node that needs a
+    model fetches it, pinned and SHA-256 checked. Set
+    `RADIANCE_ALLOW_DOWNLOADS=0` to keep the old ask-first behaviour on a
+    metered or air-gapped machine. Gated models need `HF_TOKEN`.
 
 ### Fixed
+
+- **Models download automatically, pinned and verified (3.5.0).** Every node
+  that needs a model now fetches it on first use; `RADIANCE_ALLOW_DOWNLOADS=0`
+  or the Hugging Face offline flags still stop all downloads. One downloader,
+  `core/model_fetch.py`, installs a file only after its SHA-256 matches, writes
+  to `.part` and resumes after an interruption, shows ComfyUI's progress bar,
+  and sends the user's `HF_TOKEN` to gated repositories (a refusal names the
+  page to accept and the token to set). Found by auditing every source online:
+  - *Read Models* (`auto_download`, now on by default): all 60 catalogue files
+    were on unpinned `main` with no digest. Each is pinned to a commit with its
+    SHA-256 and size. `flux1-schnell-fp8` pointed at a file that does not
+    exist (now Kijai's `flux1-schnell-fp8-e4m3fn`), and the FLUX.1 VAE came
+    from the gated FLUX.1-dev repo (now Comfy-Org's ungated copy, the same
+    file byte for byte).
+  - *Upscale*: none of the nine files had a digest; the Hugging Face mirrors
+    tried first were missing or private, so every download fell back to a
+    second URL. Each now comes from its original release file with its
+    SHA-256. HAT-L's GitHub URLs return 404 (it is published only on Google
+    Drive): it is a manual install, and Tier 2 uses SwinIR-L at 4x until it
+    is present. SeedVR2's second attempt loaded a repository that does not
+    exist; it now says to install the SeedVR2 node pack. The SD x4 pipeline is
+    pinned to a commit.
+  - *AI Upscale* downloaded SUPIR and Real-ESRGAN straight to the final path,
+    with no check, so an interrupted download left a truncated model that was
+    loaded next time. Pinned and verified now.
+  - *Depth Map Generator* loaded Depth Anything V2 from `main`; pinned to a
+    commit per size.
+  - `tools/pin_models.py` re-checks every pin against its source (79 of 79 on
+    2026-09-25). Tests: `tests/test_model_pins.py`; the loader and consent
+    tests follow the new default.
+
+- **Bugs found while documenting every input.** The tooltip pass listed these
+  in KNOWN_ISSUES as owed; each is fixed and pinned by a test that fails on
+  the old code (`tests/test_documented_bugs.py`, 18).
+  - *ControlNet Apply* passed the hint image as B,H,W,C where ComfyUI's
+    ControlNets take it channels-first, and passed no VAE, so ControlNets that
+    encode the hint (SD3, Flux, DiT) could not work. The hint is channels-first
+    and an optional `vae` input is passed on.
+  - *Upscale Video* ran the built-in models on the CPU for clips (it used the
+    frames' device, always the CPU in ComfyUI); it uses the compute device. A
+    one-frame clip now keeps `model_tier`, `sharpness_boost`,
+    `enhancement_prompt` and `diffusion_steps`.
+  - *Multipass Relight*, point light with `depth_map` and no
+    `world_position`: the depth flip was on the wrong setting, so near pixels
+    sat behind far ones either way. Near is now toward the camera.
+  - *Video Batch Decode* divided the latent by dit_config's `latent_scale`,
+    although a ComfyUI sampler already returns it in VAE space, so
+    HunyuanVideo, CogVideoX and SD latents were scaled twice. It is reported
+    and not applied.
+  - *Video HDR Decode*: Reinhard put input white at half of `peak_nits`; it
+    is now extended Reinhard with the brightest input (1.0, lifted by a
+    positive EV) on `peak_nits`. The SDR preview peaked near 0.12; it now
+    reaches display white. `sRGB / BT.1886` output was the same clamped linear
+    light as Linear; it is the sRGB curve relative to `peak_nits`.
+  - *HDR Color Pipeline*: only five primaries pairs converted and the rest
+    passed through silently; every pair of the listed primaries converts, with
+    Bradford adaptation where the whites differ. `chromatic_adaptation` on a
+    conversion that already adapts (to or from ACEScg) is skipped with a
+    warning instead of applied twice. Found on the way: its D65/D60 Bradford
+    matrices put D65 white 1.2 % off D60, and its ACEScg-to-Rec.709 matrix was
+    4e-3 off the inverse; both corrected.
+  - *Video Model Info* forced every Wan model to Wan2.1 (16ch), the 48-channel
+    Wan2.2 TI2V 5B included, over `model_preset`. The latent channel count the
+    model reports picks the preset, and a matching preset the user chose is
+    kept.
+  - *Digital Cinema Read* skipped a video's first frame: `start_frame` counts
+    from 1 but went to the reader as a 0-based offset. It is converted.
+  - *EXR MultiPart* wrote only the first frame of a batch; every frame is
+    written, `<prefix>.<frame_index + n>.exr`, in parallel. A one-frame AOV is
+    used for every frame. Depth stays one Z channel from the first channel.
+  - *Policy Guard* read every input at 1.0 = 100 nits and PQ or HLG code
+    values as linear light. A `signal` option reads Display SDR, Scene-linear
+    (1.0 = 203 nits), PQ or HLG. *Radiance QC* `fail_on_errors` only added
+    "(BLOCKING)" to the status; it now stops the graph with the report.
+    *Synthesis* `guidance_nits` used 100 nits = 1.0; it uses 203.
+  - *AMF* description (and clip name) went into the XML unescaped, so `<` or
+    `&` broke the file; they are escaped.
+  - *Regional prompts*: each chained node reset the strength of every earlier
+    region to its own `global_strength`, and in Replace mode dropped the
+    earlier cut-out. Earlier regions keep their strength and area, and the
+    global keeps every cut.
+  - *Sampler* `sdr_blend` and `sdr_inject_steps` defaulted to 0 in Python and
+    0.35 / 6 in the widgets, so an API prompt that left them out ran with SDR
+    guidance off. The defaults match.
 
 - **HDR Color Pipeline crashed on PQ input.** It still passed `peak_nits` to
   a PQ decode that had dropped the argument on purpose, so every PQ run
@@ -143,7 +242,7 @@ All notable changes to FXTD Radiance will be documented in this file.
   - *PNG previews.* Linear frames got x/(1+x) with no display encoding (dark), and 8-bit conversion truncated. Both viewers now bake the OCIO ACES 2.0 view (exact, threaded) and round. The bake also no longer overwrites the IMAGE passed downstream.
   - *Always dirty.* `IS_CHANGED` returned NaN on every queue, re-running every node downstream of a viewer. It now fingerprints the inputs, and is NaN only while the delivery cache has no frames for the node.
   - *Lite Viewer.* Readout, clip check and diff read an fp16 float proxy, so they show source values at source coordinates. The canvas is in device pixels, so 1:1 is exact on scaled displays; it was sized from a bordered box, 0.3 % off. B is scaled to A, diff has a gain, and play/loop run at the source fps. Frames load progressively.
-  - Tests: `tests/test_viewer_phase1.py` (11), and `js/tests/viewer_color.test.mjs` and `js/tests/lite_viewer.test.mjs`, which read real pixels back from Chromium.
+  - Tests: `tests/test_viewer_phase1.py` (11), and `js/tests/viewer_color.test.mjs` and `js/tests/lite_viewer.test.mjs` (removed with the Lite Viewer), which read real pixels back from Chromium.
 
 - **Legacy nodes off the menu.** HDR Latent Encoder and HDR Turbo Encoder are
   hidden (`DEPRECATED`) and now raise when run, naming VAE Encode (HDR): a
@@ -309,6 +408,63 @@ All notable changes to FXTD Radiance will be documented in this file.
   - *Transport.* In/out points, J/K/L shuttle, ping-pong and play-once, play every frame (waits for each frame) or realtime with a dropped-frame count.
   - *WebGPU.* `FEATURE_PARITY` is false and the gaps are listed in KNOWN_ISSUES; WebGL stays the default.
   - Tests: `js/tests/viewer_color.test.mjs` grows to 16 browser checks (shader compile, ARRI green, gamut, scope signal, viewer f-stop, DPR 2 crisp zoom, key scoping, ping-pong, P3).
+
+- **Rival Film Grain and Motion Blur classes deleted (3.5.0).** `radiance.film` declared its own `RadianceFilmGrain` (film-stock profiles, `film/grain.py`) and `RadianceMotionBlur` (directional / radial / zoom, in `film/camera.py`) under the keys the VFX menu already ships from `nodes/vfx/optics.py` and `nodes/vfx/motion_blur.py`. ComfyUI never loaded them; they were kept only until the owner chose. The shipped nodes stay, so no saved graph changes; `film/grain.py` and the film Motion Blur class are removed.
+
+- **VFX nodes that broke or crawled at production size (3.5.0).** Found by timing every VFX node on 24 frames of 1024x576 (CPU, 6 GB). Each fix was checked against the old maths.
+  - *Motion Blur held the clip several times over.* The Motion Blur in the menu (`nodes/vfx/motion_blur.py`, vector blur) integrated the whole clip at once on the CPU with a copy of the vectors: +1 GB for 24 frames of 1024x576. It now works a few frames at a time on the GPU: +0.48 GB, output identical.
+  - *Multipass Relight was killed out of memory.* The whole clip was shaded at once on the CPU with about 25 frame-sized temporaries, and unconnected passes were full frames of a constant. It now shades a few frames at a time on the GPU with broadcast defaults: 4.0 s. Output identical across 96 combinations of light, normal convention, premultiply, beauty mix and passes. The 0..1-or-signed normal decision is still made on the whole clip.
+  - *Linear Matting took 4.5 s a frame.* Its six box means were square 2-D pools (cost grows with radius squared). They are now two 1-D passes, which is the same zero-padded mean, on the GPU in chunks: 107 s to 13.5 s on this machine, peak +1.8 GB to +0.65 GB, output within 2e-6.
+  - *HDR Stitch took 24 s to paste a small crop.* Same cause in the feather, plus two full-frame pyramids for the whole clip at once: now 3.1 s and +0.66 GB, output within 5e-6.
+  - *Floyd-Steinberg dither looped over every pixel in Python* (8 s a 1024x576 frame, about 2 minutes a 4K frame). It now processes one anti-diagonal of every frame and channel at a time, with the loop's arithmetic and the loop's order of error additions, so the result is bit-identical: 0.44 s for one frame, 1.5 s for 24.
+  - *Depth Map Generator kept the clip's depth on the GPU.* Every full-resolution depth frame, then a 3-channel copy of all of them, stayed in VRAM (about 32 GB for 240 frames of 4K), and frames went through the Hugging Face processor on the CPU one at a time. Frames are now preprocessed on the device with the processor's own steps (torchvision's uint8 bicubic resize, so the input matches it to 2e-7), run through the model up to 8 at a time, and moved to the CPU as they are produced; normalisation is unchanged. On CUDA the model runs in fp16: against fp32 the Small and Base models differ by 0.03-0.07 % of the depth range on average, with no NaNs.
+  - New `core/tensor/chunking.py`: frames-per-chunk from free VRAM (or 1 GB on CPU) and the compute device. The timings above are CPU; GPU gains are larger and still to be measured on the RTX 4080.
+  - *Linear Matting crashed on a mask of another size.* Load Image returns a 64x64 mask for an image with no alpha; the mask is now resized to the image.
+  - Tests: `tests/test_vfx_efficiency.py` (28), pinning each node to its old maths and chunked runs to single-pass runs.
+
+- **VFX nodes held the clip several times over (3.5.0, phase 2).** Ten more nodes built every intermediate for the whole clip at once on the CPU. They now work a few frames at a time on the GPU (or the CPU when there is none; Optical Flow's DIS solver is OpenCV on the CPU), and set-up work that is the same for every frame is done once. Output checked against the old code: identical for Optical Flow's vectors, Lens Distortion, Chromatic Aberration, Depth of Field, HDR Grain Matcher, Relight Engine and Multipass Composite; within 2.4e-7 for Anamorphic Streaks and Film Grain; within 7e-6 for Subpixel Stabilizer. A seed gives the same grain as before. CPU, 1024x576, peak memory above the input:
+
+  | Node | 24 frames | 64 frames |
+  |---|---|---|
+  | Lens Distortion | +768 MB to +356 MB, 2.3x faster | +2.0 GB to +0.9 GB |
+  | Depth of Field | +1.16 GB to +0.98 GB | +3.1 GB to +1.2 GB |
+  | Anamorphic Streaks | +657 MB to +495 MB | +1.7 GB to +1.2 GB |
+  | Film Grain | +1.14 GB to +1.09 GB | +3.0 GB to +2.1 GB |
+  | Chromatic Aberration | +389 MB to +287 MB, 3x faster | +1.0 GB to +0.9 GB |
+  | Subpixel Stabilizer | 1.4x faster (batched FFT, no per-frame `.item()` reads) | +959 MB to +880 MB |
+  | HDR Grain Matcher | +1.03 GB to +0.66 GB, 1.4x faster (each reference frame's grain computed once) | +2.6 GB to +1.2 GB |
+  | Relight Engine | +1.27 GB to +0.71 GB | +3.3 GB to +1.2 GB |
+  | Optical Flow | +826 MB to +609 MB, 1.3x faster (DIS built once per chunk, not per pair) | +2.2 GB to +1.3 GB |
+  | Multipass Composite | +1.30 GB to +1.20 GB (four full outputs) | both out of memory on this 8 GB machine with all seven inputs connected |
+
+  - *Lens Distortion with Invert crashed.* It passed a tensor as the fill value of `full_like`. Fixed; the inverse keeps the sign of tiny values.
+  - New `FrameSink` in `core/tensor/chunking.py` collects chunk results on the CPU, keeping a one-chunk result as it is so a short clip costs no more than before.
+  - Optical Flow's Lucas-Kanade fallback still solves one pair at a time: its batched solve differs from the per-pair one by up to 0.07 px.
+  - Tests: `tests/test_vfx_efficiency.py` grows to 40.
+
+- **EXR Passes Writer, Compression Artifacts and Scene Cut Detect ran one frame after another (3.5.0, phase 3).** CPU, 1024x576:
+  - *EXR Passes Writer* writes frames in parallel (OpenEXR compresses outside the GIL; up to 8 at once) and converts each pass one frame at a time instead of copying the whole clip first. 24 frames with beauty, normal, albedo and depth: 11.1 s to 5.3 s on this 2-core machine, and it scales with cores. Every file's header, channels and pixels are identical to before (180 files compared across layouts, bit depths and compressions).
+  - *Compression Artifacts* encodes frames in parallel and writes them straight into the output instead of a list that was then stacked: 64 frames 5.3 s to 2.2 s, +888 MB to +485 MB. Identical output, and the seeded noise is still drawn frame by frame in order.
+  - *Compression Artifacts crashed in JPEG or Both mode* when a side was not a multiple of `block_size` (100x100 with the default 8 raised ValueError). Blocks cut off at the right or bottom edge are now averaged over the pixels they have; whole-block images are unchanged.
+  - *Scene Cut Detect analysed every frame twice*, once in each pair it belongs to. Each frame's histograms and edge map are now computed once: 64 frames 4.3 s to 2.3 s, cuts and scores bit-identical.
+  - Tests: `tests/test_vfx_efficiency.py` grows to 43. Three chunked-versus-one-pass checks compare within 1e-6 instead of bit for bit: a vectorised reduction can round differently with the batch's memory alignment, and one did once in about 50 runs.
+
+- **Roto removed (3.5.0).** `◎ Vector Mask Draw (Roto)` (`RadianceVectorMaskDraw`) typed polygon or spline points as text, with no way to draw on the image, so it was slower to use than ComfyUI's own mask editor or a SAM / matting node. It is deleted; 156 nodes load. A saved graph that used it shows it as a missing node. The Video Mask Propagator that shared its file stays, now in `nodes/vfx/mask_propagate.py`.
+
+- **Viewer: Simple / Advanced, one compare, Lite Viewer removed (3.5.0).**
+  - *Simple mode.* A switch in the Viewer's title bar. Simple shows the picture, a transport (play, step, scrub, frame) and compare; Advanced shows every panel as before. A new Viewer opens in Simple; the choice is saved with the node. Graphs saved before the switch open in Advanced, as they looked. Choosing Advanced grows a small node to 1180 x 760.
+  - *Compare did not work as labelled.* A/B grabbed a still of A over a connected `compare_image`, so A was compared with itself. Wipe with no B showed the ungraded source. Difference and Blink drew nothing on the default WebGL path, and Blink started playback. One controller now drives every compare control in both modes: A, B, Wipe, Diff (|A − B| × 4) and Blink (two flips a second), drawn in the shader. B is the `compare_image` frame under the playhead; with none, **Pin A as B** keeps the current frame, read at image resolution so it lines up at any zoom, and it survives a new run. **Release B** returns to the input.
+  - *Lite Viewer removed.* Simple mode does its job, and two viewers meant two frontends and two sets of compare bugs. `◎ Radiance Lite Viewer` (`RadianceLiteViewer`) is deleted: `nodes/monitor/lite_viewer.py`, `js/radiance_lite_viewer.js` and their tests. 157 nodes load. A graph saved with one opens with a Radiance Viewer in its place, in Simple mode: the frontend rewrites the node before ComfyUI's missing-node check, keeps `input_space` and `fps`, and re-points its links by socket name (root graph and subgraphs). `workflows/start.json` uses a Viewer in Simple mode instead.
+  - *Context loss reported on every graph load.* Removing a viewer releases its WebGL context on purpose, and the context-lost handler logged that as an error and kept the context restorable. It now ignores its own release.
+  - *Docs.* The README key table listed A for compare and L for luma; compare is X, luma is Y, A is alpha, and J / K / L are the shuttle.
+  - Tests: `js/tests/viewer_compare_mode.test.mjs` (13, including the load-time conversion). `tests/test_viewer_phase1.py` checks the node is gone.
+
+- **Viewer player, checked end to end (3.5.0).** Driven in a browser on a bar-coded 96- and 240-frame clip and a 48-frame PNG sequence, reading the frame number back from the pixels.
+  - *Playback froze at the end of the range.* The loop checked whether the in point was loaded whatever the loop mode, so ping-pong and play-once waited at the out point for a frame they would never show, and a whole-clip loop longer than the 16-frame paging window waited for a frame 0 that had been paged out. One function now decides the next frame for both the check and the step; a loop wrap moves the playhead so the window re-centres and loads the in point first.
+  - *The node grew without limit.* The viewer widget sized itself from the node (height minus 110), so LiteGraph grew the node every frame: 760 to 5688 px in 3 s, with the picture pushed off screen. The widget has a fixed minimum height now and the node keeps its size.
+  - *J did nothing on a video loaded straight into the Viewer.* Browsers cannot play a video element backwards; J now steps back by seeking, at the playback rate, and wraps when looping. K, L and Space stop it.
+  - *Every frame went through the CPU.* The main 2D canvas asked for `willReadFrequently`, which makes Chrome keep it in software, so the WebGL frame was copied back to the CPU on every draw. The flag is gone; the pixel readouts read the WebGL buffer.
+  - Tests: `js/tests/playback_step.test.mjs` (8). The browser run passes 20 of 21 checks on the 240-frame clip, including bounded memory over a full loop; the one left is the frame rate, which this software-GL machine cannot reach.
 
 - **HDR VAE Decode and SDR → HDR audit (3.5.0).**
   - *Auto log-inverted sampled latents.* Samplers copy the latent dict, so HDR
@@ -627,7 +783,12 @@ All notable changes to FXTD Radiance will be documented in this file.
   `rpacks/SDXL_Standard.rpack`, and three unreferenced images (`icon.png`,
   `Viewer_shortcut.png`, `radiance_workspace.png`). The unused
   `DYNAMIC_EXEC_ENABLED` flag in the Nuke listener went with them; nothing
-  read it.
+  read it. A second pass removed five more: `nodes/hdr/patch.py` and
+  `nodes/monitor/scopes.py` (empty modules that registered nothing),
+  `tools/validate_hdr_pipeline.py` (imported a `radiance_color` module that
+  no longer exists, so it could not run), and `scripts/build_js.js` with
+  `package-lock.json` (minified the frontend into a `build/` folder nothing
+  loads; `package.json` keeps only `npm test`).
 - **`tools/check_release_ready.py` works again and runs in the suite.** It
   had crashed since `license` became an SPDX string, looked for README
   headings that no longer exist, and flagged local `__pycache__` as release

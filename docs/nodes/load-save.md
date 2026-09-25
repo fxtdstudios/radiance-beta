@@ -24,7 +24,7 @@ Read a video, image or frame sequence through Radiance Read, decoded to scene-li
 | :--- | :--- | :--- | :--- | :--- |
 | `source_path` | string |  |  | Video file, image, or frame sequence (e.g. shot.####.exr). Required: an empty path stops the graph. |
 | `read_mode` | choice | `Auto` | `Auto`, `Video`, `Sequence`, `EXR` | How to treat source_path. Auto detects from the path; EXR is handled exactly like Sequence. |
-| `start_frame` | int | 1 |  | Sequence: the frame number to start at (a number outside the range on disk falls back to the first frame). Video: a 0-based offset, so the default 1 skips the clip's first frame. |
+| `start_frame` | int | 1 |  | Sequence: the frame number to start at (a number outside the range on disk falls back to the first frame). Video: the frame to start at counting from 1, so the default 1 is the clip's first frame. |
 | `frame_limit` | int | 0 |  | Maximum number of frames to read from start_frame. 0 reads to the end. |
 | `input_colorspace` | choice | `sRGB (Standard)` | `sRGB (Standard)`, `Auto / Linear (pass-through)`, `Rec.709 (BT.1886)`, `Rec.709 (camera OETF)`, `Rec.2020 (BT.2020 OETF)`, `P3-D65 (Gamma 2.6)`, `PQ (ST.2084)`, `HLG (BT.2100)`, `Linear Rec.709 (sRGB)`, `Linear Rec.2020`, and 12 more | Transfer the source was encoded with. It is decoded to scene-linear; shot_metadata.colorspace records the result. |
 | `fps_override` | float | 0 |  | 0 = the source's own rate. Written to shot_metadata.fps. |
@@ -141,10 +141,10 @@ Write one multi-part OpenEXR frame with named AOV parts (beauty, depth, normal, 
 | Input | Type | Default | Range or choices | What it does |
 | :--- | :--- | :--- | :--- | :--- |
 | `filename_prefix` | string | `radiance_multipart` |  | File name stem. The file is written as <prefix>.<frame_index, 4-digit padded>.exr. |
-| `beauty` | IMAGE |  |  | Main image, written as the 'beauty' part (R, G, B, plus A if it has 4 channels). Values are written unchanged, so feed scene-linear data. Only the first frame of a batch is written. |
+| `beauty` | IMAGE |  |  | Main image, written as the 'beauty' part (R, G, B, plus A if it has 4 channels). Values are written unchanged, so feed scene-linear data. Each frame of a batch is written to its own file. |
 | `bit_depth` | choice | `16-bit Half Float` | `16-bit Half Float`, `32-bit Float` | Pixel type for every part: 16-bit half float (smaller, about 11 bits of precision) or 32-bit float. |
 | `compression` | choice | `ZIP` | `ZIP`, `ZIPS`, `PIZ`, `RLE`, `Uncompressed`, `PXR24`, `B44`, `B44A`, `DWAA`, `DWAB` | EXR compression for every part. ZIP, ZIPS, PIZ, RLE and Uncompressed are lossless; PXR24 is lossy on 32-bit float; B44, B44A, DWAA and DWAB are lossy. |
-| `depth` (optional) | IMAGE |  |  | Depth AOV written as a single Z channel in a 'depth' part. Only the first (red) channel is used; values are not normalised. |
+| `depth` (optional) | IMAGE |  |  | Depth AOV written as a single Z channel in a 'depth' part, from the first channel (a grey depth image carries the same value in all three); values are not normalised. |
 | `normal` (optional) | IMAGE |  |  | Normals AOV written as NX, NY, NZ in a 'normal' part, values unchanged (no 0-1 to -1..1 remap). |
 | `albedo` (optional) | IMAGE |  |  | Albedo AOV written as albedo.R/G/B in an 'albedo' part, values unchanged. |
 | `custom_1` (optional) | IMAGE |  |  | Extra AOV written as <custom_1_name>.R/G/B in a part of that name. |
@@ -153,7 +153,7 @@ Write one multi-part OpenEXR frame with named AOV parts (beauty, depth, normal, 
 | `custom_2_name` (optional) | string | `specular` |  | Part and channel-prefix name for custom_2. Letters, digits, underscore, hyphen or dot only. |
 | `output_path` (optional) | string |  |  | Output folder. Empty writes to the ComfyUI output folder; a relative path is inside it; an absolute path is used as-is. Created if missing. |
 | `remote_path` (optional) | string |  |  | Optional second folder (for example a NAS or UNC share) the finished file is copied to. A failed copy only logs a warning. |
-| `frame_index` (optional) | int | 1 |  | Frame number used in the file name only. It does not select a frame from the batch. |
+| `frame_index` (optional) | int | 1 |  | Frame number of the first image in the batch, used in the file name; later frames count up from it. An AOV with one frame is used for every frame. |
 | `custom_metadata` (optional) | string |  | multi-line text | Extra header attributes, one key=value per line. Keys are stored with a 'rad_' prefix unless they are standard EXR names (owner, comments, capDate and so on). |
 
 **Outputs**

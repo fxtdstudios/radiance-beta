@@ -496,14 +496,17 @@ def _build_amf(
     uid  = str(uuid.uuid4())
     dt   = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # Text is XML-escaped: a description with < or & (or a clip name with
+    # them) used to be inserted verbatim and made the file unparseable.
+    from xml.sax.saxutils import escape as _xml_escape
     return _AMF_TEMPLATE.format(
         ns               = _AMF_NS,
         uuid             = uid,
         dt               = dt,
-        description      = description,
-        clip_name        = clip_name,
-        input_transform  = input_transform,
-        output_transform = output_transform,
+        description      = _xml_escape(str(description)),
+        clip_name        = _xml_escape(str(clip_name)),
+        input_transform  = _xml_escape(str(input_transform)),
+        output_transform = _xml_escape(str(output_transform)),
         peak_nits        = peak_nits,
         min_nits         = min_nits,
     )
@@ -1033,7 +1036,7 @@ class RadianceACESMetadataFile:
                 "description": ("STRING", {
                     "default": "Created by Radiance ACES 2.0 pipeline.",
                     "multiline": True,
-                    "tooltip": "(write) Free text stored in the AMF's amfInfo description. It is inserted verbatim, so avoid < and & characters.",
+                    "tooltip": "(write) Free text stored in the AMF's amfInfo description (XML-escaped, so any characters are safe).",
                 }),
                 "save_path": ("STRING", {
                     "default": "",

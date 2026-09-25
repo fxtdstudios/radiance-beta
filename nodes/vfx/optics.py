@@ -42,6 +42,8 @@ import hashlib
 import torch
 import torch.nn.functional as F
 
+from radiance.core.tensor.chunking import FrameSink, chunks, compute_device, frames_per_chunk
+
 logger = logging.getLogger("radiance.optics")
 
 
@@ -111,8 +113,13 @@ class RadianceLensDistortion:
     def apply(self, image: torch.Tensor, k1: float, k2: float, scale: float,
               center_x: float, center_y: float, padding_mode: str, invert: bool):
         B, H, W, C = image.shape
-        device = image.device
-        dtype  = image.dtype
+        # 3.5.0: the warp is the same for every frame, so its grid is built
+        # once at (1, H, W, 2) instead of per frame, and frames are resampled a
+        # few at a time on the GPU. The whole clip used to be warped at once on
+        # the input's device (the CPU in ComfyUI) with per-frame grids and an
+        # ST-map per frame: +0.8 GB for 24 frames of 1024x576.
+        device = compute_device()
+        dtype = torch.float32
 
         # Normalized grid [-1, 1]
         y, x = torch.meshgrid(
@@ -126,7 +133,7 @@ class RadianceLensDistortion:
         cy = (center_y * 2.0) - 1.0
         center_vec = torch.tensor([cx, cy], device=device, dtype=dtype)
 
-        grid = torch.stack((x - cx, y - cy), dim=-1).unsqueeze(0).expand(B, -1, -1, -1)
+        grid = torch.stack((x - cx, y - cy), dim=-1).unsqueeze(0)          # (1, H, W, 2)
         r2   = grid[..., 0] ** 2 + grid[..., 1] ** 2
 
         if invert:
@@ -135,30 +142,38 @@ class RadianceLensDistortion:
             # barrel distortion (k1≈-0.5) at corners where r²≈2.
             # Clamp to ±1e-6 prevents NaN/Inf.
             denom = 1.0 + k1 * r2 + k2 * (r2 ** 2)
-            denom = torch.where(denom.abs() < 1e-6,
-                                torch.full_like(denom, 1e-6 * denom.sign().clamp(min=1.0)),
-                                denom)
+            # 3.5.0: this passed a tensor as full_like's fill value, which
+            # raises, so invert failed on every call. Near-zero values keep
+            # their sign (zero counts as positive).
+            tiny = torch.where(denom < 0, torch.full_like(denom, -1e-6), torch.full_like(denom, 1e-6))
+            denom = torch.where(denom.abs() < 1e-6, tiny, denom)
             scale_factor = (1.0 / max(scale, 1e-6)) / denom
         else:
             distortion   = 1.0 + k1 * r2 + k2 * (r2 ** 2)
             scale_factor = distortion * scale
 
-        distorted_grid = grid * scale_factor.unsqueeze(-1) + center_vec
+        distorted_grid = grid * scale_factor.unsqueeze(-1) + center_vec     # (1, H, W, 2)
+        del grid, r2, scale_factor
 
-        img_bchw = image.permute(0, 3, 1, 2)
-        out_bchw = F.grid_sample(
-            img_bchw, distorted_grid,
-            mode="bicubic", padding_mode=padding_mode, align_corners=True,
-        )
-        out = out_bchw.permute(0, 2, 3, 1)
+        out = FrameSink((B, H, W, C))
+        per = frames_per_chunk(H, W, C, 3.0, device)
+        for a, b in chunks(B, per):
+            img_bchw = image[a:b].to(device, dtype).permute(0, 3, 1, 2)
+            out_bchw = F.grid_sample(
+                img_bchw, distorted_grid.expand(b - a, -1, -1, -1),
+                mode="bicubic", padding_mode=padding_mode, align_corners=True,
+            )
+            out.put(a, b, out_bchw.permute(0, 2, 3, 1))
+            del img_bchw, out_bchw
 
         # ST-Map: R=U, G=V in [0,1]. Nuke/Fusion compatible.
         # Two-channel content, zero-padded to RGB so ComfyUI IMAGE shape is (B,H,W,3).
         st_uv   = (distorted_grid * 0.5 + 0.5).clamp(0.0, 1.0)
-        st_map  = torch.cat([st_uv, torch.zeros_like(st_uv[..., :1])], dim=-1)
+        st_one  = torch.cat([st_uv, torch.zeros_like(st_uv[..., :1])], dim=-1).cpu()
+        st_map  = st_one.expand(B, -1, -1, -1).contiguous()
 
         logger.debug(f"[LensDistortion] k1={k1} k2={k2} scale={scale} invert={invert}")
-        return (out, st_map)
+        return (out.value, st_map)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -210,8 +225,10 @@ class RadianceChromaticAberration:
     def apply(self, image: torch.Tensor, shift_r: float, shift_g: float, shift_b: float,
               center_x: float, center_y: float, invert: bool):
         B, H, W, C = image.shape
-        device = image.device
-        dtype  = image.dtype
+        # 3.5.0: per-channel grids built once at (1, H, W, 2), frames resampled
+        # a few at a time on the GPU (was: per-frame grids, whole clip, CPU).
+        device = compute_device()
+        dtype  = torch.float32
 
         y, x = torch.meshgrid(
             torch.linspace(-1, 1, H, device=device, dtype=dtype),
@@ -221,37 +238,42 @@ class RadianceChromaticAberration:
         cx = (center_x * 2.0) - 1.0
         cy = (center_y * 2.0) - 1.0
         center_vec = torch.tensor([cx, cy], device=device, dtype=dtype)
+        grid = torch.stack((x - cx, y - cy), dim=-1).unsqueeze(0)          # (1, H, W, 2)
 
-        grid     = torch.stack((x - cx, y - cy), dim=-1).unsqueeze(0).expand(B, -1, -1, -1)
-        img_bchw = image.permute(0, 3, 1, 2)
-
-        out_channels = []
-        for c, shift in enumerate([shift_r, shift_g, shift_b][:min(3, C)]):
-
-            # BUG 8 FIX: identity warp (shift==0) — skip grid_sample entirely
+        # BUG 8 FIX: identity warp (shift==0) — no grid, direct copy.
+        # Exact inverse: for output pixel at grid position g=(x-cx),
+        # sample input at (g/(1+s))+cx. Verified: forward(inverse(x))=x.
+        channel_grids = []
+        for shift in [shift_r, shift_g, shift_b][:min(3, C)]:
             if shift == 0.0:
-                out_channels.append(img_bchw[:, c:c + 1, :, :])
+                channel_grids.append(None)
                 continue
-
-            # Exact inverse: for output pixel at grid position g=(x-cx),
-            # sample input at (g/(1+s))+cx. Verified: forward(inverse(x))=x.
             s = shift if not invert else (1.0 / (1.0 + shift) - 1.0)
-            channel_grid = grid * (1.0 + s) + center_vec
+            channel_grids.append(grid * (1.0 + s) + center_vec)
+        del grid
 
-            sampled = F.grid_sample(
-                img_bchw[:, c:c + 1, :, :],
-                channel_grid,
-                mode="bicubic", padding_mode="reflection", align_corners=True,
-            )
-            out_channels.append(sampled)
+        out = FrameSink((B, H, W, C))
+        per = frames_per_chunk(H, W, C, 3.0, device)
+        for a, b in chunks(B, per):
+            n = b - a
+            img_bchw = image[a:b].to(device, dtype).permute(0, 3, 1, 2)
+            out_channels = []
+            for c, cg in enumerate(channel_grids):
+                if cg is None:
+                    out_channels.append(img_bchw[:, c:c + 1, :, :])
+                    continue
+                out_channels.append(F.grid_sample(
+                    img_bchw[:, c:c + 1, :, :], cg.expand(n, -1, -1, -1),
+                    mode="bicubic", padding_mode="reflection", align_corners=True,
+                ))
+            if C > 3:
+                # Alpha preserved at original position (correct for pre-multiplied images)
+                out_channels.append(img_bchw[:, 3:, :, :])
+            out.put(a, b, torch.cat(out_channels, dim=1).permute(0, 2, 3, 1))
+            del img_bchw, out_channels
 
-        if C > 3:
-            # Alpha preserved at original position (correct for pre-multiplied images)
-            out_channels.append(img_bchw[:, 3:, :, :])
-
-        out = torch.cat(out_channels, dim=1).permute(0, 2, 3, 1)
         logger.debug(f"[ChromAb] R={shift_r} G={shift_g} B={shift_b} invert={invert}")
-        return (out,)
+        return (out.value,)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -377,46 +399,53 @@ class RadianceAnamorphicStreaks:
               streak_falloff: float = 3.0):
 
         B, H, W, C = image.shape
-        device = image.device
-
-        img_bchw = image.permute(0, 3, 1, 2)
-        RGB      = img_bchw[:, :3, :, :]
-
-        # Isolate super-threshold highlights
-        highlights = F.relu(RGB - threshold)
+        # 3.5.0: a few frames at a time on the GPU (was: the whole clip on the
+        # input's device, the CPU in ComfyUI, through up to 9 passes of long
+        # 1-D kernels). Each frame is independent, so the result is unchanged.
+        device = compute_device()
+        dtype = torch.float32
 
         # BUG 11 FIX: log2 pass scaling — 6 passes at 64px vs old 2 passes
         # Each pass halves the remaining kernel width for a realistic long tail
-        passes      = max(1, int(math.log2(max(streak_length, 1))))
+        passes = max(1, int(math.log2(max(streak_length, 1))))
+        # BUG 10 FIX: kernels built once, not inside the helper (and now not per chunk)
+        kernels = []
         current_pad = streak_length
-
-        blurred = highlights
         for _ in range(passes):
-            # BUG 10 FIX: kernel built once per pass, not inside the helper
-            kernel  = self._make_kernel(current_pad, streak_falloff, device, image.dtype)
-            blurred = self._directional_blur(blurred, kernel, current_pad, streak_direction)
+            kernels.append((self._make_kernel(current_pad, streak_falloff, device, dtype), current_pad))
             current_pad = max(1, int(current_pad * 0.75))
 
         color_tint = torch.tensor(
-            [streak_color_r, streak_color_g, streak_color_b],
-            dtype=blurred.dtype, device=device,
+            [streak_color_r, streak_color_g, streak_color_b], dtype=dtype, device=device,
         ).view(1, 3, 1, 1)
 
-        streaks  = blurred * color_tint * intensity
-        out_rgb  = RGB + streaks
-
-        if C > 3:
-            out_bchw    = torch.cat([out_rgb, img_bchw[:, 3:, :, :]], dim=1)
-            streaks_out = torch.cat([streaks, img_bchw[:, 3:, :, :]], dim=1)
-        else:
-            out_bchw    = out_rgb
-            streaks_out = streaks
+        out = FrameSink((B, H, W, C))
+        streaks_img = FrameSink((B, H, W, C))
+        per = frames_per_chunk(H, W, C, 6.0, device)
+        for a, b in chunks(B, per):
+            img_bchw = image[a:b].to(device, dtype).permute(0, 3, 1, 2)
+            RGB = img_bchw[:, :3, :, :]
+            # Isolate super-threshold highlights
+            blurred = F.relu(RGB - threshold)
+            for kernel, pad in kernels:
+                blurred = self._directional_blur(blurred, kernel, pad, streak_direction)
+            streaks = blurred * color_tint * intensity
+            out_rgb = RGB + streaks
+            if C > 3:
+                out_bchw    = torch.cat([out_rgb, img_bchw[:, 3:, :, :]], dim=1)
+                streaks_out = torch.cat([streaks, img_bchw[:, 3:, :, :]], dim=1)
+            else:
+                out_bchw    = out_rgb
+                streaks_out = streaks
+            out.put(a, b, out_bchw.permute(0, 2, 3, 1))
+            streaks_img.put(a, b, streaks_out.permute(0, 2, 3, 1))
+            del img_bchw, blurred, streaks, out_rgb, out_bchw, streaks_out
 
         logger.debug(
             f"[AnaStreaks] threshold={threshold} length={streak_length} "
             f"passes={passes} dir={streak_direction}"
         )
-        return (out_bchw.permute(0, 2, 3, 1), streaks_out.permute(0, 2, 3, 1))
+        return (out.value, streaks_img.value)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -505,8 +534,7 @@ class RadianceFilmGrain:
               grain_size_b_offset: float, hdr_aware: bool, seed: int):
 
         B, H, W, C = image.shape
-        device = image.device
-        dtype  = image.dtype
+        dtype  = torch.float32
 
         if seed != 0:
             torch.manual_seed(seed)
@@ -517,43 +545,61 @@ class RadianceFilmGrain:
             max(0.1, grain_size + grain_size_b_offset),
         ]
 
-        # Per-channel grain: white noise → Gaussian blur → scale by strength
-        grain_channels = []
-        for c in range(min(3, C)):
-            # Raw white noise (zero mean)
-            noise = torch.randn(B, 1, H, W, device=device, dtype=dtype) * grain_strength
+        # Raw white noise (zero mean), drawn exactly as before: one full-clip
+        # draw per channel from the global generator on the input's device, so
+        # a seed gives the same grain it always has.
+        # 3.5.0: the blur, modulation and add run a few frames at a time on the
+        # GPU (they are per frame). The whole clip used to go through them at
+        # once on the CPU: +1.1 GB for 24 frames of 1024x576.
+        device = compute_device()
+        out = FrameSink((B, H, W, C))
+        per = frames_per_chunk(H, W, C, 5.0, device)
+        n_noise = min(3, C)
+        # When the clip is one chunk each channel's noise is drawn just before
+        # it is used and dropped after, as the single-pass code did; the draw
+        # order, and so the grain for a seed, is the same either way.
+        single = per >= B
+        noises = None if single else [
+            torch.randn(B, 1, H, W, device=image.device, dtype=image.dtype) for _ in range(n_noise)]
 
-            # Give grain spatial structure via Gaussian blur
-            noise = self._gaussian_blur_2d(noise, channel_sizes[c])
+        def _noise(c, a, b):
+            if single:
+                return torch.randn(B, 1, H, W, device=image.device, dtype=image.dtype)
+            return noises[c][a:b]
 
-            grain_channels.append(noise)
+        for a, b in chunks(B, per):
+            # Per-channel grain: white noise → Gaussian blur → scale by strength
+            grain_rgb = torch.cat([
+                self._gaussian_blur_2d(_noise(c, a, b).to(device, dtype).mul(grain_strength), channel_sizes[c])
+                for c in range(n_noise)
+            ], dim=1)                                              # (n, 3, H, W)
 
-        grain_rgb = torch.cat(grain_channels, dim=1)  # (B, 3, H, W)
+            img_bchw = image[a:b].to(device, dtype).permute(0, 3, 1, 2)
+            rgb      = img_bchw[:, :3, :, :]
 
-        img_bchw  = image.permute(0, 3, 1, 2)
-        rgb       = img_bchw[:, :3, :, :]
+            if hdr_aware:
+                # Poisson shot-noise modulation: grain amplitude ∝ 1/√luminance
+                # Brighter regions get finer grain — matches film physics
+                luma = (0.2126 * rgb[:, 0:1, :, :].clamp(min=0.0)
+                      + 0.7152 * rgb[:, 1:2, :, :].clamp(min=0.0)
+                      + 0.0722 * rgb[:, 2:3, :, :].clamp(min=0.0))
+                # Normalise: luma=1.0 → full strength; luma=4.0 → half strength
+                modulation = 1.0 / (luma + 1.0).sqrt()
+                grain_rgb  = grain_rgb * modulation
 
-        if hdr_aware:
-            # Poisson shot-noise modulation: grain amplitude ∝ 1/√luminance
-            # Brighter regions get finer grain — matches film physics
-            luma = (0.2126 * rgb[:, 0:1, :, :].clamp(min=0.0)
-                  + 0.7152 * rgb[:, 1:2, :, :].clamp(min=0.0)
-                  + 0.0722 * rgb[:, 2:3, :, :].clamp(min=0.0))
-            # Normalise: luma=1.0 → full strength; luma=4.0 → half strength
-            modulation = 1.0 / (luma + 1.0).sqrt()
-            grain_rgb  = grain_rgb * modulation
-
-        out_rgb = rgb + grain_rgb
-
-        if C > 3:
-            out_bchw = torch.cat([out_rgb, img_bchw[:, 3:, :, :]], dim=1)
-        else:
-            out_bchw = out_rgb
+            out_rgb = rgb + grain_rgb
+            if C > 3:
+                out_bchw = torch.cat([out_rgb, img_bchw[:, 3:, :, :]], dim=1)
+            else:
+                out_bchw = out_rgb
+            out.put(a, b, out_bchw.permute(0, 2, 3, 1))
+            del grain_rgb, img_bchw, out_rgb, out_bchw
+        del noises
 
         logger.debug(
             f"[FilmGrain] size={grain_size} strength={grain_strength} hdr_aware={hdr_aware}"
         )
-        return (out_bchw.permute(0, 2, 3, 1),)
+        return (out.value,)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

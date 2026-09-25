@@ -4,6 +4,8 @@ import numpy as np
 import logging
 import json
 
+from radiance.core.tensor.chunking import FrameSink, chunks, compute_device, frames_per_chunk
+
 logger = logging.getLogger("radiance.vfx.masking")
 
 _SAM_NOT_SHIPPED = (
@@ -151,55 +153,50 @@ class RadianceLinearMatting:
     CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX/Masking"
 
     def apply(self, image: torch.Tensor, mask: torch.Tensor, method: str, trimap_dilation: int, eps: float):
-        # Ensure correct shapes
         B, H, W, C = image.shape
-        
-        # Bring mask to [B, 1, H, W]
-        if mask.dim() == 3:
-            mask_bchw = mask.unsqueeze(1)
-        else:
-            mask_bchw = mask
-            
-        # Bilateral / Guided Filter implementation in scene-linear Torch space
-        # Operating in scene-linear avoids sub-pixel edge fringing because sRGB curve doesn't warp color profiles.
-        img_bchw = image.permute(0, 3, 1, 2)
-        
-        # Compute local means
-        # Kernel size derived from dilation
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(0)
+        if tuple(mask.shape[-2:]) != (H, W):
+            # ComfyUI's Load Image returns a 64x64 mask for an image with no
+            # alpha; any other size mismatch crashed here too.
+            mask = F.interpolate(mask.float().unsqueeze(1), size=(H, W), mode="bilinear",
+                                 align_corners=False).squeeze(1)
+        # Guided filter (He et al.) on the image as given:
+        #   a = cov(I, p) / (var(I) + eps),  b = mean(p) - a * mean(I),
+        #   q = mean(a) * I + mean(b), averaged over channels.
         r = trimap_dilation * 2 + 1
-        
-        # Guided Filter Math in pure Torch
-        # q = a * I + b
-        # a = (cov(I, p)) / (var(I) + eps)
-        # b = mean(p) - a * mean(I)
-        
-        # Pad inputs
         pad = r // 2
-        I = img_bchw
-        p = mask_bchw
-        
-        mean_I = F.avg_pool2d(I, r, stride=1, padding=pad)
-        mean_p = F.avg_pool2d(p, r, stride=1, padding=pad)
-        mean_Ip = F.avg_pool2d(I * p, r, stride=1, padding=pad)
-        
-        cov_Ip = mean_Ip - mean_I * mean_p
-        
-        mean_II = F.avg_pool2d(I * I, r, stride=1, padding=pad)
-        var_I = mean_II - mean_I * mean_I
-        
-        a = cov_Ip / (var_I + eps)
-        b = mean_p - a * mean_I
-        
-        mean_a = F.avg_pool2d(a, r, stride=1, padding=pad)
-        mean_b = F.avg_pool2d(b, r, stride=1, padding=pad)
-        
-        q = mean_a * I + mean_b
-        q = q.mean(dim=1, keepdim=True)
-        q = q.clamp(0.0, 1.0)
-        
-        # Output alpha matte as [B, H, W]
-        alpha = q.squeeze(1)
-        foreground = image * q.permute(0, 2, 3, 1)
-        
-        logger.info(f"[Linear Matting] Guided filter, radius {r // 2}, eps {eps}")
-        return (alpha, foreground)
+
+        def box(x):
+            # 3.5.0: the r x r zero-padded mean as two 1-D passes. Identical
+            # result (zero padding, divisor r*r), O(r) instead of O(r^2) per
+            # pixel. The 2-D pool took 4.5 s a frame at 1024x576 with the
+            # default radius.
+            if r == 1:
+                return x
+            x = F.avg_pool2d(x, (1, r), stride=1, padding=(0, pad))
+            return F.avg_pool2d(x, (r, 1), stride=1, padding=(pad, 0))
+
+        dev = compute_device()
+        alpha = FrameSink((B, H, W))
+        foreground = FrameSink((B, H, W, C))
+        # Frames per chunk: about 12 frame-sized buffers are alive at once.
+        per = frames_per_chunk(H, W, C, 12.0, dev)
+        single_mask = mask.shape[0] == 1
+        for a0, a1 in chunks(B, per):
+            I = image[a0:a1].to(dev, torch.float32).permute(0, 3, 1, 2)
+            p = (mask[:1] if single_mask else mask[a0:a1]).to(dev, torch.float32).unsqueeze(1)
+            mean_I = box(I)
+            mean_p = box(p)
+            cov_Ip = box(I * p) - mean_I * mean_p
+            var_I = box(I * I) - mean_I * mean_I
+            a = cov_Ip / (var_I + eps)
+            b = mean_p - a * mean_I
+            del cov_Ip, var_I
+            q = (box(a) * I + box(b)).mean(dim=1, keepdim=True).clamp_(0.0, 1.0)
+            alpha.put(a0, a1, q.squeeze(1))
+            foreground.put(a0, a1, (I * q).permute(0, 2, 3, 1))
+            del I, p, mean_I, mean_p, a, b, q
+
+        logger.info(f"[Linear Matting] Guided filter, radius {pad}, eps {eps}")
+        return (alpha.value, foreground.value)
