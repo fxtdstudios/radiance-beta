@@ -194,12 +194,12 @@ def test_davinci_send_formats(mock_save_pil, mock_save_exr, tmp_path):
     mock_save_exr.assert_called_with(ANY, Path(folder) / "test_exr.exr", half=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  4. RadianceMCP Bridge & Sequence Path Pattern Regex Fix Tests
+#  4. DCC Bridge (RadianceMCP) & Sequence Path Pattern Regex Fix Tests
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_mcp_push_to_nuke_sequence_regex_fix():
     """Verify both dot and underscore separated sequence paths resolve to Nuke's '####' format."""
-    # Underscore style sequence (MCP Bridge Node default)
+    # Underscore style sequence (DCC Bridge node default)
     written_underscore = ["C:/renders/frame_1001.exr", "C:/renders/frame_1002.exr"]
     with patch("radiance.tools.nuke_connector.NukeConnector.load_exr") as mock_load:
         mock_load.return_value = (True, "loaded")

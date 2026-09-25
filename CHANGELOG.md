@@ -131,7 +131,11 @@ All notable changes to FXTD Radiance will be documented in this file.
     to every format, so either the EXR or the TIFF / PNG was in the wrong
     encoding. Scene-linear or sRGB input is now converted to what each format
     holds; the default, As is, keeps the old output.
-  - *MCP Bridge*: a request line is capped at 4 MB (a client that sent no
+  - *MCP Bridge is now DCC Bridge.* It was never the Model Context Protocol
+    (it is Radiance's own TCP channel for queueing workflows and exporting
+    frames), and the name read as if an AI client could connect to it. Only
+    the label changed; the node key stays `RadianceMCP`, so saved graphs load.
+  - *DCC Bridge*: a request line is capped at 4 MB (a client that sent no
     newline grew memory without bound), a failed Nuke push no longer raises,
     and its Resolve target says the Send to DaVinci Resolve node can import.
   - Tests: `tests/test_dcc_send.py` (7).

@@ -23,7 +23,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceProjectManager": "◎ Project Manager",
     "RadianceBlendComposite": "◎ Blend Composite",
-    "RadianceMCP": "◎ Radiance MCP Bridge",
+    "RadianceMCP": "◎ Radiance DCC Bridge",
     "RadianceNukeSend": "◎ Radiance Send to Nuke",
     "RadianceDaVinciSend": "◎ Radiance Send to DaVinci Resolve",
 }

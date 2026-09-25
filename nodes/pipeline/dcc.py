@@ -12,11 +12,13 @@ import numpy as np
 from radiance.nodes.io.write import _save_exr, _save_video_ffmpeg, _load_video_to_numpy, _read_sequence
 from radiance.path_utils import strip_path_quotes
 
-logger = logging.getLogger("radiance.mcp")
+logger = logging.getLogger("radiance.dcc_bridge")
 
 # ── Bridge Protocol ───────────────────────────────────────────────────────────
-# One JSON object per line in, one JSON object per line out. Not the Model
-# Context Protocol despite the node's name: a small TCP control channel.
+# One JSON object per line in, one JSON object per line out: a small TCP
+# control channel. The node was labelled "MCP Bridge" until 3.5.0, which read as
+# the Model Context Protocol; it is not, and is now "DCC Bridge". Its node key
+# stays RadianceMCP so saved graphs load.
 
 #: Longest request line accepted. A client that never sent a newline used to
 #: grow the buffer without bound.
@@ -77,7 +79,7 @@ def _handle(conn, addr=None):
                     try:
                         import urllib.request
                         from radiance.config.env import get_comfy_url
-                        data = json.dumps({"prompt": payload, "client_id": "radiance_mcp"}).encode()
+                        data = json.dumps({"prompt": payload, "client_id": "radiance_dcc_bridge"}).encode()
                         comfy_url = get_comfy_url().rstrip("/")
                         req = urllib.request.Request(
                             f"{comfy_url}/prompt",
@@ -117,7 +119,7 @@ def start_server(port: int = None, host: str = None) -> str:
         loopback = bind_host in _LOOPBACK_HOSTS
         if not loopback and not _remote_bridge_allowed():
             logger.warning(
-                "MCP Bridge: refusing non-loopback bind %r without RADIANCE_ALLOW_REMOTE_BRIDGE=1; "
+                "DCC Bridge: refusing non-loopback bind %r without RADIANCE_ALLOW_REMOTE_BRIDGE=1; "
                 "falling back to 127.0.0.1", bind_host,
             )
             bind_host = "127.0.0.1"
@@ -129,19 +131,19 @@ def start_server(port: int = None, host: str = None) -> str:
         try:
             _SERVER.bind((bind_host, port))
             _SERVER.listen(5)
-            logger.info(f"MCP Bridge listening on {bind_host}:{port}")
+            logger.info(f"DCC Bridge listening on {bind_host}:{port}")
             while _SERVER_RUNNING:
                 try:
                     conn, addr = _SERVER.accept()
-                    logger.debug(f"MCP connection from {addr}")
+                    logger.debug(f"DCC Bridge connection from {addr}")
                     threading.Thread(target=_handle, args=(conn, addr), daemon=True).start()
                 except socket.timeout:
                     continue
                 except Exception as e:
                     if _SERVER_RUNNING:
-                        logger.warning(f"MCP accept: {e}")
+                        logger.warning(f"DCC Bridge accept: {e}")
         except OSError as e:
-            logger.error(f"MCP socket: {e}")
+            logger.error(f"DCC Bridge socket: {e}")
         finally:
             try:
                 _SERVER.close()
@@ -306,7 +308,7 @@ class RadianceMCP:
     CATEGORY = "FXTD STUDIOS/Radiance/07 Pipeline & DCC"
     OUTPUT_NODE = True
     DESCRIPTION = (
-        "MCP Bridge — Export frames as EXR/video for DCC consumption, "
+        "DCC Bridge — Export frames as EXR/video for DCC consumption, "
         "or start a TCP bridge server for command/control between ComfyUI and DCC apps."
     )
 
@@ -339,7 +341,7 @@ class RadianceMCP:
 
         if mode == "Bridge Server":
             status = start_server(bridge_port, bridge_host)
-            logger.info(f"[MCP] {status}")
+            logger.info(f"[DCC Bridge] {status}")
             return (status, "")
 
         if not output_path:
@@ -446,5 +448,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceMCP": "◎ Radiance MCP Bridge",
+    "RadianceMCP": "◎ Radiance DCC Bridge",
 }

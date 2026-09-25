@@ -8,10 +8,10 @@ DCC bridges, metadata, audio, project handoff, and studio integration.
 
 - [Audio Cut](#audio-cut)
 - [Audio Transcribe](#audio-transcribe)
+- [DCC Bridge](#dcc-bridge)
 - [Export to Nuke](#export-to-nuke)
 - [Export to Resolve](#export-to-resolve)
 - [Linear Check](#linear-check)
-- [MCP Bridge](#mcp-bridge)
 - [NDI Sender](#ndi-sender)
 
 ## Audio Cut
@@ -69,6 +69,38 @@ Transcribe speech from an audio or video file using Whisper.
 | `segments_json` | STRING |
 | `segment_count` | INT |
 | `transcribe_report` | STRING |
+
+## DCC Bridge
+
+`RadianceMCP`
+
+DCC Bridge — Export frames as EXR/video for DCC consumption, or start a TCP bridge server for command/control between ComfyUI and DCC apps.
+
+**Inputs**
+
+| Input | Type | Default | Range or choices | What it does |
+| :--- | :--- | :--- | :--- | :--- |
+| `mode` | choice | `Export Frames` | `Export Frames`, `Bridge Server` | Export Frames = save EXR/video for DCC. Bridge Server = start TCP control server. |
+| `source` | choice | `Auto` | `Auto`, `Images`, `Video`, `Sequence` | Auto = try Images, then Video, then Sequence. Select explicitly to avoid ambiguity. |
+| `target` | choice | `Nuke` | `Nuke`, `Resolve`, `Fusion` | Target DCC application (metadata hint). |
+| `output_path` | string |  |  | Output directory for EXR frames (Export mode) or bridge log (Bridge mode). |
+| `format` | choice | `EXR (16-bit half)` | `EXR (16-bit half)`, `EXR (32-bit float)`, `EXR + H.264 MP4`, `EXR + ProRes MOV` | EXR bit depth. +H.264 or +ProRes also generates a video file. |
+| `images` (optional) | IMAGE |  |  | Batch of frames to export (used when source is Images or Auto). |
+| `video_path` (optional) | string |  |  | Path to a video file (.mp4, .mov, etc.) to decode and export (source=Video or Auto). |
+| `sequence_path` (optional) | string |  |  | Path/pattern to an image sequence e.g. /frames/frame.%04d.exr (source=Sequence or Auto). |
+| `fps` (optional) | float | 24 | 1 to 240, step 0.001 | Frame rate for video export. |
+| `frame_start` (optional) | int | 1001 | 0 to 999999 | Starting frame number for EXR sequence export. |
+| `frame_end` (optional) | int | 0 | 0 to 999999 | Last frame index (0 = read all found frames, for sequences only). |
+| `filename_prefix` (optional) | string | `frame` |  | Prefix for EXR filenames (e.g. frame_1001.exr). |
+| `bridge_port` (optional) | int | 1987 | 1024 to 65535 | TCP port for Bridge Server (default 1987). |
+| `bridge_host` (optional) | string | `127.0.0.1` |  | Bind address (127.0.0.1 = loopback only; 0.0.0.0 = all interfaces). |
+
+**Outputs**
+
+| Output | Type |
+| :--- | :--- |
+| `status` | STRING |
+| `render_path` | STRING |
 
 ## Export to Nuke
 
@@ -142,38 +174,6 @@ Check that the shot metadata tags the image as scene-linear (Linear or ACEScg) b
 | :--- | :--- |
 | `image` | IMAGE |
 | `shot_metadata` | RADIANCE_SHOT |
-
-## MCP Bridge
-
-`RadianceMCP`
-
-MCP Bridge — Export frames as EXR/video for DCC consumption, or start a TCP bridge server for command/control between ComfyUI and DCC apps.
-
-**Inputs**
-
-| Input | Type | Default | Range or choices | What it does |
-| :--- | :--- | :--- | :--- | :--- |
-| `mode` | choice | `Export Frames` | `Export Frames`, `Bridge Server` | Export Frames = save EXR/video for DCC. Bridge Server = start TCP control server. |
-| `source` | choice | `Auto` | `Auto`, `Images`, `Video`, `Sequence` | Auto = try Images, then Video, then Sequence. Select explicitly to avoid ambiguity. |
-| `target` | choice | `Nuke` | `Nuke`, `Resolve`, `Fusion` | Target DCC application (metadata hint). |
-| `output_path` | string |  |  | Output directory for EXR frames (Export mode) or bridge log (Bridge mode). |
-| `format` | choice | `EXR (16-bit half)` | `EXR (16-bit half)`, `EXR (32-bit float)`, `EXR + H.264 MP4`, `EXR + ProRes MOV` | EXR bit depth. +H.264 or +ProRes also generates a video file. |
-| `images` (optional) | IMAGE |  |  | Batch of frames to export (used when source is Images or Auto). |
-| `video_path` (optional) | string |  |  | Path to a video file (.mp4, .mov, etc.) to decode and export (source=Video or Auto). |
-| `sequence_path` (optional) | string |  |  | Path/pattern to an image sequence e.g. /frames/frame.%04d.exr (source=Sequence or Auto). |
-| `fps` (optional) | float | 24 | 1 to 240, step 0.001 | Frame rate for video export. |
-| `frame_start` (optional) | int | 1001 | 0 to 999999 | Starting frame number for EXR sequence export. |
-| `frame_end` (optional) | int | 0 | 0 to 999999 | Last frame index (0 = read all found frames, for sequences only). |
-| `filename_prefix` (optional) | string | `frame` |  | Prefix for EXR filenames (e.g. frame_1001.exr). |
-| `bridge_port` (optional) | int | 1987 | 1024 to 65535 | TCP port for Bridge Server (default 1987). |
-| `bridge_host` (optional) | string | `127.0.0.1` |  | Bind address (127.0.0.1 = loopback only; 0.0.0.0 = all interfaces). |
-
-**Outputs**
-
-| Output | Type |
-| :--- | :--- |
-| `status` | STRING |
-| `render_path` | STRING |
 
 ## NDI Sender
 
