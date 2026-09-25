@@ -4,7 +4,7 @@ import numpy as np
 import logging
 import json
 
-from radiance.core.tensor.chunking import chunks, compute_device, frames_per_chunk
+from radiance.core.tensor.chunking import FrameSink, chunks, compute_device, frames_per_chunk
 
 logger = logging.getLogger("radiance.vfx.masking")
 
@@ -178,8 +178,8 @@ class RadianceLinearMatting:
             return F.avg_pool2d(x, (r, 1), stride=1, padding=(pad, 0))
 
         dev = compute_device()
-        alpha = torch.empty((B, H, W), dtype=torch.float32)
-        foreground = torch.empty((B, H, W, C), dtype=torch.float32)
+        alpha = FrameSink((B, H, W))
+        foreground = FrameSink((B, H, W, C))
         # Frames per chunk: about 12 frame-sized buffers are alive at once.
         per = frames_per_chunk(H, W, C, 12.0, dev)
         single_mask = mask.shape[0] == 1
@@ -194,9 +194,9 @@ class RadianceLinearMatting:
             b = mean_p - a * mean_I
             del cov_Ip, var_I
             q = (box(a) * I + box(b)).mean(dim=1, keepdim=True).clamp_(0.0, 1.0)
-            alpha[a0:a1] = q.squeeze(1).cpu()
-            foreground[a0:a1] = (I * q).permute(0, 2, 3, 1).cpu()
+            alpha.put(a0, a1, q.squeeze(1))
+            foreground.put(a0, a1, (I * q).permute(0, 2, 3, 1))
             del I, p, mean_I, mean_p, a, b, q
 
         logger.info(f"[Linear Matting] Guided filter, radius {pad}, eps {eps}")
-        return (alpha, foreground)
+        return (alpha.value, foreground.value)

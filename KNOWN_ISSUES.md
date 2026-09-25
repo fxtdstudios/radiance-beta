@@ -126,7 +126,7 @@ clear backlog.
 
 ## VFX nodes: memory and speed (3.5.0)
 
-The six nodes that broke or crawled at production size are fixed (see the changelog). These still hold the whole clip in memory and run on the CPU even with a GPU present, so long 4K clips are slow and can run out of memory: Film Grain, Depth of Field, Lens Distortion, Chromatic Aberration, Anamorphic Streaks, Subpixel Stabilizer, HDR Grain Matcher, Relight Engine, Multipass Composite and Multipass Estimate's geometry passes (normals, GTAO, curvature). Multipass Estimate runs its models one frame at a time. The EXR Passes Writer writes frames serially and stores every channel as 32-bit float. Work in chunks of frames, or split long clips, until these are converted.
+The six nodes that broke or crawled at production size, and ten more that held the clip several times over, now work in chunks of frames on the GPU (see the changelog). Still to convert: Multipass Estimate's geometry passes (normals, GTAO, curvature) hold the whole clip on the CPU and its models run one frame at a time; the EXR Passes Writer writes frames serially and stores every channel as 32-bit float; Compression Artifacts and Scene Cut Detect work on the whole clip at once. Multipass Composite returns four full-size images, so with every input connected a long clip needs about eleven clip-sized buffers in RAM. Split long 4K clips for these.
 
 ## Found while documenting every input (3.5.0)
 

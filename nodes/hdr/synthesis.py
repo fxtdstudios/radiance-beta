@@ -2,6 +2,8 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 
+from radiance.core.tensor.chunking import FrameSink, chunks, compute_device, frames_per_chunk
+
 class RadianceSDRtoHDRExpand:
     """
     ◎ Radiance SDR to HDR Expand
@@ -236,28 +238,21 @@ class RadianceRelightEngine:
               diffuse_intensity: float, specular_intensity: float, specular_roughness: float,
               camera: dict = None):
         
-        device = image.device
-        normals = normal_map.clone()
-        if normals.shape != image.shape:
-            normals = F.interpolate(normals.permute(0, 3, 1, 2), 
-                                    size=(image.shape[1], image.shape[2]), 
-                                    mode="bilinear").permute(0, 2, 3, 1)
+        # 3.5.0: lit a few frames at a time on the GPU (was the whole clip at
+        # once on the input's device, the CPU in ComfyUI, with about 6 full
+        # temporaries). The light, view and half vectors are built once.
+        device = compute_device()
+        B_img, H_img, W_img, C_img = image.shape
 
-        normals = normals[..., :3] * 2.0 - 1.0
-        n_norm = torch.norm(normals, p=2, dim=-1, keepdim=True).clamp(min=1e-6)
-        N = normals / n_norm
-        
         L = torch.tensor([light_dir_x, -light_dir_y, light_dir_z], device=device, dtype=torch.float32)
         L = F.normalize(L, p=2, dim=0)
-        
+
         # ── View Vector (V) ──
-        B_img, H_img, W_img, _ = image.shape
         y_c, x_c = torch.meshgrid(
             torch.linspace(-1, 1, H_img, device=device),
             torch.linspace(-1, 1, W_img, device=device),
             indexing='ij'
         )
-        
         if camera is not None and "transform" in camera:
             cam_mat = np.array(camera["transform"])
             cam_pos = torch.tensor(cam_mat[:3, 3], device=device, dtype=torch.float32)
@@ -268,31 +263,49 @@ class RadianceRelightEngine:
             cam_z = 2.0
             V = torch.stack([-x_c, y_c, torch.full_like(x_c, cam_z)], dim=-1)
             V = F.normalize(V, p=2, dim=-1).unsqueeze(0)
-            
-        N_dot_L = torch.sum(N * L.view(1, 1, 1, 3), dim=-1, keepdim=True)
-        diffuse = F.relu(N_dot_L)
-        
         H = F.normalize(L.view(1, 1, 1, 3) + V, p=2, dim=-1)
-        N_dot_H = torch.sum(N * H, dim=-1, keepdim=True)
-        
-        shininess = max(0.001, min(2.0 / (specular_roughness**2) - 2.0, 2048.0))
-        specular = torch.pow(F.relu(N_dot_H), shininess)
-        
-        light_color = torch.tensor([light_color_r, light_color_g, light_color_b], device=device, dtype=torch.float32).view(1, 1, 1, 3)
-        total_diffuse = diffuse * diffuse_intensity * light_color
-        total_spec = specular * specular_intensity * light_color
-        
-        lighting_pass = total_diffuse + total_spec
-        relit_image = image[..., :3] + lighting_pass
-        
-        if image.shape[-1] > 3:
-            relit_image = torch.cat([relit_image, image[..., 3:]], dim=-1)
-        
-        lighting_out = lighting_pass
-        if lighting_pass.shape[-1] != relit_image.shape[-1] and relit_image.shape[-1] == 4:
-            lighting_out = torch.cat([lighting_pass, torch.ones_like(lighting_pass[..., :1])], dim=-1)
+        del V, x_c, y_c
 
-        return (relit_image, lighting_out)
+        shininess = max(0.001, min(2.0 / (specular_roughness**2) - 2.0, 2048.0))
+        light_color = torch.tensor([light_color_r, light_color_g, light_color_b], device=device, dtype=torch.float32).view(1, 1, 1, 3)
+
+        def lighting_for(nm: torch.Tensor) -> torch.Tensor:
+            normals = nm.to(device, torch.float32)
+            if tuple(normals.shape[1:3]) != (H_img, W_img):
+                normals = F.interpolate(normals.permute(0, 3, 1, 2),
+                                        size=(H_img, W_img),
+                                        mode="bilinear").permute(0, 2, 3, 1)
+            normals = normals[..., :3] * 2.0 - 1.0
+            N = normals / torch.norm(normals, p=2, dim=-1, keepdim=True).clamp(min=1e-6)
+            diffuse = F.relu(torch.sum(N * L.view(1, 1, 1, 3), dim=-1, keepdim=True))
+            specular = torch.pow(F.relu(torch.sum(N * H, dim=-1, keepdim=True)), shininess)
+            return diffuse * diffuse_intensity * light_color + specular * specular_intensity * light_color
+
+        four = C_img > 3
+
+        def lighting_image(lp: torch.Tensor) -> torch.Tensor:
+            return torch.cat([lp, torch.ones_like(lp[..., :1])], dim=-1) if four else lp
+
+        # A single normal frame lights every image frame; the lighting output is
+        # then that one frame, as before.
+        shared = lighting_for(normal_map[:1]) if normal_map.shape[0] == 1 else None
+        relit = FrameSink((B_img, H_img, W_img, C_img))
+        lighting_out = FrameSink((1 if shared is not None else B_img, H_img, W_img, 4 if four else 3))
+        if shared is not None:
+            lighting_out.put(0, 1, lighting_image(shared))
+        per = frames_per_chunk(H_img, W_img, C_img, 8.0, device)
+        for a, b in chunks(B_img, per):
+            img = image[a:b].to(device, torch.float32)
+            lp = shared if shared is not None else lighting_for(normal_map[a:b])
+            out = img[..., :3] + lp
+            if four:
+                out = torch.cat([out, img[..., 3:]], dim=-1)
+            relit.put(a, b, out)
+            if shared is None:
+                lighting_out.put(a, b, lighting_image(lp))
+            del img, lp, out
+
+        return (relit.value, lighting_out.value)
 
 
 NODE_CLASS_MAPPINGS = {

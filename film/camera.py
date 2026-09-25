@@ -6,7 +6,7 @@ from typing import Tuple
 import math
 import logging
 
-from radiance.core.tensor.chunking import chunks, frames_per_chunk
+from radiance.core.tensor.chunking import FrameSink, chunks, frames_per_chunk
 
 # Module logger
 logger = logging.getLogger("radiance.film.camera")
@@ -309,96 +309,95 @@ class RadianceDepthOfField:
         batch_size, h, w, c = image.shape
 
         try:
-            img = image.to(device).float()
+            # 3.5.0: a few frames at a time. The whole clip used to be on the
+            # device at once with the output, each blur level and the blend
+            # temporaries (about 5x the clip), so a long 4K clip ran out of
+            # VRAM and fell back to the CPU for the whole batch. Each frame is
+            # independent, so the result is unchanged.
+            num_levels = 5
+            use_shaped = bokeh_shape != "Circle"
+            level_kernels = []
+            for level in range(1, num_levels + 1):
+                level_sigma = blur_amount * level / num_levels
+                kern = _make_bokeh_kernel(bokeh_shape, max(1, int(level_sigma))) if use_shaped else None
+                level_kernels.append((level_sigma, (level - 1) / num_levels, kern))
 
-            # Create or use depth map
             if depth_map is not None:
-                # Use provided depth map
-                depth = depth_map.to(device).float()
-
+                depth_src = depth_map
                 # Reduce to (B, H, W) regardless of input shape.
                 # Depth maps arrive as (B,H,W,C) from IMAGE type, but may
                 # also be (B,H,W) or (H,W) from custom nodes.
-                if depth.dim() == 4:
-                    # (B, H, W, C) — take first channel
-                    depth = depth[..., 0]
-                elif depth.dim() == 2:
-                    # (H, W) — add batch dim
-                    depth = depth.unsqueeze(0)
-                # else: already (B, H, W)
-
-                # Spatial resize if needed
-                if depth.shape[-2:] != (h, w):
-                    depth = torch.nn.functional.interpolate(
-                        depth.unsqueeze(1),
-                        size=(h, w),
-                        mode="bilinear",
-                        align_corners=False,
-                    ).squeeze(1)
-
-                # Batch broadcast: single-frame depth map → match video batch
-                if depth.shape[0] == 1 and batch_size > 1:
-                    depth = depth.expand(batch_size, -1, -1)
+                if depth_src.dim() == 4:
+                    depth_src = depth_src[..., 0]         # (B, H, W, C) — take first channel
+                elif depth_src.dim() == 2:
+                    depth_src = depth_src.unsqueeze(0)    # (H, W) — add batch dim
             else:
-                # Create radial depth (center focused)
+                # Radial depth (centre focused), the same for every frame
                 y = torch.linspace(-1, 1, h, device=device)
                 x = torch.linspace(-1, 1, w, device=device)
                 yy, xx = torch.meshgrid(y, x, indexing="ij")
-                depth = torch.sqrt(xx**2 + yy**2)
-                depth = depth / depth.max()
-                depth = depth.unsqueeze(0).expand(batch_size, -1, -1)
+                radial = torch.sqrt(xx**2 + yy**2)
+                radial = (radial / radial.max()).unsqueeze(0)
 
-            # Calculate blur strength based on depth
-            depth_diff = torch.abs(depth - focus_distance)
-            blur_mask = torch.clamp(
-                (depth_diff - focus_range) / (1 - focus_range + 1e-6), 0, 1
-            )
+            out = FrameSink((batch_size, h, w, c))
+            per = frames_per_chunk(h, w, c, 6.0, device)
+            for a, b in chunks(batch_size, per):
+                n = b - a
+                img = image[a:b].to(device).float()
 
-            # Only blur foreground if enabled
-            if not foreground_blur:
-                foreground_mask = depth < focus_distance
-                blur_mask = blur_mask * (~foreground_mask).float()
-
-            # Apply multi-pass blur with smooth level blending.
-            # FIX 3: Previous code used a hard binary threshold
-            #   (blur_mask >= level_threshold).float()
-            # which created 5 discrete concentric rings with sharp visible edges.
-            # Replaced with a smooth transition using clamp — each level fades
-            # in/out over 1/num_levels of the blur range, giving continuous bokeh.
-            output = img.clone()
-            num_levels = 5
-            use_shaped = bokeh_shape != "Circle"
-            for level in range(1, num_levels + 1):
-                level_sigma = blur_amount * level / num_levels
-                level_threshold = (level - 1) / num_levels
-
-                if use_shaped:
-                    radius = max(1, int(level_sigma))
-                    kern = _make_bokeh_kernel(bokeh_shape, radius)
-                    blurred = _apply_bokeh_kernel(img, kern)
+                if depth_map is not None:
+                    depth = (depth_src if depth_src.shape[0] == 1 else depth_src[a:b]).to(device).float()
+                    # Spatial resize if needed
+                    if depth.shape[-2:] != (h, w):
+                        depth = torch.nn.functional.interpolate(
+                            depth.unsqueeze(1), size=(h, w), mode="bilinear", align_corners=False,
+                        ).squeeze(1)
+                    # Batch broadcast: single-frame depth map → match video batch
+                    if depth.shape[0] == 1 and n > 1:
+                        depth = depth.expand(n, -1, -1)
                 else:
-                    blurred = gpu_gaussian_blur(img, level_sigma)
+                    depth = radial.expand(n, -1, -1)
 
-                # Smooth blend weight: 0→1 over one level width
-                level_mask = torch.clamp(
-                    (blur_mask - level_threshold) * num_levels, 0.0, 1.0
-                ).unsqueeze(-1)
-                output = output * (1 - level_mask) + blurred * level_mask
-
-            # Highlight boost (bokeh brightness)
-            if highlight_boost > 1.0:
-                luma = (
-                    0.2126 * output[..., 0]
-                    + 0.7152 * output[..., 1]
-                    + 0.0722 * output[..., 2]
+                # Calculate blur strength based on depth
+                depth_diff = torch.abs(depth - focus_distance)
+                blur_mask = torch.clamp(
+                    (depth_diff - focus_range) / (1 - focus_range + 1e-6), 0, 1
                 )
-                highlight_mask = (luma > 0.8) * blur_mask
-                boost = 1.0 + (highlight_boost - 1.0) * highlight_mask.unsqueeze(-1)
-                output = output * boost
 
-            # HDR: Preserve super-white values (important for bokeh highlights)
-            output = torch.clamp(output, min=0)
-            return (output.cpu(),)
+                # Only blur foreground if enabled
+                if not foreground_blur:
+                    foreground_mask = depth < focus_distance
+                    blur_mask = blur_mask * (~foreground_mask).float()
+
+                # Multi-pass blur with smooth level blending: each level fades
+                # in over 1/num_levels of the blur range (no hard rings).
+                output = img.clone()
+                for level_sigma, level_threshold, kern in level_kernels:
+                    if use_shaped:
+                        blurred = _apply_bokeh_kernel(img, kern)
+                    else:
+                        blurred = gpu_gaussian_blur(img, level_sigma)
+                    level_mask = torch.clamp(
+                        (blur_mask - level_threshold) * num_levels, 0.0, 1.0
+                    ).unsqueeze(-1)
+                    output = output * (1 - level_mask) + blurred * level_mask
+                    del blurred, level_mask
+
+                # Highlight boost (bokeh brightness)
+                if highlight_boost > 1.0:
+                    luma = (
+                        0.2126 * output[..., 0]
+                        + 0.7152 * output[..., 1]
+                        + 0.0722 * output[..., 2]
+                    )
+                    highlight_mask = (luma > 0.8) * blur_mask
+                    boost = 1.0 + (highlight_boost - 1.0) * highlight_mask.unsqueeze(-1)
+                    output = output * boost
+
+                # HDR: Preserve super-white values (important for bokeh highlights)
+                out.put(a, b, torch.clamp(output, min=0))
+                del img, depth, depth_diff, blur_mask, output
+            return (out.value,)
 
         except RuntimeError:
             if use_gpu:
@@ -414,163 +413,6 @@ class RadianceDepthOfField:
                     highlight_boost,
                     foreground_blur,
                     False,
-                )
-            raise
-
-
-# =============================================================================
-# MOTION BLUR NODE
-# =============================================================================
-
-
-class RadianceMotionBlur:
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
-    """
-    Apply motion blur (directional, radial, or zoom) to simulate camera movement.
-    """
-
-    BLUR_TYPES = ["Directional", "Radial", "Zoom"]
-
-    def __init__(self):
-        pass
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-                "blur_type": (cls.BLUR_TYPES, {"default": "Directional"}),
-                "amount": (
-                    "FLOAT",
-                    {
-                        "default": 10.0,
-                        "min": 0.0,
-                        "max": 100.0,
-                        "step": 1.0,
-                        "display": "slider",
-                    },
-                ),
-            },
-            "optional": {
-                "angle": (
-                    "FLOAT",
-                    {"default": 0.0, "min": -180.0, "max": 180.0, "step": 1.0},
-                ),
-                "center_x": (
-                    "FLOAT",
-                    {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01},
-                ),
-                "center_y": (
-                    "FLOAT",
-                    {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01},
-                ),
-                "samples": ("INT", {"default": 16, "min": 4, "max": 64, "step": 4,
-                    "tooltip": "Number of samples for stochastic effects (motion blur, bokeh). Higher = smoother but slower.",
-                }),
-                "use_gpu": ("BOOLEAN", {"default": True,
-                    "tooltip": "Run the effect on GPU via CUDA/MPS. Falls back to CPU if unavailable.",
-                }),
-            },
-        }
-
-    RETURN_TYPES = ("IMAGE",)
-    FUNCTION = "apply_motion_blur"
-    CATEGORY = "FXTD STUDIOS/Radiance/◎ VFX"
-    DESCRIPTION = (
-        "Apply motion blur (directional, radial, or zoom) to simulate camera movement."
-    )
-
-    @torch.no_grad()
-    def apply_motion_blur(
-        self,
-        image: torch.Tensor,
-        blur_type: str,
-        amount: float,
-        angle: float = 0.0,
-        center_x: float = 0.5,
-        center_y: float = 0.5,
-        samples: int = 16,
-        use_gpu: bool = True,
-    ):
-
-        if amount < 0.5:
-            return (image,)
-
-        device = get_device(use_gpu)
-        batch_size, h, w, c = image.shape
-
-        try:
-            # 3.5.0: one sample at a time, over chunks of frames. This used to
-            # tile the clip `samples` times and sample every copy at once
-            # (batch x samples images plus a batch x samples grid): 16 samples
-            # of 24 frames at 1024x576 ran out of memory in 6 GB, and one 4K
-            # frame at 64 samples needed about 17 GB. Now the working set is
-            # the chunk, its accumulator and one sampled copy.
-            dt = torch.float32
-            t_vals = torch.linspace(-0.5, 0.5, samples, dtype=torch.float64)
-
-            if blur_type == "Directional":
-                angle_rad = math.radians(angle)
-                dx = math.cos(angle_rad) * amount / w
-                dy = math.sin(angle_rad) * amount / h
-                thetas = torch.zeros(samples, 2, 3, dtype=torch.float64)
-                thetas[:, 0, 0] = 1.0
-                thetas[:, 1, 1] = 1.0
-                thetas[:, 0, 2] = t_vals * dx * 2   # x offset
-                thetas[:, 1, 2] = t_vals * dy * 2   # y offset
-
-            elif blur_type == "Radial":
-                cx = center_x * 2 - 1
-                cy = center_y * 2 - 1
-                rotations = t_vals * amount * 0.02
-                cos_r = torch.cos(rotations)
-                sin_r = torch.sin(rotations)
-                thetas = torch.zeros(samples, 2, 3, dtype=torch.float64)
-                thetas[:, 0, 0] = cos_r
-                thetas[:, 0, 1] = -sin_r
-                thetas[:, 0, 2] = cx * (1 - cos_r) + cy * sin_r
-                thetas[:, 1, 0] = sin_r
-                thetas[:, 1, 1] = cos_r
-                thetas[:, 1, 2] = cy * (1 - cos_r) - cx * sin_r
-
-            else:  # Zoom
-                cx = center_x * 2 - 1
-                cy = center_y * 2 - 1
-                t_zoom = torch.linspace(0.0, 1.0, samples, dtype=torch.float64)
-                scales = 1.0 + (t_zoom - 0.5) * amount * 0.01
-                thetas = torch.zeros(samples, 2, 3, dtype=torch.float64)
-                thetas[:, 0, 0] = scales
-                thetas[:, 1, 1] = scales
-                thetas[:, 0, 2] = cx * (1 - scales)
-                thetas[:, 1, 2] = cy * (1 - scales)
-
-            thetas = thetas.to(device=device, dtype=dt)
-            # The same grid serves every frame: one (1, H, W, 2) per sample.
-            grids = [torch.nn.functional.affine_grid(thetas[s:s + 1], (1, c, h, w), align_corners=False)
-                     for s in range(samples)]
-
-            out = torch.empty((batch_size, h, w, c), dtype=dt)
-            # chunk in, accumulator, one sampled copy (+ grid-sample scratch)
-            per = frames_per_chunk(h, w, c, 4.0, device)
-            for a, b in chunks(batch_size, per):
-                n = b - a
-                x = image[a:b].to(device=device, dtype=dt).permute(0, 3, 1, 2)
-                acc = torch.zeros_like(x)
-                for g in grids:
-                    acc.add_(torch.nn.functional.grid_sample(
-                        x, g.expand(n, -1, -1, -1),
-                        mode="bilinear", padding_mode="border", align_corners=False))
-                acc.div_(samples).clamp_(min=0)          # HDR: keep super-whites
-                out[a:b] = acc.permute(0, 2, 3, 1).cpu()
-                del x, acc
-            return (out,)
-
-        except RuntimeError:
-            if use_gpu:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                return self.apply_motion_blur(
-                    image, blur_type, amount, angle, center_x, center_y, samples, False
                 )
             raise
 
@@ -954,14 +796,12 @@ class RadianceCompressionArtifacts:
 
 NODE_CLASS_MAPPINGS = {
     "RadianceDepthOfField": RadianceDepthOfField,
-    "RadianceMotionBlur": RadianceMotionBlur,
     "RadianceRollingShutter": RadianceRollingShutter,
     "RadianceCompressionArtifacts": RadianceCompressionArtifacts,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "RadianceDepthOfField": "◎ Radiance Depth of Field",
-    "RadianceMotionBlur": "◎ Radiance Motion Blur",
     "RadianceRollingShutter": "◎ Radiance Rolling Shutter",
     "RadianceCompressionArtifacts": "◎ Radiance Compression Artifacts",
 }

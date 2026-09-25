@@ -3,6 +3,8 @@ import torch.nn.functional as F
 import numpy as np
 import logging
 
+from radiance.core.tensor.chunking import FrameSink, chunks, compute_device, frames_per_chunk
+
 logger = logging.getLogger("radiance.vfx.plate")
 
 class RadianceHDRGrainMatcher:
@@ -37,42 +39,47 @@ class RadianceHDRGrainMatcher:
     def apply(self, target: torch.Tensor, reference: torch.Tensor, intensity: float, kernel_size: int, r_gain: float, g_gain: float, b_gain: float):
         B, H, W, C = target.shape
         ref_B = reference.shape[0]
-        device = target.device
-        
-        # Bring inputs to BCHW and extract log2 exposure space
         # log2 prevents grain extraction from being influenced by absolute light levels
         eps = 1e-4
-        target_log = torch.log2(target.clamp(min=0.0) + eps)
-        
-        # We loop over batch and extract grain dynamically from reference frames
-        # If reference has fewer frames, we wrap around or cycle
-        grain_accum = []
-        for i in range(B):
-            ref_idx = i % ref_B
-            ref_frame = reference[ref_idx].permute(2, 0, 1).unsqueeze(0) # 1, C, H, W
-            ref_log = torch.log2(ref_frame.clamp(min=0.0) + eps)
-            
-            # Box-filter smooth
-            pad = kernel_size // 2
-            ref_smooth = F.avg_pool2d(ref_log, kernel_size, stride=1, padding=pad)
-            
-            # High-frequency grain
-            grain = ref_log - ref_smooth
-            grain_accum.append(grain)
-            
-        grain_tensor = torch.cat(grain_accum, dim=0) # B, C, H, W
-        grain_tensor = grain_tensor.permute(0, 2, 3, 1) # B, H, W, C
-        
-        # Apply channel gains
+        pad = kernel_size // 2
+
+        # 3.5.0: each reference frame's grain is computed once (it used to be
+        # recomputed for every target frame: 240 times for a one-frame
+        # reference and a 240-frame clip), and targets are grained a few frames
+        # at a time on the GPU instead of all at once on the CPU (about 6x the
+        # clip in memory). Frames cycle through the reference as before.
+        device = compute_device()
         gains = torch.tensor([r_gain, g_gain, b_gain], device=device).view(1, 1, 1, 3)
-        grained_log = target_log + (grain_tensor * intensity * gains)
-        
-        # Convert back from log2 space
-        grained_img = torch.pow(2.0, grained_log) - eps
-        grained_img = grained_img.clamp(min=0.0)
-        
+        grain_cache = {}
+
+        def grain_of(idx: int) -> torch.Tensor:
+            if idx not in grain_cache:
+                ref_frame = reference[idx].to(device, torch.float32).permute(2, 0, 1).unsqueeze(0)  # 1, C, H, W
+                ref_log = torch.log2(ref_frame.clamp(min=0.0) + eps)
+                ref_smooth = F.avg_pool2d(ref_log, kernel_size, stride=1, padding=pad)   # box-filter smooth
+                grain_cache[idx] = (ref_log - ref_smooth).permute(0, 2, 3, 1)           # high-frequency grain
+            return grain_cache[idx]
+
+        out = FrameSink((B, H, W, C))
+        per = frames_per_chunk(H, W, C, 5.0, device)
+        for a, b in chunks(B, per):
+            needed = [i % ref_B for i in range(a, b)]
+            # Keep only the grains this chunk uses (all of them when the
+            # reference is shorter than a chunk).
+            for k in [k for k in grain_cache if k not in needed]:
+                del grain_cache[k]
+            grain_tensor = torch.cat([grain_of(k) for k in needed], dim=0)             # n, H, W, C
+            # In place where the values allow it, so the chunk holds about two
+            # frame-sized buffers instead of six.
+            target_log = target[a:b].to(device, torch.float32).clamp(min=0.0).add_(eps).log2_()
+            grained_log = grain_tensor.mul_(intensity).mul_(gains).add_(target_log)
+            del target_log
+            # Convert back from log2 space
+            out.put(a, b, torch.pow(2.0, grained_log).sub_(eps).clamp_(min=0.0))
+            del grain_tensor, grained_log
+
         logger.info(f"[HDR Grain Matcher] Extracted and re-applied grain (Intensity: {intensity})")
-        return (grained_img,)
+        return (out.value,)
 
 
 class RadianceSubpixelStabilizer:
@@ -102,113 +109,89 @@ class RadianceSubpixelStabilizer:
 
     def apply(self, image: torch.Tensor, anchor_frame: int, max_shift: int):
         B, H, W, C = image.shape
-        device = image.device
-        
+        # 3.5.0: frames go through the FFT, the peak search and the warp a few
+        # at a time on the GPU. This used to be one frame at a time with seven
+        # blocking .item() reads each, on the CPU. The sub-pixel step is the
+        # same double-precision arithmetic on the same five samples, and ties
+        # resolve to the first maximum in row-major order as before.
+        device = compute_device()
         anchor_idx = min(anchor_frame, B - 1)
-        # Target reference anchor frame (convert to grayscale for correlation)
-        ref_frame = image[anchor_idx].mean(dim=-1) # H, W
-        
-        # Precompute window function (Hann window) to minimize FFT boundary leakage
+
+        # Hann window to minimise FFT boundary leakage
         hann_y = torch.hann_window(H, device=device).unsqueeze(1)
         hann_x = torch.hann_window(W, device=device).unsqueeze(0)
         window = hann_y * hann_x
-        
-        ref_windowed = ref_frame * window
-        F_ref = torch.fft.fft2(ref_windowed)
-        
-        stabilized = torch.zeros_like(image)
-        # 3 channels, not 2. RETURN_TYPES declares this output as IMAGE, and a
-        # ComfyUI IMAGE is (B, H, W, 3|4) -- PreviewImage, SaveImage and every
-        # downstream node index channels 0..2 unconditionally, so a (B, H, W, 2)
-        # tensor crashed or rendered garbage the moment it was wired anywhere.
-        # Blue stays 0 so the map reads as the usual red=x / green=y vector view.
-        displacements = torch.zeros((B, H, W, 3), device=device)
-        
-        for i in range(B):
-            if i == anchor_idx:
-                stabilized[i] = image[i]
-                continue
-                
-            cur_frame = image[i].mean(dim=-1)
-            cur_windowed = cur_frame * window
-            F_cur = torch.fft.fft2(cur_windowed)
-            
-            # Cross-power spectrum
-            # R = (F_ref * conj(F_cur)) / |F_ref * conj(F_cur)|
+        # Reference anchor frame, greyscale for correlation
+        ref_frame = image[anchor_idx].to(device, torch.float32).mean(dim=-1)
+        F_ref = torch.fft.fft2(ref_frame * window)
+
+        grid_y, grid_x = torch.meshgrid(
+            torch.linspace(-1, 1, H, device=device),
+            torch.linspace(-1, 1, W, device=device),
+            indexing="ij",
+        )
+
+        stabilized = FrameSink((B, H, W, C))
+        shifts = torch.zeros((B, 3), dtype=torch.float32)       # dx, dy, 0 per frame
+        per = frames_per_chunk(H, W, C, 8.0, device)
+        for a, b in chunks(B, per):
+            frames = image[a:b].to(device, torch.float32)                              # n, H, W, C
+            F_cur = torch.fft.fft2(frames.mean(dim=-1) * window)
+            # Cross-power spectrum R = (F_ref * conj(F_cur)) / |F_ref * conj(F_cur)|
             cross = F_ref * torch.conj(F_cur)
-            R = cross / (torch.abs(cross) + 1e-12)
-            
-            # Inverse FFT to find peak
-            r = torch.fft.ifft2(R).real
-            
-            # Find integer peak
-            max_val = torch.max(r)
-            idx = (r == max_val).nonzero()[0]
-            dy_int, dx_int = idx[0].item(), idx[1].item()
-            
-            # Wrap around coordinates
-            if dy_int > H // 2:
-                dy_int -= H
-            if dx_int > W // 2:
-                dx_int -= W
-                
-            # Subpixel refinement using 3x3 parabolic interpolation around peak
-            # f(x) = A*x^2 + B*x + C
-            # Peak center is x_c = -B / 2A
-            dy_sub, dx_sub = float(dy_int), float(dx_int)
-            
-            try:
-                # 3x3 neighborhood around peak (safe wrap around index check)
-                y_indices = [(dy_int + offset) % H for offset in [-1, 0, 1]]
-                x_indices = [(dx_int + offset) % W for offset in [-1, 0, 1]]
-                
-                # Retrieve neighborhood values
-                val_n1_0 = r[y_indices[0], x_indices[1]].item() # y - 1
-                val_p1_0 = r[y_indices[2], x_indices[1]].item() # y + 1
-                val_0_0  = r[y_indices[1], x_indices[1]].item() # center
-                
-                val_0_n1 = r[y_indices[1], x_indices[0]].item() # x - 1
-                val_0_p1 = r[y_indices[1], x_indices[2]].item() # x + 1
-                
-                # Parabolic peak estimation
+            r = torch.fft.ifft2(cross / (torch.abs(cross) + 1e-12)).real               # n, H, W
+            del F_cur, cross
+            n = b - a
+            peak = torch.argmax(r.reshape(n, -1), dim=1)                               # first maximum
+            py, px = peak // W, peak % W
+            # The peak and its four neighbours (wrapped), read back in one go.
+            ys = torch.stack([(py - 1) % H, (py + 1) % H, py, py, py], dim=1)
+            xs = torch.stack([px, px, px, (px - 1) % W, (px + 1) % W], dim=1)
+            vals = r[torch.arange(n, device=device).unsqueeze(1), ys, xs].double().cpu().tolist()
+            pys, pxs = py.cpu().tolist(), px.cpu().tolist()
+            del r
+
+            dxs, dys = [], []
+            for j in range(n):
+                i = a + j
+                if i == anchor_idx:
+                    dxs.append(0.0); dys.append(0.0)
+                    continue
+                dy_int, dx_int = pys[j], pxs[j]
+                # Wrap around coordinates
+                if dy_int > H // 2:
+                    dy_int -= H
+                if dx_int > W // 2:
+                    dx_int -= W
+                dy_sub, dx_sub = float(dy_int), float(dx_int)
+                # Sub-pixel refinement: parabola through the peak and its neighbours
+                val_n1_0, val_p1_0, val_0_0, val_0_n1, val_0_p1 = vals[j]
                 denom_y = val_n1_0 + val_p1_0 - 2 * val_0_0
                 if abs(denom_y) > 1e-5:
                     dy_sub += (val_n1_0 - val_p1_0) / (2 * denom_y)
-                    
                 denom_x = val_0_n1 + val_0_p1 - 2 * val_0_0
                 if abs(denom_x) > 1e-5:
                     dx_sub += (val_0_n1 - val_0_p1) / (2 * denom_x)
-            except Exception as _exc:
-                logger.debug(
-                    "[Radiance] apply(): ignoring %s from `y_indices = [(dy_int + offset) % H for offset in [-1, 0, 1]]`: %s",
-                    type(_exc).__name__, _exc,
-                )
-                
-            # Clamp maximum shifts to prevent wild drift on noise
-            dx = max(min(dx_sub, float(max_shift)), -float(max_shift))
-            dy = max(min(dy_sub, float(max_shift)), -float(max_shift))
-            
-            # Translate current frame using grid_sample
-            # Grid maps [-1, 1] range. Translate delta by pixels / size
-            grid_y, grid_x = torch.meshgrid(
-                torch.linspace(-1, 1, H, device=device),
-                torch.linspace(-1, 1, W, device=device),
-                indexing="ij"
-            )
-            
-            grid_shift_x = grid_x - (dx / (W / 2.0))
-            grid_shift_y = grid_y - (dy / (H / 2.0))
-            
-            grid = torch.stack([grid_shift_x, grid_shift_y], dim=-1).unsqueeze(0)
-            
-            img_chw = image[i].permute(2, 0, 1).unsqueeze(0) # 1, C, H, W
-            warp = F.grid_sample(img_chw, grid, mode="bicubic", padding_mode="border", align_corners=True)
-            
-            stabilized[i] = warp.squeeze(0).permute(1, 2, 0)
-            
-            # Store displacement mapping (diagnostic)
-            displacements[i, ..., 0] = dx
-            displacements[i, ..., 1] = dy
-            
+                # Clamp maximum shifts to prevent wild drift on noise
+                dxs.append(max(min(dx_sub, float(max_shift)), -float(max_shift)))
+                dys.append(max(min(dy_sub, float(max_shift)), -float(max_shift)))
+
+            # Translate each frame with grid_sample ([-1, 1] grid, shift in pixels / half size)
+            dx_t = torch.tensor(dxs, device=device, dtype=torch.float32).view(n, 1, 1)
+            dy_t = torch.tensor(dys, device=device, dtype=torch.float32).view(n, 1, 1)
+            grid = torch.stack([grid_x - dx_t / (W / 2.0), grid_y - dy_t / (H / 2.0)], dim=-1)
+            warp = F.grid_sample(frames.permute(0, 3, 1, 2), grid, mode="bicubic",
+                                 padding_mode="border", align_corners=True).permute(0, 2, 3, 1)
+            if a <= anchor_idx < b:
+                warp[anchor_idx - a] = frames[anchor_idx - a]      # the anchor is passed through
+            stabilized.put(a, b, warp)
+            shifts[a:b, 0] = torch.tensor(dxs)
+            shifts[a:b, 1] = torch.tensor(dys)
+            del frames, grid, warp
+
+        # Displacement map (diagnostic): red = x, green = y in pixels, blue 0.
+        # 3 channels, as a ComfyUI IMAGE must be.
+        displacements = shifts.view(B, 1, 1, 3).expand(B, H, W, 3).contiguous()
+
         logger.info(f"[Subpixel Stabilizer] Anchored sequence to frame {anchor_idx}.")
-        return (stabilized, displacements)
+        return (stabilized.value, displacements)

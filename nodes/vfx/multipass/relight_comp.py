@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from ....performance import perf_finish, perf_start
-from ....core.tensor.chunking import chunks, compute_device, frames_per_chunk
+from ....core.tensor.chunking import FrameSink, chunks, compute_device, frames_per_chunk
 
 _NORMAL_INPUTS = ["OpenGL (Y-Up)", "DirectX (Y-Down)"]
 _LIGHT_TYPES = ["Directional", "Point"]
@@ -236,7 +236,7 @@ class RadianceMultipassRelight:
                 return torch.full((1, 1, 1), float(default), device=device, dtype=torch.float32)
             return _scalar_pass(part(x, a, b), n, height, width, default, device)
 
-        outs = [torch.empty((batch, height, width, 3), dtype=torch.float32) for _ in range(5)]
+        outs = [FrameSink((batch, height, width, 3)) for _ in range(5)]
         per = frames_per_chunk(height, width, 3, 30.0, device)
         for a, b in chunks(batch, per):
             n = b - a
@@ -330,11 +330,11 @@ class RadianceMultipassRelight:
 
             lighting = (diffuse_light + ambient_light + specular_light).clamp(min=0.0)
             full = (n, height, width, 3)
-            outs[0][a:b] = relit.expand(full).cpu()
-            outs[1][a:b] = diffuse_light.expand(full).cpu()
-            outs[2][a:b] = specular_light.expand(full).cpu()
-            outs[3][a:b] = lighting.expand(full).cpu()
-            outs[4][a:b] = alpha_s.unsqueeze(-1).expand(full).cpu()
+            outs[0].put(a, b, relit.expand(full))
+            outs[1].put(a, b, diffuse_light.expand(full))
+            outs[2].put(a, b, specular_light.expand(full))
+            outs[3].put(a, b, lighting.expand(full))
+            outs[4].put(a, b, alpha_s.unsqueeze(-1).expand(full))
             del base, relit, diffuse_light, specular_light, lighting, ambient_light
 
         info = {
@@ -365,7 +365,7 @@ class RadianceMultipassRelight:
         }
 
         perf_finish(logger, "Multipass Relight", _perf, device)
-        return (*outs, json.dumps(info, indent=2))
+        return (*[o.value for o in outs], json.dumps(info, indent=2))
 
 
 class RadianceMultipassComposite:
@@ -420,51 +420,70 @@ class RadianceMultipassComposite:
         light_wrap_radius: int = 8,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str]:
         batch, height, width, _ = foreground.shape
-        device = foreground.device
+        # 3.5.0: composited a few frames at a time on the GPU (was the whole
+        # clip on the input's device, the CPU in ComfyUI, with full-size
+        # zeros / ones for unconnected inputs). Every step is per frame.
+        device = compute_device()
         _perf = perf_start(device)
         fg_src = relit_foreground if relit_foreground is not None else foreground
-        fg = _match_image(fg_src, batch, height, width, 3).to(device=device).clamp(min=0.0)
-        matte = _scalar_pass(alpha, batch, height, width, 1.0, device)
-        if premultiplied_input:
-            straight_fg = torch.where(
-                matte.unsqueeze(-1) > 1e-8,
-                fg / matte.unsqueeze(-1).clamp(min=1e-8),
-                torch.zeros_like(fg),
-            )
-        else:
-            straight_fg = fg
-        if alpha_invert:
-            matte = 1.0 - matte
 
-        if background is None:
-            bg = torch.zeros((batch, height, width, 3), device=device, dtype=torch.float32)
-        else:
-            bg = _match_image(background, batch, height, width, 3).to(device=device).clamp(min=0.0)
+        def part(x: Optional[torch.Tensor], a: int, b: int) -> Optional[torch.Tensor]:
+            if x is None or x.shape[0] == 1:
+                return x
+            if x.shape[0] < batch:
+                raise ValueError(f"Batch mismatch: expected {batch} frames or a single broadcast frame, got {x.shape[0]}")
+            return x[a:b]
 
-        if shadow_mask is not None and shadow_strength > 0.0:
-            sh = _scalar_pass(shadow_mask, batch, height, width, 0.0, device)
-            bg = bg * (1.0 - sh.unsqueeze(-1) * float(shadow_strength)).clamp(0.0, 1.0)
-
-        front_mask = torch.ones((batch, height, width), device=device, dtype=torch.float32)
-        if foreground_depth is not None and background_depth is not None:
-            fg_z = _scalar_pass(foreground_depth, batch, height, width, 0.5, device, clamp=False)
-            bg_z = _scalar_pass(background_depth, batch, height, width, 0.5, device, clamp=False)
-            if depth_near_is_white:
-                front_mask = (fg_z >= (bg_z - float(depth_bias))).float()
+        outs = [FrameSink((batch, height, width, 3)) for _ in range(4)]
+        per = frames_per_chunk(height, width, 3, 12.0, device)
+        for a, b in chunks(batch, per):
+            n = b - a
+            full = (n, height, width, 3)
+            fg = _match_image(part(fg_src, a, b), n, height, width, 3).to(device=device).clamp(min=0.0)
+            matte = _scalar_pass(part(alpha, a, b), n, height, width, 1.0, device)
+            if premultiplied_input:
+                straight_fg = torch.where(
+                    matte.unsqueeze(-1) > 1e-8,
+                    fg / matte.unsqueeze(-1).clamp(min=1e-8),
+                    torch.zeros_like(fg),
+                )
             else:
-                front_mask = (fg_z <= (bg_z + float(depth_bias))).float()
+                straight_fg = fg
+            if alpha_invert:
+                matte = 1.0 - matte
 
-        visible_alpha = (matte * front_mask).clamp(0.0, 1.0)
+            if background is None:
+                bg = torch.zeros((1, 1, 1, 3), device=device, dtype=torch.float32)
+            else:
+                bg = _match_image(part(background, a, b), n, height, width, 3).to(device=device).clamp(min=0.0)
 
-        if light_wrap > 0.0 and background is not None:
-            soft_bg = _blur_bhwc(bg, int(light_wrap_radius))
-            edge = (_blur_bhwc(visible_alpha.unsqueeze(-1), max(1, int(light_wrap_radius) // 2))[..., 0] - visible_alpha).clamp(0.0, 1.0)
-            straight_fg = straight_fg + soft_bg * edge.unsqueeze(-1) * float(light_wrap)
+            if shadow_mask is not None and shadow_strength > 0.0:
+                sh = _scalar_pass(part(shadow_mask, a, b), n, height, width, 0.0, device)
+                bg = bg * (1.0 - sh.unsqueeze(-1) * float(shadow_strength)).clamp(0.0, 1.0)
 
-        premult = straight_fg * visible_alpha.unsqueeze(-1)
-        composite = premult + bg * (1.0 - visible_alpha).unsqueeze(-1)
-        holdout = visible_alpha.unsqueeze(-1).expand(-1, -1, -1, 3).contiguous()
-        depth_matte = front_mask.unsqueeze(-1).expand(-1, -1, -1, 3).contiguous()
+            front_mask = torch.ones((1, 1, 1), device=device, dtype=torch.float32)
+            if foreground_depth is not None and background_depth is not None:
+                fg_z = _scalar_pass(part(foreground_depth, a, b), n, height, width, 0.5, device, clamp=False)
+                bg_z = _scalar_pass(part(background_depth, a, b), n, height, width, 0.5, device, clamp=False)
+                if depth_near_is_white:
+                    front_mask = (fg_z >= (bg_z - float(depth_bias))).float()
+                else:
+                    front_mask = (fg_z <= (bg_z + float(depth_bias))).float()
+
+            visible_alpha = (matte * front_mask).clamp(0.0, 1.0)
+
+            if light_wrap > 0.0 and background is not None:
+                soft_bg = _blur_bhwc(bg, int(light_wrap_radius))
+                edge = (_blur_bhwc(visible_alpha.unsqueeze(-1), max(1, int(light_wrap_radius) // 2))[..., 0] - visible_alpha).clamp(0.0, 1.0)
+                straight_fg = straight_fg + soft_bg * edge.unsqueeze(-1) * float(light_wrap)
+
+            premult = straight_fg * visible_alpha.unsqueeze(-1)
+            composite = premult + bg * (1.0 - visible_alpha).unsqueeze(-1)
+            outs[0].put(a, b, composite.expand(full))
+            outs[1].put(a, b, premult.expand(full))
+            outs[2].put(a, b, visible_alpha.unsqueeze(-1).expand(full))
+            outs[3].put(a, b, front_mask.unsqueeze(-1).expand(full))
+            del fg, matte, straight_fg, bg, visible_alpha, premult, composite
 
         info = {
             "mode": "alpha_over_depth_comp",
@@ -477,13 +496,7 @@ class RadianceMultipassComposite:
         }
 
         perf_finish(logger, "Multipass Composite", _perf, device)
-        return (
-            composite.contiguous(),
-            premult.contiguous(),
-            holdout.contiguous(),
-            depth_matte.contiguous(),
-            json.dumps(info, indent=2),
-        )
+        return (*[o.value for o in outs], json.dumps(info, indent=2))
 
 
 NODE_CLASS_MAPPINGS = {

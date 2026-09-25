@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 import logging
 
-from radiance.core.tensor.chunking import chunks, compute_device, frames_per_chunk
+from radiance.core.tensor.chunking import FrameSink, chunks, compute_device, frames_per_chunk
 
 logger = logging.getLogger("radiance.motion_blur")
 
@@ -59,7 +59,7 @@ class RadianceMotionBlur:
             indexing="ij",
         )
         base_grid = torch.stack((x, y), dim=-1).unsqueeze(0)          # (1, H, W, 2)
-        out = torch.empty((B, H, W, C), dtype=torch.float32)
+        out = FrameSink((B, H, W, C))
         per = frames_per_chunk(H, W, C, 7.0, dev)
         for a, b in chunks(B, per):
             img_bchw = image[a:b].to(dev, torch.float32).permute(0, 3, 1, 2)
@@ -91,11 +91,11 @@ class RadianceMotionBlur:
                 scale = (orig_max / (res_max + 1e-6)).clamp(min=1.0)
                 result = (result * scale).clamp(max=orig_max)
 
-            out[a:b] = result.permute(0, 2, 3, 1).cpu()
+            out.put(a, b, result.permute(0, 2, 3, 1))
             del img_bchw, result
 
         logger.info(f"[Motion Blur] Applied Vector Blur (Shutter: {shutter_angle}, Samples: {samples})")
-        return (out,)
+        return (out.value,)
 
 NODE_CLASS_MAPPINGS = {
     "RadianceMotionBlur": RadianceMotionBlur,

@@ -51,10 +51,10 @@ def _leaf_modules(package_name: str) -> Iterable[str]:
 
     That boundary is why the implementation packages (`radiance.image`,
     `radiance.hdr`, `radiance.film`, `radiance.color`) were invisible here, and
-    it still earns its keep: `radiance.film` declares RadianceFilmGrain and
-    RadianceMotionBlur pointing at different classes from the ones
-    radiance.nodes.vfx ships under those keys. A recursive sweep would decide
-    that collision by import order rather than by anyone choosing. Cross-package
+    it still earns its keep: `radiance.film` used to declare RadianceFilmGrain
+    and RadianceMotionBlur pointing at different classes from the ones
+    radiance.nodes.vfx ships under those keys, and a recursive sweep would have
+    decided that collision by import order rather than by anyone choosing. Cross-package
     publication goes through a group's ``__init__.py``, one named key at a time
     -- see nodes/catalog.py and nodes/color/__init__.py.
     """

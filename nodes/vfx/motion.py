@@ -6,6 +6,7 @@ try:
     from radiance.nodes.vfx.multipass.core import _flow_to_hsv_image, _optical_flow
 except Exception:
     from .multipass.core import _flow_to_hsv_image, _optical_flow
+from radiance.core.tensor.chunking import chunks, frames_per_chunk
 
 logger = logging.getLogger("radiance.motion")
 
@@ -78,33 +79,37 @@ class RadianceOpticalFlow:
         luma = (0.2126 * images[..., 0] + 0.7152 * images[..., 1] + 0.0722 * images[..., 2])
         luma_norm = (torch.log1p(luma.clamp(min=0.0) * 10.0) / 2.4).clamp(0.0, 1.0)
 
-        vectors_out = []
-        visuals_out = []
-        vectors_out.append(torch.zeros((H, W, 3), device=device, dtype=torch.float32))
-        visuals_out.append(torch.zeros((H, W, 3), device=device, dtype=torch.float32))
+        method = {"Auto": "auto", "DIS": "dis",
+                  "Lucas-Kanade": "lucas-kanade"}.get(solver, "auto")
 
-        for i in range(1, B):
-            curr = luma_norm[i : i + 1]
-            prev = luma_norm[i - 1 : i]
-            method = {"Auto": "auto", "DIS": "dis",
-                      "Lucas-Kanade": "lucas-kanade"}.get(solver, "auto")
-            u, v = _optical_flow(curr, prev, method=method,
+        # 3.5.0: frame pairs go to DIS a chunk at a time, so it builds its
+        # solver once per chunk instead of once per pair, and results are
+        # written into the outputs as they come (the per-frame lists and the
+        # stack were two copies of each output). Every pair is solved and
+        # visualised on its own as before.
+        vectors_tensor = torch.zeros((B, H, W, 3), device=device, dtype=torch.float32)
+        visuals_tensor = torch.zeros((B, H, W, 3), device=device, dtype=torch.float32)
+        # Lucas-Kanade stays one pair per call: its batched solve does not give
+        # exactly the per-pair result (up to 0.07 px apart), and it is the
+        # fallback for an install without OpenCV.
+        use_lk = method == "lucas-kanade"
+        if method == "auto":
+            try:
+                import cv2  # noqa: F401,PLC0415
+            except ImportError:
+                use_lk = True
+        per = 1 if use_lk else frames_per_chunk(H, W, 1, 24.0, device)
+        for a, b in chunks(B - 1, per):
+            u, v = _optical_flow(luma_norm[a + 1:b + 1], luma_norm[a:b], method=method,
                                  window_radius=radius, preset=dis_preset)
             u = u * flow_scale
             v = v * flow_scale
-            vec = torch.stack(
-                [u.squeeze(0), v.squeeze(0), torch.zeros((H, W), device=device, dtype=torch.float32)],
-                dim=-1,
-            )
-            vectors_out.append(vec)
+            vectors_tensor[a + 1:b + 1, ..., 0] = u
+            vectors_tensor[a + 1:b + 1, ..., 1] = v
             if visualize:
-                visuals_out.append(_flow_to_hsv_image(u, v).squeeze(0))
-            else:
-                visuals_out.append(torch.zeros((H, W, 3), device=device, dtype=torch.float32))
+                visuals_tensor[a + 1:b + 1] = _flow_to_hsv_image(u, v)
+            del u, v
 
-        vectors_tensor = torch.stack(vectors_out)
-        visuals_tensor = torch.stack(visuals_out)
-        
         stats = json.dumps({
             "frames": B,
             "resolution": f"{W}x{H}",

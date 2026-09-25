@@ -13,7 +13,6 @@ and check that the chunked paths give the same result as a single pass.
 """
 from __future__ import annotations
 
-import math
 
 import numpy as np
 import pytest
@@ -45,44 +44,6 @@ def test_chunks_cover_the_batch_once():
 
 
 # ── Motion Blur ──────────────────────────────────────────────────────────────
-
-def _motion_blur_reference(img, blur_type, amount, angle, cx, cy, samples):
-    """The pre-3.5.0 batched maths: every sample of every frame at once."""
-    b, h, w, c = img.shape
-    t = torch.linspace(-0.5, 0.5, samples)
-    th = torch.zeros(samples, 2, 3)
-    if blur_type == "Directional":
-        a = math.radians(angle)
-        th[:, 0, 0] = 1; th[:, 1, 1] = 1
-        th[:, 0, 2] = t * (math.cos(a) * amount / w) * 2
-        th[:, 1, 2] = t * (math.sin(a) * amount / h) * 2
-    elif blur_type == "Radial":
-        x0, y0 = cx * 2 - 1, cy * 2 - 1
-        r = t * amount * 0.02
-        cr, sr = torch.cos(r), torch.sin(r)
-        th[:, 0, 0] = cr; th[:, 0, 1] = -sr; th[:, 0, 2] = x0 * (1 - cr) + y0 * sr
-        th[:, 1, 0] = sr; th[:, 1, 1] = cr; th[:, 1, 2] = y0 * (1 - cr) - x0 * sr
-    else:
-        x0, y0 = cx * 2 - 1, cy * 2 - 1
-        s = 1.0 + (torch.linspace(0, 1, samples) - 0.5) * amount * 0.01
-        th[:, 0, 0] = s; th[:, 1, 1] = s; th[:, 0, 2] = x0 * (1 - s); th[:, 1, 2] = y0 * (1 - s)
-    th = th.unsqueeze(0).expand(b, -1, -1, -1).reshape(b * samples, 2, 3)
-    tiled = img.permute(0, 3, 1, 2).unsqueeze(1).expand(-1, samples, -1, -1, -1).reshape(b * samples, c, h, w)
-    grid = F.affine_grid(th, tiled.shape, align_corners=False)
-    out = F.grid_sample(tiled, grid, mode="bilinear", padding_mode="border", align_corners=False)
-    return out.reshape(b, samples, c, h, w).mean(1).permute(0, 2, 3, 1).clamp(min=0)
-
-
-@pytest.mark.parametrize("blur_type", ["Directional", "Radial", "Zoom"])
-def test_film_motion_blur_matches_the_batched_maths(blur_type, tiny_chunks):
-    from radiance.film.camera import RadianceMotionBlur
-    torch.manual_seed(0)
-    img = torch.rand(3, 40, 56, 3) * 2
-    got = RadianceMotionBlur().apply_motion_blur(img, blur_type, 20.0, 30.0, 0.3, 0.6, 16, use_gpu=False)[0]
-    ref = _motion_blur_reference(img, blur_type, 20.0, 30.0, 0.3, 0.6, 16)
-    assert got.shape == img.shape
-    assert float((got - ref).abs().max()) < 1e-4
-
 
 def test_shipped_motion_blur_chunked_equals_one_pass(monkeypatch):
     """The Motion Blur in the menu is nodes/vfx/motion_blur.py (vector blur);
@@ -287,3 +248,130 @@ def test_depth_resize_size_matches_the_processor():
         ref = get_resize_output_image_size(torch.zeros(3, h, w), (518, 518), True, 14)
         ref = (ref.height, ref.width) if hasattr(ref, "height") else tuple(ref)   # SizeDict (v5) or tuple (v4)
         assert _dpt_resize_size(h, w, 518, 518, 14) == tuple(int(v) for v in ref)
+
+
+# ── Phase 2: per-frame nodes, a few frames at a time ─────────────────────────
+
+def _chunked_equals_one_pass(monkeypatch, fn):
+    import radiance.core.tensor.chunking as ch
+    one = fn()
+    monkeypatch.setattr(ch, "chunk_budget_bytes", lambda device: 1)
+    many = fn()
+    one = one if isinstance(one, tuple) else (one,)
+    many = many if isinstance(many, tuple) else (many,)
+    for a, b in zip(one, many):
+        if isinstance(a, torch.Tensor):
+            assert a.shape == b.shape
+            assert float((a - b).abs().max()) < 1e-5
+
+
+def _clip(c=3, b=3, h=32, w=44, seed=6):
+    torch.manual_seed(seed)
+    return torch.rand(b, h, w, c) * 2
+
+
+@pytest.mark.parametrize("node,call", [
+    ("LensDistortion", lambda N, x: N().apply(x, -0.2, 0.05, 1.1, 0.5, 0.5, "border", False)),
+    ("LensDistortion", lambda N, x: N().apply(x, -0.2, 0.05, 1.1, 0.5, 0.5, "zeros", True)),
+    ("ChromaticAberration", lambda N, x: N().apply(x, 0.01, 0.0, -0.01, 0.5, 0.5, False)),
+    ("AnamorphicStreaks", lambda N, x: N().apply(x, 0.8, 16, 0.2, 0.5, 1.0, 1.0, "Diagonal +45", 3.0)),
+    ("FilmGrain", lambda N, x: N().apply(x, 1.0, 0.05, 0.1, 0.0, -0.1, True, 42)),
+])
+def test_optics_nodes_chunked_equal_one_pass(node, call, monkeypatch):
+    import radiance.nodes.vfx.optics as optics
+    x = _clip(c=4)
+    _chunked_equals_one_pass(monkeypatch, lambda: call(getattr(optics, f"Radiance{node}"), x))
+
+
+def test_lens_distortion_invert_runs_and_is_identity_at_zero():
+    """invert passed a tensor as full_like's fill value and raised on every call."""
+    from radiance.nodes.vfx.optics import RadianceLensDistortion
+    x = _clip()
+    out, st = RadianceLensDistortion().apply(x, 0.0, 0.0, 1.0, 0.5, 0.5, "border", True)
+    assert float((out - x).abs().max()) < 1e-4
+    assert st.shape == (3, 32, 44, 3)
+    RadianceLensDistortion().apply(x, -0.5, 0.0, 1.0, 0.5, 0.5, "zeros", True)   # strong barrel: no raise
+
+
+def test_film_grain_seed_still_gives_the_same_grain():
+    """The noise is still one full-clip draw per channel from the global
+    generator, so a seed reproduces the grain it gave before chunking."""
+    from radiance.nodes.vfx.optics import RadianceFilmGrain
+    x = _clip()
+    a = RadianceFilmGrain().apply(x, 1.0, 0.05, 0.1, 0.0, -0.1, False, 7)[0]
+    b = RadianceFilmGrain().apply(x, 1.0, 0.05, 0.1, 0.0, -0.1, False, 7)[0]
+    c = RadianceFilmGrain().apply(x, 1.0, 0.05, 0.1, 0.0, -0.1, False, 8)[0]
+    assert torch.equal(a, b) and not torch.equal(a, c)
+    # Red channel, recomputed from the same draw: noise * strength, blurred at size 1.1.
+    torch.manual_seed(7)
+    red = torch.randn(3, 1, 32, 44) * 0.05
+    red = RadianceFilmGrain._gaussian_blur_2d(red, 1.1)[:, 0]
+    assert float((a[..., 0] - (x[..., 0] + red)).abs().max()) < 1e-5
+
+
+@pytest.mark.parametrize("shape", ["Circle", "Hexagon"])
+def test_depth_of_field_chunked_equals_one_pass(shape, monkeypatch):
+    from radiance.film.camera import RadianceDepthOfField
+    x = _clip()
+    d = torch.rand(1, 16, 22, 3)
+    _chunked_equals_one_pass(monkeypatch, lambda: RadianceDepthOfField().apply_dof(
+        x, 10.0, d, 0.4, 0.1, shape, 2.0, False, use_gpu=False))
+
+
+def test_stabilizer_finds_the_shift_and_chunks_agree(monkeypatch):
+    from radiance.nodes.vfx.plate import RadianceSubpixelStabilizer
+    torch.manual_seed(8)
+    base = torch.rand(1, 48, 64, 3)
+    seq = torch.cat([torch.roll(base, shifts=(i, 2 * i), dims=(1, 2)) for i in range(4)])
+    _, disp = RadianceSubpixelStabilizer().apply(seq, 0, 64)
+    assert disp[3, 0, 0, 0].item() == pytest.approx(-6.0, abs=0.05)
+    assert disp[3, 0, 0, 1].item() == pytest.approx(-3.0, abs=0.05)
+    assert disp[0].abs().max().item() == 0.0
+    _chunked_equals_one_pass(monkeypatch, lambda: RadianceSubpixelStabilizer().apply(seq, 1, 64))
+
+
+def test_grain_matcher_one_reference_frame(monkeypatch):
+    from radiance.nodes.vfx.plate import RadianceHDRGrainMatcher
+    tgt = _clip(b=5); ref = _clip(b=1, seed=9)
+    _chunked_equals_one_pass(monkeypatch, lambda: RadianceHDRGrainMatcher().apply(tgt, ref, 1.0, 3, 1.0, 1.0, 1.0))
+
+
+def test_relight_engine_and_composite_chunked_equal_one_pass(monkeypatch):
+    from radiance.nodes.hdr.synthesis import RadianceRelightEngine
+    from radiance.nodes.vfx.multipass.relight_comp import RadianceMultipassComposite
+    x = _clip(c=4); nm = _clip(b=1, seed=10)
+    _chunked_equals_one_pass(monkeypatch, lambda: RadianceRelightEngine().apply(
+        x, nm, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5, 0.1))
+    fg = _clip(); al = torch.rand(3, 32, 44, 1)
+    _chunked_equals_one_pass(monkeypatch, lambda: RadianceMultipassComposite().composite(
+        fg, al, background=_clip(b=1, seed=11), light_wrap=0.5, shadow_mask=torch.rand(3, 32, 44, 1)))
+
+
+def _moving_clip(n=4, h=40, w=56):
+    torch.manual_seed(3)
+    base = torch.rand(1, h, w, 3)
+    return torch.cat([torch.roll(base, (i, 2 * i), (1, 2)) for i in range(n)])
+
+
+@pytest.mark.parametrize("solver", ["DIS", "Lucas-Kanade"])
+def test_optical_flow_chunked_equals_one_pass(solver, monkeypatch):
+    if solver == "DIS":
+        pytest.importorskip("cv2")
+    from radiance.nodes.vfx.motion import RadianceOpticalFlow
+    x = _moving_clip()
+    _chunked_equals_one_pass(monkeypatch, lambda: RadianceOpticalFlow().analyze(x, "Medium", 1.0, True, solver))
+
+
+def test_optical_flow_lucas_kanade_is_solved_one_pair_at_a_time(monkeypatch):
+    """LK's batched solve is not exactly its per-pair solve, so pairs stay single."""
+    import radiance.nodes.vfx.motion as motion
+    seen = []
+    real = motion._optical_flow
+
+    def spy(a, b, **kw):
+        seen.append(a.shape[0])
+        return real(a, b, **kw)
+    monkeypatch.setattr(motion, "_optical_flow", spy)
+    vec, vis, _ = motion.RadianceOpticalFlow().analyze(_moving_clip(5), "Fast", 1.0, False, "Lucas-Kanade")
+    assert seen == [1, 1, 1, 1]
+    assert float(vec[0].abs().max()) == 0.0 and float(vis.abs().max()) == 0.0

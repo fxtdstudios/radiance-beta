@@ -4,7 +4,7 @@ import numpy as np
 import logging
 import json
 
-from radiance.core.tensor.chunking import chunks, compute_device, frames_per_chunk
+from radiance.core.tensor.chunking import FrameSink, chunks, compute_device, frames_per_chunk
 
 logger = logging.getLogger("radiance.vfx.inpaint")
 
@@ -188,8 +188,8 @@ class RadianceHDRStitch:
         # pyramids at once: 24 s to paste a 208x240 crop into 24 frames of
         # 1024x576, with about 10 frame-sized buffers alive.
         dev = compute_device()
-        stitched_out = torch.empty((B, H, W, C), dtype=torch.float32)
-        mask_out = torch.empty((B, H, W), dtype=torch.float32)
+        stitched_out = FrameSink((B, H, W, C))
+        mask_out = FrameSink((B, H, W))
         per = frames_per_chunk(H, W, C, 14.0, dev)
         for a, b in chunks(B, per):
             n = b - a
@@ -216,11 +216,11 @@ class RadianceHDRStitch:
                 stitched = orig * (1.0 - blend_mask_3d) + full_cropped_img * blend_mask_3d
             else:
                 stitched = self._laplacian_blend(orig, full_cropped_img, blend_mask)
-            stitched_out[a:b] = stitched.cpu()
-            mask_out[a:b] = blend_mask.cpu()
+            stitched_out.put(a, b, stitched)
+            mask_out.put(a, b, blend_mask)
             del orig, orig_mask, blend_mask, blend_mask_3d, full_cropped_img, stitched
 
-        stitched, blend_mask = stitched_out, mask_out
+        stitched, blend_mask = stitched_out.value, mask_out.value
         logger.info(f"[HDR Stitch] Composited crop back into frame using {blend_mode} (Feather: {feather_radius}).")
         return (stitched, blend_mask)
 

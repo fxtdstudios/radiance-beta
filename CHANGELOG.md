@@ -310,8 +310,10 @@ All notable changes to FXTD Radiance will be documented in this file.
   - *WebGPU.* `FEATURE_PARITY` is false and the gaps are listed in KNOWN_ISSUES; WebGL stays the default.
   - Tests: `js/tests/viewer_color.test.mjs` grows to 16 browser checks (shader compile, ARRI green, gamut, scope signal, viewer f-stop, DPR 2 crisp zoom, key scoping, ping-pong, P3).
 
+- **Rival Film Grain and Motion Blur classes deleted (3.5.0).** `radiance.film` declared its own `RadianceFilmGrain` (film-stock profiles, `film/grain.py`) and `RadianceMotionBlur` (directional / radial / zoom, in `film/camera.py`) under the keys the VFX menu already ships from `nodes/vfx/optics.py` and `nodes/vfx/motion_blur.py`. ComfyUI never loaded them; they were kept only until the owner chose. The shipped nodes stay, so no saved graph changes; `film/grain.py` and the film Motion Blur class are removed.
+
 - **VFX nodes that broke or crawled at production size (3.5.0).** Found by timing every VFX node on 24 frames of 1024x576 (CPU, 6 GB). Each fix was checked against the old maths.
-  - *Motion Blur held the clip several times over.* The Motion Blur in the menu (`nodes/vfx/motion_blur.py`, vector blur) integrated the whole clip at once on the CPU with a copy of the vectors: +1 GB for 24 frames of 1024x576. It now works a few frames at a time on the GPU: +0.48 GB, output identical. The rival Motion Blur in `film/camera.py` (directional / radial / zoom, not registered while the owner picks between the two) sampled every copy of the clip at once and ran out of memory at its default 16 samples (64 samples asked for 10.9 GB); it now adds one sample at a time (3.7 s, +0.4 GB), within 6e-6 of before.
+  - *Motion Blur held the clip several times over.* The Motion Blur in the menu (`nodes/vfx/motion_blur.py`, vector blur) integrated the whole clip at once on the CPU with a copy of the vectors: +1 GB for 24 frames of 1024x576. It now works a few frames at a time on the GPU: +0.48 GB, output identical.
   - *Multipass Relight was killed out of memory.* The whole clip was shaded at once on the CPU with about 25 frame-sized temporaries, and unconnected passes were full frames of a constant. It now shades a few frames at a time on the GPU with broadcast defaults: 4.0 s. Output identical across 96 combinations of light, normal convention, premultiply, beauty mix and passes. The 0..1-or-signed normal decision is still made on the whole clip.
   - *Linear Matting took 4.5 s a frame.* Its six box means were square 2-D pools (cost grows with radius squared). They are now two 1-D passes, which is the same zero-padded mean, on the GPU in chunks: 107 s to 13.5 s on this machine, peak +1.8 GB to +0.65 GB, output within 2e-6.
   - *HDR Stitch took 24 s to paste a small crop.* Same cause in the feather, plus two full-frame pyramids for the whole clip at once: now 3.1 s and +0.66 GB, output within 5e-6.
@@ -320,6 +322,26 @@ All notable changes to FXTD Radiance will be documented in this file.
   - New `core/tensor/chunking.py`: frames-per-chunk from free VRAM (or 1 GB on CPU) and the compute device. The timings above are CPU; GPU gains are larger and still to be measured on the RTX 4080.
   - *Linear Matting crashed on a mask of another size.* Load Image returns a 64x64 mask for an image with no alpha; the mask is now resized to the image.
   - Tests: `tests/test_vfx_efficiency.py` (28), pinning each node to its old maths and chunked runs to single-pass runs.
+
+- **VFX nodes held the clip several times over (3.5.0, phase 2).** Ten more nodes built every intermediate for the whole clip at once on the CPU. They now work a few frames at a time on the GPU (or the CPU when there is none; Optical Flow's DIS solver is OpenCV on the CPU), and set-up work that is the same for every frame is done once. Output checked against the old code: identical for Optical Flow's vectors, Lens Distortion, Chromatic Aberration, Depth of Field, HDR Grain Matcher, Relight Engine and Multipass Composite; within 2.4e-7 for Anamorphic Streaks and Film Grain; within 7e-6 for Subpixel Stabilizer. A seed gives the same grain as before. CPU, 1024x576, peak memory above the input:
+
+  | Node | 24 frames | 64 frames |
+  |---|---|---|
+  | Lens Distortion | +768 MB to +356 MB, 2.3x faster | +2.0 GB to +0.9 GB |
+  | Depth of Field | +1.16 GB to +0.98 GB | +3.1 GB to +1.2 GB |
+  | Anamorphic Streaks | +657 MB to +495 MB | +1.7 GB to +1.2 GB |
+  | Film Grain | +1.14 GB to +1.09 GB | +3.0 GB to +2.1 GB |
+  | Chromatic Aberration | +389 MB to +287 MB, 3x faster | +1.0 GB to +0.9 GB |
+  | Subpixel Stabilizer | 1.4x faster (batched FFT, no per-frame `.item()` reads) | +959 MB to +880 MB |
+  | HDR Grain Matcher | +1.03 GB to +0.66 GB, 1.4x faster (each reference frame's grain computed once) | +2.6 GB to +1.2 GB |
+  | Relight Engine | +1.27 GB to +0.71 GB | +3.3 GB to +1.2 GB |
+  | Optical Flow | +826 MB to +609 MB, 1.3x faster (DIS built once per chunk, not per pair) | +2.2 GB to +1.3 GB |
+  | Multipass Composite | +1.30 GB to +1.20 GB (four full outputs) | both out of memory on this 8 GB machine with all seven inputs connected |
+
+  - *Lens Distortion with Invert crashed.* It passed a tensor as the fill value of `full_like`. Fixed; the inverse keeps the sign of tiny values.
+  - New `FrameSink` in `core/tensor/chunking.py` collects chunk results on the CPU, keeping a one-chunk result as it is so a short clip costs no more than before.
+  - Optical Flow's Lucas-Kanade fallback still solves one pair at a time: its batched solve differs from the per-pair one by up to 0.07 px.
+  - Tests: `tests/test_vfx_efficiency.py` grows to 40.
 
 - **Roto removed (3.5.0).** `◎ Vector Mask Draw (Roto)` (`RadianceVectorMaskDraw`) typed polygon or spline points as text, with no way to draw on the image, so it was slower to use than ComfyUI's own mask editor or a SAM / matting node. It is deleted; 156 nodes load. A saved graph that used it shows it as a missing node. The Video Mask Propagator that shared its file stays, now in `nodes/vfx/mask_propagate.py`.
 

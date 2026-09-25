@@ -54,3 +54,35 @@ def compute_device() -> torch.device:
     if mps is not None and mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+class FrameSink:
+    """Collects a node's per-chunk results on the CPU.
+
+    When the whole clip fits one chunk the result is kept as it is instead of
+    being copied into a preallocated buffer, so the chunked path costs no more
+    memory than the single-pass one it replaced.
+    """
+
+    def __init__(self, shape, dtype: torch.dtype = torch.float32):
+        self.shape = tuple(int(v) for v in shape)
+        self.dtype = dtype
+        self._t = None
+
+    def put(self, a: int, b: int, x: torch.Tensor) -> None:
+        x = x.to(device="cpu", dtype=self.dtype)
+        if a == 0 and b == self.shape[0] and self._t is None:
+            # Kept as it is (a permuted view, as the single-pass code returned);
+            # only a broadcast result is materialised, since an expanded
+            # tensor cannot be written to downstream.
+            self._t = x.expand(self.shape).contiguous() if tuple(x.shape) != self.shape else x
+            return
+        if self._t is None:
+            self._t = torch.empty(self.shape, dtype=self.dtype)
+        self._t[a:b] = x
+
+    @property
+    def value(self) -> torch.Tensor:
+        if self._t is None:
+            self._t = torch.empty(self.shape, dtype=self.dtype)
+        return self._t

@@ -19,8 +19,8 @@ was hiding in:
 So this file scans the WHOLE package, every `.py` file including `__init__.py`,
 and asserts two things about every mapping it finds: that the key reaches
 ComfyUI, and that it reaches ComfyUI pointing at the class the mapping names.
-The second half matters because `radiance/film/__init__.py` declares
-RadianceFilmGrain and RadianceMotionBlur as classes that are NOT the ones
+The second half matters because `radiance/film/__init__.py` used to declare
+RadianceFilmGrain and RadianceMotionBlur as classes that were NOT the ones
 shipping under those keys -- a key-only check calls that published and moves on.
 
 Nothing here is hand-listed. Writing a new node with a mapping entry and
@@ -80,23 +80,10 @@ UNPUBLISHED_KEYS = {
 
 #: key -> why the class this mapping names is not the class that ships under
 #: the key. A rival implementation, in other words.
-SUPERSEDED_IMPLEMENTATIONS = {
-    "RadianceFilmGrain": (
-        "radiance.film.grain.RadianceFilmGrain and "
-        "radiance.nodes.vfx.optics.RadianceFilmGrain are two different nodes "
-        "competing for one menu name, with incompatible widgets (film-stock "
-        "profile list vs per-channel grain sizes). nodes.vfx ships and stays "
-        "shipping: swapping it would break every saved workflow wired to its "
-        "inputs. Which implementation survives is the owner's decision."
-    ),
-    "RadianceMotionBlur": (
-        "radiance.film.camera.RadianceMotionBlur (directional/radial/zoom from "
-        "the image alone) and radiance.nodes.vfx.motion_blur.RadianceMotionBlur "
-        "(sub-frame integration driven by optical-flow vectors) are different "
-        "nodes under one key, and their inputs do not overlap. nodes.vfx ships "
-        "and stays shipping, for the same workflow-compatibility reason as "
-        "RadianceFilmGrain. The owner picks."
-    ),
+SUPERSEDED_IMPLEMENTATIONS: dict = {
+    # Empty since 2026-09-25. radiance.film declared rival RadianceFilmGrain and
+    # RadianceMotionBlur classes; the owner kept the ones radiance.nodes.vfx
+    # ships and the film/ rivals were deleted.
 }
 
 
