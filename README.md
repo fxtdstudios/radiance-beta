@@ -504,19 +504,36 @@ the nodes themselves, and ComfyUI shows the same text on hover.
 
 ### Nuke
 
-Radiance can export EXR frames and send them to a running Nuke session over a local connection.
-
-Inside Nuke, run:
+Send to Nuke writes EXR frames and a `.nk` Read node next to them. With
+`push_to_nuke` on it also creates (or updates) that Read node in a running
+Nuke and shows it in the Viewer. Start the listener once per Nuke session, in
+the Script Editor:
 
 ```python
 exec(open("/path/to/ComfyUI/custom_nodes/radiance/scripts/start_nuke_server.py").read())
 ```
 
-Then use the Send to Nuke node from ComfyUI. The listener binds to `127.0.0.1` by default and only accepts structured production actions.
+It adds a Radiance menu (Start / Stop Bridge, Queue Last Run, Cinematic
+Encoder). The listener binds to `127.0.0.1` and accepts only signed,
+structured actions. The signing key is found the same way on both sides:
+`RADIANCE_DCC_AUTH_TOKEN` if set, otherwise `~/.radiance/dcc_token`, created
+automatically the first time either side needs it, so on one machine nothing
+has to be configured. For Nuke on another machine, copy that file there (or
+set the variable on both) and set `RADIANCE_NUKE_BIND_HOST` in Nuke and
+`RADIANCE_NUKE_HOST` in ComfyUI.
 
 ### DaVinci Resolve
 
-Radiance supports DaVinci Resolve through a folder handoff: the Send to DaVinci Resolve node exports PNG, TIFF, or EXR media into a folder Resolve can import.
+Send to DaVinci Resolve writes 16-bit TIFF, 8-bit PNG or EXR into a folder.
+With `import_to_media_pool` on it also imports them into the open project's
+Media Pool (a numbered batch comes in as one clip), through Resolve's own
+scripting API: Resolve must be running on the same machine with Preferences >
+System > General > External scripting using set to Local. Resolve's scripting
+module is found at its standard install path, or through `RESOLVE_SCRIPT_API`.
+
+Both nodes have an `input_space` setting: EXR is written scene-linear and TIFF
+/ PNG as sRGB display images, converting what comes in. `As is` (the default)
+writes the values unchanged.
 
 ## Settings
 
@@ -535,7 +552,7 @@ behaviour; set them where you start ComfyUI and restart it.
 | `RADIANCE_READ_ROOTS` | Extra folders the Read node may *preview* from, such as a NAS or UNC share. Reading any path works without it. |
 | `RADIANCE_FFMPEG` | Path to the ffmpeg to use. Otherwise the one on `PATH`, then the bundled imageio-ffmpeg. |
 | `RADIANCE_LOG_LEVEL` | `DEBUG` for full tracebacks in the console when something fails. |
-| `RADIANCE_DCC_AUTH_TOKEN` | Shared token for the Nuke connection. |
+| `RADIANCE_DCC_AUTH_TOKEN` | Shared key for the Nuke connection. Unset: both sides use `~/.radiance/dcc_token`, created automatically. |
 
 Models go in `ComfyUI/models/radiance` (MoGe in `models/geometry_estimation`); a `radiance:` entry in
 `extra_model_paths.yaml` adds more folders.

@@ -17,7 +17,41 @@ PORT = int(os.environ.get("RADIANCE_NUKE_PORT", "1986"))
 BIND_HOST = os.environ.get("RADIANCE_NUKE_BIND_HOST", os.environ.get("RADIANCE_NUKE_HOST", "127.0.0.1"))
 # ComfyUI base URL for history/prompt API calls.
 COMFY_URL = os.environ.get("RADIANCE_COMFY_URL", "http://127.0.0.1:8188")
-DCC_AUTH_TOKEN = os.environ.get("RADIANCE_DCC_AUTH_TOKEN", "")
+def load_or_create_token():
+    """The token shared with ComfyUI: RADIANCE_DCC_AUTH_TOKEN, else
+    ~/.radiance/dcc_token, created on first use. A copy of
+    radiance.core.dcc_auth.load_or_create_token (this script runs inside Nuke,
+    where the package is not importable); keep the two identical."""
+    import secrets
+    tok = (os.environ.get("RADIANCE_DCC_AUTH_TOKEN") or "").strip()
+    if tok:
+        return tok
+    path = os.path.join(os.path.expanduser("~"), ".radiance", "dcc_token")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            tok = fh.read().strip()
+        if tok:
+            return tok
+    except OSError:
+        pass
+    tok = secrets.token_hex(32)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(tok)
+    except FileExistsError:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+    return tok
+
+
+# Commands must be signed with this token. It used to be read only from
+# RADIANCE_DCC_AUTH_TOKEN, unset by default, so the listener refused every
+# command until both Nuke and ComfyUI were given the same variable.
+DCC_AUTH_TOKEN = load_or_create_token()
 RUNNING = True
 _SERVER_THREAD = None
 
@@ -270,8 +304,8 @@ def handle_client(conn):
         # RADIANCE_DCC_AUTH_TOKEN was unset -- which is the default -- so any
         # client that could reach the port was trusted.
         if not DCC_AUTH_TOKEN:
-            msg = ("ERROR: Server is not configured with RADIANCE_DCC_AUTH_TOKEN; "
-                   "refusing all commands.")
+            msg = ("ERROR: No shared token: set RADIANCE_DCC_AUTH_TOKEN or make "
+                   "~/.radiance/dcc_token writable; refusing all commands.")
             print(f"[Radiance Security] {msg}")
             conn.sendall((msg + RADIANCE_END).encode("utf-8"))
             return

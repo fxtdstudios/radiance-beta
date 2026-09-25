@@ -15,7 +15,12 @@ from radiance.path_utils import strip_path_quotes
 logger = logging.getLogger("radiance.mcp")
 
 # ── Bridge Protocol ───────────────────────────────────────────────────────────
-MCP_EOM = "\n__MCP_EOM__\n"
+# One JSON object per line in, one JSON object per line out. Not the Model
+# Context Protocol despite the node's name: a small TCP control channel.
+
+#: Longest request line accepted. A client that never sent a newline used to
+#: grow the buffer without bound.
+_MAX_LINE = 4 * 1024 * 1024
 
 _SERVER: Optional[socket.socket] = None
 _SERVER_THREAD: Optional[threading.Thread] = None
@@ -35,6 +40,9 @@ def _handle(conn, addr=None):
         while True:
             c = conn.recv(1)
             if not c:
+                return
+            if len(buf) > _MAX_LINE:
+                conn.sendall((json.dumps({"ok": False, "error": "request too large"}) + "\n").encode())
                 return
             if c == b"\n":
                 line = buf.decode("utf-8", errors="replace").strip()
@@ -188,10 +196,10 @@ def _push_to_nuke(
     host: str = None,
     port: int = None,
 ) -> str:
+    """Attempt to push the exported EXR to Nuke via the Radiance TCP listener."""
     from radiance.config.env import get_nuke_host, get_nuke_port
     if host is None: host = get_nuke_host()
     if port is None: port = get_nuke_port()
-    """Attempt to push the exported EXR to Nuke via the Radiance TCP listener."""
     try:
         from radiance.tools.nuke_connector import NukeConnector
     except ImportError:
@@ -208,31 +216,33 @@ def _push_to_nuke(
         import re
         filepath = re.sub(r"([_.])\d{4}\.(\w+)$", r"\1####.\2", filepath)
 
-    conn = NukeConnector(host=host, port=port)
-    ok, msg = conn.load_exr(
-        filepath=filepath,
-        node_name=node_name,
-        first_frame=first_frame,
-        last_frame=last_frame,
-        current_frame=first_frame,
-        color_space="linear",
-        connect_viewer=True,
-        raw=True,
-    )
+    try:
+        conn = NukeConnector(host=host, port=port)
+        ok, msg = conn.load_exr(
+            filepath=filepath,
+            node_name=node_name,
+            first_frame=first_frame,
+            last_frame=last_frame,
+            current_frame=first_frame,
+            color_space="linear",
+            connect_viewer=True,
+            raw=True,
+        )
+    except Exception as e:  # noqa: BLE001 - the frames are written; report, don't fail the node
+        return f"FAILED ({e})"
     if ok:
         return f"OK ({msg})"
     return f"FAILED ({msg})"
 
 
 def _push_to_resolve(written: list, filename_prefix: str) -> str:
-    """Report the Resolve handoff state for exported frames.
-
-    Resolve's scripting API must run inside the Resolve process, so the MCP node
-    can only prepare a folder handoff from ComfyUI.
-    """
+    """Report the Resolve handoff for exported frames. This node only writes
+    the folder; Send to DaVinci Resolve can also import into the Media Pool
+    through Resolve's scripting API."""
     if not written:
         return "no frames"
-    return "folder handoff ready for manual Resolve import; no live Resolve API push"
+    return ("folder ready to import in Resolve (Send to DaVinci Resolve can import it into "
+            "the Media Pool directly)")
 
 
 class RadianceMCP:

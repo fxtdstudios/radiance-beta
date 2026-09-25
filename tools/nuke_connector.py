@@ -54,6 +54,18 @@ def _sanitize_nuke_string(value: str, context: str = "value") -> str:
     return value
 
 
+def nuke_node_name(name: str, fallback: str = "RadianceStream") -> str:
+    """A valid Nuke node name made from `name`: letters, digits and
+    underscores, not starting with a digit. Nuke refuses anything else (a
+    hyphen included), and the file name a user types is often not one."""
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "_", (name or "").strip())[:128].strip("_")
+    if not cleaned:
+        return fallback
+    if cleaned[0].isdigit():
+        cleaned = "R_" + cleaned
+    return cleaned
+
+
 def validate_nuke_identifier(name: str, context: str = "identifier") -> str:
     """
     Validate that a string is a safe Nuke identifier (node name, stream name).
@@ -121,8 +133,15 @@ class NukeConnector:
             sock.connect((self.host, self.port))
             sock.settimeout(timeout)
 
-            # Check if token is configured for protocol version 2.
-            token = os.environ.get("RADIANCE_DCC_AUTH_TOKEN", "")
+            # The shared token: RADIANCE_DCC_AUTH_TOKEN, or ~/.radiance/dcc_token,
+            # which the Nuke listener reads too (radiance.core.dcc_auth). The
+            # listener refuses unsigned commands, so without a token nothing
+            # reached Nuke unless both environments set the variable.
+            try:
+                from radiance.core.dcc_auth import load_or_create_token
+                token = load_or_create_token()
+            except ImportError:
+                token = os.environ.get("RADIANCE_DCC_AUTH_TOKEN", "")
 
             payload = command.encode("utf-8")
             if token:
@@ -254,9 +273,12 @@ class NukeConnector:
             connect_viewer: If True, wire Read → Viewer1 input 0
             raw:            If True, bypass Nuke's internal color management
         """
-        # ── Security: sanitize all user-supplied strings ──
-        safe_path = _sanitize_nuke_string(filepath, "filepath")
-        safe_node_name = validate_nuke_identifier(node_name, "node_name")
+        # The payload is JSON handled by a whitelisted action (no code is
+        # built from it), so the path is sent as it is apart from separators;
+        # stripping quotes, as before, pointed Read nodes at paths that do not
+        # exist. The node name is made valid for Nuke instead of raising.
+        safe_path = str(filepath).replace("\\", "/").replace("\x00", "").strip()
+        safe_node_name = nuke_node_name(node_name)
         safe_color_space = _sanitize_nuke_string(color_space, "color_space")
 
         # Validate numeric parameters

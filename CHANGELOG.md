@@ -108,6 +108,34 @@ All notable changes to FXTD Radiance will be documented in this file.
 
 ### Fixed
 
+- **Send to Nuke, Send to DaVinci Resolve and the bridge, checked end to end (3.5.0).**
+  - *Push to Nuke never worked out of the box.* The Nuke listener refuses
+    unsigned commands, and the key came only from `RADIANCE_DCC_AUTH_TOKEN`,
+    which had to be set identically in both programs' environments and is
+    unset by default. Both sides now fall back to `~/.radiance/dcc_token`,
+    created with a random 256-bit key the first time either needs it, so on
+    one machine it works with no setup; commands are still HMAC-signed.
+    Checked by running the real listener script against a stand-in Nuke.
+  - *A file name with a hyphen or space broke the Nuke push*, after the EXRs
+    were written: the Read node name went to Nuke unchanged, and Nuke
+    accepts only letters, digits and underscores. The name is made valid now,
+    and a failed push is reported in `status` instead of stopping the graph.
+  - *Paths with quotes lost them* on the way to Nuke (stripped as if the
+    payload were code; it is JSON). *The `.nk` snippet* now quotes the path,
+    so a folder with a space loads, and sets `raw` like the push does.
+  - *Send to DaVinci Resolve* can import into the open project's Media Pool
+    (`import_to_media_pool`, off by default), through Resolve's scripting API;
+    a numbered batch arrives as one clip. When Resolve is not running or
+    external scripting is off, `status` says which.
+  - *`input_space`* on both nodes: the tensor used to be written unchanged
+    to every format, so either the EXR or the TIFF / PNG was in the wrong
+    encoding. Scene-linear or sRGB input is now converted to what each format
+    holds; the default, As is, keeps the old output.
+  - *MCP Bridge*: a request line is capped at 4 MB (a client that sent no
+    newline grew memory without bound), a failed Nuke push no longer raises,
+    and its Resolve target says the Send to DaVinci Resolve node can import.
+  - Tests: `tests/test_dcc_send.py` (7).
+
 - **Models download automatically, pinned and verified (3.5.0).** Every node
   that needs a model now fetches it on first use; `RADIANCE_ALLOW_DOWNLOADS=0`
   or the Hugging Face offline flags still stop all downloads. One downloader,

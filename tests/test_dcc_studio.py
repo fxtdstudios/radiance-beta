@@ -47,6 +47,13 @@ from radiance.nodes.pipeline.studio_integrations import RadianceNukeSend, Radian
 RADIANCE_TORCH_GATED = True
 
 
+@pytest.fixture(autouse=True)
+def _token_home(tmp_path, monkeypatch):
+    """The shared DCC token file lives in ~/.radiance; keep it out of the real home."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  1. NukeConnector & Security Sanitization Tests
 # ─────────────────────────────────────────────────────────────────────────────
@@ -113,10 +120,10 @@ def test_nuke_connector_load_exr(mock_socket_cls):
     args, kwargs = mock_sock.sendall.call_args
     sent_bytes = args[0]
     assert sent_bytes.startswith(b"RCMD")  # Magic
-    assert struct.unpack("<B", sent_bytes[4:5])[0] == 1  # Version 1
-    
-    # Verify the generated Python commands contain correct parameters
-    payload = sent_bytes[9:].decode("utf-8")
+    assert struct.unpack("<B", sent_bytes[4:5])[0] == 2  # signed with the shared token
+
+    # Verify the structured command carries the parameters
+    payload = sent_bytes[41:].decode("utf-8")
     assert "MyReadNode" in payload
     assert "D:/renders/frame_####.exr" in payload
     assert "1001" in payload
@@ -285,28 +292,26 @@ def test_nuke_connector_v2_signature(mock_socket_cls, monkeypatch):
 
 
 @patch("socket.socket")
-def test_nuke_connector_v1_fallback(mock_socket_cls, monkeypatch):
-    """Verify NukeConnector falls back to version 1 header when no token is defined."""
+def test_nuke_connector_signs_with_the_shared_token_file(mock_socket_cls, monkeypatch, tmp_path):
+    """3.5.0: with no RADIANCE_DCC_AUTH_TOKEN both sides use ~/.radiance/dcc_token,
+    so commands are signed out of the box. Unsigned (v1) commands were refused by
+    the listener, which made push_to_nuke fail on every default install."""
+    import hmac
+    import hashlib
     monkeypatch.delenv("RADIANCE_DCC_AUTH_TOKEN", raising=False)
 
     mock_sock = MagicMock()
     mock_socket_cls.return_value = mock_sock
-
-    end_marker = b"\n__RADIANCE_END__\n"
-    mock_sock.recv.side_effect = [b"OK" + end_marker, b""]
+    mock_sock.recv.side_effect = [b"OK\n__RADIANCE_END__\n", b""]
 
     conn = NukeConnector(host="127.0.0.1", port=1986)
-
     cmd = "print('hello')"
     success, reply = conn.send_command(cmd)
-
     assert success is True
-    args, kwargs = mock_sock.sendall.call_args
-    sent_bytes = args[0]
 
-    assert sent_bytes.startswith(b"RCMD")
-    assert sent_bytes[4] == 1
-    cmd_len = struct.unpack("<I", sent_bytes[5:9])[0]
-    assert cmd_len == len(cmd)
-    assert sent_bytes[9:].decode("utf-8") == cmd
-
+    token = (tmp_path / ".radiance" / "dcc_token").read_text().strip()
+    assert len(token) == 64
+    sent_bytes = mock_sock.sendall.call_args[0][0]
+    assert sent_bytes[:5] == b"RCMD\x02"
+    assert sent_bytes[5:37] == hmac.new(token.encode(), cmd.encode(), hashlib.sha256).digest()
+    assert struct.unpack("<I", sent_bytes[37:41])[0] == len(cmd)

@@ -74,7 +74,7 @@ Transcribe speech from an audio or video file using Whisper.
 
 `RadianceNukeSend`
 
-Export image as EXR and write a .nk Read-node snippet for direct Nuke import. Optionally push to a running Nuke instance via the Radiance TCP listener.
+Export image as EXR and write a .nk Read-node snippet for direct Nuke import. Optionally load it into a running Nuke through the Radiance listener.
 
 **Inputs**
 
@@ -82,12 +82,13 @@ Export image as EXR and write a .nk Read-node snippet for direct Nuke import. Op
 | :--- | :--- | :--- | :--- | :--- |
 | `image` | IMAGE |  |  | Frame to export. A batch is written as a numbered EXR sequence. |
 | `nuke_folder` | string |  |  | Output folder for image + .nk file. Created if missing. |
-| `filename` | string | `radiance_out` |  | Base name for the EXR file(s). |
+| `filename` | string | `radiance_out` |  | Base name for the EXR file(s). The Read node gets the same name with anything Nuke does not allow in a node name replaced by _. |
 | `frame_start` (optional) | int | 1001 | 0 to 999999 | Starting frame number for the EXR sequence. |
-| `push_to_nuke` (optional) | boolean | off |  | If True and Nuke listener is running, auto-create a Read node via TCP. |
-| `nuke_host` (optional) | string | `127.0.0.1` |  | Nuke listener host (used only when push_to_nuke=True). |
-| `nuke_port` (optional) | int | 1986 | 1024 to 65535 | Nuke listener port (used only when push_to_nuke=True). |
+| `push_to_nuke` (optional) | boolean | off |  | Also create or update the Read node in a running Nuke. Needs the Radiance listener running there (scripts/start_nuke_server.py). Both sides share a token from ~/.radiance/dcc_token, created automatically, or from RADIANCE_DCC_AUTH_TOKEN; for Nuke on another machine copy that file or set the variable there. |
+| `nuke_host` (optional) | string | `127.0.0.1` |  | Nuke listener host (used only when push_to_nuke is on). RADIANCE_NUKE_HOST replaces the default. |
+| `nuke_port` (optional) | int | 1986 | 1024 to 65535 | Nuke listener port (used only when push_to_nuke is on). RADIANCE_NUKE_PORT replaces the default. |
 | `half_float` (optional) | boolean | on |  | Write 16-bit half EXR (True) or 32-bit float EXR (False). |
+| `input_space` (optional) | choice | `As is (no conversion)` | `As is (no conversion)`, `Scene-linear`, `sRGB display` | What the image holds. EXR is written scene-linear: sRGB display input is linearised first. As is: written unchanged, as before. |
 
 **Outputs**
 
@@ -100,7 +101,7 @@ Export image as EXR and write a .nk Read-node snippet for direct Nuke import. Op
 
 `RadianceDaVinciSend`
 
-Export the current image to a DaVinci Resolve shared media folder for manual import. Supports 8-bit PNG, 16-bit TIFF, and EXR output formats.
+Export the current image to a DaVinci Resolve media folder as 16-bit TIFF, 8-bit PNG or EXR, and optionally import it into the open project's Media Pool.
 
 **Inputs**
 
@@ -109,8 +110,10 @@ Export the current image to a DaVinci Resolve shared media folder for manual imp
 | `image` | IMAGE |  |  | Frame to export. Batches write numbered files. |
 | `resolve_folder` | string |  |  | DaVinci Resolve shared media folder. Created if missing. |
 | `filename` | string | `radiance_out` |  | Base filename (no extension). |
-| `bit_depth` | choice | `16bit` | `16bit`, `8bit`, `EXR` | Output bit depth. EXR writes 16-bit half-float. |
+| `bit_depth` | choice | `16bit` | `16bit`, `8bit`, `EXR` | 16bit: 16-bit TIFF. 8bit: PNG. EXR: 16-bit half-float EXR. |
 | `frame_start` (optional) | int | 1001 | 0 to 999999 | Starting frame number for numbered sequences. |
+| `input_space` (optional) | choice | `As is (no conversion)` | `As is (no conversion)`, `Scene-linear`, `sRGB display` | What the image holds. TIFF and PNG are written as sRGB display images (scene-linear input is encoded with the sRGB curve, clipped at 1.0); EXR is written scene-linear (sRGB input is linearised). As is: unchanged, as before. |
+| `import_to_media_pool` (optional) | boolean | off |  | Also import the files into the open project's Media Pool, through Resolve's scripting API. Needs Resolve running on this machine with Preferences > System > General > External scripting using: Local (Resolve Studio). Each run imports again. |
 
 **Outputs**
 
