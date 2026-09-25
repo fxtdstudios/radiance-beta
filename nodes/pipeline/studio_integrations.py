@@ -1,14 +1,18 @@
 """
 Studio integration nodes for sending renders to DCC applications.
 
-RadianceNukeSend  — Export EXR + .nk Read-node snippet for Nuke.
-RadianceDaVinciSend — Export to DaVinci Resolve shared media folder.
+RadianceNukeSend  — Export EXR + .nk Read-node snippet for Nuke, optionally
+                    loading it into a running Nuke through the Radiance listener.
+RadianceDaVinciSend — Export to a DaVinci Resolve media folder, optionally
+                    importing it into the open project's Media Pool.
 """
 from __future__ import annotations
 
 import logging
+import os
+import sys
 from pathlib import Path
-from typing import Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -17,20 +21,60 @@ from radiance.nodes.io.write import _save_exr, _save_pil_image
 
 logger = logging.getLogger("radiance.nodes.studio")
 
+# ── Colour of the pixels being sent ─────────────────────────────────────────
+# EXR is scene-linear by convention; PNG and TIFF hold a display (sRGB) signal.
+# The nodes used to write the tensor as it came to every format, so one of the
+# two was always wrong: a scene-linear frame went to Resolve as a dark TIFF,
+# a display-referred one to Nuke as an EXR with the sRGB curve baked in.
+# "As is" keeps that behaviour for graphs that already compensate.
+INPUT_SPACES = ["As is (no conversion)", "Scene-linear", "sRGB display"]
+
+
+def _srgb_encode(x: np.ndarray) -> np.ndarray:
+    x = np.clip(x, 0.0, None)
+    return np.where(x <= 0.0031308, 12.92 * x, 1.055 * np.power(x, 1.0 / 2.4) - 0.055)
+
+
+def _srgb_decode(v: np.ndarray) -> np.ndarray:
+    v = np.clip(v, 0.0, None)
+    return np.where(v <= 0.04045, v / 12.92, np.power((v + 0.055) / 1.055, 2.4))
+
+
+def _for_format(frame: np.ndarray, input_space: str, linear_file: bool) -> np.ndarray:
+    """`frame` converted to what the file format expects (colour channels only)."""
+    if input_space.startswith("As is"):
+        return frame
+    is_linear = input_space == "Scene-linear"
+    if is_linear == linear_file:
+        return frame
+    out = frame.copy()
+    rgb = out[..., :3]
+    out[..., :3] = _srgb_decode(rgb) if linear_file else _srgb_encode(rgb)
+    return out.astype(np.float32)
+
+
+# ── Nuke ────────────────────────────────────────────────────────────────────
+
 _NUKE_NK_TEMPLATE = """\
 version {nuke_version}
 Read {{
  inputs 0
- file {filepath}
+ file "{filepath}"
  first {first}
  last {last}
  origfirst {first}
  origlast {last}
+ raw true
  name {node_name}
  xpos 0
  ypos 0
 }}
 """
+
+
+def _nk_escape(path: str) -> str:
+    """A path as a double-quoted TCL string in a .nk file."""
+    return path.replace("\\", "/").replace('"', '\\"').replace("[", "\\[").replace("$", "\\$")
 
 
 class RadianceNukeSend:
@@ -53,7 +97,8 @@ class RadianceNukeSend:
                 }),
                 "filename": ("STRING", {
                     "default": "radiance_out",
-                    "tooltip": "Base name for the EXR file(s).",
+                    "tooltip": "Base name for the EXR file(s). The Read node gets the same name with "
+                               "anything Nuke does not allow in a node name replaced by _.",
                 }),
             },
             "optional": {
@@ -63,26 +108,37 @@ class RadianceNukeSend:
                 }),
                 "push_to_nuke": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "If True and Nuke listener is running, auto-create a Read node via TCP.",
+                    "tooltip": "Also create or update the Read node in a running Nuke. Needs the Radiance "
+                               "listener running there (scripts/start_nuke_server.py). Both sides share a "
+                               "token from ~/.radiance/dcc_token, created automatically, or from "
+                               "RADIANCE_DCC_AUTH_TOKEN; for Nuke on another machine copy that file or set the "
+                               "variable there.",
                 }),
                 "nuke_host": ("STRING", {
                     "default": "127.0.0.1",
-                    "tooltip": "Nuke listener host (used only when push_to_nuke=True).",
+                    "tooltip": "Nuke listener host (used only when push_to_nuke is on). RADIANCE_NUKE_HOST "
+                               "replaces the default.",
                 }),
                 "nuke_port": ("INT", {
                     "default": 1986, "min": 1024, "max": 65535,
-                    "tooltip": "Nuke listener port (used only when push_to_nuke=True).",
+                    "tooltip": "Nuke listener port (used only when push_to_nuke is on). RADIANCE_NUKE_PORT "
+                               "replaces the default.",
                 }),
                 "half_float": ("BOOLEAN", {
                     "default": True,
                     "tooltip": "Write 16-bit half EXR (True) or 32-bit float EXR (False).",
+                }),
+                "input_space": (INPUT_SPACES, {
+                    "default": INPUT_SPACES[0],
+                    "tooltip": "What the image holds. EXR is written scene-linear: sRGB display input is "
+                               "linearised first. As is: written unchanged, as before.",
                 }),
             },
         }
 
     DESCRIPTION = (
         "Export image as EXR and write a .nk Read-node snippet for direct Nuke import. "
-        "Optionally push to a running Nuke instance via the Radiance TCP listener."
+        "Optionally load it into a running Nuke through the Radiance listener."
     )
     FUNCTION = "run"
 
@@ -96,13 +152,16 @@ class RadianceNukeSend:
         nuke_host: str = "127.0.0.1",
         nuke_port: int = 1986,
         half_float: bool = True,
+        input_space: str = INPUT_SPACES[0],
     ) -> Tuple[str, str]:
         from radiance.config.env import get_nuke_host, get_nuke_port
+        from radiance.path_utils import strip_path_quotes
         if nuke_host == "127.0.0.1":
             nuke_host = get_nuke_host()
         if nuke_port == 1986:
             nuke_port = get_nuke_port()
 
+        nuke_folder = strip_path_quotes(nuke_folder or "")
         if not nuke_folder:
             return ("Error: nuke_folder is required.", "")
 
@@ -121,7 +180,7 @@ class RadianceNukeSend:
             else:
                 fname = f"{filename}.{frame_num:04d}.exr"
             fpath = out_dir / fname
-            _save_exr(frames[i], fpath, half=half_float)
+            _save_exr(_for_format(frames[i], input_space, linear_file=True), fpath, half=half_float)
             written.append(str(fpath))
 
         first_frame = frame_start
@@ -132,12 +191,16 @@ class RadianceNukeSend:
         else:
             file_field = str(out_dir / f"{filename}.####.exr").replace("\\", "/")
 
+        from radiance.tools.nuke_connector import nuke_node_name
+        node_name = nuke_node_name(filename)
+        # The path is quoted (a folder with a space broke the Read node) and
+        # the node name is one Nuke accepts (a hyphen used to break it).
         nk_content = _NUKE_NK_TEMPLATE.format(
             nuke_version="15.0",
-            filepath=file_field,
+            filepath=_nk_escape(file_field),
             first=first_frame,
             last=last_frame,
-            node_name=filename,
+            node_name=node_name,
         )
 
         nk_path = out_dir / f"{filename}.nk"
@@ -148,7 +211,7 @@ class RadianceNukeSend:
 
         if push_to_nuke:
             push_status = self._push_to_nuke(
-                file_field, filename, first_frame, last_frame, nuke_host, nuke_port
+                file_field, node_name, first_frame, last_frame, nuke_host, nuke_port
             )
             status += f" | nuke push: {push_status}"
 
@@ -166,25 +229,96 @@ class RadianceNukeSend:
         try:
             from radiance.tools.nuke_connector import NukeConnector
         except ImportError:
-            try:
-                from radiance.nuke_connector import NukeConnector
-            except ImportError:
-                return "NukeConnector not available"
+            return "NukeConnector not available"
 
-        conn = NukeConnector(host=host, port=port)
-        ok, msg = conn.load_exr(
-            filepath=filepath,
-            node_name=node_name,
-            first_frame=first_frame,
-            last_frame=last_frame,
-            current_frame=first_frame,
-            color_space="linear",
-            connect_viewer=True,
-            raw=True,
-        )
+        try:
+            conn = NukeConnector(host=host, port=port)
+            ok, msg = conn.load_exr(
+                filepath=filepath,
+                node_name=node_name,
+                first_frame=first_frame,
+                last_frame=last_frame,
+                current_frame=first_frame,
+                color_space="linear",
+                connect_viewer=True,
+                raw=True,
+            )
+        except Exception as e:  # noqa: BLE001 - the files are written; report, don't fail the node
+            return f"FAILED ({e})"
         if ok:
             return f"OK ({msg})"
         return f"FAILED ({msg})"
+
+
+# ── DaVinci Resolve ─────────────────────────────────────────────────────────
+
+def _resolve_module_dirs() -> List[str]:
+    """Where Blackmagic installs DaVinciResolveScript.py on each platform."""
+    dirs = []
+    env = os.environ.get("RESOLVE_SCRIPT_API")
+    if env:
+        dirs.append(os.path.join(env, "Modules"))
+    if sys.platform.startswith("win"):
+        base = os.environ.get("PROGRAMDATA", r"C:\ProgramData")
+        dirs.append(os.path.join(base, "Blackmagic Design", "DaVinci Resolve", "Support",
+                                 "Developer", "Scripting", "Modules"))
+    elif sys.platform == "darwin":
+        dirs.append("/Library/Application Support/Blackmagic Design/DaVinci Resolve/"
+                    "Developer/Scripting/Modules")
+    else:
+        dirs += ["/opt/resolve/Developer/Scripting/Modules",
+                 "/home/resolve/Developer/Scripting/Modules"]
+    return dirs
+
+
+def _resolve_app():
+    """(resolve, None) for the running Resolve, or (None, why)."""
+    try:
+        import DaVinciResolveScript as dvr  # type: ignore
+    except ImportError:
+        dvr = None
+        for d in _resolve_module_dirs():
+            if os.path.isfile(os.path.join(d, "DaVinciResolveScript.py")):
+                if d not in sys.path:
+                    sys.path.append(d)
+                try:
+                    import DaVinciResolveScript as dvr  # type: ignore  # noqa: F811
+                    break
+                except ImportError:
+                    dvr = None
+        if dvr is None:
+            return None, ("DaVinci Resolve's scripting module was not found (is Resolve installed? "
+                          "RESOLVE_SCRIPT_API can point at its Developer/Scripting folder)")
+    try:
+        resolve = dvr.scriptapp("Resolve")
+    except Exception as e:  # noqa: BLE001 - fusionscript raises all kinds
+        return None, f"could not reach Resolve ({e})"
+    if resolve is None:
+        return None, ("Resolve is not running, or external scripting is off "
+                      "(Preferences > System > General > External scripting using: Local)")
+    return resolve, None
+
+
+def import_into_resolve(paths: List[str], first: int, last: int, sequence_pattern: Optional[str]) -> str:
+    """Import the written files into the current project's Media Pool.
+    Returns a status line; never raises."""
+    resolve, why = _resolve_app()
+    if resolve is None:
+        return f"not imported: {why}"
+    try:
+        project = resolve.GetProjectManager().GetCurrentProject()
+        if project is None:
+            return "not imported: no project is open in Resolve"
+        pool = project.GetMediaPool()
+        if sequence_pattern:
+            items = pool.ImportMedia([{"FilePath": sequence_pattern, "StartIndex": first, "EndIndex": last}])
+        else:
+            items = pool.ImportMedia(paths)
+        if not items:
+            return "not imported: Resolve refused the files (see its console)"
+        return f"imported {len(items)} clip(s) into '{project.GetName()}'"
+    except Exception as e:  # noqa: BLE001 - scripting API errors are opaque
+        return f"not imported: {e}"
 
 
 class RadianceDaVinciSend:
@@ -211,7 +345,7 @@ class RadianceDaVinciSend:
                 }),
                 "bit_depth": (["16bit", "8bit", "EXR"], {
                     "default": "16bit",
-                    "tooltip": "Output bit depth. EXR writes 16-bit half-float.",
+                    "tooltip": "16bit: 16-bit TIFF. 8bit: PNG. EXR: 16-bit half-float EXR.",
                 }),
             },
             "optional": {
@@ -219,12 +353,25 @@ class RadianceDaVinciSend:
                     "default": 1001, "min": 0, "max": 999999,
                     "tooltip": "Starting frame number for numbered sequences.",
                 }),
+                "input_space": (INPUT_SPACES, {
+                    "default": INPUT_SPACES[0],
+                    "tooltip": "What the image holds. TIFF and PNG are written as sRGB display images "
+                               "(scene-linear input is encoded with the sRGB curve, clipped at 1.0); EXR "
+                               "is written scene-linear (sRGB input is linearised). As is: unchanged, as before.",
+                }),
+                "import_to_media_pool": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Also import the files into the open project's Media Pool, through Resolve's "
+                               "scripting API. Needs Resolve running on this machine with Preferences > "
+                               "System > General > External scripting using: Local (Resolve Studio). "
+                               "Each run imports again.",
+                }),
             },
         }
 
     DESCRIPTION = (
-        "Export the current image to a DaVinci Resolve shared media folder for manual import. "
-        "Supports 8-bit PNG, 16-bit TIFF, and EXR output formats."
+        "Export the current image to a DaVinci Resolve media folder as 16-bit TIFF, 8-bit PNG or EXR, "
+        "and optionally import it into the open project's Media Pool."
     )
     FUNCTION = "run"
 
@@ -235,7 +382,11 @@ class RadianceDaVinciSend:
         filename: str,
         bit_depth: str = "16bit",
         frame_start: int = 1001,
+        input_space: str = INPUT_SPACES[0],
+        import_to_media_pool: bool = False,
     ) -> Tuple[str, str]:
+        from radiance.path_utils import strip_path_quotes
+        resolve_folder = strip_path_quotes(resolve_folder or "")
         if not resolve_folder:
             return ("Error: resolve_folder is required.", "")
 
@@ -246,34 +397,27 @@ class RadianceDaVinciSend:
         out_dir = Path(resolve_folder)
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        ext = {"EXR": "exr", "8bit": "png"}.get(bit_depth, "tif")
         written = []
         for i in range(len(frames)):
             frame_num = frame_start + i
+            fname = f"{filename}.{ext}" if len(frames) == 1 else f"{filename}.{frame_num:04d}.{ext}"
+            fpath = out_dir / fname
             if bit_depth == "EXR":
-                if len(frames) == 1:
-                    fname = f"{filename}.exr"
-                else:
-                    fname = f"{filename}.{frame_num:04d}.exr"
-                fpath = out_dir / fname
-                _save_exr(frames[i], fpath, half=True)
+                _save_exr(_for_format(frames[i], input_space, linear_file=True), fpath, half=True)
             elif bit_depth == "8bit":
-                if len(frames) == 1:
-                    fname = f"{filename}.png"
-                else:
-                    fname = f"{filename}.{frame_num:04d}.png"
-                fpath = out_dir / fname
-                _save_pil_image(frames[i], fpath, "8-bit PNG")
+                _save_pil_image(_for_format(frames[i], input_space, linear_file=False), fpath, "8-bit PNG")
             else:  # 16bit
-                if len(frames) == 1:
-                    fname = f"{filename}.tif"
-                else:
-                    fname = f"{filename}.{frame_num:04d}.tif"
-                fpath = out_dir / fname
-                _save_pil_image(frames[i], fpath, "16-bit TIFF")
-
+                _save_pil_image(_for_format(frames[i], input_space, linear_file=False), fpath, "16-bit TIFF")
             written.append(str(fpath))
 
         status = f"{len(written)} frame(s) [{bit_depth}] → {out_dir}"
+        if import_to_media_pool:
+            pattern = None
+            if len(written) > 1:
+                pattern = str(out_dir / f"{filename}.%04d.{ext}")
+            status += " | resolve: " + import_into_resolve(
+                written, frame_start, frame_start + len(written) - 1, pattern)
         return (status, str(out_dir))
 
 

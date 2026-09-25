@@ -8,10 +8,10 @@ DCC bridges, metadata, audio, project handoff, and studio integration.
 
 - [Audio Cut](#audio-cut)
 - [Audio Transcribe](#audio-transcribe)
+- [DCC Bridge](#dcc-bridge)
 - [Export to Nuke](#export-to-nuke)
 - [Export to Resolve](#export-to-resolve)
 - [Linear Check](#linear-check)
-- [MCP Bridge](#mcp-bridge)
 - [NDI Sender](#ndi-sender)
 
 ## Audio Cut
@@ -70,11 +70,43 @@ Transcribe speech from an audio or video file using Whisper.
 | `segment_count` | INT |
 | `transcribe_report` | STRING |
 
+## DCC Bridge
+
+`RadianceMCP`
+
+DCC Bridge — Export frames as EXR/video for DCC consumption, or start a TCP bridge server for command/control between ComfyUI and DCC apps.
+
+**Inputs**
+
+| Input | Type | Default | Range or choices | What it does |
+| :--- | :--- | :--- | :--- | :--- |
+| `mode` | choice | `Export Frames` | `Export Frames`, `Bridge Server` | Export Frames = save EXR/video for DCC. Bridge Server = start TCP control server. |
+| `source` | choice | `Auto` | `Auto`, `Images`, `Video`, `Sequence` | Auto = try Images, then Video, then Sequence. Select explicitly to avoid ambiguity. |
+| `target` | choice | `Nuke` | `Nuke`, `Resolve`, `Fusion` | Target DCC application (metadata hint). |
+| `output_path` | string |  |  | Output directory for EXR frames (Export mode) or bridge log (Bridge mode). |
+| `format` | choice | `EXR (16-bit half)` | `EXR (16-bit half)`, `EXR (32-bit float)`, `EXR + H.264 MP4`, `EXR + ProRes MOV` | EXR bit depth. +H.264 or +ProRes also generates a video file. |
+| `images` (optional) | IMAGE |  |  | Batch of frames to export (used when source is Images or Auto). |
+| `video_path` (optional) | string |  |  | Path to a video file (.mp4, .mov, etc.) to decode and export (source=Video or Auto). |
+| `sequence_path` (optional) | string |  |  | Path/pattern to an image sequence e.g. /frames/frame.%04d.exr (source=Sequence or Auto). |
+| `fps` (optional) | float | 24 | 1 to 240, step 0.001 | Frame rate for video export. |
+| `frame_start` (optional) | int | 1001 | 0 to 999999 | Starting frame number for EXR sequence export. |
+| `frame_end` (optional) | int | 0 | 0 to 999999 | Last frame index (0 = read all found frames, for sequences only). |
+| `filename_prefix` (optional) | string | `frame` |  | Prefix for EXR filenames (e.g. frame_1001.exr). |
+| `bridge_port` (optional) | int | 1987 | 1024 to 65535 | TCP port for Bridge Server (default 1987). |
+| `bridge_host` (optional) | string | `127.0.0.1` |  | Bind address (127.0.0.1 = loopback only; 0.0.0.0 = all interfaces). |
+
+**Outputs**
+
+| Output | Type |
+| :--- | :--- |
+| `status` | STRING |
+| `render_path` | STRING |
+
 ## Export to Nuke
 
 `RadianceNukeSend`
 
-Export image as EXR and write a .nk Read-node snippet for direct Nuke import. Optionally push to a running Nuke instance via the Radiance TCP listener.
+Export image as EXR and write a .nk Read-node snippet for direct Nuke import. Optionally load it into a running Nuke through the Radiance listener.
 
 **Inputs**
 
@@ -82,12 +114,13 @@ Export image as EXR and write a .nk Read-node snippet for direct Nuke import. Op
 | :--- | :--- | :--- | :--- | :--- |
 | `image` | IMAGE |  |  | Frame to export. A batch is written as a numbered EXR sequence. |
 | `nuke_folder` | string |  |  | Output folder for image + .nk file. Created if missing. |
-| `filename` | string | `radiance_out` |  | Base name for the EXR file(s). |
+| `filename` | string | `radiance_out` |  | Base name for the EXR file(s). The Read node gets the same name with anything Nuke does not allow in a node name replaced by _. |
 | `frame_start` (optional) | int | 1001 | 0 to 999999 | Starting frame number for the EXR sequence. |
-| `push_to_nuke` (optional) | boolean | off |  | If True and Nuke listener is running, auto-create a Read node via TCP. |
-| `nuke_host` (optional) | string | `127.0.0.1` |  | Nuke listener host (used only when push_to_nuke=True). |
-| `nuke_port` (optional) | int | 1986 | 1024 to 65535 | Nuke listener port (used only when push_to_nuke=True). |
+| `push_to_nuke` (optional) | boolean | off |  | Also create or update the Read node in a running Nuke. Needs the Radiance listener running there (scripts/start_nuke_server.py). Both sides share a token from ~/.radiance/dcc_token, created automatically, or from RADIANCE_DCC_AUTH_TOKEN; for Nuke on another machine copy that file or set the variable there. |
+| `nuke_host` (optional) | string | `127.0.0.1` |  | Nuke listener host (used only when push_to_nuke is on). RADIANCE_NUKE_HOST replaces the default. |
+| `nuke_port` (optional) | int | 1986 | 1024 to 65535 | Nuke listener port (used only when push_to_nuke is on). RADIANCE_NUKE_PORT replaces the default. |
 | `half_float` (optional) | boolean | on |  | Write 16-bit half EXR (True) or 32-bit float EXR (False). |
+| `input_space` (optional) | choice | `As is (no conversion)` | `As is (no conversion)`, `Scene-linear`, `sRGB display` | What the image holds. EXR is written scene-linear: sRGB display input is linearised first. As is: written unchanged, as before. |
 
 **Outputs**
 
@@ -100,7 +133,7 @@ Export image as EXR and write a .nk Read-node snippet for direct Nuke import. Op
 
 `RadianceDaVinciSend`
 
-Export the current image to a DaVinci Resolve shared media folder for manual import. Supports 8-bit PNG, 16-bit TIFF, and EXR output formats.
+Export the current image to a DaVinci Resolve media folder as 16-bit TIFF, 8-bit PNG or EXR, and optionally import it into the open project's Media Pool.
 
 **Inputs**
 
@@ -109,8 +142,10 @@ Export the current image to a DaVinci Resolve shared media folder for manual imp
 | `image` | IMAGE |  |  | Frame to export. Batches write numbered files. |
 | `resolve_folder` | string |  |  | DaVinci Resolve shared media folder. Created if missing. |
 | `filename` | string | `radiance_out` |  | Base filename (no extension). |
-| `bit_depth` | choice | `16bit` | `16bit`, `8bit`, `EXR` | Output bit depth. EXR writes 16-bit half-float. |
+| `bit_depth` | choice | `16bit` | `16bit`, `8bit`, `EXR` | 16bit: 16-bit TIFF. 8bit: PNG. EXR: 16-bit half-float EXR. |
 | `frame_start` (optional) | int | 1001 | 0 to 999999 | Starting frame number for numbered sequences. |
+| `input_space` (optional) | choice | `As is (no conversion)` | `As is (no conversion)`, `Scene-linear`, `sRGB display` | What the image holds. TIFF and PNG are written as sRGB display images (scene-linear input is encoded with the sRGB curve, clipped at 1.0); EXR is written scene-linear (sRGB input is linearised). As is: unchanged, as before. |
+| `import_to_media_pool` (optional) | boolean | off |  | Also import the files into the open project's Media Pool, through Resolve's scripting API. Needs Resolve running on this machine with Preferences > System > General > External scripting using: Local (Resolve Studio). Each run imports again. |
 
 **Outputs**
 
@@ -139,38 +174,6 @@ Check that the shot metadata tags the image as scene-linear (Linear or ACEScg) b
 | :--- | :--- |
 | `image` | IMAGE |
 | `shot_metadata` | RADIANCE_SHOT |
-
-## MCP Bridge
-
-`RadianceMCP`
-
-MCP Bridge — Export frames as EXR/video for DCC consumption, or start a TCP bridge server for command/control between ComfyUI and DCC apps.
-
-**Inputs**
-
-| Input | Type | Default | Range or choices | What it does |
-| :--- | :--- | :--- | :--- | :--- |
-| `mode` | choice | `Export Frames` | `Export Frames`, `Bridge Server` | Export Frames = save EXR/video for DCC. Bridge Server = start TCP control server. |
-| `source` | choice | `Auto` | `Auto`, `Images`, `Video`, `Sequence` | Auto = try Images, then Video, then Sequence. Select explicitly to avoid ambiguity. |
-| `target` | choice | `Nuke` | `Nuke`, `Resolve`, `Fusion` | Target DCC application (metadata hint). |
-| `output_path` | string |  |  | Output directory for EXR frames (Export mode) or bridge log (Bridge mode). |
-| `format` | choice | `EXR (16-bit half)` | `EXR (16-bit half)`, `EXR (32-bit float)`, `EXR + H.264 MP4`, `EXR + ProRes MOV` | EXR bit depth. +H.264 or +ProRes also generates a video file. |
-| `images` (optional) | IMAGE |  |  | Batch of frames to export (used when source is Images or Auto). |
-| `video_path` (optional) | string |  |  | Path to a video file (.mp4, .mov, etc.) to decode and export (source=Video or Auto). |
-| `sequence_path` (optional) | string |  |  | Path/pattern to an image sequence e.g. /frames/frame.%04d.exr (source=Sequence or Auto). |
-| `fps` (optional) | float | 24 | 1 to 240, step 0.001 | Frame rate for video export. |
-| `frame_start` (optional) | int | 1001 | 0 to 999999 | Starting frame number for EXR sequence export. |
-| `frame_end` (optional) | int | 0 | 0 to 999999 | Last frame index (0 = read all found frames, for sequences only). |
-| `filename_prefix` (optional) | string | `frame` |  | Prefix for EXR filenames (e.g. frame_1001.exr). |
-| `bridge_port` (optional) | int | 1987 | 1024 to 65535 | TCP port for Bridge Server (default 1987). |
-| `bridge_host` (optional) | string | `127.0.0.1` |  | Bind address (127.0.0.1 = loopback only; 0.0.0.0 = all interfaces). |
-
-**Outputs**
-
-| Output | Type |
-| :--- | :--- |
-| `status` | STRING |
-| `render_path` | STRING |
 
 ## NDI Sender
 

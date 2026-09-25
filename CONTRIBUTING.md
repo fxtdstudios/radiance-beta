@@ -28,7 +28,7 @@ radiance/
 │   ├── hdr/                 # ACES2 · colorspace · delivery · encoder · smart · uplift
 │   ├── io/                  # EXR I/O · sequence · unified read/write · video I/O
 │   ├── monitor/             # Radiance Viewer · realtime preview
-│   ├── pipeline/            # audio_cut · DNA · layout · MCP bridge · workspace
+│   ├── pipeline/            # audio_cut · DNA · layout · DCC bridge · workspace
 │   ├── upscale/             # Tiler · image/video upscale · face restore · router
 │   ├── vfx/                 # 3D · depth · motion · optics · overlay · multipass
 │   └── video/               # character · DiT adapter · T2V pipeline · HDR video

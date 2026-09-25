@@ -12,10 +12,17 @@ import numpy as np
 from radiance.nodes.io.write import _save_exr, _save_video_ffmpeg, _load_video_to_numpy, _read_sequence
 from radiance.path_utils import strip_path_quotes
 
-logger = logging.getLogger("radiance.mcp")
+logger = logging.getLogger("radiance.dcc_bridge")
 
 # ── Bridge Protocol ───────────────────────────────────────────────────────────
-MCP_EOM = "\n__MCP_EOM__\n"
+# One JSON object per line in, one JSON object per line out: a small TCP
+# control channel. The node was labelled "MCP Bridge" until 3.5.0, which read as
+# the Model Context Protocol; it is not, and is now "DCC Bridge". Its node key
+# stays RadianceMCP so saved graphs load.
+
+#: Longest request line accepted. A client that never sent a newline used to
+#: grow the buffer without bound.
+_MAX_LINE = 4 * 1024 * 1024
 
 _SERVER: Optional[socket.socket] = None
 _SERVER_THREAD: Optional[threading.Thread] = None
@@ -35,6 +42,9 @@ def _handle(conn, addr=None):
         while True:
             c = conn.recv(1)
             if not c:
+                return
+            if len(buf) > _MAX_LINE:
+                conn.sendall((json.dumps({"ok": False, "error": "request too large"}) + "\n").encode())
                 return
             if c == b"\n":
                 line = buf.decode("utf-8", errors="replace").strip()
@@ -69,7 +79,7 @@ def _handle(conn, addr=None):
                     try:
                         import urllib.request
                         from radiance.config.env import get_comfy_url
-                        data = json.dumps({"prompt": payload, "client_id": "radiance_mcp"}).encode()
+                        data = json.dumps({"prompt": payload, "client_id": "radiance_dcc_bridge"}).encode()
                         comfy_url = get_comfy_url().rstrip("/")
                         req = urllib.request.Request(
                             f"{comfy_url}/prompt",
@@ -109,7 +119,7 @@ def start_server(port: int = None, host: str = None) -> str:
         loopback = bind_host in _LOOPBACK_HOSTS
         if not loopback and not _remote_bridge_allowed():
             logger.warning(
-                "MCP Bridge: refusing non-loopback bind %r without RADIANCE_ALLOW_REMOTE_BRIDGE=1; "
+                "DCC Bridge: refusing non-loopback bind %r without RADIANCE_ALLOW_REMOTE_BRIDGE=1; "
                 "falling back to 127.0.0.1", bind_host,
             )
             bind_host = "127.0.0.1"
@@ -121,19 +131,19 @@ def start_server(port: int = None, host: str = None) -> str:
         try:
             _SERVER.bind((bind_host, port))
             _SERVER.listen(5)
-            logger.info(f"MCP Bridge listening on {bind_host}:{port}")
+            logger.info(f"DCC Bridge listening on {bind_host}:{port}")
             while _SERVER_RUNNING:
                 try:
                     conn, addr = _SERVER.accept()
-                    logger.debug(f"MCP connection from {addr}")
+                    logger.debug(f"DCC Bridge connection from {addr}")
                     threading.Thread(target=_handle, args=(conn, addr), daemon=True).start()
                 except socket.timeout:
                     continue
                 except Exception as e:
                     if _SERVER_RUNNING:
-                        logger.warning(f"MCP accept: {e}")
+                        logger.warning(f"DCC Bridge accept: {e}")
         except OSError as e:
-            logger.error(f"MCP socket: {e}")
+            logger.error(f"DCC Bridge socket: {e}")
         finally:
             try:
                 _SERVER.close()
@@ -188,10 +198,10 @@ def _push_to_nuke(
     host: str = None,
     port: int = None,
 ) -> str:
+    """Attempt to push the exported EXR to Nuke via the Radiance TCP listener."""
     from radiance.config.env import get_nuke_host, get_nuke_port
     if host is None: host = get_nuke_host()
     if port is None: port = get_nuke_port()
-    """Attempt to push the exported EXR to Nuke via the Radiance TCP listener."""
     try:
         from radiance.tools.nuke_connector import NukeConnector
     except ImportError:
@@ -208,31 +218,33 @@ def _push_to_nuke(
         import re
         filepath = re.sub(r"([_.])\d{4}\.(\w+)$", r"\1####.\2", filepath)
 
-    conn = NukeConnector(host=host, port=port)
-    ok, msg = conn.load_exr(
-        filepath=filepath,
-        node_name=node_name,
-        first_frame=first_frame,
-        last_frame=last_frame,
-        current_frame=first_frame,
-        color_space="linear",
-        connect_viewer=True,
-        raw=True,
-    )
+    try:
+        conn = NukeConnector(host=host, port=port)
+        ok, msg = conn.load_exr(
+            filepath=filepath,
+            node_name=node_name,
+            first_frame=first_frame,
+            last_frame=last_frame,
+            current_frame=first_frame,
+            color_space="linear",
+            connect_viewer=True,
+            raw=True,
+        )
+    except Exception as e:  # noqa: BLE001 - the frames are written; report, don't fail the node
+        return f"FAILED ({e})"
     if ok:
         return f"OK ({msg})"
     return f"FAILED ({msg})"
 
 
 def _push_to_resolve(written: list, filename_prefix: str) -> str:
-    """Report the Resolve handoff state for exported frames.
-
-    Resolve's scripting API must run inside the Resolve process, so the MCP node
-    can only prepare a folder handoff from ComfyUI.
-    """
+    """Report the Resolve handoff for exported frames. This node only writes
+    the folder; Send to DaVinci Resolve can also import into the Media Pool
+    through Resolve's scripting API."""
     if not written:
         return "no frames"
-    return "folder handoff ready for manual Resolve import; no live Resolve API push"
+    return ("folder ready to import in Resolve (Send to DaVinci Resolve can import it into "
+            "the Media Pool directly)")
 
 
 class RadianceMCP:
@@ -296,7 +308,7 @@ class RadianceMCP:
     CATEGORY = "FXTD STUDIOS/Radiance/07 Pipeline & DCC"
     OUTPUT_NODE = True
     DESCRIPTION = (
-        "MCP Bridge — Export frames as EXR/video for DCC consumption, "
+        "DCC Bridge — Export frames as EXR/video for DCC consumption, "
         "or start a TCP bridge server for command/control between ComfyUI and DCC apps."
     )
 
@@ -329,7 +341,7 @@ class RadianceMCP:
 
         if mode == "Bridge Server":
             status = start_server(bridge_port, bridge_host)
-            logger.info(f"[MCP] {status}")
+            logger.info(f"[DCC Bridge] {status}")
             return (status, "")
 
         if not output_path:
@@ -436,5 +448,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RadianceMCP": "◎ Radiance MCP Bridge",
+    "RadianceMCP": "◎ Radiance DCC Bridge",
 }
