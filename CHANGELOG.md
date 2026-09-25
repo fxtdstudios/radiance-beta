@@ -90,8 +90,73 @@ All notable changes to FXTD Radiance will be documented in this file.
     to read the pass as an occlusion amount, which inverted real AO loaded
     through Read AOVs. With nothing connected the default is still fully
     open. A hand-made occlusion mask now needs inverting once.
+11. **Fixes that change the output of a saved graph** (details under Fixed,
+    "Bugs found while documenting every input"): Multipass Relight's point
+    light with a depth pass is lit the right way round; Video Batch Decode no
+    longer divides HunyuanVideo, CogVideoX and SD latents by `latent_scale`;
+    Video HDR Decode puts input white on `peak_nits`, its SDR preview reaches
+    display white and its `sRGB / BT.1886` output has a curve; HDR Color
+    Pipeline converts every primaries pair and its D65/D60 adaptation and
+    ACEScg-to-Rec.709 matrices are corrected; Digital Cinema Read reads a
+    video's first frame; EXR MultiPart writes every frame of a batch; Radiance
+    QC with `fail_on_errors` stops the graph; Synthesis `guidance_nits` is on
+    the 203-nit scale.
 
 ### Fixed
+
+- **Bugs found while documenting every input.** The tooltip pass listed these
+  in KNOWN_ISSUES as owed; each is fixed and pinned by a test that fails on
+  the old code (`tests/test_documented_bugs.py`, 18).
+  - *ControlNet Apply* passed the hint image as B,H,W,C where ComfyUI's
+    ControlNets take it channels-first, and passed no VAE, so ControlNets that
+    encode the hint (SD3, Flux, DiT) could not work. The hint is channels-first
+    and an optional `vae` input is passed on.
+  - *Upscale Video* ran the built-in models on the CPU for clips (it used the
+    frames' device, always the CPU in ComfyUI); it uses the compute device. A
+    one-frame clip now keeps `model_tier`, `sharpness_boost`,
+    `enhancement_prompt` and `diffusion_steps`.
+  - *Multipass Relight*, point light with `depth_map` and no
+    `world_position`: the depth flip was on the wrong setting, so near pixels
+    sat behind far ones either way. Near is now toward the camera.
+  - *Video Batch Decode* divided the latent by dit_config's `latent_scale`,
+    although a ComfyUI sampler already returns it in VAE space, so
+    HunyuanVideo, CogVideoX and SD latents were scaled twice. It is reported
+    and not applied.
+  - *Video HDR Decode*: Reinhard put input white at half of `peak_nits`; it
+    is now extended Reinhard with the brightest input (1.0, lifted by a
+    positive EV) on `peak_nits`. The SDR preview peaked near 0.12; it now
+    reaches display white. `sRGB / BT.1886` output was the same clamped linear
+    light as Linear; it is the sRGB curve relative to `peak_nits`.
+  - *HDR Color Pipeline*: only five primaries pairs converted and the rest
+    passed through silently; every pair of the listed primaries converts, with
+    Bradford adaptation where the whites differ. `chromatic_adaptation` on a
+    conversion that already adapts (to or from ACEScg) is skipped with a
+    warning instead of applied twice. Found on the way: its D65/D60 Bradford
+    matrices put D65 white 1.2 % off D60, and its ACEScg-to-Rec.709 matrix was
+    4e-3 off the inverse; both corrected.
+  - *Video Model Info* forced every Wan model to Wan2.1 (16ch), the 48-channel
+    Wan2.2 TI2V 5B included, over `model_preset`. The latent channel count the
+    model reports picks the preset, and a matching preset the user chose is
+    kept.
+  - *Digital Cinema Read* skipped a video's first frame: `start_frame` counts
+    from 1 but went to the reader as a 0-based offset. It is converted.
+  - *EXR MultiPart* wrote only the first frame of a batch; every frame is
+    written, `<prefix>.<frame_index + n>.exr`, in parallel. A one-frame AOV is
+    used for every frame. Depth stays one Z channel from the first channel.
+  - *Policy Guard* read every input at 1.0 = 100 nits and PQ or HLG code
+    values as linear light. A `signal` option reads Display SDR, Scene-linear
+    (1.0 = 203 nits), PQ or HLG. *Radiance QC* `fail_on_errors` only added
+    "(BLOCKING)" to the status; it now stops the graph with the report.
+    *Synthesis* `guidance_nits` used 100 nits = 1.0; it uses 203.
+  - *AMF* description (and clip name) went into the XML unescaped, so `<` or
+    `&` broke the file; they are escaped.
+  - *Regional prompts*: each chained node reset the strength of every earlier
+    region to its own `global_strength`, and in Replace mode dropped the
+    earlier cut-out. Earlier regions keep their strength and area, and the
+    global keeps every cut.
+  - *Sampler* `sdr_blend` and `sdr_inject_steps` defaulted to 0 in Python and
+    0.35 / 6 in the widgets, so an API prompt that left them out ran with SDR
+    guidance off. The defaults match.
 
 - **HDR Color Pipeline crashed on PQ input.** It still passed `peak_nits` to
   a PQ decode that had dropped the argument on purpose, so every PQ run

@@ -264,7 +264,12 @@ class RadianceMultipassRelight:
                     positions = _match_image(part(world_position, a, b), n, height, width, 3).to(device=device)
                 else:
                     positions = _view_positions(n, height, width, device, part(depth_map, a, b), depth_scale)
-                    if depth_map is not None and depth_near_is_white:
+                    # +Z is toward the camera, and _view_positions maps white to
+                    # +Z, so near-is-white depth is already right; a distance
+                    # style pass (near is black) is the one to flip. The flip was
+                    # on the wrong setting, so near pixels sat behind far ones
+                    # either way.
+                    if depth_map is not None and not depth_near_is_white:
                         positions[..., 2] = -positions[..., 2]
                 light_pos = _color_tensor(light_x, light_y, light_z, device)
                 l_vec = light_pos - positions

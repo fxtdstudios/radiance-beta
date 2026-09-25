@@ -2157,15 +2157,23 @@ class RadianceUpscaleVideo:
             # Single frame: delegate to image node path directly
             logger.info("[Radiance/Upscale] Single frame — routing to image upscale")
             node   = RadianceUpscaleImage()
+            # Every setting that applies to one frame is passed on; model_tier,
+            # sharpness_boost, enhancement_prompt and diffusion_steps used to be
+            # dropped, so a one-frame clip ignored them.
             up, cf, info = node.upscale_image(
                 frames, scale=scale, tile_size=tile_size, overlap=overlap_spatial,
-                upscale_model=upscale_model, hdr_mode=hdr_mode, color_encoding=color_encoding,
+                sharpness_boost=sharpness_boost, upscale_model=upscale_model,
+                model_tier=model_tier, diffusion_steps=diffusion_steps,
+                enhancement_prompt=enhancement_prompt,
+                hdr_mode=hdr_mode, color_encoding=color_encoding,
             )
             return (up, cf, info.replace("RadianceUpscaleImage", "RadianceUpscaleVideo(1fr)"))
 
         scale_int = {"2×": 2, "4×": 4, "8× (tile cascade)": 4}[scale]
         do_double = scale == "8× (tile cascade)"
-        device    = frames.device
+        # The compute device, not the one the frames arrived on (always the CPU
+        # in ComfyUI): the built-in models ran on the processor for clips.
+        device    = _compute_device(frames)
 
         # ── Color + HDR pre-encode (whole batch) ───────────────────────────────
         # SR runs in display-referred [0,1] domain; restore at the end.

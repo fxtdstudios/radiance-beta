@@ -139,7 +139,7 @@ Batch-decode video latents to pixel frames with memory management.
 | :--- | :--- | :--- | :--- | :--- |
 | `vae` | VAE |  |  | VAE matching the model that produced the latent. |
 | `latent` | LATENT |  |  | Video latent from a sampler or pipeline. A 5-D latent is decoded through the VAE's temporal path. |
-| `dit_config` (optional) | string | `{}` |  | JSON from RadianceVideoModelInfo. A latent_scale other than 1.0 divides the latent before decoding (this double-scales a ComfyUI-sampled latent); its compression values are used only if the VAE does not report its own. |
+| `dit_config` (optional) | string | `{}` |  | JSON from RadianceVideoModelInfo. Its compression values are used only if the VAE does not report its own. Its latent_scale is not applied: a ComfyUI sampler already returns the latent in VAE space. |
 | `tile_decode` (optional) | boolean | off |  | Route the decode through the VAE's own tiled entry point (comfy.sd.VAE.decode_tiled) to cut peak VRAM on large videos. Leave off: an untiled decode already falls back to tiling by itself when it runs out of memory. |
 | `tile_overlap` (optional) | int | 64 | 0 to 256 | Pixel overlap between spatial tiles (higher = smoother seams). Only read when tile_decode is on. |
 | `output_linear` (optional) | boolean | off |  | Convert the VAE's display-referred sRGB frames to scene-linear (inverse sRGB transfer). Off: sRGB clamped to [0, 1], as VAE Decode. |
@@ -266,10 +266,10 @@ Encode decoded sRGB video frames (IMAGE, not latents) to an HDR signal at the me
 | :--- | :--- | :--- | :--- | :--- |
 | `image` | IMAGE |  |  | Decoded video frames, display-referred sRGB Rec.709 in [0, 1]. Linearised with a pure 2.2 gamma; 1.0 is mapped to peak_nits. |
 | `hdr_metadata_json` | string | `{"peak_nits":1000,"gamut":"BT.2020","eotf":"PQ (ST.2084)"}` |  | JSON from RadianceVideoHDRConditioner or manually entered |
-| `tonemap` | choice | `Reinhard` | `Reinhard`, `Linear clip`, `Pass-through` | Reinhard: x / (1 + x / peak), so input white lands at half peak_nits. Linear clip: clamp at 10,000 nits. Pass-through: no curve. |
+| `tonemap` | choice | `Reinhard` | `Reinhard`, `Linear clip`, `Pass-through` | Reinhard: extended Reinhard whose white point is the brightest input (1.0 lifted by a positive exposure_compensation_ev), so that value lands exactly on peak_nits and the highlights above it roll off; at 0 EV or less there is nothing to compress. Linear clip: clamp at 10,000 nits. Pass-through: no curve (clamped at 10,000 nits by the encode). |
 | `exposure_compensation_ev` (optional) | float | 0 | -6 to 6, step 0.1 | EV adjustment before tone-mapping |
-| `output_eotf` (optional) | choice | `PQ (ST.2084)` | `PQ (ST.2084)`, `HLG (BT.2100)`, `Linear`, `sRGB / BT.1886` | Encoding of hdr_image. PQ: ST 2084 code values (1.0 = 10,000 nits). HLG: BT.2100 OETF. Linear and sRGB / BT.1886 both output clamped linear light normalised to 10,000 nits (no sRGB curve). |
-| `sdr_preview_nits` (optional) | float | 100 | 1 to 203 | Knee (in nits) of the Reinhard curve for sdr_preview. The preview is not renormalised to display white, so it stays dark (about 0.12 at 100 nits). |
+| `output_eotf` (optional) | choice | `PQ (ST.2084)` | `PQ (ST.2084)`, `HLG (BT.2100)`, `Linear`, `sRGB / BT.1886` | Encoding of hdr_image. PQ: ST 2084 code values (1.0 = 10,000 nits). HLG: BT.2100 OETF. Linear: clamped linear light normalised to 10,000 nits. sRGB / BT.1886: the sRGB curve on light relative to peak_nits (1.0 = peak), an SDR signal. |
+| `sdr_preview_nits` (optional) | float | 100 | 1 to 203 | Nits shown as white-ish mid-range in sdr_preview: light is measured in units of this value and rolled off with extended Reinhard so the brightest input reaches display white (1.0). Lower = brighter preview. |
 | `gamut_clip` (optional) | boolean | on |  | Clamp to [0, 1] of the encode container after the primaries conversion (negatives from out-of-gamut colours, values above peak) |
 
 **Outputs**
@@ -379,9 +379,9 @@ Display configuration and parameter info for a loaded video model.
 | Input | Type | Default | Range or choices | What it does |
 | :--- | :--- | :--- | :--- | :--- |
 | `model` | MODEL |  |  | Video diffusion model to inspect. It is passed through unchanged on the model output. |
-| `model_preset` | choice | `LTX-Video (128ch)` | `SD-VAE (4ch)`, `SDXL-VAE (4ch)`, `LTX-Video (128ch)`, `HunyuanVideo (16ch)`, `Wan2.1 (16ch)`, `Wan2.2-T2V-14B (16ch)`, `Wan2.2-I2V-14B (16ch)`, `Wan2.2-TI2V-5B (48ch)`, `HunyuanVideo-1.5 (32ch)`, `CogVideoX (16ch)`, and 1 more | Latent spec used when auto-detection finds nothing. Detection reads the model class name (ltx, hunyuan, wan, cogvideo, mochi) and wins over this choice; any Wan model is detected as Wan2.1 (16ch). |
+| `model_preset` | choice | `LTX-Video (128ch)` | `SD-VAE (4ch)`, `SDXL-VAE (4ch)`, `LTX-Video (128ch)`, `HunyuanVideo (16ch)`, `Wan2.1 (16ch)`, `Wan2.2-T2V-14B (16ch)`, `Wan2.2-I2V-14B (16ch)`, `Wan2.2-TI2V-5B (48ch)`, `HunyuanVideo-1.5 (32ch)`, `CogVideoX (16ch)`, and 1 more | Latent spec used when auto-detection finds nothing. Detection reads the model class name (ltx, hunyuan, wan, cogvideo, mochi) and the latent channel count the model reports. A preset from the detected family that matches the channels is kept; otherwise the matching one is used. |
 | `override_channels` (optional) | int | 0 | 0 to 512 | Replace the latent channel count written to dit_config. 0 keeps the preset's value. |
-| `override_latent_scale` (optional) | float | 0 | 0 to 10 | Replace the preset's latent_scale in dit_config (RadianceVideoBatchDecode divides the latent by it before decoding). 0 keeps the preset's value. |
+| `override_latent_scale` (optional) | float | 0 | 0 to 10 | Replace the preset's latent_scale in dit_config. Reported for reference; Video Batch Decode does not apply it, since sampler output is already in VAE space. 0 keeps the preset's value. |
 | `print_info` (optional) | boolean | off |  | Also write the info report to the ComfyUI console log. |
 
 **Outputs**

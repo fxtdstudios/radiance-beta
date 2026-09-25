@@ -131,46 +131,9 @@ The six nodes that broke or crawled at production size, ten more that held the c
 ## Found while documenting every input (3.5.0)
 
 Writing a tooltip for all 1,259 inputs meant reading the code behind each
-one. These do not do what their name says. Behaviour is unchanged for now;
-each tooltip says what really happens, and these are the fixes owed.
-
-**Bugs**
-
-- **ControlNet Apply passes the hint image in the wrong layout** (no
-  `movedim(-1, 1)` as stock ComfyUI does) and passes no VAE, so ControlNets
-  that need one fail. `nodes/generate/loader.py`.
-- **Upscale Video runs the built-in models on the CPU** for more than one
-  frame (`device = frames.device`), and a single frame is handed to the image
-  path without `model_tier`, `sharpness_boost`, `enhancement_prompt` or
-  `diffusion_steps`. `nodes/upscale/upscale.py`.
-- **Multipass Relight with a point light and `depth_map`** (no
-  `world_position`) puts near pixels at negative Z whichever way
-  `depth_near_is_white` is set, so near and far read reversed. Multipass
-  Estimate supplies `world_position`, which avoids this.
-- **Video Batch Decode divides by dit_config's `latent_scale`** although
-  sampler output is already in VAE space, so HunyuanVideo, CogVideoX and SD
-  presets are scaled twice. `nodes/video/t2v.py`.
-- **Video HDR Decode's SDR preview peaks near 0.12** at the default 100 nits;
-  its `sRGB / BT.1886` output applies no curve (same as Linear), and Reinhard
-  maps input white to half of `peak_nits`. `nodes/video/hdr.py`.
-- **HDR Color Pipeline**: primaries pairs outside the five supported pass
-  through unchanged with no message, and `chromatic_adaptation` on an already
-  adapted Rec.709 to ACEScg matrix adapts twice.
-- **Model Info maps every Wan model to Wan 2.1 (16 channels)**, including the
-  48-channel Wan 2.2 TI2V 5B, and overrides `model_preset`.
-- **Digital Cinema Read skips the first frame of a video** (`start_frame`
-  defaults to 1 and is a 0-based offset for video).
-- **EXR MultiPart writes only the first frame** of a batch and keeps only the
-  red channel of `depth`.
-- **Policy Guard reads peak nits at 1.0 = 100 nits**, not the package's 203,
-  and reads PQ or HLG input as linear; `fail_on_errors` only labels the
-  status and does not stop the graph. **Synthesis `guidance_nits`** also uses
-  100.
-- **AMF writer does not escape `description`**, so `<` or `&` breaks the XML.
-- **Regional prompts**: each chained node resets the strength of every earlier
-  region to its own `global_strength`.
-- **Sampler `sdr_blend`** defaults to 0.0 in Python and 0.35 in the widget, so
-  API prompts that omit it disable SDR guidance.
+one. The bugs it found are fixed (see the changelog, "Bugs found while
+documenting every input"). These controls still do not do what their name
+says; each tooltip says what really happens.
 
 **Controls that do nothing or less than their name**
 

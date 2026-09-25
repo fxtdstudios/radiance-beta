@@ -109,7 +109,7 @@ class RadianceHDRSynthesisEngine:
             "optional": {
                 "guidance_mask":  ("MASK",  {"tooltip": "Per-pixel guidance mask from Radiance Luminance Guidance."}),
                 "guidance_nits":  ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10000.0, "step": 50.0,
-                    "tooltip": "Target peak in nits inside guidance_mask, converted at 100 nits = 1.0 (not the package's 203 nits). 0 = ignore the mask and use energy_target everywhere."}),
+                    "tooltip": "Target peak in nits inside guidance_mask, on the package's scale (203 nits = 1.0). 0 = ignore the mask and use energy_target everywhere."}),
             }
         }
 
@@ -160,8 +160,10 @@ class RadianceHDRSynthesisEngine:
             g_mask = guidance_mask.unsqueeze(1).float()  # (B, 1, H, W)
             g_mask_low = F.interpolate(g_mask, size=(base_H, base_W), mode="bilinear", align_corners=False)
 
-            # Target nits: 100 nits = 1.0 energy, 1000 nits = 10.0 energy
-            g_target = guidance_nits / 100.0
+            # Target nits on the package's scale, 1.0 = 203 nits (BT.2408
+            # reference white), the same scale as the output. It used 100.
+            from radiance.color.encodings import DEFAULT_REFERENCE_WHITE_NITS
+            g_target = guidance_nits / DEFAULT_REFERENCE_WHITE_NITS
 
             # Blend global energy_target with local guidance target
             effective_target = torch.lerp(torch.full_like(luma, energy_target), torch.full_like(luma, g_target), g_mask_low)

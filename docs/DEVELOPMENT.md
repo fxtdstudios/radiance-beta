@@ -73,6 +73,8 @@ the gap is recorded under Open rather than quietly corrected.
 
 **Correctness**
 
+- [x] **The bugs found while documenting every input (3.5.0).** All thirteen in KNOWN_ISSUES fixed: ControlNet Apply, Upscale Video, Multipass Relight point + depth, Video Batch Decode, Video HDR Decode, HDR Color Pipeline (plus its wrong D65/D60 and ACEScg-to-Rec.709 matrices), Video Model Info, Digital Cinema Read, EXR MultiPart, Policy Guard / QC `fail_on_errors` / Synthesis nits, AMF escaping, regional prompt chaining, sampler SDR defaults. `tests/test_documented_bugs.py` (18, each failing on the old code); live ComfyUI run of HDR Decode, Color Pipeline, EXR MultiPart and Policy Guard: success. The "controls that do nothing" list stays for the post-3.5.0 pass.
+
 - [x] **Legacy latent RUDRA decoders retired (3.5.0).** The video decoders
       trained on stills, the truncated `ltx-video` full decoder and the
       per-model checkpoint matrix are gone with them. Learned SDR → HDR is the

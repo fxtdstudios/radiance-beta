@@ -178,6 +178,12 @@ What affects an existing graph:
 - **Multipass Relight reads `ao` the way renderers write it: 1 = open.** It
   used to read the pass as an occlusion amount, which inverted real AO loaded
   through Read AOVs. A hand-made occlusion mask needs inverting once.
+- **Thirteen bug fixes change some outputs:** Video HDR Decode (white on
+  `peak_nits`, a real SDR preview), Video Batch Decode (no second
+  `latent_scale`), HDR Color Pipeline (every primaries pair, corrected D60
+  matrices), Multipass Relight's point light with a depth pass, Digital
+  Cinema Read (a video's first frame), EXR MultiPart (every frame). The
+  changelog's upgrade note lists them.
 
 ### Models (RUDRA SDR → HDR)
 

@@ -173,10 +173,10 @@ Check every frame against a delivery policy (peak nits, clipping, black crush, l
 | Input | Type | Default | Range or choices | What it does |
 | :--- | :--- | :--- | :--- | :--- |
 | `mode` | choice | `Guard` | `Preset`, `Guard` | Preset: output a policy JSON (data1) and its description (data2); the image is not checked. Guard: check the image against a policy. |
-| `image` | IMAGE |  |  | Frames to check, display-referred 0..1 (peak is read as 1.0 = 100 nits). Ignored in Preset mode. |
+| `image` | IMAGE |  |  | Frames to check. Peak nits are read as set by signal; clipping, black crush and luma are measured on the values as they are. Ignored in Preset mode. |
 | `preset` (optional) | choice | `Broadcast SDR` | `Broadcast SDR`, `Cinema HDR (P3-PQ)`, `OTT HDR10`, `Social Media`, `Custom` | Delivery policy to output in Preset mode. Custom uses the custom_* values. |
 | `policy_file` (optional) | string |  |  | Optional path to a policy JSON file; when it loads, it replaces the preset. A failed load logs a warning and falls back to the preset. Preset mode only. |
-| `custom_max_peak_nits` (optional) | float | 1000 | 0 to 10000, step 10 | Custom preset: highest allowed peak, in nits, with 1.0 = 100 nits. Preset mode only. |
+| `custom_max_peak_nits` (optional) | float | 1000 | 0 to 10000, step 10 | Custom preset: highest allowed peak, in nits (read as set by signal in Guard mode). Preset mode only. |
 | `custom_max_clipping` (optional) | float | 0.01 | 0 to 1, step 0.001 | Custom preset: highest allowed fraction of pixels with luma above 0.99 (0.01 = 1%). Preset mode only. |
 | `custom_max_black_crush` (optional) | float | 0.05 | 0 to 1, step 0.001 | Custom preset: highest allowed fraction of pixels with luma below 0.01 (0.05 = 5%). Preset mode only. |
 | `custom_max_saturation` (optional) | float | 1 | 0 to 2, step 0.01 | Custom preset: highest allowed mean HSV-style saturation, (max - min) / max per pixel. 1.0 only fails on negative pixel values. Preset mode only. |
@@ -184,9 +184,10 @@ Check every frame against a delivery policy (peak nits, clipping, black crush, l
 | `max_clipping` (optional) | float | 0.01 | 0 to 1, step 0.001 | Highest allowed fraction of pixels with luma above 0.99, worst frame. Guard mode, used only when policy is empty. |
 | `max_black_crush` (optional) | float | 0.05 | 0 to 1, step 0.001 | Highest allowed fraction of pixels with luma below 0.01, worst frame. Guard mode, used only when policy is empty. |
 | `max_saturation` (optional) | float | 1 | 0 to 2, step 0.01 | Highest allowed mean saturation, (max - min) / max per pixel, worst frame. 1.0 only fails on negative pixel values. Guard mode, used only when policy is empty. |
-| `max_peak_nits` (optional) | float | 1000 | 0 to 10000, step 10 | Highest allowed peak, where the brightest channel value x 100 is taken as nits (1.0 = 100 nits). Guard mode, used only when policy is empty. |
+| `max_peak_nits` (optional) | float | 1000 | 0 to 10000, step 10 | Highest allowed peak in nits, the brightest channel read as set by signal. Guard mode, used only when policy is empty. |
 | `require_metadata` (optional) | string |  |  | Comma-separated metadata keys that must appear in metadata_present, for example colorspace, eotf. Guard mode, used only when policy is empty. |
 | `metadata_present` (optional) | string |  |  | Comma-separated metadata the deliverable carries, as keys or key=value pairs. Only the keys are checked. Guard mode only. |
+| `signal` (optional) | choice | `Display SDR (1.0 = 100 nits)` | `Display SDR (1.0 = 100 nits)`, `Scene-linear (1.0 = 203 nits)`, `PQ (ST 2084)`, `HLG (BT.2100, 1000-nit display)` | How pixel values are read as light for the peak check. Display SDR: 1.0 = 100 nits (BT.1886 white). Scene-linear: Radiance's convention, 1.0 = 203 nits (BT.2408). PQ: ST 2084 code values, absolute. HLG: BT.2100 code values on the 1000-nit reference display. Guard mode only. |
 
 **Outputs**
 
@@ -241,7 +242,7 @@ Run technical QC on an image or sequence (crushed blacks, clipped whites, out-of
 | `enable_focus_check` (optional) | boolean | off |  | Add a Laplacian-variance sharpness score; below 20/100 is reported as a low-sharpness warning. |
 | `enable_artifacts_check` (optional) | boolean | on |  | Add an 8x8 block-edge score for JPEG/DCT compression artifacts; 10/100 or more is a warning. |
 | `enable_noise_check` (optional) | boolean | on |  | Add a high-frequency noise score; below 5/100 warns of over-denoising, above 30/100 of high noise. |
-| `fail_on_errors` (optional) | boolean | off |  | Adds (BLOCKING) to the status string when QC fails. It does not stop the workflow. |
+| `fail_on_errors` (optional) | boolean | off |  | Stop the workflow with an error, carrying the report, when QC fails. Off: the failure is only reported. |
 | `qc_report_json` (optional) | string |  |  | json_report output of an Analyze run. Export mode only. |
 | `output_path` (optional) | string |  |  | Export folder. Empty = ComfyUI output folder; relative = subfolder of it; absolute paths are used as is. Export mode only. |
 | `filename_prefix` (optional) | string | `qc_report` |  | Report file name stem; a date-time stamp and the extension are appended. Export mode only. |
