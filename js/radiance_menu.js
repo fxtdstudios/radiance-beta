@@ -1,10 +1,9 @@
 // radiance_menu.js
 // ─────────────────────────────────────────────────────────────────────────────
-// Floating launcher so the Radiance dashboards are reachable without adding the
-// Project Manager node. Renders a fixed ◎ button (bottom-right) that opens a
+// Launcher so the Radiance dashboards are reachable without adding the
+// Project Manager node. Adds a ◎ button to ComfyUI's action bar that opens a
 // small menu — Project Manager / Workflow Library / Assets — via the in-canvas
 // overlay (window.showRadianceDashboard, defined by radiance_workspace.js).
-// Self-contained: a plain DOM element on document.body, no ComfyUI widget API.
 // To revert: delete this file.
 // ─────────────────────────────────────────────────────────────────────────────
 import { app } from "../../scripts/app.js";
@@ -19,16 +18,20 @@ function openDash(file, title) {
     else window.open(`${_EXT_BASE}/${file}`, "_blank");
 }
 
-function build() {
-    if (document.getElementById("radiance-launcher-fab")) return;
+// ALBABIT-FIX: the button lives in ComfyUI's action bar. As a fixed bottom-right
+// element it covered the canvas toolbar (select, fit view, zoom, minimap) that
+// the frontend now draws in that corner.
+const style = document.createElement("style");
+style.textContent = `.radiance-launcher-icon::before { content: "◎"; color: ${GOLD}; font-style: normal; font-size: 16px; line-height: 1; }`;
+document.head.appendChild(style);
 
-    const root = document.createElement("div");
-    root.id = "radiance-launcher-fab";
-    Object.assign(root.style, { position: "fixed", right: "18px", bottom: "18px", zIndex: "9000", fontFamily: "'Inter',system-ui,sans-serif" });
+let menu = null;
 
-    const menu = document.createElement("div");
+function buildMenu() {
+    menu = document.createElement("div");
+    menu.id = "radiance-launcher-menu";
     Object.assign(menu.style, {
-        position: "absolute", right: "0", bottom: "52px", minWidth: "190px",
+        position: "fixed", zIndex: "9000", minWidth: "190px", fontFamily: "'Inter',system-ui,sans-serif",
         background: "#111114", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "10px",
         padding: "6px", display: "none", boxShadow: "0 24px 60px -30px rgba(0,0,0,0.9)",
     });
@@ -49,30 +52,30 @@ function build() {
     menu.appendChild(item("▤", "Workflow Library", "workspace_dashboard.html", "Radiance Workflow Library"));
     menu.appendChild(item("▦", "Assets", "assets_dashboard.html", "Radiance Assets"));
 
-    const fab = document.createElement("button");
-    fab.title = "Radiance dashboards";
-    fab.textContent = "◎";
-    Object.assign(fab.style, {
-        width: "42px", height: "42px", borderRadius: "50%", border: `1.5px solid ${GOLD}`,
-        background: "#16161a", color: GOLD, fontSize: "20px", cursor: "pointer", lineHeight: "1",
-        boxShadow: "0 8px 24px -8px rgba(0,0,0,0.8)",
-    });
-    fab.onclick = (e) => {
-        e.stopPropagation();
-        menu.style.display = menu.style.display === "none" ? "block" : "none";
-    };
     document.addEventListener("click", () => { menu.style.display = "none"; });
+    document.body.appendChild(menu);
+}
 
-    root.appendChild(menu);
-    root.appendChild(fab);
-    document.body.appendChild(root);
+function toggleMenu(e) {
+    e.stopPropagation();
+    if (menu.style.display !== "none") {
+        menu.style.display = "none";
+        return;
+    }
+    const r = e.target.closest("button").getBoundingClientRect();
+    menu.style.top = `${r.bottom + 6}px`;
+    menu.style.right = `${window.innerWidth - r.right}px`;
+    menu.style.display = "block";
 }
 
 app.registerExtension({
     name: "Radiance.Launcher.FAB",
+    actionBarButtons: [
+        { icon: "radiance-launcher-icon", tooltip: "Radiance dashboards", onClick: toggleMenu },
+    ],
     async setup() {
-        build();
+        buildMenu();
     },
 });
 
-console.log("[Radiance Launcher] floating menu ready");
+console.log("[Radiance Launcher] action bar menu ready");

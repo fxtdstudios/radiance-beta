@@ -219,7 +219,7 @@ def ws(tmp_path, monkeypatch, real_aiohttp_web):
     monkeypatch.setattr(mod.folder_paths, "get_input_directory", lambda: str(inp))
     monkeypatch.setattr(mod.folder_paths, "get_output_directory", lambda: str(out))
 
-    repo_dir = Path(ws_mod.__file__).resolve().parent / "workflows"
+    repo_dir = Path(ws_mod.__file__).resolve().parents[2] / "workflows"
     assert mod._WORKFLOW_DIR_RESOLVED != repo_dir.resolve(), (
         "the storage root was not redirected — this test would write into the repo")
 
@@ -229,6 +229,13 @@ def ws(tmp_path, monkeypatch, real_aiohttp_web):
 # ═══════════════════════════════════════════════════════════════════════════
 #  1. Pipeline path helpers
 # ═══════════════════════════════════════════════════════════════════════════
+
+def test_the_library_is_the_package_workflows_folder():
+    """Moving workspace.py into nodes/pipeline/ sent the library to a stray
+    nodes/pipeline/workflows/, hiding earlier saves and workflows/official/."""
+    package_workflows = Path(__file__).resolve().parents[1] / "workflows"
+    assert ws_mod._WORKFLOW_DIR_RESOLVED == package_workflows.resolve()
+
 
 def test_next_version_on_missing_and_empty_dir(tmp_path):
     assert ws_mod._next_version(tmp_path / "does_not_exist") == "v001"

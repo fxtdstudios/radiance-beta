@@ -160,7 +160,3 @@ MagicMock/
 # ACES studio config (generated per installed OCIO version, not shipped).
 ACES/studio-config.ocio
 ACES/studio-config.ocio.tmp
-
-# Workspace saves land beside nodes/pipeline/workspace.py (WORKFLOW_DIR); runtime data, never shipped
-nodes/pipeline/workflows/
-nodes/gizmos/
