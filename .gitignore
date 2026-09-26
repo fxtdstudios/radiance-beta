@@ -161,6 +161,5 @@ MagicMock/
 ACES/studio-config.ocio
 ACES/studio-config.ocio.tmp
 
-# Workspace saves land beside nodes/pipeline/workspace.py (WORKFLOW_DIR); runtime data, never shipped
-nodes/pipeline/workflows/
+# Gizmo saves land beside nodes/gizmo.py (GIZMOS_DIR); runtime data, never shipped
 nodes/gizmos/

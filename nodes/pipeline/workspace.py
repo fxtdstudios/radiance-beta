@@ -212,7 +212,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 #                         PATH SECURITY HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-WORKFLOW_DIR = os.path.join(os.path.dirname(__file__), "workflows")
+# ALBABIT-FIX: the package's workflows/ folder, not one beside this file. Moving
+# the module into nodes/pipeline/ had sent the library to a stray folder there,
+# hiding earlier saves and the shipped workflows/official/.
+WORKFLOW_DIR = str(Path(__file__).resolve().parents[2] / "workflows")
 OFFICIAL_DIR = os.path.join(WORKFLOW_DIR, "official")
 os.makedirs(WORKFLOW_DIR, exist_ok=True)
 os.makedirs(OFFICIAL_DIR, exist_ok=True)
