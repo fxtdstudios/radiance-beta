@@ -160,6 +160,3 @@ MagicMock/
 # ACES studio config (generated per installed OCIO version, not shipped).
 ACES/studio-config.ocio
 ACES/studio-config.ocio.tmp
-
-# Gizmo saves land beside nodes/gizmo.py (GIZMOS_DIR); runtime data, never shipped
-nodes/gizmos/

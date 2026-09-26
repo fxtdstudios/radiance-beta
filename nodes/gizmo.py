@@ -43,7 +43,9 @@ def _route(method: str, path: str):
     return getattr(PromptServer.instance.routes, method)(path)
 
 # Ensure local gizmos folder exists
-GIZMOS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gizmos")
+# ALBABIT-FIX: the package's gizmos/ folder, not one beside this file. Moving the
+# module into nodes/ had sent saved gizmos to a stray nodes/gizmos/.
+GIZMOS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "gizmos")
 os.makedirs(GIZMOS_DIR, exist_ok=True)
 
 
